@@ -2,66 +2,64 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-627",
-  "previousHandoff": "90335dcd2b345ae6e381fe537753dafb69c4f847",
-  "round": "4, answering review round 2 at code head 29b084da: four findings in the index's loss class, six minors, and a forward merge GitHub's CONFLICTING required. Code head 8445fe23a0a1. All 22 review threads of both rounds are answered and resolved.",
+  "previousHandoff": "26a7a38641d5b02d178be10b041a9bfa04c6d16f",
+  "round": "5, answering review round 3 at code head 8445fe23: two findings of the older-build loss class in the back-fill, and two smaller items. Code head 30ceb42013e1, one commit. All 28 review threads of the three rounds are answered and resolved.",
   "proof": [
     {
-      "criterion": "Review round 2, finding 1: an adopted record under an older build's live claim returns ClaimedElsewhere before any index write, so nothing moves its entry, the cursor passes it and a refused-only, unlisted delivery is lost for good. The scenario is a rolling deploy whose older process is killed between its claim and its outcome write.",
-      "surface": "The sweep against a real nats-server over a bucket in the state a mixed deploy leaves: a record in the older build's shape (in_flight, a live claimed_at, no pending), an index entry naming it, and a failed attempt two hours old so no listing returns it.",
-      "command": "cd /legion/workspaces/sjawhar/legion/infra-627/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable\" go test ./internal/dispatch/redeliver/ -run TestALiveClaimOverARecordNamingNoIndexEntryIsIndexedAtItsClaimEnd -count=1 -timeout 15m",
-      "observed": "Passes at 8445fe23a0a1. The first sweep answers claimed-elsewhere and asks GitHub nothing, and writes the entry the claim's end is owed without writing the record, so the claimant's compare-and-set stands; ten minutes on, with the claim void and the original entry behind the cursor's window, the delivery is redelivered.",
-      "headSha": "8445fe23a0a1",
-      "negativeControl": "Run by the implementer, not taken from the worker that wrote the fix: with the entry write cut from that branch, `--- FAIL: TestALiveClaimOverARecordNamingNoIndexEntryIsIndexedAtItsClaimEnd: past the claim: outcome \"\", want \"redelivered\"`. The file was restored from a copy taken first and the diff stat re-checked."
+      "criterion": "Review round 3, finding 1: backfillIndex writes the record of an older build's live claim, which moves the revision the claimant's outcome write is compare-and-set against, so the claimant's answer is lost and the delivery is asked for a second time once the claim ends. decide's live-claim branch already avoided exactly this.",
+      "surface": "The sweep against a real nats-server over a bucket in the state a mixed deploy leaves: an older build's claim live (in_flight, a claimed_at inside the deadline, no pending) while the back-fill runs, with the claimant then writing its outcome over the revision it claimed at.",
+      "command": "cd /legion/workspaces/sjawhar/legion/infra-627/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable\" go test ./internal/dispatch/redeliver/ -run TestABackfillLeavesALiveClaimToItsClaimant -count=1 -timeout 15m",
+      "observed": "Passes at 30ceb42013e1. The back-fill writes the entry the claim's end is owed and no record, so the record keeps the revision it was claimed at, the claimant's outcome write lands, and no second request is made after the claim is void. The rule is one helper, indexLiveClaim, which decide's live-claim branch and the back-fill's loop both call, so the two cannot drift.",
+      "headSha": "30ceb42013e1",
+      "negativeControl": "Run by the implementer against the reviewed code, by disabling the back-fill's call in place: `--- FAIL: TestABackfillLeavesALiveClaimToItsClaimant: the back-fill wrote the claimed record, moving it from revision 2 to 5: the claimant's outcome write is refused over that`. The file was restored from a copy taken first and the diff stat re-checked."
     },
     {
-      "criterion": "Review round 2, finding 2: a record an older build creates during a rollback longer than Lookback has no entry and is listed nowhere, and backfillIndex returns at its marker check until the marker expires, which can be 72 hours and can outlast the delivery.",
-      "surface": "The sweep against a real nats-server over a bucket holding a cursor in the older build's shape, the index marker set, and an unlisted refused-only record with no entry and no Pending.",
-      "command": "cd /legion/workspaces/sjawhar/legion/infra-627/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable\" go test ./internal/dispatch/redeliver/ -run TestABackfillRunsUnderAnOlderBuildsCursorWhateverTheMarkerSays -count=1 -timeout 15m",
-      "observed": "Passes at 8445fe23a0a1. cursorRecord carries indexed, which this build always sets, so a cursor lacking it is a sweep an older build made and the back-fill runs whatever the marker says; a bucket with no cursor at all is still a first sweep. The record is back-filled and redelivered.",
-      "negativeControl": "Run by the implementer: with the marker check unconditional again, `--- FAIL: TestABackfillRunsUnderAnOlderBuildsCursorWhateverTheMarkerSays: guid-unindexed outcome \"\", want \"redelivered\"`.",
-      "headSha": "8445fe23a0a1"
+      "criterion": "Review round 3, finding 2: the cursor's indexed field reaches only an older build that completes a sweep. One whose sweeps are all cut short (a SIGTERM in the pace wait, the cap of 300 requests, a rate limit) writes no cursor, so the marker stands and a record it created at its first claim, refused, with its attempt at the edge of Lookback, is read by nothing until the marker expires, which can be 72 hours.",
+      "surface": "The sweep against a real nats-server over a bucket holding a cursor this build wrote (indexed true), a marker older than Lookback, and an unlisted refused record with no entry and no Pending.",
+      "command": "cd /legion/workspaces/sjawhar/legion/infra-627/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable\" go test ./internal/dispatch/redeliver/ -run TestAMarkerOlderThanTheLookbackIsBackfilledAgain -count=1 -timeout 15m",
+      "observed": "Passes at 30ceb42013e1. The marker now carries the moment its back-fill worked from, the sweep's own start, which is at or before the scan that read the records, so it never claims more cover than it had; a sweep back-fills again once that moment is further behind than Lookback, which is one whole-bucket read an hour at most. The cursor's indexed field is kept, so a roll-forward back-fills at once rather than within the hour.",
+      "headSha": "30ceb42013e1",
+      "negativeControl": "Run by the implementer, with any marker that exists counted fresh again: `--- FAIL: TestAMarkerOlderThanTheLookbackIsBackfilledAgain: guid-unlisted outcome \"\", want \"redelivered\"`."
     },
     {
-      "criterion": "Review round 2, findings 3 and 4: two guards had no test. A back-fill write that loses its compare-and-set must not mark the bucket, since the winner may be a build that writes no entry; and the stray repair must not delete an entry another sweeper has just written and is about to name.",
-      "surface": "The sweep against a real nats-server: for the first, a KV wrapper whose first Update of a guid. key answers wrong last sequence, so the record's revision moves between the scan and the back-fill write; for the second, a record waiting out the longest backoff with two entries it does not name, one keyed in the sweep's own minute and one five minutes back.",
-      "command": "cd /legion/workspaces/sjawhar/legion/infra-627/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable\" go test ./internal/dispatch/redeliver/ -run 'TestABackfillThatLosesItsRecordRaceLeavesTheIndexUnmarked|TestAStrayIndexEntryIsDeletedOnlyPastTheMargin' -count=1 -timeout 15m",
-      "observed": "Both pass at 8445fe23a0a1: the marker stays unwritten when the back-fill loses its race, and the fresh entry survives while the old one is deleted. The margin was also short, since a key is truncated to its minute, so strayMargin is now cursorOverlap + time.Minute, which is what makes its promise true rather than weakening the comment to match.",
-      "negativeControl": "Both run by the implementer. With the back-fill branch reduced to `err != nil`: `reading the index marker gave <nil>, want nats: key not found: a back-fill whose write another writer won marked the bucket, and nothing reads that record again for three days`. With the margin condition removed: `the sweep deleted pending.20261102.03.45.guid-waiting, an entry keyed in its own minute that another sweeper may be about to name`.",
-      "headSha": "8445fe23a0a1"
+      "criterion": "Review round 3, finding 3: the stray-margin test passed with the round-2 margin, because its two strays fell on one side of either margin, so nothing held the widening the round before had made.",
+      "surface": "The same sweep, with the harness clock off a minute boundary and a stray keyed exactly at minute(now) - cursorOverlap, which the margin as it stands must keep and the narrower one deletes.",
+      "command": "cd /legion/workspaces/sjawhar/legion/infra-627/packages/envoy && DISPATCH_TEST_DATABASE_URL=\"postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable\" go test ./internal/dispatch/redeliver/ -run TestAStrayIndexEntryIsDeletedOnlyPastTheMargin -count=1 -timeout 15m",
+      "observed": "Passes at 30ceb42013e1. The clock is advanced to the next :30 inside the test rather than in newHarness, because a harness clock off real time by up to 30 s breaks TestARateLimitStopsTheSweepUntilGitHubsRetryTime, which judges a limit written on the harness clock by the database's clock.",
+      "headSha": "30ceb42013e1",
+      "negativeControl": "Run by the implementer with strayMargin = cursorOverlap, the round-2 margin: `--- FAIL: TestAStrayIndexEntryIsDeletedOnlyPastTheMargin: the sweep deleted pending.20261102.05.41.guid-waiting, an entry whose writer may be inside the overlap a cursor leaves`."
     },
     {
-      "criterion": "2h: two concurrent imports of one source share one GitHub sync, and a slow source blocks no other source of its project. Re-measured at this head after the forward merge.",
+      "criterion": "2h: two concurrent imports of one source share one GitHub sync, and a slow source blocks no other source of its project. Re-measured at this head; the importer is untouched this round.",
       "surface": "POST /api/v1/projects/CORE/architecture-sources/{owner}/{repo}/sync on a booted envoy-dispatch with a throwaway GitHub App key and a fake App API that holds one repository's blob reads.",
-      "command": "cd /legion/scratch/tmp/infra627 && ./build.sh && ./e1.sh head",
-      "observed": "The sibling source's sync answered 200 in 0.056 s while legion/arch was held 8.044 s in its blob read, and the fake's log shows the sibling's whole fetch - installation, head, tree and blob - complete eight seconds before the hold was released. Two concurrent syncs of one source cost 1 installation and 1 head lookup, in three trials with no hold and again with the installation lookup held. GET /api/v1/projects/CORE/architecture answered 200 in 14.5 ms during the hold.",
-      "headSha": "8445fe23a0a1",
-      "negativeControl": "./e1.sh base, the same harness against main's tip 70d73cce0: the sibling blocked 8.052 s against an 8.015 s hold, and two concurrent syncs cost 2 installation and 2 head lookups in every trial."
+      "command": "cd /legion/scratch/tmp/infra627 && HEAD=30ceb420 ./build.sh && HEAD=30ceb420 ./e1.sh head",
+      "observed": "The sibling source's sync answered 200 in 0.051 s while legion/arch was held 8.242 s in its blob read; two concurrent syncs of one source cost 1 installation and 1 head lookup; GET /api/v1/projects/CORE/architecture answered 200 in 13.1 ms during the hold.",
+      "headSha": "30ceb42013e1",
+      "negativeControl": "./e1.sh base against main's tip 70d73cce0, measured at the previous head with the same harness: the sibling blocked 8.052 s against an 8.015 s hold and two syncs cost 2 installation and 2 head lookups. No file the importer compiles changed this round."
     },
     {
-      "criterion": "2i: the running sweep reads only the deliveries the index says are due, at a cost that does not follow what the bucket remembers. Re-measured at this head.",
-      "surface": "The running sweep in a booted envoy-dispatch against a real nats-server v2.10.29, its bucket holding N open, not-due records with their entries, the marker and a cursor this build wrote; /varz sampled every 250 ms and read either side of the measured sweep, with an idle window of comparable length for the floor.",
-      "command": "cd /legion/scratch/tmp/infra627 && IDLE=60 ./e2.sh head 1000 && IDLE=60 ./e2.sh head 10000 && ./e2cost.sh 10000 2000 && ./e2op.sh 1000 && ./e2op.sh 10000",
-      "observed": "With the idle floor (2 messages and 2,356 bytes over 60.1 s, the same in all four runs) subtracted, one sweep took 5 messages and 1,622 bytes at N=1,000 and 5 messages and 1,626 bytes at N=10,000 - flat in N - with its line reading deliveries=0 index_entries=0 complete=true. The index costs 138.0 bytes per open delivery and 127.0 bytes per redelivery request, the second measured over 2,000 moves done as a request does one. envoy-dispatch redeliver-webhooks --dry-run --since 72h is byte-identical from both builds at both N after normalising the report line's since= and nats.go's own exit lines, and nothing else.",
-      "headSha": "8445fe23a0a1",
-      "negativeControl": "./e2.sh base 1000 and 10000 against 70d73cce0: 2,004 messages / 879,701 bytes and 20,006 messages / 8,816,727 bytes for the same buckets, linear in N at about 2N+6. At N=10,000 the head is 4,001 times fewer messages and 5,422 times fewer bytes."
+      "criterion": "2i: the running sweep reads only the deliveries the index says are due, at a cost that does not follow what the bucket remembers. Re-measured at this head after the back-fill changed.",
+      "surface": "The running sweep in a booted envoy-dispatch against a real nats-server v2.10.29, its bucket holding 10,000 open, not-due records with their entries, the marker and a cursor this build wrote; /varz sampled every 250 ms across one sweep, with an idle window of the same length for the floor.",
+      "command": "cd /legion/scratch/tmp/infra627 && HEAD=30ceb420 IDLE=60 ./e2.sh head 10000",
+      "observed": "The sweep's own traffic was 5 messages and 1,664 bytes, flat against the 5 messages and 1,626 bytes the previous head measured at the same N, with the fake receiving 0 redelivery requests and the bucket left at 20,002 keys (10,000 records, 10,000 entries, the cursor and the marker). The marker's new timestamp did not bring the back-fill round in this sweep, which is what the flat figure shows.",
+      "headSha": "30ceb42013e1",
+      "negativeControl": "./e2.sh base 10000 against 70d73cce0, with the same seeder and script: 20,006 messages and 8,816,727 bytes for the same bucket, linear in N at about 2N+6."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/redeliver/sweep.go: the live-claim branch writes the adopted record's entry without writing the record; Sweep reads the cursor whole and threads olderBuild to the back-fill; the not-written comment and the package doc's waiting sentence; the bucket layer moved out (1,012 -> 821 lines).",
-    "packages/envoy/internal/dispatch/redeliver/index.go: putPending, strayMargin = cursorOverlap + time.Minute, backfillIndex's olderBuild path and its one collapsed !written branch, one errNotWritten sentinel with the kind in the message, and three comments that no longer held.",
-    "packages/envoy/internal/dispatch/redeliver/state.go (new, 256 lines): the bucket layer - record with its claim helpers, cursorRecord with its new indexed field, readState/writeState/openState, the cursor and record reads and writes, isConflict, and scanOpenRecords with openRecord and sortOpenRecords.",
-    "packages/envoy/internal/dispatch/redeliver/sweep_test.go: four regression tests (TestALiveClaimOverARecordNamingNoIndexEntryIsIndexedAtItsClaimEnd, TestABackfillRunsUnderAnOlderBuildsCursorWhateverTheMarkerSays, TestABackfillThatLosesItsRecordRaceLeavesTheIndexUnmarked, TestAStrayIndexEntryIsDeletedOnlyPastTheMargin) with the conflictingRecord wrapper; TestARefusedRecordWriteLeavesTheDeliveryForTheNextSweep rebuilt to the index-only case its doc describes, asserting Listed == 0; the adoption test's leftover-stray assertion removed.",
-    "packages/envoy/cmd/dispatch/README.md: waiting's third case, the adopted entry.",
-    "packages/envoy/cmd/dispatch/main.go: the forward merge's one resolved line, which keeps this branch's waitBackground closure and main's new outboxStopped argument.",
-    ".github/workflows/ci.yaml: no longer in the pull request's diff, because main's #2395 added the same kvwatch patterns."
+    "packages/envoy/internal/dispatch/redeliver/index.go: the new indexLiveClaim helper and the back-fill's use of it; the marker becomes indexMarker{At} and indexMarked becomes indexFresh(now), which reads a marker further behind than Lookback as one to replace; indexKey's and backfillIndex's comments on when the back-fill runs.",
+    "packages/envoy/internal/dispatch/redeliver/sweep.go: decide's live-claim branch calls the same helper.",
+    "packages/envoy/internal/dispatch/redeliver/sweep_test.go: TestABackfillLeavesALiveClaimToItsClaimant and TestAMarkerOlderThanTheLookbackIsBackfilledAgain; TestAStrayIndexEntryIsDeletedOnlyPastTheMargin rebuilt to hold the margin.",
+    "packages/envoy/cmd/dispatch/README.md: when the back-fill runs.",
+    "packages/envoy/internal/dispatch/redeliver/state.go: unchanged; cursorRecord.Indexed's comment still holds."
   ],
   "trickyParts": [
-    "On this pod `go test ./internal/dispatch/redeliver/ -count=2` can end FAIL with zero `--- FAIL` lines, from storetest's drop of its isolated database needing pg_terminate_backend, which the login legion_test lacks. Judge by the `--- FAIL` count.",
+    "On this pod a run of internal/dispatch/redeliver can end FAIL with zero `--- FAIL` lines, from storetest's drop of its isolated database needing pg_terminate_backend, which the login legion_test lacks. Judge by the `--- FAIL` count; a repeat is clean.",
     "Four tests of that package migrate into the database their DSN names, so use DISPATCH_TEST_DATABASE_URL=postgres://legion_test@127.0.0.1:5433/legion_test_infra627?sslmode=disable rather than $LEGION_TEST_PG_DSN.",
     "-race needs cgo here: prefix CGO_ENABLED=1.",
-    "Seeding a bucket for the head build now needs a cursor carrying `indexed` as well as the entries and the marker: without it the head's first sweep runs its back-fill, and that is what gets measured instead of a steady sweep. The evidence harness's seeder writes it.",
-    "The evidence harness was rebuilt after the pod was replaced and is at /legion/scratch/tmp/infra627 (README.md, build.sh, e1.sh, e2.sh, e2cost.sh, e2op.sh, e1gh/, e2gh/, e2seed/, bin/, src/, out/), with its transcripts under out/. The tester's own is /legion/scratch/tmp/t627.",
-    "check-ci-filters.sh takes about 140 s and is the only check that sees an import changing which CI jobs a file starts."
+    "The harness clock must stay on real time for the package as a whole: TestARateLimitStopsTheSweepUntilGitHubsRetryTime writes a limit on the harness clock and judges it by the database's, so moving newHarness off a minute boundary breaks it. A test that needs an offset clock advances its own.",
+    "Seeding a bucket for this build needs the entries, the marker and a cursor carrying indexed; the marker now also needs a time no further behind than Lookback, or the sweep back-fills instead of reading its index. The harness's seeder writes all of it.",
+    "The evidence harness is /legion/scratch/tmp/infra627, with its README naming each script; `HEAD=<rev> ./build.sh` is how it is pointed at another head."
   ],
   "deviations": [
     "The spec's 2i names the index key as pending.<GUID> with the due time in the value; the due time is in the key instead. Plan departure 1.",
@@ -69,15 +67,15 @@
     "The before/after line on the committed load reproduction can only show no regression; run as written in round 1, three runs a side. Plan departure 3.",
     "A caller that goes away no longer suppresses the record of its sync's deadline on the source row. Plan departure 4.",
     "Lookback grows from 60 to 66 minutes, which the index requires; accepted by INFRA-514's architect at 2026-11-01T19:55:54Z.",
-    "The benchmark's ratio criterion is not met, the residual being nats-server's per-subject work for the filtered consumer; recorded as a departure by the same message, with no bucket of its own and no child issue.",
-    "The forward merge changed the pull request's fingerprint by one line, so this head needs a full test round rather than the bare gates. The merge was required: GitHub reported the pull request CONFLICTING after #2395 merged."
+    "The benchmark's ratio criterion is not met, the residual being nats-server's per-subject work for the filtered consumer; recorded as a departure by the same message.",
+    "The back-fill now reads the whole bucket once a Lookback at most, where before this round it read it once per marker TTL. That is the cost of reaching a record an older build left behind whatever it did, and it is still one read an hour against the one every two minutes this change replaced."
   ],
   "openQuestions": [
-    "None blocking. All 22 review threads of rounds 1 and 2 are answered and resolved."
+    "None blocking. All 28 review threads are answered and resolved."
   ],
   "discoveredComplexity": [
-    "An index that is maintained by only some of the processes writing the bucket has to survive every state the others leave, and each such state is a separate way to lose a delivery: a record rewritten without the field, a record created without it, and a record held under a claim written without it. The first two were found in round 1's review and this round's; the third is this round's, and it is the one the adoption rule alone did not reach, because the sweep returns on a live claim before it reaches any write.",
-    "A build can tell that another build has swept by what the other build does not write. The cursor is the one key every sweep writes, so a field this build always sets turns the cursor into that signal, and a rollback stops hiding behind the back-fill's marker.",
-    "A margin against another writer's clock must also cover the resolution of what it compares. The entries are keyed to the minute, so a margin of cursorOverlap proved only that a write was older than cursorOverlap minus a minute; the margin has to carry that minute itself."
+    "A rule two readers of one bucket must both follow belongs in one helper the moment there are two of them. decide had the live-claim rule and its reason written out; the back-fill grew a second path to the same records and did not have it, and the cost was the claimant's own write. indexLiveClaim is now the one place that rule lives.",
+    "A marker that says work was done must say when, or it cannot say whether the work still holds. The index marker was a bare key, so the only thing that could bring the back-fill round again was the bucket's TTL expiring it; carrying the moment it was written turns it into a statement with an age, and the back-fill falls due against Lookback instead of 72 hours.",
+    "A signal read from what another build does not write only reaches a build that gets far enough to write. The cursor's indexed field reaches an older build that completes a sweep and no other, which is why it is kept for what it is good at - making a roll-forward immediate - and the marker's age carries the rest."
   ]
 }
