@@ -38812,6 +38812,35 @@ var KEYED_LAYER_MEMORY_MS = 5 * 60000;
 var KEYED_LAYER_SEEN = new Map;
 var KEYED_LAYER_PROBES = new Map;
 var KEY_LAYER_PROBE_MS = 5000;
+function keyedLayerMemory() {
+  const wall = Date.now();
+  const now = performance.now();
+  const kept = {};
+  for (const [origin, seen] of KEYED_LAYER_SEEN) {
+    const age = now - seen;
+    if (age >= 0 && age < KEYED_LAYER_MEMORY_MS) {
+      kept[origin] = new Date(wall - age).toISOString();
+    }
+  }
+  return kept;
+}
+function rememberKeyedLayer(saved) {
+  if (typeof saved !== "object" || saved === null)
+    return;
+  const wall = Date.now();
+  const now = performance.now();
+  for (const [origin, at] of Object.entries(saved)) {
+    if (typeof at !== "string")
+      continue;
+    const age = wall - Date.parse(at);
+    if (!(age >= 0 && age < KEYED_LAYER_MEMORY_MS))
+      continue;
+    const seen = now - age;
+    const known = KEYED_LAYER_SEEN.get(origin);
+    if (known === undefined || known < seen)
+      KEYED_LAYER_SEEN.set(origin, seen);
+  }
+}
 function keyEchoed(response, key) {
   const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
   return echoed.replace(/^"(.*)"$/, "$1") === key;
@@ -46787,13 +46816,15 @@ function loadSessionMemory(dir, sessionId) {
   const pictures = shownPictures(sessionId);
   for (const address of stringList(state.pictures))
     pictures.add(address);
+  rememberKeyedLayer(state.keyedLayer);
   return new Set(stringList(state.follows));
 }
 function writeMemory(dir, sessionId, follows) {
   const state = {
     advice: [...adviceMemory()],
     pictures: [...shownPictures(sessionId)],
-    follows: [...follows]
+    follows: [...follows],
+    keyedLayer: keyedLayerMemory()
   };
   writeAtomically(join5(dir, "state.json"), `${JSON.stringify(state)}
 `);

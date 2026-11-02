@@ -279,7 +279,7 @@ answer anything else `400 INVALID_SESSION_ID`). `ref_key` is filled by the `arti
 trigger, never by application code, and a lookup by owner compares `artifactOwnerKey`, the
 trigger's own owner expression, except an agent's conversation's, which compares `session_id`,
 that expression's session arm, so the partial index `artifacts_session_id` serves the two
-lookups its upload makes (`agentArtifactByNameSQL`, `agentArtifactSlugTakenSQL`). An agent's
+lookups its upload makes (`agentArtifactByNameOrSlugSQL`, `agentArtifactSlugTakenSQL`). An agent's
 conversation holds files and images only: a markdown document uploaded to it is
 `400 ARTIFACT_INPUT`, since a live document needs an event owner and every event belongs to an
 issue, a document or a project. For the same reason its upload appends no event and its uploads
@@ -294,8 +294,11 @@ Every owner's upload reads its kind from its bytes (`artifactKind`): a `text/mar
 a document, and any other is an `image` only when `http.DetectContentType` reads its bytes as a
 PNG, JPEG, GIF or WebP, the pictures a model is shown, stored and served under that type whatever
 the client declared. Anything else is a `file` under its declared type, so a client cannot store
-arbitrary bytes, or an SVG, as an image. An artifact keeps its kind: a version whose kind is not
-its artifact's is `400 ARTIFACT_KIND_MISMATCH`.
+arbitrary bytes, or an SVG, as an image. An upload's name finds the owner's artifact whose name or
+slug it is (`artifactByNameOrSlugSQL`), so a name that is an artifact's slug is that artifact's
+next version, never a second artifact the same reference would also name. An artifact keeps its
+kind: a version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`, naming the
+artifact's slug, name and kind.
 
 Each document room has two shared Yjs types: the authoritative
 `Y.XmlFragment("prosemirror")` tree and `Y.Map("marks")`, the server-maintained
