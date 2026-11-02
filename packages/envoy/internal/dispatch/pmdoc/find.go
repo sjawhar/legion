@@ -286,8 +286,8 @@ func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
 	}
 	matches := quoteMatches(f.text, quote)
 	if len(matches) == 0 {
-		if kind, rest := listItemQuote(quote); rest != "" {
-			matches = listItemQuoteMatches(f.doc, f.text, kind, rest)
+		if item := ParseListItemQuote(quote); item.Text != "" {
+			matches = listItemQuoteMatches(f.doc, f.text, item)
 		}
 	}
 	return matches, nil
@@ -295,34 +295,55 @@ func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
 
 // listItemTaskBox is a task item's box, `[ ]` or `[x]`, opening what follows a list marker: the
 // box renders as the item's checkbox, not as text the item holds.
-var listItemTaskBox = regexp.MustCompile(`^\[[ xX]\][ \t]+`)
+var listItemTaskBox = regexp.MustCompile(`^\[([ xX])\][ \t]+`)
 
-// listItemQuote reads a quote that opens with a list item's marker (`- `, `* `, `+ `, `5. `,
-// `5) `), and a task box after it, as the item's marker and the text after it, the marker's kind
-// and that text. A quote opening with no marker, or holding nothing after it, answers no text.
-func listItemQuote(quote string) (MarkerKind, string) {
-	marker, width := LeadingBlockMarker(quote)
-	if marker.Kind != MarkerOrdered && marker.Kind != MarkerBullet {
-		return MarkerNone, ""
-	}
-	rest := quote[width:]
-	rest = rest[len(listItemTaskBox.FindString(rest)):]
-	return marker.Kind, rest
+// ListItemQuote is a quote that opens with a list item's marker read as what the marker selects:
+// an item of a list of Kind whose text starts with Text, and, when a task box (`[ ]`, `[x]`)
+// follows the marker, a task item checked or not as Checked says.
+type ListItemQuote struct {
+	Kind    MarkerKind
+	Checked *bool
+	Text    string
 }
 
-// listItemQuoteMatches is every match of rest, a quote's text after a list marker of kind, that
-// begins where a list item of that kind begins its text: the marker selects the item, as a heading
-// quote's marker selects a heading, and the renderer writes it before the item's first paragraph,
-// so the text it is quoted with starts there. The item's number is not matched, only its kind.
-func listItemQuoteMatches(doc *Node, text flattenedText, kind MarkerKind, rest string) []quoteMatch {
-	candidates := quoteMatches(text, rest)
+// ParseListItemQuote reads a quote that opens with a list item's marker (`- `, `* `, `+ `, `5. `,
+// `5) `), and a task box after it, as the item they select. A quote opening with no marker, or
+// holding nothing after it, selects no item: its Text is empty.
+func ParseListItemQuote(quote string) ListItemQuote {
+	marker, width := LeadingBlockMarker(quote)
+	if marker.Kind != MarkerOrdered && marker.Kind != MarkerBullet {
+		return ListItemQuote{}
+	}
+	item := ListItemQuote{Kind: marker.Kind, Text: quote[width:]}
+	if box := listItemTaskBox.FindStringSubmatch(item.Text); box != nil {
+		checked := box[1] != " "
+		item.Checked = &checked
+		item.Text = item.Text[len(box[0]):]
+	}
+	return item
+}
+
+// listItemQuoteMatches is every match of item's text that begins where an item it selects begins
+// its text: the marker selects the item, as a heading quote's marker selects a heading, and the
+// renderer writes it before the item's first paragraph, so the text it is quoted with starts
+// there. The item's number is not matched, only its kind, and a task box only a task item whose
+// box is in that state.
+func listItemQuoteMatches(doc *Node, text flattenedText, item ListItemQuote) []quoteMatch {
+	candidates := quoteMatches(text, item.Text)
 	if len(candidates) == 0 {
 		return nil
 	}
 	var matches []quoteMatch
 	walk(doc, func(node *Node, path []int, pos, end int) bool {
-		if node.Type != "paragraph" || textblockMarker(doc, node, path).Kind != kind {
+		if node.Type != "paragraph" || textblockMarker(doc, node, path).Kind != item.Kind {
 			return true
+		}
+		if item.Checked != nil {
+			// textblockMarker found a list item's first paragraph, so its parent is that item.
+			checked, task := nodeAtPath(doc, path[:len(path)-1]).Attrs["checked"].(bool)
+			if !task || checked != *item.Checked {
+				return true
+			}
 		}
 		for _, match := range candidates {
 			if match.From == pos+1 && match.To <= end-1 {
@@ -708,8 +729,8 @@ func markupInRange(marks []inlineMarkup, span range16) inlineMarkup {
 func quoteNotFound(doc *Node, quote string) error {
 	if marker := atxHeadingMarker.FindString(quote); marker != "" {
 		quote = quote[len(marker):]
-	} else if _, rest := listItemQuote(quote); rest != "" {
-		quote = rest
+	} else if item := ParseListItemQuote(quote); item.Text != "" {
+		quote = item.Text
 	} else if rendered, marked := renderedMarkdownQuote(quote); marked {
 		quote = rendered.value
 	}

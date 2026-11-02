@@ -68,9 +68,13 @@ type ErrQuoteNotFound struct {
 
 func (e *ErrQuoteNotFound) Error() string {
 	if e.Matches > 0 {
+		places := "places"
+		if e.Matches == 1 {
+			places = "place"
+		}
 		return fmt.Sprintf(
-			"%squote %q matches %d places, so that occurrence is out of range; occurrence is zero-based; nearest blocks: %s",
-			e.prefix(), e.Quote, e.Matches, pmdoc.QuoteBlocks(e.Nearest),
+			"%squote %q matches %d %s, so that occurrence is out of range; occurrence is zero-based; nearest blocks: %s",
+			e.prefix(), e.Quote, e.Matches, places, pmdoc.QuoteBlocks(e.Nearest),
 		)
 	}
 	if len(e.Cells) > 0 {
@@ -79,13 +83,21 @@ func (e *ErrQuoteNotFound) Error() string {
 			e.prefix(), e.Quote, oneCellAdvice(e.Field, e.Cells),
 		)
 	}
-	if marker, width := pmdoc.LeadingBlockMarker(e.Quote); (marker.Kind == pmdoc.MarkerOrdered || marker.Kind == pmdoc.MarkerBullet) && width < len(e.Quote) {
-		// The marker is not text the item holds: it selects a list item of its kind whose text
-		// starts with the rest, so a miss is the rest's or the kind's, and the rest alone is the
-		// quote that matches the text anywhere.
+	if item := pmdoc.ParseListItemQuote(e.Quote); strings.TrimSpace(item.Text) != "" {
+		// The marker, and a task box after it, are no text the item holds: they select an item of
+		// their kind whose text starts with the rest, so a miss is the rest's, the kind's or the
+		// box's, and the rest alone is the quote that matches the text anywhere.
+		selects := "an item of a " + string(item.Kind)
+		if item.Checked != nil {
+			state := "unchecked"
+			if *item.Checked {
+				state = "checked"
+			}
+			selects = "a " + state + " task item of a " + string(item.Kind)
+		}
 		return fmt.Sprintf(
-			"%squote %q not found; a leading list marker is no text the item holds: it selects an item of a %s, its number not matched, whose text starts with the rest; quote the item's text without the marker (%q) to match it anywhere; nearest blocks: %s",
-			e.prefix(), e.Quote, marker.Kind, strings.TrimSpace(e.Quote[width:]), pmdoc.QuoteBlocks(e.Nearest),
+			"%squote %q not found; a leading list marker is no text the item holds: it selects %s, its number not matched, whose text starts with the rest; quote the item's text without the marker (%q) to match it anywhere; nearest blocks: %s",
+			e.prefix(), e.Quote, selects, strings.TrimSpace(item.Text), pmdoc.QuoteBlocks(e.Nearest),
 		)
 	}
 	return fmt.Sprintf(`%squote %q not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: %s`, e.prefix(), e.Quote, pmdoc.QuoteBlocks(e.Nearest))
@@ -1487,9 +1499,12 @@ func cellHolds(text, part string) bool {
 	return bare != "" && strings.Contains(text, bare)
 }
 
-// cellQuoteParts is quote split at each pipe a backslash does not escape, as a markdown table row
-// is split into cells, each part trimmed and its `\|` read as the pipe a cell holds; empty parts
-// are dropped. A quote with no such pipe is no row, and has no parts.
+// cellQuoteParts is quote split as a markdown table row is split into cells: at every pipe after an
+// even run of backslashes (none included), inside code spans and links too, since a row ends a cell
+// there (pmdoc's splitAtEvenEscapedPipes). Each part is trimmed and read as the text its cell would
+// hold, a pipe after an odd run being the pipe a cell holds and each pair of backslashes before a
+// pipe one backslash; empty parts are dropped. A quote with no such pipe is no row, and has no
+// parts.
 func cellQuoteParts(quote string) []string {
 	var parts []string
 	var part strings.Builder
@@ -1501,16 +1516,27 @@ func cellQuoteParts(quote string) []string {
 		part.Reset()
 	}
 	for index := 0; index < len(quote); index++ {
-		switch {
-		case quote[index] == '\\' && index+1 < len(quote) && quote[index+1] == '|':
-			part.WriteByte('|')
-			index++
-		case quote[index] == '|':
-			split = true
-			flush()
-		default:
+		if quote[index] != '\\' && quote[index] != '|' {
 			part.WriteByte(quote[index])
+			continue
 		}
+		run := 0
+		for index < len(quote) && quote[index] == '\\' {
+			run++
+			index++
+		}
+		if index == len(quote) || quote[index] != '|' {
+			part.WriteString(strings.Repeat(`\`, run))
+			index--
+			continue
+		}
+		part.WriteString(strings.Repeat(`\`, run/2))
+		if run%2 == 1 {
+			part.WriteByte('|')
+			continue
+		}
+		split = true
+		flush()
 	}
 	flush()
 	if !split {

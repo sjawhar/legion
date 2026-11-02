@@ -2441,6 +2441,46 @@ func TestApplyOperationQuoteOpeningWithAListMarkerSelectsTheItem(t *testing.T) {
 	}
 }
 
+// A task box after a list marker selects only a task item in that state, and a with carrying the
+// marker and the other box ticks the item it selected.
+func TestApplyOperationListMarkerQuoteMatchesTheTaskBox(t *testing.T) {
+	tree, err := parseInput("- [ ] deploy\n- [x] ship\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "- [ ] deploy", With: "- [x] deploy"})
+	if err != nil {
+		t.Fatalf("task-box quote = %v, want it to select the unchecked item", err)
+	}
+	if markdown, _ := pmdoc.Render(out); !strings.Contains(markdown, "- [x] deploy") {
+		t.Fatalf("task-box replace wrote %q, want the item ticked", markdown)
+	}
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "- [x] deploy", With: "x"})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || !strings.Contains(missing.Error(), "a checked task item") || !strings.Contains(missing.Error(), `without the marker ("deploy")`) {
+		t.Fatalf("checked box on an unchecked item = %v, want a miss naming the box and the text to quote", err)
+	}
+}
+
+// A row quote is split as a markdown row is split: a pipe after an odd run of backslashes is the
+// pipe a cell holds, and one after an even run ends a cell.
+func TestApplyOperationRowQuoteSplitsAtPipesAsARowDoes(t *testing.T) {
+	tree, err := parseInput("| Item | Owner |\n| --- | --- |\n| a\\\\ | b |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: `Item \| Owner`, With: "x"})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || strings.Contains(missing.Error(), "table cell") {
+		t.Fatalf("quote with an escaped pipe = %v, want the ordinary miss", err)
+	}
+	// `a\\|` is a cell holding `a\` and the boundary after it.
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: `a\\| b`, With: "x"})
+	if !errors.As(err, &missing) || !strings.Contains(missing.Error(), `the cells are "a\\", "b"`) {
+		t.Fatalf("quote with a pipe after two backslashes = %v, want it read as the row's two cells", err)
+	}
+}
+
 // An out-of-range occurrence is a miss like any other: it names the quote, how many places it
 // did match, and the nearest blocks — not a bare "target not found" (Rev1326).
 func TestApplyOperationOutOfRangeOccurrenceNamesTheQuoteAndMatchCount(t *testing.T) {
