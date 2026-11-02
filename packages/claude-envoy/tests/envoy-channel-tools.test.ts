@@ -85,6 +85,56 @@ test("sends Envoy messages through the shared transport", async () => {
   })
 })
 
+test("a send that is not confirmed names its key, and a resend under that key sends it again", async () => {
+  const keys: string[] = []
+  let answer: "time out" | "repeat" = "time out"
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (_request, init) => {
+      keys.push((JSON.parse(String(init?.body)) as { idempotency_key: string }).idempotency_key)
+      if (answer === "time out") throw new DOMException("The operation timed out.", "TimeoutError")
+      return Response.json({
+        event_id: "evt-resent",
+        source: "agent",
+        source_event_id: "agent.ses_claude.evt-resent",
+        source_session: "ses_claude",
+        topic: "notifications.agent.ses_receiver",
+        dedupe_key: `agent.ses_receiver.${keys[0]}`,
+        issued_at: 1,
+        payload_summary: "ready",
+        trace_id: "trace-resent",
+        recipient: "ses_receiver",
+        duplicate: true,
+      })
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const failed = await executeEnvoyTool(runtime, "envoy_send", {
+    session_id: "ses_receiver",
+    message: "ready",
+  }).then(
+    () => undefined,
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  )
+  const key = keys[0] as string
+  expect(failed).toContain("The send to ses_receiver is not confirmed delivered")
+  expect(failed).toContain(`Sending it again with idempotency_key ${key} is safe`)
+
+  answer = "repeat"
+  const resent = await executeEnvoyTool(runtime, "envoy_send", {
+    session_id: "ses_receiver",
+    message: "ready",
+    idempotency_key: key,
+  })
+
+  expect(keys).toEqual([key, key, key])
+  expect(resent).toMatchObject({
+    message:
+      "already sent to ses_receiver: Envoy held a send under this idempotency_key, so it stored no second copy",
+  })
+})
+
 test("replies in a Slack thread with slack_post, with the token the broker grants", async () => {
   // The broker's client on PATH, standing in for the exec form once LEGION_SLACK_BOT_TOKEN is
   // granted, and a fake Slack Web API at SLACK_POST_API_URL.

@@ -6,6 +6,7 @@ import {
   MessageMetadataSchema,
   messageMetadataShape,
   parseEnvoyToolArguments,
+  sendConfirmationText,
   sessionsOnMachine,
   toMessageMetadata,
 } from "../tool-contract";
@@ -54,6 +55,7 @@ describe("envoyToolSpecs", () => {
     expect(Object.keys(send?.arguments(schemaApi) ?? {}).sort()).toEqual([
       "expects_reply",
       "expires_at",
+      "idempotency_key",
       "in_reply_to",
       "message",
       "session_id",
@@ -125,6 +127,36 @@ describe("envoyToolSpecs", () => {
   });
 });
 
+describe("envoy_send resend", () => {
+  const key = "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80";
+
+  test("takes the idempotency_key an unconfirmed send named", () => {
+    expect(
+      parseEnvoyToolArguments("send", { session_id: "ses_b", message: "hi", idempotency_key: key })
+    ).toEqual({ session_id: "ses_b", message: "hi", idempotency_key: key });
+  });
+
+  test("refuses a key the listener would not store once", () => {
+    for (const idempotency_key of ["retry-1", key.toUpperCase(), `${key}0`]) {
+      expect(() =>
+        parseEnvoyToolArguments("send", { session_id: "ses_b", message: "hi", idempotency_key })
+      ).toThrow(ToolInputError);
+    }
+  });
+
+  test("says a resend the listener already held stored no second copy", () => {
+    const envelope = { event_id: "event-2" };
+    expect(
+      sendConfirmationText({ envelope, recipient: "ses_b", confirmed: true, duplicate: true })
+    ).toBe(
+      "already sent to ses_b: Envoy held a send under this idempotency_key, so it stored no second copy"
+    );
+    expect(
+      sendConfirmationText({ envelope, recipient: "ses_b", confirmed: true, duplicate: false })
+    ).toBe("sent event-2 to ses_b");
+  });
+});
+
 describe("message metadata", () => {
   test("maps validated wire fields to the client input shape", () => {
     const metadata = MessageMetadataSchema.parse({
@@ -185,7 +217,7 @@ describe("message metadata", () => {
     expect(failure.problems).toEqual([
       "message is required (string)",
       'expects_reply must be one of none|optional|required; got "no"',
-      'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at',
+      'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at, idempotency_key',
     ]);
     expect(failure.message).toContain("envoy_send was not called: 3 problems");
   });

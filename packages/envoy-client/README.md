@@ -201,11 +201,16 @@ uses the stack runs only with `LEGION_E2E_ENVOY_STACK=1`.
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
 accept optional `inReplyTo`, `supersedes`, `urgency`, `expectsReply`, and `expiresAt` metadata.
-Successful direct sends return both the envelope and listener-selected recipient; publishes return
-the envelope and an optional role holder. Network failures and 5xx responses retry once after
-250 ms. Listener error responses preserve their `error` and optional `expected` fields. The
-listener's bearer is the `token` the client is given (`envoySettings`); without one it sends no
-`Authorization` header.
+Successful direct sends return both the envelope and listener-selected recipient, and
+`duplicate` when the listener already held a send under that target and idempotency key;
+publishes return the envelope and an optional role holder. Network failures, timeouts (5 s an
+attempt, the answer's body included) and 5xx responses retry once after 250 ms, under the same
+idempotency key. A send whose last attempt got no answer or a 5xx throws
+`EnvoySendUnconfirmedError`: the message may or may not be stored, and the error names its
+`idempotencyKey`, under which a resend is stored at most once inside the stream's 72-hour
+duplicate window. A 4xx stays an `EnvoyApiError`. Listener error responses preserve their
+`error` and optional `expected` fields. The listener's bearer is the `token` the client is given
+(`envoySettings`); without one it sends no `Authorization` header.
 
 `subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
 `plugin_version` on every registration, and exposes listener warnings, including a topic that has

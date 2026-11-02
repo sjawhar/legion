@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { MINTED_DEDUPE_KEY_PATTERN } from "@legion/contracts";
 import { machineID } from "../machine";
 import {
   createEnvoyClient,
   type DeliveryAnswer,
   EnvoyApiError,
+  EnvoySendUnconfirmedError,
   newClientInstanceID,
 } from "../transport";
 
@@ -690,6 +692,122 @@ describe("EnvoyClient", () => {
 
     expect(idempotencyKeys).toHaveLength(2);
     expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+  });
+
+  test("a send no attempt of which is answered is not confirmed delivered, and names the key a resend reuses", async () => {
+    const idempotencyKeys: string[] = [];
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { readonly idempotency_key: string };
+        idempotencyKeys.push(body.idempotency_key);
+        // What AbortSignal.timeout raises when the listener holds the request past the deadline.
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      },
+    });
+
+    const error = await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_target", message: "hello" })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+
+    expect(idempotencyKeys).toHaveLength(2);
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+    const key = idempotencyKeys[0] as string;
+    // The listener stores a send once per key only for a key of this shape, so the key the error
+    // names is one a resend cannot deliver twice.
+    expect(`agent.ses_target.${key}`).toMatch(new RegExp(MINTED_DEDUPE_KEY_PATTERN));
+    expect(error).toBeInstanceOf(EnvoySendUnconfirmedError);
+    expect(error).toMatchObject({
+      targetSessionID: "ses_target",
+      idempotencyKey: key,
+      attempts: 2,
+    });
+    expect((error as Error).message).toBe(
+      "The send to ses_target is not confirmed delivered: the listener did not answer " +
+        "(The operation timed out.) on the last of 2 attempts. It may or may not have arrived. " +
+        `Sending it again with idempotency_key ${key} is safe: Envoy keeps one copy per key ` +
+        "for 72 hours."
+    );
+  });
+
+  test("a send whose last attempt the listener answered with a 5xx is not confirmed delivered", async () => {
+    const refusal = () =>
+      Response.json(
+        { error: "envoy: the message bus did not answer: context deadline exceeded" },
+        { status: 503 }
+      );
+    const recorded = recordFetch([refusal(), refusal()]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const error = await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_target", message: "hello" })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+
+    expect(recorded.requests).toHaveLength(2);
+    expect(error).toBeInstanceOf(EnvoySendUnconfirmedError);
+    const unconfirmed = error as EnvoySendUnconfirmedError;
+    expect(unconfirmed.last).toBeInstanceOf(EnvoyApiError);
+    expect((unconfirmed.last as EnvoyApiError).details.status).toBe(503);
+    expect(unconfirmed.message).toStartWith(
+      "The send to ses_target is not confirmed delivered: the listener answered 503 " +
+        "(envoy: the message bus did not answer: context deadline exceeded) on the last of 2 " +
+        "attempts. It may or may not have arrived. Sending it again with idempotency_key "
+    );
+  });
+
+  test("a send the listener refused with a 4xx is that refusal, sent once", async () => {
+    const recorded = recordFetch([
+      Response.json({ error: "no live session ses_target" }, { status: 404 }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const error = await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_target", message: "hello" })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+
+    expect(recorded.requests).toHaveLength(1);
+    expect(error).toBeInstanceOf(EnvoyApiError);
+    expect(error).not.toBeInstanceOf(EnvoySendUnconfirmedError);
+    expect((error as Error).message).toBe("no live session ses_target");
+  });
+
+  test("a resend under the named key sends that key and reports the listener's repeat", async () => {
+    const key = "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80";
+    const recorded = recordFetch([
+      jsonResponse({
+        event_id: "event-resent",
+        source: "agent",
+        source_event_id: "agent.ses_sender.event-resent",
+        source_session: "ses_sender",
+        topic: "notifications.agent.ses_target",
+        dedupe_key: `agent.ses_target.${key}`,
+        issued_at: 1,
+        payload_summary: "hello",
+        trace_id: "trace-resent",
+        recipient: "ses_target",
+        duplicate: true,
+      }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.send({
+      sourceSessionID: "ses_sender",
+      targetSessionID: "ses_target",
+      message: "hello",
+      idempotencyKey: key,
+    });
+
+    expect(await recorded.requests[0]?.json()).toMatchObject({ idempotency_key: key });
+    expect(result).toMatchObject({ recipient: "ses_target", confirmed: true, duplicate: true });
   });
 
   test("retries a delivered publish with one generated idempotency key", async () => {
