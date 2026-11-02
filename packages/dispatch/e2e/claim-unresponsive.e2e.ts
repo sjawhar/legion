@@ -32,6 +32,15 @@ const holder = {
   dir: "/srv/stalled",
 };
 const taker = { session_id: "claim-taker-session", title: "Second agent" };
+/** A second holder, stalled longer ago than the grace, whose issue the Unclaimed filter may
+ *  therefore list. Only the agent registry can say that: while its query is pending the issue is
+ *  held like any other, so that row appearing is the one sign the list has judged a claim. */
+const freedHolder = {
+  session_id: "claim-freed-session",
+  title: "Holder whose claim came free",
+  machine_id: "box-1",
+  dir: "/srv/freed",
+};
 
 /** An issue claimed by `holder`, with both sessions live, and the agent token the takes below
  *  are made with. */
@@ -62,6 +71,27 @@ test("an unresponsive holder keeps its claim: the issue page says unresponsive s
   browser,
 }) => {
   const { issueKey, token } = await seedClaim("Worked by a stalled session");
+  // A claim the Unclaimed filter may list, seeded before the holder is stalled because the
+  // fixture's session list is written whole: all three sessions, then each one's silence.
+  const freed = await createIssue({
+    project: "CORE",
+    title: "Claimed by a holder long gone quiet",
+  });
+  await setLiveSessions([holder, taker, freedHolder]);
+  await claimIssue(freed.key, {
+    actor: {
+      id: freedHolder.session_id,
+      kind: "session",
+      origin: { session_title: freedHolder.title },
+    },
+    as: "agent",
+    token,
+  });
+  await setSessionLastSeen(
+    freedHolder.session_id,
+    Date.now() - (ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS + 60_000)
+  );
+  await setSessionState(freedHolder.session_id, "unresponsive");
   const lastSeen = await stall(6 * 60_000);
 
   const alice = await asUser(browser, "alice");
@@ -91,12 +121,16 @@ test("an unresponsive holder keeps its claim: the issue page says unresponsive s
     );
 
     // The issue is nobody's to pick up while the claim holds, so the Unclaimed filter hides it.
-    // A second issue nobody has claimed is what says the list arrived: a count of zero passes
-    // against a page that has rendered no row at all, so a regression that listed the held
-    // issue would pass this too if nothing positive were waited for first.
+    // Two rows have to arrive before that absence means anything. An unclaimed issue says the
+    // issue list rendered at all, against which a count of zero passes vacuously. The freed
+    // holder's issue says the agent registry answered: the filter judges a claim against it
+    // (`claimIsTakeable`, features/project/issue-filters.ts), and while that query is pending
+    // every claim counts as held - so the held issue would be hidden for that reason alone, and
+    // a regression that listed it could pass this check unnoticed.
     const pickable = await createIssue({ project: "CORE", title: "Nobody's to pick up" });
     await page.goto("/projects/CORE/issues?unclaimed=1");
     await expect(page.locator("[data-issue-row]").filter({ hasText: pickable.key })).toHaveCount(1);
+    await expect(page.locator("[data-issue-row]").filter({ hasText: freed.key })).toHaveCount(1);
     await expect(page.getByTestId("unclaimed-unchecked")).toHaveCount(0);
     await expect(page.locator("[data-issue-row]").filter({ hasText: issueKey })).toHaveCount(0);
 

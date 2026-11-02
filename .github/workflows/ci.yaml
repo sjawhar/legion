@@ -3098,8 +3098,8 @@ jobs:
   # SIGSTOPs a child process carrying envoy-client's own registration and heartbeat and holds the
   # listener to `unresponsive` — the role claim kept, the send stored — until the gone horizon.
   # Its longest property waits out that horizon and one reaper pass: the role claim reaper runs
-  # at ENVOY_SESSION_REAP_INTERVAL, which the rig sets to two seconds, so the suite costs the
-  # horizon rather than the five minutes a fixed reaper pass used to cost it.
+  # at ENVOY_ROLE_CLAIM_REAP_INTERVAL, which the rig sets to two seconds, so the suite costs the
+  # horizon rather than the five minutes that reaper's own default would cost it.
   envoy-session-stall:
     needs: changes
     if: needs.changes.outputs.envoy_session_stall == 'true'
