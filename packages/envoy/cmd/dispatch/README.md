@@ -1314,7 +1314,7 @@ any), creates the function `block_ref_listed(to_types, to_id)`, true when `to_ty
 The column is added with no default, so no row is rewritten, and the previous release, which neither reads nor writes it, keeps writing rows that hold null and so are listed as before.
 The column takes `block_refs` `ACCESS EXCLUSIVE` and the view `graph_edges` `ACCESS EXCLUSIVE` for the migration's short transaction, so a block index write and a reference read wait behind it.
 It refuses and rewrites no row; its census answers `0`.
-No shipped block type declares a `block[]` attribute, so no pointer row exists for a build that does not know one to drop.
+The shipped `plan_task` and `check` declare the `block[]` attributes `serves` and `needs`, so a document written since they shipped holds pointer rows, which a build that does not read `to_types` lists as it lists every other `block_refs` row.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -2690,7 +2690,7 @@ What each node type weighs:
 | `table_header_row`, `table_row` | a row | 3 | block id |
 | `table_header`, `table_cell` | a cell and its paragraph | 4 | block id, alignment, spans |
 | `footnote_definition` | a footnote definition | 3, and 3 when empty | block id, label |
-| `callout`, `ask` (typed blocks) | a `:::name{…}` block | 3, and 3 when empty | block id and the schema's attributes |
+| `callout`, `ask`, `requirement`, `plan_task`, `check` (typed blocks) | a `:::name{…}` block | 3, and 3 when empty | block id and the schema's attributes |
 | `text` | a run of text; each mark a run carries is the inline syntax that opens it | 1 | none (marks) |
 | `hardbreak` | a hard line break | 3, beside its line's 1 | isInline |
 | `image` | an image; its alt text's nodes weigh 1 each | 3 | source, alt, title |

@@ -15,15 +15,15 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// blockPointerTestSchema is the shipped schema (its callout included) with two test types: a
-// requirement, and a claim whose serves attribute is a block[] attribute pointing only at
-// requirements, or attributes when given. Call it before useTestBlockSchema swaps the schema.
+// blockPointerTestSchema is the shipped schema (its callout and its requirement included) with
+// one test type: a claim whose serves attribute is a block[] attribute pointing only at
+// requirements, or attributes when given. No shipped type is named claim, so it shadows none.
+// Call it before useTestBlockSchema swaps the schema.
 func blockPointerTestSchema(attributes BlockAttributes) BlockSchema {
 	if attributes == nil {
 		attributes = oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList, Targets: []string{"requirement"}})
 	}
 	return BlockSchema{Version: schema.Version, Types: append(slices.Clone(schema.Types),
-		BlockTypeSchema{Name: "requirement", Content: BlockContentParagraphs, Render: "host", Attributes: BlockAttributes{}},
 		BlockTypeSchema{Name: "claim", Content: BlockContentParagraphs, Render: "host", Attributes: attributes},
 	)}
 }
@@ -46,10 +46,11 @@ func useTestBlockSchema(t testing.TB, value BlockSchema) {
 
 // A block[] attribute's name is the kind of the links it makes, so it is one `?kind=` can name and
 // never a structural edge kind; its targets are types whose blocks the link graph holds; only it
-// carries targets; and it starts empty. No shipped type declares one.
+// carries targets. The shipped schema declares two: a plan task's serves and needs, the first of
+// which a check shares.
 func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
-	if kinds := LinkKinds(); len(kinds) != 0 {
-		t.Fatalf("the shipped schema's link kinds = %v, want none", kinds)
+	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"needs", "serves"}) {
+		t.Fatalf("the shipped schema's link kinds = %v, want needs and serves", kinds)
 	}
 	if err := validateBlockSchema(blockPointerTestSchema(nil)); err != nil {
 		t.Fatalf("validate the test schema: %v", err)
@@ -89,8 +90,8 @@ func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
 		{Name: "note", BlockAttributeSchema: BlockAttributeSchema{Kind: BlockAttributeString}},
 	}})
 	useTestBlockSchema(t, twice)
-	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"serves"}) {
-		t.Fatalf("link kinds of two types declaring serves = %v, want [serves]", kinds)
+	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"needs", "serves"}) {
+		t.Fatalf("link kinds of the types declaring serves = %v, want [needs serves]", kinds)
 	}
 	var served BlockSchema
 	if err := json.Unmarshal(SchemaJSON(), &served); err != nil || len(served.Types) != len(twice.Types) {
@@ -257,10 +258,12 @@ func TestABlockPointerAttributeRoundTripsThroughMarkdownAndYjs(t *testing.T) {
 	}
 }
 
-// A pointer a write introduces to a block of a type its attribute does not allow is refused,
-// naming what is wrong; one to an allowed or an absent block is accepted, and one the tree before
-// the write already held is never refused, whatever its target has become.
-func TestCheckBlockPointersRefusesATargetOfADisallowedType(t *testing.T) {
+// A pointer a write introduces is refused, naming what is wrong, when it names a block of a type
+// its attribute does not allow, a block no document holds, a block of an issue neither the
+// writing document's own nor above it, or, under needs, a block of another document; one at an
+// allowed block of its own issue or of an issue above it is accepted, and one the tree before the
+// write already held is never refused, whatever its target has become.
+func TestCheckBlockPointersRefusesATargetItMayNotName(t *testing.T) {
 	value := blockPointerTestSchema(nil)
 	// A draft holds the same attribute name as text, which a retype into a claim makes a pointer;
 	// a loose block holds it as a pointer to any block, which a retype into a claim narrows.
@@ -272,25 +275,42 @@ func TestCheckBlockPointersRefusesATargetOfADisallowedType(t *testing.T) {
 	)
 	anyBlock := blockPointerTestSchema(oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList}))
 	useTestBlockSchema(t, value)
+	// The write lands in checks.md of CORE-1, whose parent is CORE-7; CORE-8 is a sibling tree,
+	// and the handbook is a document CORE, the project, holds and no issue does.
 	const (
 		requirement = "dispatch://CORE-1/spec#b-r1"
 		paragraph   = "dispatch://CORE-1/spec#b-p1"
 		callout     = "dispatch://CORE-1/spec#b-k1"
 		absent      = "dispatch://CORE-1/spec#b-gone"
+		above       = "dispatch://CORE-7/spec#b-a1"
+		sibling     = "dispatch://CORE-8/spec#b-s1"
+		handbook    = "dispatch://CORE/artifact/handbook-md#b-h1"
+		ourTask     = "dispatch://CORE-1/artifact/checks-md#b-t1"
+		theirTask   = "dispatch://CORE-1/spec#b-t9"
 	)
-	types := map[string][]string{"CORE-1/spec#r1": {"requirement"}, "CORE-1/spec#p1": {"paragraph"}, "CORE-1/spec#k1": {"callout"}}
-	// resolve answers the types of the blocks it is asked for, by node id, and counts its calls:
-	// a check looks its targets up at most once.
+	writing := BlockWriting{Document: "CORE-1/checks-md", Issue: "CORE-1", Ancestors: []string{"CORE-7"}}
+	blocks := map[string]BlockTarget{
+		"CORE-1/spec#r1":      {Types: []string{"requirement"}, Document: "CORE-1/spec", Issue: "CORE-1"},
+		"CORE-1/spec#p1":      {Types: []string{"paragraph"}, Document: "CORE-1/spec", Issue: "CORE-1"},
+		"CORE-1/spec#k1":      {Types: []string{"callout"}, Document: "CORE-1/spec", Issue: "CORE-1"},
+		"CORE-7/spec#a1":      {Types: []string{"requirement"}, Document: "CORE-7/spec", Issue: "CORE-7"},
+		"CORE-8/spec#s1":      {Types: []string{"requirement"}, Document: "CORE-8/spec", Issue: "CORE-8"},
+		"CORE/handbook-md#h1": {Types: []string{"requirement"}, Document: "CORE/handbook-md"},
+		"CORE-1/checks-md#t1": {Types: []string{"plan_task"}, Document: "CORE-1/checks-md", Issue: "CORE-1"},
+		"CORE-1/spec#t9":      {Types: []string{"plan_task"}, Document: "CORE-1/spec", Issue: "CORE-1"},
+	}
+	// resolve answers where the write lands and the blocks it is asked for, by node id, and
+	// counts its calls: a check looks its targets up at most once.
 	var calls int
-	resolve := func(targets []text.Ref) (map[string][]string, error) {
+	resolve := func(targets []text.Ref) (BlockWriting, map[string]BlockTarget, error) {
 		calls++
-		found := make(map[string][]string)
+		found := make(map[string]BlockTarget)
 		for _, target := range targets {
-			if held, ok := types[text.TargetID(target)]; ok {
+			if held, ok := blocks[text.TargetID(target)]; ok {
 				found[text.TargetID(target)] = held
 			}
 		}
-		return found, nil
+		return writing, found, nil
 	}
 	parse := func(markdown string) *Node {
 		t.Helper()
@@ -303,23 +323,32 @@ func TestCheckBlockPointersRefusesATargetOfADisallowedType(t *testing.T) {
 	claim := func(ref string) *Node {
 		return parse(":::claim{#c1 serves=\"" + ref + "\"}\nIt holds.\n:::\n")
 	}
+	task := func(ref string) *Node {
+		return parse(":::plan_task{#t2 needs=\"" + ref + "\"}\nDo it.\n:::\n")
+	}
 	for _, test := range []struct {
-		name       string
-		tree       *Node
-		prior      *Node
-		refusedFor string // the target type the refusal names; empty when accepted
+		name  string
+		tree  *Node
+		prior *Node
+		// refusal is what the refusal must name; none: the write is accepted.
+		refusal []string
 	}{
 		{name: "a requirement", tree: claim(requirement)},
-		{name: "a paragraph", tree: claim(paragraph), refusedFor: "paragraph"},
-		{name: "a callout", tree: claim(callout), refusedFor: "callout"},
-		{name: "a block no document holds", tree: claim(absent)},
+		{name: "a paragraph", tree: claim(paragraph), refusal: []string{`"serves"`, paragraph, `"paragraph"`, "requirement"}},
+		{name: "a callout", tree: claim(callout), refusal: []string{`"serves"`, callout, `"callout"`, "requirement"}},
+		{name: "a block no document holds", tree: claim(absent), refusal: []string{`"serves"`, absent, "no document holds"}},
+		{name: "a requirement of the issue above", tree: claim(above)},
+		{name: "a requirement of a sibling tree", tree: claim(sibling), refusal: []string{`"serves"`, sibling, "CORE-8", "CORE-1"}},
+		{name: "a requirement of a document a project holds", tree: claim(handbook), refusal: []string{`"serves"`, handbook, "CORE/handbook-md", "CORE-1"}},
+		{name: "a plan task of the writing document", tree: task(ourTask)},
+		{name: "a plan task of another document", tree: task(theirTask), refusal: []string{`"needs"`, theirTask, "CORE-1/spec", "its own document"}},
 		{name: "a callout the tree before already pointed at", tree: claim(callout), prior: claim(callout)},
-		{name: "a callout replacing a requirement", tree: claim(callout), prior: claim(requirement), refusedFor: "callout"},
-		{name: "a callout after a pointer of another block", tree: parse(":::claim{#c2 serves=\"" + callout + "\"}\nIt holds.\n:::\n"), prior: claim(callout), refusedFor: "callout"},
-		{name: "a callout pointed at by a block retyped from text", tree: claim(callout), prior: parse(":::draft{#c1 serves=\"" + callout + "\"}\nIt holds.\n:::\n"), refusedFor: "callout"},
-		{name: "a callout pointed at by a block retyped from a pointer to any block", tree: claim(callout), prior: parse(":::loose{#c1 serves=\"" + callout + "\"}\nIt holds.\n:::\n"), refusedFor: "callout"},
-		{name: "a callout second after a requirement", tree: claim(requirement + " " + callout), prior: claim(requirement), refusedFor: "callout"},
-		{name: "a callout before a paragraph, both new", tree: claim(callout + " " + paragraph), refusedFor: "callout"},
+		{name: "a callout replacing a requirement", tree: claim(callout), prior: claim(requirement), refusal: []string{`"serves"`, callout, `"callout"`}},
+		{name: "a callout after a pointer of another block", tree: parse(":::claim{#c2 serves=\"" + callout + "\"}\nIt holds.\n:::\n"), prior: claim(callout), refusal: []string{`"serves"`, callout, `"callout"`}},
+		{name: "a callout pointed at by a block retyped from text", tree: claim(callout), prior: parse(":::draft{#c1 serves=\"" + callout + "\"}\nIt holds.\n:::\n"), refusal: []string{`"serves"`, callout, `"callout"`}},
+		{name: "a callout pointed at by a block retyped from a pointer to any block", tree: claim(callout), prior: parse(":::loose{#c1 serves=\"" + callout + "\"}\nIt holds.\n:::\n"), refusal: []string{`"serves"`, callout, `"callout"`}},
+		{name: "a callout second after a requirement", tree: claim(requirement + " " + callout), prior: claim(requirement), refusal: []string{`"serves"`, callout, `"callout"`}},
+		{name: "a callout before a paragraph, both new", tree: claim(callout + " " + paragraph), refusal: []string{`"serves"`, callout, `"callout"`}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls = 0
@@ -327,7 +356,7 @@ func TestCheckBlockPointersRefusesATargetOfADisallowedType(t *testing.T) {
 			if calls > 1 {
 				t.Fatalf("CheckBlockPointers looked its targets up %d times, want at most once", calls)
 			}
-			if test.refusedFor == "" {
+			if len(test.refusal) == 0 {
 				if err != nil {
 					t.Fatalf("CheckBlockPointers = %v, want accepted", err)
 				}
@@ -336,8 +365,7 @@ func TestCheckBlockPointersRefusesATargetOfADisallowedType(t *testing.T) {
 			if !errors.Is(err, ErrBlockPointer) || errors.Is(err, ErrSchema) {
 				t.Fatalf("CheckBlockPointers = %v, want ErrBlockPointer and no schema refusal", err)
 			}
-			ref := map[string]string{"paragraph": paragraph, "callout": callout}[test.refusedFor]
-			for _, want := range []string{`"serves"`, ref, `"` + test.refusedFor + `"`, "requirement"} {
+			for _, want := range test.refusal {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("CheckBlockPointers = %v, want it to name %s", err, want)
 				}
@@ -345,18 +373,43 @@ func TestCheckBlockPointersRefusesATargetOfADisallowedType(t *testing.T) {
 		})
 	}
 
+	// A document a project holds, and no issue does, points only inside itself.
+	project := func(targets []text.Ref) (BlockWriting, map[string]BlockTarget, error) {
+		found := make(map[string]BlockTarget)
+		for _, target := range targets {
+			if held, ok := blocks[text.TargetID(target)]; ok {
+				found[text.TargetID(target)] = held
+			}
+		}
+		return BlockWriting{Document: "CORE/handbook-md"}, found, nil
+	}
+	if err := CheckBlockPointers(claim(handbook), nil, project); err != nil {
+		t.Fatalf("a project document pointing at a requirement of its own = %v, want accepted", err)
+	}
+	outside := CheckBlockPointers(claim(requirement), nil, project)
+	if !errors.Is(outside, ErrBlockPointer) {
+		t.Fatalf("a project document pointing outside itself = %v, want refused", outside)
+	}
+	for _, want := range []string{`"serves"`, requirement, "CORE-1/spec", "a block of itself"} {
+		if !strings.Contains(outside.Error(), want) {
+			t.Fatalf("a project document pointing outside itself = %v, want it to name %s", outside, want)
+		}
+	}
+
 	// Two blocks share a node id only across a store's rows; any of their types outside the
 	// targets refuses.
-	shared := func(targets []text.Ref) (map[string][]string, error) {
-		return map[string][]string{text.TargetID(targets[0]): {"requirement", "callout"}}, nil
+	shared := func(targets []text.Ref) (BlockWriting, map[string]BlockTarget, error) {
+		return writing, map[string]BlockTarget{
+			text.TargetID(targets[0]): {Types: []string{"requirement", "callout"}, Document: "CORE-1/spec", Issue: "CORE-1"},
+		}, nil
 	}
 	if err := CheckBlockPointers(claim(requirement), nil, shared); !errors.Is(err, ErrBlockPointer) {
 		t.Fatalf("a target holding a requirement and a callout = %v, want refused", err)
 	}
 	// A pointer with no targets points at any block, so nothing is looked up for it.
 	useTestBlockSchema(t, anyBlock)
-	if err := CheckBlockPointers(claim(callout), nil, func([]text.Ref) (map[string][]string, error) {
-		return nil, errors.New("looked up a pointer with no targets")
+	if err := CheckBlockPointers(claim(callout), nil, func([]text.Ref) (BlockWriting, map[string]BlockTarget, error) {
+		return BlockWriting{}, nil, errors.New("looked up a pointer with no targets")
 	}); err != nil {
 		t.Fatalf("a pointer with no targets = %v, want accepted", err)
 	}

@@ -1683,7 +1683,7 @@ Parsing mints an omitted id, while live document reads and writes validate each 
 Schema changes are additive: add a type, add a defaulted attribute, add an enum choice, or widen a content rule.
 Tightening content, removing or renaming a type or attribute, or requiring a new attribute requires a document migration and version bump.
 
-A `block[]` attribute points at blocks; no shipped type declares one.
+A `block[]` attribute points at blocks; the shipped ones are a plan task's `serves` and `needs` and a check's `serves`.
 Its value is the empty string (no pointers) or canonical block references joined by exactly one space, none leading or trailing, no other whitespace and none repeated (`pmdoc.ParseBlockPointerValue`, and the renderer joins them with one space);
 anything else is refused, never normalised.
 A canonical reference is one `text.FormatBlockRef` writes back byte for byte (`text.CanonicalBlockRef`):
@@ -1699,10 +1699,11 @@ not a list item or a table's row or cell); absent or empty, it points at any blo
 Its default is absent or `[]`.
 
 Three rules enforce `targets`.
-An agent's or API write is refused when a pointer it introduces names an existing block of a type the attribute does not allow (`pmdoc.CheckBlockPointers`, called by `docs.refuseBlockPointers` from `applyLive`, `SeedText`, and `RebuildDocument` given markdown):
+An agent's or API write is refused when a pointer it introduces names a block the attribute may not name (`pmdoc.CheckBlockPointers`, called by `docs.refuseBlockPointers` from `applyLive`, `SeedText`, and `RebuildDocument` given markdown):
 a pointer is introduced when the tree before the write holds no pointer with the same typed block id, typed block type, attribute and reference (a new pointer, a changed value, or a block retyped into a type declaring the attribute, whatever the type before declared under that name), and every pointer is when there is no such tree (a new document, a repair of a tree outside the schema, a rebuild whose latest version does not read back).
-`refs.BlockTypes` reads each target's type as the block index will hold it:
-a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.IndexBlocks` takes it), any other from its current `document_blocks` rows (one query for all of a write's introduced pointers), and a target no block holds is accepted.
+`refs.BlockTargets` reads each target as the block index will hold it, with the writing document's own issue and that issue's ancestors (`refs.IssueAncestors`, the server's one recursive `child_of` walk, bounded by the same depth cap as every other issue walk):
+a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.IndexBlocks` takes it), any other from its current `document_blocks` rows, each with its document and that document's issue (one query for all of a write's introduced pointers).
+The write is refused when the pointer names a block no document holds, a block of a type the attribute's targets do not allow, a block of an issue that is neither the writing document's own issue nor an ancestor of it, a block of another document where a project holds the writing document and no issue does, or a block of another document under `needs`, which orders the tasks of one plan and so points only inside its own document.
 The refusal is `400 INVALID_OP` on `attributes` on the edit route and `400 INVALID_MARKDOWN` on every other;
 a pointer the write leaves unchanged is never refused.
 A browser's write and the block-index reconciliation are never refused, and store the pointer as any other.
