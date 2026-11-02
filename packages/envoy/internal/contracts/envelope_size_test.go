@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,15 +41,14 @@ func (c noCI) RecordSuite(context.Context, contracts.CIObservation) error {
 
 // The listener publishes each envelope to NATS whole, and the server refuses a message past its max
 // payload, 1 MiB by default, which would lose the event on every delivery. The normalizer bounds
-// every text an envelope copies from its webhook at MaxEnvelopeTextRunes, and a push's changed paths
-// as a list (MaxPushChangedPaths, MaxPushChangedPathRunes). Each kind of event the daemon reads is
-// posted to the listener's handler here with every text it copies past those bounds, under the
-// longest owner (39 characters) and repository name (100) GitHub allows, so its envelope is the
-// largest the normalizer makes: in 4-byte runes, and in `<`, which costs the most bytes a rune once
-// the payload is a JSON string inside the envelope's JSON (`\\u003c`, 7 bytes). Each is answered
-// 200 and stored by a real NATS server at the default max payload. A workflow run's file name,
-// a segment of its subject, is the longest a filesystem keeps (255 bytes); a checks settlement has
-// its own bound, which the CI store's tests publish at.
+// every text an envelope copies from its webhook at MaxEnvelopeTextRunes. Each kind of event the
+// daemon reads is posted to the listener's handler here with every text it copies past that bound,
+// under the longest owner (39 characters) and repository name (100) GitHub allows, so its envelope
+// is the largest the normalizer makes: in 4-byte runes, and in `<`, which costs the most bytes a
+// rune once the payload is a JSON string inside the envelope's JSON (`\\u003c`, 7 bytes). Each is
+// answered 200 and stored by a real NATS server at the default max payload. A workflow run's file
+// name, a segment of its subject, is the longest a filesystem keeps (255 bytes); a checks
+// settlement has its own bound, which the CI store's tests publish at.
 func TestTheLargestEnvelopeOfEachKindTheDaemonReadsIsStored(t *testing.T) {
 	owner, repo := strings.Repeat("o", 39), strings.Repeat("r", 100)
 	repository := object{"name": repo, "full_name": owner + "/" + repo, "owner": object{"login": owner}}
@@ -145,41 +143,19 @@ func TestTheLargestEnvelopeOfEachKindTheDaemonReadsIsStored(t *testing.T) {
 						t.Errorf("payload %s is %d runes, want it at the %d-rune bound", field, runes, contracts.MaxEnvelopeTextRunes)
 					}
 				}
-				if tc.event == "push" {
-					paths := payload["changed_paths"]
-					if lines := strings.Count(paths, "\n") + 1; lines != contracts.MaxPushChangedPaths ||
-						utf8.RuneCountInString(paths) != contracts.MaxPushChangedPathRunes || payload["changed_paths_truncated"] != "true" {
-						t.Errorf("changed paths are %d paths in %d runes (truncated %q), want %d paths in %d runes, truncated",
-							lines, utf8.RuneCountInString(paths), payload["changed_paths_truncated"],
-							contracts.MaxPushChangedPaths, contracts.MaxPushChangedPathRunes)
-					}
-				}
 				t.Logf("the stored %s is %d bytes on a %d-byte subject", tc.event, len(stored.Data), len(stored.Subject))
 			})
 		}
 	}
 }
 
-// largestPush is a push whose every copied text is over, whose ref is 5,000 runes, and whose
-// commits list MaxPushChangedPaths paths of filler that, with the newlines joining them, are
-// exactly MaxPushChangedPathRunes, and one path more.
+// largestPush is a push whose every copied text is over and whose ref is 5,000 runes.
 func largestPush(repository object, filler, over string) object {
-	const n = contracts.MaxPushChangedPaths
-	text := contracts.MaxPushChangedPathRunes - (n - 1)
-	paths := make([]any, n+1)
-	for i := range paths {
-		runes := text / n
-		if i < text%n {
-			runes++
-		}
-		prefix := fmt.Sprintf("%03d/", i)
-		paths[i] = prefix + strings.Repeat(filler, runes-len(prefix))
-	}
 	return object{
 		"ref": "refs/heads/" + strings.Repeat(filler, 5000), "before": over, "after": over,
 		"compare": over, "forced": true, "repository": repository, "pusher": object{"name": over},
 		"head_commit": object{"message": over}, "commits": []any{object{
-			"added": paths[:n/2], "modified": paths[n/2:], "removed": []any{},
+			"added": []any{}, "modified": []any{}, "removed": []any{},
 		}},
 	}
 }

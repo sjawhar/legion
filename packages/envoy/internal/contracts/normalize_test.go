@@ -2,7 +2,6 @@ package contracts
 
 import (
 	"encoding/json"
-	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -1988,135 +1987,6 @@ func TestGithubPayloadFields(t *testing.T) {
 			want: map[string]string{"head_subject": realLongSubject},
 		},
 		{
-			name:  "push lists unique changed paths across commits in first-seen order",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{"id": "1", "added": []any{"a.ts"}, "removed": []any{}, "modified": []any{"b.ts"}},
-					map[string]any{"id": "2", "added": []any{}, "removed": []any{"c.ts"}, "modified": []any{"a.ts"}},
-				},
-			},
-			want: map[string]string{"changed_paths": "a.ts\nb.ts\nc.ts", "changed_paths_truncated": "false"},
-		},
-		{
-			name:  "push caps changed paths at 100 and flags truncation",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{"id": "1", "added": numberedPaths(0, 60), "removed": []any{}, "modified": []any{}},
-					map[string]any{"id": "2", "added": []any{}, "removed": []any{}, "modified": numberedPaths(60, 101)},
-				},
-			},
-			want: map[string]string{
-				"changed_paths":           strings.Join(numberedPathStrings(0, 100), "\n"),
-				"changed_paths_truncated": "true",
-			},
-		},
-		{
-			name:  "push with exactly 100 unique paths and a repeat does not flag truncation",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{"id": "1", "added": numberedPaths(0, 100), "removed": []any{}, "modified": []any{}},
-					map[string]any{"id": "2", "added": []any{}, "removed": []any{}, "modified": numberedPaths(0, 1)},
-				},
-			},
-			want: map[string]string{
-				"changed_paths":           strings.Join(numberedPathStrings(0, 100), "\n"),
-				"changed_paths_truncated": "false",
-			},
-		},
-		{
-			// A hundred paths are not bounded by their count alone: git bounds no path's length, and
-			// the envelope carries the list whole. The list stops at a path that would take it past
-			// its text budget, keeps every path it lists whole, and says it stopped.
-			name:  "push stops listing changed paths at their text budget and flags truncation",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{"id": "1", "added": longPaths(0, 100), "removed": []any{}, "modified": []any{}},
-				},
-			},
-			want: map[string]string{
-				"changed_paths":           strings.Join(pathsWithinBudget(longPathStrings(0, 100)), "\n"),
-				"changed_paths_truncated": "true",
-			},
-		},
-		{
-			name:  "push with no commits omits changed_paths",
-			event: "push",
-			body: map[string]any{
-				"repository":  map[string]any{"full_name": "example-org/example-repo"},
-				"ref":         "refs/heads/legion/X",
-				"commits":     []any{},
-				"head_commit": nil,
-			},
-			want:    map[string]string{"changed_paths_truncated": "false", "commit_count": "0"},
-			omitted: []string{"changed_paths"},
-		},
-		{
-			name:  "a forced push says so",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"forced":     true,
-				"commits": []any{
-					map[string]any{"id": "1", "added": []any{}, "removed": []any{}, "modified": []any{".legion/review.json"}},
-				},
-			},
-			want: map[string]string{"forced": "true", "changed_paths": ".legion/review.json"},
-		},
-		{
-			name:  "a push GitHub says was not forced says so",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"forced":     false,
-				"commits":    []any{},
-			},
-			want: map[string]string{"forced": "false"},
-		},
-		{
-			name:  "a push whose body leaves forced out says it was not forced",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits":    []any{},
-			},
-			want: map[string]string{"forced": "false"},
-		},
-		{
-			name:  "push removing the .legion handoffs lists the removed paths",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "example-org/example-repo"},
-				"ref":        "refs/heads/legion/X",
-				"commits": []any{
-					map[string]any{
-						"id":       "9b6fe2c5154f",
-						"added":    []any{},
-						"removed":  []any{".legion/implement.json", ".legion/plan.json", ".legion/review.json", ".legion/test.json"},
-						"modified": []any{},
-					},
-				},
-			},
-			want: map[string]string{
-				"changed_paths":           ".legion/implement.json\n.legion/plan.json\n.legion/review.json\n.legion/test.json",
-				"changed_paths_truncated": "false",
-			},
-		},
-		{
 			name:  "merged pull request carries merge and ref facts",
 			event: "pull_request",
 			body: map[string]any{
@@ -2491,60 +2361,12 @@ func TestAWorkflowFileNameIsOneValidSubjectSegment(t *testing.T) {
 	}
 }
 
-// numberedPathStrings returns src/f<from>.ts .. src/f<to-1>.ts.
-func numberedPathStrings(from, to int) []string {
-	paths := make([]string, 0, to-from)
-	for n := from; n < to; n++ {
-		paths = append(paths, fmt.Sprintf("src/f%d.ts", n))
-	}
-	return paths
-}
-
-// longPathStrings returns paths of 400 runes each, numbered from..to-1.
-func longPathStrings(from, to int) []string {
-	paths := make([]string, 0, to-from)
-	for n := from; n < to; n++ {
-		paths = append(paths, fmt.Sprintf("src/%s/f%03d.ts", strings.Repeat("d", 388), n))
-	}
-	return paths
-}
-
-func longPaths(from, to int) []any {
-	paths := make([]any, 0, to-from)
-	for _, path := range longPathStrings(from, to) {
-		paths = append(paths, path)
-	}
-	return paths
-}
-
-// pathsWithinBudget returns the longest prefix of paths whose newline-joined list fits the push
-// payload's changed-paths budget.
-func pathsWithinBudget(paths []string) []string {
-	runes := 0
-	for i, path := range paths {
-		if i > 0 {
-			runes++
-		}
-		runes += len([]rune(path))
-		if runes > maxPushChangedPathRunes {
-			return paths[:i]
-		}
-	}
-	return paths
-}
-
-func numberedPaths(from, to int) []any {
-	paths := make([]any, 0, to-from)
-	for _, path := range numberedPathStrings(from, to) {
-		paths = append(paths, path)
-	}
-	return paths
-}
-
-// TestGithubPayloadPushChangedPathsFixture normalizes a captured-shape GitHub push body carrying
-// the real LEGION-23 handoff push (PR #966, commit 538bbf1a: `.legion/implement.json` added,
-// nothing else) and asserts the daemon sees exactly that one path, unflagged.
-func TestGithubPayloadPushChangedPathsFixture(t *testing.T) {
+// TestGithubPayloadPushCarriesExactlyTheKeysTheDaemonReads normalizes a captured real GitHub push
+// body (sjawhar/legion PR #966, commit 538bbf1a) and asserts the push payload's exact key set: the
+// ten fields the listener publishes, and none of changed_paths, changed_paths_truncated or forced,
+// which no daemon reads since sjawhar/legion#2354 moved Legion's handoffs onto their Dispatch
+// issues.
+func TestGithubPayloadPushCarriesExactlyTheKeysTheDaemonReads(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "push_handoff_only.json"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -2561,18 +2383,19 @@ func TestGithubPayloadPushChangedPathsFixture(t *testing.T) {
 	}
 	payload := decodePayload(t, envelope.Payload)
 	want := map[string]string{
-		"changed_paths":           ".legion/implement.json",
-		"changed_paths_truncated": "false",
-		"commit_count":            "1",
-		"after":                   "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
-		"ref":                     "refs/heads/legion/LEGION-23",
-		// GitHub's own push carries "forced": false.
-		"forced": "false",
+		"kind":         "push",
+		"repo":         "sjawhar/legion",
+		"ref":          "refs/heads/legion/LEGION-23",
+		"after":        "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
+		"before":       "da6d40f735b36fdda8f6980cd7550b872d5ceeba",
+		"pusher":       "legion-implementer[bot]",
+		"sender":       "legion-implementer[bot]",
+		"head_subject": "implement: record handoff",
+		"commit_count": "1",
+		"compare_url":  "https://github.com/sjawhar/legion/compare/da6d40f735b3...538bbf1ab6b9",
 	}
-	for key, value := range want {
-		if got := payload[key]; got != value {
-			t.Fatalf("payload[%q] = %q, want %q", key, got, value)
-		}
+	if !maps.Equal(want, payload) {
+		t.Fatalf("push payload keys = %v, want %v\ngot: %v", slices.Sorted(maps.Keys(payload)), slices.Sorted(maps.Keys(want)), payload)
 	}
 }
 
