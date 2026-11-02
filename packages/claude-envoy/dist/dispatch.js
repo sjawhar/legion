@@ -14644,8 +14644,13 @@ var askEventPayloadFields = {
   opened_event_id: number2().int().positive(),
   kind: string2().optional(),
   question: string2().optional(),
-  options: array(object({ label: string2().optional() })).optional(),
-  answer: object({ selected: array(string2()).nullish(), text: string2().nullish() }).nullish(),
+  options: array(object({ id: string2().optional(), label: string2().optional() })).optional(),
+  revision: number2().int().positive().optional(),
+  answer: object({
+    id: string2().optional(),
+    selected: array(string2()).nullish(),
+    text: string2().nullish()
+  }).nullish(),
   previous_answer: object({
     user: string2().optional(),
     selected: array(string2()).nullish(),
@@ -15253,8 +15258,8 @@ var dispatchToolSpecs = [
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
-      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
-      reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. Mutually " + "exclusive with reply_to.").optional(),
+      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
+      reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
@@ -15581,7 +15586,7 @@ var ISSUE_KEY = `${PROJECT_KEY}-[1-9][0-9]*`;
 var DOCUMENT_SLUG = "[a-z0-9]+(?:-[a-z0-9]+)*";
 var ISSUE_KEY_ONLY = new RegExp(`^${ISSUE_KEY}$`);
 var BLOCK_REFERENCE = new RegExp(`^dispatch://(?:(${ISSUE_KEY})/spec|(${ISSUE_KEY}|${PROJECT_KEY})/artifact/(${DOCUMENT_SLUG}))#b-(.*)$`, "s");
-var ITEM_BLOCK_REFERENCE = new RegExp(`^dispatch://(?:${ISSUE_KEY}/(comment|message)|${PROJECT_KEY}/artifact/${DOCUMENT_SLUG}/(comment))/([^/?#]+)#b-(.*)$`, "s");
+var ITEM_BLOCK_REFERENCE = new RegExp(`^dispatch://(?:${ISSUE_KEY}/(ask|comment|message)|${PROJECT_KEY}/artifact/${DOCUMENT_SLUG}/(ask|comment))/([^/?#]+)#b-(.*)$`, "s");
 var atIdBound = `dispatch://CORE-1/spec#b-${"x".repeat(MAX_BLOCK_ID_BYTES)}`;
 var DISPATCH_BLOCK_POINTER_VALUES = [
   {
@@ -15681,25 +15686,55 @@ var DISPATCH_BLOCK_POINTER_VALUES = [
     value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
     ok: false,
     why: "a block of an issue's comment",
-    problem: "a block[] attribute points only at a block of a document"
+    problem: "is a block of a comment: a block[] attribute points only at a block of a document"
   },
   {
     value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2@v1",
     ok: false,
     why: "a block of a revision of an issue's comment",
-    problem: "a block[] attribute points only at a block of a document"
+    problem: "is a block of a comment: a block[] attribute points only at a block of a document"
   },
   {
     value: "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2",
     ok: false,
     why: "a block of a project document's comment",
-    problem: "a block[] attribute points only at a block of a document"
+    problem: "is a block of a comment: a block[] attribute points only at a block of a document"
   },
   {
     value: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
     ok: false,
     why: "a block of an issue message",
-    problem: "a block[] attribute points only at a block of a document"
+    problem: "is a block of a message: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b2",
+    ok: false,
+    why: "a part of an issue's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b2@v1",
+    ok: false,
+    why: "a part of a revision of an issue's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b2",
+    ok: false,
+    why: "a part of a project document's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b2@v1",
+    ok: false,
+    why: "a part of a revision of a project document's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/artifact/notes-md/ask/a1#b-b2",
+    ok: false,
+    why: "an issue document's ask, a shape no reference has",
+    problem: "is not a block reference as Dispatch writes one"
   },
   {
     value: "dispatch://CORE-1/artifact/notes-md/comment/c1#b-x",
@@ -15717,7 +15752,7 @@ var DISPATCH_BLOCK_POINTER_VALUES = [
     value: "dispatch://CORE-1/spec#b-x dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
     ok: false,
     why: "a document's block, then an issue message's",
-    problem: "a block[] attribute points only at a block of a document"
+    problem: "is a block of a message: a block[] attribute points only at a block of a document"
   }
 ];
 var TYPED_BLOCK_ID_SHORTCUT_EXCLUDED = `	
@@ -16061,7 +16096,8 @@ function fieldKinds(spec) {
       nullable,
       required: required.has(field),
       ...description === undefined ? {} : { description },
-      ...values === undefined ? {} : { values }
+      ...values === undefined ? {} : { values },
+      shape: inner === undefined ? [] : shapeLines(inner, "")
     });
   }
   return fields;
@@ -16095,6 +16131,58 @@ function kindOf(field, node) {
     default:
       return "json";
   }
+}
+function withoutNull(node) {
+  const members = (node.anyOf ?? [node]).filter((member) => member.type !== "null");
+  return members.length === 1 ? members[0] : undefined;
+}
+function typeName(node) {
+  if (node.anyOf !== undefined)
+    return node.anyOf.map(typeName).join(" or ");
+  if (node.enum !== undefined)
+    return node.enum.map(String).join("|");
+  switch (node.type) {
+    case "string":
+      return "text";
+    case "integer":
+    case "number":
+    case "boolean":
+    case "null":
+      return node.type;
+    case "object":
+      return "object";
+    case "array":
+      return node.items === undefined ? "list" : `list of ${pluralTypeName(node.items)}`;
+    default:
+      return "any JSON";
+  }
+}
+function pluralTypeName(node) {
+  if (node.type === "object")
+    return "objects";
+  if (node.type === "integer")
+    return "integers";
+  if (node.type === "number")
+    return "numbers";
+  return typeName(node);
+}
+function shapeLines(node, indent) {
+  const item = node.type === "array" ? node.items : undefined;
+  const properties = (item ?? node).properties;
+  if (properties === undefined)
+    return [];
+  const required = new Set((item ?? node).required ?? []);
+  return [
+    `${indent}${item === undefined ? "Its keys:" : "Each item's keys:"}`,
+    ...Object.entries(properties).flatMap(([key, child]) => {
+      const about = [required.has(key) ? "required" : undefined, typeName(child)].filter((part) => part !== undefined).join("; ");
+      const inner = withoutNull(child);
+      return [
+        `${indent}  ${key} (${about})${child.description === undefined ? "" : `: ${child.description}`}`,
+        ...inner === undefined ? [] : shapeLines(inner, `${indent}    `)
+      ];
+    })
+  ];
 }
 function singular(field) {
   return field.endsWith("s") ? field.slice(0, -1) : field;
@@ -16143,10 +16231,17 @@ function flagTable(tool, fields) {
         field,
         action: "json",
         value: "<json>",
-        text: `Every option as a JSON list of {label, description?}, in place of --${singular(name)}.`
+        text: [`Every option as a JSON list, in place of --${singular(name)}.`, ...info.shape].join(`
+`)
       });
     } else if (kind === "json") {
-      add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
+      add(`--${name}-json`, {
+        field,
+        action: "json",
+        value: "<json>",
+        text: [about, ...info.shape].filter((line) => line !== "").join(`
+`)
+      });
       add(`--${name}-json-file`, {
         field,
         action: "json-file",
@@ -16424,7 +16519,8 @@ function commandHelp(tool) {
     surface.spec.description,
     "",
     "Flags:",
-    ...commandFlagTable(tool).flatMap((row) => row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, `      ${row.text}`]),
+    ...commandFlagTable(tool).flatMap((row) => row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, ...row.text.split(`
+`).map((line) => `      ${line}`)]),
     "",
     `Example: ${commandLine(tool, surface.spec.example)}`,
     ""
@@ -17482,6 +17578,7 @@ function dispatchIssueRef(key) {
 function dispatchDocumentRef(owner, slug) {
   return `dispatch://${owner}/artifact/${slug}`;
 }
+var ITEM_KINDS = ["ask", "comment", "message"];
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
@@ -17493,7 +17590,7 @@ function parseBlockRef(holder, fragment) {
   }
   const pin = target.pin === undefined ? {} : { pin: target.pin };
   const artifact = parsed.artifact === undefined ? {} : { artifact: parsed.artifact };
-  if (parsed.kind === "comment" || parsed.kind === "message" && target.pin === undefined) {
+  if (parsed.kind === "ask" || parsed.kind === "comment" || parsed.kind === "message" && target.pin === undefined) {
     return {
       owner: parsed.owner,
       kind: "block",
@@ -18919,18 +19016,23 @@ function itemBlockOf(value) {
   const ref = parseDispatchRef(value);
   return ref?.item === undefined || ref.block === undefined ? undefined : { ...ref, item: ref.item, block: ref.block };
 }
+function article(kind) {
+  return kind === "ask" ? "an ask" : `a ${kind}`;
+}
 function replyBlockProblem(field, kind, value) {
   if (!/^dispatch:\/\/[^#]*#b-/.test(value))
     return;
   const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
   const ref = parseDispatchRef(value);
   if (ref?.kind !== "block") {
-    return `${field} ${value} names no block; a block of a ${kind} reads ${form}`;
+    return `${field} ${value} names no block; a block of ${article(kind)} reads ${form}`;
   }
   const other = ref.item?.kind;
   if (other !== kind) {
-    const answer = other === "comment" ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}` : other === "message" ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}` : "";
-    return `${field} ${value} names a block of ${other === undefined ? "a document" : `a ${other}`}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+    const answer = other === "comment" ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}` : other === "message" ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}` : other === "ask" ? `; answer it with ${commandLine("dispatch_comment", { reply_to_ask: value })}` : "";
+    const named = other === undefined ? "a document" : article(other);
+    const answers = kind === "ask" ? "reply_to_ask answers a part of the ask it names" : `${article(kind)} reply answers a block of ${article(kind)}`;
+    return `${field} ${value} names a block of ${named}, but ${answers} (${form})${answer}`;
   }
   if (ref.pin !== undefined) {
     return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
@@ -19054,8 +19156,8 @@ function messageInReplyTo(args) {
   const id = messageIdOf(block?.item.id ?? inReplyTo);
   return id === undefined ? undefined : { id, ...block === undefined ? {} : { block: block.block } };
 }
-function commentReplyTo(args) {
-  const replyTo = optionalString(args, "reply_to");
+function itemReplyTo(args, field) {
+  const replyTo = optionalString(args, field);
   if (replyTo === undefined)
     return;
   const block = itemBlockOf(replyTo);
@@ -19095,12 +19197,17 @@ function argumentProblems(tool, args) {
         problems.push("artifact is required when quote is supplied");
       }
       const replyTo = optionalString(args, "reply_to");
-      if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
+      const replyToAsk = optionalString(args, "reply_to_ask");
+      if (replyTo !== undefined && replyToAsk !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
-      const replyBlock = replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
-      if (replyBlock !== undefined)
-        problems.push(replyBlock);
+      for (const problem of [
+        replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo),
+        replyToAsk === undefined ? undefined : replyBlockProblem("reply_to_ask", "ask", replyToAsk)
+      ]) {
+        if (problem !== undefined)
+          problems.push(problem);
+      }
       break;
     }
     case "dispatch_message": {
@@ -19212,7 +19319,7 @@ function dispatchRefFromUrl(value, serverUrl) {
       return `dispatch://${key}/artifact/${slug}${version}${blockOf("v")}`;
     }
     if (ask !== undefined)
-      return `dispatch://${key}/ask/${ask}`;
+      return `dispatch://${key}/ask/${ask}${blockOf()}`;
     if (comment !== undefined)
       return `dispatch://${key}/comment/${comment}${blockOf()}`;
     if (message !== undefined)
@@ -19239,7 +19346,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     return;
   return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/ask/<uuid>#b-<part id> or " + "dispatch://PROJECT/artifact/<slug>/ask/<uuid>#b-<part id> (one part of an ask: its question, " + "one of its options or its answer, optionally pinned to a revision of the ask's parts with " + "@v<N> after it; for dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
   if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children" && ref.kind !== "block") {
@@ -19251,8 +19358,9 @@ function innerRefProblem(tool, ref, refText) {
   const itemKind = ref.item?.kind ?? ref.kind;
   const documentArgument = ref.kind === "block" && ref.item === undefined && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
   const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
-  const fix = tool === "dispatch_comment" && itemKind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && itemKind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}${ref.item === undefined ? "" : ` of a ${ref.item.kind}`}` : `a ${ref.kind}`;
+  const partRef = ref.pin === undefined ? refText : refText.slice(0, -`@v${ref.pin}`.length);
+  const fix = tool === "dispatch_comment" && itemKind === "ask" ? `reply under it with reply_to_ask ${ref.item === undefined ? ref.id : partRef} and ${ownerArguments}` : tool === "dispatch_comment" && itemKind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}${ref.item === undefined ? "" : ` of ${article(ref.item.kind)}`}` : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
 var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
@@ -19457,16 +19565,11 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const byId = artifacts.find((candidate) => candidate.id === artifactReference);
   if (byId !== undefined)
     return byId;
-  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
-  if (bySlug !== undefined) {
-    const named = byName.filter((candidate) => candidate.id !== bySlug.id && candidate.kind === "doc");
-    if (named.length > 0) {
-      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
-    }
+  if (bySlug !== undefined)
     return bySlug;
-  }
+  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -19521,10 +19624,10 @@ async function documentTargets(client, resolution) {
   };
 }
 var documentHintLimit = 8;
-function documentReferenceProblem(reference, documents, owner, use) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => use === "id" ? `${document.id} (${document.slug}, ${document.name})` : `${document.slug} (${document.name})`);
+function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
+  const hints = documents.slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return use === undefined ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}` : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
+  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
@@ -19703,14 +19806,19 @@ function referenceLines(read) {
     return [`- ${read}`];
   if (read.edges.length === 0)
     return ["- none"];
-  return read.edges.map((edge) => {
-    const { node } = edge;
-    const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
-    const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
-    const item = node.kind === "block" && node.document === undefined && (node.parent?.kind === "comment" || node.parent?.kind === "message") ? node.parent : undefined;
-    const source = item === undefined ? `${node.kind} ${node.ref ?? node.id}` : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
-    return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
-  });
+  return read.edges.map(edgeLine);
+}
+function isItemKind(kind) {
+  return ITEM_KINDS.some((item) => item === kind);
+}
+function edgeLine(edge) {
+  const { node } = edge;
+  const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
+  const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
+  const parent = node.parent ?? undefined;
+  const item = node.kind === "block" && node.document === undefined && isItemKind(parent?.kind) ? parent : undefined;
+  const source = item === undefined ? `${node.kind} ${node.ref ?? node.id}` : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
+  return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
 }
 function unavailableReason(error) {
   return dispatchAnswered(error, 404) ? "unavailable" : `unavailable: ${messageFor(error)}`;
@@ -19752,12 +19860,12 @@ function nodeLine(node) {
   const made = fact(node.made_by, node.made_at);
   const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
-  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" ? "revision" : "version"} ${node.parent_version})`}`;
+  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${isItemKind(parent.kind) ? "revision" : "version"} ${node.parent_version})`}`;
   return [
     `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
   ];
 }
-function blockLines(node, ref) {
+function blockLines(node, ref, noun = "Block") {
   const unit = ref.item === undefined ? "version" : "revision";
   const blockID = node.block_id ?? ref.block;
   const head = ref.item === undefined ? [
@@ -19766,7 +19874,7 @@ function blockLines(node, ref) {
     ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
     ...node.text === undefined ? [] : ["Text:", node.text]
   ] : [
-    `Block ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
+    `${noun} ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
     ...node.text === undefined ? [] : [node.text]
   ];
   const { pin } = node;
@@ -19780,6 +19888,14 @@ function blockLines(node, ref) {
     `Text at ${unit} ${pin.version}:`,
     pin.text
   ];
+}
+function askPartNoun(ask, node, blockID) {
+  if (ask.answer?.id === blockID)
+    return "Answer";
+  if (ask.options.some((option) => option.id === blockID))
+    return "Option";
+  const placed = (ask.revision ?? 0) > 0 && ask.options.every((option) => option.id !== undefined) && (ask.answer === null || ask.answer.id !== undefined);
+  return placed && node.pin?.state !== "removed" ? "Question" : "Part";
 }
 function logSummary(issue, events) {
   return [
@@ -19845,9 +19961,11 @@ function childrenSummary(issue) {
   ].join(`
 `);
 }
-function askSummary({ ask, replies, answers }, graph) {
+function askSummary({ ask, replies, answers }, askRef, pictures, incoming, outgoing) {
   const answer = ask.answer;
   const earlierAnswers = answers.slice(0, -1);
+  const parts = askPartEdges(ask, incoming);
+  const partRef = (id) => `${askRef}#b-${encodeBlockId(id)}`;
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     `Body: ${reply.body}`
@@ -19856,14 +19974,19 @@ function askSummary({ ask, replies, answers }, graph) {
     `Question: ${ask.question}`,
     ...anchorLines(ask),
     "Options:",
-    ...ask.options.length === 0 ? ["- none"] : ask.options.map((option) => `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}`),
+    ...ask.options.length === 0 ? ["- none"] : ask.options.flatMap((option) => [
+      `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}${option.id === undefined ? "" : ` (${partRef(option.id)})`}`,
+      ...partReferenceLines(parts.at, option.id)
+    ]),
     `State: ${ask.state}`,
     `Ask id: ${ask.id}`,
     "Answer:",
     ...answer === null ? ["- none"] : [
       `- By: ${answer.user}`,
       `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
-      ...answer.text === null ? [] : [`- Text: ${answer.text}`]
+      ...answer.text === null ? [] : [`- Text: ${answer.text}`],
+      ...answer.id === undefined ? [] : [`- Reference: ${partRef(answer.id)}`],
+      ...partReferenceLines(parts.at, answer.id)
     ],
     ...earlierAnswers.length === 0 ? [] : [
       "Earlier answers:",
@@ -19877,9 +20000,37 @@ function askSummary({ ask, replies, answers }, graph) {
     ],
     "Replies:",
     ...chain.length === 0 ? ["- none"] : chain,
-    ...graph
+    ...pictures,
+    ...graphSectionLines(parts.rest, outgoing)
   ].join(`
 `);
+}
+function askPartEdges(ask, incoming) {
+  const ids = new Set([...ask.options.map((option) => option.id), ask.answer?.id].filter((id) => id !== undefined));
+  const at = new Map;
+  if (typeof incoming === "string" || ids.size === 0)
+    return { at, rest: incoming };
+  const rest = [];
+  for (const edge of incoming.edges) {
+    const part = edge.block?.block_id;
+    if (part === undefined || !ids.has(part)) {
+      rest.push(edge);
+      continue;
+    }
+    const { block: _block, ...atPart } = edge;
+    const held = at.get(part);
+    if (held === undefined)
+      at.set(part, [atPart]);
+    else
+      held.push(atPart);
+  }
+  return { at, rest: { node: incoming.node, edges: rest } };
+}
+function partReferenceLines(at, id) {
+  const edges = id === undefined ? undefined : at.get(id);
+  if (edges === undefined || edges.length === 0)
+    return [];
+  return ["  Referenced by:", ...edges.map((edge) => `  ${edgeLine(edge)}`)];
 }
 function openAskAge(ageSeconds) {
   const seconds = Math.max(0, Math.floor(ageSeconds));
@@ -20854,14 +21005,15 @@ async function executeDispatchTool(input) {
       const owner = documentOwner();
       const resolved = owner.kind === "project" || artifactReference === undefined ? owner.kind === "project" ? await resolveDocument(owner, artifactReference) : undefined : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = commentReplyTo(args);
-      const replyToAskReference = optionalString(args, "reply_to_ask");
-      const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
-      if (replyToAskReference !== undefined && replyToAsk === undefined) {
+      const replyTo = itemReplyTo(args, "reply_to");
+      const replyToAskTarget = itemReplyTo(args, "reply_to_ask");
+      const replyToAsk = replyToAskTarget === undefined ? undefined : normalizeUUID(replyToAskTarget.id);
+      if (replyToAskTarget !== undefined && replyToAsk === undefined) {
         throw new ToolInputError(input.tool, [
           await invalidReplyToAskProblem(client, owner, resolved)
         ]);
       }
+      const replyToBlock = replyTo?.block ?? replyToAskTarget?.block;
       const requestedTurn = optionalString(args, "turn");
       const body = await writePictures(resolved, stringArg(args, "body"), {
         cap: DISPATCH_BODY_MAX,
@@ -20872,7 +21024,7 @@ async function executeDispatchTool(input) {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
         ...replyTo === undefined ? {} : { reply_to: replyTo.id },
-        ...replyTo?.block === undefined ? {} : { reply_to_block: replyTo.block },
+        ...replyToBlock === undefined ? {} : { reply_to_block: replyToBlock },
         ...replyToAsk === undefined ? {} : { ask_id: replyToAsk },
         ...requestedTurn === undefined ? {} : { turn: requestedTurn },
         actor
@@ -21285,12 +21437,13 @@ ${handoff.body}`,
         const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks(await documentIdOf(ref), "all"));
         await refuseItemOffRef(input.tool, "ask", ref, stringArg(args, "ref"), askRead.ask, () => documentIdOf(ref));
         const askRef = refTarget(ref, "ask", askRead.ask.id);
-        const [pictures, graph] = await Promise.all([
+        const [pictures, incoming, outgoing] = await Promise.all([
           picturesOf(askTexts(askRead)),
-          graphSections(client, askRef)
+          graphReferences(client, { to: askRef }),
+          graphReferences(client, { from: askRef })
         ]);
         return {
-          text: askSummary(askRead, [...pictures.lines, ...graph]),
+          text: askSummary(askRead, askRef, pictures.lines, incoming, outgoing),
           details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
           ...showImages(pictures)
         };
@@ -21331,17 +21484,26 @@ ${handoff.body}`,
         const ref = ownerArguments.ref;
         const blockRef = stringArg(args, "ref");
         const holder = blockRef.slice(0, blockRef.indexOf("#"));
-        const [incoming, outgoing] = await Promise.all([
+        const askOfPart = ref.item?.kind === "ask" ? client.getAsk(ref.item.id).catch(() => {
+          return;
+        }) : undefined;
+        const [incoming, outgoing, partOf] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
               throw new Error(`No block ${ref.block} in ${holder}.`);
             }
             throw error;
           }),
-          graphReferences(client, { from: blockRef })
+          graphReferences(client, { from: blockRef }),
+          askOfPart
         ]);
+        const blockID = incoming.node.block_id ?? ref.block ?? "";
+        const noun = ref.item?.kind !== "ask" ? undefined : partOf === undefined ? "Part" : askPartNoun(partOf.ask, incoming.node, blockID);
         return {
-          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(`
+          text: [
+            ...blockLines(incoming.node, ref, noun),
+            ...graphSectionLines(incoming, outgoing)
+          ].join(`
 `),
           details: {
             ...ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
@@ -22425,7 +22587,8 @@ var ErrorWireSchema = object({
 });
 var EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: string2().optional(),
-  holder: string2().optional()
+  holder: string2().optional(),
+  duplicate: boolean2().optional()
 });
 var ReplayWireSchema = object({
   stream: object({
@@ -22511,44 +22674,84 @@ class EnvoyApiError extends Error {
     this.code = parsed?.code;
   }
 }
+var mintedDedupeKey2 = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
+
+class EnvoySendUnconfirmedError extends Error {
+  targetSessionID;
+  idempotencyKey;
+  attempts;
+  last;
+  name = "EnvoySendUnconfirmedError";
+  resendSafe;
+  constructor(targetSessionID, idempotencyKey, attempts, last) {
+    const got = last instanceof EnvoyApiError ? `the listener answered ${last.details.status} (${last.message})` : `the listener did not answer (${last instanceof Error ? last.message : String(last)})`;
+    const tried = attempts === 1 ? "on its only attempt" : `on the last of ${attempts} attempts`;
+    const resendSafe = mintedDedupeKey2.test(`agent.${targetSessionID.trim()}.${idempotencyKey}`);
+    const resend = resendSafe ? `Sending it again with idempotency_key ${idempotencyKey} within ` + `${DELIVERY_DUPLICATE_WINDOW_MS / 3600000} hours is the safe resend: Envoy drops it as ` + "a repeat if the first copy arrived (a recipient that restarted in between can rarely " + "see it twice)." : `Envoy cannot recognise a resend under idempotency_key ${idempotencyKey} as a repeat ` + "(the key is not a lower-case UUID, or the session id holds a dot): ask the recipient " + "whether it arrived before sending it again.";
+    super(`The send to ${targetSessionID} is not confirmed delivered: ${got} ${tried}. It may or may ` + `not have arrived. ${resend}`, { cause: last });
+    this.targetSessionID = targetSessionID;
+    this.idempotencyKey = idempotencyKey;
+    this.attempts = attempts;
+    this.last = last;
+    this.resendSafe = resendSafe;
+  }
+}
 function createEnvoyClient(config) {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config.token;
+  const attempts = config.retry === false ? 1 : 2;
+  const attemptOnce = async (url, init, deadlineMs) => {
+    const headers = new Headers(init.headers);
+    if (apiToken)
+      headers.set("Authorization", `Bearer ${apiToken}`);
+    let response;
+    try {
+      response = await config.fetch(url, {
+        ...init,
+        headers,
+        signal: AbortSignal.timeout(deadlineMs)
+      });
+    } catch (error) {
+      return { unanswered: error };
+    }
+    try {
+      return { response, body: await response.text() };
+    } catch (error) {
+      if (response.status >= 400 && response.status < 500) {
+        return { response, body: `(its body did not arrive: ${String(error)})` };
+      }
+      return { unanswered: error };
+    }
+  };
   const request = async (path, init, options = {}) => {
     const url = `${baseUrl}${path}`;
-    const attempts = config.retry === false ? 1 : 2;
     const tries = options.retry === false ? 1 : attempts;
     for (let attempt = 0;attempt < tries; attempt += 1) {
-      let response;
-      try {
-        const headers = new Headers(init.headers);
-        if (apiToken)
-          headers.set("Authorization", `Bearer ${apiToken}`);
-        response = await config.fetch(url, {
-          ...init,
-          headers,
-          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
-        });
-      } catch (error) {
+      const outcome = await attemptOnce(url, init, options.timeoutMs ?? timeoutMs);
+      if ("unanswered" in outcome) {
+        options.onUnanswered?.();
         if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
-        throw error;
+        throw outcome.unanswered;
       }
-      const responseBody = await response.text();
+      const { response, body } = outcome;
       if (response.ok)
-        return responseBody;
+        return body;
       const error = new EnvoyApiError({
         method: init.method ?? "GET",
         url,
         status: response.status,
-        responseBody
+        responseBody: body
       });
-      if (response.status >= 500 && attempt + 1 < tries) {
-        await waitForRetry();
-        continue;
+      if (response.status >= 500) {
+        options.onUnanswered?.();
+        if (attempt + 1 < tries) {
+          await waitForRetry();
+          continue;
+        }
       }
       throw error;
     }
@@ -22584,18 +22787,33 @@ function createEnvoyClient(config) {
     getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
     send: async (input) => {
       const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/send", {
-        source: input.source ?? "agent",
-        ...sourceSession(input.sourceSessionID),
-        target_session: input.targetSessionID,
-        message: input.message,
-        idempotency_key: idempotencyKey,
-        ...messageMetadata(input)
-      })));
+      let unanswered = false;
+      let response;
+      try {
+        const answer = await post("/v1/messages/send", {
+          source: input.source ?? "agent",
+          ...sourceSession(input.sourceSessionID),
+          target_session: input.targetSessionID,
+          message: input.message,
+          idempotency_key: idempotencyKey,
+          ...messageMetadata(input)
+        }, {
+          onUnanswered: () => {
+            unanswered = true;
+          }
+        });
+        response = EnvelopeResponseSchema.parse(JSON.parse(answer));
+      } catch (error) {
+        if (error instanceof EnvoyApiError && error.details.status < 500 && !unanswered) {
+          throw error;
+        }
+        throw new EnvoySendUnconfirmedError(input.targetSessionID, idempotencyKey, attempts, error);
+      }
       return {
         envelope: response,
         recipient: response.recipient ?? input.targetSessionID,
-        confirmed: response.recipient !== undefined
+        confirmed: response.recipient !== undefined,
+        duplicate: response.duplicate === true
       };
     },
     publish: async (input) => {
@@ -22634,7 +22852,13 @@ function createEnvoyClient(config) {
         raw = await post("/v1/roles/set", body);
       } catch (error) {
         if (error instanceof EnvoyApiError && error.details.status === 409) {
-          const held = RoleHeldWireSchema.safeParse(JSON.parse(error.details.responseBody));
+          let answer;
+          try {
+            answer = JSON.parse(error.details.responseBody);
+          } catch {
+            throw error;
+          }
+          const held = RoleHeldWireSchema.safeParse(answer);
           if (held.success)
             return { claimed: false, holder: held.data.holder };
         }

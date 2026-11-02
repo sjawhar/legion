@@ -20,8 +20,8 @@ type Member struct {
 // documentTarget reads its answer rather than an `exists` probe of its own: inside the
 // recursive walk below the probe sits under an OR, which no semijoin can carry, so the planner
 // plans it as a hashed subplan and reads all of document_blocks to build the hash — 800,000
-// rows and 45,915 buffers of a 122,128-buffer read, once for each of the two places the
-// predicate is spliced into. A lateral that stops at its first row is a nested loop keyed
+// rows and 45,915 buffers of a 122,128-buffer read, once for each place the predicate is
+// spliced into. A lateral that stops at its first row is a nested loop keyed
 // through document_blocks_node_id, the hash index on exactly node_id, and it runs at all only
 // for a block target, because its own to_kind test is a one-time filter the planner re-reads on
 // each loop.
@@ -52,6 +52,11 @@ const closureQuery = `
 				or (r.from_kind = 'artifact' and r.from_id in (select id::text from artifacts where issue_key = $1))
 			)
 			union
+			select ` + documentOfTarget + `, 1, 'ask', r.ask_id::text` + askPartLinksFrom + `
+			` + documentBlockHeld + askPartLinksCurrent + `
+			  and r.ask_id in (select id from asks where issue_key = $1)
+			  and ` + documentTarget + `
+			union
 			select ` + documentOfTarget + `, c.depth + 1, 'artifact', a.id::text
 			from closure c
 			join artifacts a on a.ref_key = c.ref_key
@@ -71,8 +76,10 @@ const closureQuery = `
 // block: a deleted block's links drop out of the closure until a version holds its id again. A
 // block of a comment or message reaches its item, as a document's block reaches its document: a
 // link one holds is read from its item's own refs row, which every comment and message keeps
-// beside its blocks' mentions, so the member's via is the item. A reference to an item block, as
-// one to its item, reaches no document.
+// beside its blocks' mentions, so the member's via is the item. An ask keeps no such row - its
+// refs are its question's alone - so the links its parts hold are read from ask_block_refs, by
+// the same rule: the member's via is the ask, at the depth the ask's own link has. A reference to
+// an item block, as one to its item, reaches no document.
 func Closure(ctx context.Context, q Queryer, issueKey string) ([]Member, bool, error) {
 	rows, err := q.Query(ctx, closureQuery, issueKey)
 	if err != nil {
