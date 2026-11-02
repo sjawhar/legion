@@ -14,8 +14,10 @@ import (
 // documents(key, artifact_id) in scope, every actor that document credits: the one that created it
 // (artifacts.created_by) and every one a version lists (artifact_versions.authors). Each row has
 // the key, the author's actor JSON and a rank: the creator first, then the versions in number
-// order, and each version's authors in its list's order. An artifact that is not a document
-// credits no one. A version's authors are a JSON array, or JSON null where a writer encoded a nil
+// order, and each version's authors in its list's order. An uploaded file that is not a document,
+// a picture among them, credits its uploaders the same way, so a person's comment on it reaches
+// the agent that uploaded it as one on a document reaches its writer. A version's authors are a
+// JSON array, or JSON null where a writer encoded a nil
 // list, which every Go reader of the column decodes as no authors; the CTE reads null the same way
 // rather than failing on jsonb_array_elements' refusal of a scalar. loadDocumentSessionAuthors,
 // loadCommentRecipients and loadPrimaryDocumentAuthors all read it, so a document credits the same
@@ -23,12 +25,11 @@ import (
 const documentCreditsSQL = `
 	select d.key, a.created_by as author, array[1, 0, 0]::bigint[] as rank
 	from documents d
-	join artifacts a on a.id = d.artifact_id and a.kind = 'doc'
+	join artifacts a on a.id = d.artifact_id
 	union all
 	select d.key, credit.author, array[1, v.number, credit.position]::bigint[]
 	from documents d
-	join artifacts a on a.id = d.artifact_id and a.kind = 'doc'
-	join artifact_versions v on v.artifact_id = a.id
+	join artifact_versions v on v.artifact_id = d.artifact_id
 	cross join lateral jsonb_array_elements(nullif(v.authors, 'null'::jsonb))
 		with ordinality as credit(author, position)
 `

@@ -60,14 +60,38 @@ type AgentToken struct {
 	RevokedAt  *time.Time `json:"revoked_at"`
 }
 
-// Anchor identifies a document mark at a particular named version.
+// AnchorKindFile is a file anchor's Kind: a comment on a whole uploaded file that is not a
+// Markdown document, or with a Box on part of a picture.
+const AnchorKindFile = "file"
+
+// Anchor identifies a document mark at a particular named version, or, with Kind AnchorKindFile, an
+// uploaded file at the version a comment is about and, with Box, part of that picture. A file
+// anchor has no mark in any document: its MarkID is the comment's own id, its Quote empty, its
+// BlockID nil, and it is never orphaned, since a file's version never changes.
 type Anchor struct {
-	ArtifactID string  `json:"artifact_id"`
-	BlockID    *string `json:"block_id"`
-	MarkID     string  `json:"mark_id"`
-	Version    int     `json:"version"`
-	Quote      string  `json:"quote"`
-	Orphaned   bool    `json:"orphaned"`
+	Kind       string     `json:"kind,omitempty"`
+	ArtifactID string     `json:"artifact_id"`
+	BlockID    *string    `json:"block_id"`
+	MarkID     string     `json:"mark_id"`
+	Version    int        `json:"version"`
+	Quote      string     `json:"quote"`
+	Orphaned   bool       `json:"orphaned"`
+	Box        *AnchorBox `json:"box,omitempty"`
+}
+
+// AnchorBox is part of a picture as fractions of its width and height from its top-left corner,
+// so it covers the same part of the picture at any size it is drawn.
+type AnchorBox struct {
+	Left   float64 `json:"left"`
+	Top    float64 `json:"top"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// OnText says the anchor marks a passage of a Markdown document, the only kind the document
+// service projects, refreshes or decides: false for no anchor and for a file anchor.
+func (a *Anchor) OnText() bool {
+	return a != nil && a.Kind != AnchorKindFile
 }
 
 // DecodeAnchor decodes a stored anchor row, reading artifact_id only where the stored value is a
@@ -112,12 +136,30 @@ func DecodeAnchor(data []byte, anchor *Anchor) error {
 	return nil
 }
 
-// AnchorInput selects document text by quote or identifies a browser-owned mark.
+// AnchorInput selects document text by quote or identifies a browser-owned mark, or, with neither,
+// names an uploaded file that is not a document: at Version (the latest when nil), and with Box
+// part of that picture.
 type AnchorInput struct {
-	Artifact   string  `json:"artifact"`
-	Quote      *string `json:"quote,omitempty"`
-	Occurrence *int    `json:"occurrence,omitempty"`
-	MarkID     *string `json:"mark_id,omitempty"`
+	Artifact   string          `json:"artifact"`
+	Quote      *string         `json:"quote,omitempty"`
+	Occurrence *int            `json:"occurrence,omitempty"`
+	MarkID     *string         `json:"mark_id,omitempty"`
+	Version    *int            `json:"version,omitempty"`
+	Box        *AnchorBoxInput `json:"box,omitempty"`
+}
+
+// AnchorBoxInput is a request's box, each side a pointer so a side the request leaves out is
+// refused rather than read as 0.
+type AnchorBoxInput struct {
+	Left   *float64 `json:"left"`
+	Top    *float64 `json:"top"`
+	Width  *float64 `json:"width"`
+	Height *float64 `json:"height"`
+}
+
+// OnFile says the input names a whole file or part of a picture: no quote, occurrence or mark.
+func (input *AnchorInput) OnFile() bool {
+	return input != nil && input.Quote == nil && input.Occurrence == nil && input.MarkID == nil
 }
 
 // Project groups native issues under a short key.

@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
+	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 )
 
 // TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt writes documents through the API as
@@ -48,7 +50,7 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL, files: filestest.NewMemory()})
 	issue := createInteractionIssue(t, handler, "DOCS", "Document comments", "The issue's own spec.")
 
 	// upload writes a document as actor, a session's actor map or a person's login, and returns
@@ -124,6 +126,36 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 	upload(t, "/api/v1/projects/DOCS/artifacts", "plan.md", "The plan ships on Friday, after the review.\n", editor)
 	humanDocument := upload(t, "/api/v1/projects/DOCS/artifacts", "notes.md", "Notes only people wrote.\n", "alice")
 
+	t.Run("a person's comment on part of a picture reaches the session that uploaded it", func(t *testing.T) {
+		actor, err := json.Marshal(writer)
+		if err != nil {
+			t.Fatalf("encode the uploader: %v", err)
+		}
+		body, contentType, err := apitest.MultipartUpload(map[string]string{"name": "chart.png", "actor": string(actor)}, "chart.png", "image/png", pngBytes("chart"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", body)
+		request.Header.Set("Content-Type", contentType)
+		request.Header.Set("Authorization", "Bearer agent-token")
+		uploaded := httptest.NewRecorder()
+		handler.ServeHTTP(uploaded, request)
+		if uploaded.Code != http.StatusCreated {
+			t.Fatalf("the session's upload of the chart: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+		}
+		chart := decodeBody[uploadedArtifact](t, uploaded).Artifact.ID
+		boxed := comment(t, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			"body": "This bar looks low.",
+			"anchor": map[string]any{
+				"artifact": chart, "box": map[string]any{"left": 0.6, "top": 0.1, "width": 0.3, "height": 0.25},
+			},
+		}, "alice")
+		expect(t, boxed, true, contracts.AgentSubject("session-writer"))
+		whole := comment(t, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			"body": "Which run is this?", "anchor": map[string]any{"artifact": chart},
+		}, "alice")
+		expect(t, whole, true, contracts.AgentSubject("session-writer"))
+	})
 	t.Run("a person's comment on a passage of an issue's document reaches the session that wrote it", func(t *testing.T) {
 		id := comment(t, "/api/v1/issues/"+issue.Key+"/comments",
 			map[string]any{"body": "Why Friday?", "anchor": passage(issueDocument, "on Friday")}, "alice")

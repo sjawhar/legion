@@ -1207,3 +1207,17 @@ test("a Kubernetes service subject renders as namespace/name, and anything else 
   );
   expect(serviceSubjectLabel("kubernetes-admin")).toBe("kubernetes-admin");
 });
+
+test("keeps a file anchor's kind and box on a comment event payload", () => {
+  const anchor = {
+    kind: "file",
+    artifact_id: "01234567-0000-4000-8000-000000000001",
+    mark_id: "01234567-0000-4000-8000-000000000002",
+    version: 2,
+    quote: "",
+    block_id: null,
+    orphaned: false,
+    box: { left: 0.62, top: 0.1, width: 0.3, height: 0.25 },
+  };
+  expect(CommentEventPayloadSchema.parse({ id: "comment-1", anchor })).toMatchObject({ anchor });
+});

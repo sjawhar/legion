@@ -1138,8 +1138,9 @@ func loadMessageAuthor(ctx context.Context, deps Deps, messageID string) (model.
 }
 
 // commentedDocument names the artifact a top-level comment is on: its anchor's for a comment on a
-// passage (of an issue's document or a project artifact), otherwise the event's own artifact for a
-// comment on a whole project artifact. The author lookup decides whether that artifact is a document.
+// passage (of an issue's document or a project artifact) or on an uploaded file, otherwise the event's own artifact for a
+// comment on a whole project artifact. That artifact is a document, or an uploaded file whose
+// uploaders it credits as a document credits its writers (documentCreditsSQL).
 func commentedDocument(event model.Event) string {
 	document := ""
 	if values, ok := event.Payload.(map[string]any); ok {

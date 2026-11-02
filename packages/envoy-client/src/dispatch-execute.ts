@@ -2,6 +2,9 @@ import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
   Advised,
+  Anchor,
+  AnchorBox,
+  AnchorInput,
   ArchitectureSource,
   Artifact,
   ArtifactBlock,
@@ -991,6 +994,23 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
+      const box = optionalString(args, "box");
+      if (box !== undefined) {
+        const parsed = parseCommentBox(box);
+        if (typeof parsed === "string") problems.push(parsed);
+      }
+      if (box !== undefined || optionalNumber(args, "version") !== undefined) {
+        if (optionalString(args, "quote") !== undefined) {
+          problems.push(
+            "box and version name an uploaded file, which takes no quote: drop --quote to comment on the file, or drop --box and --version to comment on a passage"
+          );
+        }
+        if (replyTo !== undefined || optionalString(args, "reply_to_ask") !== undefined) {
+          problems.push(
+            "a reply joins its thread and keeps the thread's anchor, so box and version would be dropped: drop them"
+          );
+        }
+      }
       const replyBlock =
         replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
       if (replyBlock !== undefined) problems.push(replyBlock);
@@ -1362,9 +1382,15 @@ function ownerConflictProblems(
         `version ${version} and ref ${refText} name two versions; name the version once`
       );
     }
+    // A version ref on a comment names the version of an uploaded file it is about; only a quote,
+    // or the spec, shows before the read that it names a document, whose comment is on its live
+    // text (the run refuses any other document's).
     if (
       ref.version !== undefined &&
-      (tool === "dispatch_comment" || tool === "dispatch_suggest" || tool === "dispatch_doc_edit")
+      ((tool === "dispatch_comment" &&
+        (optionalString(args, "quote") !== undefined || refDocument === "spec")) ||
+        tool === "dispatch_suggest" ||
+        tool === "dispatch_doc_edit")
     ) {
       problems.push(
         `${command} acts on the live document, so the version ref ${refText} names would be dropped: drop its @v${ref.version}`
@@ -1376,17 +1402,32 @@ function ownerConflictProblems(
       );
     }
   }
-  // A comment or an ask on an issue lands on one of its documents only when it quotes it; the
-  // document a call names without a quote would be dropped. A block ref is refused whole
-  // (`innerRefProblem`), so its document is not named again here.
+  // A comment on an issue lands on one of its documents only when it quotes it; the document a
+  // call names without a quote would be dropped. Only the spec is known to be a document before
+  // the issue is read: any other artifact may be an uploaded file, which a comment takes with no
+  // quote, so the comment's own run refuses a document it reads (`issueDocumentDropped`). A block
+  // ref is refused whole (`innerRefProblem`), so its document is not named again here.
   const projectOwned = project !== undefined || ref?.owner.kind === "project";
+  const commentDocument =
+    tool === "dispatch_comment"
+      ? (artifact ?? (ref?.kind === "block" ? undefined : refDocument))
+      : undefined;
   if (tool === "dispatch_comment" && !projectOwned && optionalString(args, "quote") === undefined) {
-    const document = artifact ?? (ref?.kind === "block" ? undefined : refDocument);
-    if (document !== undefined) {
-      problems.push(
-        `${command} posts on the issue unless quote anchors it in a document, so document ${document} would be dropped: add --quote to comment on a passage of it, or name only the issue`
-      );
+    // A box or version on the spec is refused by the run, which names what they would drop.
+    if (
+      commentDocument === "spec" &&
+      optionalString(args, "box") === undefined &&
+      optionalNumber(args, "version") === undefined
+    ) {
+      problems.push(issueDocumentDropped(command, commentDocument));
     }
+  }
+  if (
+    tool === "dispatch_comment" &&
+    commentDocument === undefined &&
+    (optionalString(args, "box") !== undefined || optionalNumber(args, "version") !== undefined)
+  ) {
+    problems.push("box and version name part of an uploaded file: add --artifact naming the file");
   }
   if (tool === "dispatch_ask") {
     const anchor = asObject(args.anchor);
@@ -1805,6 +1846,78 @@ function anchor(
   if (quote === undefined) return undefined;
   const occurrence = optionalNumber(args, "occurrence");
   return { artifact: artifact.id, quote, ...(occurrence === undefined ? {} : { occurrence }) };
+}
+
+/** The refusal of a comment on an issue that names a document but quotes none of it. */
+function issueDocumentDropped(command: string, document: string): string {
+  return `${command} posts on the issue unless quote anchors it in a document, so document ${document} would be dropped: add --quote to comment on a passage of it, or name only the issue`;
+}
+
+/** How far past the picture's right edge or bottom a box's far side may reach, as the server
+ *  allows: fractions a reader typed from a box drawn to the edge can sum a rounding error above 1. */
+const BOX_TOLERANCE = 1e-9;
+
+/**
+ * A comment's `--box`: four comma-separated fractions of the picture, left,top,width,height,
+ * measured from its top-left corner. Answers the box, or the problem with it in the words the
+ * server would refuse it with, so the call is refused before anything is sent.
+ */
+export function parseCommentBox(text: string): AnchorBox | string {
+  const parts = text.split(",").map((part) => part.trim());
+  const numbers = parts.map((part) => (part === "" ? Number.NaN : Number(part)));
+  if (numbers.length !== 4 || numbers.some((value) => !Number.isFinite(value))) {
+    return `box must be four fractions left,top,width,height separated by commas, such as 0.62,0.1,0.3,0.25; got "${text}"`;
+  }
+  const [left, top, width, height] = numbers as [number, number, number, number];
+  if (left < 0 || top < 0) {
+    return "box left and top must be at least 0: they are fractions of the picture from its top-left corner";
+  }
+  if (width <= 0 || height <= 0) return "box width and height must be greater than 0";
+  if (left + width > 1 + BOX_TOLERANCE) {
+    return "box left + width must be at most 1: the box runs past the picture's right edge";
+  }
+  if (top + height > 1 + BOX_TOLERANCE) {
+    return "box top + height must be at most 1: the box runs past the picture's bottom";
+  }
+  return { left, top, width, height };
+}
+
+/**
+ * The anchor of a new comment on `artifact`: a quote's in a document, or, on an uploaded file that
+ * is not a document, the whole file at `version` (its latest when none is named) and on a picture
+ * the box. A document named with no quote takes none: a project document's whole-document comment.
+ * A box on a file that is not a picture, or a box or version on a document, is refused here, as the
+ * server would refuse it.
+ */
+function commentAnchor(
+  artifact: Artifact,
+  args: Record<string, unknown>,
+  refVersion: number | undefined
+): AnchorInput | undefined {
+  const quoted = anchor(artifact, args);
+  if (quoted !== undefined) return quoted;
+  const box = optionalString(args, "box");
+  const version = optionalNumber(args, "version") ?? refVersion;
+  if (artifact.kind === "doc") {
+    if (box !== undefined || version !== undefined) {
+      throw new ToolInputError("dispatch_comment", [
+        `${artifact.name} is a Markdown document, so --box and --version, which name part of an uploaded file, would be dropped: comment on a passage of it with --quote`,
+      ]);
+    }
+    return undefined;
+  }
+  const parsed = box === undefined ? undefined : parseCommentBox(box);
+  if (typeof parsed === "string") throw new ToolInputError("dispatch_comment", [parsed]);
+  if (parsed !== undefined && artifact.kind !== "image") {
+    throw new ToolInputError("dispatch_comment", [
+      `a box marks part of a picture, and ${artifact.name} is an uploaded file that is not one: drop --box to comment on the whole file`,
+    ]);
+  }
+  return {
+    artifact: artifact.id,
+    ...(version === undefined ? {} : { version }),
+    ...(parsed === undefined ? {} : { box: parsed }),
+  };
 }
 
 function toolActor(origin: DispatchOrigin, input: ExecuteDispatchToolInput): Actor {
@@ -2411,6 +2524,7 @@ function replyBlockLines(record: Pick<Comment, "reply_block">): string[] {
 function anchorLines(
   record: Pick<Comment, "anchor" | "anchor_block" | "anchor_block_error">
 ): string[] {
+  if (record.anchor?.kind === "file") return [fileAnchorText(record.anchor)];
   return [
     ...(record.anchor?.quote === undefined ? [] : [`> ${record.anchor.quote}`]),
     ...(record.anchor_block === undefined
@@ -2420,6 +2534,19 @@ function anchorLines(
       ? []
       : [`Position: unavailable (${record.anchor_block_error})`]),
   ];
+}
+
+/** A file anchor as a reader of a thread needs it: the version, and on a picture the box, in the
+ *  order and units `dispatch comment --box` takes it. */
+export function fileAnchorText(anchor: Anchor): string {
+  const version = `version ${anchor.version}`;
+  const box = anchor.box;
+  if (box === undefined) return `On the whole file, ${version}`;
+  const fraction = (value: number) => String(Number(value.toFixed(4)));
+  return (
+    `On part of the picture, ${version}: box left ${fraction(box.left)}, top ${fraction(box.top)}, ` +
+    `width ${fraction(box.width)}, height ${fraction(box.height)} (fractions of its width and height from its top-left corner)`
+  );
 }
 
 /** Where an anchor's block stands. Every node from the top-level block down reads `type[index]`;
@@ -2508,20 +2635,31 @@ async function openAnchoredThreads(
       ...threadReplyLines(askReplies.get(ask.id) ?? []),
     ].join("\n")
   );
+  const commentThreads = openCommentThreads(
+    comments,
+    (comment) => comment.anchor?.artifact_id === resolved.artifact.id
+  );
+  return [...askThreads, ...commentThreads];
+}
+
+/** Each open comment thread whose root `isOn` takes, or with `resolved` each resolved one, its
+ *  root then its replies, as dispatch_doc_read prints it. */
+function openCommentThreads(
+  comments: readonly Comment[],
+  isOn: (root: Comment) => boolean,
+  resolved = false
+): string[] {
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
   const roots = comments.filter(
     (comment) =>
-      comment.reply_to === null &&
-      !comment.ask_id &&
-      !comment.resolved &&
-      comment.anchor?.artifact_id === resolved.artifact.id
+      comment.reply_to === null && !comment.ask_id && comment.resolved === resolved && isOn(comment)
   );
   const replies = new Map<string, Comment[]>(roots.map((root) => [root.id, []]));
   for (const comment of comments) {
     const root = comment.reply_to === null ? undefined : threadRootId(comment, byId);
     if (root !== undefined) replies.get(root)?.push(comment);
   }
-  const commentThreads = roots.map((root) =>
+  return roots.map((root) =>
     [
       `comment ${root.id} · ${actorText(root.author)} · ${root.created_at}`,
       ...anchorLines(root),
@@ -2529,7 +2667,26 @@ async function openAnchoredThreads(
       ...threadReplyLines(replies.get(root.id) ?? []),
     ].join("\n")
   );
-  return [...askThreads, ...commentThreads];
+}
+
+/** The comment threads on an uploaded file, open and resolved: those whose anchor names it, each
+ *  with its version and box, and on a project's file the comments on the whole file an older
+ *  Dispatch wrote with no anchor. No ask is anchored to a file. */
+async function fileThreads(
+  client: DispatchClient,
+  resolved: ResolvedArtifact
+): Promise<{ open: string[]; resolved: string[] }> {
+  const comments =
+    resolved.owner.kind === "project"
+      ? await client.getArtifactComments(resolved.artifact.id)
+      : await client.getComments(resolved.issue?.key ?? "");
+  const isOn = (comment: Comment) =>
+    comment.anchor?.artifact_id === resolved.artifact.id ||
+    (resolved.owner.kind === "project" && comment.anchor === null);
+  return {
+    open: openCommentThreads(comments, isOn),
+    resolved: openCommentThreads(comments, isOn, true),
+  };
 }
 
 /** A thread's replies as dispatch_doc_read prints them under their ask or root comment. */
@@ -3949,7 +4106,14 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_comment": {
-      const artifactReference = optionalString(args, "artifact");
+      // An issue's document or file a ref names is the comment's artifact, as --artifact is; its
+      // version, as --version, names the version of an uploaded file.
+      const ref = ownerArguments.ref;
+      const artifactReference =
+        optionalString(args, "artifact") ??
+        (ref?.owner.kind === "issue" && (ref.kind === "spec" || ref.kind === "artifact")
+          ? ref.id
+          : undefined);
       const owner = documentOwner();
       const resolved =
         owner.kind === "project" || artifactReference === undefined
@@ -3957,9 +4121,29 @@ export async function executeDispatchTool(
             ? await resolveDocument(owner, artifactReference)
             : undefined
           : await resolveDocument(owner, artifactReference);
-      const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
       const replyTo = commentReplyTo(args);
       const replyToAskReference = optionalString(args, "reply_to_ask");
+      const replying = replyTo !== undefined || replyToAskReference !== undefined;
+      if (ref?.version !== undefined && resolved?.artifact.kind === "doc") {
+        throw new ToolInputError(input.tool, [
+          `dispatch comment acts on the live document, so the version ref ${optionalString(args, "ref")} names would be dropped: drop its @v${ref.version}`,
+        ]);
+      }
+      if (
+        resolved?.owner.kind === "issue" &&
+        resolved.artifact.kind === "doc" &&
+        optionalString(args, "quote") === undefined &&
+        optionalString(args, "box") === undefined &&
+        optionalNumber(args, "version") === undefined
+      ) {
+        throw new ToolInputError(input.tool, [
+          issueDocumentDropped("dispatch comment", artifactReference ?? resolved.artifact.slug),
+        ]);
+      }
+      // A reply joins its thread, whose anchor it keeps; the static check refused a box or version
+      // on one, and a project document names the reply's owner.
+      const anchored =
+        resolved && !replying ? commentAnchor(resolved.artifact, args, ref?.version) : undefined;
       const replyToAsk =
         replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
@@ -4293,7 +4477,7 @@ export async function executeDispatchTool(
       }
       if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
         const { artifact } = resolved;
-        return readUploadedFile(
+        const read = await readUploadedFile(
           client,
           artifact,
           resolved.owner.kind === "project"
@@ -4306,6 +4490,19 @@ export async function executeDispatchTool(
           resolved.owner.kind === "project" ? resolved.owner.project : resolved.owner.issue,
           shown
         );
+        const threads = await fileThreads(client, resolved);
+        return {
+          ...read,
+          text: [
+            read.text,
+            ...(threads.open.length === 0
+              ? []
+              : [`Open threads on ${artifact.name}:`, ...threads.open]),
+            ...(threads.resolved.length === 0
+              ? []
+              : [`Resolved threads on ${artifact.name}:`, ...threads.resolved]),
+          ].join("\n\n"),
+        };
       }
       const documentPromise = client.docRead(resolved.artifact.id, version);
       const threadsPromise = openAnchoredThreads(client, resolved);

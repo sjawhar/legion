@@ -19,7 +19,8 @@ type AnchorBlockBackfill struct {
 
 // BackfillAnchorBlocks resolves legacy quote anchors that still have one matching passage.
 // Rows with a missing or ambiguous quote stay unchanged, so the command is idempotent and never
-// guesses a block for an old row.
+// guesses a block for an old row. A comment on an uploaded file (model.AnchorKindFile) has no
+// block in any document and is not a candidate.
 func (s *Service) BackfillAnchorBlocks(ctx context.Context) (AnchorBlockBackfill, error) {
 	ctx = store.WithTransactionTracking(ctx)
 	var result AnchorBlockBackfill
@@ -45,6 +46,7 @@ func (s *Service) backfillAnchorBlocks(ctx context.Context, table string) (int, 
 		select id::text, anchor
 		from %s
 		where anchor is not null and nullif(anchor->>'block_id', '') is null
+			and coalesce(anchor->>'kind', '') <> 'file'
 		order by id
 	`, table))
 	if err != nil {

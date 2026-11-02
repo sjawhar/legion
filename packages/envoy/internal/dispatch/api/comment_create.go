@@ -711,7 +711,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Mentions = mentions
 	comment.Deliveries = []model.CommentDelivery{}
 	comment.RepliesToBlock = threadTarget.ReplyBlock.nodeID()
-	if comment.Anchor != nil {
+	if comment.Anchor.OnText() {
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -744,7 +744,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 				return
 			}
 		}
-		if root.Anchor != nil {
+		if root.Anchor.OnText() {
 			replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", root.ID)
 			if err != nil {
 				s.writeHandlerError(w, err)
