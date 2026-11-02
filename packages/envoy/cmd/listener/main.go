@@ -1149,6 +1149,13 @@ func main() {
 		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 	}
 
+	// Phase 6b3: Say we are alive and reporting, now and every listenerReadyInterval, on the one
+	// topic the Legion daemons read wakes of released issue pods from. Without it a daemon
+	// cannot tell "the listener sends no reports" from "the listener has nothing to report", so
+	// it releases nothing: this is the positive signal that lets release run at all. It shares
+	// summaryCtx, which the shutdown cancels.
+	startListenerReadyReports(summaryCtx, client, logger, listenerReadyInterval)
+
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;
 	// after three failed recovery intervals, SIGTERM enters the bounded shutdown

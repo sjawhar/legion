@@ -609,6 +609,9 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 		supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
+	// A released pod's replacement is up once its agent registers and says ready, which is the
+	// first observation the daemon has of it (R5's pod-ready time).
+	supervision.supervisor.OnTerminal(w.podResumeReady)
 	w.attachIdleRelease(supervision)
 }
 
@@ -626,6 +629,7 @@ func (w *workflowRuntime) attachIdleRelease(supervision *supervision) {
 		return
 	}
 	w.idlePeriod, w.idleStore, w.idleImages = k.IdleRelease.Idle(), supervision.supervisor.store, images
+	w.outbox.backstop = k.IdleRelease.Backstop()
 }
 
 // replayTerminal applies the ready or failure fact of every stored claim in either state that no
@@ -820,6 +824,10 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	})
 	group.Go(func() error {
 		w.tickIdle(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.tickWakes(running)
 		return nil
 	})
 	group.Go(func() error {
@@ -1123,6 +1131,8 @@ func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
 	if c.Issue == "" || c.Role == claim.RoleController {
 		return
 	}
+	// The confirmation is also the woken role's first turn, which ends the resume R5 measures.
+	w.podResumeFirstTurn(c)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
 		defer cancel()

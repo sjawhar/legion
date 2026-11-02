@@ -279,6 +279,131 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ReleaseRecord is one release of an issue pod as a reader of the records sees it: the run it
+// released, the roles whose claims it suspended, when it completed, and how many bytes of
+// unpushed work it saved as a bundle (zero when the workspace held none).
+type ReleaseRecord struct {
+	ID          int64    `json:"id"`
+	Issue       string   `json:"issue"`
+	Generation  uint64   `json:"generation"`
+	Roles       []string `json:"roles"`
+	At          string   `json:"at"`
+	BundleBytes int      `json:"bundleBytes"`
+}
+
+// ResumeRecord is one wake of a released pod and what it cost: the release it ended (0 when no
+// release row is recorded for it), the role the wake was for and what woke it, when the wake
+// reached the daemon, when the replacement pod was Ready and when the woken role took its first
+// turn — each absent until it is observed — and whether the wake went ten minutes with no turn.
+type ResumeRecord struct {
+	ID          int64  `json:"id"`
+	Release     int64  `json:"release"`
+	Issue       string `json:"issue"`
+	Role        string `json:"role"`
+	Kind        string `json:"kind"`
+	At          string `json:"at"`
+	PodReadyAt  string `json:"podReadyAt,omitempty"`
+	FirstTurnAt string `json:"firstTurnAt,omitempty"`
+	Stuck       bool   `json:"stuck"`
+}
+
+// HoldRecord is one pass of the idle rule that kept a pod past the idle period, with the rule's
+// own name for what held it (workflow.IdleHold's String).
+type HoldRecord struct {
+	ID     int64  `json:"id"`
+	Issue  string `json:"issue"`
+	Reason string `json:"reason"`
+	At     string `json:"at"`
+}
+
+// ReleaseRecordsResponse is the body of GET /legion/v1/claims/release-records: every release,
+// resume and hold of the project recorded at or after the `since` the caller named, oldest
+// first. Each list is never null, so a window with nothing in it reads as three empty lists
+// rather than three absent ones.
+type ReleaseRecordsResponse struct {
+	Releases []ReleaseRecord `json:"releases"`
+	Resumes  []ResumeRecord  `json:"resumes"`
+	Holds    []HoldRecord    `json:"holds"`
+}
+
+// releaseRecords is a pod reading its deployment's idle-release records: what has been released,
+// what came back and how long it took, and every pod the rule kept with the reason it read. A pod
+// holds its claim credential and LEGION_DAEMON_URL and no operator token, so the route
+// authenticates by the claim exactly as ready, exit and activity do — but it is a GET with no
+// body, so the three fields ride in the query string rather than in JSON.
+//
+// It refuses a blank field by its name with 400, a claim this daemon does not hold and a wrong
+// secret with claim.InvalidSecret, and a stale plugin with the stale-contract 409, as its
+// siblings do. `since` is required and must be an RFC 3339 instant: a window nobody named is not
+// a window, and the whole table is not an answer.
+func (s *server) releaseRecords(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	token, secret, since := claim.Token(query.Get("claimToken")), query.Get("secret"), query.Get("since")
+	if !requireFields(w, field{"claimToken", string(token)}, field{"secret", secret}, field{"since", since}) {
+		return
+	}
+	from, err := time.Parse(time.RFC3339, since)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("since must be an RFC 3339 time: "+err.Error()))
+		return
+	}
+	m, ok := s.authenticated(token, secret)
+	if !ok {
+		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
+		return
+	}
+	if s.refuseIfStaleClaim(w, r, m.Claim()) {
+		return
+	}
+	if s.releaseRecordStore == nil {
+		writeJSON(w, http.StatusInternalServerError, errorBody("the daemon keeps no release records"))
+		return
+	}
+	records, err := s.releaseRecordStore.PodReleaseRecords(r.Context(), s.project, from.UTC())
+	if err != nil {
+		s.log.Error("api: the release records could not be read", "claim", token, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody("read the release records: "+err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, releaseRecordsBody(records))
+}
+
+// releaseRecordsBody is store.PodReleaseRecords on the wire: every time as RFC 3339 in UTC, an
+// unobserved one left out, and every list present.
+func releaseRecordsBody(records store.PodReleaseRecords) ReleaseRecordsResponse {
+	body := ReleaseRecordsResponse{
+		Releases: make([]ReleaseRecord, 0, len(records.Releases)),
+		Resumes:  make([]ResumeRecord, 0, len(records.Resumes)),
+		Holds:    make([]HoldRecord, 0, len(records.Holds)),
+	}
+	for _, release := range records.Releases {
+		roles := release.Roles
+		if roles == nil {
+			roles = []string{}
+		}
+		body.Releases = append(body.Releases, ReleaseRecord{ID: release.ID, Issue: release.Issue,
+			Generation: release.Generation, Roles: roles, At: recordedAt(release.At), BundleBytes: release.BundleBytes})
+	}
+	for _, resume := range records.Resumes {
+		body.Resumes = append(body.Resumes, ResumeRecord{ID: resume.ID, Release: resume.Release, Issue: resume.Issue,
+			Role: resume.Role, Kind: resume.Kind, At: recordedAt(resume.At), PodReadyAt: recordedAt(resume.PodReadyAt),
+			FirstTurnAt: recordedAt(resume.FirstTurnAt), Stuck: resume.Stuck})
+	}
+	for _, hold := range records.Holds {
+		body.Holds = append(body.Holds, HoldRecord{ID: hold.ID, Issue: hold.Issue, Reason: hold.Reason, At: recordedAt(hold.At)})
+	}
+	return body
+}
+
+// recordedAt is a recorded moment on the wire: RFC 3339 in UTC, and the empty string for one
+// nothing has observed, which the omitempty fields then leave out.
+func recordedAt(at time.Time) string {
+	if at.IsZero() {
+		return ""
+	}
+	return at.UTC().Format(time.RFC3339)
+}
+
 // authenticated is the claim's machine when secret is the one its registration was issued. A
 // claim the daemon does not supervise, one no agent has registered on, and a wrong secret all
 // answer the same: nothing about the claim is told to a caller that cannot prove it holds it.

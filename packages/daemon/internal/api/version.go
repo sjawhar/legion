@@ -457,7 +457,10 @@ package api
 // restores from the chunked `launcher_bundle` frames before any role starts; a launcher before 47
 // knows neither frame, and a shim before 47 answers none, so the image probe holds this daemon
 // and the image that runs its roles together. A claim may read the deployment's release, resume
-// and hold records on GET /legion/v1/claims/release-records. This change adds four store
+// and hold records on GET /legion/v1/claims/release-records, authenticated by the claim and
+// naming the window in its query, and each entry of the state's `strandedClaims` now carries the
+// `suspendedBy` of a suspended claim, so a released one whose wake never brought its pod back
+// reads apart from one an operator suspended. This change adds four store
 // migrations. (#2538 takes 45 and #2539 takes 46, so this branch takes the number above them, as
 // the collision note says.)
 const DaemonAPIVersion = 47

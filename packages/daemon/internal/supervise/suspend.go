@@ -112,21 +112,42 @@ func holdSuspendUntilReady(m *Machine, _ context.Context, ev Event) error {
 	return ErrSuspendHeld
 }
 
-// suspendedAgain is a suspension of a claim already suspended. An operator's suspend of a claim the
-// daemon suspended takes the suspension over (Claim.SuspendedBy), so the rule resumes it no more
-// until the operator does; any other changes nothing, and an operator's suspension stays the
-// operator's.
+// suspendedAgain is a suspension of a claim already suspended, and the one place a suspension's
+// source changes under it (Claim.SuspendedBy). A source takes the claim over only when it
+// outranks the one that holds it (suspensionRank): an operator's suspend of a claim the daemon
+// suspended, so the rule resumes it no more until the operator does, and a daemon's or an
+// operator's suspend of a claim whose idle pod was released, so the linger, park, close or
+// hand-over that asked for it owns the claim and no later wake acts on it. Anything else changes
+// nothing, and an operator's suspension is never taken over.
 func suspendedAgain(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
 		return err
 	}
-	if request.By != SuspendedByOperator || m.claim.SuspendedBy == SuspendedByOperator {
+	if suspensionRank(request.By) <= suspensionRank(m.claim.SuspendedBy) {
 		return nil
 	}
-	m.log.Info("supervise: the operator's suspension takes the suspended claim over", "reason", request.Reason, "suspendedBy", m.claim.SuspendedBy)
-	m.claim.SuspendedBy = SuspendedByOperator
+	m.log.Info("supervise: a suspension takes the suspended claim over", "reason", request.Reason,
+		"by", request.By, "suspendedBy", m.claim.SuspendedBy)
+	m.claim.SuspendedBy = request.By
 	return m.persist(ctx)
+}
+
+// suspensionRank orders the sources a suspended claim can be held by, weakest first: a released
+// claim's suspension is the weakest, because the release ended no phase and every wake may
+// resume it; the daemon's is stronger, since it is a linger, a park or a close; the operator's is
+// strongest and nothing takes it over. An exit's is the root's own and is left where it is.
+func suspensionRank(source SuspendSource) int {
+	switch source {
+	case SuspendedByReleased:
+		return 1
+	case SuspendedByDaemon:
+		return 2
+	case SuspendedByOperator:
+		return 3
+	default:
+		return 2
+	}
 }
 
 // suspendAtTimeout is the held suspension's timer: the turn did not end by the hold's deadline, so

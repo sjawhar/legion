@@ -265,7 +265,7 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 	}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
-		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st, PluginRelaunchable: relaunchable,
+		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st, ReleaseRecords: st, PluginRelaunchable: relaunchable,
 		ClaimReady:   func(c supervise.Claim) { *readied = append(*readied, c) },
 		PromptAgents: testPromptAgents,
 		CapabilityReported: func(ctx context.Context, _ supervise.Claim, report capabilities.Report) {

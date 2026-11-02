@@ -98,6 +98,8 @@ func newIdleRig(t *testing.T) *idleRig {
 		bundle: runtime.WorkspaceBundle{Bundle: []byte("PACK"), Head: "abc", Tips: []string{"abc"}, At: time.Now().UTC()}}
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.Runtime, sup.deps.Store, sup.deps.PluginContract = rt, st, api.DaemonAPIVersion
+	// The teardown records the release through the supervisor's store, as the daemon's does.
+	sup.store = st
 
 	token := mustClaimToken(t, issue.Key, claim.RoleImplementer)
 	locator, err := rt.Spawn(ctx, runtime.SpawnSpec{Claim: token, Role: claim.RoleImplementer})
@@ -129,6 +131,13 @@ func newIdleRig(t *testing.T) *idleRig {
 		activity_at = now() - interval '25 minutes', activity_background = false,
 		activity_kinds = '', activity_next_reminder_at = null where issue = $1`, issue.Key); err != nil {
 		t.Fatalf("backdate the pod: %v", err)
+	}
+	// The idle rule releases nothing unless the Envoy listener has reported itself ready inside
+	// the freshness window (R7, workflowRuntime.listenerLive). A rig stands for a deployment
+	// whose listener is reporting.
+	if _, err := pool.Exec(ctx, `insert into listener_reports (project, ready_at) values ($1, $2)
+		on conflict (project) do update set ready_at = excluded.ready_at`, "legion", time.Now().UTC()); err != nil {
+		t.Fatalf("seed the listener's report: %v", err)
 	}
 
 	// The drain runs a minute after whatever the release queued, so every row of it is due.

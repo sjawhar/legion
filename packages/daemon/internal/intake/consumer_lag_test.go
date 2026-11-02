@@ -42,8 +42,8 @@ func TestConsumerLagCountsWhatWaitsAndCallsAConsumerStalledWhenNoneIsHandledFor6
 	}
 
 	lags := consumers.Lag(ctx)
-	if names := lagNames(lags); !slices.Equal(names, []string{dispatch, dispatchServerConsumerName(spec.Project), github}) {
-		t.Fatalf("Lag names %q, want the Dispatch, Dispatch-server and GitHub consumers", names)
+	if names := lagNames(lags); !slices.Equal(names, []string{dispatch, dispatchServerConsumerName(spec.Project), github, wakeConsumerName(spec.Project)}) {
+		t.Fatalf("Lag names %q, want the Dispatch, Dispatch-server, GitHub and listener-wake consumers", names)
 	}
 	for _, lag := range lags[:2] {
 		if lag.Waiting != 0 || !lag.OldestAt.IsZero() || lag.Stalled || lag.Unavailable != "" {
@@ -127,8 +127,8 @@ func TestConsumerLagNamesWhatNATSDidNotAnswer(t *testing.T) {
 		standIn.info, standIn.getMsg = refused, nil
 		defer func() { standIn.info = nil }()
 		lags := consumers.Lag(ctx)
-		if len(lags) != 3 {
-			t.Fatalf("Lag = %+v, want all three consumers", lags)
+		if len(lags) != 4 {
+			t.Fatalf("Lag = %+v, want all four consumers", lags)
 		}
 		for _, lag := range lags {
 			if lag.Waiting != 0 || lag.Stalled || !lag.OldestAt.IsZero() || lag.Unavailable != "read the consumer's info: "+refused.Error() {

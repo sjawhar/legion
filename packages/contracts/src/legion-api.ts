@@ -269,12 +269,15 @@ const legionPendingStatusWrite = z.strictObject({
 
 /** `api.StrandedClaim` — one claim nothing will wake (`workflow.Stranded`): a worker of its issue's
  * phase, or its tree's architect, in a tree that runs, named by its issue, its role and its state;
- * the issue's entry under `issues` carries the rest. Its state and role say the move that brings it
- * back (`api.StrandedClaim.Move`). */
+ * the issue's entry under `issues` carries the rest. `suspendedBy` is who suspended a suspended
+ * one, absent on a failed one; `released` is the pod the daemon released whose wake never brought
+ * it back. Its state, role and suspension say the move that brings it back
+ * (`api.StrandedClaim.Move`). */
 const legionStrandedClaim = z.strictObject({
   issue: issueKey,
   role: z.enum(LEGION_ROLES),
   state: z.enum(["suspended", "failed"]),
+  suspendedBy: nonEmptyString.optional(),
 });
 
 /** `api.HeldOutboxRow` — one due lifecycle outbox row its issue's lifecycle lane cannot run yet,
@@ -560,6 +563,58 @@ export const LegionActivityRequest = z.strictObject({
 });
 
 export type LegionActivityRequestBody = z.output<typeof LegionActivityRequest>;
+
+/** `api.ReleaseRecord` — one issue pod the daemon released: the run it released, the roles whose
+ * claims it suspended (sorted, as the store holds them), when the release completed, and the size
+ * of the git bundle of unpushed work it saved, zero when the workspace held none. */
+const legionReleaseRecord = z.strictObject({
+  id: z.number().int().positive(),
+  issue: issueKey,
+  generation: z.number().int().nonnegative(),
+  roles: z.array(nonEmptyString),
+  at: timestamp,
+  bundleBytes: z.number().int().nonnegative(),
+});
+
+/** `api.ResumeRecord` — one wake of a released pod and what it cost: the release it ended (0 when
+ * no release row is recorded for it), the role it was for, what woke it, when the wake reached the
+ * daemon, and `podReadyAt` and `firstTurnAt`, each absent until it is observed. `stuck` is a wake
+ * that went ten minutes with no turn of the woken role. */
+const legionResumeRecord = z.strictObject({
+  id: z.number().int().positive(),
+  release: z.number().int().nonnegative(),
+  issue: issueKey,
+  role: nonEmptyString,
+  kind: nonEmptyString,
+  at: timestamp,
+  podReadyAt: timestamp.optional(),
+  firstTurnAt: timestamp.optional(),
+  stuck: z.boolean(),
+});
+
+/** `api.HoldRecord` — one pass of the idle rule that kept a pod past the idle period, with the
+ * rule's own name for what held it (`workflow.IdleHold`). The daemon records no row for a pod that
+ * is simply not idle yet. */
+const legionHoldRecord = z.strictObject({
+  id: z.number().int().positive(),
+  issue: issueKey,
+  reason: nonEmptyString,
+  at: timestamp,
+});
+
+/** `api.ReleaseRecordsResponse`, the body of `GET /legion/v1/claims/release-records`: every
+ * release, resume and hold of the project recorded at or after the `since` the caller names,
+ * oldest first. The caller is an issue pod, which holds its claim credential and no operator
+ * token, so `claimToken`, `secret` and `since` ride in the query string — the route is a GET with
+ * no body — and the claim secret authenticates it as `claims/ready` is authenticated. Every list
+ * is present: a window with nothing in it is three empty lists, never three absent ones. */
+export const LegionReleaseRecordsResponse = z.strictObject({
+  releases: z.array(legionReleaseRecord),
+  resumes: z.array(legionResumeRecord),
+  holds: z.array(legionHoldRecord),
+});
+
+export type LegionReleaseRecords = z.output<typeof LegionReleaseRecordsResponse>;
 
 /** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`

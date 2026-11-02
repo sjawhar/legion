@@ -532,12 +532,14 @@ type HeldOutboxRow struct {
 
 // StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
 // architect, in a tree that runs — named by its issue, its role and its state; the issue's own
-// entry under `issues` carries the rest. Its state and role say the move that brings it back
+// entry under `issues` carries the rest. SuspendedBy is who suspended a suspended one and is
+// absent on a failed one. Its state, role and suspension say the move that brings it back
 // (Move).
 type StrandedClaim struct {
-	Issue string     `json:"issue"`
-	Role  claim.Role `json:"role"`
-	State string     `json:"state"`
+	Issue       string     `json:"issue"`
+	Role        claim.Role `json:"role"`
+	State       string     `json:"state"`
+	SuspendedBy string     `json:"suspendedBy,omitempty"`
 }
 
 // StrandedMove is the move that brings a stranded claim back (StrandedClaim.Move). Its value is the
@@ -547,18 +549,24 @@ type StrandedMove string
 const (
 	StrandedResume           StrandedMove = "resume"
 	StrandedSuspendedWorkers StrandedMove = "suspendedWorkers"
+	StrandedReleasedNoResume StrandedMove = "releasedNoResume"
 	StrandedRetry            StrandedMove = "retry"
 	StrandedWorkflowStart    StrandedMove = "needsWorkflowStart"
 )
 
 // StrandedMoves is every move, in the order the boot's log line and `legion state` list them.
 func StrandedMoves() []StrandedMove {
-	return []StrandedMove{StrandedResume, StrandedSuspendedWorkers, StrandedRetry, StrandedWorkflowStart}
+	return []StrandedMove{StrandedResume, StrandedSuspendedWorkers, StrandedReleasedNoResume, StrandedRetry, StrandedWorkflowStart}
 }
 
 // Move is the move that brings c back, the one statement of it that the boot's log line and
 // `legion state` both group by:
 //
+//   - StrandedReleasedNoResume, a claim whose idle pod the daemon released and whose wake never
+//     brought it back (workflow.Stranded's ten-minute rule): the pod and its disk are gone, so
+//     the move is the operator's reading of why the replacement pod never took a turn, not a
+//     resume of the claim — a released claim resumes on its next delivery, and the wake that
+//     should have resumed it has already been taken.
 //   - StrandedResume, a suspended architect: the operator's resume (`legion claims resume`), which
 //     a catch-up follows.
 //   - StrandedSuspendedWorkers, a suspended phase worker: the move its claim's suspendedBy calls
@@ -573,6 +581,8 @@ func StrandedMoves() []StrandedMove {
 func (c StrandedClaim) Move() StrandedMove {
 	failed := c.State == string(supervise.StateFailed)
 	switch {
+	case !failed && c.SuspendedBy == string(supervise.SuspendedByReleased):
+		return StrandedReleasedNoResume
 	case failed && c.Role == claim.RoleArchitect:
 		return StrandedRetry
 	case failed:
@@ -584,11 +594,16 @@ func (c StrandedClaim) Move() StrandedMove {
 	}
 }
 
-// StrandedClaimsOf is stranded as the state shows it, claim for claim.
+// StrandedClaimsOf is stranded as the state shows it, claim for claim. A failed claim carries no
+// suspension, so only a suspended one names who suspended it.
 func StrandedClaimsOf(stranded []supervise.Claim) []StrandedClaim {
 	claims := make([]StrandedClaim, len(stranded))
 	for i, c := range stranded {
-		claims[i] = StrandedClaim{Issue: c.Issue, Role: c.Role, State: string(c.State)}
+		view := StrandedClaim{Issue: c.Issue, Role: c.Role, State: string(c.State)}
+		if c.State == supervise.StateSuspended {
+			view.SuspendedBy = string(c.SuspendedBy)
+		}
+		claims[i] = view
 	}
 	return claims
 }

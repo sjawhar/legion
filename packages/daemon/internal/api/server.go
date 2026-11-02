@@ -148,6 +148,10 @@ type Options struct {
 	// store — on a context that outlives the agent's connection, and the route answers the agent
 	// once it has returned.
 	CapabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
+	// ReleaseRecords is the store's record of what the idle release has done (store.Store), which
+	// the claim route `GET /legion/v1/claims/release-records` serves a pod. Nil answers that route
+	// 500 and changes nothing else.
+	ReleaseRecords ReleaseRecordStore
 }
 
 // TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
@@ -157,6 +161,12 @@ type TreeLifecycles interface {
 	OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error)
 	ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (treelifecycle.Lifecycle, bool, error)
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
+}
+
+// ReleaseRecordStore is the store's idle-release records (store.Store) as the claim route reads
+// them: every release, resume and hold of the project recorded at or after a time.
+type ReleaseRecordStore interface {
+	PodReleaseRecords(ctx context.Context, project string, since time.Time) (store.PodReleaseRecords, error)
 }
 
 type server struct {
@@ -195,9 +205,11 @@ type server struct {
 	records      record.Store
 	dispatch     dispatch.Client
 	claimReady   func(c supervise.Claim)
-	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
+	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported,
+	// releaseRecordStore Options.ReleaseRecords.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
+	releaseRecordStore ReleaseRecordStore
 	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
 	stopping  context.Context
 	drained   context.Context
@@ -246,6 +258,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		claimReady:         opts.ClaimReady,
 		promptAgents:       opts.PromptAgents,
 		capabilityReported: opts.CapabilityReported,
+		releaseRecordStore: opts.ReleaseRecords,
 		log:                opts.Log,
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,
@@ -280,6 +293,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/claims/activity", s.activity)
+	mux.HandleFunc("GET /legion/v1/claims/release-records", s.releaseRecords)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
 	mux.HandleFunc("POST /legion/v1/controller/github-credential", s.controllerGitHubCredential)

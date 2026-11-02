@@ -699,6 +699,7 @@ func heldSummary(held []api.HeldOutboxRow) string {
 var strandedPhrases = map[api.StrandedMove]string{
 	api.StrandedResume:           "resume",
 	api.StrandedSuspendedWorkers: "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json)",
+	api.StrandedReleasedNoResume: "released, woken over ten minutes ago and the pod never came back",
 	api.StrandedRetry:            "failed, retry",
 	api.StrandedWorkflowStart:    "failed, needs a workflow start",
 }
@@ -706,7 +707,9 @@ var strandedPhrases = map[api.StrandedMove]string{
 // strandedSummary is the one line an operator reads for the claims nothing will wake: how many,
 // and each by issue and role under the move that brings it back (api.StrandedClaim.Move, which the
 // boot's log line groups by too). A suspended phase worker's move is the troubleshooting page's "A
-// tree does not move after a restart" for its suspendedBy, which `legion claims list --json` shows.
+// tree does not move after a restart" for its suspendedBy, which `legion claims list --json` shows;
+// a released one is a pod whose wake was taken and whose replacement never took a turn, which is
+// the daemon's own log of that wake to read, not a suspension to lift.
 func strandedSummary(stranded []api.StrandedClaim) string {
 	if len(stranded) == 0 {
 		return "claims nothing will wake: none"

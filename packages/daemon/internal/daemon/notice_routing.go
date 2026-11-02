@@ -211,7 +211,16 @@ func claimRuns(state supervise.ClaimState) bool {
 // Stopping) — a suspension, a failure, a release. The routing reads it, so no notice is routed to
 // a sub-architect whose session is being stopped; it goes on up the tree, as it will once the stop
 // returns.
+//
+// A released claim is the one suspended claim that keeps its role. Its pod was released while it
+// was idle and its session, its phase and its task are all as it left them: the notice is still
+// its owner's, and the wake is what brings the owner back for it (outbox.wakeForDelivery). Were
+// it to lose its role here, a notice for a released sub-architect would walk up to the architect
+// above it, which owns neither the issue nor the answer.
 func holdsRole(held supervise.ClaimView) bool {
+	if held.State == supervise.StateSuspended && held.SuspendedBy == supervise.SuspendedByReleased {
+		return !held.Stopping
+	}
 	return claimRuns(held.State) && !held.Stopping
 }
 

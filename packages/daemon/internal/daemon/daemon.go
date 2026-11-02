@@ -1527,6 +1527,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		ClaimReady:         claimReadyHook(keeper, claimReady),
 		PromptAgents:       promptAgents(p.roleReferences),
 		CapabilityReported: s.capabilityReported,
+		ReleaseRecords:     st,
 	})
 
 	group, serving := errgroup.WithContext(ctx)
@@ -1731,7 +1732,12 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	stranded, err := workflow.Stranded(ctx, tx, records, claims)
+	now := time.Now().UTC()
+	resumes, err := strandedReleaseWakes(ctx, s.store, s.projectToken, claims, now)
+	if err != nil {
+		return api.State{}, err
+	}
+	stranded, err := workflow.Stranded(ctx, tx, records, claims, resumes, now)
 	if err != nil {
 		return api.State{}, err
 	}

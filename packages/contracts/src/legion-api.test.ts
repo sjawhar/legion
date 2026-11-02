@@ -26,6 +26,7 @@ import {
   LegionPhaseBackwardRequest,
   LegionPhaseRetryRequest,
   LegionReadyRequest,
+  LegionReleaseRecordsResponse,
   LegionRegisterResponse,
   LegionRootCloseRequest,
   LegionSignOffRequest,
@@ -704,6 +705,75 @@ test("a session's activity report carries its reading, its work and its wake", (
   expect(LegionActivityRequest.safeParse(badAt).success).toBeFalse();
   // No generation: the secret is the whole fence, and an added key is refused.
   expect(LegionActivityRequest.safeParse({ ...report, generation: 3 }).success).toBeFalse();
+});
+
+// What a pod reads of its deployment's idle release: a release with the roles it suspended and
+// the bundle it saved, the wake that ended it with the stamps observed so far, and a pod the rule
+// kept with the reason it read. The three lists are always present, so a window with nothing in
+// it is readable without a missing-key check.
+test("the release records carry a release, a resume and a hold", () => {
+  const records = {
+    releases: [
+      {
+        id: 1,
+        issue: "LEGION-208",
+        generation: 3,
+        roles: ["implementer", "tester"],
+        at: "2026-11-01T12:00:00Z",
+        bundleBytes: 4096,
+      },
+    ],
+    resumes: [
+      {
+        id: 1,
+        release: 1,
+        issue: "LEGION-208",
+        role: "implementer",
+        kind: "delivery",
+        at: "2026-11-01T12:30:00Z",
+        podReadyAt: "2026-11-01T12:31:00Z",
+        stuck: false,
+      },
+    ],
+    holds: [{ id: 1, issue: "LEGION-209", reason: "background_work", at: "2026-11-01T13:00:00Z" }],
+  };
+  expect(LegionReleaseRecordsResponse.safeParse(records).success).toBeTrue();
+
+  const empty = { releases: [], resumes: [], holds: [] };
+  expect(LegionReleaseRecordsResponse.safeParse(empty).success).toBeTrue();
+
+  // A release that saved nothing records a zero bundle, never a missing one, and a pod nothing
+  // has released yet carries no release row for its wake.
+  const nothingSaved = {
+    ...records,
+    releases: [{ ...records.releases[0], roles: [], bundleBytes: 0 }],
+    resumes: [{ ...records.resumes[0], release: 0 }],
+  };
+  expect(LegionReleaseRecordsResponse.safeParse(nothingSaved).success).toBeTrue();
+
+  // A list left out, a negative bundle, an unobserved stamp sent as null rather than left out,
+  // and an added key are each refused.
+  const noHolds = { releases: records.releases, resumes: records.resumes };
+  expect(LegionReleaseRecordsResponse.safeParse(noHolds).success).toBeFalse();
+  const negative = { ...records, releases: [{ ...records.releases[0], bundleBytes: -1 }] };
+  expect(LegionReleaseRecordsResponse.safeParse(negative).success).toBeFalse();
+  const nulled = { ...records, resumes: [{ ...records.resumes[0], firstTurnAt: null }] };
+  expect(LegionReleaseRecordsResponse.safeParse(nulled).success).toBeFalse();
+  const extra = { ...records, holds: [{ ...records.holds[0], issueKey: "LEGION-209" }] };
+  expect(LegionReleaseRecordsResponse.safeParse(extra).success).toBeFalse();
+});
+
+// A released claim the state reports as stranded says so: its `suspendedBy` is `released`, which
+// the operator's move reads (`api.StrandedClaim.Move`). A failed one carries none.
+test("a stranded claim may name the suspension that holds it", () => {
+  const stranded = { issue: "LEGION-208", role: "implementer", state: "suspended", suspendedBy: "released" };
+  const state = fixture("state.json") as { strandedClaims: unknown[] };
+  state.strandedClaims = [stranded];
+  expect(LegionStateResponse.safeParse(state).success).toBeTrue();
+
+  const blank = { ...stranded, suspendedBy: "" };
+  state.strandedClaims = [blank];
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
 });
 
 test("the state golden shows a claim's capability report beside its locator", () => {

@@ -138,6 +138,12 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 	case intake.Push:
 		return e.push(ctx, tx, fact)
 	case intake.PullRequestChecks:
+		// A settlement on the head of a released pod's pull request wakes that pod before the
+		// settlement is applied, so the woken role's task names the settlement this very
+		// transaction records (wakeOnSettlement).
+		if err := e.wakeOnSettlement(ctx, tx, fact); err != nil {
+			return intake.Result{}, err
+		}
 		return e.checks(ctx, tx, fact)
 	case intake.RequiredChecks:
 		return e.requiredChecks(ctx, tx, fact)
@@ -183,6 +189,10 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.checkLookEnded(ctx, tx, fact)
 	case intake.CheckBound:
 		return e.checkBound(ctx, tx, fact)
+	case intake.ListenerWake:
+		return e.listenerWake(ctx, tx, fact)
+	case intake.PodBackstopDue:
+		return e.podBackstopDue(ctx, tx, fact)
 	default:
 		return intake.Result{}, nil
 	}

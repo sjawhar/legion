@@ -140,20 +140,35 @@ func (s *Store) MarkPodResumeStuck(ctx context.Context, id int64) error {
 
 // StuckPodResumes are the resumes whose wake is at or before the bound with no first turn and no
 // stuck mark yet: the ones the daemon warns about and counts, read once per pass so each warns
-// once.
+// once. The stranded report reads UnfinishedPodResumes instead, which keeps a marked row.
 func (s *Store) StuckPodResumes(ctx context.Context, project string, before time.Time) ([]PodResume, error) {
-	rows, err := s.pool.Query(ctx, `select id, release_id, project, issue, role, kind, at
-		from pod_resumes where project = $1 and first_turn_at is null and not stuck and at <= $2 order by id`,
-		project, before)
+	return s.podResumesWithoutAFirstTurn(ctx, project, before, true)
+}
+
+// UnfinishedPodResumes are every resume of project whose wake is at or before the bound and whose
+// woken role has not taken its first turn, the ones a stuck pass has already marked included.
+// The stranded report reads this one: a resume marked stuck is exactly a pod a wake never brought
+// back, so dropping it would take the claim out of the report the moment the warning was written.
+func (s *Store) UnfinishedPodResumes(ctx context.Context, project string, before time.Time) ([]PodResume, error) {
+	return s.podResumesWithoutAFirstTurn(ctx, project, before, false)
+}
+
+func (s *Store) podResumesWithoutAFirstTurn(ctx context.Context, project string, before time.Time, unmarked bool) ([]PodResume, error) {
+	query := `select id, release_id, project, issue, role, kind, at, stuck
+		from pod_resumes where project = $1 and first_turn_at is null and at <= $2`
+	if unmarked {
+		query += ` and not stuck`
+	}
+	rows, err := s.pool.Query(ctx, query+` order by id`, project, before)
 	if err != nil {
-		return nil, fmt.Errorf("read the stuck resumes of %s: %w", project, err)
+		return nil, fmt.Errorf("read the unfinished resumes of %s: %w", project, err)
 	}
 	defer rows.Close()
 	var out []PodResume
 	for rows.Next() {
 		var r PodResume
-		if err := rows.Scan(&r.ID, &r.Release, &r.Project, &r.Issue, &r.Role, &r.Kind, &r.At); err != nil {
-			return nil, fmt.Errorf("read the stuck resumes of %s: %w", project, err)
+		if err := rows.Scan(&r.ID, &r.Release, &r.Project, &r.Issue, &r.Role, &r.Kind, &r.At, &r.Stuck); err != nil {
+			return nil, fmt.Errorf("read the unfinished resumes of %s: %w", project, err)
 		}
 		out = append(out, r)
 	}
