@@ -1,12 +1,16 @@
 -- Decision records on the block graph: the two tables the Decisions view writes.
 --
 -- decision_keeps is one row per decision a person agreed with: the heading block of a decision of
--- the issue's decisions.md and the decision's changed_version at the moment they pressed Keep.
--- The key is the block rather than the person, because Keep records that the decision has been
--- reviewed and not who reviewed it: a second person's Keep moves the row, and kept_by and kept_at
--- say who last did. A decision whose text changes afterwards stands at a higher changed_version
--- than the row holds, which is how the view tells a kept decision from one waiting for review
--- again.
+-- the issue's decisions.md, the sum of the decision's whole text at the moment they pressed Keep,
+-- and the changed_version it then stood at. The key is the block rather than the person, because
+-- Keep records that the decision has been reviewed and not who reviewed it: a second person's
+-- Keep moves the row, and kept_by and kept_at say who last did.
+--
+-- The sum, not the version, is what tells a kept decision from one waiting for review again. A
+-- decision's changed_version is the greatest of the blocks it holds NOW, so it does not move when
+-- a block is removed from the decision or moved into or out of it: the text changes and every
+-- remaining block keeps its version. The sum covers all three, since it is taken over the
+-- decision's text as a whole. changed_version is kept beside it for the version a reader sees.
 --
 -- user_document_reads is one row per person per document: the version they last read. The Spec
 -- tab marks each block that changed since it, so it is keyed on the person as the per-issue and
@@ -19,6 +23,7 @@
 create table decision_keeps (
   artifact_id uuid not null references artifacts(id) on delete cascade,
   block_id text not null,          -- the decision's heading block
+  text_sha256 text not null,       -- the decision's whole text when it was kept
   changed_version integer not null,
   kept_by text not null,
   kept_at timestamptz not null default now(),

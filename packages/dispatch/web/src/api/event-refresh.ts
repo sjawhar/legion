@@ -761,6 +761,11 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });
+      // The Decisions view reads two of the issue's documents - its decisions.md for the
+      // decisions and its spec for each link's target - and the event names its document by
+      // name alone, which does not say which the spec is, so every version of the issue
+      // refreshes it. The query exists only while that tab is open.
+      targets.push({ exact: true, queryKey: ["decisions", key] });
     } else {
       // An uploaded document is an `attached_to` edge into its issue.
       targets.push(referencePanel(issueReference));
@@ -789,6 +794,9 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       return targets;
     }
     targets.push({ queryKey: ["asks", key] });
+    // The view lists the spec's open questions beside the decisions, and a decision's turn is
+    // its ask's.
+    targets.push({ exact: true, queryKey: ["decisions", key] });
     if (movesOpenAsks(event)) {
       targets.push({ queryKey: projectsKey }, pinnedRow(key));
     }

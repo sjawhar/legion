@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"sort"
@@ -271,7 +273,7 @@ func (s *server) readDecisions(ctx context.Context, document model.Artifact, ref
 			decision.Kept = &keep
 		}
 		decision.WaitingReview = decision.Kind == "agent" && !decision.Replaced &&
-			(decision.Kept == nil || decision.Kept.ChangedVersion < decision.ChangedVersion)
+			(decision.Kept == nil || decision.Kept.TextSHA256 != decisionTextSum(decision.Text))
 		decisions = append(decisions, decision)
 	}
 	return decisions, nil
@@ -285,6 +287,16 @@ func staleLink(decision model.Decision, link model.BlockLink) bool {
 		return false
 	}
 	return link.To.ChangedAt != nil && link.To.ChangedAt.Before(*decision.ChangedAt)
+}
+
+// decisionTextSum is the sum a Keep records and the view compares: the decision's whole text, so
+// a block removed from the decision, or moved into or out of it, asks for review again as a
+// reworded block does. The decision's changed version cannot do that work, since it is the
+// greatest of the blocks the decision holds now and a removal leaves every remaining block at
+// the version it had.
+func decisionTextSum(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 // decisionSections cuts the decisions document into its sections: each `##` heading outside
@@ -404,7 +416,7 @@ func decisionBlockAsks(ctx context.Context, q queryer, artifactID string) (map[s
 // decisionKeeps is every decision of the document a person has kept, by heading block.
 func decisionKeeps(ctx context.Context, q queryer, artifactID string) (map[string]model.DecisionKeep, error) {
 	rows, err := q.Query(ctx, `
-		select block_id, changed_version, kept_by, kept_at
+		select block_id, text_sha256, changed_version, kept_by, kept_at
 		from decision_keeps where artifact_id = $1::uuid
 	`, artifactID)
 	if err != nil {
@@ -414,7 +426,8 @@ func decisionKeeps(ctx context.Context, q queryer, artifactID string) (map[strin
 	keeps := map[string]model.DecisionKeep{}
 	for rows.Next() {
 		keep := model.DecisionKeep{ArtifactID: artifactID}
-		if err := rows.Scan(&keep.BlockID, &keep.ChangedVersion, &keep.KeptBy, &keep.KeptAt); err != nil {
+		if err := rows.Scan(&keep.BlockID, &keep.TextSHA256, &keep.ChangedVersion,
+			&keep.KeptBy, &keep.KeptAt); err != nil {
 			return nil, err
 		}
 		keeps[keep.BlockID] = keep
@@ -423,9 +436,9 @@ func decisionKeeps(ctx context.Context, q queryer, artifactID string) (map[strin
 }
 
 // keepDecision is POST /api/v1/artifacts/{id}/blocks/{block_id}/keep: the caller agrees with the
-// decision that heading block opens, at the version its text stands at now. Any other block - one
-// that is no decision heading, or a decision under `## Replaced`, which is no longer the design -
-// is 404 TARGET_NOT_FOUND.
+// decision that heading block opens, as its text stands now. Any other block - one that is no
+// decision heading, or a decision under `## Replaced`, which is no longer the design - is 404
+// TARGET_NOT_FOUND.
 func (s *server) keepDecision(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -450,13 +463,15 @@ func (s *server) keepDecision(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	keep := model.DecisionKeep{ArtifactID: document.ID}
 	if err := tx.QueryRow(r.Context(), `
-		insert into decision_keeps (artifact_id, block_id, changed_version, kept_by)
-		values ($1::uuid, $2, $3, $4)
+		insert into decision_keeps (artifact_id, block_id, text_sha256, changed_version, kept_by)
+		values ($1::uuid, $2, $3, $4, $5)
 		on conflict (artifact_id, block_id) do update
-			set changed_version = excluded.changed_version, kept_by = excluded.kept_by, kept_at = now()
-		returning block_id, changed_version, kept_by, kept_at
-	`, document.ID, blockID, decision.ChangedVersion, model.CanonicalLogin(actor.ID)).
-		Scan(&keep.BlockID, &keep.ChangedVersion, &keep.KeptBy, &keep.KeptAt); err != nil {
+			set text_sha256 = excluded.text_sha256, changed_version = excluded.changed_version,
+				kept_by = excluded.kept_by, kept_at = now()
+		returning block_id, text_sha256, changed_version, kept_by, kept_at
+	`, document.ID, blockID, decisionTextSum(decision.Text), decision.ChangedVersion,
+		model.CanonicalLogin(actor.ID)).
+		Scan(&keep.BlockID, &keep.TextSHA256, &keep.ChangedVersion, &keep.KeptBy, &keep.KeptAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -477,11 +492,20 @@ func (s *server) keepDecision(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, keep)
 }
 
-// keptDecision is the decision blockID opens in document, refused unless document is an issue's
-// decisions.md and that block is the heading of a decision outside `## Replaced`.
+// keptDecision is the decision blockID opens in document, refused unless document is the
+// decisions.md of its issue - resolved as the view resolves it, by slug and then by filename, so
+// Keep and the view never disagree about which document holds the decisions - and that block is
+// the heading of a decision outside `## Replaced`.
 func (s *server) keptDecision(ctx context.Context, document model.Artifact, blockID string) (model.Decision, error) {
 	notFound := errorf(http.StatusNotFound, "TARGET_NOT_FOUND", "no decision %q in %s", blockID, document.Name)
-	if document.IssueKey == nil || document.Name != decisionsDocumentName {
+	if document.IssueKey == nil {
+		return model.Decision{}, notFound
+	}
+	decisionsDocument, found, err := s.issueDecisionsDocument(ctx, *document.IssueKey)
+	if err != nil {
+		return model.Decision{}, err
+	}
+	if !found || decisionsDocument.ID != document.ID {
 		return model.Decision{}, notFound
 	}
 	decisions, err := s.readDecisions(ctx, document, artifactReference(document), "")

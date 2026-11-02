@@ -295,6 +295,79 @@ func TestKeepRecordsAgreementUntilTheDecisionChanges(t *testing.T) {
 	}
 }
 
+// keepBlock is a person's Keep of the decision that heading block opens.
+func keepBlock(t *testing.T, handler http.Handler, artifactID, blockID string) model.DecisionKeep {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+artifactID+"/blocks/"+blockID+"/keep", map[string]any{}, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("keep %s: status=%d body=%s", blockID, response.Code, response.Body.String())
+	}
+	return decodeBody[model.DecisionKeep](t, response)
+}
+
+// A kept decision whose text changes without its changed version moving waits for review again.
+// The version is the greatest of the blocks the decision holds now, so a block taken out of it,
+// and one moved from it into another decision, leave both decisions' versions where they were
+// while their text changed: the sum of the text, not the version, is what Keep records.
+func TestAKeptDecisionWaitsForReviewAgainWhenABlockLeavesOrJoinsIt(t *testing.T) {
+	fixture := newDecisionsFixture(t)
+	handler, key, id := fixture.handler, fixture.issue.Key, fixture.decisions.ID
+
+	// A paragraph written into the agent decision, kept with it, then taken out again.
+	const measured = "Measured against the file store."
+	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
+		{"op": "insert", "markdown": measured, "before": "## " + nameDecision},
+	})
+	table := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
+	keepBlock(t, handler, id, table.BlockID)
+	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
+		{"op": "delete", "find": measured},
+	})
+	removed := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
+	if strings.Contains(removed.Text, measured) {
+		t.Fatalf("the paragraph is still in the decision: %q", removed.Text)
+	}
+	if removed.Kept == nil || removed.Kept.ChangedVersion < removed.ChangedVersion {
+		t.Fatalf("the removal moved the decision's changed version: kept = %#v, decision = %#v",
+			removed.Kept, removed)
+	}
+	if !removed.WaitingReview {
+		t.Fatalf("after a block left it the decision = %#v, want it waiting for review", removed)
+	}
+
+	// Both decisions kept as they now stand, then the agent decision's paragraph moved into the
+	// unsure one: no block of either changed, so neither changed version moves.
+	view := readIssueDecisions(t, handler, key)
+	table = decisionNamed(t, view, tableDecision)
+	cache := decisionNamed(t, view, cacheDecision)
+	keepBlock(t, handler, id, table.BlockID)
+	keepBlock(t, handler, id, cache.BlockID)
+	blocks := blockIDsByText(t, handler, id)
+	paragraph := blocks[tableParagraph+" Shapes dispatch://"+key+"/spec#b-ship%5Fit and dispatch://"+key+"/spec#b-hold-it."]
+	if paragraph == "" {
+		t.Fatalf("the decision's paragraph has no block id; blocks = %v", blocks)
+	}
+	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
+		{"op": "move", "block": paragraph, "before": "## Replaced"},
+	})
+	moved := readIssueDecisions(t, handler, key)
+	left := decisionNamed(t, moved, tableDecision)
+	joined := decisionNamed(t, moved, cacheDecision)
+	if strings.Contains(left.Text, tableParagraph) || !strings.Contains(joined.Text, tableParagraph) {
+		t.Fatalf("the move left the paragraph where it was: %q and %q", left.Text, joined.Text)
+	}
+	for _, decision := range []model.Decision{left, joined} {
+		if decision.Kept == nil || decision.Kept.ChangedVersion < decision.ChangedVersion {
+			t.Fatalf("the move moved %q's changed version: kept = %#v, decision = %#v",
+				decision.Heading, decision.Kept, decision)
+		}
+		if !decision.WaitingReview {
+			t.Fatalf("after the move %q = %#v, want it waiting for review", decision.Heading, decision)
+		}
+	}
+}
+
 // Each person's last read version of a document: null before they read it, the version they
 // recorded after, and a bearer may read neither route.
 func TestDocumentReadRecordsEachPersonsLastReadVersion(t *testing.T) {

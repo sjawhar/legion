@@ -2270,9 +2270,11 @@ export interface BlockLinks {
 }
 
 // DecisionKeep is one person's agreement with a decision: the decision's heading block, the
-// version its text stood at when they pressed Keep, and who did when. A decision whose text
-// changes afterwards stands at a higher `changed_version`, which is how the view tells a kept
-// decision from one waiting for review again.
+// version its text stood at when they pressed Keep, and who did when. What tells a kept decision
+// from one waiting for review again is the sum of its text, which the server records beside the
+// row and serves as `waiting_review`: a decision's `changed_version` is the greatest of the
+// blocks it holds now, so it does not move when a block is removed from the decision or moved
+// into or out of it.
 export interface DecisionKeep {
   readonly artifact_id: string;
   readonly block_id: string;
@@ -2298,8 +2300,8 @@ export interface DecisionLink {
 // ask (a person's decision links the answered ask) and "agent" otherwise; `unsure` is set by a
 // paragraph that starts `Unsure:`; `replaced` by sitting under the section headed exactly
 // `## Replaced`. `changed_version` and `changed_at` are the greatest of its blocks'.
-// `waiting_review` is an agent's decision, not replaced, that nobody has kept at its current
-// version.
+// `waiting_review` is an agent's decision, not replaced, whose text nobody has kept as it
+// stands.
 export interface Decision {
   readonly block_id: string;
   readonly heading: string;

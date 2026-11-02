@@ -1807,16 +1807,21 @@ type BlockLinks struct {
 	Links []BlockLink `json:"links"`
 }
 
-// DecisionKeep is one person's agreement with a decision: the decision's heading block, the
-// version its text stood at when they pressed Keep, and who did when. A decision whose text
-// changes afterwards stands at a higher ChangedVersion, which is how the view tells a kept
-// decision from one waiting for review again.
+// DecisionKeep is one person's agreement with a decision: the decision's heading block, the sum
+// of its whole text when they pressed Keep, the version it then stood at, and who did when. The
+// sum, not the version, is what tells a kept decision from one waiting for review again: a
+// decision's ChangedVersion is the greatest of the blocks it holds now, so it does not move when
+// a block is removed from the decision or moved into or out of it, where the text changes and
+// every remaining block keeps its version.
 type DecisionKeep struct {
 	ArtifactID     string    `json:"artifact_id"`
 	BlockID        string    `json:"block_id"`
 	ChangedVersion int       `json:"changed_version"`
 	KeptBy         string    `json:"kept_by"`
 	KeptAt         time.Time `json:"kept_at"`
+	// TextSHA256 is the sum the view compares; a reader is served the decision's Text and
+	// WaitingReview, so it is no part of the wire shape.
+	TextSHA256 string `json:"-"`
 }
 
 // DecisionLink is one link from a block of a decision to a block of the issue's spec: the
@@ -1836,7 +1841,7 @@ type DecisionLink struct {
 // ask (a person's decision links the answered ask) and "agent" otherwise; Unsure is set by a
 // paragraph that starts "Unsure:"; Replaced is set by sitting under the section headed exactly
 // "## Replaced". ChangedVersion and ChangedAt are the greatest of its blocks'. WaitingReview is
-// an agent's decision, not replaced, that nobody has kept at its current version.
+// an agent's decision, not replaced, whose text nobody has kept as it stands.
 type Decision struct {
 	BlockID        string         `json:"block_id"`
 	Heading        string         `json:"heading"`
