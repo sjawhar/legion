@@ -62,7 +62,7 @@ func TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating(t *testing.T) {
 		{"a holder that stopped heartbeating before the claim went stale", session.ClaimStaleAfter + time.Minute, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			harness := newListenerDeliveryHarness(t, nil)
+			harness := newListenerDeliveryHarness(t)
 			storeSessionHeartbeat(t, harness.client, holder, time.Now().Add(-tc.since))
 			if _, err := harness.registry.SetRole(holder, "test-machine", role, false); err != nil {
 				t.Fatalf("claim the role: %v", err)

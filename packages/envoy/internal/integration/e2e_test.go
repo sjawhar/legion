@@ -5,12 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,37 +17,27 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
+// deliveryEvent is one envelope the listener harness below delivered to a session. A session
+// takes its messages off its own NATS subscription, so the harness hands it nothing: the event
+// is recorded where the harness resolves the session and records the delivery, which is where a
+// push to the session's serve port was made until dispatch://INFRA-889.
 type deliveryEvent struct {
-	path string
-	body string
+	sessionID string
+	item      contracts.Envelope
 }
 
+// sessionRecorder is a registered session and the deliveries made to it.
 type sessionRecorder struct {
-	events chan deliveryEvent
-	port   int
+	sessionID string
+	events    chan deliveryEvent
 }
 
-func newSessionRecorder(t *testing.T) *sessionRecorder {
+// newSessionRecorder registers sessionID, following topics, and records every delivery to it.
+func newSessionRecorder(t *testing.T, env *testEnv, sessionID string, topics []string) *sessionRecorder {
 	t.Helper()
-	recorder := &sessionRecorder{events: make(chan deliveryEvent, 32)}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read recorder body: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		recorder.events <- deliveryEvent{path: r.URL.Path, body: string(body)}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(srv.Close)
-	if _, err := fmt.Sscanf(srv.URL, "http://127.0.0.1:%d", &recorder.port); err != nil || recorder.port == 0 {
-		if _, err := fmt.Sscanf(srv.URL, "http://[::1]:%d", &recorder.port); err != nil || recorder.port == 0 {
-			t.Fatalf("parse recorder port from %q", srv.URL)
-		}
-	}
-	return recorder
+	events := env.watchDeliveries(sessionID)
+	env.registerSession(sessionID, topics)
+	return &sessionRecorder{sessionID: sessionID, events: events}
 }
 
 func (r *sessionRecorder) expectDelivery(t *testing.T, timeout time.Duration) deliveryEvent {
@@ -61,7 +46,7 @@ func (r *sessionRecorder) expectDelivery(t *testing.T, timeout time.Duration) de
 	case event := <-r.events:
 		return event
 	case <-time.After(timeout):
-		t.Fatal("timed out waiting for delivery")
+		t.Fatalf("timed out waiting for a delivery to %s", r.sessionID)
 		return deliveryEvent{}
 	}
 }
@@ -70,7 +55,7 @@ func (r *sessionRecorder) expectNoDelivery(t *testing.T, timeout time.Duration) 
 	t.Helper()
 	select {
 	case event := <-r.events:
-		t.Fatalf("unexpected delivery: %+v", event)
+		t.Fatalf("unexpected delivery to %s: %s", r.sessionID, event.item.EventID)
 	case <-time.After(timeout):
 	}
 }
@@ -187,6 +172,7 @@ func (h *listenerHarness) handleAgent(msg *natsgo.Msg, item contracts.Envelope) 
 	result := session.HandleAgentMessage(item, sessionID, h.machineID, interestPtr, entryPtr, &h.env.deliverer)
 	if result.Delivered {
 		h.dedupeCache.Record(item.DedupeKey, sessionID)
+		h.env.recordDelivery(sessionID, item)
 	}
 	if result.ShouldNAK {
 		_ = msg.NakWithDelay(h.nakDelay)
@@ -227,6 +213,7 @@ func (h *listenerHarness) handleFanout(msg *natsgo.Msg, item contracts.Envelope)
 			continue
 		}
 		h.dedupeCache.Record(item.DedupeKey, interest.SessionID)
+		h.env.recordDelivery(interest.SessionID, item)
 	}
 	if failed {
 		_ = msg.NakWithDelay(h.nakDelay)
@@ -242,10 +229,6 @@ func fanoutShouldNAK(sessions *session.SessionRegistry, sessionID string, err er
 	_, getErr := sessions.Get(sessionID)
 	return getErr == nil
 }
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func waitUntil(t *testing.T, timeout time.Duration, desc string, fn func() bool) {
 	t.Helper()
@@ -276,8 +259,7 @@ func waitForMatchCount(t *testing.T, env *testEnv, machineID, topic string, want
 
 func TestE2E_WebhookToSession(t *testing.T) {
 	env := setupTestEnv(t)
-	recorder := newSessionRecorder(t)
-	env.registerSession("ses_webhook", recorder.port, []string{"notifications.slack.*.*.mention"})
+	recorder := newSessionRecorder(t, env, "ses_webhook", []string{"notifications.slack.*.*.mention"})
 	waitForMatchCount(t, env, "test-machine", "notifications.slack.T123.C456.mention", 1)
 
 	listener := newListenerHarness(t, env, "test-machine", "listener-webhook")
@@ -288,22 +270,18 @@ func TestE2E_WebhookToSession(t *testing.T) {
 	publishEnvelope(env, item)
 
 	event := recorder.expectDelivery(t, 5*time.Second)
-	if event.path != "/session/ses_webhook/prompt_async" {
-		t.Fatalf("unexpected delivery path: %s", event.path)
+	if event.sessionID != "ses_webhook" || event.item.EventID != item.EventID {
+		t.Fatalf("delivered %+v to %s, want the published envelope to ses_webhook", event.item, event.sessionID)
 	}
-	if !strings.Contains(event.body, "hello from slack") {
-		t.Fatalf("delivery body missing webhook payload: %s", event.body)
-	}
-	if !strings.Contains(event.body, item.Topic) {
-		t.Fatalf("delivery body missing topic: %s", event.body)
+	if event.item.PayloadSummary != "hello from slack" || event.item.Topic != item.Topic {
+		t.Fatalf("delivered %+v, want the webhook's payload on its own topic", event.item)
 	}
 	recorder.expectNoDelivery(t, 300*time.Millisecond)
 }
 
 func TestE2E_AgentToAgent_LocalMachine(t *testing.T) {
 	env := setupTestEnv(t)
-	recorder := newSessionRecorder(t)
-	env.registerSession("ses_local", recorder.port, nil)
+	recorder := newSessionRecorder(t, env, "ses_local", nil)
 
 	listener := newListenerHarness(t, env, "test-machine", "listener-agent-local")
 	listener.start()
@@ -313,94 +291,26 @@ func TestE2E_AgentToAgent_LocalMachine(t *testing.T) {
 	publishEnvelope(env, item)
 
 	event := recorder.expectDelivery(t, 5*time.Second)
-	if event.path != "/session/ses_local/prompt_async" {
-		t.Fatalf("unexpected delivery path: %s", event.path)
+	if event.item.EventID != item.EventID || event.item.PayloadSummary != "private hello" {
+		t.Fatalf("delivered %+v, want the published envelope", event.item)
 	}
-	if !strings.Contains(event.body, "private hello") {
-		t.Fatalf("delivery body missing agent payload: %s", event.body)
-	}
-	var delivery struct {
-		Parts []struct {
-			Text string `json:"text"`
-		} `json:"parts"`
-	}
-	if err := json.Unmarshal([]byte(event.body), &delivery); err != nil {
-		t.Fatalf("decode delivery body: %v", err)
-	}
-	if len(delivery.Parts) != 1 {
-		t.Fatalf("delivery parts = %d, want 1: %s", len(delivery.Parts), event.body)
-	}
-	header := "[NOTIFICATION to you from ses_sender]"
-	if !strings.Contains(delivery.Parts[0].Text, header) {
-		t.Fatalf("delivery text missing header %q: %s", header, delivery.Parts[0].Text)
-	}
-	replyInstruction := `Reply With: envoy_send(session_id="ses_sender", message="...")`
-	if !strings.Contains(delivery.Parts[0].Text, replyInstruction) {
-		t.Fatalf("delivery text missing reply instruction %q: %s", replyInstruction, delivery.Parts[0].Text)
+	if event.item.SourceSession != "ses_sender" {
+		t.Fatalf("the delivered envelope names sender %q, want ses_sender", event.item.SourceSession)
 	}
 	recorder.expectNoDelivery(t, 300*time.Millisecond)
 }
 
-// TestE2E_AgentToAgent_RemoteMachine delivers to a session that runs on, and last registered
-// through, another machine while its stored subscription still names this listener: the stored
-// subscription makes this listener its owner (session.ErrWrongMachine is for a session another
-// listener owns), and the owner pushes to the machine the session's record names.
-func TestE2E_AgentToAgent_RemoteMachine(t *testing.T) {
-	env := setupTestEnv(t)
-	defer func(originalClient *http.Client) {
-		env.deliverer.HTTPClient = originalClient
-	}(env.deliverer.HTTPClient)
-
-	var pushes atomic.Int32
-	env.deliverer.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		pushes.Add(1)
-		if r.URL.Hostname() != "remote-machine" {
-			t.Errorf("expected remote-machine host, got %s", r.URL.Hostname())
-		}
-		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
-	})}
-	// The session's own record names the machine it runs on, and the listener resolves that
-	// record before it pushes, so the push is addressed to remote-machine rather than to this
-	// listener's own host. Without the record there is nothing to push to and the transport
-	// below is never reached, which is what the push count guards against.
-	if err := env.sessions.Put("ses_remote", session.SessionEntry{
-		Port: 7777, MachineID: "remote-machine", Dir: "/remote",
-	}); err != nil {
-		t.Fatalf("register the remote session: %v", err)
-	}
-	if _, err := env.registry.Upsert(store.Interest{SessionID: "ses_remote", MachineID: "test-machine", Dir: "/remote"}, []string{contracts.AgentSubject("ses_remote")}); err != nil {
-		t.Fatalf("upsert remote interest: %v", err)
-	}
-
-	listener := newListenerHarness(t, env, "test-machine", "listener-agent-remote")
-	listener.start()
-
-	publishEnvelope(env, newEnvelope("agent", contracts.AgentSubject("ses_remote"), "remote hello", "dedupe-agent-remote"))
-
-	waitUntil(t, 5*time.Second, "remote agent message acked", func() bool {
-		consumerInfo, err := listener.client.JS().ConsumerInfo(bus.Stream, listener.consumer)
-		if err != nil {
-			return false
-		}
-		return consumerInfo.NumPending == 0 && consumerInfo.AckFloor.Consumer > 0
-	})
-	if got := pushes.Load(); got != 1 {
-		t.Fatalf("the remote session was pushed to %d times, want exactly 1: the delivery must reach the machine the record names", got)
-	}
-}
-
 func TestE2E_RestartResilience(t *testing.T) {
 	env := setupTestEnv(t)
-	recorder := newSessionRecorder(t)
-	env.registerSession("ses_restart", recorder.port, []string{"notifications.slack.*.*.mention"})
+	recorder := newSessionRecorder(t, env, "ses_restart", []string{"notifications.slack.*.*.mention"})
 	waitForMatchCount(t, env, "test-machine", "notifications.slack.T10.C10.mention", 1)
 
 	listenerA := newListenerHarness(t, env, "test-machine", "listener-restart")
 	listenerA.start()
 	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T10.C10.mention", "before restart", "dedupe-restart-1"))
 	first := recorder.expectDelivery(t, 5*time.Second)
-	if !strings.Contains(first.body, "before restart") {
-		t.Fatalf("first delivery body mismatch: %s", first.body)
+	if first.item.PayloadSummary != "before restart" {
+		t.Fatalf("first delivery was %q, want the first envelope", first.item.PayloadSummary)
 	}
 	listenerA.close()
 
@@ -413,28 +323,27 @@ func TestE2E_RestartResilience(t *testing.T) {
 	seen := map[string]bool{}
 	for len(seen) < 2 {
 		event := recorder.expectDelivery(t, 5*time.Second)
-		if strings.Contains(event.body, "during downtime 1") {
+		if event.item.PayloadSummary == "during downtime 1" {
 			seen["during downtime 1"] = true
 		}
-		if strings.Contains(event.body, "during downtime 2") {
+		if event.item.PayloadSummary == "during downtime 2" {
 			seen["during downtime 2"] = true
 		}
 	}
 
 	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T10.C10.mention", "after restart", "dedupe-restart-4"))
 	event := recorder.expectDelivery(t, 5*time.Second)
-	if !strings.Contains(event.body, "after restart") {
-		t.Fatalf("expected post-restart delivery, got: %s", event.body)
+	if event.item.PayloadSummary != "after restart" {
+		t.Fatalf("expected the post-restart envelope, got %q", event.item.PayloadSummary)
 	}
 	recorder.expectNoDelivery(t, 300*time.Millisecond)
 }
 
 func TestE2E_DeadSessionFanout(t *testing.T) {
 	env := setupTestEnv(t)
-	recorder := newSessionRecorder(t)
 	broadcastTopic := "notifications.slack.*.*.mention"
 	concreteTopic := "notifications.slack.T20.C20.mention"
-	env.registerSession("ses_live", recorder.port, []string{broadcastTopic})
+	recorder := newSessionRecorder(t, env, "ses_live", []string{broadcastTopic})
 	if _, err := env.registry.Upsert(store.Interest{SessionID: "ses_dead", MachineID: "test-machine", Dir: "/dead"}, []string{broadcastTopic}); err != nil {
 		t.Fatalf("upsert dead interest: %v", err)
 	}
@@ -445,16 +354,15 @@ func TestE2E_DeadSessionFanout(t *testing.T) {
 
 	publishEnvelope(env, newEnvelope("slack", concreteTopic, "fanout payload", "dedupe-dead-fanout"))
 	event := recorder.expectDelivery(t, 5*time.Second)
-	if !strings.Contains(event.body, "fanout payload") {
-		t.Fatalf("live session body mismatch: %s", event.body)
+	if event.item.PayloadSummary != "fanout payload" {
+		t.Fatalf("the live session was delivered %q, want the published envelope", event.item.PayloadSummary)
 	}
 	recorder.expectNoDelivery(t, 300*time.Millisecond)
 }
 
 func TestE2E_IdempotencyKey(t *testing.T) {
 	env := setupTestEnv(t)
-	recorder := newSessionRecorder(t)
-	env.registerSession("ses_idempotent", recorder.port, nil)
+	recorder := newSessionRecorder(t, env, "ses_idempotent", nil)
 
 	listener := newListenerHarness(t, env, "test-machine", "listener-idempotent")
 	listener.start()
@@ -464,8 +372,8 @@ func TestE2E_IdempotencyKey(t *testing.T) {
 	publishEnvelope(env, item)
 
 	event := recorder.expectDelivery(t, 5*time.Second)
-	if !strings.Contains(event.body, "only once") {
-		t.Fatalf("delivery body mismatch: %s", event.body)
+	if event.item.PayloadSummary != "only once" {
+		t.Fatalf("delivered %q, want the published envelope", event.item.PayloadSummary)
 	}
 	recorder.expectNoDelivery(t, 300*time.Millisecond)
 }

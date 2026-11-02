@@ -56,8 +56,8 @@ const noGrantBackoff = 10 * time.Minute
 const sessionConsumerDrain = 2 * time.Second
 
 // deliveryAnswer is the delivery field of a registration's answer (subscribeResponse.Delivery),
-// present whenever the registration carried delivery or registered a serving port. A listener of an
-// earlier release answers without it, which the plugin reads as core.
+// present whenever the registration carried a delivery object. A listener of an earlier release
+// answers without it, which the plugin reads as core.
 type deliveryAnswer struct {
 	Mode string `json:"mode"`
 	// Subject is the session's relay subject (bus.DeliverSubject), in consumer mode.

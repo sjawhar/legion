@@ -1,9 +1,10 @@
 package main
 
 // The rig several of this package's tests share: a bus client of the test's own, the envelopes it
-// publishes through it, and the wait for a started listener to list a session as registered
-// through a machine. They are here, in a file that tests nothing itself, because the tests that
-// use them are spread across this package and no one of those files owns them.
+// publishes through it, the wait for a durable to have settled, and the wait for a started
+// listener to list a session as registered through a machine. They are here, in a file that tests
+// nothing itself, because the tests that use them are spread across this package and no one of
+// those files owns them.
 
 import (
 	"encoding/json"
@@ -55,6 +56,26 @@ func publish(t *testing.T, client *bus.Client, item contracts.Envelope) {
 	}
 	if err := client.Conn.Flush(); err != nil {
 		t.Fatalf("flush the publish of %s: %v", item.Topic, err)
+	}
+}
+
+// awaitDurableState waits up to 5 s for durable to hold pending messages for an ack with every
+// message through floor acked.
+func awaitDurableState(t *testing.T, client *bus.Client, durable string, pending int, floor uint64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		info, err := client.JS().ConsumerInfo(bus.Stream, durable)
+		if err != nil {
+			t.Fatalf("read the durable %s: %v", durable, err)
+		}
+		if info.NumAckPending == pending && info.AckFloor.Stream >= floor {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the durable %s has %d pending ack, ack floor %d; want %d pending and everything through %d acked", durable, info.NumAckPending, info.AckFloor.Stream, pending, floor)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

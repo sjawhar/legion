@@ -53,7 +53,9 @@ func TestDeliver_NoRegistryEntry(t *testing.T) {
 	}
 }
 
-func TestDeliver_SkipsPush_whenSelfSubscribedSessionHasNoPort(t *testing.T) {
+// A self-subscribed session takes its messages off its own NATS subscription, so the resolution
+// succeeds with nothing for the caller to do.
+func TestDeliver_SucceedsForASelfSubscribedSession(t *testing.T) {
 	// Given
 	sessions, deliverer := newKVDeliverer(t)
 	var entry session.SessionEntry

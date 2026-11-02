@@ -19,14 +19,14 @@ import (
 const claimNow = int64(1_700_000_000_000)
 
 func TestMergeForClaim_NewSessionAccepted(t *testing.T) {
-	next := SessionEntry{Port: 100, Driving: false}
+	next := SessionEntry{Dir: "/work/first", Driving: false}
 
 	got, err := mergeForClaim(SessionEntry{}, natsgo.ErrKeyNotFound, next, claimNow)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Port != 100 {
-		t.Fatalf("expected the first claim to be accepted, got port %d", got.Port)
+	if got.Dir != "/work/first" {
+		t.Fatalf("expected the first claim to be accepted, got %+v", got)
 	}
 	if got.UpdatedAt != claimNow {
 		t.Fatalf("expected UpdatedAt stamped to now, got %d", got.UpdatedAt)
@@ -36,66 +36,66 @@ func TestMergeForClaim_NewSessionAccepted(t *testing.T) {
 func TestMergeForClaim_TransientGetErrorRefusesWrite(t *testing.T) {
 	boom := errors.New("kv unavailable")
 
-	_, err := mergeForClaim(SessionEntry{}, boom, SessionEntry{Port: 100}, claimNow)
+	_, err := mergeForClaim(SessionEntry{}, boom, SessionEntry{Dir: "/work/first"}, claimNow)
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected the transient KV error to be returned, got %v", err)
 	}
 }
 
 func TestMergeForClaim_SameProcessRefreshes(t *testing.T) {
-	cur := SessionEntry{Port: 100, Driving: true, UpdatedAt: claimNow - 120_000}
-	next := SessionEntry{Port: 100, Driving: true}
+	cur := SessionEntry{Dir: "/work/first", Driving: true, UpdatedAt: claimNow - 120_000}
+	next := SessionEntry{Dir: "/work/first", Driving: true}
 
 	got, err := mergeForClaim(cur, nil, next, claimNow)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Port != 100 || got.UpdatedAt != claimNow {
-		t.Fatalf("expected same-port heartbeat to refresh, got %+v", got)
+	if got.Dir != "/work/first" || got.UpdatedAt != claimNow {
+		t.Fatalf("expected the same process's heartbeat to refresh, got %+v", got)
 	}
 }
 
-func TestMergeForClaim_DriverBeatsNonDrivingIncumbent(t *testing.T) {
-	cur := SessionEntry{Port: 100, Driving: false, UpdatedAt: claimNow - 1_000}
-	next := SessionEntry{Port: 200, Driving: true}
+// The latest claim takes the route whatever the incumbent said. Both rows were decided by the
+// two claims' serving ports until dispatch://INFRA-889: a driving claim displaced a non-driving
+// incumbent, and a newer driving claim displaced a live driving one (a genuine re-home, the
+// session restarted in a new process with -s). No claim carries a port now, so neither rule can
+// fire and both rows are the one rule that is left.
+func TestMergeForClaim_TheLatestClaimTakesTheRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		incumbentDrives bool
+	}{
+		{name: "the incumbent is not driving"},
+		{name: "the incumbent is driving", incumbentDrives: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cur := SessionEntry{Dir: "/work/incumbent", Driving: tc.incumbentDrives, UpdatedAt: claimNow - 1_000}
+			next := SessionEntry{Dir: "/work/newcomer", Driving: true}
 
-	got, err := mergeForClaim(cur, nil, next, claimNow)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.Port != 200 {
-		t.Fatalf("expected the driving process to take the route, got port %d", got.Port)
-	}
-}
-
-func TestMergeForClaim_NewDriverTakesOverFromOldDriver(t *testing.T) {
-	// Genuine re-home: the session was restarted in a new process with -s, so
-	// the newer driving claim wins even though the incumbent is also driving.
-	cur := SessionEntry{Port: 100, Driving: true, UpdatedAt: claimNow - 1_000}
-	next := SessionEntry{Port: 200, Driving: true}
-
-	got, err := mergeForClaim(cur, nil, next, claimNow)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.Port != 200 {
-		t.Fatalf("expected the newer driving claim to win a re-home, got port %d", got.Port)
+			got, err := mergeForClaim(cur, nil, next, claimNow)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Dir != "/work/newcomer" {
+				t.Fatalf("expected the latest claim to take the route, got %+v", got)
+			}
+		})
 	}
 }
 
 // --- Registry integration: Put writes through mergeForClaim ---
 
-func TestSessionRegistry_PutAcceptsDrivingClaimOverBystander(t *testing.T) {
+func TestSessionRegistry_PutWritesTheLatestClaimThrough(t *testing.T) {
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Minute))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
 
-	if err := reg.Put("ses_rehomed", SessionEntry{Port: 34751, MachineID: "m", Dir: "/work/bystander"}); err != nil {
+	if err := reg.Put("ses_rehomed", SessionEntry{MachineID: "m", Dir: "/work/bystander"}); err != nil {
 		t.Fatalf("bystander put failed: %v", err)
 	}
-	if err := reg.Put("ses_rehomed", SessionEntry{Port: 42145, MachineID: "m", Dir: "/work/driver", Driving: true}); err != nil {
+	if err := reg.Put("ses_rehomed", SessionEntry{MachineID: "m", Dir: "/work/driver", Driving: true}); err != nil {
 		t.Fatalf("driver put failed: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestSessionRegistry_PutAcceptsDrivingClaimOverBystander(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get failed: %v", err)
 	}
-	if got.Port != 42145 {
-		t.Fatalf("expected the driving process to take the route, got port %d", got.Port)
+	if got.Dir != "/work/driver" {
+		t.Fatalf("expected the latest claim to take the route, got %+v", got)
 	}
 }
