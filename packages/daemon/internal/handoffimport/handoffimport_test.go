@@ -793,22 +793,22 @@ func TestUnderTheRecordsDaemonTestingAndReviewingDeferTheRemoval(t *testing.T) {
 		"imported 0, unchanged 8, kept worker record 0, removed .legion/ 1, deferred 1, left the workflow 0, no branch 1, failed 0")
 }
 
-// Under the records' daemon, a push past the head an awaiting_merge issue's READY named withdraws
-// that READY and sends the issue back to implementing (workflow's withdrawMovedReady): the new
-// daemon carries no push, so the import's removal commit is such a push. A branch in awaiting_merge
-// can still carry .legion/ at the cutover: retro removed only its own .legion/<KEY>/, and a child
-// branch can carry its parent's directory (on 2026-10-27, three sibling branches in needs_review
-// carried their parent's). The import must leave such a branch where it is, so the issue keeps its
-// phase and its READY (A9), and must not report the branch failed; its line says the issue's own
-// merge is what carries .legion/ to the default branch.
-func TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved(t *testing.T) {
+// Under the records' daemon the merger merges the head it reads, so the import's removal commit,
+// a push past that head, is code nobody reviewed and the merger would have to read the branch
+// again. A branch in merging can still carry .legion/ at the cutover: retro removed only its own
+// .legion/<KEY>/, and a child branch can carry its parent's directory (on 2026-10-27, three
+// sibling branches in needs_review carried their parent's). The import must leave such a branch
+// where it is, so the issue keeps its phase and the head its merger read (A9), and must not
+// report the branch failed; its line says the issue's own merge is what carries .legion/ to the
+// default branch.
+func TestUnderTheRecordsDaemonAMergingBranchCarryingAnotherIssuesHandoffsIsNotMoved(t *testing.T) {
 	w := newWorld(t)
 	w.schema = recordsSchema
 	base := w.commits[w.branches["legion/LEG-1"]].parent
 	files := maps.Clone(w.commits[base].files)
 	files[".legion/OTHER-3/plan.json"] = handoffText("OTHER-3", "plan")
 	w.branches["legion/LEG-8"] = w.commit(base, "LEG-8: the work, its parent's handoffs merged in, its own removed by retro", files)
-	w.states["LEG-8"] = seededIssue{"awaiting_merge", []string{".legion/OTHER-3/plan.json"}}
+	w.states["LEG-8"] = seededIssue{"merging", []string{".legion/OTHER-3/plan.json"}}
 	o := w.serve()
 	before := w.branches["legion/LEG-8"]
 
@@ -819,25 +819,24 @@ func TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved(t *testing.T) {
 	}
 	for _, update := range w.updates {
 		if update.branch == "legion/LEG-8" {
-			t.Errorf("legion/LEG-8, in awaiting_merge, was moved to %s: the push withdraws its READY and sends it back to implementing", update.sha)
+			t.Errorf("legion/LEG-8, in merging, was moved to %s: the push puts code the merger never read above the head it merges", update.sha)
 		}
 	}
 	if w.branches["legion/LEG-8"] != before {
 		t.Errorf("legion/LEG-8 moved from %s to %s", before, w.branches["legion/LEG-8"])
 	}
-	wantLines(t, stdout, "LEG-8: removal deferred: LEG-8 is in awaiting_merge; "+
+	wantLines(t, stdout, "LEG-8: removal deferred: LEG-8 is in merging; "+
 		"its merge carries .legion/ to the default branch, which the cleanup after the cutover removes")
 	if strings.Contains(stdout, "LEG-8: failed") {
-		t.Errorf("the awaiting_merge branch was reported failed:\n%s", stdout)
+		t.Errorf("the merging branch was reported failed:\n%s", stdout)
 	}
 }
 
-// Under the records' daemon a held issue waits as an issue in testing, reviewing, merging or
-// awaiting_merge does: the state says only `held`, not the phase the hold came from, and the retry
-// that restores that phase would otherwise find the removal push (a tester's planned red cleared, a
-// round's approval no longer standing, a READY naming a head the branch no longer has). A merging
-// issue waits for its own reason: the merger builds READY at the head it reads, and a push past it
-// makes the daemon refuse or void that READY.
+// Under the records' daemon a held issue waits as an issue in testing, reviewing or merging does:
+// the state says only `held`, not the phase the hold came from, and the retry that restores that
+// phase would otherwise find the removal push (a tester's planned red cleared, a round's approval
+// no longer standing). A merging issue waits for its own reason: the merger merges the head it
+// reads, and a push past that head is one no review covers.
 func TestUnderTheRecordsDaemonHeldAndMergingBranchesAreNotMoved(t *testing.T) {
 	w := newWorld(t)
 	w.schema = recordsSchema
