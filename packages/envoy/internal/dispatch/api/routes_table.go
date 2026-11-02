@@ -70,7 +70,7 @@ const (
 
 // writeClasses is the class of every mutating route, by "<method> <pattern>". It stands beside
 // the table rather than in each row because Go leaves no field out of a positional composite
-// literal: a sixth value on the row would have to be written on all 146 rows, every GET row
+// literal: a sixth value on the row would have to be written on all 150 rows, every GET row
 // included, and a GET row needs no class. routes() stamps it onto the row, so apiRoute.Scope is
 // what every reader of a route sees, and undecidableWrites holds the two in exact correspondence
 // — a mutating row this table does not name, and a name that is no mutating row, each fail
