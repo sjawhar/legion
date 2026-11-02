@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -691,6 +692,60 @@ func TestAnUploadNamedAfterAnArtifactsSlugOfAnotherKindIsRefused(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("issue holds %d report-md artifacts, want 1", count)
+	}
+}
+
+// Uploads at once to one owner that holds no plan yet, some named `plan.md` and the rest `plan-md`,
+// are all stored, and leave no reference, a name or a slug, that names two artifacts. Which name
+// lands first decides whether they make one artifact or two: `plan-md` first holds that name and
+// slug, and `plan.md` then gets `plan-md-2`. Neither upload may look its artifact up while the
+// other is still creating one, which a project's upload, with no row to lock as an issue's has,
+// needs its own lock for.
+func TestConcurrentUploadsUnderOneNameAndItsSlugLeaveNoReferenceNamingTwo(t *testing.T) {
+	for _, owner := range []string{"issue", "project"} {
+		t.Run(owner, func(t *testing.T) {
+			handler, database, _ := newTestServer(t, testServerOptions{})
+			issue := createArtifactIssue(t, handler)
+			path, ownerKey := "/api/v1/projects/TEST/artifacts", "TEST"
+			if owner == "issue" {
+				path, ownerKey = "/api/v1/issues/"+issue.Key+"/artifacts", issue.Key
+			}
+			const uploads = 6
+			start := make(chan struct{})
+			responses := make(chan *httptest.ResponseRecorder, uploads)
+			for index := range uploads {
+				name := []string{"plan.md", "plan-md"}[index%2]
+				go func() {
+					<-start
+					responses <- dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
+						"name": name, "content": "# Plan " + string(rune('a'+index)) + "\n",
+					}, "alice")
+				}()
+			}
+			close(start)
+			for range uploads {
+				if response := awaitResponse(t, responses); response.Code != http.StatusCreated {
+					t.Fatalf("concurrent upload: status=%d body=%s, want 201", response.Code, response.Body.String())
+				}
+			}
+
+			rows, err := database.Pool.Query(context.Background(), `
+				select a.slug || ' (' || a.name || ') and ' || b.slug || ' (' || b.name || ')'
+				from artifacts a join artifacts b
+					on coalesce(a.issue_key, a.project_key) = coalesce(b.issue_key, b.project_key) and a.id < b.id
+				where coalesce(a.issue_key, a.project_key) = $1 and (a.name in (b.name, b.slug) or a.slug in (b.name, b.slug))
+			`, ownerKey)
+			if err != nil {
+				t.Fatalf("read artifacts sharing a reference: %v", err)
+			}
+			shared, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				t.Fatalf("read artifacts sharing a reference: %v", err)
+			}
+			if len(shared) != 0 {
+				t.Fatalf("artifacts sharing a reference on %s: %v, want none", ownerKey, shared)
+			}
+		})
 	}
 }
 

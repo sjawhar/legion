@@ -439,6 +439,10 @@ func (s *server) storeArtifact(
 			return
 		}
 		project = &loaded.Key
+		if err := lockProjectArtifacts(r.Context(), tx, loaded.Key); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	var artifact model.Artifact
 	var created bool
@@ -1523,6 +1527,19 @@ func newArtifactKeyRefusal(target artifactTarget, slug string) error {
 	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
 		"the reference key `%s/<slug>` this name gives a new artifact is %d bytes, past the %d bytes a new artifact's reference key may hold; give it a shorter name",
 		target.refPrefix(), key, maxNewArtifactKeyBytes)
+}
+
+// lockProjectArtifacts serialises one project's own uploads (its documents, not its issues') for
+// the rest of tx, as lockAgentArtifacts does a conversation's. A project's upload otherwise locks
+// no row before it looks its artifact up by name or slug and takes a new slug, so two uploads at
+// once - `plan.md` and `plan-md` - could each miss the other and leave two documents that one
+// reference names. Only these uploads take the lock, and they take it before any row or room, so
+// it joins no lock cycle.
+func lockProjectArtifacts(ctx context.Context, tx pgx.Tx, project string) error {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('project-artifacts:' || $1))`, project); err != nil {
+		return fmt.Errorf("lock the project's documents: %w", err)
+	}
+	return nil
 }
 
 func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifactTarget, name string) (string, error) {
