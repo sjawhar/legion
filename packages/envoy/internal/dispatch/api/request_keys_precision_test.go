@@ -130,9 +130,9 @@ func TestTheMaintenanceLoopKeepsAKeyForItsWholeWindow(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunSuggestionOutcomeSweep(ctx, rig.database.Pool, 50*time.Millisecond, sweepLeases(t, rig.database), nil)
+		RunMaintenanceSweep(ctx, rig.database.Pool, 50*time.Millisecond, sweepLeases(t, rig.database), nil)
 	}()
-	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease) == 0; {
+	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass ran", maintenanceLease) == 0; {
 		if time.Now().After(deadline) {
 			t.Fatalf("the loop never made a pass:\n%s", logs.Lines("lease="))
 		}
@@ -225,8 +225,9 @@ func TestARequestKeysRowIsOneOfItsStates(t *testing.T) {
 }
 
 // Every route the keyed layer's own tables name - those that replay a recovery point, never keep
-// their answer, or take an upload's body - is a POST or PATCH route the server registers: a pattern
-// spelled wrong would silently turn its rule off.
+// their answer, take an upload's body, or read a body of their own size (handoffWriteRoute) - is a
+// POST or PATCH route the server registers: a pattern spelled wrong would silently turn its rule
+// off.
 func TestEveryKeyedRouteTableNamesARoute(t *testing.T) {
 	registered := map[string]bool{}
 	for _, route := range (&server{}).routes() {
@@ -244,6 +245,7 @@ func TestEveryKeyedRouteTableNamesARoute(t *testing.T) {
 	for route := range keyedUploads {
 		tables["keyedUploads"] = append(tables["keyedUploads"], route)
 	}
+	tables["handoffWriteRoute"] = []string{handoffWriteRoute}
 	for table, routes := range tables {
 		for _, route := range routes {
 			if !registered[route] {

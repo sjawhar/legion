@@ -46,6 +46,9 @@ var subcommands = []subcommand{
 	{"backfill-files", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return backfillFiles(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
 	}},
+	{"stored-order", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
+		return storedOrder(ctx, args, env.get("DATABASE_URL"), stdout)
+	}},
 	{"settings", func(_ context.Context, _ []string, _ settingValues, stdout, stderr io.Writer) int {
 		if err := writeSettings(stdout); err != nil {
 			fmt.Fprintf(stderr, "settings: %v\n", err)
@@ -253,8 +256,8 @@ func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writ
 }
 
 func writeRebuildRefsReport(out io.Writer, report refs.Rebuild) {
-	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d blocks_owed=%d\n",
-		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges, report.BlocksOwed)
+	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d blocks_owed=%d items_owed=%d\n",
+		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges, report.BlocksOwed, report.ItemsOwed)
 }
 
 func writeAnchorBlockBackfillReport(out io.Writer, result docs.AnchorBlockBackfill) {

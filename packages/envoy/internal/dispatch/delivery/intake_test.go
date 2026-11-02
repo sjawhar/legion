@@ -201,11 +201,21 @@ func pathBaseForTest(workflowPath string) string {
 // test.
 func shrinkIntakeFlowControl(t *testing.T) {
 	t.Helper()
-	messageTimeout, pollInterval := intakeMessageTimeout, settingsPollInterval
-	intakeMessageTimeout, settingsPollInterval = 5*time.Second, time.Second
-	t.Cleanup(func() {
-		intakeMessageTimeout, settingsPollInterval = messageTimeout, pollInterval
-	})
+	messageTimeout := intakeMessageTimeout
+	intakeMessageTimeout = 5 * time.Second
+	t.Cleanup(func() { intakeMessageTimeout = messageTimeout })
+}
+
+// loadedSettingsCache is a settings cache holding what delivery_settings holds now, read once and
+// never again: what an intake under test routes by when nothing changes its settings meanwhile.
+// With no row it holds nothing, as a server's cache does before the settings are first written.
+func loadedSettingsCache(t *testing.T, ctx context.Context, pool *store.Pool) *SettingsCache {
+	t.Helper()
+	settings := newSettingsCache(pool, nil)
+	if !settings.reload(ctx) {
+		t.Fatal("read delivery_settings into the cache")
+	}
+	return settings
 }
 
 // publishWorkflowEnvelope publishes one workflow-run envelope built as Envoy's own GitHub
@@ -246,9 +256,9 @@ func publishWorkflowEnvelope(t *testing.T, natsClient *bus.Client, owner, repo, 
 }
 
 // startIntake runs intake until the test ends, and waits for Run to return before the test's own
-// cleanups go on. Cancelling alone does not: Run reads settingsPollInterval and the intake
-// flow-control vars, and the next test's shrinkIntakeFlowControl writes them, so a Run still
-// unwinding from the previous test is a data race on them.
+// cleanups go on. Cancelling alone does not: Run reads the intake flow-control vars, and the next
+// test's shrinkIntakeFlowControl writes them, so a Run still unwinding from the previous test is a
+// data race on them.
 func startIntake(t *testing.T, intake *Intake) {
 	t.Helper()
 	runCtx, cancel := context.WithCancel(t.Context())

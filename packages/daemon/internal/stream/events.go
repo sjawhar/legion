@@ -7,10 +7,11 @@ import (
 )
 
 // Event is one agent fact the stream observed. The set is sealed: a connection arriving
-// (Hello), OMP starting and ending a turn (TurnStart, TurnEnd), OMP taking back a prompt it
-// had acknowledged (LateRefusal), and the connection going away (Closed). The acknowledgement
-// of a prompt is not one of them — it is Conn.Prompt's return, so the one goroutine that sent the
-// prompt is the one that learns it was taken (B4).
+// (Hello), OMP starting and ending a turn (TurnStart, TurnEnd), OMP saying how one prompt's work
+// ended (PromptResult), OMP taking back a prompt it had acknowledged (LateRefusal), and the
+// connection going away (Closed). The acknowledgement of a prompt is not one of them — it is
+// Conn.Prompt's return, so the one goroutine that sent the prompt is the one that learns it was
+// taken (B4).
 type Event interface{ isEvent() }
 
 // AgentSecretsIdentity is the pod's session identity a hello2 carried (shimwire.AgentSecretsHello):
@@ -43,6 +44,25 @@ type TurnEnd struct {
 	Claim claim.Token
 }
 
+// PromptResult is OMP's prompt_result: the work of one prompt is over. It is the only frame that
+// names the prompt a turn belonged to, since agent_end carries no prompt identity
+// (omp://rpc.md), and it arrives right after the agent_end of the turn the prompt ran. A turn
+// another wake started — a background job's result, with background work on for every role — ends
+// with no prompt_result behind it, which is how the supervisor tells that turn from the delivery's
+// own.
+//
+// DeliveryID is the delivery the prompt's request id names (promptDelivery), so a result read on
+// a connection that did not send the prompt still names its delivery. AgentInvoked is false for a
+// prompt that ran no turn at all. Error is OMP's reason when the work ended in one: the message
+// of the frame's error object (shimwire.PromptError), which is all of the failure the daemon
+// records.
+type PromptResult struct {
+	Claim        claim.Token
+	DeliveryID   string
+	AgentInvoked bool
+	Error        string
+}
+
 // LateRefusal is OMP answering `{success:false}` for a prompt it had already answered
 // `{success:true}` — "Agent is already processing…" once it finds a turn it did not start, and
 // whatever a prompt that failed before any turn began says
@@ -71,11 +91,12 @@ type Closed struct {
 	Claim claim.Token
 }
 
-func (Hello) isEvent()       {}
-func (TurnStart) isEvent()   {}
-func (TurnEnd) isEvent()     {}
-func (LateRefusal) isEvent() {}
-func (Closed) isEvent()      {}
+func (Hello) isEvent()        {}
+func (TurnStart) isEvent()    {}
+func (TurnEnd) isEvent()      {}
+func (PromptResult) isEvent() {}
+func (LateRefusal) isEvent()  {}
+func (Closed) isEvent()       {}
 
 // eventQueue is the ordered, unbounded hand-off between every connection's reader and the one
 // channel Events() returns.

@@ -5,7 +5,7 @@ import { type ReactNode, useEffect, useRef } from "react";
 import { Link, MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type {
   AskRead,
   BlockPin,
@@ -16,6 +16,7 @@ import type {
 } from "../../api/types";
 import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
+import { shortForm } from "./routes";
 
 function issue(key: string, title: string): IssueDetails {
   return {
@@ -792,6 +793,237 @@ test("an unpinned block's card shows its current text, and a block that cannot b
     view.unmount();
     getReferences.mockRestore();
     getIssueSummary.mockRestore();
+  }
+});
+
+// An open card's block read is fetched again by an event that can change it (`blockQuery`). An
+// edit that deletes the block makes that read answer 404: the card drops the text it showed and
+// reads as a freshly loaded page's card for the same link, its short form. A pinned reference to
+// the removed block answers 200 with the pin's `removed` state and keeps the pinned text, and any
+// other failure leaves the text it last read.
+test.each([
+  [
+    "a comment block deleted by its author",
+    {
+      block: { id: "b2" },
+      id: "11111111-1111-4111-8111-111111111111",
+      key: "CORE-1",
+      kind: "comment",
+    } as const,
+    new ApiError(404, { code: "NOT_FOUND", error: "no block" }),
+    undefined,
+  ],
+  [
+    "a spec block deleted by a document edit",
+    { block: { id: "p1" }, key: "CORE-1", kind: "spec" } as const,
+    new ApiError(404, { code: "NOT_FOUND", error: "no block" }),
+    undefined,
+  ],
+  [
+    "a spec block whose refresh failed with a 500",
+    { block: { id: "p1" }, key: "CORE-1", kind: "spec" } as const,
+    new ApiError(500, { code: "INTERNAL", error: "boom" }),
+    ["Ship it on Friday."],
+  ],
+  [
+    "a pinned spec block whose refresh answers it removed",
+    { block: { id: "p1", pin: "2" }, key: "CORE-1", kind: "spec" } as const,
+    pinnedRead({ removed_version: 4, state: "removed", text: "Ship it on Friday." }),
+    ["Version 2", "Removed in version 4", "Ship it on Friday."],
+  ],
+] as const)("an open card of %s shows what the refresh leaves it", async (_case, route, refresh, kept) => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(summaryWithSpec());
+  const first = pinnedRead({ state: "unchanged", text: "Ship it on Friday." });
+  const getReferences = spyOn(api, "getReferences")
+    .mockResolvedValueOnce({
+      ...first,
+      node: {
+        ...first.node,
+        made_by: [{ id: "alice", kind: "user" }],
+        pin: "pin" in route.block ? first.node.pin : undefined,
+        text: "Ship it on Friday.",
+      },
+    })
+    .mockImplementationOnce(() =>
+      refresh instanceof Error ? Promise.reject(refresh) : Promise.resolve(refresh)
+    );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Link to="/" {...referenceTriggerProps(route)}>
+          the block
+        </Link>
+        <RefPreviewHost />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    act(() => {
+      screen.getByRole("link", { name: "the block" }).focus();
+    });
+    const card = screen.getByRole("tooltip");
+    await waitFor(() => expect(card.textContent).toContain("Ship it on Friday."));
+
+    await act(() => queryClient.refetchQueries({ queryKey: ["references", "to"] }));
+    expect(getReferences).toHaveBeenCalledTimes(2);
+    const after = screen.getByRole("tooltip");
+    if (kept === undefined) {
+      await waitFor(() => expect(after.textContent).toBe(shortForm(route)));
+    } else {
+      for (const text of kept) {
+        expect(after.textContent).toContain(text);
+      }
+    }
+  } finally {
+    view.unmount();
+    getReferences.mockRestore();
+    getIssueSummary.mockRestore();
+  }
+});
+
+// A block of a comment or message heads with its item and author in place of a document; a pinned
+// comment block names the revision it pins and how the block stands since, and shows that
+// revision's text. Its text is the graph read's, so neither the comment, the message, the issue
+// nor a summary of the issue or of a project document is read for it, a block of a project
+// document's comment included.
+test("a comment or message block's card names its item and author, a comment's pin as a revision, and the block's text", async () => {
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const message = "33333333-3333-4333-8333-333333333333";
+  const getIssue = mockIssues();
+  const getComment = spyOn(api, "getComment");
+  const getMessage = spyOn(api, "getMessage");
+  const getIssueSummary = spyOn(api, "getIssueSummary");
+  const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary");
+  const getReferences = spyOn(api, "getReferences").mockImplementation((reference) =>
+    Promise.resolve(
+      reference.includes("/comment/")
+        ? {
+            edges: [],
+            node: {
+              block_id: "b2",
+              changed_version: 2,
+              id: `comment/${comment}#b2`,
+              issue_key: "CORE-1",
+              kind: "block",
+              made_by: [{ id: "alice", kind: "user" }],
+              parent: { id: comment, kind: "comment", ref: `dispatch://CORE-1/comment/${comment}` },
+              pin: {
+                ref: `dispatch://CORE-1/comment/${comment}#b-b2@v1`,
+                state: "changed",
+                text: "Beta, as first written.",
+                version: 1,
+              },
+              project: "CORE",
+              ref: `dispatch://CORE-1/comment/${comment}#b-b2`,
+              text: "Beta, as edited.",
+            },
+          }
+        : {
+            edges: [],
+            node: {
+              block_id: "b1",
+              id: `message/${message}#b1`,
+              issue_key: "CORE-1",
+              kind: "block",
+              made_by: [{ id: "bob", kind: "user" }],
+              parent: { id: message, kind: "message", ref: `dispatch://CORE-1/message/${message}` },
+              project: "CORE",
+              ref: `dispatch://CORE-1/message/${message}#b-b1`,
+              text: "The message's first paragraph.",
+            },
+          }
+    )
+  );
+  const view = render(
+    <Harness>
+      <Link
+        to="/"
+        {...referenceTriggerProps({
+          block: { id: "b2", pin: "1" },
+          id: comment,
+          key: "CORE-1",
+          kind: "comment",
+        })}
+      >
+        the comment block
+      </Link>
+      <Link
+        to="/"
+        {...referenceTriggerProps({
+          block: { id: "b1" },
+          id: message,
+          key: "CORE-1",
+          kind: "message",
+        })}
+      >
+        the message block
+      </Link>
+      <Link
+        to="/"
+        {...referenceTriggerProps({
+          block: { id: "b2" },
+          item: { id: comment, kind: "comment" },
+          kind: "document",
+          project: "CORE",
+          slug: "plan-md",
+        })}
+      >
+        the document comment block
+      </Link>
+    </Harness>
+  );
+  try {
+    act(() => {
+      screen.getByRole("link", { name: "the comment block" }).focus();
+    });
+    const card = screen.getByRole("tooltip");
+    await waitFor(() => expect(card.textContent).toContain("Beta, as first written."));
+    expect(getReferences).toHaveBeenCalledWith(`dispatch://CORE-1/comment/${comment}#b-b2@v1`);
+    expect(card.textContent).toContain("CORE-1 · Comment · alice");
+    expect(card.textContent).toContain("Revision 1");
+    expect(card.textContent).toContain("Changed in revision 2");
+    expect(card.textContent).not.toContain("as edited");
+    // A comment's revisions have no page: the card opens the live comment at the block.
+    expect(card.querySelector("a")?.getAttribute("href")).toBe(
+      `/issues/CORE-1/comments/${comment}#b-b2`
+    );
+
+    act(() => {
+      screen.getByRole("link", { name: "the message block" }).focus();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tooltip").textContent).toContain("The message's first paragraph.")
+    );
+    const messageCard = screen.getByRole("tooltip");
+    expect(messageCard.textContent).toContain("CORE-1 · Message · bob");
+    expect(messageCard.textContent).not.toContain("Revision");
+    expect(messageCard.querySelector("a")?.getAttribute("href")).toBe(
+      `/issues/CORE-1/messages/${message}#b-b1`
+    );
+
+    act(() => {
+      screen.getByRole("link", { name: "the document comment block" }).focus();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("tooltip").textContent).toContain("Comment · alice")
+    );
+    expect(getReferences).toHaveBeenCalledWith(
+      `dispatch://CORE/artifact/plan-md/comment/${comment}#b-b2`
+    );
+    expect(getComment).not.toHaveBeenCalled();
+    expect(getMessage).not.toHaveBeenCalled();
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
+    expect(getProjectDocumentSummary).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getReferences.mockRestore();
+    getProjectDocumentSummary.mockRestore();
+    getIssueSummary.mockRestore();
+    getMessage.mockRestore();
+    getComment.mockRestore();
+    getIssue.mockRestore();
   }
 });
 

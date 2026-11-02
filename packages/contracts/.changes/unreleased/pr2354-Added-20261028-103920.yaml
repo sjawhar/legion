@@ -1,0 +1,17 @@
+kind: Added
+body: |-
+    Phase handoff records on a Dispatch issue: `HandoffSummary` (`id`, `issue_key`, `phase`,
+    `version`, `author`, `created_at`), what `GET /api/v1/issues/{key}/handoffs` lists and
+    `POST /api/v1/issues/{key}/handoffs/{phase}` answers, and `Handoff`, the same with `body`, the
+    exact text the session wrote, as `GET /api/v1/issues/{key}/handoffs/{phase}/latest` and
+    `GET /api/v1/handoffs/{id}` answer it. The `handoff.recorded` event joins `DispatchEvent`, its
+    payload `HandoffRecordedPayload` (`handoff_id`, `phase`, `version`, strict, never the body).
+    `DISPATCH_HANDOFF_BODY_MAX` (262144) is the longest handoff body in UTF-8 bytes, generated into
+    Go as `contracts.DispatchHandoffBodyMax`, which the server enforces as `413 CAP_EXCEEDED`. Two
+    specs join `dispatch-tools.ts`: `dispatch_handoff_write` (`issue`, `phase`, `body`), which
+    refuses before sending a phase that is not a lowercase slug (`^[a-z][a-z0-9-]{0,31}$`) and a body
+    over the cap or not one JSON object, and `dispatch_handoff_read`, the newest handoff of a phase or
+    the version named.
+time: 2026-10-28T10:39:20.152812809Z
+custom:
+    Issue: pr2354

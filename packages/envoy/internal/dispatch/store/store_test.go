@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
+	"github.com/sjawhar/envoy/migrationid"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -207,6 +208,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_deliveries",
 		"refs",
 		"events",
+		"event_horizon",
 		"user_issue_state",
 		"user_agent_state",
 		"document_blocks",
@@ -215,6 +217,14 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"document_block_texts",
 		"document_indexed_versions",
 		"block_grammar_owed",
+		"comment_blocks",
+		"message_blocks",
+		"comment_block_texts",
+		"comment_block_state",
+		"message_block_state",
+		"comment_block_refs",
+		"message_block_refs",
+		"handoffs",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
@@ -229,7 +239,9 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_ask_id",
 		"refs_to",
 		"refs_excerpt_drift",
-		"events_unpublished",
+		"events_outbox_fresh",
+		"events_outbox_retry",
+		"events_outbox_owner",
 		"asks_open_artifact",
 		"issues_search",
 		"comments_search",
@@ -239,6 +251,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"issues_parent_key",
 		"artifacts_issue_key",
 		"asks_anchor_artifact",
+		"asks_anchor_artifact_id",
 		"comments_anchor_artifact",
 		"ask_followers_ask_id_text",
 		"events_ask_answered_by_user",
@@ -248,6 +261,21 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"block_refs_from_node",
 		"document_block_versions_owed",
 		"block_grammar_owed_enqueued",
+		"comment_blocks_node_id",
+		"comment_blocks_comment_id_text",
+		"message_blocks_node_id",
+		"message_blocks_message_id_text",
+		"comment_block_state_owed",
+		"message_block_state_owed",
+		"comment_block_refs_to",
+		"comment_block_refs_from_node",
+		"message_block_refs_to",
+		"message_block_refs_from_node",
+		"comments_replies_to_block",
+		"messages_replies_to_block",
+		"events_person_words",
+		"comment_deliveries_session",
+		"message_deliveries_session_created",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
@@ -333,6 +361,11 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"user_issue_state_pkey",
 		"user_issue_state_issue_key_fkey",
 		"user_agent_state_pkey",
+		"handoffs_pkey",
+		"handoffs_issue_key_fkey",
+		"handoffs_phase_check",
+		"handoffs_version_check",
+		"handoffs_issue_key_phase_version_key",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select conname
@@ -348,9 +381,21 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	assertRecordsEveryVersion(t, ctx, store)
 }
 
-// Dispatch's set is numbered 1 to N with none missing; pgmigratetest.CheckNumberedOneToN says why.
-func TestMigrationSetIsNumberedOneToN(t *testing.T) {
-	if err := pgmigratetest.CheckNumberedOneToN(migrationFiles, "migrations"); err != nil {
+// Dispatch's set hands its identifiers out the way the repository requires: its numbered
+// migrations are 1 to the file its series closed at (migrationid's closings), each
+// taken once and none above it, and every migration added since is named for the UTC moment its
+// author created it, so two pull requests open at once cannot both claim one version;
+// migrationid.Check says why.
+func TestMigrationSetTakesNumbersThenTimestamps(t *testing.T) {
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := make(map[int]string, len(migrations))
+	for _, migration := range migrations {
+		versions[migration.Version] = migration.Name
+	}
+	if err := migrationid.Check(versions); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -366,7 +411,8 @@ func TestEveryMigrationFileIsEmbedded(t *testing.T) {
 // censusRequiredFrom is the first migration number that must declare a census (LEGION-459): one
 // more than the highest migration on main when the census landed, so no migration written before
 // the rule is caught by it. Every migration below it that declares one is a worked example. Read
-// from origin/main on 2026-10-01, where the set ended at 0055.
+// from origin/main on 2026-10-01, where the set ended at 0055. Every timestamped migration is
+// above it, so every migration added from now on declares a census.
 const censusRequiredFrom = 56
 
 // Every migration from censusRequiredFrom on declares a census: the count a deployment reads before
@@ -603,9 +649,11 @@ func assertDatabaseObjectsAbsent(t *testing.T, ctx context.Context, pool *Pool, 
 func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	t.Helper()
 	ctx := context.Background()
+	// The runner's own DDL (createVersionTable), bigint included: a test that created the table
+	// as an integer would make the runner widen it, which is not what these tests are about.
 	if _, err := store.Pool.Exec(ctx, `
 		create table if not exists schema_migrations (
-			version integer primary key,
+			version bigint primary key,
 			applied_at timestamptz not null default now()
 		)
 	`); err != nil {

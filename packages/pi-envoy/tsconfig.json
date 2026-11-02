@@ -29,6 +29,8 @@
     "../pi-shared/src/omp-host.d.ts",
     "../pi-shared/src/text-modules.d.ts",
     "scripts/*.ts",
+    "scripts/role-takeover/*.ts",
+    "test/*.ts",
     "src/**/*.ts"
   ]
 }

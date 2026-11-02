@@ -8,6 +8,7 @@ import {
   gatedWrite,
   operandPath,
 } from "./askgate-marker";
+import { newAsks } from "./askgate-new-asks";
 import {
   commandHelp,
   commandName,
@@ -19,6 +20,7 @@ import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { checkDispatchCall, dispatchServerUrls, executeDispatchTool } from "./dispatch-execute";
 import { DispatchWriteLandedError } from "./dispatch-http";
+import { sessionDirectory, sessionStateRoot } from "./dispatch-session-directory";
 import {
   appendResult,
   loadSessionMemory,
@@ -26,8 +28,6 @@ import {
   type ResultInput,
   readSessionTitle,
   recordOutcome,
-  sessionDirectory,
-  sessionStateRoot,
   writeLongOutput,
   writePicture,
 } from "./dispatch-session-state";
@@ -58,7 +58,7 @@ const OK = 0;
 const REFUSED = 1;
 const USAGE = 2;
 
-const HOSTS = ["omp", "claude", "opencode"] as const satisfies readonly DispatchHost[];
+const HOSTS = ["omp", "claude"] as const satisfies readonly DispatchHost[];
 
 /** Claude Code reads back at most 30,000 characters of a command's output by default
  *  (`BASH_MAX_OUTPUT_LENGTH`). The whole output stays under this, with room to spare, every line
@@ -177,11 +177,12 @@ export function fitOutput(
  * One `dispatch` command: parses `argv` into a Dispatch tool's arguments, runs that tool once as
  * the host session the environment names, and prints what the model reads. The host plugin sets
  * `DISPATCH_HOST`, `ENVOY_CONFIG_FILE` (the envoy.json it chose) and the session's id in the
- * agent's shell (`CLAUDE_CODE_SESSION_ID` under Claude Code, `DISPATCH_SESSION_ID` elsewhere); an
- * empty variable counts as unset. With `DISPATCH_HOST` unset, `CLAUDE_CODE_CHILD_SESSION=1`, which
- * Claude Code sets in every Bash and hook process it runs, is host `claude`: a Claude Code
- * subagent's Bash can lack what the bridge's `SessionStart` hook writes to `CLAUDE_ENV_FILE`
- * (anthropics/claude-code#46696).
+ * agent's shell (`CLAUDE_CODE_SESSION_ID` under Claude Code, where claude-envoy's QA override
+ * `ENVOY_SESSION_ID` wins over it as it does on the session's claim; `DISPATCH_SESSION_ID`
+ * elsewhere); an empty variable counts as unset. With `DISPATCH_HOST` unset,
+ * `CLAUDE_CODE_CHILD_SESSION=1`, which Claude Code sets in every Bash and hook process it runs, is
+ * host `claude`: a Claude Code subagent's Bash can lack what the bridge's `SessionStart` hook
+ * writes to `CLAUDE_ENV_FILE` (anthropics/claude-code#46696).
  *
  * The envoy.json it reads is the one its session's plugin chose: with `DISPATCH_HOST` set, the file
  * `ENVOY_CONFIG_FILE` names (each plugin sets the two together), else its host's own rule
@@ -206,6 +207,9 @@ export async function runDispatchCli(
   // The host need not be known for the session to be: a Python `subprocess.run(["dispatch", …])`
   // inherits the session id without `DISPATCH_HOST`. A ledger that cannot be written changes
   // nothing here: the refusal is already printed, and the caller is exiting.
+  // Under Claude Code the session is the one claude-envoy registers and claims under: its QA
+  // override ENVOY_SESSION_ID, else CLAUDE_CODE_SESSION_ID (`claudeSessionId` in claude-envoy).
+  const claudeSession = env.ENVOY_SESSION_ID ?? env.CLAUDE_CODE_SESSION_ID;
   const refuse = (
     text: string,
     code: number,
@@ -213,7 +217,7 @@ export async function runDispatchCli(
     askgate?: ResultInput["askgate"]
   ): number => {
     print(text);
-    const sessionId = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
+    const sessionId = claudeSession ?? env.DISPATCH_SESSION_ID;
     if (sessionId !== undefined) {
       try {
         appendResult(sessionDirectory(env, sessionId), {
@@ -254,13 +258,15 @@ export async function runDispatchCli(
     return refuse(
       hostName === undefined
         ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session."
-        : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`,
+        : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp or claude.`,
       USAGE,
       parsed.tool
     );
   }
-  const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
-  const sessionId = env[sessionVariable];
+  const [sessionId, sessionVariable] =
+    host === "claude"
+      ? [claudeSession, "ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID"]
+      : [env.DISPATCH_SESSION_ID, "DISPATCH_SESSION_ID"];
   if (sessionId === undefined) {
     return refuse(
       `dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`,
@@ -358,6 +364,20 @@ export async function runDispatchCli(
           if (file.flag === "--path" && file.operand === parsed.args.path) uploadBytes = bytes;
         }
         const spent = consumeMarker(gate.stores, argv, parsed.args, files, Date.now());
+        // The asks this write would open for a person, counted from the write's own text: the
+        // one number pi-envoy's record of an unmarked write carries, so a session holding a
+        // Dispatch token alone can count the asks that went out, or were refused, unreviewed.
+        // The ledger carries the count and never the ask text. An upload's asks are in its file,
+        // whose bytes are already read above, and which the dry run's arguments name only by
+        // path. A re-upload's blocks are counted again: the write carries them.
+        const asksCarried = spent.ok
+          ? 0
+          : newAsks(
+              parsed.tool,
+              uploadBytes === undefined
+                ? parsed.args
+                : { ...parsed.args, content: new TextDecoder().decode(uploadBytes) }
+            ).length;
         if (!spent.ok && gate.mode === "block") {
           return refuse(
             spent.changed === undefined
@@ -365,7 +385,7 @@ export async function runDispatchCli(
               : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`,
             REFUSED,
             parsed.tool,
-            { mode: "block", why: spent.why }
+            { mode: "block", why: spent.why, asksCarried }
           );
         }
         if (!spent.ok) {
@@ -373,7 +393,10 @@ export async function runDispatchCli(
           // the write is sent, on its own: a ledger that cannot take it stops the write here, so
           // no unreviewed write posts unrecorded.
           try {
-            appendResult(dir, { tool: parsed.tool, askgate: { mode: "warn", why: spent.why } });
+            appendResult(dir, {
+              tool: parsed.tool,
+              askgate: { mode: "warn", why: spent.why, asksCarried },
+            });
           } catch (error) {
             return refuse(
               `${notCalled} AskGate is on for this session in warn mode, and ${spent.why}. A write that posts unreviewed is first recorded in this session's ledger, and the ledger could not be written: ${messageFor(error)}.`,

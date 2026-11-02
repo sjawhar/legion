@@ -11,6 +11,7 @@ import {
   syncArchitectureSource,
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
+import { selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -18,7 +19,9 @@ import { asUser } from "./users";
 // `/auth/whoami` answers), so a key pressed before the page renders reaches no handler.
 async function openIssue(page: Page, issueKey: string, title: string): Promise<void> {
   await page.goto(`/issues/${issueKey}`);
-  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(
+    page.getByTestId("issue-header").getByRole("heading", { level: 1, name: title })
+  ).toBeVisible();
   await page.locator("body").focus();
 }
 
@@ -255,7 +258,9 @@ test("/ searches only, and a query that is no action's start lists the hits abov
     await input.press("Enter");
     await expect(dialog).toHaveCount(0);
     await expect(
-      page.getByRole("heading", { level: 1, name: "Astrolabe issue calibration" })
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Astrolabe issue calibration" })
     ).toBeVisible();
     await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
     expect(statusWrites).toEqual([]);
@@ -364,7 +369,7 @@ test("a focus-dependent row is offered, survives filtering, and runs on the row 
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Inbox palette" });
-  await createAsk(
+  const ask = await createAsk(
     issue.key,
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: { id: "e2e-palette", kind: "session" }, as: "agent" }
@@ -376,10 +381,11 @@ test("a focus-dependent row is offered, survives filtering, and runs on the row 
     await page.goto("/");
     await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
     await page.locator("body").focus();
-    // Every other inbox binding is gated on a focused row, so `j` first: with one focused, the
-    // movement rows are still absent while the row's own action is offered.
+    // Every other inbox binding is gated on the row in hand, so `j` first: with the reading
+    // column on (INFRA-575) that hand is the selection the column is showing, not the focus,
+    // and the movement rows are still absent while the row's own action is offered.
     await page.keyboard.press("j");
-    await expect(page.locator("[data-inbox-row]").first()).toBeFocused();
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", ask.id);
     await page.keyboard.press("Control+k");
 
     const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
@@ -564,7 +570,9 @@ test("a fresh open starts on an empty query, so it lists the new page's actions"
       .first()
       .click();
     await expect(
-      page.getByRole("heading", { level: 1, name: "Astrolabe calibration" })
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Astrolabe calibration" })
     ).toBeVisible();
     await page.locator("body").focus();
     await page.keyboard.press("Control+k");
@@ -708,7 +716,7 @@ test("the Inbox offers the selection's snooze but not the keys that mark and cle
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Inbox selection palette" });
-  await createAsk(
+  const ask = await createAsk(
     issue.key,
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: { id: "e2e-palette", kind: "session" }, as: "agent" }
@@ -721,8 +729,12 @@ test("the Inbox offers the selection's snooze but not the keys that mark and cle
     const row = page.locator("[data-inbox-row]");
     await expect(row).toHaveCount(1);
     await page.locator("body").focus();
+    // `j` puts the row in hand: with the reading column on (INFRA-575) that is the selection
+    // the column is showing. The reader's own place is the row it selected, which is where the
+    // palette hands the focus back.
     await page.keyboard.press("j");
-    await expect(row).toBeFocused();
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", ask.id);
+    await row.focus();
     await page.keyboard.press("x");
     const bar = page.getByRole("group", { name: "Selected asks" });
     await expect(bar).toContainText("1 selected");
@@ -735,7 +747,7 @@ test("the Inbox offers the selection's snooze but not the keys that mark and cle
     await page.keyboard.press("Control+k");
     await expect(snooze).toHaveCount(1);
     await expect
-      .soft(actions.getByRole("option", { name: "Select or deselect the focused ask" }))
+      .soft(actions.getByRole("option", { name: "Select or deselect the selected ask" }))
       .toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);

@@ -665,9 +665,8 @@ func TestTheTreesCloseWaitsForAnOpenCheckAndRunsOnceItCloses(t *testing.T) {
 	}
 }
 
-// A done child set back to todo closes its open check as not run before its new run starts: the
-// record alone, since the rerun reuses the implementer's claim and the pod, and the look open at
-// the re-entry is interrupted under the new generation's stamp, as a phase worker's run is.
+// A done child set back to todo closes its open check as not run before its new run starts. The
+// implementer's live claim stays live: the closed check rejects its old look's report.
 func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 	rig := childCheckRig(t, "")
 	seedSlot(t, rig.pool, record.Slot{Issue: "LEGION-208", Index: 0})
@@ -685,8 +684,8 @@ func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 		t.Fatalf("issue_close rows = %v, want none for the implementer the rerun reuses", got)
 	}
 	suspends := superviseRowsOf(t, rig.pool, "LEGION-209", "suspend")
-	if len(suspends) != 1 || suspends[0].Role != claim.RoleImplementer || suspends[0].Generation != 8 {
-		t.Fatalf("suspend rows = %+v, want the open look's implementer interrupted under generation 8", suspends)
+	if len(suspends) != 0 {
+		t.Fatalf("suspend rows = %+v, want none while the child is back in the workflow", suspends)
 	}
 	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 0 {
 		t.Fatalf("issue suspensions = %+v, want none: the pod is the new run's", got)

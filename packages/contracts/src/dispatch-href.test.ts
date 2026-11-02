@@ -38,6 +38,7 @@ test("the golden table covers both item shapes on every document path", () => {
     "/issues/CORE-1/artifacts/notes-md?ask=77777777-7777-4777-8777-777777777777",
     "/projects/CORE/documents/handbook-md?comment=88888888-8888-4888-8888-888888888888",
     "/projects/CORE/documents/handbook-md?ask=99999999-9999-4999-8999-999999999999",
+    "/projects/CORE/documents/handbook-md?comment=88888888-8888-4888-8888-888888888888#b-b2",
   ]);
 });
 

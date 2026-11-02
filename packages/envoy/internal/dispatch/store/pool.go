@@ -138,6 +138,7 @@ type Pool struct {
 	listen      *pgxpool.Pool
 	leases      *pgxpool.Pool
 	outbox      *pgxpool.Pool
+	horizon     *pgxpool.Pool
 	// closed refuses every separate pool but the health probe's from the moment Close begins
 	// (separate); healthClosed refuses that one too, once Close has closed every other pool
 	// (healthPool).
@@ -270,29 +271,36 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	// it instead of holding the probe's one connection for the full bound.
 	ctx, cancel := context.WithTimeout(ctx, healthProbeTimeout)
 	defer cancel()
+	// The cast holds the result at bigint whichever type the column has: a connection that
+	// prepared this read while schema_migrations.version was an integer would otherwise fail it
+	// once after a boot widens the column ("cached plan must not change result type").
 	var version int
-	if err := health.QueryRow(ctx, "select coalesce(max(version), 0) from schema_migrations").Scan(&version); err != nil {
+	if err := health.QueryRow(ctx, "select coalesce(max(version), 0)::bigint from schema_migrations").Scan(&version); err != nil {
 		return 0, err
 	}
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener takes its connections from. Three permanent
-// listeners dial through it - the delivery hub, the event stream relay and the stale-room
-// evictor - and each connection is hijacked as soon as it is opened, so it leaves with its
-// caller and the pool holds none between dials: what one bounds is dials in flight, not
-// connections held. A listener redialling while another dials waits that dial out, which is
-// what a loop that dials and then waits for notifications for the life of the process can
-// afford.
+// listenerPoolSize bounds the pool Listener takes its connections from. Five permanent
+// listeners dial through it - the delivery hub, the event stream relay, the stale-room evictor,
+// the shared hub cmd/dispatch's woken background loops wait on (pglisten.Hub, one connection for
+// all of their channels) and the events outbox - and a sixth, the test hooks'
+// (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS alone, which production never sets. Each
+// connection is hijacked as soon as it is opened, so it leaves with its caller and the pool holds
+// none between dials: what one bounds is dials in flight, not connections held. A listener
+// redialling while another dials waits that dial out, which is what a loop that dials and then
+// waits for notifications for the life of the process can afford.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
-// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go)
-// and the document rooms' stale-room evictor (docs/stale_room.go) each hold one for as long as
-// they wait for notifications, which is the life of the process: a connection of the shared pool
-// held that long would be one fewer for every request, and a LISTEN on a pooled connection would
-// end when the pool recycled it.
+// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go),
+// the document rooms' stale-room evictor (docs/stale_room.go), the background loops' shared wake
+// hub (cmd/dispatch), the events outbox (outbox/lease.go) and, under the test hooks, their
+// fan-out (api/test_hooks_fanout.go) each hold one for as long as they wait for notifications,
+// which is the life of the process: a connection of the shared pool held that long would be one
+// fewer for every request, and a LISTEN on a pooled connection would end when the pool recycled
+// it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener", "")
 	if err != nil {
@@ -310,19 +318,22 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
 // connection before it learns whether the lease is held, so a pass that skips because the other
 // process holds the lease holds a connection for that round trip too. Thirteen names are leased -
-// the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
-// the block-index reconciliation, the term-statistics refresh, the GitHub webhook redelivery
-// sweep, the architecture import, the delivery reconcile, the edit-notice sweep, the repair of
-// closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for the
-// consumers' reconciliation (delivery.consumerLease, a name each for delivery-events and
-// delivery-jobs) and the server process registry's prune (processes.RunPrune) - taken by thirteen
-// callers, since each delivery intake takes its own durable's name from a bind poll of its own,
-// so thirteen callers can be inside Exclusive at once. Thirteen connections are exactly those
-// thirteen: the headroom is zero, not one, and the next leased loop added here makes a fourteenth
-// caller that waits for a connection rather than failing, for as long as the longest pass then
-// holding one. They cannot come from the shared pool: a lease is held for the whole pass, which
-// is minutes for the compaction, and the shared pool's sharedPoolSize connections are what every
-// request reads through.
+// the document compaction, the keyed writes' maintenance sweep (api.RunMaintenanceSweep, which
+// keeps the lease name suggestion-outcomes the suggestion sweep carried that work under), the
+// reference-excerpt reconciliation, the block-index reconciliation, the term-statistics refresh,
+// the GitHub webhook redelivery sweep, the architecture import, the delivery reconcile, the
+// edit-notice sweep, the repair of closed and reopened issues' asks (api.RunIssueAskRepair), one
+// per delivery durable for the consumers' reconciliation (delivery.consumerLease, a name each for
+// delivery-events and delivery-jobs) and the server process registry's prune (processes.RunPrune)
+// - taken by thirteen callers, since each delivery intake takes its own durable's name from a
+// bind poll of its own, so thirteen callers can be inside Exclusive at once. The suggestion
+// outcome sweep is not among them: it takes no lease, since the cursor row each of its pages
+// holds for update serialises two processes by itself (api/suggestion_outcomes.go). Thirteen
+// connections are exactly those thirteen: the headroom is zero, not one, and the next leased loop
+// added here makes a fourteenth caller that waits for a connection rather than failing, for as
+// long as the longest pass then holding one. They cannot come from the shared pool: a lease is
+// held for the whole pass, which is minutes for the compaction, and the shared pool's
+// sharedPoolSize connections are what every request reads through.
 const leasePoolSize = 13
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
@@ -335,10 +346,13 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 	return p.separate(&p.leases, leasePoolSize, "loop leases", "")
 }
 
-// outboxPoolSize bounds the pool the events outbox reads and records events through. The outbox
-// is one goroutine that runs one statement at a time and closes each cursor before its next
-// statement, so one connection is every connection it can use.
-const outboxPoolSize = 1
+// outboxPoolSize bounds the pool the events outbox reads and records events through, and takes
+// and renews its publisher hold on (duty.Hold). The outbox's scan is one goroutine that runs one
+// statement at a time and closes each cursor before its next statement, and the hold's renewal
+// runs beside it on a goroutine of its own, so two connections are every connection it can use: a
+// renewal never waits behind a batch's statement, which may take up to the five seconds a batch's
+// record is allowed, longer than the hold's two seconds between renewals.
+const outboxPoolSize = 2
 
 // registryPoolSize bounds the pool the registry of live server processes stamps this process's row
 // through: processes.Register opens it from this pool's configuration with MaxConns 1, outside the
@@ -346,24 +360,51 @@ const outboxPoolSize = 1
 const registryPoolSize = 1
 
 // permanentListeners is how many connections the listener pool dials and hands off for the life
-// of the process: the delivery hub, the event stream relay and the stale-room evictor (Listener).
-const permanentListeners = 3
+// of the process (Listener): the delivery hub, the event stream relay, the stale-room evictor,
+// the shared wake hub cmd/dispatch's woken background loops wait on, which main.go dials through
+// database.Pool.Listener, and the events outbox's LISTEN on dispatch_events and
+// dispatch_duty_holds.
+const permanentListeners = 5
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
-// every pool's size, the registry's own pool (processes.Register) among them, and one connection
-// per permanent listener, which the listener pool dials and hands off rather than holds.
-const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + roomAppendsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + permanentListeners
+// every pool's size, the registry's own pool (processes.Register) and the event horizon's
+// (Horizon) among them, and one connection per permanent listener, which the listener pool dials
+// and hands off rather than holds.
+const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + roomAppendsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + horizonPoolSize + permanentListeners
 
-// Outbox is the pool the events outbox claims, reads and records events through, and reads the
-// followers and authors a publish routes to. Under load the API's requests queue for the shared
-// pool's connections, and an outbox statement queued behind them holds back every event behind
-// it; on a pool of its own it waits for none of them, and holds no connection a request could use.
+// Outbox is the pool the events outbox reads and records events through, reads the
+// followers and authors a publish routes to, and holds its publisher hold on. Under load the API's
+// requests queue for the shared pool's connections, and an outbox statement queued behind them
+// holds back every event behind it, or lets the hold lapse; on a pool of its own it waits for none
+// of them, and holds no connection a request could use.
 func (p *Pool) Outbox() (*Pool, error) {
 	opened, err := p.separate(&p.outbox, outboxPoolSize, "events outbox", "")
 	if err != nil {
 		return nil, err
 	}
 	return NewPool(opened), nil
+}
+
+// horizonPoolSize bounds the pool the event log's safe horizon (events.Horizon) works through. The
+// server keeps one Horizon, whose concurrent callers share the one observation in flight, so one
+// connection serves every observation. The other statements the Horizon runs share both
+// connections with it: the stall diagnosis and the write of the proven horizon (event_horizon),
+// which run after an observation has released its waiters, and the reads every GET /auth/whoami and
+// the relay's first start make (a mark, the oldest transaction that can write the event log, the
+// persisted horizon), each one statement.
+const horizonPoolSize = 2
+
+// Horizon is the pool the event log's safe horizon (events.Horizon) takes its observations, its
+// marks and the reads beside them, its stall diagnosis and its persist write through. Every reader that pages the event log by a global id cursor - the
+// event stream relay, the delivery hub, a references read since a cursor - reads only up to what
+// an observation has proven safe. Under load the API's requests queue for the shared pool's
+// connections, and an observation queued behind them holds back every live reader of the event
+// log; on a pool of its own it waits for none of them, and holds no connection a request could
+// use. Like the rooms pool it is outside the nested-acquire guard, because a separate pool cannot
+// close the cycle the guard prevents: none of those statements (each one batch or one row) asks
+// for a second connection while it holds one.
+func (p *Pool) Horizon() (*pgxpool.Pool, error) {
+	return p.separate(&p.horizon, horizonPoolSize, "event horizon", "")
 }
 
 // separate opens the pool held at field on demand (openSeparateLocked) and closes it with the
@@ -420,10 +461,11 @@ func (p *Pool) openSeparateLocked(field **pgxpool.Pool, size int32, name, applic
 	return opened, nil
 }
 
-// Close releases every connection the pool holds, the document rooms, their appends and the health
-// probe included, and returns once every connection in use has come back. It closes the health
-// probe's pool last, after every other pool has closed: Healthy answers for as long as Close waits,
-// and Use keeps counting the closing pools' connections. No other separate pool opens or is handed
+// Close releases every connection the pool holds, the separate pools' - the document rooms, their
+// appends, the health probe, the listener, the leases, the outbox and the event horizon -
+// included, and returns once every connection in use has come back. It closes the health probe's
+// pool last, after every other pool has closed: Healthy answers for as long as Close waits, and
+// Use keeps counting the closing pools' connections. No other separate pool opens or is handed
 // out once Close has begun.
 func (p *Pool) Close() {
 	p.mu.Lock()
@@ -432,7 +474,7 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	separates := []*pgxpool.Pool{p.rooms, p.roomAppends, p.listen, p.leases, p.outbox}
+	separates := []*pgxpool.Pool{p.rooms, p.roomAppends, p.listen, p.leases, p.outbox, p.horizon}
 	p.mu.Unlock()
 	for _, separate := range separates {
 		if separate != nil {

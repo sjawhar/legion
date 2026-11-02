@@ -32,14 +32,14 @@ func TestAnUpdateClassHoldsNoCopyAndMatchesByIdentity(t *testing.T) {
 	// Durable classes, so the room's record holds them (pendingUpdates) until each is taken.
 	recordClass := func(update []byte) *UpdateCredit {
 		credit := &UpdateCredit{}
-		service.recordUpdateClass(artifactID, update, documentUpdateClass{contentChanged: true, durable: true, credit: credit})
+		service.queueUpdateClass(artifactID, update, documentUpdateClass{contentChanged: true, durable: true, credit: credit}, false)
 		return credit
 	}
 	takeClass := func(update []byte, want *UpdateCredit, what string) {
 		t.Helper()
 		class, counted, found := service.consumeUpdateClass(artifactID, update)
-		if found && class.durable {
-			service.finishDurableAppend(artifactID, counted)
+		if found {
+			service.finishUpdateClass(artifactID, counted, class)
 		}
 		switch {
 		case !found:

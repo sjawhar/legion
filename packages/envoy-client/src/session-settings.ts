@@ -2,8 +2,11 @@ import {
   type DispatchConfigResolution,
   type DispatchEnvironment,
   dispatchSettings,
+  dispatchUrl,
+  lostDispatchUrlNotice,
 } from "./dispatch-config";
 import {
+  type CommandMode,
   type EnvoyConfig,
   type EnvoyHarness,
   envoyConfigPath,
@@ -57,37 +60,44 @@ export interface SessionSettings {
  * both are off (`missingConfigNotice`, which names a dangling link's target and the OpenCode-era
  * user file, which is not read, while it is still there); when a variable turned a section on, each
  * section still off is said with the same missing-file text. A section's own error (a token that
- * does not resolve, a command that failed) is said for that section. A file that turns a section
- * off, or holds no section for it, says nothing. What a checkout's files hold that the session does
- * not read is said too: an `envoy` section, a file that cannot be used while `DISPATCH_URL`
- * replaces it, and an OpenCode-era `.opencode/envoy.json` (`warnings`). Last, for a session that
- * opens a NATS connection (`nats` not false), an Envoy that is on and takes no inbound messages is
- * said to, naming why (`inbound.off`: no NATS server, or the seed's refusal), and a pass deadline
- * the resolver raised to the heartbeat interval (`passDeadlineRaisedFrom`, `envoySettings`) is
- * said to have been raised, naming both values.
+ * does not resolve, a command that failed) is said for that section. Dispatch off with
+ * `DISPATCH_TOKEN_FILE` set and no server named (`lost`, `lostDispatchUrlNotice`) is said as the
+ * `DISPATCH_URL` a shell lost, whether the file is missing or names no server; a missing file's
+ * link and OpenCode-era user file are then said once, in that notice. Otherwise a file that turns
+ * a section off, or holds no section for it, says nothing. What a checkout's files hold that the
+ * session does not read is said too: an `envoy` section, a file that cannot be used while
+ * `DISPATCH_URL` replaces it, and an OpenCode-era `.opencode/envoy.json` (`warnings`). Last, for a
+ * session that opens a NATS connection (`nats` not false), an Envoy that is on and takes no inbound
+ * messages is said to, naming why (`inbound.off`: no NATS server, or the seed's refusal), and a
+ * pass deadline the resolver raised to the heartbeat interval (`passDeadlineRaisedFrom`,
+ * `envoySettings`) is said to have been raised, naming both values.
  */
 function startNotice(
   config: EnvoyConfig,
   dispatch: DispatchConfigResolution,
   envoy: EnvoySettings,
-  nats: boolean
+  nats: boolean,
+  lost: string | undefined
 ): string | null {
   if (config.kind === "failed") return `${config.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config;
+  const lostNotice = !dispatch.enabled && dispatch.notice === lost ? (lost ?? null) : null;
   const dispatchQuiet = !dispatch.enabled && dispatch.error === null;
   const envoyQuiet = !envoy.enabled && envoy.error === null;
   const parts: string[] = [];
-  if (missing !== null && dispatchQuiet && envoyQuiet) {
+  if (missing !== null && dispatchQuiet && envoyQuiet && lostNotice === null) {
     parts.push(missingConfigNotice(config.path, missing, "Dispatch and Envoy are off"));
   } else {
     if (!dispatch.enabled && dispatch.error !== null)
       parts.push(`Dispatch is off: ${dispatch.error}`);
+    else if (lostNotice !== null) parts.push(lostNotice);
     else if (dispatchQuiet && missing !== null) {
       parts.push(missingConfigNotice(config.path, missing, "Dispatch is off"));
     }
     if (!envoy.enabled && envoy.error !== null) parts.push(`Envoy is off: ${envoy.error}`);
     else if (envoyQuiet && missing !== null) {
-      parts.push(missingConfigNotice(config.path, missing, "Envoy is off"));
+      const said = lostNotice === null ? missing : { link: null };
+      parts.push(missingConfigNotice(config.path, said, "Envoy is off"));
     }
   }
   if (checkout?.kind === "valid" && checkout.envoyError !== null) parts.push(checkout.envoyError);
@@ -130,7 +140,13 @@ export function sessionSettings(
   return {
     dispatch,
     envoy,
-    notice: startNotice(config, dispatch, envoy, options.nats !== false),
+    notice: startNotice(
+      config,
+      dispatch,
+      envoy,
+      options.nats !== false,
+      config.kind === "read" ? lostDispatchUrlNotice(env, config) : undefined
+    ),
   };
 }
 
@@ -147,20 +163,37 @@ export interface SessionDispatch {
 /** Dispatch from `file`, read now: for a command, which resolves it once, and for a plugin that
  * resolves it on every use rather than once at its start. A file whose location could not be
  * worked out turns Dispatch off with that error. `activeDispatchSettings` turns its `dispatch` into
- * the configuration a caller uses, or null, or a throw. */
+ * the configuration a caller uses, or null, or a throw. `commands: "kept"` never runs a `!` token
+ * command: it takes the outcome one of the session's other Dispatch calls already kept in this
+ * process, and with none Dispatch reads as off with an error saying so (`dispatchSettings`), for a
+ * caller on a deadline such as the per-request feed of people's answers. */
 export function sessionDispatchSettings(
   file: SessionConfigFile,
   env: DispatchEnvironment,
-  options: { readonly cwd: string }
+  options: { readonly cwd: string; readonly commands?: CommandMode | undefined }
 ): SessionDispatch {
   if (file.path === null)
     return { dispatch: offWithError(file.error), warnings: [], missing: null };
   const config = readEnvoyConfig(file.path, env, options);
   return {
-    dispatch: dispatchSettings(env, config),
+    dispatch: dispatchSettings(env, config, { commands: options.commands }),
     warnings: config.kind === "read" ? config.warnings : [],
     missing: config.kind === "read" ? config.missing : null,
   };
+}
+
+/** The Dispatch URL `file` and the environment configure now (`dispatchUrl`), read without its
+ * token, so no `!` command runs; undefined when Dispatch is off before its token is read or the
+ * file's location could not be worked out. What a caller on a deadline names to
+ * `readSessionAnswers` while `sessionDispatchSettings(…, { commands: "kept" })` is off with an
+ * error, so only a list read from that URL stands in. */
+export function sessionDispatchUrl(
+  file: SessionConfigFile,
+  env: DispatchEnvironment,
+  options: { readonly cwd: string }
+): string | undefined {
+  if (file.path === null) return undefined;
+  return dispatchUrl(env, readEnvoyConfig(file.path, env, options));
 }
 
 /** Envoy from `file` (`envoySettings`), for a command that resolves Envoy alone. A file whose

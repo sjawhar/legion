@@ -350,6 +350,9 @@ func superviseEvent(ev stream.Event) (supervise.Event, error) {
 		return supervise.StreamTurnStart{Claim: ev.Claim, DeliveryID: ev.DeliveryID}, nil
 	case stream.TurnEnd:
 		return supervise.StreamTurnEnd{Claim: ev.Claim}, nil
+	case stream.PromptResult:
+		return supervise.StreamPromptResult{Claim: ev.Claim, DeliveryID: ev.DeliveryID,
+			AgentInvoked: ev.AgentInvoked, Error: ev.Error}, nil
 	case stream.LateRefusal:
 		return supervise.StreamLateRefusal{Claim: ev.Claim, DeliveryID: ev.DeliveryID, Error: ev.Error, Replayed: ev.Replayed,
 			ConnSequence: ev.ConnSequence}, nil
@@ -367,6 +370,8 @@ func claimOf(ev supervise.Event) claim.Token {
 	case supervise.StreamTurnStart:
 		return ev.Claim
 	case supervise.StreamTurnEnd:
+		return ev.Claim
+	case supervise.StreamPromptResult:
 		return ev.Claim
 	case supervise.StreamLateRefusal:
 		return ev.Claim

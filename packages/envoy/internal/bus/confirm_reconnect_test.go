@@ -109,7 +109,7 @@ func TestConfirmPublishedRefusesADenialAReconnectCleared(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the client never saw the server drop the connection")
 	}
-	if err := confirmPublished(conn, subject, before); !errors.Is(err, errPublishUnconfirmed) {
+	if err := confirmPublished(conn, subject, before); !errors.Is(err, ErrPublishUnconfirmed) {
 		t.Fatalf("a denied publish read as %v, want unconfirmed: last error %v, reconnecting %t",
 			err, conn.LastError(), conn.IsReconnecting())
 	}
@@ -145,7 +145,7 @@ func TestConfirmPublishedRefusesADenialACompletedReconnectCleared(t *testing.T) 
 	case <-time.After(5 * time.Second):
 		t.Fatal("the client never reconnected")
 	}
-	if err := confirmPublished(conn, subject, before); !errors.Is(err, errPublishUnconfirmed) {
+	if err := confirmPublished(conn, subject, before); !errors.Is(err, ErrPublishUnconfirmed) {
 		t.Fatalf("a denied publish read as %v, want unconfirmed: before %+v, after %+v", err, before, observe(conn))
 	}
 }
@@ -169,9 +169,10 @@ func TestSameErrorTreatsAValueThatCannotBeComparedAsChanged(t *testing.T) {
 
 // answeringServer serves one NATS client and stays up: it answers every flush that follows a
 // publish with the permissions violation for deny, when deny is not empty, and then the PONG, and,
-// when receipt is true, then sends an empty receipt to the publish's reply subject. A publish with
-// headers (HPUB, as RequestCoreTo's forward with its Nats-Msg-Id is) is read whole by its length,
-// since its header block spans lines.
+// when receipt is true, then sends the notification stream's acknowledgement and an empty receipt
+// to the publish's reply subject, as a stored agent subject with a live holder answers a forward.
+// A publish with headers (HPUB, as RequestCoreTo's forward with its Nats-Msg-Id is) is read whole
+// by its length, since its header block spans lines.
 func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -224,6 +225,8 @@ func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
 				}
 				fmt.Fprint(conn, "PONG\r\n")
 				if sid, ok := sids[reply]; ok && receipt {
+					const stored = `{"stream":"ENVOY_NOTIFICATIONS","seq":1}`
+					fmt.Fprintf(conn, "MSG %s %s %d\r\n%s\r\n", reply, sid, len(stored), stored)
 					fmt.Fprintf(conn, "MSG %s %s 0\r\n\r\n", reply, sid)
 				}
 				published = false
@@ -263,12 +266,13 @@ func TestPublishConfirmedReadsTheStateBeforeThePublish(t *testing.T) {
 }
 
 // A forward publishConfirmed cannot confirm - the server reported another subject's violation
-// during it - still counts as delivered when its receipt arrives, since the receipt proves it.
+// during it - still counts as delivered when the stream's acknowledgement and its receipt arrive,
+// since they prove it.
 func TestAnUnconfirmedForwardWithAReceiptIsDelivered(t *testing.T) {
 	conn := answeringServer(t, "notifications.other", true)
 	client := &Client{Conn: conn}
 
-	if err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 2*time.Second); err != nil {
+	if err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, "", 2*time.Second); err != nil {
 		t.Fatalf("an unconfirmed forward whose receipt arrived returned %v, want nil", err)
 	}
 }
@@ -279,8 +283,8 @@ func TestAnUnconfirmedForwardWithoutAReceiptIsNotAReceiptTimeout(t *testing.T) {
 	conn := answeringServer(t, "notifications.other", false)
 	client := &Client{Conn: conn}
 
-	err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 300*time.Millisecond)
-	if !errors.Is(err, errPublishUnconfirmed) || errors.Is(err, ErrReceiptTimeout) {
+	err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, "", 300*time.Millisecond)
+	if !errors.Is(err, ErrPublishUnconfirmed) || errors.Is(err, ErrReceiptTimeout) {
 		t.Fatalf("an unconfirmed forward with no receipt returned %v, want the unconfirmed error", err)
 	}
 }

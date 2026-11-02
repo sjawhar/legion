@@ -1,5 +1,194 @@
 # Changelog
 
+## [main@6b1524cdb8aa] - 2026-11-01
+
+### Fixed
+
+- The bundled `dispatch request-approval` finds an ask block whose id the renderer writes
+  `id="…"`, such as `a b` (`id="a b"`) or `R&D` (`id="R&amp;D"`), instead of naming it as one the
+  latest version does not hold yet and refusing every request over the document.
+
+## [main@2605f55135db] - 2026-11-01
+
+### Added
+
+- Consumer delivery. The channel server subscribes the current session id's relay subject,
+  `notifications.envoy.deliver.<session id>`, before it registers, and every registration asks the
+  listener for the session's durable consumer, with an epoch per NATS connection and the resume
+  point `replay-<session id>.json` now keeps beside the replay state. Answered `consumer`, the
+  session takes its agent subject and every followed topic the stream stores from the listener's
+  relay, in stream order: each frame is answered `received` as it decodes and `done` once Claude
+  Code has it. In a Legion pane that is when `legion claude-bridge` answers its inbox, which it does
+  once Claude Code took the message into a step (`--replay-user-messages`). In channel mode it is
+  when the MCP notification write resolves, the last signal Claude Code gives there, so a
+  notification Claude Code drops after that (a channel it did not load) is not sent again. A
+  frame already shown or skipped is `done` at once; one whose write fails, or that arrives after
+  the session moved to another id, is answered `nak` and comes again, and from its third delivery
+  is replaced by a notice naming it. The core copies of those subjects then show nothing and only
+  answer a lane's receipt, and the replay engine makes no `/v1/replay` call. So a message
+  published while Claude Code was not running or its connection was down, a role message to a
+  role it holds included, is delivered once when it is back, for up to 72 hours. A NATS reconnect
+  begins a new epoch and registers at once, so the listener restarts the relay at the consumer's
+  ack floor. A session coming from the previous plugin has no resume point of its own: its first
+  consumer starts at the replay cursors its state file holds, so the messages stored while it was
+  away are delivered instead of acked away.
+  A BTW that arrives late is passed over, as a replayed one is. Answered `core`, or by
+  a listener of an earlier release, delivery works as before (INFRA-594).
+
+### Changed
+
+- In a Legion pane, `legion claude-bridge` runs Claude Code with `--replay-user-messages` and
+  answers an Envoy delivery on its inbox (`LEGION_CLAUDE_INBOX`) only once Claude Code re-emits it
+  as the user message it took, no longer once the bridge queued it; a delivery Claude Code ended a
+  step without taking, or had not taken when it exited, is answered with an error. The inbox reads
+  a client's next deliveries while it waits and answers them in the order they came. So a relayed
+  frame is `done` only once Claude Code took the delivery (INFRA-594).
+
+### Fixed
+
+- `envoy_sessions`' `machine` filter finds a session by the listener it registered through as
+  well as by the machine its process runs on: it matched only the latter, so a filter by a hub's
+  machine id (`envoy-hub`, `gke`) listed nothing for the sessions registered through it
+  (INFRA-594).
+- A message the session missed is no longer shown twice when its live copy arrives while the
+  replayed one is being written. The replay engine's frame is now claimed in the same dedupe a
+  live frame is, from before it is handed to the channel's write queue until the engine records it
+  in the replay ledger, so whichever copy comes second is a repeat and is not shown; the claim is
+  released when the frame was not shown after all, so a later copy still reaches the session
+  (INFRA-594).
+
+## [main@ed9113e7c092] - 2026-11-01
+
+### Changed
+
+- The shipped `dispatch` command accepts only `omp` and `claude` as `DISPATCH_HOST`, and reads
+  `OPENCODE_CONFIG_DIR` no longer; `envoy_publish`'s description no longer names an OpenCode
+  agent as the kind of session a serve port reaches. Legion no longer supports OpenCode.
+- The plugin declares daemon API contract 44 in `package.json`'s `legion.daemonApiVersion`:
+  a Claude Code role's start command and pane no longer carry
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, so a role may leave a background task running past
+  the end of a turn and read its result in the turn Claude Code starts when it finishes.
+  `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_DISABLE_CRON=1` stay.
+- The channel instructions describe `urgency` as how soon the sender asks the reader to act, and say that it does not change when or in what order deliveries arrive.
+
+### Fixed
+
+- The Legion plugin's `Stop` hook entry now carries `${background_tasks}`, Claude Code's list of
+  the session's own tasks, and a turn that ends with one of them still running earns no phase
+  reminder: the task's result starts the next turn, so the worker is waiting to be woken rather
+  than stalled. A hook argument an older binary does not substitute reads as no background work,
+  which is the behaviour before this field existed.
+
+## [main@f699b1316430] - 2026-10-31
+
+### Changed
+
+- The channel server mints a client instance id when the process starts and sends it on every registration and on each deregistration. A `/clear` handoff therefore removes the registry entry of the old session id only while that entry still belongs to this process, and the soft reclaim that follows takes the role only when the named predecessor has no live registration, when its live registration carries the same instance id, or when either side carries no instance id. A refusal that names the predecessor itself now keeps the role record of that session, which belongs to the live holder; a refusal naming any other session removes it.
+
+## [main@1d3e69553791] - 2026-10-31
+
+### Fixed
+
+- The `dispatch` command (`dist/dispatch.js`), the MCP server's start notice and its Dispatch reply name the lost `DISPATCH_URL` when `DISPATCH_TOKEN_FILE` is set and nothing names the server: `DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for`, where they named a missing envoy.json. When the chosen file is missing, its dangling link and the unread OpenCode-era user file follow, the old file last, so the session hook still prints the old file's advice.
+
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- The plugin ships `claude-envoy:outside-message` and `claude-envoy:plain-words`, so a standalone
+  Claude Code session and a Legion phase worker on the Claude Code backend read the same rules for
+  text that reaches a person outside the company as an Oh My Pi session does.
+
+### Changed
+
+- The `dispatch` and `dispatch-writing-specs` skills this plugin links tell a session to write
+  each ask or comment id whole in a reference, taking it from `dispatch read`'s `Ask id:` or
+  from the page URL, because the command accepts a prefix while a person's link does not. The
+  `dispatch` skill said an ask or comment id could be an 8-hex prefix, and a reference built
+  from one opens nothing for the person who clicks it.
+
+## [main@e65900f4438b] - 2026-10-30
+
+### Added
+
+- The `dispatch` command (`dist/dispatch.js`) takes `dispatch answers`, which prints every item of
+  that list in full.
+- `tests/answers-claude.test.ts` runs the real Claude Code, the release the new repository-root
+  `.claude-code-pin` pins (2.1.311), against a stand-in model and Dispatch, and shows the list on
+  the Messages request after startup, `--resume`, `/compact` and a subagent's start. CI's
+  claude-envoy job installs that release (`.github/actions/install-claude-code`), and the test
+  refuses to skip there.
+- A third session hook, `dist/session-hook.js answers`, on every `SessionStart` (startup, resume,
+  clear, compact, fork) and every `SubagentStart`, puts what people wrote to the session in the
+  last 72 hours into the model's context: answers to its asks, replies to
+  its comments, comments on documents it wrote and messages to it, read from Dispatch's
+  `GET /api/v1/agents/{session_id}/answers` for the hook input's `session_id`, which at
+  `SubagentStart` is the parent's. It is the list every Oh My Pi model request carries, under
+  8,000 characters, newest first, with a line naming `dispatch answers` when older items are left
+  out. The hook prints within 800 ms of its start, or 150 ms after its code begins when Bun's
+  start-up alone took longer, so a slow start-up never costs a list Dispatch answers at once; it
+  exits 50 ms after that, always with status 0: when Dispatch has not answered it carries the last
+  list read, kept in `answers.json` in the session's Dispatch state directory, with when it was
+  read and why this read failed, or, when no list read before has an item to show, one line saying
+  the list could not be read and why. A `!` command in envoy.json runs in a process the hook starts
+  detached, one per session at a time, and waits on until that same deadline; a slower command
+  still runs to its end or its 10 s timeout in that process, which removes its output file and
+  reads the list with its token for the next hook. While it runs, only a list read from the
+  Dispatch URL envoy.json names now stands in, never one another Dispatch answered. Against a
+  Dispatch older than this release, which answers its own 404 "no route for …", the hook adds
+  nothing to the context and writes one line naming that Dispatch to stderr.
+
+### Changed
+
+- Daemon API contract 43: the `legion` MCP tool reads the state's new `consumers` and
+  `repositories.withoutWebhookApp` strictly, and its `handoff_complete` description names the
+  implementer's new refusal `HANDOFF_NO_PULL_REQUEST`. A daemon of contract 42 and this plugin
+  refuse each other.
+- `dispatch-first`, which every Claude Code session loads at its start, says that a result a person asked for is like a blocker: a document or artifact notifies nobody, so the document that holds the result ends with an ask block asking their next step, else a `dispatch ask`. Its rule that each ask and message stands alone is gone, since `dispatch-writing-specs` carries it where an ask is written.
+
+### Fixed
+
+- The `answers` hook adds nothing to the context when Dispatch answers its own `404 NOT_FOUND`
+  "no route for …", as a build older than the answers route does, and no list read before from
+  that Dispatch has an item to show. Before, it added a line saying the answers could not be read
+  and telling the agent to run `dispatch answers`, a command that fails against that same
+  Dispatch. A list read before from that Dispatch is still carried, its left-out line naming no
+  command. The hook writes one line to stderr naming that Dispatch and that it has no answers
+  route, also when the refresher that ran a `!` token command made the read
+  (`answers-refresh.json` carries the `notice`). A proxy's 404 page, a 200 that is no answers
+  list and every other failed read still add the line naming why.
+
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- The Dispatch tools take a block reference in `reply_to` and `in_reply_to` to answer one block of a comment or message, and read a block of a comment or message by its reference.
+
+### Changed
+
+- The bundled `envoy_publish` description says a role message errs when its
+  holder did not confirm it within the listener's window, and a team or other ad-hoc topic errs
+  naming each session holding its own NATS connection that registered the topic and did not
+  confirm it; a session that stopped without unregistering stays registered for up to 5 minutes
+  and is named in that time, and a named session is not a failed delivery to the others.
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+
+### Fixed
+
+- Main's rebuild of `dist/` and `legion/` lands even when main moved while its push job waited
+  for a runner: it commits the build onto main's tip whenever it is newer than the build main
+  holds, and starts one fresh run when a build input changed in between, so main's built plugin is
+  at most one run behind its inputs and never moves backward (#2493).
+  `scripts/build-inputs.txt` lists every path that can change the build; `tests/build-inputs.test.ts`
+  runs the build and fails when the bundles or the Legion plugin read a file the list does not
+  match (the files the build's scripts read by path are listed by hand).
+- A message the listener forwards to the session's agent subject is shown with the topic it was
+  published to: the channel notification's `topic` meta is the envelope's `topic`, falling back to
+  the NATS subject only when the envelope names none, where it was always the subject. A role
+  message's forward was shown under the session's own `notifications.agent.<id>`, and so was an
+  ad-hoc topic's copy the listener now confirms with the session, which can arrive before the copy
+  on the topic itself.
+
 ## [main@1f5b08286a6d] - 2026-10-29
 
 ### Added

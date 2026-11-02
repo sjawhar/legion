@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
@@ -1337,6 +1338,13 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
 	command = append(command, "--role-references", p.RoleReferences.Encode(), "--role-namespaces", RoleProbeDir)
+	// The pod's own test database, where a deployment serves one: the probe pod runs under the
+	// same runtime an issue pod does, so a gVisor the server cannot start under refuses the boot
+	// probe rather than every pod's first Postgres test. It runs on the probe's own volume and
+	// stops the server it started.
+	if r.testPostgres {
+		command = append(command, "--test-postgres", RoleProbeDir+"/"+launcher.TestPGDirName)
+	}
 	// Each role that names overlays of its own is read as it will start: the probe pod mounts the
 	// operator's volumes as every pod does, so a file a role's PI_CONFIG_FILES names and the mounts
 	// lack refuses the boot here, naming the role and the file, rather than that role's Oh My Pi at

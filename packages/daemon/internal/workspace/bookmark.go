@@ -157,7 +157,9 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	add := []string{
 		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "--sparse-patterns", "empty", "-R", cloneDir,
 	}
-	result, err := runCommand(ctx, run, add, nil, "")
+	// The add and its retry run in the shared clone, the directory their own -R names: it is
+	// there, since the clone is what this workspace is added to.
+	result, err := runCommand(ctx, run, add, nil, cloneDir)
 	if err != nil {
 		return fmt.Errorf("run %s: %w", strings.Join(add, " "), err)
 	}
@@ -170,7 +172,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if _, err := runCheckedOnClone(ctx, run, cloneDir, "workspace", "forget", workspaceName); err != nil {
 			return err
 		}
-		if _, err := RunChecked(ctx, run, add, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, add, nil, cloneDir); err != nil {
 			return err
 		}
 	}
@@ -194,11 +196,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 // refusal.
 func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local bookmarkRow) ([]string, error) {
 	revset := "(" + strings.Join(local.removed, " | ") + ")..(" + strings.Join(local.added, " | ") + ")"
-	read, err := onClone(workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
-	if err != nil {
-		return nil, err
-	}
-	result, err := RunChecked(ctx, run, read, nil, "")
+	result, err := runCheckedOnClone(ctx, run, workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +340,7 @@ func readBookmark(ctx context.Context, run Runner, workspace Workspace, name str
 	if err != nil {
 		return bookmarkRows{}, err
 	}
-	result, err := runCommand(ctx, run, list, nil, "")
+	result, err := runCommand(ctx, run, list, nil, workspace.Clone)
 	if err != nil {
 		return bookmarkRows{}, fmt.Errorf("run %s: %w", strings.Join(list, " "), err)
 	}

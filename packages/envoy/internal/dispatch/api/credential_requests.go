@@ -1,11 +1,15 @@
-// credential_requests.go relays Dispatch's credential-request UI to the secrets broker
-// (the "UI routes" of the shared broker contract). Every handler does the same five things:
+// credential_requests.go relays Dispatch's credential pages to the secrets broker (its account
+// routes). Dispatch lists the credential requests waiting on the signed-in person, each secret
+// request carrying the broker's approve_url, the page where that person, signed in to the broker,
+// decides it; it relays a machine login's approve or deny with the code the person typed; and it
+// relays a person's revoke of a grant or a machine login. Every handler does the same five things:
 // require a human caller, require the broker to be configured, resolve or read its input, call
 // the matching agentsecrets.Client method, and forward the broker's exact status and body — the
 // broker decides. The pending list alone answers null rather than 404 FEATURE_OFF without a broker.
-// The one thing Dispatch supplies is who decides: approve, deny, revoke and the machine-login list
-// send the login requireHuman resolved, in Dispatch's canonical lowercase form, as the approver,
-// and never forward the browser's body, so nothing a browser sends can name the approver.
+// The one thing Dispatch supplies is who acts: a machine login's approve and deny, a revoke and the
+// machine-login list send the login requireHuman resolved, in Dispatch's canonical lowercase form,
+// as the approver, which the broker takes on Dispatch's word, and never forward the browser's body,
+// so nothing a browser sends can name the approver.
 package api
 
 import (
@@ -146,6 +150,10 @@ func (s *server) getCredentialRecord(w http.ResponseWriter, r *http.Request) {
 
 // --- POST .../{id}/approve, .../{id}/deny, .../machine-lookup ---
 
+// approveCredentialRecord and denyCredentialRecord decide a machine login, whose decision carries
+// the code the person typed. A secret request is decided on the broker's own page alone: the broker
+// answers either route for one 403 DECIDE_ON_BROKER_PAGE with its approve_url, relayed verbatim like
+// every answer.
 func (s *server) approveCredentialRecord(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {

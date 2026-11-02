@@ -141,6 +141,10 @@ type workflowRuntime struct {
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
 	reviewAppLogin string
+	// reviewAppID is the review App's id as the configuration names it (github_apps.review.app_id,
+	// the id GitHub's GET /app answers for it): a check run named tester or architect counts as a
+	// Legion verdict only when that App created it, as Envoy's listener counts it (readSettlement).
+	reviewAppID string
 	// build is the daemon's own build (Build): what the boot fact carries as the revision it
 	// compares the open production checks against, and the guard on whether Dispatch's build is
 	// read and compared too.
@@ -160,18 +164,6 @@ type workflowRuntime struct {
 	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
 	// then. Only the pass touches it.
 	refusedReviews map[int64]bool
-	// uncarried is every comparison of an approved head with a recorded head, by repository, pull
-	// request and the two heads, that GitHub answered and that does not carry the approval
-	// (readApprovalCarry), so the pass does not ask again: the compare of two fixed commits never
-	// changes its answer. It is held in memory only; a restart's first pass asks again. Only the
-	// pass touches it.
-	uncarried map[string]bool
-	// unrecordedOpened is, by issue, the open pull request the pass found for an issue with none
-	// recorded and applied, keyed by what the workflow decides it by (readUnrecordedPullRequests),
-	// that the workflow did not record: the pass applies it again only once one of those changes.
-	// It is held in memory only; a restart's first pass applies each again. Only the pass touches
-	// it.
-	unrecordedOpened map[string]string
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -280,7 +272,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
-		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
+		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
@@ -381,10 +373,10 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		w.conn = nil
 		return err
 	}
-	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: heard, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+	w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{
+		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
-		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository,
+		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
 	})
 	if err != nil {
 		conn.Close()
@@ -487,9 +479,10 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 // keep keeps, judged against every record, while every summary of the listing is still the walk
 // each chain is read up.
 func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatch.IssueSummary, keep func(records map[string]*record.Issue, summary dispatch.IssueSummary) bool, boot bool) error {
-	// The transaction performs no I/O: what admission reads of a todo issue's repository, and the
-	// Dispatch chain above its parent, are read now, up one walk over the whole listing
-	// (listingAncestry); each listed issue's fact carries that chain to admission.
+	// The transaction performs no I/O: what admission reads of a todo issue's repository, the
+	// Dispatch chain above its parent, and who set the label of a labelled triage root the workflow
+	// does not record, are read now, up one walk over the whole listing (listingAncestry); each
+	// listed issue's fact carries that chain, or that setter, to admission.
 	var records map[string]*record.Issue
 	var walk ancestry
 	var err error
@@ -505,17 +498,28 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 			continue
 		}
 		fact := intake.ListedIssue(summary)
-		if summary.Status == "todo" {
+		labelledTriageRoot := fact.LabelledTriageRoot()
+		if fact.Status == "todo" || labelledTriageRoot {
 			if walk == nil {
 				if records, walk, err = w.listingAncestry(ctx, issues); err != nil {
 					return err
 				}
 			}
+		}
+		switch {
+		case fact.Status == "todo":
 			prepared, err := w.prepareListed(ctx, records, walk, fact)
 			if err != nil {
 				return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 			}
 			fact.Ancestry = prepared.Ancestry
+		case labelledTriageRoot && records[summary.Key] == nil:
+			// The listing carries no actor, so the setter is read from the log as an event's is;
+			// a recorded root a person moved back to triage is never queued again, so its log is
+			// not read.
+			if fact.LabelSetter, err = w.labelSetter(ctx, summary.Key); err != nil {
+				return fmt.Errorf("prepare who set the label of %s for admission: %w", summary.Key, err)
+			}
 		}
 		scope = append(scope, summary)
 		listed = append(listed, fact)
@@ -755,7 +759,7 @@ func terminalEventID(c supervise.Claim, state supervise.ClaimState) string {
 func (w *workflowRuntime) run(ctx context.Context) error {
 	group, running := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		if err := w.consumers.Run(running, w.pool, w.handlers...); err != nil {
+		if err := w.consumers.Run(running, w.handlers...); err != nil {
 			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
 			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, w.conn))
 		}

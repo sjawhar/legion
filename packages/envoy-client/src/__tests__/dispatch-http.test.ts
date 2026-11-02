@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
+import type { ArchitectureSource, IssueSummary, ItemBlocks } from "@legion/contracts";
 import { DISPATCH_WRITE_RETRY, DispatchClient, DispatchGatewayError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -239,6 +239,34 @@ describe("DispatchClient", () => {
       method: "GET",
       headers: { Authorization: "Bearer secret", Accept: "application/json" },
     });
+  });
+
+  test("reads a session's answers with since and max_chars, and the caller's signal aborts it", async () => {
+    const body = { session_id: "session-1", since: "2026-10-24T00:00:00Z", total: 0, items: [] };
+    const { fetchImpl, requests } = fakeFetch([jsonResponse(body), jsonResponse(body)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const controller = new AbortController();
+
+    await expect(
+      client.sessionAnswers("session-1", {
+        since: "2026-10-24T00:00:00Z",
+        maxChars: 8000,
+        signal: controller.signal,
+      })
+    ).resolves.toEqual(body);
+    await expect(client.sessionAnswers("session-1")).resolves.toEqual(body);
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/agents/session-1/answers?since=2026-10-24T00%3A00%3A00Z&max_chars=8000",
+      "/api/v1/agents/session-1/answers",
+    ]);
+    const signal = requests[0]?.init.signal;
+    expect(signal?.aborted).toBe(false);
+    controller.abort();
+    expect(signal?.aborted).toBe(true);
+    expect(requests[1]?.init.signal?.aborted).toBe(false);
   });
 
   test("maps project document and reference routes to authenticated API requests", async () => {
@@ -982,6 +1010,32 @@ describe("DispatchClient", () => {
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
     ).toEqual(["/api/v1/comments/comment-1"]);
   });
+
+  test("maps a comment's and a message's blocks reads to the API", async () => {
+    const blocks: ItemBlocks = {
+      item: { kind: "comment", id: "comment-1" },
+      revision: 1,
+      indexed: true,
+      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6 }],
+    };
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse(blocks),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-1" } }),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-2" } }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.commentBlocks("comment-1")).toEqual(blocks);
+    await client.messageBlocks("message-1");
+    await client.messageBlocks("message-2", "s1");
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/comments/comment-1/blocks",
+      "/api/v1/messages/message-1/blocks",
+      "/api/v1/messages/message-2/blocks?session=s1",
+    ]);
+  });
 });
 
 test("maps an ask resolution to the authenticated API", async () => {
@@ -1042,6 +1096,38 @@ test("createProject surfaces PROJECT_EXISTS as the refusal's code", async () => 
     status: 409,
     fromDispatch: true,
   });
+});
+
+test("maps handoff writes and reads to the handoff routes, the body sent as its own text", async () => {
+  const summary = {
+    id: "0b7c2c5e-8f6d-4b8a-9a43-5d2e8c1f0a11",
+    issue_key: "DSP-1",
+    phase: "implement",
+    version: 2,
+    author: actor,
+    created_at: "2026-10-26T00:00:00Z",
+  };
+  // Spacing and key order a re-serialization would lose.
+  const body = '{ "schemaVersion": 1,\n  "b": 2, "a": 1 }\n';
+  const { fetchImpl, requests } = fakeFetch([
+    jsonResponse(summary, 201),
+    jsonResponse([summary]),
+    jsonResponse({ ...summary, body }),
+    jsonResponse({ ...summary, body }),
+  ]);
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+  expect(await client.writeHandoff("DSP-1", "implement", { actor, body })).toEqual(summary);
+  expect(await client.listHandoffs("DSP-1")).toEqual([summary]);
+  expect((await client.latestHandoff("DSP-1", "implement")).body).toBe(body);
+  expect((await client.handoff(summary.id)).body).toBe(body);
+  expect(requests.map((request) => [request.init.method, new URL(request.url).pathname])).toEqual([
+    ["POST", "/api/v1/issues/DSP-1/handoffs/implement"],
+    ["GET", "/api/v1/issues/DSP-1/handoffs"],
+    ["GET", "/api/v1/issues/DSP-1/handoffs/implement/latest"],
+    ["GET", `/api/v1/handoffs/${summary.id}`],
+  ]);
+  expect(requestBody(requests[0] as RecordedRequest)).toEqual({ actor, body });
 });
 
 test("syncArchitectureSource refuses a repository with an empty owner or name without a request", async () => {

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -47,7 +48,27 @@ var (
 	// ErrNotEnrollingCredential refuses a revoke of a pod enrollment by any launcher credential but
 	// the one that enrolled it (Revoke).
 	ErrNotEnrollingCredential = errors.New("only the machine login that enrolled a pod may end its enrollment")
-	ErrPodTokenRequired       = errors.New("a pod enrollment's renewal must carry its projected token")
+	// ErrVMEndsByRevokingItsLogin refuses every launcher credential's revoke of a vm enrollment
+	// (Revoke): a VM's one credential moves to whoever logs in last with that VM's token, a copied
+	// token included, so a launcher proof never ends a VM's enrollment. Revoking the VM's machine
+	// login (RevokeCredential), or its lease, ends it.
+	ErrVMEndsByRevokingItsLogin = errors.New("a VM's enrollment ends when its machine login is revoked on Dispatch's machine-login page, or with its lease; no launcher credential ends it")
+	ErrPodTokenRequired         = errors.New("a pod enrollment's renewal must carry its projected token")
+	// ErrVMIdentity is a VM identity token that does not prove this VM: one that does not verify
+	// (another issuer or audience, a bad signature, no verified email, no Compute Engine claims),
+	// another instance's or account's token, or a vm enrollment under a launcher credential that
+	// another VM's login holds.
+	ErrVMIdentity = errors.New("the VM identity token does not identify this VM")
+	// ErrVMTokenExpired is a VM identity token whose expiry has passed: the VM fetches a fresh one
+	// from its metadata server and tries again.
+	ErrVMTokenExpired = errors.New("the VM identity token has expired")
+	// ErrVMTokenRequired refuses a vm enrollment's renewal that carries no VM identity token: a VM
+	// renews only while it can prove it is still that VM.
+	ErrVMTokenRequired = errors.New("a VM enrollment's renewal must carry its VM identity token")
+	// ErrVMNotListed refuses a VM enrollment, or its renewal, once its fleet's settings no longer
+	// allow the VM (VMService): its account dropped from BROKER_VM_SERVICES, or another project or
+	// instance-name glob configured. So narrowing a fleet ends an enrolled VM at its next renewal.
+	ErrVMNotListed = errors.New("this VM is not one its fleet's settings allow")
 )
 
 type Credential struct {
@@ -55,6 +76,10 @@ type Credential struct {
 	Operator *string
 	Service  *string
 	Host     string
+	// Subject is the identity a service's token login proved (TokenLogin.Subject): a Kubernetes
+	// ServiceAccount, or a VM's runtime id (VMClaims.RuntimeID); nil for every login a person
+	// approved.
+	Subject *string
 }
 
 // LiveCredential is one of the machine logins a person may revoke, as their machine-login page
@@ -67,8 +92,10 @@ type LiveCredential struct {
 	// Service names the service a service's login is for (legion-daemon); nil for a person's own
 	// machine.
 	Service *string
-	// Subject is the ServiceAccount a service's token login proved
-	// (system:serviceaccount:<namespace>:<name>); nil for every login a person approved.
+	// Subject is what a service's token login proved: its ServiceAccount
+	// (system:serviceaccount:<namespace>:<name>), or a VM's runtime id (VMClaims.RuntimeID,
+	// <service account email>@<project>/<zone>/<instance id>); nil for every login a person
+	// approved.
 	Subject *string
 	// ApprovedBy is the login of the person who approved it, "" for a service's token login, which
 	// no person approves.
@@ -89,12 +116,16 @@ type Enrollment struct {
 	Thumbprint string
 	SessionID  *string
 	PodToken   string
+	// VMToken is a vm enrollment's Google identity token, which proves the runtime id is its VM's
+	// (VMClaims.RuntimeID).
+	VMToken string
 	// Slot names one of several independent identities in one pod (record.ValidSlot): each slot
 	// of a pod is an enrollment of its own, with its own key, lease and grants. "" is the one
 	// identity of every session and single-identity pod enrollment.
 	Slot string
-	// Subject is a pod enrollment's verified service-account subject, set by Create from the
-	// projected token itself and never from the caller; nil for a session.
+	// Subject is a pod enrollment's verified service-account subject, or a vm enrollment's verified
+	// service-account email, set by Create from the token itself and never from the caller; nil for
+	// a session.
 	Subject      *string
 	LeaseExpires time.Time
 	Existing     bool // true when Create returned an already-live enrollment for the same key
@@ -118,8 +149,12 @@ type Service struct {
 	Lease time.Duration
 	// Pod verifies the cluster's projected ServiceAccount tokens against BROKER_K8S_OIDC_ISSUER and
 	// BROKER_K8S_OIDC_AUDIENCE; nil on a broker that trusts no Kubernetes token issuer, which enrolls
-	// no pod and serves no token login.
+	// no pod and serves no Kubernetes token login.
 	Pod PodVerifier
+	// VM verifies Google Compute Engine identity tokens against Google's issuer and
+	// BROKER_GOOGLE_OIDC_AUDIENCE (GoogleVMVerifier); nil on a broker with no Google audience, which
+	// enrolls no VM and serves no VM login.
+	VM VMVerifier
 
 	// Chain re-verifies a launcher credential's issuance chain on every AuthenticateLauncher
 	// call: a launcher_credentials row is never trusted on its own, since it must still trace
@@ -129,8 +164,16 @@ type Service struct {
 
 	// ServiceLogins is BROKER_SERVICE_LOGINS: each ServiceAccount subject that logs in as a service
 	// with its token, answering that service. AuthenticateLauncher reads it for every credential a
-	// token login issued.
+	// Kubernetes token login issued.
 	ServiceLogins map[string]string
+	// VMServicesByAccount, VMProjects and VMInstancePatterns are BROKER_VM_SERVICES,
+	// BROKER_VM_PROJECTS and BROKER_VM_INSTANCES, each keyed by a Google service account's email:
+	// the service its VMs log in as, the one project they run in, and the instance-name glob
+	// (path.Match) they match. machine.Service.VerifyServiceToken reads all three at a VM's login;
+	// AuthenticateLauncher reads the first two for every credential a VM's login issued.
+	VMServicesByAccount map[string]string
+	VMProjects          map[string]string
+	VMInstancePatterns  map[string]string
 
 	// testConflictHook, when set, runs once a 23505 insert conflict is detected in createAttempt,
 	// before the recovery lookup. It exists only so a test can deterministically reproduce the
@@ -173,28 +216,30 @@ func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, opera
 	return s.mintLauncherCredential(ctx, tx, &operator, nil, host, thumbprint, jwk, recordID, expires)
 }
 
-// TokenLogin is one verified token login, as IssueTokenLogin records it: the ServiceAccount
-// subject and the service BROKER_SERVICE_LOGINS maps it to, the pod its token is bound to ("" for
-// none) and when the token expires, the key the request object proved (its thumbprint and public
-// JWK), and when the credential expires.
+// TokenLogin is one verified token login, as IssueTokenLogin records it: the identity the token
+// proved (a ServiceAccount subject, or a VM's runtime id, VMClaims.RuntimeID), the service
+// BROKER_SERVICE_LOGINS or BROKER_VM_SERVICES maps it to, the host the credential names (a
+// ServiceAccount's <namespace>/<name>, a VM's <project>/<zone>/<instance name>), the pod its token
+// is bound to ("" for none) and when the token expires, the key the request object proved (its
+// thumbprint and public JWK), and when the credential expires.
 type TokenLogin struct {
-	Subject, Service, PodUID string
-	TokenExpires             time.Time
-	Thumbprint               string
-	JWK                      json.RawMessage
-	Expires                  time.Time
+	Subject, Service, Host, PodUID string
+	TokenExpires                   time.Time
+	Thumbprint                     string
+	JWK                            json.RawMessage
+	Expires                        time.Time
 }
 
 // IssueTokenLogin issues or moves the launcher credential of a service's token login, which no
 // person approves (machine.Service.TokenLogin verified everything in login). The subject holds one
 // live credential, created at its first login: each login moves it to login's key and expiry under
 // the same id, so a login proving the key the credential already holds changes only its expiry and
-// every pod the account enrolled stays under it. Its host is the account's <namespace>/<name>.
-// Each login writes a launcher_credential.token_login audit row naming the subject, the pod the
-// token is bound to, the key, and both expiries. A key another live credential holds is a unique
-// violation (store.IsUniqueViolation), and nothing is written.
+// every pod the account enrolled stays under it. A VM's subject is its own runtime id, so each VM of
+// a fleet holds a credential of its own and one VM's login never moves another's. Its host is
+// login's. Each login writes a launcher_credential.token_login audit row naming the subject, the
+// pod the token is bound to, the key, and both expiries. A key another live credential holds is a
+// unique violation (store.IsUniqueViolation), and nothing is written.
 func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.UUID, error) {
-	namespace, name := accountName(login.Subject)
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return uuid.Nil, err
@@ -207,7 +252,7 @@ func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.U
 		do update set service=excluded.service, host=excluded.host, key_thumbprint=excluded.key_thumbprint,
 			public_jwk=excluded.public_jwk, expires_at=excluded.expires_at
 		returning id`,
-		uuid.New(), login.Service, namespace+"/"+name, login.Thumbprint, []byte(login.JWK), login.Subject, login.Expires).Scan(&id); err != nil {
+		uuid.New(), login.Service, login.Host, login.Thumbprint, []byte(login.JWK), login.Subject, login.Expires).Scan(&id); err != nil {
 		return uuid.Nil, err
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.token_login',$1,
@@ -217,14 +262,6 @@ func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.U
 		return uuid.Nil, err
 	}
 	return id, tx.Commit(ctx)
-}
-
-// accountName splits a ServiceAccount subject, system:serviceaccount:<namespace>:<name>, which
-// BROKER_SERVICE_LOGINS already holds to that form.
-func accountName(subject string) (namespace, name string) {
-	rest := strings.TrimPrefix(subject, "system:serviceaccount:")
-	namespace, name, _ = strings.Cut(rest, ":")
-	return namespace, name
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
@@ -239,20 +276,20 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 // entire issuance chain re-verified through s.Chain — a launcher_credentials row is never trusted
 // on its own, so a row inserted without a genuine approved credential-request record behind it
 // never authenticates. A credential a service's token login issued (IssueTokenLogin, its subject
-// set, and so its service, as the table's check constraint holds) authenticates while
-// ServiceLogins still names its subject for its service, so removing an account from
-// BROKER_SERVICE_LOGINS ends its credential at its next call. A missing, expired, revoked,
-// chain-broken or no-longer-listed credential all answer ("", false, nil); only a genuine
-// dependency failure is a non-nil error, matching Lookup's own contract.
+// set, and so its service, as the table's check constraint holds) authenticates while its subject
+// is still listed for its service (tokenLoginListed), so removing an account from
+// BROKER_SERVICE_LOGINS or BROKER_VM_SERVICES ends its credential at its next call. A missing,
+// expired, revoked, chain-broken or no-longer-listed credential all answer ("", false, nil); only a
+// genuine dependency failure is a non-nil error, matching Lookup's own contract.
 func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string, bool, error) {
 	if _, err := uuid.Parse(lid); err != nil {
 		return "", false, nil
 	}
-	var thumbprint string
+	var thumbprint, host string
 	var recordID, service, subject *string
 	var expiresAt time.Time
-	err := s.Store.Pool.QueryRow(ctx, `select key_thumbprint, record_id, service, subject, expires_at from launcher_credentials where id=$1 and revoked_at is null`, lid).
-		Scan(&thumbprint, &recordID, &service, &subject, &expiresAt)
+	err := s.Store.Pool.QueryRow(ctx, `select key_thumbprint, host, record_id, service, subject, expires_at from launcher_credentials where id=$1 and revoked_at is null`, lid).
+		Scan(&thumbprint, &host, &recordID, &service, &subject, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
@@ -263,7 +300,7 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 		return "", false, nil
 	}
 	if subject != nil {
-		if listed, ok := s.ServiceLogins[*subject]; !ok || listed != *service {
+		if !s.tokenLoginListed(*subject, *service, host) {
 			return "", false, nil
 		}
 		return thumbprint, true, nil
@@ -280,16 +317,52 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 	return thumbprint, true, nil
 }
 
-// Credential loads a launcher credential's own identity (operator, service, host) by its id, for
-// a handler that has already authenticated the caller via a launcher proof (proof.Subject's
-// LauncherID, verified live by AuthenticateLauncher through proof.Verifier.LookupLauncher) and
-// needs that identity to pass to Create or Revoke. err is a genuine dependency failure; a launcher
-// id a live proof just verified vanishing before this read is treated the same way (never
-// silently swallowed into an empty Credential).
+// tokenLoginListed reports whether a token login's subject still logs in as service: a VM's
+// runtime id while its fleet still allows it (VMService, its project from the runtime id and its
+// instance name from the credential's host, <project>/<zone>/<instance name>), and a Kubernetes
+// ServiceAccount while BROKER_SERVICE_LOGINS names it for service.
+func (s *Service) tokenLoginListed(subject, service, host string) bool {
+	if account, project, ok := vmRuntimeAccount(subject); ok {
+		_, rest, _ := strings.Cut(host, "/")
+		_, instance, _ := strings.Cut(rest, "/")
+		bound, err := s.VMService(VMClaims{Account: account, Project: project, Instance: instance})
+		return err == nil && bound == service
+	}
+	listed, ok := s.ServiceLogins[subject]
+	return ok && listed == service
+}
+
+// VMService answers the service vm logs in as: the one BROKER_VM_SERVICES binds its account to,
+// when its project is the one BROKER_VM_PROJECTS names for that account and its instance name
+// matches the BROKER_VM_INSTANCES glob (path.Match). The account alone does not name a fleet:
+// anyone who can run a VM as it in any project could otherwise log in as its service. Any other VM
+// is an error naming what did not match; machine.Service.VerifyServiceToken refuses the login with
+// it, and Create and RenewVM the enrollment (ErrVMNotListed).
+func (s *Service) VMService(vm VMClaims) (string, error) {
+	service, listed := s.VMServicesByAccount[vm.Account]
+	if !listed {
+		return "", fmt.Errorf("%s is not in BROKER_VM_SERVICES", vm.Account)
+	}
+	if project := s.VMProjects[vm.Account]; vm.Project != project {
+		return "", fmt.Errorf("%s logs in from project %s only (BROKER_VM_PROJECTS), and this VM is in project %s", vm.Account, project, vm.Project)
+	}
+	pattern := s.VMInstancePatterns[vm.Account]
+	if matched, err := path.Match(pattern, vm.Instance); err != nil || !matched {
+		return "", fmt.Errorf("instance %s does not match %s's instance names %q (BROKER_VM_INSTANCES)", vm.Instance, vm.Account, pattern)
+	}
+	return service, nil
+}
+
+// Credential loads a launcher credential's own identity (operator, service, host, and a token
+// login's subject) by its id, for a handler that has already authenticated the caller via a
+// launcher proof (proof.Subject's LauncherID, verified live by AuthenticateLauncher through
+// proof.Verifier.LookupLauncher) and needs that identity to pass to Create or Revoke. err is a
+// genuine dependency failure; a launcher id a live proof just verified vanishing before this read is
+// treated the same way (never silently swallowed into an empty Credential).
 func (s *Service) Credential(ctx context.Context, id string) (Credential, error) {
 	var cred Credential
-	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host from launcher_credentials where id=$1`, id).
-		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host); err != nil {
+	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host, subject from launcher_credentials where id=$1`, id).
+		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host, &cred.Subject); err != nil {
 		return Credential{}, err
 	}
 	return cred, nil
@@ -304,7 +377,11 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
 // A pod token past its expiry is ErrPodTokenExpired, naming that expiry; any other token that does
-// not prove this pod is ErrPodIdentity.
+// not prove this pod is ErrPodIdentity. A vm enrollment is a Google VM enrolling itself: its runtime
+// id must be the one its VM identity token proves (VMClaims.RuntimeID), and its credential the one
+// that VM's own login holds (its subject is that runtime id), so one VM of a fleet never enrolls
+// another; a VM token past its expiry is ErrVMTokenExpired, and every other mismatch ErrVMIdentity.
+// Like a session, a vm enrollment takes no slot.
 // A credential revoked (RevokeCredential: by the person who approved a person's machine login, or
 // by anyone signed in for a service's), even after the caller's launcher proof was verified, is
 // ErrUnauthenticated.
@@ -329,6 +406,19 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 			return Enrollment{}, ErrPodIdentity
 		}
 		in.Subject = &claims.Subject
+	}
+	if in.Kind == "vm" {
+		claims, err := s.verifyVMToken(ctx, in.VMToken)
+		if err != nil {
+			return Enrollment{}, err
+		}
+		if id := claims.RuntimeID(); id != in.RuntimeID || cred.Subject == nil || *cred.Subject != id {
+			return Enrollment{}, fmt.Errorf("%w: the token is VM %s's, the enrollment names %q", ErrVMIdentity, id, in.RuntimeID)
+		}
+		if _, err := s.VMService(claims); err != nil {
+			return Enrollment{}, fmt.Errorf("%w: %v", ErrVMNotListed, err)
+		}
+		in.Subject = &claims.Account
 	}
 	in.ID = uuid.New()
 	in.LeaseExpires = time.Now().Add(s.Lease)
@@ -563,6 +653,24 @@ func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, er
 	return claims, nil
 }
 
+// verifyVMToken verifies a VM's Google identity token (VMVerifier: issuer, audience, signature,
+// expiry, a verified email and the Compute Engine claims), before any transaction opens, as
+// verifyPodToken does. A token past its expiry is ErrVMTokenExpired; every other failure, and a
+// broker with no BROKER_GOOGLE_OIDC_AUDIENCE, is ErrVMIdentity, naming why.
+func (s *Service) verifyVMToken(ctx context.Context, raw string) (VMClaims, error) {
+	if s.VM == nil {
+		return VMClaims{}, fmt.Errorf("%w: a VM's token needs BROKER_GOOGLE_OIDC_AUDIENCE", ErrVMIdentity)
+	}
+	claims, err := s.VM.VerifyVM(ctx, raw)
+	if errors.Is(err, oidc.ErrExpired) {
+		return VMClaims{}, fmt.Errorf("%w (%v)", ErrVMTokenExpired, err)
+	}
+	if err != nil {
+		return VMClaims{}, fmt.Errorf("%w (%v)", ErrVMIdentity, err)
+	}
+	return claims, nil
+}
+
 // Renew extends a live enrollment's lease by Lease. The caller's session proof says only that it
 // holds the enrollment's key; a pod enrollment's renewal proves only that its renewer holds an
 // unexpired token the issuer minted for that pod: no API-server call proves the pod still exists,
@@ -571,7 +679,8 @@ func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, er
 // row is locked) and required to name the pod UID (runtime_id) and the service-account subject the
 // enrollment recorded at Create, else ErrPodIdentity and the lease stays where it was. A token from
 // another pod or account never renews this one. A machine session renews on its proof alone; a
-// token on its renewal is ErrPodIdentity.
+// token on its renewal is ErrPodIdentity. A vm enrollment renews through RenewVM alone: Renew
+// refuses it ErrVMTokenRequired (or ErrPodIdentity carrying a pod token).
 //
 // The ratchet is keyed on the pod UID. Every pod enrollment starts with pod_token_renewed_at null,
 // whether migration 0014 found it or Create made it, and the first renewal carrying an accepted
@@ -602,11 +711,34 @@ func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, er
 // the log miss it, yet its next phase enrolls an unmarked row). That release also drops
 // podTokenRatcheted and its partial index, which only the ratchet needs.
 func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, error) {
-	withToken := podToken != ""
+	return s.renew(ctx, id, podToken, "")
+}
+
+// RenewVM renews a vm enrollment as Renew renews a pod's, carrying the VM's current identity
+// token, which is verified as Create verifies it (verifyVMToken, before the row is locked) and
+// required to prove the VM the enrollment was made for: the runtime id (VMClaims.RuntimeID) and the
+// account Create recorded, else ErrVMIdentity, and ErrVMTokenExpired for a token past its expiry;
+// the lease stays where it was. Every renewal of a vm enrollment carries the token (an empty one is
+// ErrVMTokenRequired), so a copy of the VM's key off the VM renews nothing once it can no longer
+// fetch that VM's tokens. A token on any other kind's renewal is ErrVMIdentity.
+func (s *Service) RenewVM(ctx context.Context, id, vmToken string) (Renewal, error) {
+	return s.renew(ctx, id, "", vmToken)
+}
+
+// renew is Renew carrying podToken and RenewVM carrying vmToken; at most one is set.
+func (s *Service) renew(ctx context.Context, id, podToken, vmToken string) (Renewal, error) {
+	withToken, withVMToken := podToken != "", vmToken != ""
 	var claims PodClaims
 	if withToken {
 		var err error
 		if claims, err = s.verifyPodToken(ctx, podToken); err != nil {
+			return Renewal{}, err
+		}
+	}
+	var vm VMClaims
+	if withVMToken {
+		var err error
+		if vm, err = s.verifyVMToken(ctx, vmToken); err != nil {
 			return Renewal{}, err
 		}
 	}
@@ -631,6 +763,17 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 	switch {
 	case kind != "pod" && withToken:
 		return Renewal{}, ErrPodIdentity
+	case kind != "vm" && withVMToken:
+		return Renewal{}, fmt.Errorf("%w: enrollment %s is a %s, not a VM", ErrVMIdentity, id, kind)
+	case kind == "vm" && !withVMToken:
+		return Renewal{}, ErrVMTokenRequired
+	case kind == "vm":
+		if vm.RuntimeID() != renewal.RuntimeID || subject == nil || vm.Account != *subject {
+			return Renewal{}, fmt.Errorf("%w: the token is VM %s's, the enrollment VM %s's", ErrVMIdentity, vm.RuntimeID(), renewal.RuntimeID)
+		}
+		if _, err := s.VMService(vm); err != nil {
+			return Renewal{}, fmt.Errorf("%w: %v", ErrVMNotListed, err)
+		}
 	case kind == "pod" && withToken:
 		if claims.PodUID != renewal.RuntimeID || subject == nil || claims.Subject != *subject {
 			return Renewal{}, ErrPodIdentity
@@ -677,15 +820,16 @@ func podTokenRatcheted(ctx context.Context, tx pgx.Tx, podUID string) (bool, err
 
 // authorized reports whether cred may act on an enrollment of the given kind and operator — the
 // trust boundary both Create (when creating one) and Revoke (when ending one) enforce: an
-// operator credential may only act on that same operator's own non-pod enrollments; a service
-// credential (no operator) may only act on pod enrollments, which never carry an operator.
+// operator credential may only act on that same operator's own sessions; a service credential (no
+// operator) may only act on pod and vm enrollments, which never carry an operator.
 func authorized(cred Credential, kind string, operator *string) bool {
+	machine := kind == "pod" || kind == "vm"
 	switch {
 	case cred.Operator != nil && (operator == nil || *operator != *cred.Operator):
 		return false
-	case cred.Operator != nil && kind == "pod":
+	case cred.Operator != nil && machine:
 		return false
-	case cred.Operator == nil && (kind != "pod" || operator != nil):
+	case cred.Operator == nil && (!machine || operator != nil):
 		return false
 	}
 	return true
@@ -700,9 +844,13 @@ func authorized(cred Credential, kind string, operator *string) bool {
 // against, so that case alone falls through to ErrNotLive below rather than ErrOperatorMismatch.
 //
 // A pod enrollment carries no operator, so the operator cannot tell one service's pods from
-// another's: a pod enrollment is ended only by the launcher credential that created it
+// another's: it is ended only by the launcher credential that created it
 // (ErrNotEnrollingCredential for any other), never by another service's credential nor a second
-// credential of the same service. A Legion daemon's token login keeps its account's one credential
+// credential of the same service. A vm enrollment is ended by no launcher credential at all
+// (ErrVMEndsByRevokingItsLogin): a VM's credential follows whoever last logged in with that VM's
+// token, a copied token included, so its proof shows nothing about who holds the VM; the VM's
+// enrollment ends when a person revokes its machine login (RevokeCredential) or with its lease. A
+// Legion daemon's token login keeps its account's one credential
 // across its restarts (machine.Service.TokenLogin), so it ends here every pod it enrolled. An
 // enrollment another credential made — a service login a person approved before token logins, or
 // the daemon's credential before someone revoked it — ends when its pod stops renewing, one lease
@@ -734,6 +882,9 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	}
 	if !authorized(cred, kind, operator) {
 		return ErrOperatorMismatch
+	}
+	if kind == "vm" {
+		return ErrVMEndsByRevokingItsLogin
 	}
 	if kind == "pod" && enrolledBy != cred.ID {
 		return ErrNotEnrollingCredential
@@ -964,17 +1115,31 @@ func endCredential(ctx context.Context, tx pgx.Tx, id, host string, service *str
 // Postgres, whose uuid column would otherwise reject it with a type-mismatch error (SQLSTATE
 // 22P02) that propagates out as a Lookup error instead of ("", false, nil), which
 // proof.Verifier.Verify would in turn surface as a 500 instead of the 401 a forged eid deserves.
+// A vm enrollment is live only while its fleet still allows the VM (tokenLoginListed over its
+// runtime id, its credential's service and host): once an operator narrows the fleet's account,
+// project or instance names past it, the VM has no session identity at all, so every call it signs
+// — a request, a release, a grant reuse, a renewal — is refused as an ended session's is, while
+// its row waits for its lease to lapse.
 func (s *Service) Lookup(ctx context.Context, id string) (string, bool, error) {
 	if _, err := uuid.Parse(id); err != nil {
 		return "", false, nil
 	}
-	var thumbprint string
+	var thumbprint, kind, runtimeID string
+	var service, host *string
 	var live bool
-	err := s.Store.Pool.QueryRow(ctx, `select thumbprint, revoked_at is null and enrollment_lease_live(lease_expires_at) from enrollments where id=$1`, id).Scan(&thumbprint, &live)
+	err := s.Store.Pool.QueryRow(ctx, `select e.thumbprint, e.revoked_at is null and enrollment_lease_live(e.lease_expires_at), e.kind, e.runtime_id, c.service, c.host
+		from enrollments e left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1`, id).
+		Scan(&thumbprint, &live, &kind, &runtimeID, &service, &host)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
-	return thumbprint, live, err
+	if err != nil {
+		return "", false, err
+	}
+	if kind == "vm" && (service == nil || host == nil || !s.tokenLoginListed(runtimeID, *service, *host)) {
+		live = false
+	}
+	return thumbprint, live, nil
 }
 
 // Get answers this enrollment's own metadata (kind, operator, slot, lease expiry) for

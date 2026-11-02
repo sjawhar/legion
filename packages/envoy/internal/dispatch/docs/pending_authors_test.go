@@ -206,7 +206,9 @@ func countVersionAuthor(t *testing.T, database *store.Store, artifactID string, 
 // A settlement lists an edit whose append is held until after it commits, and that append, once
 // it lands, puts nothing back: once the room has gone and another process loads the document, the
 // next version lists only its own author. The append is held by holding the edit's update observer
-// once it has credited alice, before ygo hands the update to persistence.
+// once it has credited alice, before ygo hands the update to persistence. The settlement stores the
+// held edit itself, with alice's credit, before its version (Ledger.flushThrough), so the held
+// append stores nothing when it lands.
 func TestASettlementsListedEditIsNotOwedAgainWhenItsHeldAppendLands(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -222,7 +224,7 @@ func TestASettlementsListedEditIsNotOwedAgainWhenItsHeldAppendLands(t *testing.T
 	release := holdPeerEdit(t, service, artifactID, &service.afterCreditUpdate, appendBlocks(t, "Alice's paragraph.\n"))
 
 	before := latestVersionNumber(t, service, artifactID)
-	settleCurrentGeneration(t, service, artifactID)
+	settleNow(service, artifactID)
 	settled := latestVersionNumber(t, service, artifactID)
 	if settled != before+1 {
 		t.Fatalf("latest version = %d, want %d, the settlement's", settled, before+1)
@@ -230,8 +232,12 @@ func TestASettlementsListedEditIsNotOwedAgainWhenItsHeldAppendLands(t *testing.T
 	if authors := versionAuthors(t, service.store, artifactID, settled); !slices.Equal(authors, []model.Actor{agent, alice}) {
 		t.Fatalf("the settlement's version lists %+v, want %+v and %+v", authors, agent, alice)
 	}
+	stored := storedUpdateCount(t, service.store, artifactID)
 	release()
 	waitForLandedAppends(t, service, artifactID)
+	if after := storedUpdateCount(t, service.store, artifactID); after != stored {
+		t.Fatalf("alice's held append left %d stored updates, want %d: the settlement stored her edit", after, stored)
+	}
 	service.removeConnection(artifactID, 1)
 
 	if err := service.Evict(context.Background(), artifactID); err != nil {

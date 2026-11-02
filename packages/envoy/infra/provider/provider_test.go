@@ -132,6 +132,7 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.Contains(t, user.Properties, "nkey")
 	require.NotContains(t, user.Properties, "publicKey")
 	require.Contains(t, user.Properties, "dispatchMachineId")
+	require.Contains(t, user.Properties, "listenerMachineId")
 	require.Equal(t, "boolean", user.Properties["daemon"].Type)
 	for _, direction := range []string{"publish", "subscribe"} {
 		require.Equal(t, "#/types/envoy-infra:nats:Rules",
@@ -226,27 +227,32 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
-	// The pods' disruption protection, the front door's and the listener's replica counts and the
-	// database's availability are optional plain strings and integers.
+	// The pods' disruption protection, the front door's and the listener's replica counts, the
+	// database's availability and the image cert-publish runs on are optional plain strings and
+	// integers. Every input that configures Dispatch is optional in the schema: a generated Go
+	// SDK's constructor refuses a nil required input, so a cluster-only consumer could not call
+	// the component at all while one stayed required, and the resolver is what requires it with
+	// clusterOnly off.
 	for input, typ := range map[string]string{
 		"priorityClassName": "string", "appPdbMinAvailable": "integer",
 		"frontDoorPdbMinAvailable": "integer", "listenerPdbMinAvailable": "integer",
 		"frontDoorReplicas": "integer", "listenerReplicas": "integer",
-		"databaseAvailabilityType": "string",
+		"databaseAvailabilityType": "string", "frontDoorToolsImage": "string",
 	} {
 		require.Equal(t, typ, dispatch.InputProperties[input].Type, input)
 		require.True(t, dispatch.InputProperties[input].Plain, input)
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
-	// The Tailscale Service the front door hosts is a required Input, typically the consumer's
-	// Service's name output; the image cert-publish runs on is a required plain string.
-	for input, plain := range map[string]bool{"tailnetService": false, "frontDoorToolsImage": true} {
-		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
-		require.Equal(t, plain, dispatch.InputProperties[input].Plain, input)
-		require.False(t, dispatch.InputProperties[input].Secret, input)
-		require.Contains(t, dispatch.RequiredInputs, input)
-	}
+	// clusterOnly, which builds the cluster alone, is an optional plain boolean: it decides which
+	// resources register, so it is never another resource's output, and a stack that sets nothing
+	// sends no property at all, leaving an applied stack's inputs where they are.
+	require.Equal(t, "boolean", dispatch.InputProperties["clusterOnly"].Type)
+	require.True(t, dispatch.InputProperties["clusterOnly"].Plain)
+	require.False(t, dispatch.InputProperties["clusterOnly"].Secret)
+	// region and hostname, which name every cloud resource, are the only inputs the schema
+	// requires: every other input configures Dispatch itself, which clusterOnly does not build.
+	require.ElementsMatch(t, []string{"region", "hostname"}, dispatch.RequiredInputs)
 	require.True(t, dispatch.Properties["agentToken"].Secret)
 	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
 		require.Equal(t, "string", dispatch.Properties[output].Type, output)

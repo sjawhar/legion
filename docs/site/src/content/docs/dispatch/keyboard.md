@@ -53,17 +53,21 @@ These work on every page.
 
 ## Inbox
 
+From 1280 px the Inbox page is two columns, and these keys act on the **selected** row: the one
+the right column is showing. Below that width, and in the Inbox drawer, they act on the
+**focused** row.
+
 | Keys | Action |
 | --- | --- |
 | `j` / `k` | Next / previous ask |
-| `↓` / `↑` | Next / previous ask, while a row is focused |
-| `Enter` | Answer the focused ask (moves into its answer box) |
-| `1` – `9` | Select option 1–9 of the focused ask |
+| `↓` / `↑` | Next / previous ask, while the focus is in the list (below 1280 px, while a row is focused) |
+| `Enter` | Answer the selected ask (moves into its answer box, opening the note field of a decision block first) |
+| `1` – `9` | Pick option 1–9 of the selected ask |
 | `o` | Open the ask's issue or document |
-| `y` | Copy the focused ask's reference |
-| `x` | Select or deselect the focused ask |
-| `h` | Snooze the focused ask, or every selected ask |
-| `Escape` | Back to the ask row, then off it; from the bulk snooze menu, back to the list; with no row focused, clear the selection |
+| `y` | Copy the selected ask's reference |
+| `x` | Tick or untick the selected ask, for a snooze of several at once |
+| `h` | Snooze the selected ask, or every ticked ask |
+| `Escape` | From the right column, back to its row; then back to the ask row, then off it; from the bulk snooze menu, back to the list; with no row focused, drop every tick |
 
 ## Project
 

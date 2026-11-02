@@ -290,7 +290,7 @@ func TestAWaitingRootsChildCompletesItsPhase(t *testing.T) {
 	seedPhase(t, rig.pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", Failing: []string{}})
 
-	result := rig.apply("child-implemented", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer", Generation: 3, Commit: "head-43", Summary: "implemented"})
+	result := rig.apply("child-implemented", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer", Generation: 3, Commit: "head-43", HandoffRecord: "implement-1", HandoffVersion: 1, Summary: "implemented"})
 	if result.Refusal != nil {
 		t.Fatalf("the child's completion = %+v, want it accepted", result.Refusal)
 	}
@@ -441,7 +441,8 @@ func TestARootWithNoOpenTreeClosesAtItsMerge(t *testing.T) {
 
 // A merged root stands in awaiting_merge for as long as its tree runs, so the two facts that would
 // take an awaiting pull request back to implementing can land on a merge GitHub already made. A
-// push past the head READY named takes neither move (withdrawMovedReady), and a red required check
+// synchronize past the head READY named is older than the merge, since GitHub synchronizes only an
+// open pull request, and changes nothing (pullRequestSynchronized), and a red required check
 // withdraws nothing there, as it never has (classify.RedWithdrawsReady): there is nothing left to
 // merge or to re-implement.
 func TestNothingWithdrawsTheREADYOfAWaitingMergedRoot(t *testing.T) {

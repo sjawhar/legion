@@ -79,12 +79,13 @@ func (s *server) agentLastActivity(ctx context.Context, sessionIDs []string) (ma
 
 // listAgents is readable by any authenticated caller: a session picks a target by the
 // capabilities it advertises. Sending to a session without an issue stays human-only. The list is
-// the process's copy of the listener's live sessions (readRouteRoster), at most routeRosterTTL
-// (5 s) old, so one listener call serves agents lists and issue reads alike; a listener that did
-// not answer answers 503 for as long as that copy is a silence, and a request that ends while it
-// waits on the shared fetch answers 503 saying so. Once the process is shutting down, a list the
-// drain still serves asks the listener on its own request instead, since the shared fetch runs on
-// the process's lifetime and can no longer answer.
+// the stored copy of the listener's live sessions every process shares (readRouteRoster, the
+// route_roster row), at most routeRosterTTL (5 s) old, so one listener call serves agents lists
+// and issue reads alike; a listener that did not answer answers 503 for as long as that copy is a
+// silence, a request that ends while it waits on the shared fetch answers 503 saying so, and a
+// failed read of the stored copy answers as the database's error. Once the process is shutting
+// down, a list the drain still serves asks the listener on its own request instead, since the
+// shared fetch runs on the process's lifetime and can no longer answer.
 func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -94,7 +95,11 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roster := s.readRouteRoster(r.Context())
+	roster, err := s.readRouteRoster(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if !roster.answered && s.lifetime.Err() != nil {
 		// The process is shutting down: the shared fetch runs on its lifetime, so it has ended or
 		// failed at once, and its silence says nothing about the listener. A request the drain

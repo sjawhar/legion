@@ -116,20 +116,32 @@ reads `DISPATCH_SERVER_URL` from `compose/.env` and checks that `/auth/start`
 emits exactly `$DISPATCH_SERVER_URL/auth/callback`. It persists the new
 `ENVOY_IMAGE_TAG` only after both checks. A pull that fails changes nothing; the previous image
 keeps serving. A deploy that fails after the new image started restores the
-previous tag and restarts only `dispatch`, unless the failed image moved the
-database's schema. Before each deploy the deployer reads the schema version and
-records, as `ENVOY_IMAGE_SCHEMA=<tag>:<version>` in `compose/.env`, the version
-the deployed tag runs against. It keeps that record until the tag changes, so a
-retry of a failed image compares against the version the previous tag runs
-against, not the one the failed attempt left. When a deploy fails, it first stops
-the failed image and confirms that no `dispatch` container still runs. Then it
-reads the version again, waiting on the advisory lock Dispatch's migration runner
+previous tag and restarts only `dispatch`, unless the failed image changed the
+set of migrations the database has applied. Before each deploy the deployer
+reads every version in `schema_migrations` and records, as
+`ENVOY_IMAGE_SCHEMA=<tag>:<max>-<count>-<digest>` in `compose/.env`, the set the
+deployed tag runs against: the highest version applied, how many are applied,
+and the SHA-256 of the versions, ascending, one per line. It is the set and not
+`max(version)` alone because a migration whose version is below one already
+applied, a numbered migration merged after a timestamped one deployed, leaves
+the max where it was. The deployer keeps that record until the tag changes, so a
+retry of a failed image compares against the set the previous tag runs against,
+not the one the failed attempt left. When a deploy fails, it first stops the
+failed image and confirms that no `dispatch` container still runs. Then it reads
+the versions again, waiting on the advisory lock Dispatch's migration runner
 holds, so a migration the failed image left in flight ends before the read. If
-the stop or the read fails, or the version moved past the record, it starts
-nothing, logs `refusing to roll back to <previous>` with both versions, and exits
-1. Recovery is then forward: deploy an image that fixes the failure, or start the
-failed one by hand once its failure is understood. Never start the previous tag
-against the newer schema.
+the stop or the read fails, or the value differs from the record, it starts
+nothing, logs `refusing to roll back to <previous>` with both values, each as
+`<max> (<count> applied)`, and exits 1. Recovery is then forward: deploy an image
+that fixes the failure, or start the failed one by hand once its failure is
+understood. Never start the previous tag against the newer schema.
+
+A record the deployer before this one wrote is `<tag>:<version>`, a bare
+`max(version)`. While the tag that wrote it is still deployed it is compared the
+old way, refusing the rollback once the max has moved past it, so a retry in
+flight across the upgrade keeps the safety it started with; it sees an
+out-of-order migration only through the max. The first deploy under a new tag
+records the set.
 
 The deployer's database clients (`pg_dump` for the backup, `psql` for the schema
 version) run in the `pg_dump` image under `docker run --init`, so the bound
@@ -185,7 +197,7 @@ to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in
 | `ENVOY_OIDC_AUDIENCE` | conditional | Audience those tokens must carry (`envoy`). Set with `ENVOY_OIDC_ISSUER` or not at all. |
 | `ENVOY_ALLOWED_HOSTS` | conditional | Comma-separated host names or addresses (no port) an unauthenticated listener serves `/v1` to beside loopback; required for each name clients reach it by when neither `ENVOY_API_TOKEN` nor the OIDC pair is set and they do not dial loopback. Any other `Host` gets a JSON 421. Unused when a bearer is required. |
 | `ENVOY_API_ALLOW_UNAUTHENTICATED` | Fargate transition only | Set to `1` only temporarily to start a non-loopback listener with neither credential. |
-| `ENVOY_HOST_BRIDGE` | no | Where the listener reaches a session on this machine that registers a port (OpenCode's serve port): one registered through it, or one whose recorded host is this listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on this machine and re-registered through another listener records. Unset, it reaches the session at the host its registration recorded, and at `host.docker.internal` when it recorded none; the compose files set `127.0.0.1`, since host networking does not resolve `host.docker.internal`. A session it owns that re-registered through another listener and records another host runs on that machine, so it is reached at its recorded host, else that listener's machine id, never through the bridge. The listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; another listener's session is that listener's to deliver, and a session owned by a listener that cannot reach its port is reached by nobody. A serve-port client records as its host its `ENVOY_MACHINE_ID`, or the machine's hostname when that is unset, and a registration whose host is not an IP address or a plain host name (letters, digits, `_`, `.`, `-`; no space) is refused `400 host is not a host name or address`: set `ENVOY_MACHINE_ID` on that machine to such a name. |
+| `ENVOY_HOST_BRIDGE` | no | Where the listener reaches a session on this machine that registers a port: one registered through it, or one whose recorded host is this listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on this machine and re-registered through another listener records. Unset, it reaches the session at the host its registration recorded, and at `host.docker.internal` when it recorded none; the compose files set `127.0.0.1`, since host networking does not resolve `host.docker.internal`. A session it owns that re-registered through another listener and records another host runs on that machine, so it is reached at its recorded host, else that listener's machine id, never through the bridge. The listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; another listener's session is that listener's to deliver, and a session owned by a listener that cannot reach its port is reached by nobody. A serve-port client records as its host its `ENVOY_MACHINE_ID`, or the machine's hostname when that is unset, and a registration whose host is not an IP address or a plain host name (letters, digits, `_`, `.`, `-`; no space) is refused `400 host is not a host name or address`: set `ENVOY_MACHINE_ID` on that machine to such a name. |
 | `ENVOY_SUBSCRIBE_ALL_TOPICS` | no | Set to `1` to have the listener also subscribe to every notification topic (`notifications.>`, in the queue group `envoy-listener-live-<machine id>`) and deliver each topic the stream does not store, a team topic for one, to the sessions on this machine that registered a port and subscribed to it. Such a topic is live: it reaches whoever is subscribed when it is published and is never kept or retried. Only a NATS user whose grant allows a `notifications.>` subscribe (a host's own user) may set it; under any other the start exits 1 with an ERROR naming the variable. Unset, empty or `0` leaves it off; any other value refuses startup. Both compose files set it. |
 | `ENVOY_WEBHOOKS` | no | Comma-separated enabled webhook providers. Without `github` the listener opens no CI store and publishes no CI settlements. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | conditional | Required when GitHub webhooks are enabled. |
@@ -232,7 +244,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `ENVOY_NATS_REPLICAS` | no | The deployment's replica count, from 1 to 5; defaults to `1`. Dispatch creates the `ENVOY_NOTIFICATIONS` stream and its webhook redelivery bucket with this many copies and raises one it finds with fewer, at start and every 30 seconds after; `envoy-dispatch redeliver-webhooks` reads it too. More than 1 needs a clustered NATS. Set the listener's value: the copies stay up only when every program carries the same one. |
 | `ENVOY_STREAM_MAX_BYTES` | no | The `ENVOY_NOTIFICATIONS` stream's byte limit in bytes: a full stream refuses new publishes, which the outbox retries, and keeps what it holds until it is 72 hours old (the listener's row says how to size it); unset creates the stream with none and keeps a deployed one, and set, Dispatch raises a smaller limit, or none, to it at start and every 30 seconds and never lowers one. Set the listener's value: the stream holds the largest limit any program carries. |
 | `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. To rotate it, set the new value followed by the old one, separated by a space or a line feed, move every consumer, then set the new value alone (`cmd/dispatch/README.md`). |
-| `DISPATCH_SIGNIN_ISSUER` / `DISPATCH_SIGNIN_CLIENT_ID` / `DISPATCH_SIGNIN_CLIENT_SECRET`, with `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` | cookie identity | The issuer people sign in through, Dispatch's client there and its secret, and exactly one of: the group a person must be in, through a Cognito sign-in pool; or the Google Workspace domain whose people may sign in, with the issuer `https://accounts.google.com` and a Google web client. Cookie identity requires the issuer, client ID, secret and one of the two at startup; some without the others, both the group and the domain, a domain under another issuer, or a group under Google's refuse to boot. Header identity is for tests and local harnesses only, and refuses every one of these settings. `DISPATCH_ALLOWED_LOGINS` is removed and refused at startup. |
+| `DISPATCH_SIGNIN_ISSUER` / `DISPATCH_SIGNIN_CLIENT_ID` / `DISPATCH_SIGNIN_CLIENT_SECRET`, with `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` | cookie identity, to sign anyone in | The issuer people sign in through, Dispatch's client there and its secret, and exactly one of: the group a person must be in, through a Cognito sign-in pool; or the Google Workspace domain whose people may sign in, with the issuer `https://accounts.google.com` and a Google web client. Cookie identity takes them together or not at all: with the issuer, client ID, secret and one of the two it signs people in, and with none of them it boots, serves its agent-token API and signs nobody in, answering every request that needs a person `401 NO_IDENTITY` — a request carrying a `dsession` cookie issued while sign-in was on included, since `DISPATCH_SIGNING_KEY` goes on verifying that cookie for its thirty days and no membership check is left. Some without the others, both the group and the domain, a domain under another issuer, or a group under Google's refuse to boot. Header identity is for tests and local harnesses only, and refuses every one of these settings. `DISPATCH_ALLOWED_LOGINS` is removed and refused at startup. |
 | `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`; for direct tailnet access, set it to `$(tailscale ip -4)`, never `0.0.0.0`. |
 | `DISPATCH_PORT` | no | Defaults to `8766`; the healthcheck follows it. |
 | `DISPATCH_IDENTITY` | no | `cookie` (default) is Dispatch's production identity. `header:<name>` is only for tests and local harnesses. |

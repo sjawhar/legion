@@ -1,6 +1,5 @@
 import { type ReactNode, useMemo } from "react";
 
-import type { WriteBounds } from "../../api/client";
 import type { Ask } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { QueryError } from "../../components/QueryError";
@@ -13,9 +12,10 @@ import {
 } from "../../theme/classes";
 import type { ComposerAnchor, ComposerKind, ComposerOwner } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
+import type { SaveCommentEdit } from "../conversation/send-request";
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
-import { marginComposeSendKey } from "./margin-context";
+import { marginComposeSendKey, useMargin } from "./margin-context";
 import { ThreadList } from "./ThreadList";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
@@ -53,7 +53,7 @@ interface CommentsTabProps {
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   needsYou: Ask[];
   onAction: (id: string, action: MarginItemAction) => void;
-  onEdit: (id: string, body: string, bounds: WriteBounds) => Promise<unknown>;
+  onEdit: SaveCommentEdit;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;
@@ -93,6 +93,7 @@ export function MarginComposerSlot({
    *  Comments tab shows. */
   onScreen: boolean;
 }): ReactNode {
+  const { anchorRefusal } = useMargin();
   const sendKey = useMemo(
     () => marginComposeSendKey(composer.anchor.artifact),
     [composer.anchor.artifact]
@@ -110,6 +111,7 @@ export function MarginComposerSlot({
       ) : null}
       <MentionComposer
         anchor={composer.anchor}
+        anchorRefusal={anchorRefusal}
         autoFocus={onScreen}
         closed={isClosed}
         frame="pt-3"

@@ -31,8 +31,8 @@ interface ObjectSource {
 interface BlockVolume {
   name: string;
   projected?: { sources: (TokenSource | ObjectSource)[] };
-  config_map?: { name: string; items?: { key: string; path: string }[] };
-  secret?: { name: string };
+  config_map?: { name: string; items?: { key: string; path: string }[]; default_mode?: string };
+  secret?: { name: string; default_mode?: string };
   persistent_volume_claim?: { name: string };
   nfs?: { server: string; path: string };
 }
@@ -52,8 +52,8 @@ interface PodToken {
 interface PodVolume {
   name: string;
   projected?: { sources: { serviceAccountToken: PodToken }[] };
-  configMap?: { name: string; items?: { key: string; path: string }[] };
-  secret?: { secretName: string };
+  configMap?: { name: string; items?: { key: string; path: string }[]; defaultMode?: number };
+  secret?: { secretName: string; defaultMode?: number };
   persistentVolumeClaim?: { claimName: string };
   nfs?: { server: string; path: string };
 }
@@ -91,7 +91,7 @@ const operatorToken = (): PodToken => ({
 });
 
 const block = (): Block => ({
-  service_account: "legion-worker",
+  service_account: "operator-account",
   env: {
     KUBECONFIG: "/var/run/legion/kubernetes/config/config",
     HAWK_API_URL: "https://hawk.internal.example",
@@ -140,7 +140,7 @@ const roleMounts = (): PodMount[] => [
 const pod = (): Pod => ({
   metadata: { name: "legion-legsmoke-legsmoke-1" },
   spec: {
-    serviceAccountName: "legion-worker",
+    serviceAccountName: "operator-account",
     automountServiceAccountToken: false,
     initContainers: [{ name: "workspace-init", volumeMounts: [] }],
     containers: [{ name: "roles", env: [{ name: "POD_UID" }], volumeMounts: roleMounts() }],
@@ -200,7 +200,37 @@ describe("deployment-pod-block verdict", () => {
   test("another ServiceAccount is wrong", () => {
     const p = pod();
     p.spec.serviceAccountName = "default";
-    expect(verdict(p).wrong).toEqual(["the pod runs as ServiceAccount default, not legion-worker"]);
+    expect(verdict(p).wrong).toEqual([
+      "the pod runs as ServiceAccount default, not operator-account",
+    ]);
+  });
+
+  // A block naming no account runs its pods as the namespace's `default`, which is what a pod
+  // naming none runs as too: the two are the same rule, not a check the verdict skips.
+  test("a block naming no ServiceAccount is kept by a pod on default", () => {
+    const b = block();
+    delete b.service_account;
+    const p = pod();
+    p.spec.serviceAccountName = "default";
+    expect(verdict(p, b).wrong).toEqual([]);
+  });
+
+  // An empty service_account names no account either, and jq's `//` keeps an empty string, so the
+  // verdict reads it through the same rule rather than holding the pod to a nameless account.
+  test("a block whose ServiceAccount is empty is kept by a pod on default", () => {
+    const b = block();
+    b.service_account = "";
+    const p = pod();
+    p.spec.serviceAccountName = "default";
+    expect(verdict(p, b).wrong).toEqual([]);
+  });
+
+  test("a block naming no ServiceAccount is wrong on a pod of another account", () => {
+    const b = block();
+    delete b.service_account;
+    expect(verdict(pod(), b).wrong).toEqual([
+      "the pod runs as ServiceAccount operator-account, not default",
+    ]);
   });
 
   test("a share the block names is read by its claim or export", () => {
@@ -290,6 +320,47 @@ describe("deployment-pod-block verdict", () => {
     expect(verdict(p).wrong).toEqual([
       "volume kubernetes-api-ca is secret, not config_map",
       "volume operator-creds is Secret someone-else, not legion-operator-creds",
+    ]);
+  });
+
+  test("a default_mode the block sets is read against the pod's defaultMode", () => {
+    const b = block();
+    b.volumes[1] = {
+      name: "kubernetes-api-ca",
+      config_map: {
+        name: "kube-root-ca.crt",
+        items: [{ key: "ca.crt", path: "ca.crt" }],
+        default_mode: "0o444",
+      },
+    };
+    b.volumes[2] = {
+      name: "operator-creds",
+      secret: { name: "legion-operator-creds", default_mode: "0440" },
+    };
+    const p = pod();
+    p.spec.volumes[2] = {
+      name: "kubernetes-api-ca",
+      configMap: {
+        name: "kube-root-ca.crt",
+        items: [{ key: "ca.crt", path: "ca.crt" }],
+        defaultMode: 0o444,
+      },
+    };
+    p.spec.volumes[3] = {
+      name: "operator-creds",
+      secret: { secretName: "legion-operator-creds", defaultMode: 0o440 },
+    };
+    expect(verdict(p, b)).toEqual({ process: { pid: 10, comm: "legion" }, missing: [], wrong: [] });
+
+    // The API server stores 0644 for a volume that sets no mode, so one the pod left out reads so.
+    const open = pod();
+    open.spec.volumes[3] = {
+      name: "operator-creds",
+      secret: { secretName: "legion-operator-creds", defaultMode: 0o644 },
+    };
+    expect(verdict(open, b).wrong).toEqual([
+      "volume kubernetes-api-ca has defaultMode 0644, not 0444",
+      "volume operator-creds has defaultMode 0644, not 0440",
     ]);
   });
 

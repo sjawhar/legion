@@ -33,6 +33,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/testbin"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -643,11 +644,7 @@ func TestWhatAnIssuePlantsNeitherReadsTheProvisioningTokenNorOutlivesItsPod(t *t
 	if output, err := exec.Command("go", "build", "-o", legion, "github.com/sjawhar/legion/daemon/cmd/legion").CombinedOutput(); err != nil {
 		t.Fatalf("build the Go legion: %v\n%s", err, output)
 	}
-	probeFilters := exec.Command("jj", "config", "list", "--include-defaults", "git.filter.enabled")
-	probeFilters.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(t.TempDir(), "none.toml"), "XDG_CONFIG_HOME="+t.TempDir(), "HOME="+t.TempDir())
-	if out, _ := probeFilters.Output(); len(strings.TrimSpace(string(out))) == 0 {
-		t.Fatal("this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs")
-	}
+	testbin.RequireJJFilters(t)
 
 	type vector struct {
 		name string
@@ -859,6 +856,7 @@ func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
 		{"-C", seed, "push", "--quiet", remote, "HEAD:main"},
 	} {
 		command := exec.Command(git, argv...)
+		command.Dir = root
 		command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, output)
@@ -934,6 +932,7 @@ func feedTar(remote string) ([]byte, error) {
 	defer func() { _ = os.RemoveAll(dir) }()
 	clone := filepath.Join(dir, "clone.git")
 	command := exec.Command("git", "clone", "--bare", "--quiet", "--no-local", remote, clone)
+	command.Dir = dir
 	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 	if output, err := command.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("clone %s: %w\n%s", remote, err, output)

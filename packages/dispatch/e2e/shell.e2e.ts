@@ -47,6 +47,78 @@ test("a transient whoami failure shows a retry banner and keeps the app, not the
   await context.close();
 });
 
+// After a restart, whoami answers 503 EVENT_HEAD_UNAVAILABLE ("ask again") for as long as an event
+// write of Dispatch's database open since before the server's boot holds the head back: two
+// seconds a request, then the refusal. Under load such a write can stay open past the three tries
+// a read gets, and a page that stops on "Couldn't reach Dispatch." then stays there until the
+// person clicks Retry, though Dispatch answers again a moment later (driven against a real server:
+// a write held 15 s across a restart left the page on that message 10 s after it committed). The
+// page asks again while whoami answers that code, and opens once it answers.
+test("a page asks whoami again while it answers EVENT_HEAD_UNAVAILABLE, and opens once it answers", async ({
+  browser,
+}, testInfo) => {
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const refuseUntil = Date.now() + 12_000;
+  let refused = 0;
+  await page.route("**/auth/whoami", (route) => {
+    if (Date.now() >= refuseUntil) {
+      return route.continue();
+    }
+    refused++;
+    return route.fulfill({
+      body: JSON.stringify({
+        code: "EVENT_HEAD_UNAVAILABLE",
+        error: "the event log's head could not be read; ask again",
+      }),
+      contentType: "application/json",
+      status: 503,
+    });
+  });
+
+  await page.goto("/");
+  if (testInfo.project.name === "iphone") {
+    await page.getByRole("button", { name: "Open navigation" }).click({ timeout: 30_000 });
+  }
+  await expect(page.getByText("Signed in as alice")).toBeVisible({ timeout: 30_000 });
+  expect(refused).toBeGreaterThan(0);
+
+  await context.close();
+});
+
+// whoami answers 503 EVENT_HEAD_READ_FAILED when it cannot read the event log's head at all: the
+// database or its pool does not answer. Unlike EVENT_HEAD_UNAVAILABLE that need not end on its own,
+// so the page asks again only as any read does, and then shows that it could not reach Dispatch,
+// with Retry, rather than loading for ever.
+test("a page stops on Couldn't reach Dispatch. while whoami answers EVENT_HEAD_READ_FAILED", async ({
+  browser,
+}) => {
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  let refused = 0;
+  await page.route("**/auth/whoami", (route) => {
+    refused++;
+    return route.fulfill({
+      body: JSON.stringify({
+        code: "EVENT_HEAD_READ_FAILED",
+        error: "the event log's head could not be read",
+      }),
+      contentType: "application/json",
+      status: 503,
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Couldn't reach Dispatch.")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  const shown = refused;
+  expect(shown).toBeLessThanOrEqual(3);
+  await page.waitForTimeout(3_000);
+  expect(refused).toBe(shown);
+
+  await context.close();
+});
+
 test("signing out revokes the session on the server and returns to the sign-in page @phone", async ({
   browser,
 }, testInfo) => {

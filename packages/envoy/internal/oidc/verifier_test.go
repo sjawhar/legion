@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -167,6 +168,69 @@ func TestVerifyRefreshesKeySetForRotatedKey(t *testing.T) {
 	}
 	if got := issuer.JWKSFetches() - fetchesBefore; got != 1 {
 		t.Errorf("key set fetched %d more times, want 1 refresh", got)
+	}
+}
+
+// TestVerifyBoundsKeySetReadsUnderAnUnpublishedKeyID: go-oidc's own RemoteKeySet reads the
+// issuer's key set again for every token naming a key id it does not hold, so one forged token
+// replayed is one read of the issuer per copy. The verifier reads through *Keys instead, which
+// bounds those reads at one per MinRefresh however many such tokens arrive.
+func TestVerifyBoundsKeySetReadsUnderAnUnpublishedKeyID(t *testing.T) {
+	issuer := oidctest.New(t)
+	verifier, signing := newVerifierFor(t, issuer)
+	if _, err := verifier.Verify(context.Background(), issuer.Mint(t, signing, issuer.Claims(testSubject, testAudience))); err != nil {
+		t.Fatalf("Verify with the published key: %v", err)
+	}
+	if fetches := issuer.JWKSFetches(); fetches != 1 {
+		t.Fatalf("key set read %d times for the first verification, want 1", fetches)
+	}
+
+	// One key the issuer never published, presented as a stream of distinct tokens: the shape a
+	// replayed forgery takes. MinRefresh is the default minute here, which nothing in this test
+	// passes.
+	unpublished := oidctest.NewKey(t, "never-published")
+	const tokens = 16
+	for i := range tokens {
+		claims := issuer.Claims(testSubject, testAudience)
+		claims["jti"] = fmt.Sprintf("replay-%d", i)
+		_, err := verifier.Verify(context.Background(), issuer.Mint(t, unpublished, claims))
+		if !errors.Is(err, ErrSignature) {
+			t.Fatalf("token %d, signed by a key the issuer never published = %v, want ErrSignature", i, err)
+		}
+	}
+	if fetches := issuer.JWKSFetches(); fetches != 2 {
+		t.Errorf("key set read %d times for %d tokens naming an unpublished key id, want 2: the first opens the refresh window and the rest fall inside it", fetches, tokens)
+	}
+}
+
+// TestVerifyAcceptsAKeyRotatedInWithoutWaitingOutTheWindow is the other side of that bound: a key
+// the issuer publishes after the cached set was read is accepted at once, because the first token
+// naming a key id the set does not hold is allowed its one read. A rotation waits for no part of
+// MinRefresh.
+func TestVerifyAcceptsAKeyRotatedInWithoutWaitingOutTheWindow(t *testing.T) {
+	issuer := oidctest.New(t)
+	keys, signing := keysFor(t, issuer, "signing-key")
+	// Longer than this test can take, so the rotation below is answered by the read a first miss
+	// is allowed and not by the window reopening.
+	keys.MinRefresh = time.Hour
+	verifier := NewWithKeys(issuer.URL(), testAudience, keys)
+	if _, err := verifier.Verify(context.Background(), issuer.Mint(t, signing, issuer.Claims(testSubject, testAudience))); err != nil {
+		t.Fatalf("Verify with the published key: %v", err)
+	}
+
+	rotated := oidctest.NewKey(t, "rotated-key")
+	token := issuer.Mint(t, rotated, issuer.Claims(testSubject, testAudience))
+	issuer.Publish(rotated)
+
+	claims, err := verifier.Verify(context.Background(), token)
+	if err != nil {
+		t.Fatalf("Verify with the key rotated in inside the window: %v", err)
+	}
+	if claims.Subject != testSubject {
+		t.Errorf("Subject = %q, want %q", claims.Subject, testSubject)
+	}
+	if fetches := issuer.JWKSFetches(); fetches != 2 {
+		t.Errorf("key set read %d times, want 2: the first verification and the rotation's one refresh", fetches)
 	}
 }
 

@@ -212,7 +212,9 @@ test("issue header copies its key and persists its title, status, and route @pho
 
   try {
     await page.goto(`/issues/${issue.key}`);
-    const heading = page.getByRole("heading", { level: 1, name: "First decision" });
+    const heading = page
+      .getByTestId("issue-header")
+      .getByRole("heading", { level: 1, name: "First decision" });
     await expect(heading).toBeVisible();
     const copyKey = page.getByRole("button", { name: `Copy issue key ${issue.key}` });
     await copyKey.click();
@@ -550,7 +552,9 @@ test("closing an issue removes its asks from the inbox and pinning stays private
   try {
     await page.goto(`/issues/${issue.key}`);
     await inbox.goto("/");
-    await expect(inbox.locator("[data-testid^=ask-]")).toHaveCount(2);
+    // The Inbox's rows are what the close takes a question out of: from 1280 px a card is drawn
+    // for the selected row alone (INFRA-575), so the rows are the list.
+    await expect(inbox.locator("[data-inbox-row]")).toHaveCount(2);
     await page.getByRole("button", { name: "Close issue" }).click();
     await expect
       .poll(() => getIssue(issue.key))
@@ -559,7 +563,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
         status: "done",
       });
     await expect(page.getByText("This issue is closed.", { exact: true })).toBeVisible();
-    await expect(inbox.locator("[data-testid^=ask-]")).toHaveCount(1);
+    await expect(inbox.locator("[data-inbox-row]")).toHaveCount(1);
     await expect(inbox.getByText("First ask", { exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Pin issue" }).click();
     await expect(page.getByRole("button", { name: "Unpin issue" })).toBeEnabled();
@@ -578,7 +582,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
       // Alice's issues are nobody else's own work; the closed one is gone from the cleared
       // filter too.
       await bobPage.goto("/?assignee=everyone");
-      await expect(bobPage.locator("[data-testid^=ask-]")).toHaveCount(1);
+      await expect(bobPage.locator("[data-inbox-row]")).toHaveCount(1);
       await expect(bobPage.getByText("First ask", { exact: true })).toHaveCount(0);
       await expect(bobPage.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
     } finally {
@@ -867,7 +871,10 @@ test("issue header gives the title the row's free space beside a short details l
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  const title = page.getByRole("heading", { level: 1 });
+  // The title is not the page's only `h1`: the shell's loading skeleton is one, and a rendered
+  // document whose text opens on a top-level heading puts that heading on the page too. The
+  // header holds the one heading the issue is identified by.
+  const title = page.getByTestId("issue-header").getByRole("heading", { level: 1 });
   const measureTitle = () =>
     page.evaluate(() => {
       const heading = document.querySelector("[data-testid=issue-header] h1") as HTMLElement;
@@ -953,7 +960,7 @@ test("issue header delivers the click that ends a title edit to the control unde
   // `disabled` while their previous write is in flight, and a browser drops a click on a
   // disabled button.
   const pressWhileEditingTitle = async (control: Locator) => {
-    await page.getByRole("heading", { level: 1 }).click();
+    await page.getByTestId("issue-header").getByRole("heading", { level: 1 }).click();
     await expect(page.getByLabel("Issue title")).toBeFocused();
     await expect(control).toBeEnabled();
     const box = await control.boundingBox();
@@ -968,7 +975,9 @@ test("issue header delivers the click that ends a title edit to the control unde
     for (const width of [1024, 1279]) {
       await page.setViewportSize({ height: 800, width });
       await page.goto(`/issues/${issue.key}`);
-      await expect(page.getByRole("heading", { level: 1, name: "Short title" })).toBeVisible();
+      await expect(
+        page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Short title" })
+      ).toBeVisible();
 
       const pin = page.getByRole("button", { name: "Pin issue" });
       await pressWhileEditingTitle(pin);
@@ -1256,7 +1265,7 @@ test("an issue's whole title wraps at every width, whether prose or one unbroken
     const page = await context.newPage();
     for (const issue of [prose, oneWord]) {
       await page.goto(`/issues/${issue.key}`);
-      const title = page.getByRole("heading", { level: 1 });
+      const title = page.getByTestId("issue-header").getByRole("heading", { level: 1 });
       await expect(title).toHaveText(issue.title);
       // Whole means nothing between the title and the document clips it: no clamp, ellipsis, or
       // box shorter or narrower than the text it holds, at the width this project renders.

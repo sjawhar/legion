@@ -224,6 +224,13 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 // are the listener's own and cost nothing; the sweep runs aside, so the listener reads the
 // notifications that follow the LISTEN while the rooms are decided.
 //
+// service.roomLoads is every room this process has loaded, and nothing here takes an entry out of
+// it: an entry goes when its document is collected (keepInstance), or, for a load that left no
+// document, with the failure that ended that load, where that failure was met (LoadDoc,
+// onLoadDocument), so the sweep ranges over every room loaded since the last collection. An entry
+// whose room has gone costs the interval's lookup and the server's (mayEvict, srv.GetDoc) and no
+// database read, since the head is read only for a room that is still resident.
+//
 // The test hook runs once the sweep's decisions have ended, so a test that waits on it waits for
 // the sweep too.
 func (e *staleRoomEvictor) connected(ctx context.Context) func() {

@@ -39,8 +39,10 @@
 #      longer has,
 #   6. a go command that fails or a first-party package go list cannot load, since its closure
 #      is then unknown, and a `!` pattern under `some` or a brace in a gate's filter,
-#   7. a SELECTED_BY in ci-ok's step that is not exactly {job: the output its if: tests} for every
-#      job ci-ok needs but changes and lint, or a PULL_REQUEST_ONLY that is not exactly the jobs
+#   7. a job whose if: tests an output of changes that ci-ok's needs or its SELECTED_BY does not
+#      name, which leaves that job advisory once ci-ok is the one required check, a SELECTED_BY
+#      in ci-ok's step that is not exactly {job: the output its if: tests} for every job ci-ok
+#      needs but changes and lint, or a PULL_REQUEST_ONLY that is not exactly the jobs
 #      whose if: restricts to github.event_name == 'pull_request': ci-ok.sh fails a job that map
 #      says changes selected unless it succeeded, so a wrong entry fails a job that was rightly
 #      skipped or passes one a failed-only re-run left skipped,
@@ -48,7 +50,12 @@
 #      name exactly that filter's patterns (anchors flattened), naming each missing and extra one,
 #      or that is missing or has no on.push.paths: it runs on main the work the filter's job runs
 #      on pull requests and merge groups (docs-pages.yaml, the docs filter), so the two lists
-#      cannot drift.
+#      cannot drift,
+#   9. a pattern of a changes filter, or a read ci_job_reads.py declares (a gate's or a RULES
+#      row's), that matches no file of the repository, naming the pattern and the filter, gate or
+#      row it is in: a filter and a declared read that name the same path which does not exist are
+#      consistent with each other and select nothing, so every rule above passes while a change to
+#      the files they mean starts no job. A `!` pattern is exempt, since it names what to leave out.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,

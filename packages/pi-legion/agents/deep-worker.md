@@ -8,9 +8,6 @@ description: |
 # this agent a model, through modelRoles.deep or a task.agentModelOverrides entry for it (docs/kubernetes.md, Operator configuration).
 model: ["@deep"]
 tools: read, glob, grep, bash, edit, write
-# The implementer waits for each worker's result before it checks or commits it; without this, Oh My
-# Pi runs a task agent in the background whenever async jobs are enabled.
-blocking: true
 ---
 
 You are an autonomous coding worker. You are given a goal, not steps: decide how to reach it, then

@@ -11,7 +11,8 @@
             "input": {
               "event": "Stop",
               "lastAssistantMessage": "${last_assistant_message}",
-              "stopHookActive": "${stop_hook_active}"
+              "stopHookActive": "${stop_hook_active}",
+              "backgroundTasks": "${background_tasks}"
             },
             "timeout": 30
           }

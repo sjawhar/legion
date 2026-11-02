@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
 
 // Every agent of a tree writes the shared clone, so everything below is what a tree agent can plant
@@ -174,7 +176,7 @@ func TestProvisionStartsOnlyTheGitBootResolved(t *testing.T) {
 // planted there never runs with the token file in its environment — though it does run, in the
 // uncredentialed workspace add.
 func TestTheCredentialedFetchRunsNoWorkingCopyFilter(t *testing.T) {
-	requireFilters(t)
+	testbin.RequireJJFilters(t)
 	sink := filepath.Join(t.TempDir(), "filter-ran")
 	err := provisionTwice(t, func(t *testing.T, _ *recordingRunner, clone string) {
 		filter := recordingScript(t, "filter", sink, "exec cat")
@@ -200,17 +202,6 @@ func TestTheCredentialedFetchRunsNoWorkingCopyFilter(t *testing.T) {
 		if line != "filter token-file=" {
 			t.Errorf("the filter the tree planted ran inside a credentialed step: %s", line)
 		}
-	}
-}
-
-// requireFilters fails unless the jj under test, reading no configuration of the user's, has
-// working-copy filters: provisioning is proven against the jj the worker image ships.
-func requireFilters(t *testing.T) {
-	t.Helper()
-	probe := exec.Command("jj", "config", "list", "--include-defaults", "git.filter.enabled")
-	probe.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(t.TempDir(), "none.toml"), "XDG_CONFIG_HOME="+t.TempDir(), "HOME="+t.TempDir())
-	if out, _ := probe.Output(); len(strings.TrimSpace(string(out))) == 0 {
-		t.Fatal("this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs")
 	}
 }
 
@@ -537,7 +528,7 @@ func TestTheRunnerRefusesASharedCloneWhoseRepositoryIsASymlink(t *testing.T) {
 
 	for name, command := range map[string]func() error{
 		"a command on the clone": func() error {
-			_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, "")
+			_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, ws.Clone)
 			return err
 		},
 		"a command in a workspace of it": func() error {
@@ -633,7 +624,7 @@ func TestTheRunnerRefusesASymlinkedJJ(t *testing.T) {
 		untouched := symlinkJJ(t, ws.Clone, filepath.Join("repo", "config-id"), filepath.Join("repo", "config.toml"))
 		for name, command := range map[string]func() error{
 			"a command on the clone": func() error {
-				_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, "")
+				_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, ws.Clone)
 				return err
 			},
 			"a command in a workspace of it": func() error {
@@ -756,7 +747,7 @@ func TestTheRunnerRefusesASymlinkedLayoutDirectory(t *testing.T) {
 				t.Fatal(err)
 			}
 			untouched := plant(t, filepath.Join(copied, rel), "config-id", "config.toml")
-			_, err = RunChecked(context.Background(), run, append(slices.Clip(log), "-R", ws.Clone), nil, "")
+			_, err = RunChecked(context.Background(), run, append(slices.Clip(log), "-R", ws.Clone), nil, ws.Clone)
 			refused(t, "a command on the clone", err, symlink)
 			_, err = RunCheckedIn(context.Background(), run, ws, log)
 			refused(t, "a command in a workspace of it", err, symlink)

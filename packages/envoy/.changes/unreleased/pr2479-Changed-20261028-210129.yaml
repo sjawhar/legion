@@ -1,5 +1,0 @@
-kind: Changed
-body: A Dispatch document read that misses the cache validates the document tree once instead of five times, and reads each text from its Yjs items directly instead of through ygo's `ToDelta` (`pmdoc.ReadUnshared`, `pmdoc.ValidDocument`). A live `/blocks` read builds its blocks from the tree it read with one validation instead of four. Tokens, `/text`, `/blocks` and every refusal are byte for byte the same. The token encoder `pmdoc.AppendTokenJSON` is now `pmdoc.EncodeTokenJSON`, which allocates its own buffer.
-time: 2026-10-28T21:01:29.828972272Z
-custom:
-    Issue: pr2479

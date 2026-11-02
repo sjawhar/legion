@@ -194,6 +194,29 @@ func heldOnceComplete(t *testing.T, reg *Registry, sessionID string, want []stri
 	}
 }
 
+// waitForHeld waits until the view answers that sessionID holds exactly want, so a test that then
+// starts the view again knows the claims reached it before it did.
+func waitForHeld(t *testing.T, reg *Registry, sessionID string, want ...string) {
+	t.Helper()
+	waitFor(t, 5*time.Second, func() bool {
+		roles, err := reg.RolesHeldBy(sessionID)
+		return err == nil && slices.Equal(roles, want)
+	})
+}
+
+// restartRoleViewTimingOutAfter puts the role claim view where a listener start leaves it when
+// nats.go's idle timer ends its first scan: the view is emptied and followed again by a watcher
+// whose first scan delivers delivered claims and then stalls until that timer ends it. The
+// replacement is the registry's own role watcher (newRoleWatcher), so it rescans as the product's
+// does and the view becomes complete without a Rewatch.
+func restartRoleViewTimingOutAfter(t *testing.T, reg *Registry, rawRoles natsgo.KeyValue, delivered int) {
+	t.Helper()
+	reg.roleWatcher.Stop()
+	reg.resetRoleHolders()
+	reg.roleWatcher = reg.newRoleWatcher(bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(rawRoles, delivered)})
+	reg.roleWatcher.Start()
+}
+
 // A role claim view whose first scan nats.go's idle timer ended holds only the claims that scan
 // delivered, so it is no answer: RolesHeldBy refuses it as not ready rather than report the holder
 // of a claim the scan did not deliver without its roles. The watcher scans the bucket again
@@ -219,17 +242,9 @@ func TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes(t *tes
 	putRoleClaim(t, rawRoles, "planner", "ses_holder")
 	// The registry's own view reaches the claims first, so the view the test then starts again
 	// is the only one short of them.
-	waitFor(t, 5*time.Second, func() bool {
-		roles, err := reg.RolesHeldBy("ses_holder")
-		return err == nil && slices.Equal(roles, []string{"planner", "reviewer"})
-	})
+	waitForHeld(t, reg, "ses_holder", "planner", "reviewer")
 
-	// The view starts again as a listener start's does, from nothing, and its first scan delivers
-	// architect's claim and then stalls until nats.go's idle timer ends it.
-	reg.roleWatcher.Stop()
-	reg.resetRoleHolders()
-	reg.roleWatcher = reg.newRoleWatcher(bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(rawRoles, 1)})
-	reg.roleWatcher.Start()
+	restartRoleViewTimingOutAfter(t, reg, rawRoles, 1)
 	waitFor(t, 5*time.Second, reg.roleWatcher.Ready)
 	if roles, err := reg.RolesHeldBy("ses_holder"); !errors.Is(err, ErrRoleViewNotReady) {
 		t.Fatalf("after a first scan the idle timer ended, RolesHeldBy(ses_holder) = %v, %v; want ErrRoleViewNotReady", roles, err)
@@ -239,6 +254,53 @@ func TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes(t *tes
 	}
 	if got := heldRoles(t, reg, "ses_other"); !slices.Equal(got, []string{"architect"}) {
 		t.Fatalf("after the rescan ses_other holds %v, want [architect]", got)
+	}
+}
+
+// The listener's startup gate is this wait, so it decides whether GET /v1/sessions and
+// GET /v1/registry/<session_id> are served before the role claim view can answer. Readiness is no
+// gate for them: a first scan nats.go's idle timer ended releases it with the view short of the
+// bucket, and RolesHeldBy goes on refusing (ErrRoleViewNotReady) until the rescan completes, which
+// both routes answer a live client as the bus-unavailable 503 while the bus is healthy. So
+// WaitForCacheReady returns only once that view is complete, and RolesHeldBy answers the moment it
+// returns, with no retry and no poll.
+func TestWaitForCacheReadyHoldsUntilTheRoleClaimViewAnswers(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	if _, err := reg.SetRole("ses_holder", "m1", "reviewer", false); err != nil {
+		t.Fatalf("claim reviewer: %v", err)
+	}
+	if _, err := reg.SetRole("ses_holder", "m1", "planner", false); err != nil {
+		t.Fatalf("claim planner: %v", err)
+	}
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawRoles, err := js.KeyValue(bus.RoleClaimBucket)
+	if err != nil {
+		t.Fatalf("open the role bucket: %v", err)
+	}
+	waitForHeld(t, reg, "ses_holder", "planner", "reviewer")
+
+	restartRoleViewTimingOutAfter(t, reg, rawRoles, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+	roles, err := reg.RolesHeldBy("ses_holder")
+	if err != nil {
+		t.Fatalf("RolesHeldBy(ses_holder) refused the read right after WaitForCacheReady returned: %v", err)
+	}
+	if !slices.Equal(roles, []string{"planner", "reviewer"}) {
+		t.Fatalf("right after WaitForCacheReady returned, ses_holder holds %v, want [planner reviewer]", roles)
 	}
 }
 

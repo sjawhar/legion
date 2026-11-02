@@ -1132,6 +1132,10 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 			jjAs := func(user string, args ...string) string {
 				t.Helper()
 				command := exec.Command(jj, append(args, "-R", workspace)...)
+				// -R names the repository, not a working directory: the helper runs in the
+				// workspace it reads, since jj searches upward from the directory it runs in for
+				// the closest .jj, and the test process stands in a real workspace in a pod.
+				command.Dir = workspace
 				command.Env = append(os.Environ(), "JJ_USER="+user, "JJ_EMAIL="+user+"@example.test")
 				output, err := command.CombinedOutput()
 				if err != nil {
@@ -1140,6 +1144,9 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 				return strings.TrimSpace(string(output))
 			}
 			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
+			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
+			// the test process's directory to the closest .jj and write that repository.
+			initialize.Dir = workspace
 			initialize.Env = append(os.Environ(), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
 			if output, err := initialize.CombinedOutput(); err != nil {
 				t.Fatalf("jj git init: %v\n%s", err, output)
@@ -1222,6 +1229,9 @@ func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			workspace := t.TempDir()
 			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
+			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
+			// the test process's directory to the closest .jj and write that repository.
+			initialize.Dir = workspace
 			initialize.Env = append(os.Environ(), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
 			if output, err := initialize.CombinedOutput(); err != nil {
 				t.Fatalf("jj git init: %v\n%s", err, output)

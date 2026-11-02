@@ -13,19 +13,22 @@ type Permissions struct {
 	Publish, Subscribe []string
 }
 
-// Grant returns the NATS grant for one Legion daemon. Its two durable consumers inspect and create
-// consumers in Envoy's notification stream, fetch their messages, and acknowledge them; the
+// Grant returns the NATS grant for one Legion daemon. Its three durable consumers inspect and
+// create consumers in Envoy's notification stream, fetch their messages, and acknowledge them; the
 // consumer subjects end in `>`, so the grant reaches every consumer of the stream, not only those
-// two. It also receives role-lane delivery exceptions and JetStream API replies. Those replies
-// arrive on `_INBOX.>`, so the daemon's seed receives every reply any client on the server gets,
-// key-value reads and watch updates included, such as the listener's envoy_roles and
-// envoy_sessions watchers.
+// three. Its state read gets stored messages of the stream one at a time (`STREAM.MSG.GET`): the
+// oldest message each consumer has not acknowledged, whose time is the consumer's lag. The get only
+// reads: it can create, change or delete nothing. It also receives role-lane delivery exceptions
+// and JetStream API replies. Those replies arrive on `_INBOX.>`, so the daemon's seed receives every
+// reply any client on the server gets, key-value reads and watch updates included, such as the
+// listener's envoy_roles and envoy_sessions watchers.
 //
 // Each call owns its lists so a consumer can narrow a grant without changing another caller's.
 func Grant() Permissions {
 	return Permissions{
 		Publish: []string{
 			"$JS.API.STREAM.INFO." + bus.Stream,
+			"$JS.API.STREAM.MSG.GET." + bus.Stream,
 			"$JS.API.CONSUMER.INFO." + bus.Stream + ".>",
 			"$JS.API.CONSUMER.CREATE." + bus.Stream + ".>",
 			"$JS.API.CONSUMER.MSG.NEXT." + bus.Stream + ".>",

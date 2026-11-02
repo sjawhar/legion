@@ -48,6 +48,16 @@ const READS = {
   },
   asks: { key: ["asks", "CORE-1"] },
   comment: { key: commentQuery("comment-1").queryKey },
+  // Block b2 of CORE-1's comment-1, read by a link to it and, pinned to the comment's revision 1,
+  // by another link.
+  commentBlock: {
+    data: { edges: [], node: { id: "comment/comment-1#b2", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/comment/comment-1#b-b2").queryKey,
+  },
+  commentBlockPinned: {
+    data: { edges: [], node: { id: "comment/comment-1#b2", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/comment/comment-1#b-b2@v1").queryKey,
+  },
   comments: { key: ["comments", "CORE-1"] },
   components: { key: ["components", "CORE"] },
   conversationMessages: { key: ["issue-messages", "CORE-1"] },
@@ -72,6 +82,7 @@ const READS = {
     key: ["references", "to", "dispatch://CORE/artifact/plan-md"],
   },
   grandparent: { key: issueQuery("CORE-00").queryKey },
+  handoffs: { key: ["handoffs", "CORE-1"] },
   inbox: { key: inboxQuery().queryKey },
   issuePanel: {
     data: { edges: [], node: { id: "CORE-1", kind: "issue" } },
@@ -80,16 +91,25 @@ const READS = {
   labelledProjectList: { key: projectIssuesQuery("CORE", ["ui"]).queryKey },
   log: { key: ["events", "CORE-1"] },
   message: { key: messageQuery("CORE-1", "message-1").queryKey },
+  messageBlock: {
+    data: { edges: [], node: { id: "message/message-0#b1", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/message/message-0#b-b1").queryKey,
+  },
   newParentPanel: {
     data: { edges: [], node: { id: "CORE-8", kind: "issue" } },
     key: ["references", "to", "dispatch://CORE-8"],
   },
   otherAsk: { key: askQuery("ask-9").queryKey },
+  otherCommentBlock: {
+    data: { edges: [], node: { id: "comment/comment-9#b2", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/comment/comment-9#b-b2").queryKey,
+  },
   otherDocSummary: {
     data: { id: "artifact-2" },
     key: documentSummaryQuery("CORE", "notes-md").queryKey,
   },
   otherDocumentPage: { data: { id: "artifact-2" }, key: ["artifact-ref", "CORE/notes-md"] },
+  otherHandoffs: { key: ["handoffs", "CORE-9"] },
   otherIssueMessage: { key: messageQuery("CORE-9", "message-9").queryKey },
   otherProjectList: { key: projectIssuesQuery("OTHER", []).queryKey },
   // Another block of CORE-1's spec, which a link elsewhere on the page names.
@@ -552,6 +572,22 @@ const rules: Record<string, Rule> = {
       refreshes: ["detail", "log", "projectList"],
       spares: ["summary", "pinned", "inbox", "referencePicker", "projects", "replies", "userState"],
     },
+  "a recorded handoff refreshes the issue's handoff list and its log, and no rollup": {
+    event: event("handoff.recorded", { handoff_id: "handoff-1", phase: "implement", version: 2 }),
+    refreshes: ["handoffs", "detail", "log", "projectList"],
+    spares: [
+      "otherHandoffs",
+      "parent",
+      "grandparent",
+      "unrelatedDetail",
+      "referencesTab",
+      "summary",
+      "pinned",
+      "inbox",
+      "projects",
+      "replies",
+    ],
+  },
   "a message refreshes the issue's message reads, and the Replies of those in its thread": {
     event: event("message.created", { id: "message-2", thread_logins: ["alice"] }),
     refreshes: ["detail", "log", "message", "rootMessage", "conversationMessages", "replies"],
@@ -873,6 +909,41 @@ const rules: Record<string, Rule> = {
     refreshes: ["documentPanel", "comment"],
     spares: ["specPanel", "issuePanel", "inbox"],
   },
+  "an edit of a comment refreshes every read of its blocks, pinned or not, and no other block": {
+    event: event("comment.edited", { anchor: null, ask_id: null, id: "comment-1" }),
+    refreshes: ["commentBlock", "commentBlockPinned", "comment"],
+    spares: ["otherCommentBlock", "messageBlock", "specBlock", "otherSpecBlock"],
+  },
+  "an edit of a comment a project document owns refreshes the reads of its blocks": {
+    event: event("comment.edited", { anchor: null, ask_id: null, id: "comment-1" }, documentOwner),
+    refreshes: ["commentBlock", "commentBlockPinned"],
+    spares: ["otherCommentBlock", "messageBlock"],
+  },
+  "a resolution of a comment leaves the reads of its blocks alone": {
+    event: event("comment.resolved", { anchor: null, ask_id: null, id: "comment-1" }),
+    refreshes: ["comment"],
+    spares: ["commentBlock", "commentBlockPinned"],
+  },
+  "a reply that names a block of a comment refreshes that block's reads, which list it": {
+    event: event("comment.created", {
+      anchor: null,
+      ask_id: null,
+      id: "comment-2",
+      reply_block: { block_id: "b2", node: "comment/comment-1#b2" },
+      reply_to: "comment-1",
+    }),
+    refreshes: ["commentBlock", "commentBlockPinned", "comment"],
+    spares: ["otherCommentBlock", "messageBlock"],
+  },
+  "a reply that names a block of a message refreshes that block's read": {
+    event: event("message.answered", {
+      id: "message-2",
+      in_reply_to: "message-0",
+      reply_block: { block_id: "b1", node: "message/message-0#b1" },
+    }),
+    refreshes: ["messageBlock", "rootMessage"],
+    spares: ["commentBlock", "otherCommentBlock"],
+  },
   "an edit of an ask anchored in an issue's spec refreshes the spec's panel": {
     event: event("ask.edited", { anchor: { artifact_id: "artifact-3" }, id: "ask-1" }),
     refreshes: ["specPanel", "specPanelBySlug", "ask", "inbox"],
@@ -990,6 +1061,11 @@ const eventsByType: Record<EventType, Event> = {
   "comment.edited": event("comment.edited", { anchor: null, id: "comment-1" }),
   "comment.reopened": event("comment.reopened", { anchor: null, id: "comment-1" }),
   "comment.resolved": event("comment.resolved", { anchor: null, id: "comment-1" }),
+  "handoff.recorded": event("handoff.recorded", {
+    handoff_id: "handoff-1",
+    phase: "implement",
+    version: 2,
+  }),
   "issue.claimed": event("issue.claimed", { key: "CORE-1" }),
   "issue.closed": event("issue.closed", issue({ status: "done" })),
   "issue.created": event("issue.created", issue()),

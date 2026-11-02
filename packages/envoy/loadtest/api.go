@@ -58,6 +58,19 @@ type callResult struct {
 
 func (r callResult) ok() bool { return r.err == nil && r.status/100 == 2 }
 
+// errorCode is the code a non-2xx answer's body names; "" for a 2xx answer or a transport error.
+func (r callResult) errorCode() string {
+	if r.err != nil || r.status/100 == 2 {
+		return ""
+	}
+	return errorCode(r.body)
+}
+
+// transient is a failure worth retrying: a transport error, 429 or 5xx.
+func (r callResult) transient() bool {
+	return r.err != nil || r.status == http.StatusTooManyRequests || r.status >= 500
+}
+
 // arrival is when the request reached Dispatch's socket, or its start when the trace never saw
 // the write complete.
 func (r callResult) arrival() int64 {
@@ -67,7 +80,7 @@ func (r callResult) arrival() int64 {
 	return r.start
 }
 
-// call sends one request and reads the whole response.
+// call sends one request with a JSON body (none when body is nil) and reads the whole response.
 func (a *api) call(ctx context.Context, method, path string, w who, body any) callResult {
 	return a.callKeyed(ctx, method, path, w, body, "")
 }
@@ -77,14 +90,24 @@ func (a *api) call(ctx context.Context, method, path string, w who, body any) ca
 // retry of a write whose answer was lost adds no second version. An empty key sends none, which
 // is what every unkeyed caller does.
 func (a *api) callKeyed(ctx context.Context, method, path string, w who, body any, key string) callResult {
-	var payload []byte
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return callResult{err: err}
-		}
-		payload = b
+	if body == nil {
+		return a.callRawKeyed(ctx, method, path, w, "", nil, key)
 	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return callResult{err: err}
+	}
+	return a.callRawKeyed(ctx, method, path, w, "application/json", payload, key)
+}
+
+// callRaw sends one request whose body is payload under contentType (a multipart upload, say);
+// a nil payload sends no body and no Content-Type.
+func (a *api) callRaw(ctx context.Context, method, path string, w who, contentType string, payload []byte) callResult {
+	return a.callRawKeyed(ctx, method, path, w, contentType, payload, "")
+}
+
+// callRawKeyed is callRaw under an idempotency key; an empty key sends none.
+func (a *api) callRawKeyed(ctx context.Context, method, path string, w who, contentType string, payload []byte, key string) callResult {
 	var getConn, gotConn, wrote atomic.Int64
 	trace := &httptrace.ClientTrace{
 		GetConn: func(string) { getConn.Store(time.Now().UnixNano()) },
@@ -104,8 +127,8 @@ func (a *api) callKeyed(ctx context.Context, method, path string, w who, body an
 		return callResult{err: err}
 	}
 	req.Header.Set("Accept", "application/json")
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if payload != nil && contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	if w.person != "" {
 		req.Header.Set("X-Dispatch-User", w.person)
@@ -144,8 +167,8 @@ func (a *api) callRetry(ctx context.Context, method, path string, w who, body an
 func (a *api) callRetryKeyed(ctx context.Context, method, path string, w who, body any, key string) callResult {
 	for attempt := 0; ; attempt++ {
 		res := a.callKeyed(ctx, method, path, w, body, key)
-		transient := res.err != nil || res.status == http.StatusTooManyRequests || res.status >= 500 ||
-			(key != "" && res.status == http.StatusConflict && refusalCode(res.body) == contracts.IdempotencyKeyInFlight)
+		transient := res.transient() ||
+			(key != "" && res.status == http.StatusConflict && errorCode(res.body) == contracts.IdempotencyKeyInFlight)
 		if res.ok() || !transient || attempt >= 6 || ctx.Err() != nil {
 			return res
 		}
@@ -153,19 +176,19 @@ func (a *api) callRetryKeyed(ctx context.Context, method, path string, w who, bo
 	}
 }
 
-// refusalCode is the code of a Dispatch refusal ({"error", "code"}), empty when the body is not
-// one.
-func refusalCode(body []byte) string {
+// errorCode is the code a Dispatch error body names (writeError writes {"error": ..., "code": ...});
+// "" when the body names none or is not JSON at all.
+func errorCode(body []byte) string {
 	var refusal struct {
 		Code string `json:"code"`
 	}
-	if json.Unmarshal(body, &refusal) != nil {
-		return ""
-	}
+	_ = json.Unmarshal(body, &refusal)
 	return refusal.Code
 }
 
-func sessionActor(id string) map[string]string { return map[string]string{"kind": "session", "id": id} }
+// sessionActor is a write's actor body field for a session id, the form a request body and
+// multipartFile's form both take.
+func sessionActor(id string) map[string]any { return map[string]any{"kind": "session", "id": id} }
 
 func trunc(b []byte) string {
 	if len(b) > 300 {

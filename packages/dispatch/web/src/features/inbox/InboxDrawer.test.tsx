@@ -192,3 +192,33 @@ test("Escape with a row focused backs out of the row first; only a second Escape
     getInbox.mockRestore();
   }
 });
+
+test("at 1440 px the drawer is still today's Inbox: the card in the row, no reading pane", async () => {
+  // A peek is a strip over the page it covers, so `Inbox pane={false}` holds at every width;
+  // happy-dom answers `matchMedia` from the window, which is how a width is set here.
+  const window_ = window as unknown as {
+    happyDOM: { setViewport(size: { width: number }): void };
+    innerWidth: number;
+  };
+  const was = window_.innerWidth;
+  window_.happyDOM.setViewport({ width: 1440 });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([issueAsk()]);
+  const getAsk = mockAskReads([issueAsk()]);
+  const view = renderDrawer();
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Open inbox" }));
+    const dialog = await screen.findByRole("dialog", { name: "Inbox" });
+    const card = await within(dialog).findByTestId("ask-ask-a");
+
+    expect(card.closest("[data-inbox-row]")?.getAttribute("data-inbox-row")).toBe("ask-a");
+    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    expect(document.querySelector("[data-inbox-selected]")).toBeNull();
+    // The address under the drawer is still the page's own.
+    expect(screen.getByTestId("location").textContent).toBe("");
+  } finally {
+    view.unmount();
+    window_.happyDOM.setViewport({ width: was });
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});

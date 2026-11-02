@@ -107,8 +107,14 @@ type tailnetServiceHost struct {
 	health string
 }
 
-// service is the Tailscale Service's name as tailscaled and the CLI name it, svc:<name>.
-func (h tailnetServiceHost) service() string { return "svc:" + h.name }
+// tailnetServiceName is the Tailscale Service's name as tailscaled, the CLI and Tailscale's API
+// name it, svc:<name>. Every spelling of that name comes from here — a host's own service(), the
+// serve configuration's key, and the Service a component declares — so a component and the nodes
+// that advertise its Service can never name it differently.
+func tailnetServiceName(name string) string { return "svc:" + name }
+
+// service is this host's Tailscale Service, the name it advertises and drains.
+func (h tailnetServiceHost) service() string { return tailnetServiceName(h.name) }
 
 func (h tailnetServiceHost) localAddr() string {
 	if h.localAddrPort == "" {
@@ -231,7 +237,7 @@ func tailnetServeJSON(name string, service tailnetServeService) string {
 	// A proxy URL keeps its & and its < > as written, not \u0026.
 	e.SetEscapeHTML(false)
 	// Strings, booleans and string-keyed maps always encode.
-	_ = e.Encode(tailnetServeConfig{Services: map[string]tailnetServeService{"svc:" + name: service}})
+	_ = e.Encode(tailnetServeConfig{Services: map[string]tailnetServeService{tailnetServiceName(name): service}})
 	return strings.TrimSuffix(b.String(), "\n")
 }
 

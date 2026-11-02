@@ -147,11 +147,15 @@ func TestTheRecordedSessionMayRegisterAgain(t *testing.T) {
 			h := newHarness(t)
 			h.reach(state)
 
-			h.must(RequestRegister{Claim: testToken, Generation: 1, Session: session, SessionFile: sessionFile, CapabilityHash: []byte("second"), PluginContract: h.deps.PluginContract})
+			h.must(RequestRegister{Claim: testToken, Generation: 1, Session: session, SessionFile: sessionFile, CapabilityHash: []byte("second"), PluginContract: 23})
 
 			h.wantState(state)
-			if got := string(h.store.load(testToken).CapabilityHash); got != "second" {
+			stored := h.store.load(testToken)
+			if got := string(stored.CapabilityHash); got != "second" {
 				t.Errorf("stored capability hash %q, want the re-registration's", got)
+			}
+			if stored.PluginContract != 23 {
+				t.Errorf("stored plugin contract %d, want the re-registration's 23", stored.PluginContract)
 			}
 		})
 	}

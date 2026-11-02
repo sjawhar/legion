@@ -152,18 +152,11 @@ func checkReanchorReuse(t *testing.T, name, markdown string, count int, seed int
 		for index, anchor := range anchors {
 			near := anchor.near
 			outcome := &reusedOutcomes[index]
-			outcome.r, outcome.findErr = finder.FindDiscardingMiss(anchor.quote, nil, &near)
-			var miss *ErrQuoteNotFound
-			if errors.As(perCallOutcomes[index].findErr, &miss) {
-				// A miss the upload drops is never described, but Find still describes it.
-				if outcome.findErr != ErrTargetNotFound || outcome.r != (Range{}) {
-					t.Errorf("%s: mark %d: FindDiscardingMiss of a miss returned %v and %T, want the bare ErrTargetNotFound", name, index, outcome.r, outcome.findErr)
-				}
-				if _, described := finder.Find(anchor.quote, nil, &near); !reflect.DeepEqual(described, perCallOutcomes[index].findErr) {
-					t.Errorf("%s: mark %d: the finder's Find of a miss returned %T, not FindQuote's description", name, index, described)
-				}
-			} else if !reflect.DeepEqual(outcome.findErr, perCallOutcomes[index].findErr) {
-				t.Errorf("%s: mark %d: FindDiscardingMiss returned %T, FindQuote %T", name, index, outcome.findErr, perCallOutcomes[index].findErr)
+			outcome.r, outcome.findErr = finder.Find(anchor.quote, nil, &near)
+			// A row whose quote no longer resolves keeps no mark, so the upload drops its miss; the
+			// finder still describes it exactly as FindQuote does.
+			if !reflect.DeepEqual(outcome.findErr, perCallOutcomes[index].findErr) {
+				t.Errorf("%s: mark %d: the finder's Find returned %T, FindQuote %T", name, index, outcome.findErr, perCallOutcomes[index].findErr)
 			}
 			if outcome.findErr != nil {
 				continue
@@ -278,7 +271,8 @@ func TestReanchorReuseMatchesPerCallOnAnchorCorpus(t *testing.T) {
 }
 
 // One finder answers every query as FindQuote answers it alone, however many queries it answered
-// before, and FindDiscardingMiss differs from Find only where Find describes a miss.
+// before: the same range, the same description of a miss and the same choice of an ambiguous
+// quote.
 func TestQuoteFinderAnswersLikeFindQuote(t *testing.T) {
 	doc, err := Parse(strings.Join([]string{
 		"# Title of the spec",
@@ -330,23 +324,15 @@ func TestQuoteFinderAnswersLikeFindQuote(t *testing.T) {
 			if gotRange != wantRange || !reflect.DeepEqual(gotErr, wantErr) {
 				t.Errorf("round %d, query %d (%q): Find = %v, %v; FindQuote = %v, %v", round, index, query.quote, gotRange, gotErr, wantRange, wantErr)
 			}
-			discardedRange, discardedErr := finder.FindDiscardingMiss(query.quote, query.occurrence, query.near)
 			var miss *ErrQuoteNotFound
 			var choice *ErrTargetAmbiguous
 			switch {
 			case errors.As(wantErr, &miss):
 				misses++
-				if discardedErr != ErrTargetNotFound || discardedRange != (Range{}) {
-					t.Errorf("round %d, query %d (%q): FindDiscardingMiss of a miss = %v, %v; want the bare ErrTargetNotFound", round, index, query.quote, discardedRange, discardedErr)
-				}
-				continue
 			case errors.As(wantErr, &choice):
 				ambiguous++
 			case wantErr == nil:
 				hits++
-			}
-			if discardedRange != wantRange || !reflect.DeepEqual(discardedErr, wantErr) {
-				t.Errorf("round %d, query %d (%q): FindDiscardingMiss = %v, %v; FindQuote = %v, %v", round, index, query.quote, discardedRange, discardedErr, wantRange, wantErr)
 			}
 		}
 	}
@@ -371,8 +357,8 @@ func TestQuoteFinderAnswersLikeFindQuote(t *testing.T) {
 				if _, got := finder.Find("quick", nil, nil); !reflect.DeepEqual(got, want) {
 					t.Errorf("round %d: Find refused with %v, FindQuote with %v", round, got, want)
 				}
-				if _, got := finder.FindDiscardingMiss("quick", nil, nil); !reflect.DeepEqual(got, want) {
-					t.Errorf("round %d: FindDiscardingMiss refused with %v, FindQuote with %v", round, got, want)
+				if _, got := finder.NearestFirst("quick", 0); !reflect.DeepEqual(got, want) {
+					t.Errorf("round %d: NearestFirst refused with %v, FindQuote with %v", round, got, want)
 				}
 			}
 		})
@@ -476,7 +462,7 @@ func TestMarkWriterRefusesInMarkRangesOrder(t *testing.T) {
 		ask := Mark{Type: "dispatchAsk", Attrs: Attrs{"id": "q1"}}
 		writer := NewMarkWriter(frag)
 		doc.Transact(func(txn *crdt.Transaction) {
-			checkSame(t, "a mark the code block does not allow", writer.Mark(txn, code, ask), MarkRange(txn, frag, code, ask), "not allowed in code_block")
+			checkSame(t, "a mark the code block does not allow", writer.Mark(txn, code, ask), MarkRange(txn, frag, code, ask), "not allowed in a code block")
 			past := Range{From: Size(tree) + 1, To: Size(tree) + 3}
 			if got, want := writer.Mark(txn, past, comment), MarkRange(txn, frag, past, comment); got != ErrTargetNotFound || want != ErrTargetNotFound {
 				t.Errorf("a range past the text: the writer refused with %v, MarkRange with %v; want ErrTargetNotFound", got, want)

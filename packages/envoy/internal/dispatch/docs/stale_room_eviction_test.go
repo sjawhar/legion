@@ -749,12 +749,13 @@ func TestAStaleRoomWhoseWindowEndsAsItsSettlementRunsIsEvicted(t *testing.T) {
 }
 
 // A settlement of a room at the head that writes a repair is not evicted between the repair's
-// cursor and its commit. Its repair is in the room and appended, and the room's cursor holds it,
-// but the store's head does not until the settlement commits: a notification read through the pool
-// in that window finds the room one past the head, which no write of the other process explains.
-// The confirmation under the document's lock waits for the settlement, which holds that lock until
-// its commit, and then finds the room at the head; closed instead, the room would lose its reader
-// over this process's own repair.
+// cursor and its commit. Its repair is in the room and appended, and the room's cursor holds it
+// once the settlement is about to commit (commitSettlement), but the store's head does not until
+// the settlement commits: a notification read through the pool in that window finds the room one
+// past the head, which no write of the other process explains. The confirmation under the
+// document's lock waits for the settlement, which holds that lock until its commit, and then finds
+// the room at the head; closed instead, the room would lose its reader over this process's own
+// repair.
 func TestARepairingSettlementIsNotEvictedBetweenItsCursorAndItsCommit(t *testing.T) {
 	pair := newProcessPair(t)
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -772,7 +773,7 @@ func TestARepairingSettlementIsNotEvictedBetweenItsCursorAndItsCommit(t *testing
 
 	var decision *decided
 	var waitErr error
-	pair.taskA.afterSettleVersionRead = func(room string) {
+	pair.taskA.beforeSettleCommit = func(room string) {
 		if room != pair.artifactID || decision != nil {
 			return
 		}

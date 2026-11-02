@@ -201,7 +201,7 @@ func TestQueuedBrowserUpdatesOfOneRoomCommitInOneTransactionOffTheSharedPool(t *
 	ctx := context.Background()
 	database := storetest.Open(t)
 	tracer := &statementTracer{}
-	traced := storetest.Traced(t, database, tracer)
+	traced := storetest.TracedStore(t, database, tracer)
 	// The test's own reads and its hold of the document's lock go through a store of their own,
 	// so the traced store's shared pool counts the room's acquisitions alone.
 	observer := storetest.SecondProcess(t, database)
@@ -527,8 +527,8 @@ func TestAGateRefusalOrFailedCommitStoresNothingOfTheBatchAndEachUpdateEndsOnce(
 			for index := range updates {
 				_, updates[index] = peerEdit(t, live, appendBlocks(t, fmt.Sprintf("Queued %d.\n", index)))
 				credits[index] = service.creditContentChange(artifactID, nil, &instance.hold)
-				service.recordUpdateClass(artifactID, updates[index],
-					documentUpdateClass{contentChanged: true, durable: true, credit: credits[index], cursor: &instance.cursor})
+				service.queueUpdateClass(artifactID, updates[index],
+					documentUpdateClass{seq: uint64(index + 1), contentChanged: true, durable: true, credit: credits[index], cursor: &instance.cursor}, false)
 			}
 			failed := service.room(artifactID)
 			adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
@@ -651,7 +651,7 @@ func TestABatchStopsAtASuppressedUpdateAndAtAnotherRoomInstance(t *testing.T) {
 		// that is not the resident one, as one ygo's stranded persistence hands on.
 		retiredPeer, retiredUpdate := peerEdit(t, live, step("Retired", round))
 		retired := &roomCursor{}
-		service.recordUpdateClass(artifactID, retiredUpdate, documentUpdateClass{contentChanged: true, durable: true, cursor: retired})
+		service.queueUpdateClass(artifactID, retiredUpdate, documentUpdateClass{seq: 1, contentChanged: true, durable: true, cursor: retired}, false)
 		fourth := typeInRoom(t, service, artifactID, 1, alice, step("Alice", 2*round+1))
 		gate.let()
 
@@ -791,7 +791,7 @@ func TestALoneUpdateAndABatchHoldingItStoreItOnce(t *testing.T) {
 			updates := make([][]byte, 2)
 			for index := range updates {
 				_, updates[index] = peerEdit(t, live, appendBlocks(t, fmt.Sprintf("Concurrent %d.\n", index)))
-				service.recordUpdateClass(artifactID, updates[index], documentUpdateClass{contentChanged: true, durable: true, cursor: retired})
+				service.queueUpdateClass(artifactID, updates[index], documentUpdateClass{seq: uint64(index + 1), contentChanged: true, durable: true, cursor: retired}, false)
 			}
 			record := service.room(artifactID)
 			adapter := &servicePersistenceAdapter{store: service.persistence, service: service}

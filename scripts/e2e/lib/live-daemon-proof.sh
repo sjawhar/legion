@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # The run a whole-daemon live proof makes around its driver: merged-root-waits.sh,
-# no-required-checks.sh and child-adoption.sh differ only in what their driver proves, so each is
+# no-required-checks.sh, child-adoption.sh and ci-red-no-takeover.sh differ only in what their
+# driver proves, so each is
 # this run. Sourced by the entry script, never run. The entry script sets `set -euo pipefail` and
 # root, the checkout it sources this file from, and calls live_daemon_proof as its last command.
 #

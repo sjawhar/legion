@@ -22,7 +22,7 @@
 # `release-push.sh handed`, which checks the version and the files a build job
 # hands a publish job and prints the release tag; for `release-push.sh
 # no-credential`, the build job's tripwire; and for `release-push.sh
-# fold-plan` and `push-fold`, the changelog fold.
+# fold-plan`, `fold-orphans` and `push-fold`, the changelog fold.
 #
 # Each push-main case builds a bare origin holding one seed commit
 # (packages/pkg at 1.0.0 plus a README) and two clones, a and b. Clone a plays
@@ -2187,7 +2187,9 @@ echo
 echo "Case: fold-plan labels each fragment with the release that first shipped it, and push-fold lands the fold"
 # The template: clone a, detached at the base (the fold's checkout), and a bare origin whose main
 # is the base. packages/rel is released under rel-v; packages/side and packages/plain have no
-# release of their own; packages/empty has no fragment; packages/nolog has no CHANGELOG.md.
+# release of their own; packages/empty has no fragment; packages/nolog has no CHANGELOG.md and no
+# fragment either, since fold-plan warns on stderr about a fragment of a package no spec names and
+# this case's first check expects an empty stderr.
 ft="$work/fold-template"
 mkdir -p "$ft/a"
 git init -q -b main "$ft/a"
@@ -2242,7 +2244,6 @@ commit_at 2026-02-01T12:00:00+00:00 "chore: seed"
 fragment rel INFRA-1-first Added "the first entry"
 fragment rel INFRA-1-another Added "another entry"
 fragment side INFRA-1-side Changed "a side entry"
-fragment nolog INFRA-1-nolog Added "never folded"
 commit_at 2026-02-10T12:00:00+00:00 "feat: first"
 # The bump-shaped release tag: on a child of the built commit that main never holds, committed
 # at 23:30 on March 1 in UTC-5, which is March 2 in UTC.
@@ -2283,14 +2284,19 @@ packages/rel	1.9.0	2026-03-02	packages/rel/$u/INFRA-1-first.yaml
 packages/rel	1.10.0	2026-03-04	packages/rel/$u/INFRA-2-second.yaml"
 side_plan="packages/side	$main_label	2026-04-11	packages/side/$u/INFRA-1-side.yaml
 packages/side	$main_label	2026-04-11	packages/side/$u/INFRA-3-side.yaml"
-fold_plan_run packages/rel=rel-v packages/side
+plain_plan="packages/plain	$main_label	2026-04-11	packages/plain/$u/INFRA-3-plain.yaml"
+# Every package of the template that holds a fragment, since fold-plan warns on stderr about a
+# fragment of a package no spec names.
+full_plan="$rel_plan"$'\n'"$side_plan"$'\n'"$plain_plan"
+fold_plan_run packages/rel=rel-v packages/side packages/plain
 check "fold-plan: exits 0, saying nothing on stderr" "$(is "$rc|$err" "0|")"
 check "fold-plan: a fragment under two tags gets the lower version, one under the listener-shaped tag its version, one in no release none, in version order, dated in UTC" \
-  "$(is "$out" "$rel_plan"$'\n'"$side_plan")"
-fold_plan_run packages/side packages/rel=rel-v
-check "fold-plan: the packages come in the specs' order" "$(is "$out" "$side_plan"$'\n'"$rel_plan")"
-fold_plan_run packages/empty
-check "fold-plan: a package without fragments plans nothing" "$(is "$rc|$out" "0|")"
+  "$(is "$out" "$full_plan")"
+fold_plan_run packages/plain packages/side packages/rel=rel-v
+check "fold-plan: the packages come in the specs' order" \
+  "$(is "$out" "$plain_plan"$'\n'"$side_plan"$'\n'"$rel_plan")"
+fold_plan_run packages/rel=rel-v packages/side packages/plain packages/empty
+check "fold-plan: a package without fragments plans nothing" "$(is "$rc|$out" "0|$full_plan")"
 fold_plan_run
 check "fold-plan: no spec is refused" "$(is "$rc|$(contains "$err" '^::error::release-push.sh fold-plan: no package spec')" "1|true")"
 for spec in packages/rel= ../rel 'packages/rel=rel v' /packages/rel; do
@@ -2341,6 +2347,86 @@ done
 refuse_run packages/sub packages/yml packages/readme packages/link
 check "fold-plan: one error names every refused entry of every spec, sorted, with no plan" \
   "$(is "$rc|$out|$(grep -c '^::error::' <<<"$err")|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/link/$u/link\.yaml packages/readme/$u/README\.md packages/sub/$u/sjawhar packages/yml/$u/INFRA-1-a\.yml $refused")" "1||1|true")"
+
+# A file under the .changes/ of a package no spec names does not stop the fold: fold-plan names it
+# in one ::warning::, prints the plan all the same and exits 0, since the fold runs on main, where
+# a refusal would fold no package at all. fold-orphans is that check made strict, for ci.yaml's
+# lint job, which runs it on every pull request and refuses the file before it reaches main.
+# packages/envoy is folded, under envoy-v; packages/daemon, which has no CHANGELOG.md and no
+# .changie.yaml, is not.
+ot="$work/fold-orphan"
+git init -q -b main "$ot"
+identity "$ot"
+mkdir -p "$ot/packages/envoy/$u" "$ot/packages/daemon/$u"
+printf '# Changelog\n' > "$ot/packages/envoy/CHANGELOG.md"
+printf 'kind: Added\nbody: an envoy entry\n' > "$ot/packages/envoy/$u/pr-1-envoy.yaml"
+printf 'kind: Added\nbody: a daemon entry\n' > "$ot/packages/daemon/$u/pr-1-daemon.yaml"
+git -C "$ot" add -A
+GIT_COMMITTER_DATE=2026-07-01T12:00:00+00:00 git -C "$ot" commit -q -m "feat: two fragments"
+git -C "$ot" tag envoy-v1.0.0
+envoy_plan="packages/envoy	1.0.0	2026-07-01	packages/envoy/$u/pr-1-envoy.yaml"
+# orphan_run: runs fold-plan over packages/envoy alone in that repository; leaves rc, out and err.
+orphan_run() {
+  set +e
+  out=$(cd "$ot" && "$release_push" fold-plan packages/envoy=envoy-v 2>"$work/fold-orphan.err")
+  rc=$?
+  set -e
+  err=$(<"$work/fold-orphan.err")
+}
+orphan_run
+check "fold-plan: a fragment of a package no spec names is one ::warning::, not an ::error::" \
+  "$(is "$rc|$out|$(grep -c "^::warning::release-push\.sh fold-plan: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: " <<<"$err")|$(grep -c '^::error::' <<<"$err")" "0|$envoy_plan|1|0")"
+check "fold-plan: that warning names the specs it was given and says what to do about the file" \
+  "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
+# changelog-fold.yaml's build job runs fold-plan over .github/changelog-packages on main and fails
+# its step when fold-plan exits non-zero, so a refusal there folds no package at all. An orphan fragment
+# that reaches main must not stop the fold of the packages the fold is given: the plan still lists
+# packages/envoy's fragment, and the orphan is named on stderr for someone to remove.
+check "fold-plan: an orphan fragment on main does not stop the plan of the packages the fold is given" \
+  "$(is "$rc|$out|$(contains "$err" "packages/daemon/$u/pr-1-daemon\.yaml")" "0|$envoy_plan|true")"
+# orphans_run <spec>...: runs fold-orphans in that repository; leaves rc, out and err.
+orphans_run() {
+  set +e
+  out=$(cd "$ot" && "$release_push" fold-orphans "$@" 2>"$work/fold-orphans.err")
+  rc=$?
+  set -e
+  err=$(<"$work/fold-orphans.err")
+}
+orphans_run packages/envoy=envoy-v
+check "fold-orphans: the same file is refused, with one error naming it and nothing on stdout" \
+  "$(is "$rc|$out|$(grep -c "^::error::release-push\.sh fold-orphans: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: " <<<"$err")" "1||1")"
+check "fold-orphans: that refusal names the specs it was given and says what to do about the file" \
+  "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
+git -C "$ot" rm -q "packages/daemon/$u/pr-1-daemon.yaml"
+GIT_COMMITTER_DATE=2026-07-02T12:00:00+00:00 git -C "$ot" commit -q -m "chore: remove the daemon fragment"
+orphan_run
+check "fold-plan: with the file removed in a commit, the plan is printed and nothing is said" \
+  "$(is "$rc|$err|$out" "0||$envoy_plan")"
+orphans_run packages/envoy=envoy-v
+check "fold-orphans: with the file removed in a commit, it exits 0 saying nothing" "$(is "$rc|$out|$err" "0||")"
+# Only HEAD's tree counts: a file the working tree alone holds is no fragment of the fold.
+mkdir -p "$ot/packages/daemon/$u"
+printf 'kind: Added\nbody: uncommitted\n' > "$ot/packages/daemon/$u/pr-2-daemon.yaml"
+orphan_run
+check "fold-plan: a file under .changes/ in the working tree alone is not refused" \
+  "$(is "$rc|$err|$out" "0||$envoy_plan")"
+orphans_run packages/envoy=envoy-v
+check "fold-orphans: a file under .changes/ in the working tree alone is not refused" "$(is "$rc|$out|$err" "0||")"
+rm -r "$ot/packages/daemon/.changes"
+# Anywhere under .changes/, not only in unreleased/: the fold reads nothing of that package.
+mkdir -p "$ot/packages/daemon/.changes"
+printf 'A header\n' > "$ot/packages/daemon/.changes/header.tpl.md"
+git -C "$ot" add -A
+GIT_COMMITTER_DATE=2026-07-03T12:00:00+00:00 git -C "$ot" commit -q -m "chore: a daemon .changes file"
+orphan_run
+check "fold-plan: a file under .changes/ outside unreleased/ is warned about too, with the plan printed" \
+  "$(is "$rc|$out|$(contains "$err" "^::warning::release-push\.sh fold-plan: packages/daemon/\.changes/header\.tpl\.md at HEAD: ")" "0|$envoy_plan|true")"
+orphans_run packages/envoy=envoy-v
+check "fold-orphans: a file under .changes/ outside unreleased/ is refused too, printing no plan" \
+  "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-orphans: packages/daemon/\.changes/header\.tpl\.md at HEAD: ")" "1||true")"
+orphans_run
+check "fold-orphans: no spec is refused" \
+  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh fold-orphans: no package spec given')" "1||true")"
 
 # A fragment name holding a glob character is still one file: fold-plan finds the commit that
 # added that file, never one that added another file the name matches as a pattern. Here
@@ -2676,5 +2762,5 @@ fold_refused "a version group's notes that are a dangling symlink" "rel_1\.11\.0
 check "push-fold refuses a version group's notes that are a dangling symlink: defers nothing" \
   "$(is "$(contains "$out" 'Fold deferred')" false)"
 
-summary "release-push.sh version, push-main, tagged, tag, release, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan and push-fold"
+summary "release-push.sh version, push-main, tagged, tag, release, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan, fold-orphans and push-fold"
 

@@ -7,7 +7,7 @@ tags:
   - pgmigrate
   - harness
 date: 2026-10-27
-status: active
+status: superseded by sjawhar/legion#2411 — a Dispatch or daemon migration added after the numbered series is named for the UTC moment it was created (`YYYYMMDDHHMMSS_<slug>.up.sql`), so two open pull requests no longer take one number and nothing is renumbered; every numbered file keeps the number it landed with, and no number is added again (`packages/envoy/cmd/dispatch/README.md`, `packages/daemon/internal/store/migrations/embed.go`)
 module: packages/envoy/internal/dispatch/store/migrations
 related_issues:
   - "INFRA-367"

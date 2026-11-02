@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -38,9 +37,9 @@ func runtimeWithRoleFiles(t *testing.T, files map[claim.Role][]string) *Runtime 
 
 // A role role_config_files names is told its own overlays after the operator's in PI_CONFIG_FILES,
 // in order — the tester in its issue pod and the daemon-launched controller in its own — and the
-// shim's pod baseline then names the turn-scoping overlay ahead of them all, as it does the
-// operator's alone. A role it does not name runs exactly the process, in exactly the pod, a daemon
-// without the key gives it, and so does a named role's pod: its overlays ride the start command.
+// shim's pod baseline hands that value to Oh My Pi untouched, as it does the operator's alone. A
+// role it does not name runs exactly the process, in exactly the pod, a daemon without the key
+// gives it, and so does a named role's pod: its overlays ride the start command.
 func TestARoleIsToldItsOwnOverlaysAfterTheOperators(t *testing.T) {
 	with, without := runtimeWithRoleFiles(t, roleFiles), runtimeWithRoleFiles(t, nil)
 	operator := operatorPod().Env["PI_CONFIG_FILES"]
@@ -57,12 +56,8 @@ func TestARoleIsToldItsOwnOverlaysAfterTheOperators(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("the %s's PI_CONFIG_FILES = %q, want %q", tc.role, got, tc.want)
 			}
-			state := t.TempDir()
-			applied, err := podsafety.Apply([]string{"PI_CONFIG_FILES=" + got}, state)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if want := "PI_CONFIG_FILES=" + filepath.Join(state, podsafety.TurnScopeFile) + ":" + tc.want; !slices.Contains(applied, want) {
+			applied := podsafety.Apply([]string{"PI_CONFIG_FILES=" + got})
+			if want := "PI_CONFIG_FILES=" + tc.want; !slices.Contains(applied, want) {
 				t.Errorf("the %s's Oh My Pi starts on %q, want %q among them", tc.role, applied, want)
 			}
 			if !reflect.DeepEqual(podOf(t, with, tc.spec(t)), podOf(t, without, tc.spec(t))) {

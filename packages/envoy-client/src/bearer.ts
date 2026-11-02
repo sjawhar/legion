@@ -1,4 +1,10 @@
-import { type EnvoyConfigEnvironment, fileValue, httpUrl, nonEmpty } from "./envoy-config";
+import {
+  type CommandMode,
+  type EnvoyConfigEnvironment,
+  fileValue,
+  httpUrl,
+  nonEmpty,
+} from "./envoy-config";
 import { readSecretFile, sendable } from "./secret-file";
 
 /** A bearer written in an envoy.json, and the server written beside it: the only server it may go
@@ -58,14 +64,15 @@ export function bearerSource(
  * names the origin of the server written beside it, which only `<SECTION>_URL` can make differ, and
  * is otherwise refused naming the variables that give another server its bearer. Then a checkout's
  * `!` value is refused, an empty value is refused, and the value is read (`fileValue`, which runs a
- * chosen file's `!` command and refuses whitespace inside a value). Throws naming the field and the
- * file, never the value.
+ * chosen file's `!` command and refuses whitespace inside a value; with `commands: "kept"` it only
+ * takes the outcome a run already kept). Throws naming the field and the file, never the value.
  */
 export function fileBearer(
   bearer: FileBearer,
   url: string,
   section: BearerSection,
-  env: EnvoyConfigEnvironment
+  env: EnvoyConfigEnvironment,
+  commands: CommandMode = "run"
 ): string {
   const named = httpUrl(url)?.origin;
   const paired = httpUrl(bearer.server)?.origin;
@@ -82,5 +89,5 @@ export function fileBearer(
   if (bearer.token === "") {
     throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
   }
-  return fileValue(bearer.token, bearer.field, bearer.path, env);
+  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
 }

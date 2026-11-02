@@ -443,6 +443,10 @@ func (s *server) writeBroadcast(
 		if err != nil {
 			return broadcastRead{}, nil, err
 		}
+		// Each copy is a direct message: its blocks are indexed, and it writes no mention.
+		if _, err := s.indexMessage(ctx, tx, message); err != nil {
+			return broadcastRead{}, nil, err
+		}
 		// A broadcast message is a thread root that answers nothing, so its event says what
 		// every other root's does; the broadcast it belongs to is read from the message row.
 		event, err := s.appendEvent(ctx, tx, messageEvent(
@@ -455,12 +459,12 @@ func (s *server) writeBroadcast(
 		// The recipient's first delivery attempt is opened here, unclaimed, rather than by the
 		// worker that will send it. A recipient then always has an attempt to show - "Sending"
 		// while a worker holds it, and, if the process dies before the send, a lapsed pending
-		// row the ordinary same-mode retry resumes under its own idempotency key. Opening it
-		// later left a stranded recipient with no attempt at all, which only a delivery in a
-		// DIFFERENT mode could move, and that is a genuine second frame where the first landed.
-		// claimed_at stays null, so recordPendingMessageDelivery reads the row as free and
-		// resumes it instead of opening a second attempt beside it. The author asked for it, and
-		// the resume keeps that.
+		// row the delivery sweep (delivery_sweep.go) and the ordinary same-mode retry both resume
+		// under its own idempotency key. Opening it later left a stranded recipient with no
+		// attempt at all, which only a delivery in a DIFFERENT mode could move, and that is a
+		// genuine second frame where the first landed. claimed_at stays null, so
+		// recordPendingMessageDelivery reads the row as free and resumes it instead of opening a
+		// second attempt beside it. The author asked for it, and the resume keeps that.
 		attempt, err := scanMessageDelivery(tx.QueryRow(ctx, `
 			insert into message_deliveries (message_id, attempt, delivery, session_id, state, requested_by)
 			values ($1, 1, $2, $3, 'pending', $4)
@@ -484,9 +488,10 @@ func (s *server) writeBroadcast(
 // request (context.WithoutCancel): a browser that goes away, and a deploy's signal, must not cut
 // a recipient off mid-flight. One recipient's failure never stops another's: a send the listener
 // refused settles that recipient's attempt as failed, a recipient whose attempt was taken over
-// from the agent card is skipped, and a delivery this cannot record at all leaves the attempt
-// pending and unclaimed, which the broadcast view shows as sending and which the delivery sweep
-// (resumeOwedDeliveries), or a repeat under the send's key (sendOwedBroadcastRecipients), resumes
+// from the agent card is skipped, and a delivery this cannot record at all - a shutdown, a killed
+// process, a database that refuses the write - leaves the attempt pending and unclaimed, which
+// the broadcast view shows as sending and which the delivery sweep (delivery_sweep.go,
+// resumeOwedDeliveries), or a repeat under the send's key (sendOwedBroadcastRecipients), resumes
 // once the claim lease has passed.
 func (s *server) deliverBroadcast(ctx context.Context, sends []broadcastSend, delivery string, actor model.Actor) {
 	workers := min(broadcastDeliveryWorkers, len(sends))
@@ -512,7 +517,7 @@ func (s *server) deliverBroadcast(ctx context.Context, sends []broadcastSend, de
 				// own; the worker must then send nothing, because an attempt of its own would
 				// put a second frame on the session's subject. Of two senders that both found
 				// the attempt owed, the one that claims it sends and the other stops here.
-				_, err = s.deliverMessageResuming(sending, send.message, delivery, nil, actor, nil, send.attempt)
+				_, err = s.deliverMessageResuming(sending, send.message, delivery, actor, nil, send.attempt)
 				if errors.Is(err, errAttemptNotPending) {
 					continue
 				}
@@ -687,6 +692,9 @@ func (s *server) loadBroadcastRecipients(ctx context.Context, broadcastID string
 	}
 	replies, err := s.loadMessageReplyChains(ctx, s.deps.Store.Pool, ids)
 	if err != nil {
+		return nil, err
+	}
+	if err := hydrateThreadReplyBlocks(ctx, s.deps.Store.Pool, messages, replies); err != nil {
 		return nil, err
 	}
 	recipients := make([]broadcastRecipient, 0, len(messages))

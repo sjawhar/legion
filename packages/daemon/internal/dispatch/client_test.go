@@ -149,6 +149,34 @@ func TestListRepoProjectsReadsEveryMappingWithItsDefault(t *testing.T) {
 	}
 }
 
+// Whether Dispatch's GitHub App is installed on a repository is its app-installation route's
+// answer; a Dispatch older than the route answers 404, which the caller tells apart (Missing).
+func TestWebhookAppInstalledReadsDispatchsAnswer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		switch r.URL.Path {
+		case "/api/v1/github/app-installation/acme/widgets":
+			writeJSON(t, w, map[string]bool{"installed": true})
+		case "/api/v1/github/app-installation/acme/gadgets":
+			writeJSON(t, w, map[string]bool{"installed": false})
+		default:
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "NOT_FOUND", "error": "not found"})
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+
+	for repo, want := range map[string]bool{"acme/widgets": true, "acme/gadgets": false} {
+		installed, err := client.WebhookAppInstalled(context.Background(), repo)
+		if err != nil || installed != want {
+			t.Fatalf("WebhookAppInstalled(%s) = %v, %v; want %v", repo, installed, err, want)
+		}
+	}
+	if _, err := client.WebhookAppInstalled(context.Background(), "acme/older"); !Missing(err) {
+		t.Fatalf("WebhookAppInstalled on a Dispatch without the route = %v, want a 404 Missing reports", err)
+	}
+}
+
 // A hand-over is one PATCH carrying the status and an additive legion label under the daemon's
 // actor, so concurrent labels survive and the one event it makes carries both.
 func TestHandOverWritesTheStatusAndTheLabelsInOnePatch(t *testing.T) {
@@ -426,6 +454,107 @@ func TestChangesRequestedLatestNamesOnlyTheLatestVersion(t *testing.T) {
 	}
 	if version, got := (Approval{State: "changes_requested", LatestVersion: 4, Version: new(4)}).ChangesRequestedLatest(); version != 4 || got == "" {
 		t.Fatalf("changes requested with no reason = %d %q, want 4 with Dispatch's default reason", version, got)
+	}
+}
+
+// A handoff record reads back with its issue, phase, version and the actor that wrote it; the body
+// Dispatch answers with is not the daemon's to read. A record Dispatch does not have is Missing.
+func TestHandoffReadsTheRecordAndItsAuthor(t *testing.T) {
+	const id = "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		if r.Method != http.MethodGet {
+			t.Fatalf("request = %s %s, want GET", r.Method, r.URL.Path)
+		}
+		if r.URL.Path != "/api/v1/handoffs/"+id {
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "HANDOFF_NOT_FOUND", "error": "handoff not found"})
+			return
+		}
+		writeJSON(t, w, map[string]any{
+			"id": id, "issue_key": "LEGION-6", "phase": "implement", "version": 2,
+			"author":     map[string]any{"kind": "session", "id": "ses_implementer_6", "origin": map[string]any{"title": "implementer"}},
+			"created_at": "2026-10-26T08:00:00Z", "body": `{"schemaVersion":1}`,
+		})
+	}))
+	defer server.Close()
+
+	client := New(server.URL, dispatchToken)
+	handoff, err := client.Handoff(context.Background(), id)
+	if err != nil {
+		t.Fatalf("read handoff: %v", err)
+	}
+	want := Handoff{ID: id, IssueKey: "LEGION-6", Phase: "implement", Version: 2, Author: HandoffAuthor{Kind: "session", ID: "ses_implementer_6"}}
+	if handoff != want {
+		t.Fatalf("handoff = %#v, want %#v", handoff, want)
+	}
+	if _, err := client.Handoff(context.Background(), "00000000-0000-0000-0000-000000000001"); !Missing(err) {
+		t.Fatalf("an unknown handoff = %v, want Dispatch's 404", err)
+	}
+}
+
+// The newest record of a phase reads back with its body exactly as Dispatch stores it; a phase with
+// none is Dispatch's 404 HANDOFF_NOT_FOUND, not found; a 404 with another code, a Dispatch without
+// the route, is an error.
+func TestLatestHandoffReadsTheBodyAndTellsNoneFromNoRoute(t *testing.T) {
+	const body = "{\"schemaVersion\":1,\n  \"phase\": \"implement\"}\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		switch r.URL.Path {
+		case "/api/v1/issues/LEGION-6/handoffs/implement/latest":
+			writeJSON(t, w, map[string]any{
+				"id": "h-2", "issue_key": "LEGION-6", "phase": "implement", "version": 2,
+				"author": map[string]any{"kind": "session", "id": "ses_implementer_6"}, "body": body,
+			})
+		case "/api/v1/issues/LEGION-6/handoffs/test/latest":
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "HANDOFF_NOT_FOUND", "error": "issue LEGION-6 has no test handoff"})
+		default:
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "NOT_FOUND", "error": "no route for GET " + r.URL.Path})
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.URL, dispatchToken)
+	handoff, found, err := client.LatestHandoff(context.Background(), "LEGION-6", "implement")
+	want := Handoff{ID: "h-2", IssueKey: "LEGION-6", Phase: "implement", Version: 2, Author: HandoffAuthor{Kind: "session", ID: "ses_implementer_6"}, Body: body}
+	if err != nil || !found || handoff != want {
+		t.Fatalf("latest implement = %#v, %v, %v; want %#v", handoff, found, err, want)
+	}
+	if _, found, err := client.LatestHandoff(context.Background(), "LEGION-6", "test"); err != nil || found {
+		t.Fatalf("latest test = %v, %v; want none and no error", found, err)
+	}
+	if _, found, err := client.LatestHandoff(context.Background(), "LEGION-6", "review"); found || !Missing(err) {
+		t.Fatalf("latest review on a Dispatch without the route = %v, %v; want its 404", found, err)
+	}
+}
+
+// A handoff write sends the body exactly as given, under the daemon's session, and reads back the
+// record Dispatch made.
+func TestWriteHandoffSendsTheBodyUnderTheDaemonSession(t *testing.T) {
+	const text = "{\"schemaVersion\": 1}\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/issues/LEGION-7/handoffs/plan" {
+			t.Fatalf("request = %s %s, want POST /api/v1/issues/LEGION-7/handoffs/plan", r.Method, r.URL.Path)
+		}
+		assertBearer(t, r)
+		var request struct {
+			Body  string `json:"body"`
+			Actor actor  `json:"actor"`
+		}
+		decodeJSON(t, r, &request)
+		if request.Body != text || request.Actor != (actor{Kind: "session", ID: "legion-daemon:LEGION"}) {
+			t.Fatalf("write = %#v, want the file's text under legion-daemon:LEGION", request)
+		}
+		writeJSONStatus(t, w, http.StatusCreated, map[string]any{
+			"id": "h-1", "issue_key": "LEGION-7", "phase": "plan", "version": 1,
+			"author": map[string]any{"kind": "session", "id": "legion-daemon:LEGION"}, "created_at": "2026-10-27T08:00:00Z",
+		})
+	}))
+	defer server.Close()
+
+	handoff, err := New(server.URL, dispatchToken).WriteHandoff(context.Background(), "LEGION-7", "plan", text)
+	want := Handoff{ID: "h-1", IssueKey: "LEGION-7", Phase: "plan", Version: 1, Author: HandoffAuthor{Kind: "session", ID: "legion-daemon:LEGION"}}
+	if err != nil || handoff != want {
+		t.Fatalf("write = %#v, %v; want %#v", handoff, err, want)
 	}
 }
 

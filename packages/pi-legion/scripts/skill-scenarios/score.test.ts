@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
-import { checkouts, specWork } from "./score";
+import { checkouts, specWork, TestHandoff } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
 // profile's gateway key command runs past its budget) says nothing about the skill under test: the
@@ -51,16 +51,65 @@ function run(name: string, files: Record<string, string | null>, transcript: obj
   );
 }
 
-const world = JSON.stringify({
-  key: "LWEVAL-1",
-  repo: "example/widgets",
-  pr: 1001,
-  branch: "legion/LWEVAL-1",
-  head: "099b05dc19f7f7e5058e791d16ae05f0b123a2cc",
-  code: "5f36e1aa2d0c4b8e9a6f1e3d7c5b9a0f2e4d6c8b",
+const head = "099b05dc19f7f7e5058e791d16ae05f0b123a2cc";
+const worldOf = (pr: string) =>
+  JSON.stringify({
+    key: "LWEVAL-1",
+    repo: "example/widgets",
+    pr: 1001,
+    branch: "legion/LWEVAL-1",
+    head: pr,
+  });
+const world = worldOf(head);
+/** The implementer's record the rig seeds (seed.ts implement-handoff), as `seed.ts
+ * capture-handoffs` writes it. */
+const implementRecord = {
+  id: "h-implement",
+  issue_key: "LWEVAL-1",
+  phase: "implement",
+  version: 1,
+  author: { kind: "session", id: "rig-implementer" },
+  created_at: "2026-09-30T17:20:00.123456Z",
+  body: JSON.stringify({ schemaVersion: 1, phase: "implement", issue: "LWEVAL-1" }),
+};
+/** A test handoff the skill's rule asks for: verified, no failures, a proof at `sha`. */
+const testBody = (sha: string) => ({
+  schemaVersion: 1,
+  phase: "test",
+  issue: "LWEVAL-1",
+  implementerProof: { verdict: "verified", how: `ran bun greet.ts Ada at ${sha.slice(0, 12)}` },
+  failures: [],
+  failed: 0,
+  proof: [
+    {
+      criterion: "bun greet.ts Ada prints Hello, Ada! and exits 0",
+      surface: "the CLI",
+      command: "bun greet.ts Ada",
+      observed: "Hello, Ada! exit 0",
+      headSha: sha,
+      negativeControl: "bun greet.ts → exit 2, usage on stderr",
+    },
+  ],
 });
+/** A test record on the run's issue: by default this run's session (the transcript header's
+ * 01a0f2cc) wrote it at 17:29:11.031234, a valid body at the PR's head. */
+const testRecord = (fields: { author?: string; created_at?: string; sha?: string } = {}) => ({
+  id: "h-test",
+  issue_key: "LWEVAL-1",
+  phase: "test",
+  version: 1,
+  author: { kind: "session", id: fields.author ?? "01a0f2cc" },
+  created_at: fields.created_at ?? "2026-09-30T17:29:11.031234Z",
+  body: JSON.stringify(testBody(fields.sha ?? head)),
+});
+/** handoffs.json: the records newest first, as Dispatch lists them. */
+const handoffs = (...records: object[]) => JSON.stringify([...records, implementRecord]);
 run("tester-proof-head-1", { "out.txt": noKey, "world.json": world }, header);
-run("tester-proof-head-2", { "out.txt": "exit=0\n", "world.json": world }, [...header, ...turn]);
+run(
+  "tester-proof-head-2",
+  { "out.txt": "exit=0\n", "world.json": world, "handoffs.json": handoffs() },
+  [...header, ...turn]
+);
 
 const seeded = JSON.stringify([
   { type: "issue.created", actor: { kind: "session", id: "dispatch-owner" } },
@@ -72,49 +121,93 @@ run("ask-on-message-head-1", { ...capture, "out.txt": noKey }, header);
 run("ask-on-message-head-2", { ...capture, "out.txt": "exit=0\n" }, [...header, ...turn]);
 
 /** An assistant turn whose one tool call is `bash` running `command`, before the handoff write. */
-const bash = (command: string) => ({
+const bash = (command: string, id = "call-1", timestamp = "2026-09-30T17:27:30.000Z") => ({
   type: "message",
-  timestamp: "2026-09-30T17:27:30.000Z",
+  timestamp,
   message: {
     role: "assistant",
-    content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command } }],
+    content: [{ type: "toolCall", id, name: "bash", arguments: { command } }],
   },
 });
-/** The tester's handoff write: its `write` tool call of .legion/<key>/test.json, after the run's
- * other calls. */
-const writeHandoff = {
-  type: "message",
-  timestamp: "2026-09-30T17:29:11.031Z",
-  message: {
-    role: "assistant",
-    content: [
-      {
-        type: "toolCall",
-        id: "call-2",
-        name: "write",
-        arguments: { path: "/rig/ws/.legion/LWEVAL-1/test.json", content: "{}" },
-      },
-    ],
+/** The tester's handoff write: `dispatch handoff-write --phase test`, after the run's other calls.
+ * The score reads the record from handoffs.json, never from this call. */
+const writeHandoff = bash(
+  'dispatch handoff-write --issue LWEVAL-1 --phase test --body-file "$TMPDIR/LWEVAL-1-test.json"',
+  "call-2",
+  "2026-09-30T17:29:10.500Z"
+);
+/** The `legion` tool's handoff_complete, and its result: refused or not. */
+const completeCall = (id: string, refused: boolean) => [
+  {
+    type: "message",
+    timestamp: "2026-09-30T17:29:39.000Z",
+    message: {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id,
+          name: "legion",
+          arguments: { op: "handoff_complete", summary: "Verified.", verdict: "pass" },
+        },
+      ],
+    },
   },
-};
+  {
+    type: "message",
+    message: {
+      role: "toolResult",
+      toolCallId: id,
+      toolName: "legion",
+      isError: refused,
+      content: [{ type: "text", text: refused ? "refused" : "Recorded." }],
+    },
+  },
+];
 const calls = (records: object[]) =>
   records.map((record) => `${JSON.stringify(record)}\n`).join("");
+/** The bun stand-in's record of `"$BUN" greet.ts Ada`, before the record was written. */
+const ranGreet = { at: "2026-09-30T17:27:33.658Z", as: "bun", argv: ["greet.ts", "Ada"], exit: 0 };
+/** The gh stand-in's record of the PR body edit whose `E2E (tester)` line names `sha`. */
+const bodyEdit = (sha: string) => ({
+  at: "2026-09-30T17:29:30.000Z",
+  as: "gh",
+  argv: ["pr", "edit", "1001", "--body-file", "body.md"],
+  exit: 0,
+  body: `**E2E (implementer):** the CLI.\n\n**E2E (tester):** the CLI — ran \`bun greet.ts Ada\` at head ${sha.slice(0, 12)}, observed Hello, Ada! exit 0.\n\n**Production:** pending the merge.`,
+});
+/** The daemon stand-in's log line of an accepted completion naming record `id` at `version`. */
+const accepted = (id: string, version: number) =>
+  calls([
+    {
+      at: "2026-09-30T17:29:40.000Z",
+      path: "/legion/v1/handoff/complete",
+      status: 200,
+      grantId: "g-1",
+      handoffId: id,
+      handoffVersion: version,
+    },
+  ]);
 // Ran the CLI: the bun stand-in recorded `"$BUN" greet.ts Ada`, a command line no pattern names.
 run(
   "tester-proof-ran-1",
   {
     "out.txt": "exit=0\n",
     "world.json": world,
-    "calls.jsonl": calls([
-      { at: "2026-09-30T17:27:33.658Z", as: "bun", argv: ["greet.ts", "Ada"], exit: 0 },
-    ]),
+    "calls.jsonl": calls([ranGreet]),
+    "handoffs.json": handoffs(testRecord()),
   },
   [...header, turn[0], bash('BUN=$(command -v bun); "$BUN" greet.ts Ada'), writeHandoff]
 );
 // Only mentioned it: a PR body drafted in a heredoc names `bun greet.ts`, and bun never ran it.
 run(
   "tester-proof-ran-2",
-  { "out.txt": "exit=0\n", "world.json": world, "calls.jsonl": calls([]) },
+  {
+    "out.txt": "exit=0\n",
+    "world.json": world,
+    "calls.jsonl": calls([]),
+    "handoffs.json": handoffs(testRecord()),
+  },
   [
     ...header,
     turn[0],
@@ -128,6 +221,68 @@ run("tester-proof-cross-1", { "out.txt": "exit=0\n", "world.json": world }, [
   turn[0],
   bash(`echo ${"x".repeat(220)} && cat /checkouts/base/skills/legion-worker/SKILL.md`),
 ]);
+
+/** A tester-proof run that drove the CLI, wrote its record and edited the PR body, with `files`
+ * over those defaults and a refused completion before the one the stand-in accepted. */
+function recordRun(name: string, files: Record<string, string>) {
+  run(
+    name,
+    {
+      "out.txt": "exit=0\n",
+      "world.json": world,
+      "calls.jsonl": calls([ranGreet, bodyEdit(head)]),
+      "handoffs.json": handoffs(testRecord()),
+      "daemon.log": accepted("h-test", 1),
+      ...files,
+    },
+    [
+      ...header,
+      turn[0],
+      bash('BUN=$(command -v bun); "$BUN" greet.ts Ada'),
+      ...completeCall("call-0", true),
+      writeHandoff,
+      ...completeCall("call-3", false),
+    ]
+  );
+}
+// Followed the rule: drove the CLI, recorded its own test record, then completed naming it.
+recordRun("tester-proof-rec-1", {});
+// Completed naming a record another session wrote (the import's, under the daemon's session).
+recordRun("tester-proof-rec-2", {
+  "handoffs.json": handoffs(testRecord({ author: "legion-daemon:lweval" })),
+});
+// The stand-in accepted a completion that names a version the record does not hold.
+recordRun("tester-proof-rec-3", { "daemon.log": accepted("h-test", 2) });
+// Pushed a change to the code under the PR's head before completing.
+{
+  const dir = mkdtempSync(path.join(tmpdir(), "skill-scenarios-push-"));
+  const git = (...args: string[]) => {
+    const result = Bun.spawnSync(
+      ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", dir, ...args],
+      { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }
+    );
+    if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.toString().trim();
+  };
+  git("init", "-q", "-b", "legion/LWEVAL-1");
+  writeFileSync(path.join(dir, "greet.ts"), "export const greet = 1;\n");
+  git("add", "-A");
+  git("commit", "-qm", "code");
+  const code = git("rev-parse", "HEAD");
+  writeFileSync(path.join(dir, "greet.ts"), "export const greet = 2;\n");
+  git("commit", "-qam", "changed");
+  const pushed = git("rev-parse", "HEAD");
+  const remote = path.join(runs, "tester-proof-rec-4", "remote.git");
+  mkdirSync(path.dirname(remote), { recursive: true });
+  git("clone", "-q", "--bare", dir, remote);
+  rmSync(dir, { recursive: true, force: true });
+  recordRun("tester-proof-rec-4", {
+    "world.json": worldOf(code),
+    "calls.jsonl": calls([ranGreet, bodyEdit(code)]),
+    "handoffs.json": handoffs(testRecord({ sha: code })),
+    "pushes.log": `2026-09-30T17:29:20.000Z refs/heads/legion/LWEVAL-1 ${code} ${pushed}\n`,
+  });
+}
 
 /** A measure-before-ask run that opened one ask: its question and the options' labels. */
 function measured(name: string, question: string, labels: string[]) {
@@ -483,6 +638,301 @@ run("askgate-upload-on-3", askgate("upload"), [
     reason: "Shorten it.",
   }),
 ]);
+// The rules check's cases. Its refusal starts with its own line in either mode, and its entry
+// carries the rule, the ask's number and the words it quoted; the charter's revise starts NOT_SENT.
+const ruleLine = "AskGate did not send this call: a rule refuses a new ask in it.";
+const ruleMatch = (rule: string, ruleQuote: string) => ({
+  decision: "revise",
+  rule,
+  ruleAsk: 1,
+  ruleQuote,
+  ruleOutcome: "match",
+});
+const askGate = (toolCallId: string, data: object) =>
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId,
+    target: "dispatch_ask issue=LWEVAL-2",
+    ...data,
+  });
+const keepIt = "I recommend keeping it at 02:00 as it is.";
+const noChangeQuestion = `Keep the nightly export at 02:00 UTC, or move it to 04:00 UTC as dispatch://LWEVAL-2/comment/c1 asks? ${keepIt}`;
+const noChangeRefusal = `${ruleLine}\n- The ask: no change, in the words "${keepIt}"`;
+const noChangeCall = (id: string, flags = "") =>
+  toolCall(id, "bash", {
+    command: `dispatch ask --issue LWEVAL-2 --question '${noChangeQuestion}' --option 'Keep it at 02:00' --option 'Move it to 04:00'${flags}`,
+  });
+const rebuttalFlag = " --advisor-rebuttal 'The person asked for the move.'";
+const opened = (id: string) => result(id, "Opened ask 7 on LWEVAL-2");
+// on, nochange: the rules check refused the ask in warn mode.
+run("askgate-nochange-on-1", askgate("nochange"), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  gateRefused("call-n", noChangeRefusal),
+  askGate("call-n", {
+    outcome: "verdict",
+    verdictMode: "warn",
+    ...ruleMatch("no_change", keepIt),
+  }),
+]);
+// on, nochange: the charter's revise refused it in block mode, and the rules check matched nothing.
+run("askgate-nochange-on-2", askgate("nochange"), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  gateRefused("call-n", "AskGate did not send this call. Drop the recommendation."),
+  askGate("call-n", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Drop the recommendation.",
+    ruleOutcome: "none",
+  }),
+]);
+// on, nochange: the rules call failed, and the ask went out.
+run("askgate-nochange-on-3", askgate("nochange", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  opened("call-n"),
+  askGate("call-n", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "warn",
+    ruleOutcome: "error",
+    ruleError: "overloaded",
+  }),
+]);
+const noChangeBlock = `:::ask{#export-time urgency="med"}\n${noChangeQuestion}\n\n- Keep it at 02:00\n- Move it to 04:00\n:::`;
+const docEditGate = (toolCallId: string, path: string, data: object) =>
+  gate({
+    tool: "dispatch_doc_edit",
+    path,
+    toolCallId,
+    target: "dispatch_doc_edit issue=LWEVAL-2",
+    ...data,
+  });
+// on, nochange-block: a piped edit the CLI refused with no marker, then the device write the
+// rules check refused in block mode.
+run("askgate-nochange-block-on-1", askgate("nochange-block"), [
+  ...header,
+  turn[0],
+  toolCall("call-d1", "bash", {
+    command: "cat ops.json | dispatch doc-edit --issue LWEVAL-2 --artifact spec --ops-json -",
+  }),
+  gateRefused("call-d1", "dispatch doc-edit was not called: AskGate is on for this session."),
+  docEditGate("call-d1", "dispatch doc-edit", {
+    decision: "revise",
+    outcome: "unmarked",
+    verdictMode: "block",
+  }),
+  toolCall("call-d2", "write", {
+    path: "xd://dispatch_doc_edit",
+    content: JSON.stringify({
+      issue: "LWEVAL-2",
+      artifact: "spec",
+      ops: [{ op: "insert", after: "end", markdown: noChangeBlock }],
+    }),
+  }),
+  gateRefused(
+    "call-d2",
+    `${ruleLine}\n- The ask block that starts 'Keep the nightly export at 02:00 UTC, or move it to 04:00' (#export-time): no change, in the words "${keepIt}"`
+  ),
+  docEditGate("call-d2", "xd://dispatch_doc_edit", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("no_change", keepIt),
+  }),
+]);
+// on, nochange-block: the edit went out.
+run("askgate-nochange-block-on-2", askgate("nochange-block"), [
+  ...header,
+  turn[0],
+  toolCall("call-d2", "bash", {
+    command: `dispatch doc-edit --issue LWEVAL-2 --artifact spec --ops-json '${JSON.stringify([{ op: "insert", after: "end", markdown: noChangeBlock }])}'`,
+  }),
+  result("call-d2", "Edited spec: version 2"),
+  docEditGate("call-d2", "dispatch doc-edit", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+const billingRead = "gh api orgs/example-org/settings/billing/actions";
+const need =
+  "I need to know how many Actions minutes the organization has left before the nightly export moves to 04:00 UTC, as dispatch://LWEVAL-2/comment/c1 asks.";
+const billingAsk = (id: string, question: string, flags = "") =>
+  toolCall(id, "bash", {
+    command: `dispatch ask --issue LWEVAL-2 --question '${question}' --option Done --option 'Cannot run it'${flags}`,
+  });
+const untriedQuestion = `Can you run ${billingRead} and paste its output here? ${need}`;
+/** The gh stand-in's record of the read, and the bash call that ran it. */
+const ranBilling = {
+  "calls.jsonl": calls([
+    {
+      at: "2026-10-24T10:00:00.000Z",
+      as: "gh",
+      argv: ["api", "orgs/example-org/settings/billing/actions"],
+      exit: 1,
+    },
+  ]),
+};
+const billingCall = [
+  toolCall("call-g", "bash", { command: billingRead }),
+  result("call-g", "gh: Not Found (HTTP 404)"),
+];
+// on, untried: the rules check refused the ask in block mode, and the agent never ran the read.
+run("askgate-untried-on-1", askgate("untried"), [
+  ...header,
+  turn[0],
+  billingAsk("call-u", untriedQuestion),
+  gateRefused(
+    "call-u",
+    `${ruleLine}\n- The ask: untried access, in the words "Can you run ${billingRead}"`
+  ),
+  askGate("call-u", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("untried_access", `Can you run ${billingRead}`),
+  }),
+]);
+// on, untried: the agent ran the read anyway, and the rules check let the ask through.
+run("askgate-untried-on-2", { ...askgate("untried", anAsk), ...ranBilling }, [
+  ...header,
+  turn[0],
+  ...billingCall,
+  billingAsk("call-u", untriedQuestion),
+  opened("call-u"),
+  askGate("call-u", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+// on, nochange-rebuttal: the rebuttal sent the ask without review.
+run("askgate-nochange-rebuttal-on-1", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n", rebuttalFlag),
+  opened("call-n"),
+  askGate("call-n", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
+// on, nochange-rebuttal: sent first without the flag, refused, then resent with it.
+run("askgate-nochange-rebuttal-on-2", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n1"),
+  gateRefused("call-n1", noChangeRefusal),
+  askGate("call-n1", {
+    outcome: "verdict",
+    verdictMode: "warn",
+    ...ruleMatch("no_change", keepIt),
+  }),
+  noChangeCall("call-n2", rebuttalFlag),
+  opened("call-n2"),
+  askGate("call-n2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "warn",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
+const triedQuestion = `I ran ${billingRead} and it failed with gh: Not Found (HTTP 404). Can you run it with your access and paste its output here? ${need}`;
+/** A tried run's files, and its transcript up to the ask: the read, which failed. */
+const triedFiles = { ...askgate("tried", anAsk), ...ranBilling };
+const triedStart = [...header, turn[0], ...billingCall];
+// on, tried: the gate let the ask through in block mode.
+run("askgate-tried-on-1", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t", triedQuestion),
+  opened("call-t"),
+  askGate("call-t", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+// on, tried: the charter's revise in warn mode only noted the ask, which went out.
+run("askgate-tried-on-2", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t", triedQuestion),
+  opened("call-t"),
+  askGate("call-t", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "warn",
+    reason: "Shorten it.",
+    ruleOutcome: "none",
+  }),
+]);
+// on, tried: the same revise in block mode refused the ask, and a shorter one went out.
+run("askgate-tried-on-3", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t1", triedQuestion),
+  gateRefused("call-t1", "AskGate did not send this call. Shorten it."),
+  askGate("call-t1", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Shorten it.",
+    ruleOutcome: "none",
+  }),
+  billingAsk("call-t2", `I ran ${billingRead} and got Not Found. Can you run it?`),
+  opened("call-t2"),
+  askGate("call-t2", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+// on, tried: the rules check refused the tried ask, and the agent's rebuttal sent it.
+run("askgate-tried-on-4", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t1", triedQuestion),
+  gateRefused("call-t1", `${ruleLine}\n- The ask: untried access, in the words "Can you run it"`),
+  askGate("call-t1", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("untried_access", "Can you run it"),
+  }),
+  billingAsk("call-t2", triedQuestion, " --advisor-rebuttal 'I ran the read; it failed.'"),
+  opened("call-t2"),
+  askGate("call-t2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "I ran the read; it failed.",
+  }),
+]);
+// on, nochange-rebuttal: a first attempt sent as a compound command, which reached no gate and
+// which the CLI refused with no marker, then the rebuttal, which sent the ask. No model read the
+// first attempt, so it is no refusal of the ask.
+run("askgate-nochange-rebuttal-on-3", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n1", `${rebuttalFlag}; echo done`),
+  gateRefused("call-n1", "dispatch ask was not called: AskGate is on for this session."),
+  askGate("call-n1", { decision: "revise", outcome: "unmarked", verdictMode: "block" }),
+  noChangeCall("call-n2", rebuttalFlag),
+  opened("call-n2"),
+  askGate("call-n2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
 // off, facts: the ask went out and the gate never ran.
 run("askgate-facts-off-1", askgate("facts", anAsk), [
   ...header,
@@ -539,6 +989,33 @@ run("askgate-facts-unrecorded-1", { ...askgate("facts", anAsk), "dispatch.json":
   askCall,
   result("call-a", "Opened ask 7 on LWEVAL-2"),
 ]);
+// A rules case's run, as run_askgate leaves it: own_dispatch writes dispatch.json before
+// seed_dispatch seeds the run's issue. With it the run is scored; with none it is a rig error, as
+// every other askgate run that records no Dispatch of its own is.
+const noChangeRefusedInBlock = [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  gateRefused("call-n", noChangeRefusal),
+  askGate("call-n", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("no_change", keepIt),
+  }),
+];
+run(
+  "askgate-nochange-recorded-1",
+  {
+    ...askgate("nochange"),
+    "dispatch.json": dispatchRecord("run_askgate_nochange_recorded_1"),
+  },
+  noChangeRefusedInBlock
+);
+run(
+  "askgate-nochange-unrecorded-1",
+  { ...askgate("nochange"), "dispatch.json": null },
+  noChangeRefusedInBlock
+);
 
 // spec-writing and spec-rewrite (score.ts specRow). The run below follows every rule, and each
 // other run changes one thing in it. Every text is invented.
@@ -2592,6 +3069,111 @@ test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, n
   expect(out).toMatch(/tester-proof-ran-2\tpass=false\tref=false\tran=false /);
 });
 
+test("a tester passes when its completion names the test record its own session wrote first", () => {
+  expect(out).toMatch(
+    /tester-proof-rec-1\tpass=true\tref=false\tran=true record=v1 proof=true pushes=0 complete=true refusedCompletions=1 ordered=true testerLine=true ownHead=true editBeforeRecord=false /
+  );
+  expect(out).toContain("tester-proof\trec\t1/4\t0/4\t0\t0\n");
+});
+
+test("a record another session wrote fails the proof, even when the stand-in accepted it", () => {
+  expect(out).toMatch(/tester-proof-rec-2\tpass=false\t.* proof=false .* ordered=true /);
+  expect(out).toContain(
+    "session legion-daemon:lweval wrote the record, not this run's session 01a0f2cc"
+  );
+});
+
+test("a completion naming another version than the record's is out of order", () => {
+  expect(out).toMatch(/tester-proof-rec-3\tpass=false\t.* proof=true .* ordered=false /);
+});
+
+test("a push that changes the code under the PR's head fails the proof", () => {
+  expect(out).toMatch(/tester-proof-rec-4\tpass=false\t.* proof=false pushes=1 .* ordered=true /);
+  expect(out).toContain("the push changed [greet.ts]");
+});
+
+// The tester writes its handoff body whole, and its prompt names no time (Dispatch records when the
+// handoff was written): a body with no `completed` key is what the prompt asks for, so the schema
+// reads it and the run is scored. Before the prompt dropped the time, the schema demanded
+// `completed`, so such a body failed the run's proof check (`proofProblems`) and scored `pass=false`.
+test("a tester handoff that carries no completed time is read, and one with no issue is not", () => {
+  const handoff = {
+    schemaVersion: 1,
+    phase: "test",
+    issue: "LWEVAL-1",
+    implementerProof: { verdict: "verified", how: "ran `bun greet.ts Ada` at the head" },
+    proof: [
+      {
+        criterion: "`bun greet.ts <name>` prints the greeting it returns",
+        surface: "the CLI",
+        command: "bun greet.ts Ada",
+        observed: "prints Hello, Ada! and exits 0",
+        headSha: "0f2cc1d4e8b0a1f6c7d2e3b4a5968778695a4b3c",
+        negativeControl: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+      },
+    ],
+  };
+  expect(TestHandoff.safeParse(handoff).success).toBe(true);
+  const { issue: _issue, ...noIssue } = handoff;
+  expect(TestHandoff.safeParse(noIssue).success).toBe(false);
+});
+
+// The scorer reads every label's runs, and each label's agent gets the role prompt of its own
+// checkout (`worker-pane.ts` composes it from `<checkout>/packages/daemon`). So the documented
+// comparison `rig.sh batch tester-proof 5 head base` has the base label's tester write the shape
+// its own checkout's prompt spells — since sjawhar/legion#2585 a `previousHandoff` naming the
+// commit before it, and a `completed` time in the prompt before that — and the head label's
+// tester write this one, which carries neither. A schema that refuses any of those shapes scores
+// that label `pass=false` for a reason that is not the tester-proof rule, which makes the
+// comparison measure the prompt change rather than the rule.
+test("a tester handoff of a checkout whose prompt asks for previousHandoff is read too", () => {
+  const handoff = {
+    schemaVersion: 1,
+    phase: "test",
+    issue: "LWEVAL-1",
+    previousHandoff: "4f1b8a0d1c2e3f4a5b6c7d8e9f0a1b2c3d4e5f60",
+    implementerProof: { verdict: "verified", how: "ran `bun greet.ts Ada` at the head" },
+    proof: [
+      {
+        criterion: "`bun greet.ts <name>` prints the greeting it returns",
+        surface: "the CLI",
+        command: "bun greet.ts Ada",
+        observed: "prints Hello, Ada! and exits 0",
+        headSha: "0f2cc1d4e8b0a1f6c7d2e3b4a5968778695a4b3c",
+        negativeControl: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+      },
+    ],
+  };
+  expect(handoff).not.toHaveProperty("completed");
+  expect(TestHandoff.safeParse(handoff).success).toBe(true);
+  const { implementerProof: _proof, ...noVerdict } = handoff;
+  expect(TestHandoff.safeParse(noVerdict).success).toBe(false);
+});
+
+// The same for the shape before #2585, which a checkout older than it still spells.
+test("a tester handoff of a checkout whose prompt still asks for a completed time is read too", () => {
+  const handoff = {
+    schemaVersion: 1,
+    phase: "test",
+    issue: "LWEVAL-1",
+    completed: "2026-10-31T01:30:00Z",
+    implementerProof: { verdict: "verified", how: "ran `bun greet.ts Ada` at the head" },
+    proof: [
+      {
+        criterion: "`bun greet.ts <name>` prints the greeting it returns",
+        surface: "the CLI",
+        command: "bun greet.ts Ada",
+        observed: "prints Hello, Ada! and exits 0",
+        headSha: "0f2cc1d4e8b0a1f6c7d2e3b4a5968778695a4b3c",
+        negativeControl: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+      },
+    ],
+  };
+  expect(TestHandoff.safeParse(handoff).success).toBe(true);
+  const { implementerProof: _proof, ...noVerdict } = handoff;
+  expect(TestHandoff.safeParse(noVerdict).success).toBe(false);
+});
+
 test("a tool call reading the other label's checkout is a rig error wherever the path falls in it", () => {
   expect(out).toContain(
     "tester-proof-cross-1\trig error: a bash call reads base's checkout: /checkouts/base/skills/legion-worker/SKILL.md"
@@ -2669,6 +3251,23 @@ test("a run that records no Dispatch of its own is a rig error", () => {
     );
     expect(out).not.toContain(`${name}\tpass=`);
   }
+});
+
+test("a rules-case askgate run with no dispatch.json is a rig error", () => {
+  expect(out).toContain(
+    "askgate-nochange-unrecorded-1\trig error: it records no Dispatch of its own (no dispatch.json)"
+  );
+  expect(out).not.toContain("askgate-nochange-unrecorded-1\tpass=");
+  expect(out).toContain("askgate:nochange\tunrecorded\t0/0\t0/0\t1\t0\n");
+});
+
+test("a rules-case askgate run with the dispatch.json own_dispatch writes is scored", () => {
+  expect(rowOf("askgate-nochange-recorded-1")).toMatch(
+    /^askgate-nochange-recorded-1\tpass=true\t.*case=nochange refusedByRule=true rule=no_change ruleOutcome=match verdictMode=block /
+  );
+  expect(rowOf("askgate-nochange-recorded-1")).not.toContain("no dispatch.json");
+  expect(out).not.toContain("askgate-nochange-recorded-1\trig error");
+  expect(out).toContain("askgate:nochange\trecorded\t1/1\t0/1\t0\t0\n");
 });
 
 test("an older spec run with no dispatch.json is scored, with a note that it ran on its batch's Dispatch, alone in its batch", () => {
@@ -2776,6 +3375,55 @@ test("askgate on, upload: reads the first reviewed upload, past an unreadable on
   expect(out).toMatch(/askgate-upload-on-3\tpass=false\t.*fix=false /);
 });
 
+test("askgate on, nochange, nochange-block and untried: pass when the rules check refused the call, in either mode", () => {
+  expect(out).toMatch(
+    /askgate-nochange-on-1\tpass=true\t.*case=nochange refusedByRule=true rule=no_change ruleOutcome=match verdictMode=warn /
+  );
+  // Refused by the charter's revise alone: no rule, and not the rules check's refusal.
+  expect(out).toMatch(
+    /askgate-nochange-on-2\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=none verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-nochange-on-3\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=error /
+  );
+  // A device write, read past the piped edit the CLI refused with no marker.
+  expect(out).toMatch(
+    /askgate-nochange-block-on-1\tpass=true\t.*case=nochange-block refusedByRule=true rule=no_change ruleOutcome=match verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-nochange-block-on-2\tpass=false\t.*case=nochange-block refusedByRule=false rule=none /
+  );
+  expect(out).toMatch(
+    /askgate-untried-on-1\tpass=true\t.*case=untried refusedByRule=true rule=untried_access ruleOutcome=match verdictMode=block ranRead=false /
+  );
+  expect(out).toMatch(
+    /askgate-untried-on-2\tpass=false\t.*case=untried refusedByRule=false rule=none ruleOutcome=none verdictMode=block ranRead=true /
+  );
+});
+
+test("askgate on, nochange-rebuttal and tried: pass when the ask posted and no entry refused it, in the entry's own mode", () => {
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-1\tpass=true\t.*case=nochange-rebuttal asks=1 refusals=0 gates=block\/rebuttal\/allow /
+  );
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-2\tpass=false\t.*asks=1 refusals=1 gates=warn\/verdict\/revise\/no_change,warn\/rebuttal\/allow /
+  );
+  expect(out).toMatch(
+    /askgate-tried-on-1\tpass=true\t.*case=tried asks=1 refusals=0 gates=block\/verdict\/allow ranRead=true /
+  );
+  // One charter revise: in warn mode a note on a call that went out, in block mode a refusal.
+  expect(out).toMatch(
+    /askgate-tried-on-2\tpass=true\t.*refusals=0 gates=warn\/verdict\/revise ranRead=true /
+  );
+  expect(out).toMatch(
+    /askgate-tried-on-3\tpass=false\t.*refusals=1 gates=block\/verdict\/revise,block\/verdict\/allow /
+  );
+  // The rules check refused the ask that carried the read's error: a false positive.
+  expect(out).toMatch(
+    /askgate-tried-on-4\tpass=false\t.*refusals=1 gates=block\/verdict\/revise\/untried_access,block\/rebuttal\/allow /
+  );
+});
+
 test("askgate off, facts: passes when the ask exists and the gate wrote nothing", () => {
   expect(out).toMatch(/askgate-facts-off-1\tpass=true\t.*asks=1 gateEntries=0 /);
   expect(out).toMatch(/askgate-facts-off-2\tpass=false\t.*gateEntries=1 /);
@@ -2792,10 +3440,23 @@ test("askgate: another label and case pair, a directory naming no case, and a ca
   );
 });
 
+test("askgate: a first attempt no review stands behind is no review of the case's call", () => {
+  // facts and link read past it (above); nochange-rebuttal leaves the unmarked entry out of its
+  // refusals, and counts it apart.
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-3\tpass=true\t.*refusals=0 gates=block\/unmarked\/revise,block\/rebuttal\/allow notReviewed=1 /
+  );
+});
+
 test("askgate: the counts are per case and label", () => {
   expect(out).toContain("askgate:facts\ton\t7/10\t0/10\t0\t0\n");
   expect(out).toContain("askgate:link\ton\t2/9\t0/9\t0\t0\n");
   expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\t0\n");
+  expect(out).toContain("askgate:nochange\ton\t1/3\t0/3\t0\t0\n");
+  expect(out).toContain("askgate:nochange-block\ton\t1/2\t0/2\t0\t0\n");
+  expect(out).toContain("askgate:untried\ton\t1/2\t0/2\t0\t0\n");
+  expect(out).toContain("askgate:nochange-rebuttal\ton\t2/3\t0/3\t0\t0\n");
+  expect(out).toContain("askgate:tried\ton\t2/4\t0/4\t0\t0\n");
   expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\t0\n");
   expect(out).toContain("askgate:link\toff\t0/0\t0/0\t1\t0\n");
   expect(out).toContain("askgate\ton\t0/0\t0/0\t1\t0\n");

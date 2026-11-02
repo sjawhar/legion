@@ -120,11 +120,34 @@ func (g *appendGate) oldest() int64 {
 	return g.earliest
 }
 
-// appendUpdateTxClass appends one update inside tx under the gate: the document's advisory lock,
-// prune recovery, the gate (gateAppend) and the append's writes (appendWrites), each statement run
-// in tx in turn. From the gate on it is a write of this process the head tracker follows until tx
-// ends (headTracker.ownWriteIn).
+// appendUpdateTxClass appends one update inside tx under the gate: a run of one
+// (appendUpdatesTx), with no credit and no flush gating it.
 func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, kind appendKind) (persistence.Version, error) {
+	return p.appendUpdatesTx(ctx, tx, room, []BrowserUpdate{{Update: update, ContentChanged: contentChanged}}, kind, nil)
+}
+
+// AppendRoomUpdatesTx appends inside tx the run of updates a room of this process has already
+// applied, in the room's commit order, with the class and the in-flight credit its update observer
+// recorded for each, as one append of flush, the run the appending transaction stores of that room
+// instance (flushThrough). The room decoded each when it applied it, so none is decoded again.
+// flush is what gates the append: the instance's cursor with the versions this flush has appended
+// for it folded in, which is the only way an append of the room's own persistence worker reaches
+// the gate, since no ledger of its transaction names the document (appendingCursor). The version
+// returned is the first the run stored.
+func (p *PgVersioned) AppendRoomUpdatesTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, updates []BrowserUpdate) (persistence.Version, error) {
+	last, err := p.appendUpdatesTx(ctx, tx, room, updates, appendBrowser, flush)
+	if err != nil {
+		return 0, err
+	}
+	return last - persistence.Version(len(updates)) + 1, nil
+}
+
+// appendUpdatesTx appends updates inside tx under the gate, at consecutive versions from the head
+// it reads: the document's advisory lock, prune recovery, the gate (gateAppend) and the append's
+// writes (appendWrites), each statement run in tx in turn. From the gate on it is a write of this
+// process the head tracker follows until tx ends (headTracker.ownWriteIn). The version returned is
+// the last the run stored.
+func (p *PgVersioned) appendUpdatesTx(ctx context.Context, tx pgx.Tx, room string, updates []BrowserUpdate, kind appendKind, flush *RoomFlush) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -135,11 +158,11 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		return 0, err
 	}
 	wrote := p.heads.ownWriteIn(tx, room)
-	head, err := gateAppend(ctx, tx, room, appendingThrough(ctx, room), kind)
+	head, err := gateAppend(ctx, tx, room, appendingThrough(ctx, room, flush), kind)
 	if err != nil {
 		return 0, err
 	}
-	statements, version, err := p.appendWrites(room, head, []BrowserUpdate{{Update: update, ContentChanged: contentChanged}})
+	statements, version, err := p.appendWrites(room, head, updates)
 	if err != nil {
 		return 0, err
 	}

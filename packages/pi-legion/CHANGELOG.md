@@ -3,6 +3,149 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [16.1.0] - 2026-11-01
+
+### Changed
+
+- The controller's skill no longer writes `todo` for a root a person handed over: a person's `legion` label on a new issue in `triage`, and a person's approval of a parked labelled issue's spec, are queued by the daemon. `triage.md` reads the label's setter as the newest event that added it, keeps the controller's `todo` write for the roots it labels or files itself, and `backlog-stewardship.md` says a root the weekly plan says to defer is parked at the next backlog pass.
+
+## [15.9.0] - 2026-11-01
+
+### Added
+
+- A real-binary test holds the pinned Oh My Pi to running a role's `deep-worker` in the
+  background: a role pane dispatches it, the `task` call's turn ends while the subagent's own
+  model request is still held on the stand-in gateway, a role-lane message published over NATS
+  in the meantime is in the role's context at its next model turn well inside the 30 seconds
+  that bound it, and the finished job's result wakes the role into a turn carrying the worker's
+  report. The pane loads this package's root, so `agents/` is discovered, and maps the `deep`
+  model role `deep-worker` asks for as `@deep`; a pin whose defaults turned background work off,
+  or a `blocking: true` put back into an agent, fails it.
+
+### Changed
+
+- `legion.daemonApiVersion` is 44. Contract 44 drops
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` from a Claude Code role's start command and pane, so
+  the worker environment the contract covers is one variable smaller; a daemon at 44 and a
+  plugin at 43 are refused by the boot gate, which is why the two move together.
+- The `legion` tool's description and the `legion-worker` skill name the daemon's new refusal,
+  `HANDOFF_STALE_ASSIGNMENT`: the issue left your phase and came back while your turn ran, so the
+  completion is of the assignment before the one the phase hands you now. The refusal records
+  nothing, as `HANDOFF_STALE_GENERATION` does, but its remedy is not that one's: a phase entered
+  again hands work of its own, so the worker ends the turn without completing, tells the
+  architect, and does the new task's work and completes it with a handoff of its own rather than
+  reporting the refused commit again.
+- Every Legion skill that dispatches a task subagent now says to read its result with Oh My Pi's
+  `wait` tool, since a subagent runs as a background job under the pinned binary's own defaults:
+  the worker's merge gate, the architect's design gate and decomposition, the oracle's research
+  steps, retro's second reading and the simplify pass. The worker skill's stop rules say that the
+  phase reminder keeps still while a role waits on background work of its own, and that the
+  workspace is read-only from the moment the phase ends — a CI red that takes it back stops no
+  turn, so the role stops writing itself and leaves what it has uncommitted. `skills/AGENTS.md`
+  states the pairing as a rule. A new case in this package's skills guard holds the repository's
+  skills, this package's agents and a fresh build of the Claude Code plugin to naming none of the
+  retired sentences and to pairing every dispatch with `wait`.
+
+### Removed
+
+- No agent the plugin ships declares `blocking` any more: `deep-worker`, `plan-gap-analyst` and
+  `plan-reviewer` drop `blocking: true`, so a Legion pod with async jobs and bash
+  auto-background on runs each of them as a background task. A caller that must have a result
+  before its next step waits for it in its own prompt, and the shipped-agents test now holds
+  every agent file to declaring no `blocking` field, true or false.
+
+### Fixed
+
+- A worker whose turn ends while an Oh My Pi background job of its own is still running gets no
+  phase reminder: the pinned runtime holds `session_stop` back until its agent-owned async jobs
+  are idle, and the job's own result wakes the session into the next turn. The real-binary test
+  is what holds the pin to that.
+
+## [15.7.0] - 2026-10-31
+
+### Changed
+
+- `legion-worker`'s tools reference opens with the database a role's tests use: never the URL in
+  the file `OMP_SESSION_SQL_DSN_FILE`, the live sessions database every pod shares, whose login
+  can create and drop databases there, but `$LEGION_TEST_PG_DSN`, the pod's own PostgreSQL, which
+  the worker image now carries and the roles container's launcher starts at container start. The
+  rule names every Postgres variable a test reads, how a suite that resets the database it is
+  given makes one of its own with `createdb`, and what a role on a digest that predates the
+  server does instead.
+
+## [15.6.0] - 2026-10-31
+
+### Changed
+
+- A phase worker's handoff carries no `completed` time: a handoff's time is the committer date of
+  the commit that carries it. Each handoff instead carries `previousHandoff`, the newest commit on
+  the branch that changed that handoff's file (usually the role's previous handoff of the phase),
+  so a round that repeats its predecessor's words still writes a new commit; a reviewer's also
+  carries `headReviewed`. Every worker, architect and controller is told that a time or date it
+  writes comes from a command, a task result or its own task, never from an estimate.
+
+## [15.5.1] - 2026-10-31
+
+### Changed
+
+- The daemon's role prompts for every architect, every phase worker and the controller it launches say that, under Oh My Pi, the bash tool keeps one shell for the whole session, so a variable changed or unset in one command stays so for every later one. They say never to change or unset `DISPATCH_URL`, `DISPATCH_HOST`, `DISPATCH_SESSION_ID`, `DISPATCH_TOKEN_FILE` or `ENVOY_CONFIG_FILE` there, give the command that exports a lost `DISPATCH_URL` again from the session's start environment, and say that `Unable to connect` is the server, not these variables: wait and run the same command again. An architect that unset `DISPATCH_URL` while Dispatch restarted had Dispatch off for the rest of its session.
+
+## [15.5.0] - 2026-10-31
+
+### Added
+
+- `legion-worker`'s reference table sends a phase worker to `skill://outside-message` before its
+  text reaches a person outside the company: a comment, issue or pull request on a repository the
+  company does not own, an email, or a message to another project's maintainers.
+
+## [15.4.2] - 2026-10-31
+
+### Changed
+
+- legion-architect: a child issue is a separately deliverable change (its own pull request or deploy); a fresh red team checks every proposed child before it is filed or released, and the root proves its acceptance in its own last round instead of an integration child.
+
+## [15.3.1] - 2026-10-30
+
+### Fixed
+
+- The `legion-retro` skill names a retro learning file `docs/solutions/<category>/<slug>-pr<number>.md` by the pull request number, and its front-matter example carries the pull request alone, so no Dispatch issue key reaches a file name in this public repository.
+
+## [15.3.0] - 2026-10-30
+
+### Added
+
+- The skill-scenarios rig's `askgate` scenario gets five cases of AskGate's rules check, which
+  `SKILL_SCENARIOS_ASKGATE_CASE` names beside the three it had: `nochange` (an ask whose own
+  recommendation changes nothing), `nochange-rebuttal` (the same ask with `--advisor-rebuttal`),
+  `nochange-block` (the same ask inserted as an ask block with one `dispatch doc-edit`), and
+  `untried` and `tried` (an ask for a `gh api` read the agent did not run, or ran first and quotes
+  the error of). Each rules case's prompt asks for the write as one `dispatch` command of literal
+  words, the form AskGate reads: a write sent any other way reaches no review at all, and the CLI
+  refuses it or posts it with a warning. `SKILL_SCENARIOS_ASKGATE_MODE` (`warn` or `block`) sets
+  the run's `OMP_ASKGATE` and is written to `<run>/mode.txt`; unset, the pane gets no
+  `OMP_ASKGATE`, so AskGate's verdicts block and its marker checks warn. An askgate run's
+  directory is still `askgate-<case>-<label>-<n>`, so the batches of the eight cases keep their
+  own runs, and `rig.sh score askgate` counts each case and label on its own. `score.ts` reads the
+  rule a refusal names, the rules call's outcome and each call's own mode from the transcript: a
+  `nochange`, `nochange-block` or `untried` run passes when the rules check refused the case's
+  call in either mode, and a `nochange-rebuttal` or `tried` run passes when the ask posted and no
+  entry refused it. An entry no review stands behind — a command AskGate could not read, and a
+  gated write the CLI found no marker for — is no review of the case's call in any of them.
+
+## [15.2.0] - 2026-10-30
+
+### Changed
+
+- Daemon API contract 43: `GET /legion/v1/state` carries `consumers`, the lag of each of the
+  daemon's durable consumers (`name`, `waiting`, `oldestAt`, `oldestAgeSeconds`,
+  `lastHandledAt`, `stalled`, and `unavailable` when NATS did not answer), and
+  `repositories.withoutWebhookApp`, each served repository Dispatch's GitHub App is not known to
+  be installed on, with the reason. A plugin of contract 42 reads this state strictly and refuses
+  it, so the boot gate and `legion probe-image` refuse the mixed pair. The `legion` tool's
+  `handoff_complete` description names the implementer's new refusal `HANDOFF_NO_PULL_REQUEST`:
+  the daemon reads the branch's open pull request before it applies the completion, and refuses
+  the completion, recording nothing, when there is none and the record holds none merged.
+
 ## [14.0.0] - 2026-10-29
 
 ### Changed
