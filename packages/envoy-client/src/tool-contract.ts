@@ -185,7 +185,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; sending the same message again with that idempotency_key within 72 hours delivers it once.`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
     arguments: (schema) => ({
       session_id: schema
         .string()

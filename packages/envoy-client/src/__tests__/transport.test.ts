@@ -581,6 +581,27 @@ describe("EnvoyClient", () => {
     ).rejects.toBeInstanceOf(EnvoyApiError);
   });
 
+  test("a 409 whose body does not arrive stays a typed API error, sent once", async () => {
+    let calls = 0;
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async () => {
+        calls += 1;
+        const body = new ReadableStream({
+          pull(controller) {
+            controller.error(new TypeError("body lost"));
+          },
+        });
+        return new Response(body, { status: 409 });
+      },
+    });
+
+    await expect(
+      client.setRole({ sessionID: "ses_x", role: "controller", soft: true })
+    ).rejects.toBeInstanceOf(EnvoyApiError);
+    expect(calls).toBe(1);
+  });
+
   test("lists listener sessions and retains their registration metadata, plugin or none", async () => {
     const unversioned = {
       session_id: "ses_sender",
@@ -729,8 +750,9 @@ describe("EnvoyClient", () => {
     expect((error as Error).message).toBe(
       "The send to ses_target is not confirmed delivered: the listener did not answer " +
         "(The operation timed out.) on the last of 2 attempts. It may or may not have arrived. " +
-        `Sending it again with idempotency_key ${key} within 72 hours is safe: Envoy ` +
-        "recognises the repeat, and the recipient gets the message once."
+        `Sending it again with idempotency_key ${key} within 72 hours is the safe resend: ` +
+        "Envoy drops it as a repeat if the first copy arrived (a recipient that restarted in " +
+        "between can rarely see it twice)."
     );
   });
 

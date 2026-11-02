@@ -210,7 +210,9 @@ got no answer, an unreadable 2xx or a 5xx throws `EnvoySendUnconfirmedError`, ev
 attempt was refused: the message may or may not have arrived. The error names its
 `idempotencyKey` and says in `resendSafe` whether the listener's dedupe key for it
 (`agent.<target>.<key>`) is one a repeat is recognised by (`MINTED_DEDUPE_KEY_PATTERN`); when it
-is, a resend under that key inside the 72-hour duplicate window reaches the recipient once. A send
+is, a resend under that key inside the 72-hour duplicate window is dropped as a repeat if the
+first copy arrived (`DELIVERY_DUPLICATE_WINDOW_MS` names the rare cases a recipient that restarted
+still sees it twice). A send
 refused with a 4xx on every attempt stays an `EnvoyApiError`. Listener error responses preserve their
 `error` and optional `expected` fields. The listener's bearer is the `token` the client is given
 (`envoySettings`); without one it sends no `Authorization` header.

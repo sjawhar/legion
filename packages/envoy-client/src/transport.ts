@@ -424,14 +424,15 @@ const mintedDedupeKey = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
  * not parse) or got a 5xx, so the message may or may not have reached its target, even when a
  * later attempt was refused. Every attempt carried `idempotencyKey`. The listener sends under the
  * dedupe key `agent.<target>.<idempotencyKey>`, and when that key is one a repeat is recognised by
- * (`MINTED_DEDUPE_KEY_PATTERN`: a lower-case UUID and a target with no dot), the stream and the
- * recipient's plugin hand the recipient one copy for `DELIVERY_DUPLICATE_WINDOW_MS`, which states
- * where that fails (`resendSafe`). A send refused with a 4xx on every attempt it made stays an
- * `EnvoyApiError`. `last` (also the `cause`) is what the last attempt got.
+ * (`MINTED_DEDUPE_KEY_PATTERN`: a lower-case UUID and a target with no dot), the stream stores
+ * one copy and the recipient's plugin drops a repeat inside `DELIVERY_DUPLICATE_WINDOW_MS`, which
+ * states the rare cases where a recipient that restarted still sees it twice (`resendSafe`). A
+ * send refused with a 4xx on every attempt it made stays an `EnvoyApiError`. `last` (also the
+ * `cause`) is what the last attempt got.
  */
 export class EnvoySendUnconfirmedError extends Error {
   override readonly name = "EnvoySendUnconfirmedError";
-  /** Whether a resend under `idempotencyKey` inside the duplicate window reaches the target once. */
+  /** Whether Envoy recognises a resend under `idempotencyKey` inside the window as a repeat. */
   readonly resendSafe: boolean;
 
   constructor(
@@ -448,8 +449,9 @@ export class EnvoySendUnconfirmedError extends Error {
     const resendSafe = mintedDedupeKey.test(`agent.${targetSessionID.trim()}.${idempotencyKey}`);
     const resend = resendSafe
       ? `Sending it again with idempotency_key ${idempotencyKey} within ` +
-        `${DELIVERY_DUPLICATE_WINDOW_MS / 3_600_000} hours is safe: Envoy recognises the repeat, ` +
-        "and the recipient gets the message once."
+        `${DELIVERY_DUPLICATE_WINDOW_MS / 3_600_000} hours is the safe resend: Envoy drops it as ` +
+        "a repeat if the first copy arrived (a recipient that restarted in between can rarely " +
+        "see it twice)."
       : `Envoy cannot recognise a resend under idempotency_key ${idempotencyKey} as a repeat ` +
         "(the key is not a lower-case UUID, or the session id holds a dot): ask the recipient " +
         "whether it arrived before sending it again.";
@@ -731,7 +733,14 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         // A soft claim refused by a live holder is an outcome, not a failure:
         // the listener answers 409 with the holder's id.
         if (error instanceof EnvoyApiError && error.details.status === 409) {
-          const held = RoleHeldWireSchema.safeParse(JSON.parse(error.details.responseBody));
+          let answer: unknown;
+          try {
+            answer = JSON.parse(error.details.responseBody);
+          } catch {
+            // A 409 whose body did not arrive, or is not JSON, names no holder: it stays the refusal.
+            throw error;
+          }
+          const held = RoleHeldWireSchema.safeParse(answer);
           if (held.success) return { claimed: false, holder: held.data.holder };
         }
         throw error;
