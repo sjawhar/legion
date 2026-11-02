@@ -1,0 +1,14 @@
+kind: Changed
+body: |-
+    Dispatch's document server runs on sjawhar/ygo v1.55.1-sami.1. Browser edits travel as smaller,
+    Yjs-shaped updates (an update carries only its own deletions, and a transaction that changes
+    nothing and keeps nothing for later sends and stores nothing); a joining editor gets the
+    document once instead of twice; a browser that stops reading is closed once 128 MiB is queued
+    for it instead of holding memory without bound; a room is no longer closed while a write, a
+    read or a browser's join is inside it, so closing an issue, evicting a room or shutting down
+    waits for them and then closes it; and a browser's edit that reaches the server ahead of the
+    edit it builds on is stored at once, so a restart before that earlier edit arrives no longer
+    loses it.
+time: 2026-11-02T14:00:00.000000000Z
+custom:
+    Issue: pr2678
