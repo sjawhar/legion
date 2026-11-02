@@ -104,6 +104,7 @@ import {
   envoyToolSpecs,
   type MessageMetadataArguments,
   parseEnvoyToolArguments,
+  publishConfirmationText,
   sendConfirmationText,
   sessionsOnMachine,
   toMessageMetadata,
@@ -4066,15 +4067,13 @@ export default function envoyExtension(pi: PiApi): void {
           // subagent's, does reach it. Only the role lane,
           // which its holder does not subscribe to, actually goes undelivered: a subagent's
           // source is its parent, so a publish to a role that parent holds is accepted, answers
-          // with that holder, and reaches nobody. Only the role case is visible here (a plain
-          // topic's subscribers are not in the answer); AGENTS.md and the envoy skill carry the
-          // general rule. A direct envoy_send is unaffected: the agent-subject lane has no such
-          // skip.
+          // with that holder, and reaches nobody. Only the role case is an echo skip this answer
+          // can show: a plain topic's subscribers that took the message are not in it, while the
+          // ones it was only stored for are named under `unresponsive`. AGENTS.md and the envoy
+          // skill carry the general rule. A direct envoy_send is unaffected: the agent-subject
+          // lane has no such skip.
           const undelivered = source !== "" && result.holder === source && inSubagent;
-          const published =
-            result.holder === undefined
-              ? `published ${result.envelope.event_id}`
-              : `published ${result.envelope.event_id}; holder ${result.holder}`;
+          const published = publishConfirmationText(result);
           return toolSuccess(
             undelivered
               ? `${published}\nNot delivered: that holder is the session this subagent sends as, and the listener drops a message whose source session is its recipient, so the agent that spawned you did not receive it. Reach it with a write to its agent:// address instead.`
@@ -4083,6 +4082,10 @@ export default function envoyExtension(pi: PiApi): void {
               event_id: result.envelope.event_id,
               topic,
               ...(result.holder === undefined ? {} : { holder: result.holder }),
+              ...(result.holderState === undefined ? {} : { holder_state: result.holderState }),
+              // Named only when the listener named one, so an answer where every recipient took
+              // the message reads exactly as it did.
+              ...(result.unresponsive.length === 0 ? {} : { unresponsive: result.unresponsive }),
               ...(undelivered ? { undelivered_echo: true } : {}),
             }
           );

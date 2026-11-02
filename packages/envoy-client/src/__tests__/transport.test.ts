@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MINTED_DEDUPE_KEY_PATTERN } from "@legion/contracts";
+import { ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS, MINTED_DEDUPE_KEY_PATTERN } from "@legion/contracts";
 import { machineID } from "../machine";
 import {
   createEnvoyClient,
@@ -7,7 +7,13 @@ import {
   EnvoyApiError,
   EnvoySendUnconfirmedError,
   newClientInstanceID,
+  UNRESPONSIVE_RULE,
 } from "../transport";
+
+/** The grace the unresponsive rule names, in minutes, from the constant the Dispatch server
+ *  refuses a claim take by: a change of that constant must change the rule's text, and these
+ *  expectations with it, rather than leaving the text saying a number nothing enforces. */
+const GRACE_MINUTES = ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS / 60_000;
 
 type RecordedFetch = {
   readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -458,6 +464,53 @@ describe("EnvoyClient", () => {
     });
   });
 
+  // The listener answers 200 for an ad-hoc topic send whose subscriber stopped answering: it
+  // stored that session's copy and asked it for no receipt, and names the session under
+  // `unresponsive` (`cmd/listener/api.go`'s `publishResponse`). The field has to survive the
+  // client, because an agent told only "published" reads a stalled peer as one that took the
+  // message (dispatch://INFRA-392, R7).
+  test("a publish names every recipient the listener only stored it for", async () => {
+    const envelope = {
+      event_id: "event-stored",
+      source: "agent",
+      source_event_id: "agent.ses_sender.event-stored",
+      source_session: "ses_sender",
+      topic: "notifications.team.deploy-squad.all",
+      dedupe_key: "agent.team.event-stored",
+      issued_at: 3,
+      payload_summary: "broadcast",
+      trace_id: "trace-3",
+    };
+    const recorded = recordFetch([
+      jsonResponse({ ...envelope, unresponsive: ["ses_stalled", "ses_quiet"] }),
+      jsonResponse({
+        ...envelope,
+        topic: "notifications.role.controller",
+        holder: "ses_holder",
+        holder_state: "live",
+      }),
+      jsonResponse(envelope),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+    const publish = (topic: string) =>
+      client.publish({ sourceSessionID: "ses_sender", topic, message: "broadcast" });
+
+    const stored = await publish("notifications.team.deploy-squad.all");
+    const role = await publish("notifications.role.controller");
+    const taken = await publish("notifications.team.deploy-squad.all");
+
+    expect(stored.unresponsive).toEqual(["ses_stalled", "ses_quiet"]);
+    // A role publish's holder and the state the listener resolved it in, under the two names
+    // every role answer uses.
+    expect(role.holder).toBe("ses_holder");
+    expect(role.holderState).toBe("live");
+    expect(role.unresponsive).toEqual([]);
+    // An answer naming none — every recipient confirmed, or a listener predating the field —
+    // reads as it always did.
+    expect(taken.unresponsive).toEqual([]);
+    expect(taken.holderState).toBeUndefined();
+  });
+
   test("deletes a session registration", async () => {
     const recorded = recordFetch([new Response(null, { status: 200 })]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
@@ -762,7 +815,8 @@ describe("EnvoyClient", () => {
     expect(stalled).toBeInstanceOf(EnvoyApiError);
     const unresponsive = stalled as EnvoyApiError;
     expect(unresponsive.message).toBe(
-      "role reviewer holder ses_stalled lapsed; claim retained (last seen 1700000000000) Holder ses_stalled is unresponsive, last seen 2023-11-14T22:13:20.000Z. An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or until 20 minutes have passed since its last_seen, the time of its last registration."
+      "role reviewer holder ses_stalled lapsed; claim retained (last seen 1700000000000) Holder ses_stalled is unresponsive, last seen 2023-11-14T22:13:20.000Z. An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, " +
+        `or until ${GRACE_MINUTES} minutes have passed since its last_seen, the time of its last registration.`
     );
     expect(unresponsive.sessionState).toBe("unresponsive");
     expect(unresponsive.holder).toBe("ses_stalled");
@@ -803,6 +857,45 @@ describe("EnvoyClient", () => {
     );
     expect(refusal.sessionState).toBe("unresponsive");
     expect(refusal.lastSeen).toBe(1_700_000_000_000);
+  });
+
+  // The 504 of a topic send one recipient did not confirm names the stalled recipients too
+  // (`cmd/listener/confirmed.go`'s `topicSendFailure`), and its own text names neither them nor
+  // what they mean. An agent reading the refusal must not count a session the message was
+  // stored for among the sessions that failed it.
+  test("a refused topic send says which recipients it was stored for all the same", async () => {
+    const refused = {
+      error:
+        "1 of 3 sessions subscribed to notifications.team.deploy-squad.all did not confirm event event-late within 4s: ses_busy (receipt_timeout)",
+      reason: "not_confirmed",
+      event_id: "event-late",
+      dedupe_key: "agent.team.event-late",
+      delivered: ["ses_live"],
+      undelivered: [{ session_id: "ses_busy", reason: "receipt_timeout" }],
+      unresponsive: ["ses_stalled"],
+    };
+    // A 504 is answered twice: the client sends an unanswered or 5xx request once more.
+    const recorded = recordFetch([
+      Response.json(refused, { status: 504 }),
+      Response.json(refused, { status: 504 }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const refusal = (await client
+      .publish({
+        sourceSessionID: "ses_sender",
+        topic: "notifications.team.deploy-squad.all",
+        message: "broadcast",
+      })
+      .catch((error: unknown) => error)) as EnvoyApiError;
+
+    expect(refusal.message).toBe(
+      `${refused.error} Envoy stored the message for ses_stalled. That session stopped answering, so it did not fail this send. ${UNRESPONSIVE_RULE}`
+    );
+    expect(refusal.unresponsive).toEqual(["ses_stalled"]);
+    // The stalled recipient is no state of the refusal itself: nothing here says the send was
+    // refused for it.
+    expect(refusal.sessionState).toBeUndefined();
   });
 
   test("normalizes non-success responses into a typed API error", async () => {

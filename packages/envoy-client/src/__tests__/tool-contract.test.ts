@@ -1,16 +1,27 @@
 import { describe, expect, test } from "bun:test";
-import { SLACK_POST_TEXT_MAX, zodSchemaApi } from "@legion/contracts";
+import {
+  ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS,
+  SLACK_POST_TEXT_MAX,
+  zodSchemaApi,
+} from "@legion/contracts";
 import { z } from "zod";
 import {
   envoyToolSpecs,
   MessageMetadataSchema,
   messageMetadataShape,
   parseEnvoyToolArguments,
+  publishConfirmationText,
   sendConfirmationText,
   sessionsOnMachine,
   toMessageMetadata,
 } from "../tool-contract";
 import { ToolInputError } from "../tool-input-errors";
+import { UNRESPONSIVE_RULE } from "../transport";
+
+/** The grace the unresponsive rule names, in minutes, from the constant the Dispatch server
+ *  refuses a claim take by: the rule's text must carry that number, and a change of the constant
+ *  must change the text rather than leave it saying a number nothing enforces. */
+const GRACE_MINUTES = ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS / 60_000;
 
 const schemaApi = zodSchemaApi(z);
 
@@ -119,7 +130,13 @@ describe("envoyToolSpecs", () => {
     }
     expect(publish?.description).toContain("errs naming each session that did not confirm");
     expect(publish?.description).toContain(
-      "a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then, and so is one that is merely unresponsive, which takes the message when it answers. A named session is not a failed delivery to the other sessions"
+      "a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then. A named session is not a failed delivery to the other sessions"
+    );
+    // The listener answers 200 for an unresponsive follower and names it under `unresponsive`
+    // (`cmd/listener/api.go`'s `publishResponse`), so the description must not call that an
+    // error (dispatch://INFRA-392, R7).
+    expect(publish?.description).toContain(
+      "A session that is only unresponsive is named as no failure at all. The listener stores that session's copy, asks it for no receipt, and names the session under unresponsive. The accepted publish and the error both name it there. That session takes the message when it answers again."
     );
     expect(publish?.description).toContain(
       "a role message errs when its holder did not confirm it within the listener's window"
@@ -138,7 +155,8 @@ describe("envoyToolSpecs", () => {
         "A session is live, unresponsive or gone, by how long ago it last registered: live within 5 minutes, unresponsive after that and within an hour, gone past the hour or with no record at all."
       );
       expect(description).toContain(
-        "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or until 20 minutes have passed since its last_seen, the time of its last registration."
+        "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, " +
+          `or until ${GRACE_MINUTES} minutes have passed since its last_seen, the time of its last registration.`
       );
       expect(description).toContain("A session named with no state is live.");
     }
@@ -173,7 +191,8 @@ describe("sendConfirmationText", () => {
         duplicate: false,
       })
     ).toBe(
-      "sent evt_1 to ses_peer (unresponsive, so it is stored until that session answers; An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or until 20 minutes have passed since its last_seen, the time of its last registration.) (recipient unconfirmed by listener)"
+      "sent evt_1 to ses_peer (unresponsive, so it is stored until that session answers; An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, " +
+        `or until ${GRACE_MINUTES} minutes have passed since its last_seen, the time of its last registration.) (recipient unconfirmed by listener)`
     );
   });
 
@@ -191,6 +210,38 @@ describe("sendConfirmationText", () => {
         duplicate: false,
       })
     ).toContain("(unresponsive since 2025-11-01T12:26:40.000Z, so it is stored until");
+  });
+});
+
+describe("publishConfirmationText", () => {
+  const envelope = { event_id: "evt_1" };
+
+  // A publish the listener accepted still leaves a stalled subscriber without the message: the
+  // copy is stored for it. The line both hosts show is where the publishing agent learns that,
+  // so it must name the session and say the rule (dispatch://INFRA-392, R7).
+  test("names each recipient the message was only stored for, and says the rule once", () => {
+    expect(publishConfirmationText({ envelope, unresponsive: [] })).toBe("published evt_1.");
+    expect(publishConfirmationText({ envelope, unresponsive: ["ses_stalled"] })).toBe(
+      `published evt_1. Envoy stored it for ses_stalled. That session stopped answering, so it has not taken it yet. ${UNRESPONSIVE_RULE}`
+    );
+    expect(publishConfirmationText({ envelope, unresponsive: ["ses_one", "ses_two"] })).toBe(
+      `published evt_1. Envoy stored it for ses_one, ses_two. Those sessions stopped answering, so they have not taken it yet. ${UNRESPONSIVE_RULE}`
+    );
+  });
+
+  test("names a role publish's holder and the state the listener resolved it in", () => {
+    expect(
+      publishConfirmationText({
+        envelope,
+        holder: "ses_holder",
+        holderState: "live",
+        unresponsive: [],
+      })
+    ).toBe("published evt_1. Its role holder is ses_holder (live).");
+    // A listener predating the field names the holder alone, and the line says only that.
+    expect(publishConfirmationText({ envelope, holder: "ses_holder", unresponsive: [] })).toBe(
+      "published evt_1. Its role holder is ses_holder."
+    );
   });
 });
 

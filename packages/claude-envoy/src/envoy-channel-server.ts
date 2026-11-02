@@ -52,6 +52,7 @@ import { postSlackReply } from "@legion/envoy-client/slack-post"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
+  publishConfirmationText,
   sendConfirmationText,
   sessionsOnMachine,
   type ToolArgumentsByOperation,
@@ -1728,13 +1729,24 @@ export async function executeEnvoyTool(
     }
     case EnvoyToolOperation.publish: {
       const args = parseArguments(spec, input)
-      return runtime.client.publish({
+      const result = await runtime.client.publish({
         source: "agent",
         sourceSessionID: identity.id,
         topic: args.topic,
         message: args.message,
         ...toMessageMetadata(args),
       })
+      // The answer the model reads, its line first. A topic send whose subscriber stopped
+      // answering was accepted and stored for that session, and this result is the one place
+      // the model is told so.
+      return {
+        message: publishConfirmationText(result),
+        event_id: result.envelope.event_id,
+        topic: result.envelope.topic,
+        ...(result.holder === undefined ? {} : { holder: result.holder }),
+        ...(result.holderState === undefined ? {} : { holder_state: result.holderState }),
+        unresponsive: result.unresponsive,
+      }
     }
     case EnvoyToolOperation.subscribe: {
       const args = parseArguments(spec, input)
