@@ -442,7 +442,9 @@ func TestSessionConsumerCarriesTheGapAndTheUnsubscribeAcrossARefusedWrite(t *tes
 
 // A registration whose row is rewritten under every plan it makes is answered the
 // bus-unavailable 503 and writes nothing: the plugin's next heartbeat registers again, rather
-// than this one spinning against a writer that keeps winning (registrationPlanAttempts).
+// than this one spinning against a writer that keeps winning. The three plans are written out
+// rather than read from registrationPlanAttempts, so that raising the bound is a decision this
+// case makes someone take again.
 func TestSessionConsumerRefusesARegistrationEveryPlanOfWhichIsOutrun(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	const sessionID = "ses_plan_exhausted"
@@ -464,8 +466,8 @@ func TestSessionConsumerRefusesARegistrationEveryPlanOfWhichIsOutrun(t *testing.
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
 	}
-	if passes != registrationPlanAttempts {
-		t.Fatalf("the registration made %d plans, want %d", passes, registrationPlanAttempts)
+	if passes != 3 {
+		t.Fatalf("the registration made %d plans, want 3", passes)
 	}
 	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
 	if err != nil {
@@ -797,15 +799,17 @@ func awaitSkipped(t *testing.T, harness listenerDeliveryHarness, want int) {
 	}
 }
 
-// A serving-port registration keeps the consumer an earlier pass gave it when a later pass can
-// give none. Only a portless body is refused for want of a consumer; a serving-port one is
-// answered with no delivery at all, since its port is pushed to instead
-// (sessionDelivery.register). So without sessionDeliveryOutcome.carrying the re-plan would drop
-// the consumer the first pass created from the answer, and the session would read its
-// registration as one that got none -- while the consumer, and the relay that serves it, stay.
-// The later pass here is refused for want of the grant, the one refusal a listener meets without
-// its NATS user changing under it.
-func TestSessionConsumerKeepsAServingPortsConsumerWhenALaterPassIsRefused(t *testing.T) {
+// A serving-port registration whose later pass can give no consumer answers no delivery at all,
+// and its entry records none: only a portless body is refused for want of a consumer, since a
+// serving-port session's port is pushed to instead (sessionDelivery.register). Carrying the
+// consumer an earlier pass created into that answer would say consumer delivery while the
+// filter that consumer holds is the earlier pass's plan, which the row this registration stored
+// disagrees with -- and the relay would then serve a session from a filter naming topics the
+// row does not. The consumer itself stays on the server, filtered on that earlier plan, and the
+// session's next registration sets its filter to the row it stores then; until then nothing
+// claims it, since the entry says the port is the path. The later pass here is refused for want
+// of the grant, the one refusal a listener meets without its NATS user changing under it.
+func TestSessionConsumerServingPortAnswersNoConsumerWhenALaterPassIsRefused(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	const (
 		sessionID = "ses_port_carry"
@@ -837,13 +841,22 @@ func TestSessionConsumerKeepsAServingPortsConsumerWhenALaterPassIsRefused(t *tes
 	answer := rig.subscribe(t, registration)
 	rig.deps.consumers.beforeRegister = nil
 
-	if answer.Delivery == nil || answer.Delivery.Mode != deliveryModeConsumer {
-		t.Fatalf("answer %s, want the consumer the first pass created: a later pass that can give none must not drop it", answer.raw)
+	if answer.Delivery != nil {
+		t.Fatalf("answer %s, want no delivery: the pass that answered could give no consumer, and an earlier pass's one is filtered on a plan this row no longer holds", answer.raw)
 	}
-	if answer.Delivery.Subject != bus.DeliverSubject(sessionID) {
-		t.Fatalf("relay subject %q, want %q", answer.Delivery.Subject, bus.DeliverSubject(sessionID))
+	if entry := rig.entry(t, sessionID); entry.Delivery == session.DeliveryConsumer {
+		t.Fatalf("session entry %+v, want no consumer delivery: its port is the path while no consumer is filtered on the row that was stored", entry)
+	}
+	// The row the registration stored is the one the unsubscribe left, and the consumer the
+	// first pass created is still there, for the next registration to re-filter.
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if slices.Contains(stored.Topics, dropped) {
+		t.Fatalf("stored topics %v; the unsubscribe removed %s", stored.Topics, dropped)
 	}
 	if _, err := rig.deps.consumers.consumers.Info(context.Background(), sessionID); err != nil {
-		t.Fatalf("the consumer the answer names: %v", err)
+		t.Fatalf("the consumer the first pass created: %v", err)
 	}
 }
