@@ -12,6 +12,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // Ledger is what the document operations joined to one database transaction produce until it
@@ -46,6 +47,10 @@ type Ledger struct {
 	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
 	// loads until it ends, committed or not.
 	rebuilds []string
+	// readBacks holds, per document this transaction wrote whole (SeedText, ReplaceText), the
+	// read-back its parse already made of the markdown it stores (pmdoc.ParseWritten), so a step
+	// of the same request that reads that markdown again shares the parse (ReadBackOf).
+	readBacks map[string]pmdoc.WrittenReadBack
 	// copies are the documents showing a copy of an ask this transaction answered or resolved,
 	// whose settlement it marked owed (SettleCopiesOf); Commit arms each once it has committed.
 	copies []string
@@ -614,6 +619,34 @@ func (l *Ledger) writtenRendering(artifactID string) renderedTree {
 		return renderedTree{tree: write.tree, markdown: write.markdown, offsets: write.offsets}
 	}
 	return l.seeds[artifactID].rendered
+}
+
+// wroteReadBack records the read-back a write of artifactID's whole text already made of the
+// markdown it stores (pmdoc.ParseWritten): the parse ReadBackOf hands to the rest of the request.
+func (l *Ledger) wroteReadBack(artifactID string, read pmdoc.WrittenReadBack) {
+	if l == nil || read.Tree == nil {
+		return
+	}
+	if l.readBacks == nil {
+		l.readBacks = make(map[string]pmdoc.WrittenReadBack)
+	}
+	l.readBacks[artifactID] = read
+}
+
+// ReadBackOf is markdown's tree, read back by this transaction's own write of artifactID while it
+// parsed what it stored (pmdoc.ParseWritten), or nil when this transaction made no such read-back
+// or made one of another rendering: a caller holds the markdown it stored and shares that parse
+// only where the two are the same text, as IndexDocumentReferences shares the write's rendering
+// only where it is the version's markdown. A caller that reads nil parses the markdown itself.
+func (l *Ledger) ReadBackOf(artifactID, markdown string) *pmdoc.Node {
+	if l == nil {
+		return nil
+	}
+	read, held := l.readBacks[artifactID]
+	if !held || read.Markdown != markdown {
+		return nil
+	}
+	return read.Tree
 }
 
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.

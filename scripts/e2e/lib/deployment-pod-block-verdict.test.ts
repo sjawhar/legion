@@ -91,7 +91,7 @@ const operatorToken = (): PodToken => ({
 });
 
 const block = (): Block => ({
-  service_account: "legion-worker",
+  service_account: "operator-account",
   env: {
     KUBECONFIG: "/var/run/legion/kubernetes/config/config",
     HAWK_API_URL: "https://hawk.internal.example",
@@ -140,7 +140,7 @@ const roleMounts = (): PodMount[] => [
 const pod = (): Pod => ({
   metadata: { name: "legion-legsmoke-legsmoke-1" },
   spec: {
-    serviceAccountName: "legion-worker",
+    serviceAccountName: "operator-account",
     automountServiceAccountToken: false,
     initContainers: [{ name: "workspace-init", volumeMounts: [] }],
     containers: [{ name: "roles", env: [{ name: "POD_UID" }], volumeMounts: roleMounts() }],
@@ -200,7 +200,37 @@ describe("deployment-pod-block verdict", () => {
   test("another ServiceAccount is wrong", () => {
     const p = pod();
     p.spec.serviceAccountName = "default";
-    expect(verdict(p).wrong).toEqual(["the pod runs as ServiceAccount default, not legion-worker"]);
+    expect(verdict(p).wrong).toEqual([
+      "the pod runs as ServiceAccount default, not operator-account",
+    ]);
+  });
+
+  // A block naming no account runs its pods as the namespace's `default`, which is what a pod
+  // naming none runs as too: the two are the same rule, not a check the verdict skips.
+  test("a block naming no ServiceAccount is kept by a pod on default", () => {
+    const b = block();
+    delete b.service_account;
+    const p = pod();
+    p.spec.serviceAccountName = "default";
+    expect(verdict(p, b).wrong).toEqual([]);
+  });
+
+  // An empty service_account names no account either, and jq's `//` keeps an empty string, so the
+  // verdict reads it through the same rule rather than holding the pod to a nameless account.
+  test("a block whose ServiceAccount is empty is kept by a pod on default", () => {
+    const b = block();
+    b.service_account = "";
+    const p = pod();
+    p.spec.serviceAccountName = "default";
+    expect(verdict(p, b).wrong).toEqual([]);
+  });
+
+  test("a block naming no ServiceAccount is wrong on a pod of another account", () => {
+    const b = block();
+    delete b.service_account;
+    expect(verdict(pod(), b).wrong).toEqual([
+      "the pod runs as ServiceAccount operator-account, not default",
+    ]);
   });
 
   test("a share the block names is read by its claim or export", () => {

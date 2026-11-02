@@ -35,7 +35,8 @@
  * refusal (`Dangling Mermaid edge`) until the fence closes. Every other block of the same body
  * still draws. Open is the parser's answer, never a reading of the source text: the body is parsed
  * again with a probe line after it, and the fence is open exactly when the probe lands inside the
- * block (`endsInOpenMermaidFence`).
+ * block (`endsInOpenMermaidFence`). A body parsed in the parse worker is checked there, with the
+ * parse, and the answer arrives as `drawMermaidDiagrams`'s `openFence`.
  *
  * The renderer (beautiful-mermaid and ELK) runs in one shared worker (`mermaid-render.worker.ts`),
  * created only once a body or a document holds a mermaid block not drawn before: ELK's layout time
@@ -71,22 +72,14 @@ import {
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import { dangerText } from "../../theme/classes";
-import type { MermaidReply, MermaidRequest } from "./mermaid-render.worker";
+import type { DrawnSource, MermaidRequest } from "./mermaid-render.worker";
+import { rememberUpTo, type WorkerJob, WorkerQueue } from "./worker-queue";
 
 /** Draws one body block, or one editor block, once its source's answer arrives. */
 type LateDraw = (drawn: MermaidDrawing) => void;
 /** Parses a source with the engine and soft-break policy that parsed the body; `undefined` for a
  *  source the engine refuses. */
 type Reparse = (source: string) => ProseMirrorNode | undefined;
-
-/** A started worker. */
-interface Renderer {
-  worker: Worker;
-  /** Its imports have loaded, so it starts on a request as soon as it gets one. */
-  ready: boolean;
-  /** The request it is drawing, and the timer that refuses it at the time limit. */
-  current: { id: number; source: string; timer: number } | undefined;
-}
 
 /** How long the worker may draw one source before it is refused and the worker terminated. On a
  *  2-CPU issue pod, in Chromium's worker a flowchart of 50 edges draws in under 0.4 s and one of
@@ -110,25 +103,15 @@ const PREVIEW_STYLE = "svg{max-width:100%;height:auto;display:block}";
 type CachedDrawing = Exclude<MermaidDrawing, { unavailable: true }>;
 
 const drawings = new Map<string, CachedDrawing>();
-/** Each source asked for and not answered yet, oldest first, with the draws its answer feeds in
- *  the order they asked. The first is the one the worker is drawing or starts on next. A source
- *  whose draws were all cancelled stays, with none, until the cancel's microtask drops it. */
-const requests = new Map<string, LateDraw[]>();
-/** Resolves each pending `mermaidDrawsSettled` promise; run once `requests` is empty. */
+/** Resolves each pending `mermaidDrawsSettled` promise; run once nothing waits for the worker. */
 const settledWaiters: (() => void)[] = [];
-let renderer: Renderer | undefined;
-/** A worker failed to start or load; none is started until the window's next `online` event. */
-let failed = false;
-/** A cancel has queued `dropAbandoned` and it has not run yet. */
-let dropQueued = false;
-let lastRequestId = 0;
 /** `RENDER_TIME_LIMIT_MS`, unless a test shortened it through `resetMermaidDiagrams`. */
 let timeLimitMs = RENDER_TIME_LIMIT_MS;
 
 function noop(): void {}
 
 function recover(): void {
-  failed = false;
+  mermaidQueue.recover();
 }
 
 /** Upstream's `isMermaidCodeBlockLanguage` rule, restated so the page imports none of the
@@ -163,8 +146,13 @@ function lastLeafBlock(parsed: ProseMirrorNode): ProseMirrorNode | null {
  * item, and the fence with it, so a quoted diagram still being written would read as closed.
  * Only a body whose last leaf block is a mermaid block is parsed again; a re-parse the engine
  * refuses counts as closed, so the diagram draws.
+ *
+ * A body long enough to be parsed in the parse worker (`markdown-engine.ts`) is checked there,
+ * by the worker that parsed it (`markdown-parse.worker.ts`), and its answer reaches
+ * `drawMermaidDiagrams` as `openFence`: the second parse then costs the page nothing, and a
+ * streaming turn ending in an open fence costs one round trip per frame rather than two.
  */
-function endsInOpenMermaidFence(
+export function endsInOpenMermaidFence(
   parsed: ProseMirrorNode,
   markdown: string,
   reparse: Reparse
@@ -196,137 +184,69 @@ function refusal(reason: string | null): CachedDrawing {
 
 /** Resolves every `mermaidDrawsSettled` promise on the microtask after no source is waiting, so
  *  each draw that settled the last one has run first; a source asked for before that microtask
- *  keeps them waiting. Run after every change that can empty `requests`. */
+ *  keeps them waiting. The queue runs it after every change that can empty it. */
 function noteSettled(): void {
-  if (requests.size > 0 || settledWaiters.length === 0) return;
+  if (mermaidQueue.waiting || settledWaiters.length === 0) return;
   queueMicrotask(() => {
-    if (requests.size > 0) return;
+    if (mermaidQueue.waiting) return;
     for (const resolve of settledWaiters.splice(0)) resolve();
   });
 }
 
-/** Caches `drawn` for `source` and runs the draws that waited on it. */
-function settle(source: string, drawn: CachedDrawing): void {
-  if (drawings.size >= CACHE_LIMIT) {
-    const oldest = drawings.keys().next();
-    if (oldest.done !== true) drawings.delete(oldest.value);
-  }
-  drawings.set(source, drawn);
-  const draws = requests.get(source) ?? [];
-  requests.delete(source);
-  for (const draw of draws) draw(drawn);
-  noteSettled();
-}
-
-/** Terminates the worker, which stops a layout it is running, and forgets it and the request it
- *  was drawing, so an answer it posted before is dropped; the next request starts a fresh one. */
-function stopRenderer(): void {
-  if (renderer === undefined) return;
-  window.clearTimeout(renderer.current?.timer);
-  renderer.current = undefined;
-  renderer.worker.terminate();
-  renderer = undefined;
-}
-
-/** Shows every waiting block, and every later one, as code until the window's next `online`: each
- *  waiting draw runs with `unavailable`, so an editor block drops a drawing of an earlier source. */
-function fail(error: unknown): void {
-  failed = true;
-  stopRenderer();
-  const waiting = [...requests.values()];
-  requests.clear();
-  for (const draws of waiting) {
-    for (const draw of draws) draw({ unavailable: true });
-  }
-  noteSettled();
-  window.addEventListener("online", recover, { once: true });
-  console.error("Showing Mermaid source as code, the diagram renderer is unavailable", error);
-}
-
-function answer(from: Renderer, reply: MermaidReply): void {
-  if ("ready" in reply) {
-    from.ready = true;
-    sendNext();
-    return;
-  }
-  const current = from.current;
-  // An answer to a request the time limit already refused (it was posted before the worker was
-  // terminated) is dropped.
-  if (current?.id !== reply.id) return;
-  window.clearTimeout(current.timer);
-  from.current = undefined;
-  let drawn: CachedDrawing;
-  if ("markup" in reply) {
-    try {
-      drawn = { svg: mermaidSvgElement(reply.markup, document) };
-    } catch (error) {
-      drawn = refusal(error instanceof Error ? error.message : null);
+/**
+ * The sources waiting on the diagram renderer, through the queue both workers of this folder
+ * share (`worker-queue.ts`). A source the worker cannot draw is refused, and the refusal cached:
+ * the only thing the page could do instead is the layout the worker could not finish, so the
+ * block shows its source as code with the reason beside it.
+ *
+ * The worker is terminated where the page moves on from the source it is drawing
+ * (`stopAnAbandonedJob: true`): a layout can run for seconds, which is longer than a fresh
+ * worker costs, where the parse queue keeps its own worker for the opposite reason
+ * (`markdown-engine.ts`).
+ */
+const mermaidQueue = new WorkerQueue<WorkerJob, DrawnSource, MermaidDrawing>({
+  stopAnAbandonedJob: true,
+  answerOf(job, reply) {
+    let drawn: CachedDrawing;
+    if ("markup" in reply) {
+      try {
+        drawn = { svg: mermaidSvgElement(reply.markup, document) };
+      } catch (error) {
+        drawn = refusal(error instanceof Error ? error.message : null);
+      }
+    } else {
+      drawn = refusal(reply.error);
     }
-  } else {
-    drawn = refusal(reply.error);
-  }
-  settle(current.source, drawn);
-  sendNext();
-}
-
-/** Refuses `source`, which the worker has not answered within the time limit, and stops the
- *  worker, which stops its layout; the next request starts a fresh one. The timer that calls this
- *  was set by `sendNext` for the current renderer, and every path that ends that request or drops
- *  that renderer clears the timer first (`answer` on the reply, `stopRenderer` on every other), so
- *  the renderer it stops is always the one it timed. */
-function refuseLate(source: string): void {
-  stopRenderer();
-  settle(source, refusal(`it did not finish within ${timeLimitMs / 1000} seconds`));
-  sendNext();
-}
-
-function startRenderer(): void {
-  let worker: Worker;
-  try {
-    worker = new Worker(new URL("./mermaid-render.worker.ts", import.meta.url), {
-      type: "module",
-    });
-  } catch (error) {
-    fail(error);
-    return;
-  }
-  const started: Renderer = { worker, ready: false, current: undefined };
-  renderer = started;
-  worker.addEventListener("message", (event: MessageEvent<MermaidReply>) => {
-    answer(started, event.data);
-  });
-  worker.addEventListener("error", fail);
-}
-
-/** Hands the oldest waiting source to the worker, starting one when none runs, unless the worker
- *  is still loading or busy. */
-function sendNext(): void {
-  const next = requests.keys().next();
-  if (failed || next.done === true) return;
-  if (renderer === undefined) {
-    startRenderer();
-    return;
-  }
-  if (!renderer.ready || renderer.current !== undefined) return;
-  const source = next.value;
-  const id = ++lastRequestId;
-  const timer = window.setTimeout(() => refuseLate(source), timeLimitMs);
-  renderer.current = { id, source, timer };
-  renderer.worker.postMessage({ id, source } satisfies MermaidRequest);
-}
-
-/** Drops every source no draw waits for any more, so it is never sent; the worker drawing one is
- *  stopped and nothing is cached for it, and the sources still waiting go to a fresh worker. */
-function dropAbandoned(): void {
-  dropQueued = false;
-  for (const [source, draws] of requests) {
-    if (draws.length > 0) continue;
-    requests.delete(source);
-    if (renderer?.current?.source === source) stopRenderer();
-  }
-  noteSettled();
-  sendNext();
-}
+    rememberUpTo(drawings, CACHE_LIMIT, job.key, drawn);
+    return drawn;
+  },
+  createWorker() {
+    return new Worker(new URL("./mermaid-render.worker.ts", import.meta.url), { type: "module" });
+  },
+  limitMs() {
+    return timeLimitMs;
+  },
+  noWorkerFrom(error) {
+    // Every later source shows as code until the window comes back online, when `recover` lets
+    // the queue start a worker again.
+    window.addEventListener("online", recover, { once: true });
+    console.error("Showing Mermaid source as code, the diagram renderer is unavailable", error);
+  },
+  post(worker, id, job) {
+    worker.postMessage({ id, source: job.key } satisfies MermaidRequest);
+  },
+  settled: noteSettled,
+  withoutAWorker() {
+    // Nothing is cached for a renderer that is simply missing: the next body asks again, and an
+    // editor block drops a drawing of an earlier source.
+    return { unavailable: true };
+  },
+  withoutTheWorker(job) {
+    const refused = refusal(`it did not finish within ${timeLimitMs / 1000} seconds`);
+    rememberUpTo(drawings, CACHE_LIMIT, job.key, refused);
+    return refused;
+  },
+});
 
 /** Replaces `pre` with its drawn figure, moving `pre` itself into the source disclosure; with no
  *  renderer (`unavailable`) it leaves `pre` as code. */
@@ -360,12 +280,12 @@ function drawBlock(pre: HTMLPreElement, drawn: MermaidDrawing): void {
 /**
  * The editor's `MermaidDrawer` (`@legion/proof-editor/mermaid`), and the one way any block here
  * asks for a drawing. A cached source calls `draw` now, inside the call; so does an uncached one
- * while the worker is failed, with `unavailable`, and it is not queued. Any other joins the queue
+ * while no worker will run, with `unavailable`, and it is not queued. Any other joins the queue
  * and `draw` runs when the worker answers, or with `unavailable` if the worker fails first.
- * Returns the cancel: it takes `draw` off the source's list, so a cancelled draw never runs and
- * holds none of its caller's DOM while the worker draws, then queues `dropAbandoned` on a
- * microtask, after any re-paint in the same commit has asked again. A source drawn or refused
- * already, or never queued, has a cancel that does nothing.
+ * Returns the cancel: it takes `draw` off the source's job, so a cancelled draw never runs and
+ * holds none of its caller's DOM while the worker draws, then queues the drop on a microtask,
+ * after any re-paint in the same commit has asked again. A source drawn or refused already has a
+ * cancel that does nothing.
  */
 export function requestMermaidDrawing(source: string, draw: LateDraw): () => void {
   // A code block keeps its source's line ends, and the renderer splits lines at LF alone, so a
@@ -377,47 +297,32 @@ export function requestMermaidDrawing(source: string, draw: LateDraw): () => voi
     draw(drawn);
     return noop;
   }
-  if (failed) {
-    draw({ unavailable: true });
-    return noop;
-  }
-  const draws = requests.get(normalised);
-  if (draws === undefined) requests.set(normalised, [draw]);
-  else draws.push(draw);
-  sendNext();
-  let cancelled = false;
-  return () => {
-    if (cancelled) return;
-    cancelled = true;
-    const waiting = requests.get(normalised);
-    const at = waiting?.indexOf(draw) ?? -1;
-    // A draw already run, refused or cleared left no list behind to empty, so nothing to drop.
-    if (waiting === undefined || at < 0) return;
-    waiting.splice(at, 1);
-    if (dropQueued) return;
-    dropQueued = true;
-    queueMicrotask(dropAbandoned);
-  };
+  return mermaidQueue.wait(normalised, () => ({ key: normalised }), draw);
 }
 
 /**
  * Draws every mermaid code block `element` holds (painted from `parsed`, the parse of
- * `markdown`) but one whose fence is still open, each through `requestMermaidDrawing`. `reparse`
- * parses with the engine and soft-break policy that produced `parsed`; the open-fence check runs
- * it once, only when the body ends in a mermaid block. A block whose source is cached draws now;
- * every other one when the worker answers, in the order the bodies were painted. Returns the
- * cancel for those late draws, which runs each block's own cancel.
+ * `markdown`) but one whose fence is still open, each through `requestMermaidDrawing`. `openFence`
+ * is that check's answer where the parse worker already made it with the parse
+ * (`markdown-parse.worker.ts`); where it is `undefined` the check runs here, with `reparse`, which
+ * parses with the engine and soft-break policy that produced `parsed`, and only when the body ends
+ * in a mermaid block. A block whose source is cached draws now; every other one when the worker
+ * answers, in the order the bodies were painted. Returns the cancel for those late draws, which
+ * runs each block's own cancel.
  */
 export function drawMermaidDiagrams(
   element: HTMLElement,
   parsed: ProseMirrorNode,
   markdown: string,
-  reparse: Reparse
+  reparse: Reparse,
+  openFence?: boolean
 ): () => void {
   const blocks = Array.from(element.querySelectorAll<HTMLPreElement>("pre[data-language]")).filter(
     (pre) => isMermaidLanguage(pre.getAttribute("data-language"))
   );
-  if (blocks.length > 0 && endsInOpenMermaidFence(parsed, markdown, reparse)) blocks.pop();
+  if (blocks.length > 0 && (openFence ?? endsInOpenMermaidFence(parsed, markdown, reparse))) {
+    blocks.pop();
+  }
   const cancels = blocks.map((pre) =>
     requestMermaidDrawing(pre.textContent ?? "", (drawn) => drawBlock(pre, drawn))
   );
@@ -433,7 +338,7 @@ export function drawMermaidDiagrams(
  * above its target have drawn and moved it (`features/doc/refocus-after-diagrams.ts`).
  */
 export function mermaidDrawsSettled(): Promise<void> {
-  if (requests.size === 0) return Promise.resolve();
+  if (!mermaidQueue.waiting) return Promise.resolve();
   const { promise, resolve } = Promise.withResolvers<void>();
   settledWaiters.push(resolve);
   return promise;
@@ -442,7 +347,7 @@ export function mermaidDrawsSettled(): Promise<void> {
 /** Whether any source is waiting for the worker, so a diagram may still draw and move what is
  *  below it. A focus in a document runs again only then. */
 export function mermaidDrawsWaiting(): boolean {
-  return requests.size > 0;
+  return mermaidQueue.waiting;
 }
 
 /**
@@ -451,11 +356,9 @@ export function mermaidDrawsWaiting(): boolean {
  * `RENDER_TIME_LIMIT_MS` until the next reset, so a test of the time limit need not wait 5 s.
  */
 export function resetMermaidDiagrams(limitMs = RENDER_TIME_LIMIT_MS): void {
-  stopRenderer();
-  failed = false;
+  mermaidQueue.clear();
+  mermaidQueue.recover();
   window.removeEventListener("online", recover);
   drawings.clear();
-  requests.clear();
-  noteSettled();
   timeLimitMs = limitMs;
 }

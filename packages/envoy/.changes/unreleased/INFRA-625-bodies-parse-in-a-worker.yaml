@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A body longer than 2,000 characters is parsed in a Web Worker rather than on the page''s own thread, on every Dispatch surface that draws one: a comment, a reply, a message, an ask, a hover card, a margin card, the Inbox and the live session view. The reader is shown the body''s own text at once and its formatting when the worker answers, so no body within the server''s cap holds the tab; a worker that cannot be created, whose code does not load, that crashes or that holds a body past its deadline leaves that body to the page, which formats it there. The live document editor is unchanged and still parses on the page''s thread: a version view, or a paste of a list of 8,000 items, takes about 1.4 s there.'
+time: 2026-10-29T23:56:26.688201858Z
+custom:
+    Issue: INFRA-625

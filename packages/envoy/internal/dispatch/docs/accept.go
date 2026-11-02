@@ -67,15 +67,16 @@ func insideAsk(at pmdoc.TextblockAt) bool {
 }
 
 // refuseUnreadableAccept refuses a suggestion whose changed document-level block cannot be read
-// from its rendered markdown.
-func refuseUnreadableAccept(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
-	return refuseAcceptBy(before, after, found, match, at, with, replacement, pmdoc.BlockReadError)
+// from its rendered markdown. backs holds the read-back of each block it reads, which the accept's
+// other checks of the same blocks share (blockReadBacks).
+func refuseUnreadableAccept(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, backs blockReadBacks) error {
+	return refuseAcceptBy(before, after, found, match, at, with, replacement, backs.read)
 }
 
 // refuseReshapedAccept refuses a suggestion whose changed document-level block reads back as
 // blocks of another shape.
-func refuseReshapedAccept(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
-	return refuseAcceptBy(before, after, found, match, at, with, replacement, pmdoc.BlockShapeError)
+func refuseReshapedAccept(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, backs blockReadBacks) error {
+	return refuseAcceptBy(before, after, found, match, at, with, replacement, backs.shape)
 }
 
 func refuseAcceptBy(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, check func(*pmdoc.Node) error) error {
@@ -207,14 +208,14 @@ func acceptSpliceRefusal(err error) error {
 }
 
 // refuseAcceptedCodeThatReshapes refuses an accept whose code changes how a block around the code
-// reads back (pmdoc.BlockShapeError), in the words of the other accept refusals: the block, why,
-// and what the person accepting can do, since they cannot move the code as the edit route's
+// reads back (pmdoc.ReadBackBlock's Shape), in the words of the other accept refusals: the block,
+// why, and what the person accepting can do, since they cannot move the code as the edit route's
 // refusal (refuseCodeThatReshapesItsBlock) advises. The block named is the typed block holding
 // the code when the document-level block that reads back otherwise is the one holding the code,
 // and otherwise that block, such as the list of a task item that a suggestion running out of the
 // code empties ahead of the item's nested list.
-func refuseAcceptedCodeThatReshapes(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, at pmdoc.TextblockAt, with string) error {
-	broken, reshaped, err := replacementBroke(before.Node(), after, found, pmdoc.BlockShapeError)
+func refuseAcceptedCodeThatReshapes(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, at pmdoc.TextblockAt, with string, backs blockReadBacks) error {
+	broken, reshaped, err := replacementBroke(before.Node(), after, found, backs.shape)
 	if err != nil || reshaped == nil {
 		return err
 	}
@@ -287,6 +288,31 @@ func matchedBlocks(before pmdoc.ValidDocument, match pmdoc.Range) (matchBlocks, 
 // always did.
 func (m matchBlocks) lastAfter(after *pmdoc.Node) int {
 	return max(m.first, m.last+len(after.Children)-m.blocks)
+}
+
+// blockReadBacks is the read-back of each document-level block the checks of one write read
+// (pmdoc.ReadBackBlock), so a block two or three of them read is rendered and parsed once rather
+// than once a check: the block a write lands in can hold the whole document's text, where
+// rendering and parsing it again cost a one-word edit of a mebibyte-long paragraph about ten
+// mebibytes (sjawhar/legion#2519). One write's checks read trees no one changes while they run -
+// every pmdoc edit answers a copy - so a block's read-back stands for as long as the map does,
+// which is the one operation that made it.
+type blockReadBacks map[*pmdoc.Node]pmdoc.BlockReadBack
+
+// read is the parser's refusal of block's markdown, and shape what that markdown reads back as
+// where it is not blocks of the same shape (pmdoc.ReadBackBlock); both read one read-back of the
+// block.
+func (backs blockReadBacks) read(block *pmdoc.Node) error { return backs.of(block).Read }
+
+func (backs blockReadBacks) shape(block *pmdoc.Node) error { return backs.of(block).Shape }
+
+func (backs blockReadBacks) of(block *pmdoc.Node) pmdoc.BlockReadBack {
+	if back, read := backs[block]; read {
+		return back
+	}
+	back := pmdoc.ReadBackBlock(block)
+	backs[block] = back
+	return back
 }
 
 // replacementBroke is the index in after of the first document-level block the write changed

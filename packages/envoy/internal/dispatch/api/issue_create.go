@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -391,8 +390,13 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// documentReadBack is the rendering the seed stored, read back by its own parse (docs'
+	// Ledger.ReadBackOf), which the task count and the advice's blocks read in place of parsing
+	// the same markdown again (recordDocumentTaskProgress, documentBlocksFor).
+	documentReadBack := ledger.ReadBackOf(artifactID, markdown)
 	// The version row exists now, so the count names it (LEGION-542).
-	if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifactID, markdown); err != nil {
+	err = recordDocumentTaskProgress(r.Context(), tx, artifactID, documentReadBack, markdown)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -441,7 +445,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	s.deps.Docs.ScheduleSettlement(artifactID)
 	s.publish(event)
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
-		advice.documentBlocks = readDocumentBlocks(markdown)
+		advice.documentBlocks = documentBlocksFor(documentReadBack, markdown)
 	}
 	// The related-item check runs after the write committed, whatever writeAdvice
 	// answered, and waits at most relatedAllowance; its result rides the advice, or advice of its

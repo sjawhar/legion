@@ -347,8 +347,12 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 				return acceptSpliceRefusal(err)
 			}
 		}
+		// The checks below read the blocks this accept changed, several of them the same blocks:
+		// each block is rendered and parsed once for all of them (blockReadBacks). A block the
+		// settlement rewrites (settleAccepted) is another node, and is read back again.
+		backs := blockReadBacks{}
 		if code {
-			if err := refuseAcceptedCodeThatReshapes(valid, next, found, at, with); err != nil {
+			if err := refuseAcceptedCodeThatReshapes(valid, next, found, at, with, backs); err != nil {
 				return err
 			}
 		}
@@ -357,10 +361,10 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return err
 		}
 		if !insideAsk(at) {
-			if err := refuseUnreadableAccept(valid, next, found, range_, at, with, replacement); err != nil {
+			if err := refuseUnreadableAccept(valid, next, found, range_, at, with, replacement, backs); err != nil {
 				return err
 			}
-			if err := refuseReshapedAccept(valid, next, found, range_, at, with, replacement); err != nil {
+			if err := refuseReshapedAccept(valid, next, found, range_, at, with, replacement, backs); err != nil {
 				return err
 			}
 		}

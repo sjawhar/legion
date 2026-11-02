@@ -59,6 +59,9 @@
 # - LEGION_E2E_MODEL_GATEWAY_AUDIENCE (required) is the audience the operator's model gateway accepts
 #   on a worker's projected ServiceAccount token, substituted into the run's copy of the operator
 #   route's pod.yml and asserted on every pod.
+# - LEGION_E2E_POD_SERVICE_ACCOUNT (required) is the ServiceAccount the deployment's pods run as,
+#   substituted for the ${POD_SERVICE_ACCOUNT} placeholder in the run's copy of the operator
+#   route's pod.yml and asserted on every pod (lib/pod-service-account.sh).
 # - LEGION_E2E_DISPATCH_URL, LEGION_E2E_ENVOY_URL and LEGION_E2E_NATS_URL (required) are production
 #   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
 #   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
@@ -1423,13 +1426,15 @@ resources_block() {
   [ -z "$controller_cpu" ] || echo "      controller: { cpu: \"$controller_cpu\", memory: 1Gi }"
 }
 # render_operator_pod writes the run's copy of the operator route's pod.yml, the gateway's audience
-# in place of its placeholder.
+# and LEGION_E2E_POD_SERVICE_ACCOUNT's ServiceAccount each in place of its placeholder.
 render_operator_pod() {
-  # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
-  local placeholder='${MODEL_TOKEN_AUDIENCE}' pod
+  # shellcheck disable=SC2016  # the operator route's literal placeholders, not expansions
+  local placeholder='${MODEL_TOKEN_AUDIENCE}' account_placeholder='${POD_SERVICE_ACCOUNT}' pod
   pod=$(<"$operator_route/pod.yml")
-  printf '%s\n' "${pod//"$placeholder"/"$gateway_audience"}" >"$work/pod.yml"
+  pod=${pod//"$placeholder"/"$gateway_audience"}
+  printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
   grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the operator route's pod.yml has no token audience $placeholder to fill with the gateway's"
+  grep -qF "service_account: $pod_service_account" "$work/pod.yml" || fail "the operator route's pod.yml has no ServiceAccount $account_placeholder to fill with the run's"
 }
 # create_route_configmap is the operator's step before any pod runs: the operator route's models.yml and
 # overlay.yml in the ConfigMap the run's pods mount.
@@ -1988,6 +1993,20 @@ hog_oomkilled() {
     jq -e '[.status.containerStatuses[]?.state.terminated.reason, .status.containerStatuses[]?.lastState.terminated.reason] | index("OOMKilled")' >/dev/null
 }
 
+# ---- the deployment pod block (LEGION_E2E_POD_FILE) ------------------------------------------------
+
+# block_account is the ServiceAccount the pods of the deployment block LEGION_E2E_POD_FILE named
+# run as: the block's own `service_account`, and the namespace's `default` when the block names
+# none or names it empty. That is one rule in three readings of the same field — this one, the
+# verdict's own (`def account`, lib/deployment-pod-block-verdict.jq) and the daemon's
+# (serviceAccountOr, internal/runtime/sandbox/sandbox.go), which reads an unset
+# runtime.kubernetes.pod.service_account the same way. The empty case is spelled out because jq's
+# `//` keeps an empty string, so a reading that leaves it to `//` holds every pod of such a
+# deployment to a nameless account and fails the pod-shape checkpoint on a pod that is right.
+block_account() {
+  jq -r 'if (.service_account // "") == "" then "default" else .service_account end' "$pod_block"
+}
+
 # ---- the pod-shape watcher (checkpoint pod-shape) --------------------------------------------------
 
 # check_pod_shape SPEC prints each way the pod object SPEC departs from the issue-pod shape, or
@@ -2008,14 +2027,14 @@ hog_oomkilled() {
 # forked before a restart that moves the stream, holds each pod to the stream of its own creation as
 # the main shell does.
 shape_problems() {
-  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --slurpfile streams "$evidence/worker-streams.jsonl" --argjson expected "$run_resources" '
+  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --arg account "$pod_account" --slurpfile streams "$evidence/worker-streams.jsonl" --argjson expected "$run_resources" '
     include "stage4b-pods";
     ["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
     | "/var/run/legion/roles" as $dir
     | .spec as $s
     | ([$s.containers[] | select(.name == "roles")] | first) as $c
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
-      (if $s.serviceAccountName != "legion-worker" then "serviceAccountName \($s.serviceAccountName)" else empty end),
+      (if $s.serviceAccountName != $account then "serviceAccountName \($s.serviceAccountName)" else empty end),
       (if $s.automountServiceAccountToken != false then "automountServiceAccountToken \($s.automountServiceAccountToken)" else empty end),
       (if ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken)] | length) != 1
         or ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken) | .serviceAccountToken.audience] != [$audience])
@@ -3112,7 +3131,7 @@ if [ -n "$pod_file" ]; then
   jq -e 'type == "object" and ((.volumes // []) | type == "array") and ((.volume_mounts // []) | type == "array") and ((.env // {}) | type == "object")' "$pod_file" >/dev/null 2>&1 ||
     fail "LEGION_E2E_POD_FILE=$pod_file is not a JSON object with volumes, volume_mounts and env in runtime.kubernetes.pod's shape"
   jq -cS . "$pod_file" >"$pod_block" || fail "could not copy LEGION_E2E_POD_FILE=$pod_file into the run"
-  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); service account $(jq -r '.service_account // "the namespace default"' "$pod_block"), $(jq '.volumes // [] | length' "$pod_block") volumes)"
+  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); ServiceAccount $(block_account), $(jq '.volumes // [] | length' "$pod_block") volumes)"
 fi
 # The production services, each a fully-qualified host (a bare alias resolves through whatever
 # search domain the box or the pod has) and no path. A refusal names the variable, never its value.
@@ -3128,6 +3147,15 @@ gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
+pod_service_account=$(bash "$root/scripts/e2e/lib/pod-service-account.sh") ||
+  fail "LEGION_E2E_POD_SERVICE_ACCOUNT is not a ServiceAccount name the operator route's pod.yml can carry (the reason is above)"
+# pod_account is the ServiceAccount every pod of the run must run as, which pod-shape holds each
+# to: the run's own under the operator route, and the block's own under LEGION_E2E_POD_FILE, whose
+# pods carry the deployment's block instead (block_account, which reads an account the block names
+# empty as the namespace's `default`, as the verdict and the daemon both do). It is settled here,
+# once, so the shape watcher forked later judges against the same account the main shell does.
+pod_account=$pod_service_account
+[ -z "$pod_file" ] || pod_account=$(block_account)
 # The branch-built daemon links no release plugin pair (only a release workflow build does), so a
 # daemon started from this checkout boots in the degraded mode (a Warn and `plugins: none` from
 # `--check-config`) unless the run's legion.yaml names runtime.kubernetes.plugins itself. Stage 4b
@@ -3524,7 +3552,7 @@ else
   if [ -z "$block_kubeconfig" ]; then
     note "the block sets no KUBECONFIG, so the pod's kubectl is not asked"
   else
-    want="system:serviceaccount:$namespace:$(jq -r '.service_account // "default"' "$pod_block")"
+    want="system:serviceaccount:$namespace:$pod_account"
     whoami=$(pod_exec "$block_pod" architect env KUBECONFIG="$block_kubeconfig" kubectl auth whoami -o jsonpath='{.status.userInfo.username}') ||
       fail "kubectl auth whoami, on the block's KUBECONFIG, failed in pod $block_pod"
     note "in pod $block_pod (architect), kubectl auth whoami on the block's KUBECONFIG: $whoami"

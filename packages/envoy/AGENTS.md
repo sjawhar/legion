@@ -619,10 +619,11 @@ A helper that walks the room inside `Server.Apply` outside a transaction, as an 
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason:
 whether the service builds the decoder (`newDocumentCopy`:
-the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
+the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's decode of an update it appends: a browser's, which no document here encoded (`appendUpdate`), and one whose header names no single client's item count (`refuseUpdateItemCap`)) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
 ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.
-`TestTheStoreTakesOneBrowserUpdateItsRoomTook` and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates a check at ygo's default queue refuses, which fails the room;
+`TestTheStoreTakesOneBrowserUpdateItsRoomTook` is a browser's update the store decodes itself, which a check at ygo's default queue refuses, failing the room;
+`TestASettlementStampsMoreBlocksThanYgosDefaultQueue` is a server-encoded one the store judges by its header alone (`refuseUpdateItemCap`), which such a check would refuse the same way;
 `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`, `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
 Every copy that replays the room's commits makes no commit of its own:
@@ -857,8 +858,10 @@ the empty halves a block replacement leaves of the textblock it lands in, which 
 One the accept left unchanged whose spread already read back otherwise before it, such as a spread its markdown never carried, keeps that spread.
 Every other block, mark and node stays as it was.
 An empty replacement keeps the paragraph it empties, which is not written beside other blocks.
-Outside an ask it then runs, over every document-level block it changed, `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison (`refuseReshapedAccept`: `pmdoc.BlockShapeError`).
+Outside an ask it then runs, over every document-level block it changed, `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison (`refuseReshapedAccept`: the read-back's `Shape`).
 Both write a table without the empty cells its colspans and rowspans add, which the read-back of the whole document below writes, so an accept across many tables costs no more there than the cells those tables hold.
+Both verdicts come from one rendering and parse of each block (`pmdoc.ReadBackBlock`), which the checks of one write share through a `blockReadBacks` map, so a block two or three of them read — the block a write lands in can hold the whole document's text — is read back once rather than once a check.
+A replace shares one the same way (`refuseUnreadableReplacement`, `refuseReshapedReplacement`, `refuseCodeThatReshapesItsBlock`).
 A non-empty replacement inside a typed block is checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's `paragraph+ bullet_list?` rule.
 Last, the whole document is read back (`refuseMisreadAccept`:
 `pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes and text, a column without alignment expected back unaligned as the renderer writes it:
@@ -1277,8 +1280,12 @@ one in a document the block index has not reached.
 
 Each identified block of a document is a graph node too (and so is each block of a comment or message, below):
 kind `block`, id `<document ref_key>#<block id>` (`text.TargetID`), its reference the document's with `#b-` and the id as `text.EncodeBlockID` writes it (`refs.BlockRef`).
-`refs.IndexBlocks` indexes a version's blocks in the version writer's transaction, from the same render and extraction as its references:
+`refs.IndexBlocks` indexes a version's blocks in the version writer's transaction, up to the bound below, from the same render and extraction as its references:
 the blocks the render's offsets name, which `GET /api/v1/artifacts/{id}/blocks` lists, the first holder of a repeated id being the node.
+A write of more than 2,000 blocks (`docs.deferBlockIndexBlocks`, about a tenth of the second an upload is held to) indexes its references alone and leaves its blocks owed:
+migration 0122's trigger marked the version owed when its row was inserted, and the block-index reconciliation below indexes them out of the request, within 30 s of the write, unless a settlement that writes a version of its own indexes that version's blocks first — which it does only where the document changed after the write (`docs.contentChangedSinceVersion`).
+Until the index catches up, a reference into such a document resolves to no block, so the mention is listed from the document and a backlink names the document rather than the block holding it;
+measured end to end on a 2,402-block document, that wait was 34.5 s (sjawhar/legion#2519).
 A block whose id is longer than `text.MaxBlockIDBytes` is no node (`uniqueBlocks`):
 a mention inside it starts at the innermost node holding it, or at the document when none does, and `IndexBlocks` logs a warning naming the document, the version, how many such blocks it skipped, the longest one's id bytes and the bound.
 The version is still written.
@@ -1544,6 +1551,12 @@ A document `pmdoc` refuses names the first refused block it writes.
 One walk of the tree goldmark reads decides every block refusal in document order before conversion (`refuseBlocks`), and it refuses every block kind conversion does not convert (`convertedBlocks`), a link reference definition among them, so conversion refuses no block;
 `TestParseNamesTheFirstRefusedBlock` holds that order for every pair of block refusals.
 Spacing refusals (`browserListSpacing`) come before the walk, and inline ones, such as a footnote reference, in conversion after it.
+
+A document opens at most `maxNesting` (100) blocks inside one another — a quote, a list, a list item, a typed block and a footnote definition each count one (`pmdoc/nesting.go`) — and a write whose markdown goes past it is refused naming the line, `line N opens a block inside 100 blocks`.
+The browser editor's parser is held to the same number, counting the same blocks (`maxBlockNesting` in proof-editor's `src/block-nesting.ts`, whose comment names `maxNesting` and which `maxNesting`'s comment names back), as it was already held to `maxTypedNesting` (32, `maxDirectiveNesting`) for `:::` openers:
+a list or quote opener standing past the bound opens no block there and its line reads as the text it is.
+So every document this accepts draws in a browser as it reads here, and a list or quote this refuses reads in a comment as its own text rather than costing the reader the page, which a few hundred `- ` markers on one line did by overflowing that parser's stack (sjawhar/legion#2519).
+The browser counts no footnote definition, which only lets it draw deeper than this accepts, never shallower.
 
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`.
 The embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and the fixture generator reads that checked-in file.

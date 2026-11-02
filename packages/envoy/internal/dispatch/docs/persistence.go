@@ -229,9 +229,19 @@ func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *R
 
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
 // the document's content: settlement versions a document only past a content update.
+//
+// Every caller hands it an update this process encoded moments before - a new document's whole
+// tree (encodeDocumentTree), the transactions of one write's fork (mergeUpdates), a settlement's
+// own repair - so the one refusal decoding such an update into a document of its own ever made is
+// the item cap, which the update's header declares (refuseUpdateItemCap). Reading that header
+// rather than decoding the update took 88 ms and 36 MB off the request of an 8,000-item
+// document's upload, near a quarter of that request's time and a fifth of its allocation, and
+// that allocation is what the garbage collector then charged the writes after it on a two-core
+// pod (sjawhar/legion#2519). Bytes a caller sends, which no document encoded, are decoded as
+// they were (appendUpdate).
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
-		return 0, itemCapError(update, err)
+	if err := refuseUpdateItemCap(update); err != nil {
+		return 0, err
 	}
 	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil, nil, nil, false)
 }
@@ -1084,8 +1094,11 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // check of each update the service broadcasts (Server.BroadcastUpdate) takes no pending queue at
 // all: it is the check ygo's bundled stores run, since the room has already applied the update
 // (reearth/ygo#268, in the pinned fork).
-// TestTheStoreTakesOneBrowserUpdateItsRoomTook and TestASettlementStampsMoreBlocksThanYgosDefaultQueue
-// are updates the store's check refuses at ygo's default queue.
+// TestTheStoreTakesOneBrowserUpdateItsRoomTook is an update the store decodes itself under this
+// queue (appendUpdate) and a check at ygo's default would refuse;
+// TestASettlementStampsMoreBlocksThanYgosDefaultQueue is one nothing decodes alone any more - the
+// store reads its header (refuseUpdateItemCap) and ygo's check of the broadcast takes no queue -
+// and a check at that default would refuse it, failing the room.
 const maxUpdateItems = 1 << 20
 
 // updateItems is the number of items a V1 update of one client declares in its header: the
@@ -1102,6 +1115,16 @@ func updateItems(update []byte) (uint64, bool) {
 	return items, err == nil
 }
 
+// itemCapRefusal is the one way this package names an update too large to store: its header
+// declares items, more than the maxUpdateItems one document update may hold. Both refusals of
+// such an update say it with this - the store's own, before anything is written
+// (refuseUpdateItemCap), and ygo's, answered for an update the server encoded (itemCapError) -
+// and TestTheStoreJudgesAnUpdateByItsHeader reads it back from here rather than writing the
+// sentence again (sjawhar/legion#2519).
+func itemCapRefusal(items uint64) error {
+	return fmt.Errorf("%w: its %d items exceed the %d one document update can hold", ErrDocumentTooLarge, items, maxUpdateItems)
+}
+
 // itemCapError is ygo's refusal err of update, an update the server encoded itself, named as the
 // write too large to store it is when update's header declares more than maxUpdateItems items:
 // ygo refuses such an update with the same error it gives a malformed one, and a seed or a
@@ -1109,7 +1132,27 @@ func updateItems(update []byte) (uint64, bool) {
 // Any other refusal of a server-encoded update is a fault, and is err unchanged.
 func itemCapError(update []byte, err error) error {
 	if items, ok := updateItems(update); ok && items > maxUpdateItems {
-		return fmt.Errorf("%w: its %d items exceed the %d one document update can hold (%v)", ErrDocumentTooLarge, items, maxUpdateItems, err)
+		return fmt.Errorf("%w (%v)", itemCapRefusal(items), err)
 	}
 	return err
+}
+
+// refuseUpdateItemCap is the refusal of update - one this process encoded from a document it
+// built (AppendUpdateTx), or a stored history about to be decoded into a room
+// (servicePersistenceAdapter.LoadDoc) - that holds more items than one document update may
+// (maxUpdateItems), which is what ygo refuses such an update for before it integrates anything of
+// it. The count comes from the update's header (updateItems), which names it exactly for the one
+// client a server-encoded update is written by. An update of several clients declares no single
+// count, and one whose header does not read is no update at all: both are decoded to be judged,
+// and ygo's own refusal of such an update stands as it is - the cap is a count this header never
+// declared, so no decode of one of them ever reached it (itemCapError).
+func refuseUpdateItemCap(update []byte) error {
+	items, named := updateItems(update)
+	if !named {
+		return crdt.ApplyUpdateV1(newDocumentCopy(), update, nil)
+	}
+	if items > maxUpdateItems {
+		return itemCapRefusal(items)
+	}
+	return nil
 }
