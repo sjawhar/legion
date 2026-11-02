@@ -1458,13 +1458,18 @@ check_every_plugin_shows_the_state() {
   # quote what the tool answered, so one turn's prose is no measure of what envoy_sessions said.
   # A second turn asking for the tool's own two fields settles it; the assertion is unchanged, and
   # both turns' output is kept.
+  #
+  # The assertion reads the evidence copy rather than the live file, because the host keeps
+  # appending to claude.out after the turn's `result` line lands: a run of this check has refused
+  # on a read of the live file whose own evidence copy, taken a moment earlier, carried the two
+  # fields. One snapshot is both what the check judged and what the evidence holds.
   if ! shows_state "$work/claude.out"; then
     claude_turn "Call the envoy_sessions tool again for $peer and reply with its answer's state and last_seen fields verbatim, as JSON." || return 1
   fi
   cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
-  shows_state "$work/claude.out" ||
+  shows_state "$evidence/answers/$check.claude.out" ||
     refuse "Claude Code's envoy_sessions answer shows no state and last_seen" || return 1
-  grep -q "$peer" "$work/claude.out" ||
+  grep -q "$peer" "$evidence/answers/$check.claude.out" ||
     refuse "Claude Code's envoy_sessions answer does not name the unresponsive peer $peer" || return 1
   note "both hosts showed the peer's state and its last_seen"
 }
@@ -1515,7 +1520,7 @@ check_every_plugin_names_a_stored_follower() {
     claude_turn "Call the envoy_publish tool again with topic $topic and message \"$marker\", and reply with its answer's unresponsive field verbatim, as JSON." || return 1
   fi
   cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
-  names_stored_for "$work/claude.out" "$follower" ||
+  names_stored_for "$evidence/answers/$check.claude.out" "$follower" ||
     refuse "Claude Code's envoy_publish answer does not name the unresponsive follower $follower" || return 1
   note "both hosts named $follower as a follower the message is only stored for"
 }
