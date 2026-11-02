@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-592",
+  "previousHandoff": "e3c1d2cc40d1 (round 15; imported to Dispatch as test handoff v1)",
+  "round": 16,
+  "headSha": "5f9c0e073178d4d70ad1be621a246b60b03482e5",
+  "codeHeadSha": "7dc94d85e0f1578f227058b83fc9cca6bac95985",
+  "loadRule": "Pod 0989947d-6fcb-4699-8d2a-77ef6a90ee06 (2 CPUs). My first attempt at this round ran on pod a3b7ca88 and died with it (its slow-reader numbers matched these); every run recorded here was repeated on 0989947d. Fresh LOADTEST_ROOT /legion/scratch/tmp/infra-592-tester/lt seeded by main 10d1a3d6 (the merge 1fec558f's main side). Adjacent base/head pairs, nothing else of mine running during the series (08:59-09:19Z). Superuser Postgres: the stack's own, on the issue volume. Memory sampled every 2 s by mem-sampler-infra-592-tester: peak 12.82 GiB of 19 at 09:45:06Z, 3,519 samples. Go tests -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB; -race with CGO_ENABLED=1.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Read implement handoff v2 on Dispatch (the round-16 body). Re-ran the red slow-reader test (3/3) and drove the same slow readers on the real binary with the same numbers to the decisecond (40/60/100/150 KB/s complete in 209.7/139.8/83.9/55.9 s; 15 KB/s cut at 69.1 s against their 70 s). Re-ran their suites (api, multiprocess, docs stored-order, infra budget) and their 10x shape: 429 only, no dropped connection, 5.41 events/s against their 5.94 on a 3-CPU pod."
+  },
+  "failed": 0,
+  "failures": [],
+  "notes": [
+    "PR body, second risk line: 'admission's 1 s wait counts the time it spends queued, once in total' describes a write, whose wait is now 2 s (DefaultWriteWait, 92d9138d). A body edit, not code.",
+    "PR body, refusal line: write refusal max 4,117 ms is the implementer's pair; mine on a 2-CPU pod reached 8,169 ms (p50 2,012, p99 2,283 agree with the stated 2 s wait).",
+    "10x reads 55.3/s on this 2-CPU pod against 61-73/s on the 3-CPU pods of earlier rounds; base 0.0/s in the same pair."
+  ],
+  "architectChecks": {
+    "slowReaders": "PASS. Red test TestAReaderSteadilyAboveTheFloorIsAnsweredInFullOverARealConnection byte-identical to e53714b9's: 3/3 pass at 7dc94d85 (66 s for three). Real binary (slowread.py, 8 MiB file version served in one Write, client receive buffer 16 KiB, six readers at once): 40,000/60,000/100,000/150,000 B/s complete in 209.7/139.8/83.9/55.9 s (server elapsed_ms 190,734/127,330/52,228/27,883, all 8,388,608 bytes); 15,000 B/s cut by the server at elapsed_ms 69,064 after 1,769,472 bytes (25.6 KB/s average, under the 32 KiB/s floor once the 60 s grace passed); a reader that stopped after its first bytes cut at elapsed_ms 64,053 after 1,455,777 bytes handed, against the stated bound 20 s + handed/32 KiB/s = 64.4 s.",
+    "oneX": "One pair: head 0 refused, 0 non-2xx, read p99 781 ms; base 0 non-2xx, read p99 13,050 ms (a stall in the base run). The body's 1x line gives the implementer's five pairs (head 0/26/0/9/0 writes and 0/385/10/114/0 reads in stalls main also has, by the architect's decision (a)); my pair refused nothing and saw a base stall, consistent with it.",
+    "tenX": "Head 55.3 reads/s, 5.41 events/s, 97,292 read and 6,191 write refusals all 429 OVERLOADED (admission's refusal carries Retry-After: 1, writeRetryable), 0 connection failures, 0 other non-2xx; write refusal p50 2,012 / p90 2,104 / p99 2,283 / max 8,169 ms; read refusal p50 35 / p99 1,039 ms; pool waiters max 9; writes in flight held at 18 while reads queued, 24 only after the read generator stopped. Base 1.51 events/s, 0.0 reads/s, 107,352 not 2xx, 6,948 write transport errors, 19,620 pool waiters.",
+    "refusedAtResume": "Real binary: a comment and an issue upload admitted at once, body trickled 1.5-2 s while 24 writes held every unit: 429 at 3,548 and 4,047 ms; comments/artifacts/versions unchanged by them (8,000->8,024 is the 24 fillers; artifacts 2,311 and versions 20,782 before and after). A queued write whose client hung up: status=499 elapsed_ms=401.",
+    "merge": "round_shape.py d191e573 (base 05d65789) -> 7dc94d85 (base 10d1a3d6): 41 files whose own diff differs. File set: left - .legion/INFRA-592/{implement,plan,review,test}.json (3b887c23, the daemon's handoff import); entered - api/handoffs.go, api/handoffs_test.go, outbox/lease.go, each main's file the PR changes 2-19 lines (the handoff write reads its row's BodyLimit; the outbox stop waits within the one shutdown deadline); no .legion path in the PR's diff; the 14 pr2402-* fragments unchanged, none deleted on main, no issue key. Conflicts recomputed with git merge-file: 754e1888 3 files, ae28f6b4 16, 1fec558f 1, 7dc94d85 0; resolution_check.py on the runtime files: every line of both sides kept or explained - main.go passes registration.Lost() to serveUntilStopped and outboxStopped to shutdown; shutdown.go keeps main's order with waitForOutbox before deregister and pool.Close, bounded by the one shutdown deadline instead of main's outboxStopBudget; publisher.go keeps #2395's hold query, adding the branch's count of rows marked published (Published, Lag); pools.go outboxPoolSize 2, permanentListeners 5, ConnectionsPerProcess 92 = infra dispatchConnectionsPerPod 92 (TestDispatchConnectionsPerPodIsTheServers passes); routes_table.go main's four handoff routes in the branch's row form (handoffWrite carries handoffRequestLimit); artifacts.go main's lockProjectArtifacts and findArtifactByNameOrSlug kept.",
+    "tests": "Review 3 and round-15 fix tests (refused at resume, body framing, one-Write reader, keyed 499, view expiry, keyword wait, TestAWriteWaitsForRoomPastAReadsWait) 24/24 over two counts and 12/12 under -race. TestIdenticalViewsShareOneRecompute 0/200 and -race 0/100. TestAnUploadHoldsNoIssueLockWhileTheStoreWrites 0/200 and -race 0/50. TestARestEditWhoseClientLeavesMidTransactionLeavesItsRoomOpen 3 PASS. #2496 acceptance 1: 24 TestStoredOrder* PASS; soak -stored-order-rounds=200 'rounds=200 counted=200 mismatching_rounds=0 mismatching_counted_rounds=0 mismatches=0 write_p50=87.3ms write_p99=253.9ms'. go test -tags multiprocess ./cmd/dispatch -timeout 60m: ok 1,352.5 s, 158 PASS, 1 SKIP, 0 FAIL. go test ./internal/dispatch/api/: 1,478 PASS, 15 SKIP, one --- FAIL: TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, its own refusal on a byte-order database (rank_test.go:317), the same on main in earlier rounds.",
+    "ci": "At 7dc94d85, 10:36Z: 30 lanes success; dispatch in progress; ci-ok not reported (no row). Unread: dispatch, ci-ok."
+  },
+  "leftoverCheck": "After stack.sh stop and proc kill of the sampler: ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|series16|r16-real|r16-unit|go test|loadgen|infra-592-tester/|postgres' printed 0 lines.",
+  "raceNote": "Every -race run of mine used CGO_ENABLED=1 and ended ok.",
+  "evidence": "dispatch://INFRA-592/artifact/infra-592-tester-r16-tar-gz",
+  "proof": [
+    {
+      "criterion": "A reader steadily above the 32 KiB/s floor is answered in full however large a one-Write answer is; a reader below it or one that stops is cut within the stated bound",
+      "surface": "real envoy-dispatch on INFRA-589's stack, raw TCP readers with a 16 KiB receive buffer",
+      "command": "r16-real.sh (MIB=8 NAME=slowread-8m python3 slowread.py 15195 <issue> <rate>, rates 40000 60000 100000 150000 15000 and a stopped reader)",
+      "observed": "40-150 KB/s complete (209.7-55.9 s); 15 KB/s cut at 69.1 s; stopped reader cut at 64.1 s after 1.46 MB handed (bound 64.4 s)",
+      "headSha": "5f9c0e073178d4d70ad1be621a246b60b03482e5",
+      "negativeControl": "round 15 at d191e573: 40-150 KB/s readers cut at 20.0-20.2 s; the 15 KB/s and stopped readers here are refused as the rule says"
+    },
+    {
+      "criterion": "Excess load is refused early with a retryable 429 and nothing is dropped (10x)",
+      "surface": "INFRA-589's 2-core load reproduction, adjacent pair on one pod",
+      "command": "run-step.sh t16-{base,head}-10x-a --events 40 --sessions 1000 --requests 600",
+      "observed": "head 5.41 events/s, 55.3 reads/s, 103,483 refusals all 429, 0 connection failures, write refusal p99 2,283 ms",
+      "headSha": "5f9c0e073178d4d70ad1be621a246b60b03482e5",
+      "negativeControl": "main 10d1a3d6: 1.51 events/s, 0.0 reads/s, 107,352 requests not 2xx"
+    },
+    {
+      "criterion": "A write refused when it asks its units back commits nothing",
+      "surface": "real envoy-dispatch, raw TCP clients and psql",
+      "command": "r16-real.sh (order.py refused, KIND=comment and KIND=upload)",
+      "observed": "429 at 3.55 and 4.05 s; no comment, artifact or version row of theirs",
+      "headSha": "5f9c0e073178d4d70ad1be621a246b60b03482e5",
+      "negativeControl": "round 15 with abfe677d reverted: the upload answered 429 and stored its artifact and version"
+    }
+  ]
+}
