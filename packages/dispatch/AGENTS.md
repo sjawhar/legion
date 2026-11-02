@@ -848,7 +848,7 @@ alone, or both agreeing, shows one unlabeled line. A request-only id (the common
 case, which has no enrollment `session_id` of its own) shows one line with no preamble
 (`session.ts`'s `credentialSessionLines`). Both ids set and differing shows both lines: the
 enrollment's under "The session that enrolled:", since that is the one the broker verified, and
-the request's bare (`CredentialSessionLines.tsx`, shared with the machine page's facts below);
+the request's bare (`CredentialSessionLines.tsx`, which this row is the one caller of);
 never "Requested by". `pending.ts`'s
 `useCredentialRequests` is
 the one reading of that list - `listed` (empty under `null`), `loading` or `failed` - and
@@ -862,14 +862,15 @@ record among them - opens the Inbox. A secret request is decided on the broker's
 which the Inbox row links; Dispatch serves no page of its own for one.
 The machine page looks a pending machine login up by the 8-character code the operator typed
 (`POST /api/v1/credential-requests/machine-lookup`), and renders `CredentialRecordFacts.tsx`
-(kind, identifiers, enrollment, a pod enrollment's worker slot when it has one, session (the same
-resolution the Inbox row's own line uses), lifetime, requested/expiry timestamps, policy
-version, approver - the broker's `anyone`, which a shared secret's request and a service's machine
-login name, reads "Anyone signed in to Dispatch" - then the agent's reason) above
+(kind, which reads "Machine login" since the lookup returns nothing else; identifiers; lifetime;
+requested/expiry timestamps; policy version; approver, the broker's `anyone`, which a shared
+secret's request and a service's machine login name, reading "Anyone signed in to Dispatch"; then
+the agent's reason) above
 `CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown while the looked-up login carries no
 decision; a service's login gets Deny alone, since no person approves one any more).
-The broker's `enrollment.slot` (`implementer-g3`, null without one) is what tells the requests of
-two roles in one pod apart, since they share the pod's kind and runtime id. A record waiting on
+That lookup selects machine logins alone, and the broker leaves such a record's enrollment and both
+of its session ids empty, so the facts carry no enrollment, no worker slot and no session line; the
+session lines are the Inbox row's own. A record waiting on
 `anyone` is in every signed-in person's pending list, since the broker lists it for every approver,
 and any of them decides it the same way; a person's own machine login is decided by that person
 alone.
@@ -908,7 +909,9 @@ grant of a session the viewer operates, automatic or approved by anyone, and eve
 approved (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names how it was
 granted (the broker's `granted`: "Automatically", or "Approved by" its `approver`; `CredentialGrant`
 is a union on `granted`, so an automatic grant has a null approver and record and an approved one
-has both), a pod enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` to
+has both), a pod enrollment's slot under its enrollment - the broker's `enrollment.slot`
+(`implementer-g3`, null without one), which is what tells two roles' grants in one pod apart, since
+they share the pod's kind and runtime id - and has a Revoke button that POSTs `{}` to
 `/api/v1/credential-grants/{id}/revoke`. Only its operator sees an automatic grant, and revoking
 one makes that session ask before it gets those secrets again: its other automatic grants of them
 end with it.
