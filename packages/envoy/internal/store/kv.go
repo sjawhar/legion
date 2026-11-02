@@ -679,16 +679,30 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 // The merged row keeps no topic reaching a private stream subject other than the
 // session's own agent subject (dropPrivateStreamTopics): a row stored before the
 // listener refused such a topic is cleaned at the session's next registration.
+//
+// The machine id and the directory are the requesting registration's, and the stored row is the
+// fallback for whichever of the two the request leaves empty. A session that registers again
+// through another listener therefore moves its row to that listener, and every reader of the row
+// - the fan-out index (subjectIndex.set, which moves the session's subjects to the new root),
+// Registry.Match, the durable path's ownership check and the sender stamp of a message the
+// session sends (cmd/listener's senderStamp) - names the listener the session is registered
+// through now. The row was pinned to the registration that created it until
+// dispatch://INFRA-889: a session that moved kept being fanned out on a listener it no longer
+// registered through, and its sender stamp named that listener's machine and directory. A
+// request that names no machine or no directory says nothing about where the session runs, so
+// for it the stored value stands: a role claim carries the claiming listener's machine id and no
+// directory (SetRoleWithPrevious), and claiming a role must not clear the row's Cwd.
 func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
 		return Interest{}, getErr
 	}
 	sessionID := item.SessionID
+	requested := item
 	if getErr == nil {
 		item = cur
 	}
-	item.MachineID = first(item.MachineID, curValue(cur.MachineID))
-	item.Dir = first(item.Dir, curValue(cur.Dir))
+	item.MachineID = first(requested.MachineID, curValue(cur.MachineID))
+	item.Dir = first(requested.Dir, curValue(cur.Dir))
 	item.UpdatedAt = now
 	item = Merge(item, topics)
 	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
