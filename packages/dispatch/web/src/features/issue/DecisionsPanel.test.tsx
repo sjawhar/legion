@@ -161,7 +161,7 @@ test("the panel sorts the view into its four lists, in order", async () => {
   }
 });
 
-test("Keep records the decision and moves it out of Waiting for your review", async () => {
+test("Keep records the decision and moves it from Waiting for your review to Your decisions", async () => {
   const read = spyOn(api, "getIssueDecisions").mockResolvedValue(view);
   const keep = spyOn(api, "keepDecision").mockResolvedValue({
     artifact_id: documentId,
@@ -182,15 +182,16 @@ test("Keep records the decision and moves it out of Waiting for your review", as
         within(list("Waiting for your review")).queryByText("Store notices in a table")
       ).toBeNull()
     );
+    expect(within(list("Your decisions")).getByText("Store notices in a table")).toBeDefined();
   } finally {
     read.mockRestore();
     keep.mockRestore();
   }
 });
 
-test("Change opens the comment composer on decisions.md, quoting the decision's first paragraph", async () => {
+test("Change opens the comment composer on decisions.md, quoting the decision's first paragraph, and posts it as the issue's comment", async () => {
   const read = spyOn(api, "getIssueDecisions").mockResolvedValue(view);
-  const comment = spyOn(api, "createArtifactComment").mockResolvedValue({} as Comment);
+  const comment = spyOn(api, "createComment").mockResolvedValue({} as Comment);
   try {
     renderPanel();
     const waiting = await screen.findByRole("region", { name: "Waiting for your review" });
@@ -207,7 +208,7 @@ test("Change opens the comment composer on decisions.md, quoting the decision's 
 
     await waitFor(() => expect(comment).toHaveBeenCalled());
     expect(comment.mock.calls[0]?.slice(0, 2)).toEqual([
-      documentId,
+      "CORE-1",
       {
         anchor: { artifact: documentId, quote: "A table keeps them queryable." },
         body: "Use a queue instead.",

@@ -113,11 +113,13 @@ function ShapedLinks({
 function ChangeComposer({
   decision,
   documentId,
+  issueKey,
   onDone,
   quote,
 }: {
   decision: Decision;
   documentId: string;
+  issueKey: string;
   onDone: () => void;
   quote: string;
 }): ReactNode {
@@ -126,9 +128,12 @@ function ChangeComposer({
   const send = useKeyedWrite({
     inline: true,
     label: () => `Change to ${decision.heading}`,
+    // The decisions document belongs to an issue, and a comment on an issue's document is the
+    // issue's own write: the artifact route refuses it, naming the issue route (`send-request.ts`
+    // follows the same rule for a thread's replies).
     write: (input: { body: string; quote: string }, bounds) =>
-      api.createArtifactComment(
-        documentId,
+      api.createComment(
+        issueKey,
         { anchor: { artifact: documentId, quote: input.quote }, body: input.body },
         bounds
       ),
@@ -304,6 +309,7 @@ function WaitingDecision({
               <ChangeComposer
                 decision={decision}
                 documentId={documentId}
+                issueKey={issueKey}
                 onDone={() => setChanging(false)}
                 quote={quote}
               />
@@ -374,7 +380,11 @@ export function DecisionsPanel({
   )?.id;
   const { decisions, open_questions: questions } = view.data;
   const waiting = decisions.filter((decision) => decision.waiting_review);
-  const mine = decisions.filter((decision) => decision.kind === "person" && !decision.replaced);
+  // Yours: the ones a person decided, and the agent's that the reader kept — a Keep takes a
+  // decision out of "Waiting for your review", and a decision nothing holds would leave the tab.
+  const mine = decisions.filter(
+    (decision) => !decision.replaced && (decision.kind === "person" || decision.kept !== null)
+  );
   const replaced = decisions.filter((decision) => decision.replaced);
   return (
     <div className="space-y-4">
