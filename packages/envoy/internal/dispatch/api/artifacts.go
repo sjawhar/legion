@@ -481,7 +481,7 @@ func (s *server) storeArtifact(
 		return
 	} else if artifact.Kind != kind {
 		s.writeHandlerError(w, errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH",
-			"%q names artifact %s (%s), a %s; this upload is a %s, so it cannot be its next version: give it another name",
+			"%q names artifact %s (%s), whose kind is %s; this upload's kind is %s, so it cannot be its next version: give it another name",
 			input.name, artifact.Slug, artifact.Name, artifact.Kind, kind))
 		return
 	}

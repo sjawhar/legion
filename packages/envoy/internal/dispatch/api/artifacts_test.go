@@ -682,7 +682,7 @@ func TestAnUploadNamedAfterAnArtifactsSlugOfAnotherKindIsRefused(t *testing.T) {
 		Code  string `json:"code"`
 		Error string `json:"error"`
 	}](t, response)
-	want := `"report-md" names artifact report-md (report.md), a doc; this upload is a file, so it cannot be its next version: give it another name`
+	want := `"report-md" names artifact report-md (report.md), whose kind is doc; this upload's kind is file, so it cannot be its next version: give it another name`
 	if response.Code != http.StatusBadRequest || body.Code != "ARTIFACT_KIND_MISMATCH" || body.Error != want {
 		t.Fatalf("upload under a doc's slug as a file: status=%d body=%s, want 400 ARTIFACT_KIND_MISMATCH %q", response.Code, response.Body.String(), want)
 	}
