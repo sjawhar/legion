@@ -8,7 +8,7 @@ import (
 )
 
 // PodUpdateContract is the daemon contract that introduced ready_for_update (api/version.go's
-// 45). A claim whose registration declared a contract below it has no op to answer an update
+// 46). A claim whose registration declared a contract below it has no op to answer an update
 // task with: the op list is a closed enum compiled into the plugin, and a Claude Code role's
 // plugin is its image's own, never installed. Such a claim is asked all the same, and the end of
 // the turn its task starts is its answer (askForUpdate, answerByTurnEnd), so a round over it
@@ -26,9 +26,13 @@ import (
 // (internal/daemon's noPluginInstall).
 //
 // It lives here rather than beside DaemonAPIVersion because internal/api imports this package.
-// internal/api's own test holds it to that version, so a later contract bump can never leave this
-// constant above the daemon's own.
-const PodUpdateContract = 45
+// internal/api's own test pins it to the contract that brought the op, so neither a later
+// contract bump nor a merge that renumbers this change can leave this constant behind. Behind is
+// the dangerous direction: at 45, with the op at 46, every worker of the released plugin is
+// judged able to answer an op it does not have, so the end of its turn is not taken as its
+// answer and the stale lane opens a plugin round instead of relaunching it. Every round of the
+// first roll would stall, which is the one deploy this change exists for.
+const PodUpdateContract = 46
 
 // CannotAnswerUpdate says whether c's worker has no ready_for_update op to answer its update task
 // with: its process runs now (HoldsCapability) and the registration that process made declared a

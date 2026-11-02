@@ -15,10 +15,23 @@ func TestDaemonAPIVersionGolden(t *testing.T) {
 
 // supervise.PodUpdateContract is the contract that introduced ready_for_update, and supervise
 // cannot read DaemonAPIVersion: internal/api imports supervise, not the other way round. This is
-// the one place the two meet, so a later bump of DaemonAPIVersion can never leave the constant
-// above the daemon's own contract, where every claim would read as unable to answer an update
-// round and no pod would ever be replaced.
-func TestPodUpdateContractIsNotAboveTheDaemonContract(t *testing.T) {
+// the one place the two meet, so it pins the number rather than bounding it.
+//
+// A bound is not enough, and this test learned that the hard way: it read `<= DaemonAPIVersion`,
+// a merge moved this change's own contract from 45 to 46, and the constant stayed at 45 under a
+// green test. Every worker of the released 45 plugin was then judged able to answer an op its
+// plugin does not have, so no turn's end counted as an answer and the stale lane opened a plugin
+// round in place of a relaunch: every round of the first roll would have stalled. Above the
+// daemon's contract is the other way to be wrong, where no claim could answer at all.
+//
+// So the number is written here, with the entry of api/version.go that introduced the op. A
+// later contract bump changes neither: the op was introduced once, and this constant names when.
+func TestPodUpdateContractIsTheContractThatIntroducedTheOp(t *testing.T) {
+	const introducedReadyForUpdate = 46
+	if supervise.PodUpdateContract != introducedReadyForUpdate {
+		t.Fatalf("supervise.PodUpdateContract = %d, want %d, the contract whose entry in version.go introduced ready_for_update",
+			supervise.PodUpdateContract, introducedReadyForUpdate)
+	}
 	if supervise.PodUpdateContract > DaemonAPIVersion {
 		t.Fatalf("supervise.PodUpdateContract = %d, above DaemonAPIVersion %d: no claim could answer an update round",
 			supervise.PodUpdateContract, DaemonAPIVersion)
