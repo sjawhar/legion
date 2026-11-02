@@ -360,11 +360,21 @@ func (s *server) readRegisterBody(w http.ResponseWriter, r *http.Request, into *
 // open the daemon serves the claim on its previous contract — grants, handoff_complete and every
 // other grant-bearing route, as well as the claim routes — and the end of the round is what
 // relaunches the process onto the current plugin.
+//
+// Nor is a claim whose worker is in a turn. The stale-plugin lane holds the relaunch of a
+// working claim until that turn ends (holdStaleRelaunch), precisely so the turn can push what it
+// has rather than lose it to a process ended where it stood. Grants are what mint the GitHub App
+// token, so refusing them for the length of that turn would take away the one thing the hold
+// exists to protect: the turn would run on, unable to push and unable to hand off, and the work
+// would go with the relaunch the hold was waiting to start. Working, stale, relaunchable and in
+// no round is exactly the held relaunch, and the window this refusal describes opens when that
+// relaunch starts, not when the daemon decides on it.
 func (s *server) staleClaim(c supervise.Claim) (int, bool) {
 	if s.noPluginInstall != nil && s.noPluginInstall(c) {
 		return c.PluginContract, false
 	}
-	return c.PluginContract, s.pluginRelaunchable && c.PluginContract != DaemonAPIVersion && c.UpdateRound == ""
+	return c.PluginContract, s.pluginRelaunchable && c.PluginContract != DaemonAPIVersion &&
+		c.UpdateRound == "" && c.State != supervise.StateWorking
 }
 
 // logStaleRefusal is the one log line every stale-caller refusal writes: never the body,
