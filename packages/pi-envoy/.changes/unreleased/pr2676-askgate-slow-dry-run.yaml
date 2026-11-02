@@ -1,0 +1,13 @@
+kind: Fixed
+body: |-
+    AskGate no longer lets a `dispatch` write post unreviewed the first time its `--dry-run` takes
+    more than 10 s. The dry run contacts no Dispatch server, so a slow one most likely means a busy
+    machine. The first run of each read script (the dry run, and the `pwd -P` probe after a leading
+    `cd`) now gets up to 20 s, and the reads use at most half the call's deadline, so the review
+    keeps the other half. A run cut at its limit runs once more with what is left of that half
+    (25 s at the 90 s default), when at least 2 s of it is left. A dry run that still does not
+    finish tells the agent that the likely cause is a busy machine, not Dispatch, and to read back
+    what the write posted.
+time: 2026-11-02T10:30:00.000000000Z
+custom:
+    Issue: pr2676

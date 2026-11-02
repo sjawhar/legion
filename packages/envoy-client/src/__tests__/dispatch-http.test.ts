@@ -5,6 +5,7 @@ import {
   DispatchClient,
   DispatchGatewayError,
   type DispatchWriteRetry,
+  forgetKeyedLayerMemory,
 } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -1363,11 +1364,10 @@ describe("DispatchClient waits out Retry-After", () => {
     expect(state.waits[0]).toBeLessThanOrEqual(3_250);
   });
 
-  // A send repeated here is a new intent, so a write that mints its own key mints a fresh one for
-  // it. A caller's own key is that caller's one intent across calls and processes, and the refusal
-  // was answered before Dispatch's keyed layer ran, leaving no key behind to replay, so the repeat
-  // carries the caller's key again.
-  test("repeats a write under the caller's own key, and under a new one where it gave none", async () => {
+  // One call is one intent, so every send of it carries the one key: the caller's own, where it
+  // named one, else the one the call minted. The refusal was answered before Dispatch's keyed
+  // layer claimed that key, so the repeat runs the write once rather than replaying an answer.
+  test("repeats a write under the one key of its call, the caller's own or the call's", async () => {
     const uploaded = { artifact: { id: "doc-1" } };
     const { fetchImpl, requests } = fakeFetch([
       refusal(429, "EDIT_QUEUE_FULL", "1"),
@@ -1395,8 +1395,8 @@ describe("DispatchClient waits out Retry-After", () => {
     );
     expect(keys.slice(0, 2)).toEqual([callerKey, callerKey]);
     expect(keys[2]).toBeString();
-    expect(keys[3]).toBeString();
-    expect(keys[3]).not.toBe(keys[2]);
+    expect(keys[3]).toBe(keys[2]);
+    expect(keys[2]).not.toBe(callerKey);
   });
 
   test.each([
@@ -1498,5 +1498,57 @@ describe("DispatchClient waits out Retry-After", () => {
       expect(wait).toBeGreaterThanOrEqual(1_000);
       expect(wait).toBeLessThanOrEqual(1_250);
     }
+  });
+
+  // An attempt cut off for silence may still be running in Dispatch, and the 429 was answered
+  // before its keyed layer claimed the key, so the repeat carries the key that attempt carried:
+  // Dispatch answers it `409 KEY_IN_FLIGHT` and the call collects that run's answer
+  // (dispatch-keyed-writes.test.ts), where a new key could run the write a second time.
+  test("repeats a write cut off for silence under the key its first attempt carried", async () => {
+    // An answer that never comes: the request waits until its signal aborts, then fails with its
+    // reason, as fetch does, which is how `#attempt`'s silence cut ends it.
+    const hang = (signal: AbortSignal | null | undefined): Promise<Response> => {
+      const { promise, reject } = Promise.withResolvers<Response>();
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      return promise;
+    };
+    const posted = { id: "message-1", issue_key: "DSP-1" };
+    const answers: ((signal: AbortSignal | null | undefined) => Response | Promise<Response>)[] = [
+      hang,
+      () => refusal(429, "OVERLOADED", "1"),
+      () => jsonResponse(posted),
+    ];
+    const keys: (string | undefined)[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      // A silence cut is no answer at all, so the client asks `/healthz` whether this Dispatch
+      // runs the keyed layer before it asks again under the key.
+      if (String(input).endsWith("/healthz")) return jsonResponse({ idempotency_keys: true });
+      keys.push((init?.headers as Record<string, string>)["Idempotency-Key"]);
+      const answer = answers[keys.length - 1];
+      if (answer === undefined) throw new Error("unexpected request");
+      return answer(init?.signal);
+    }) as typeof fetch;
+    const { state, writeRetry } = fakeClock();
+    // One ask under the key, and a silence bound short enough to cut the first attempt at once:
+    // that bound runs on a real timer, unlike the waits, which only move the fake clock.
+    const client = retryClient(fetchImpl, {
+      ...writeRetry,
+      pausesMs: [1_000],
+      withinMs: 30_000,
+      silenceMs: 20,
+    });
+
+    await expect(client.message("DSP-1", { body: "Shipped.", actor })).resolves.toMatchObject(
+      posted
+    );
+    // What a Dispatch runs is remembered per process and origin; the tests around this one drive
+    // the same origin as a Dispatch of their own.
+    forgetKeyedLayerMemory();
+
+    expect(keys).toHaveLength(3);
+    expect(keys[0]).toBeString();
+    expect(new Set(keys).size).toBe(1);
+    // The ask under the key after the cut, then the wait-out before the third attempt.
+    expect(state.waits).toHaveLength(2);
   });
 });
