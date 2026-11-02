@@ -6,9 +6,8 @@ import (
 
 // Three readings sjawhar/legion#2481 gave the lines a code block holds, which nothing locked: the
 // reader's own suite stayed green with any of them taken out (#2481's review, "Not proven /
-// risk"; measured again at #2507's head, where removing each left every test of this package
-// passing). Each test below fails when its reading is taken out, so the next change to these
-// lines is told.
+// risk"). Each test below fails when its reading is taken out, so the next change to these lines
+// is told.
 
 // A fenced code block whose last line is the document's own, with no line feed and nothing past
 // the fence's indentation, holds none of that line: the browser editor's parser takes as many
@@ -38,8 +37,8 @@ func TestAFencedBlockEndingAtTheDocumentsOwnWhitespaceLineHoldsNoneOfIt(t *testi
 
 // The blank lines a typed block's indentation takes out of the fenced code it holds are the blank
 // lines they were before the code held them, and the whitespace lines indented code holds are
-// none of the item's either (the keptLast delete in blanksOutsideCode and sourceLines.asHeldBefore
-// before sjawhar/legion#2507, sourceLines.blank and blanksOutsideCode now, source_lines.go). A
+// none of the item's either (the keptLast delete in blanksOutsideCode and sourceLines.blank's skip
+// of indented code's held lines, source_lines.go). A
 // blank line inside a typed block in a list item spaces the item to the browser editor's parser,
 // so a line read as blank rather than as the code's would store a list a person did not write.
 // Each document below holds its line in the code, and the item the typed block stands in is

@@ -282,7 +282,7 @@ func TestQuotedListsAreSpreadWhereTheBrowserEditorsExitLands(t *testing.T) {
 // the definition's own end and of the item's blank lines meet and this one decides neither.
 func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 	for name, refusal := range map[string]string{
-		"item-definition-callout-opening-with-a-blank-line":                                       typedBlankInItem,
+		"item-definition-callout-opening-with-a-blank-line":                                       typedDefinitionBlankInItem,
 		"quoted-star-item-definition-callout-unclosed-fence-then-blank-lines":                     quotedDefinitionFenceBlank,
 		"quoted-star-item-unspaced-definition-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
 		"quoted-star-item-definition-unspaced-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,

@@ -260,14 +260,15 @@ func isList(n *Node) bool {
 
 // opensAfterParagraph reports whether block opens on the line after a paragraph without a blank
 // line: a quote, a code block (written fenced), a heading written on one line, a rule, a typed
-// block, a footnote definition, a bullet list, or an ordered list starting at one, whose first item
-// holds something (an empty item interrupts no paragraph, emptyItemGuard).
+// block, a footnote definition, a table, whose header row interrupts a paragraph as GitHub's
+// tables do, a bullet list, or an ordered list starting at one, whose first item holds something
+// (an empty item interrupts no paragraph, emptyItemGuard).
 func opensAfterParagraph(block *Node) bool {
 	if _, typed := typedBlock(block.Type); typed {
 		return true
 	}
 	switch block.Type {
-	case "blockquote", "code_block", "hr", "footnote_definition":
+	case "blockquote", "code_block", "hr", "footnote_definition", "table":
 		return true
 	case "heading":
 		return !holdsHardBreak(block.Children)

@@ -339,8 +339,11 @@ func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, 
 // theirs. pmdoc.EqualOutsideServerState is not enough here: it counts the selection and the
 // answer as caller text, which they are for the growth check, so an answer would still send a
 // notice. Block ids are left out too (pmdoc.Node.Equal): a stored version carries only a typed
-// block's id, and each parse mints the others afresh. A version that does not read back is not
-// judged, and its notice goes.
+// block's id, and each parse mints the others afresh. A list's and a list item's spread is left
+// out as well (stripListSpread): a document stored before the reader learned to read a blank
+// line inside a typed block in a list item as that item's reads back spread where the live tree
+// is tight, and that difference is the reader's, not a person's. A version that does not read
+// back is not judged, and its notice goes.
 func serverStateOnly(before, after string) bool {
 	beforeTree, err := pmdoc.ParseRendering(before)
 	if err != nil {
@@ -352,7 +355,21 @@ func serverStateOnly(before, after string) bool {
 	}
 	pmdoc.StripServerOwnedAttrs(beforeTree)
 	pmdoc.StripServerOwnedAttrs(afterTree)
+	stripListSpread(beforeTree)
+	stripListSpread(afterTree)
 	return beforeTree.Equal(afterTree)
+}
+
+// stripListSpread takes the spread off every list and list item of tree, so that two readings
+// that differ in it alone compare equal (serverStateOnly).
+func stripListSpread(node *pmdoc.Node) {
+	switch node.Type {
+	case "bullet_list", "ordered_list", "list_item":
+		delete(node.Attrs, "spread")
+	}
+	for _, child := range node.Children {
+		stripListSpread(child)
+	}
 }
 
 // editNoticeVersionMarkdown reads the markdown of artifactID's version number, and reports whether that

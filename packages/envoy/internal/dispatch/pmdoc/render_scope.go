@@ -93,35 +93,27 @@ func (r *renderer) definitionOpensOnALaterLine() bool {
 	return item.Type == "list_item" && item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
 }
 
-// inItemBelowQuotes reports whether the blocks being written stand in a list item with no quote
-// between: a line holding only their prefix is a blank line in the item, which the browser editor
-// reads as spacing it, where with a quote between it is the quote's.
-func (r *renderer) inItemBelowQuotes() bool {
-	for index := len(r.scopes) - 1; index >= 0; index-- {
-		switch r.scopes[index].node.Type {
-		case "blockquote":
-			return false
-		case "list_item":
-			return true
-		}
-	}
-	return false
-}
-
-// inTightItemBelowQuotes reports whether the blocks being written stand, with no quote between, in
-// a list item the writer writes tight (inItemBelowQuotes): a blank line between two of them would
-// be a blank line in that item, which the browser editor reads as spacing it, so they are written
-// on consecutive lines wherever markdown reads them apart there (itemBlocks).
-func (r *renderer) inTightItemBelowQuotes() bool {
+// itemBelowQuotes is the list item the blocks being written stand in with no quote between, or
+// nil where they stand in none: a line holding only their prefix is a blank line in that item,
+// which the browser editor reads as spacing it, where with a quote between it is the quote's,
+// and a blank line between two of them is the same, so a tight item writes its blocks on
+// consecutive lines wherever markdown reads them apart there (itemBlocks).
+func (r *renderer) itemBelowQuotes() *Node {
 	for index := len(r.scopes) - 1; index >= 0; index-- {
 		switch node := r.scopes[index].node; node.Type {
 		case "blockquote":
-			return false
+			return nil
 		case "list_item":
-			return node.Attrs["spread"] != true
+			return node
 		}
 	}
-	return false
+	return nil
+}
+
+// inTightItemBelowQuotes reports whether that item is one the writer writes tight.
+func (r *renderer) inTightItemBelowQuotes() bool {
+	item := r.itemBelowQuotes()
+	return item != nil && item.Attrs["spread"] != true
 }
 
 // emptyCodeWrittenBare reports whether an empty code block is written as its fences alone, with no

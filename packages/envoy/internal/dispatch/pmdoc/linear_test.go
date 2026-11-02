@@ -71,6 +71,27 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 			})
 		})
 	}
+	// A block shape: a list item whose typed block holds one list item per blank line. Reading a
+	// blank line inside such a block as the item's walked the whole block once for each of them,
+	// and the list again for each node of it, which is quadratic in a block of blank lines; the
+	// reading is taken once per block now (typedKeptLines, typedBlankSpreadsItem). A write is
+	// what reads it, so this one is timed through ParseForWrite.
+	{
+		open, repeat, closer := "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n", "  - p\n\n", "  :::\n"
+		full := parseFullTarget / len(repeat)
+		small := full / growthStep
+		name := "a typed block of spaced items in a list item"
+		t.Run(name, func(t *testing.T) {
+			growsLinearly(t, name, []int{small * len(repeat), full * len(repeat)}, linearSlack, func(size int) (time.Duration, error) {
+				text := open + strings.Repeat(repeat, size/len(repeat)) + closer
+				return cpuTimeOf(again(func() {
+					if _, err := ParseForWrite(text, nil); err != nil && !refusedForItsMarks(err) && !errors.Is(err, ErrSchema) {
+						t.Fatalf("%s at %d bytes: %v", name, size, err)
+					}
+				}))
+			})
+		})
+	}
 	// Two-part shapes: an opener half repeated, then a closer half repeated, so each closer looks
 	// back past every run before it. goldmark's ProcessDelimiters walks a closer back over every
 	// earlier run of either character, so `~~a ` then `a* ` and `*a ` then `a~ ` took 3.8-4.2 s at

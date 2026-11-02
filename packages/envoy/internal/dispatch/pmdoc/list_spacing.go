@@ -35,7 +35,11 @@ var browserSpreadAttr = []byte("pmdoc-browser-spread")
 // The blank lines indented code keeps past where goldmark ends it are that code's, and space
 // nothing (heldCodeLines, markBlocksAfterHeldCode).
 //
-// The lines alone do not decide a typed block holding a blank line in a list item, a blank line at
+// A blank line inside a typed block in a list item is read as the browser editor's parser reads
+// it (typedBlankSpreadsItem), and only two shapes are refused there: a blank line inside a typed
+// block that a footnote definition in a list item holds (typedDefinitionBlankInItem), and a list
+// this reader leaves to goldmark's looseness whose item that parser spreads (typedBlankInItem).
+// The lines alone do not decide a blank line at
 // the end of a quote after a list, or at or after a list in a typed block in a footnote
 // definition, and this parser does not read the blank lines after a list item in a quote ending in
 // a footnote definition whose typed block holds a fenced code block no fence closed
@@ -70,6 +74,10 @@ func browserListSpacing(root ast.Node, source []byte) error {
 				reason = "an empty list item followed by a blank line inside another list item, where goldmark ends the outer item and the browser editor does not"
 			}
 		case *ast.List:
+			if holdsTypedBlankInDefinition(node, lines) {
+				reason = typedDefinitionBlankInItem
+				break
+			}
 			reason = readListSpacing(node, lines)
 		}
 		if reason != "" {
@@ -112,15 +120,18 @@ func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 			if !entering {
 				return ast.WalkContinue, nil
 			}
+			if holdsTypedBlankInDefinition(node, lines) {
+				refusal = typedDefinitionBlankInItem
+				return ast.WalkStop, nil
+			}
 			reason := readListSpacing(node, lines)
 			if reason == typedFootnoteListBlank && !goldmarkSpreadsItemsBeforeBlanks(node) {
 				refusal = typedFootnoteListBlank
 				return ast.WalkStop, nil
 			}
-			// A list the lines decide carries that reading already; one left to goldmark's
-			// looseness, which reads such an item tight, is refused, and so is the blank line a
-			// footnote definition carries, which this reader does not decide at all.
-			if reason == typedBlankInItem || reason != "" && typedBlankSpreadsATightItem(node, lines) {
+			// A list the lines decide carries that reading already; only one left to goldmark's
+			// looseness, which reads such an item tight, is refused.
+			if reason != "" && typedBlankSpreadsATightItem(node, lines) {
 				refusal = typedBlankInItem
 				return ast.WalkStop, nil
 			}
@@ -217,11 +228,6 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 	quote, quoted := ancestor[*ast.Blockquote](list)
 	directive, typed := ancestor[*typedDirective](list)
 	definition, footnoted := ancestor[*extensionast.Footnote](list)
-	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
-		if typedBlankInDefinition(item, lines) {
-			return typedBlankInItem
-		}
-	}
 	// In a typed block in a footnote definition, whatever quotes or typed blocks stand between, the
 	// browser editor reads a blank line at or after a list as spacing it by what follows.
 	if typed && footnoted && isAncestor(definition, directive) {
@@ -397,14 +403,20 @@ func typedBlankUnder(container ast.Node, lines sourceLines) bool {
 	return eachTypedBlockUnder(container, false, lines.typedBlankSpreadsItem)
 }
 
-// typedBlankInDefinition reports whether a footnote definition item holds carries a typed block
-// with such a blank line inside it. That parser reads a definition's own lines as the item's but
-// ends the definition at the blank lines that end it, and the two readings meet in shapes this
-// reader does not decide, so a document holding one is refused (typedBlankInItem).
-func typedBlankInDefinition(item ast.Node, lines sourceLines) bool {
-	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
-		if definition, ok := child.(*extensionast.Footnote); ok && eachTypedBlockUnder(definition, true, lines.typedBlankInside) {
-			return true
+// typedDefinitionBlankInItem is the refusal of a blank line inside a typed block that a footnote
+// definition in a list item holds. The browser editor's parser reads a definition's own lines as
+// the item's but ends the definition at the blank lines that end it, and the two readings meet
+// there, so this reader decides neither and refuses the document by this name.
+const typedDefinitionBlankInItem = "a blank line inside a typed block in a footnote definition in a list item, which the browser editor reads as the definition's end and as a blank line of the item alike"
+
+// holdsTypedBlankInDefinition reports whether an item of list holds a footnote definition
+// carrying a typed block with such a blank line inside it (typedDefinitionBlankInItem).
+func holdsTypedBlankInDefinition(list *ast.List, lines sourceLines) bool {
+	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
+		for child := item.FirstChild(); child != nil; child = child.NextSibling() {
+			if definition, ok := child.(*extensionast.Footnote); ok && eachTypedBlockUnder(definition, true, lines.typedBlankInside) {
+				return true
+			}
 		}
 	}
 	return false

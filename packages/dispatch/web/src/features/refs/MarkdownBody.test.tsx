@@ -699,7 +699,7 @@ test("raw unsupported HTML renders as literal text with no element created", asy
       const body = view.container.firstElementChild as HTMLElement;
       expect(body.querySelector(tag)).toBeNull();
       expect(body.querySelector("p")?.textContent).toBe(markdown);
-      expect(body.getAttribute("data-markdown-fallback")).toBeNull();
+      await waitFor(() => expect(body.getAttribute("data-markdown-fallback")).toBeNull());
     } finally {
       view.unmount();
     }

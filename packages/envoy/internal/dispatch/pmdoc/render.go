@@ -401,10 +401,9 @@ func (r *renderer) block(n *Node, prefix string) {
 		}
 		// The browser editor's parser reads the lines of a definition a list item holds as the
 		// item's, so in a tight item a blank line between two of its blocks would spread the item.
-		around := r.scope().node
-		tightItem := around != nil && around.Type == "list_item" && around.Attrs["spread"] != true
+		around := r.itemBelowQuotes()
 		r.enter(n, prefix+definitionIndent)
-		if tightItem {
+		if around != nil && around.Attrs["spread"] != true {
 			r.itemBlocks(n.Children, false, prefix, prefix+definitionIndent, false)
 		} else {
 			r.blocksNoTrailing(n.Children, prefix+definitionIndent)
@@ -423,10 +422,14 @@ func (r *renderer) block(n *Node, prefix string) {
 		}
 		colons := typedFence(n, len(prefix))
 		fence := strings.Repeat(":", colons)
-		if holdsOnlyAnEmptyParagraph(n) && r.inItemBelowQuotes() {
+		if holdsOnlyAnEmptyParagraph(n) && (r.inTightItemBelowQuotes() || r.inFootnote() && r.itemBelowQuotes() != nil) {
 			// Its empty paragraph written as a line would be a blank line in a typed block in a
 			// list item, which the browser editor reads as spacing the item; written as nothing,
-			// both parsers read the typed block back holding it.
+			// both parsers read the typed block back holding it. A spread item is spread by that
+			// very line, so there the line is written and the item reads back spread - but in a
+			// footnote definition the item holds, where that line is read as the definition's end
+			// and as the item's alike and refused (typedDefinitionBlankInItem), the bare form is
+			// the only one that reads back.
 			r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix + fence)
 			return
 		}
@@ -587,23 +590,33 @@ func opensWithUnwrittenParagraph(item *Node) bool {
 }
 
 // itemBlocks writes blocks the browser editor's parser reads as a list item's lines - the item's
-// own, or those of a footnote definition the item holds - at indent, their lines' prefix, where
-// prefix is the list's. A tight item writes its blocks on consecutive lines, where a paragraph
+// own, those of a footnote definition the item holds, or those of a typed block it holds - at
+// indent, their lines' prefix, where prefix is the list's. A tight item writes its blocks on consecutive lines, where a paragraph
 // would run on into a paragraph after it and underline itself with a rule's `---`, and a block
 // whose first line would be a row of a table before it (continuesTable) would be one. The browser
 // editor's writer puts a blank line between two paragraphs (the item then reads back spread) and
 // writes a rule `***`, and so does this renderer, which writes a blank line after such a table too;
 // firstRule reports whether a rule opening the blocks is written `***` too.
+//
+// One blank line is written wherever the block after would otherwise be absorbed: a block that
+// cannot open on the line after a paragraph (opensAfterParagraph), written after a block that
+// ends in a paragraph a lazy line continues (blockEndsInParagraph), would be read as that
+// paragraph's own text - a paragraph taken into the quote before it, a list that interrupts no
+// paragraph read as text, an empty item's marker read as a setext underline. The item then reads
+// back spread, which a write refuses (RefuseMisreadDocument) and a rendering with no read-back -
+// a delete op, settlement - would otherwise store as a document holding less than it was given.
 func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string, firstRule bool) {
 	otherMarkers := otherListMarkers(blocks)
 	for index, child := range blocks {
 		afterParagraph := index > 0 && blocks[index-1].Type == "paragraph"
 		if index > 0 {
 			blanks := 0
-			if spread || afterParagraph && child.Type == "paragraph" || blocks[index-1].Type == "table" && continuesTable(child) {
+			previous := blocks[index-1]
+			if spread || afterParagraph && child.Type == "paragraph" || previous.Type == "table" && continuesTable(child) ||
+				!opensAfterParagraph(child) && blockEndsInParagraph(previous) {
 				blanks = 1
 			}
-			if previous := blocks[index-1]; isList(previous) {
+			if isList(previous) {
 				after, exact := r.blanksAfterList(previous, child)
 				switch {
 				case exact:
