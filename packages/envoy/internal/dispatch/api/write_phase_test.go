@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // A write transaction runs a read phase holding no transaction id - its owner's advisory lock
@@ -41,44 +42,6 @@ func (g *gatedProjectMark) ProjectMark(ctx context.Context, artifactID, markID s
 		})
 	}
 	return g.API.ProjectMark(ctx, artifactID, markID, record, actor)
-}
-
-// ownerLockWaiters counts this test database's backends waiting on an owner lock (the statements
-// store.LockOwner and LockOwnerShared run, which name their result owner_lock), and how many of
-// them hold a transaction id while they wait.
-func ownerLockWaiters(t *testing.T, database *store.Store) (waiting, holdingXid int) {
-	t.Helper()
-	if err := database.Pool.QueryRow(context.Background(), `
-		select count(*), count(*) filter (where backend_xid is not null)
-		from pg_stat_activity
-		where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'
-		  and query like '%owner_lock%' and pid <> pg_backend_pid()
-	`).Scan(&waiting, &holdingXid); err != nil {
-		t.Fatalf("read pg_stat_activity: %v", err)
-	}
-	return waiting, holdingXid
-}
-
-// awaitOwnerLockWaiter waits until a backend waits on an owner lock and answers how many of the
-// waiters hold a transaction id. A request that answers first did not wait, which fails the test:
-// what refuses it is that it ran while the lock's holder was still in its read phase.
-func awaitOwnerLockWaiter(t *testing.T, database *store.Store, request string, answered <-chan *httptest.ResponseRecorder) int {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		select {
-		case response := <-answered:
-			t.Fatalf("%s answered %d %s without waiting for the owner lock its writer holds", request, response.Code, response.Body.String())
-		default:
-		}
-		if waiting, holdingXid := ownerLockWaiters(t, database); waiting > 0 {
-			return holdingXid
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s never waited on the owner lock within 10s", request)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
 }
 
 // A close committed while a comment waited for the issue's owner lock refuses the comment: the
@@ -166,7 +129,9 @@ func TestAThreadReadWaitsForAWritersReadPhase(t *testing.T) {
 	mark := time.Now()
 	marks := make(chan *httptest.ResponseRecorder, 1)
 	go func() { marks <- markThreadRead(t, handler, "alice", root.ID, mark) }()
-	awaitOwnerLockWaiter(t, database, "the thread read", marks)
+	if response, early, _ := storetest.AwaitOwnerLockWaiter(t, database, "the thread read", marks); early {
+		t.Fatalf("the thread read answered %d %s without waiting for the owner lock its writer holds", response.Code, response.Body.String())
+	}
 	release()
 
 	reply := awaitResponse(t, replies)
@@ -282,7 +247,11 @@ func TestTwoWritersOfOneOwnerSerializeWithoutATransactionID(t *testing.T) {
 
 	seconds := make(chan *httptest.ResponseRecorder, 1)
 	go func() { seconds <- comment("bravo", "second") }()
-	if holdingXid := awaitOwnerLockWaiter(t, database, "the second comment", seconds); holdingXid != 0 {
+	response, early, holdingXid := storetest.AwaitOwnerLockWaiter(t, database, "the second comment", seconds)
+	if early {
+		t.Fatalf("the second comment answered %d %s without waiting for the owner lock its writer holds", response.Code, response.Body.String())
+	}
+	if holdingXid != 0 {
 		t.Fatalf("the second comment waits on the owner lock holding a transaction id")
 	}
 	release()
@@ -366,7 +335,7 @@ func TestTwoPatchesOfOneIssueSerializeOnItsOwnerLockAndLoseNoUpdate(t *testing.T
 			t.Fatalf("a PATCH answered %d %s while another transaction held the issue's owner lock", response.Code, response.Body.String())
 		default:
 		}
-		waiting, holdingXid := ownerLockWaiters(t, database)
+		waiting, holdingXid := storetest.OwnerLockWaiters(t, database)
 		if holdingXid != 0 {
 			t.Fatalf("%d of %d PATCHes wait on the issue's owner lock holding a transaction id, want none", holdingXid, waiting)
 		}

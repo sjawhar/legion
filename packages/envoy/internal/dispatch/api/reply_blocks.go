@@ -86,8 +86,9 @@ func (s *server) planReplyBlock(
 // replyBlockOf is planReplyBlock with the item's owed index queued on ledger, at the point the
 // reply reads the block, or run at once where the transaction queues no write phase (a nil
 // ledger: a route that writes as it goes, the delivery replies). A nil ledger has no queue to
-// hold the repair until a write phase that never comes, so the repair runs there as
-// IndexItemIfOwed runs it, as a batch of its own before the reply's own writes.
+// hold the repair until a write phase that never comes, so the repair runs there as every
+// unqueued repair runs (refs.ItemRepair.Write), as a batch of its own before the reply's own
+// writes.
 func (s *server) replyBlockOf(
 	ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, kind refs.ItemKind, itemID, blockID, field, code string,
 ) (*namedBlock, error) {
@@ -98,15 +99,14 @@ func (s *server) replyBlockOf(
 	if !repair.Owed() {
 		return block, nil
 	}
-	write := func(b *store.WriteBatch) error {
-		repair.Queue(b)
-		return nil
-	}
 	if ledger != nil {
-		return block, ledger.Queue(write)
+		return block, ledger.Queue(func(b *store.WriteBatch) error {
+			repair.Queue(b)
+			return nil
+		})
 	}
-	if err := store.RunWrite(ctx, tx, write); err != nil {
-		return nil, fmt.Errorf("index the blocks of %s %s: %w", kind, itemID, err)
+	if err := repair.Write(ctx, tx); err != nil {
+		return nil, err
 	}
 	return block, nil
 }

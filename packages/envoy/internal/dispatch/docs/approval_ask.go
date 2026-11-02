@@ -38,7 +38,7 @@ func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 }
 
 // openApprovalAsk is OpenApprovalAsk as the transaction's queued writes leave the request: the
-// request a version write of this transaction moved (moveApprovalAsk), nil once a queued answer
+// request a version write of this transaction moved (MoveApprovalAsk), nil once a queued answer
 // closed it (carryApproval), else the stored one.
 func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
 	if ledger := queueFor(ctx, tx); ledger != nil {
@@ -58,22 +58,15 @@ func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 // hand it back before a human sees it in Waiting on you again. Only the first move since the
 // request was opened or handed back wakes anyone, even when a thread reply already left it waiting
 // on its agent; a later one, while requested_version is already below the version it named, is
-// quiet (RewriteApprovalAsk). It runs in the transaction ctx joined (errUnjoined otherwise), as
-// every other document operation does, so its writes reach that transaction's write queue and the
-// event it appends reaches its ledger (eventSink), which publishes it after its Commit.
+// quiet (RewriteApprovalAsk). It runs in a transaction a caller joined, as every other document
+// operation does, and in the one a settlement or the block-id backfill owns, which no caller joins
+// (Ledger): the version write every document version goes through (writeVersionTx) runs in both.
+// A context holding no ledger at all is refused by the rewording it makes (RewriteApprovalAsk,
+// errUnjoined). Its writes reach the transaction's write queue and the event it appends reaches
+// its ledger (eventSink), which publishes it after its Commit. Where its writes are queued, the
+// ledger records the request as moved (pendingApproval), so the carry that follows in the same
+// version write reads the request as this move leaves it.
 func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) error {
-	if _, joined := txFromContext(ctx); !joined {
-		return errUnjoined
-	}
-	return moveApprovalAsk(ctx, tx, broker, artifactID, version, mover, serverURL)
-}
-
-// moveApprovalAsk is MoveApprovalAsk without that refusal, for the version write every document
-// version goes through (writeVersionTx): it runs in a transaction a caller joined and in the one a
-// settlement or the block-id backfill owns, which no caller joins (Ledger). Where its writes are
-// queued, the ledger records the request as moved (pendingApproval), so the carry that follows in
-// the same version write reads the request as this move leaves it.
-func moveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) error {
 	ask, err := openApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
 		return err
@@ -102,6 +95,12 @@ func moveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 // document operation's does (eventSink), which publishes it after its Commit; no caller reads it
 // back, since where the writes are queued the append has not run when this returns.
 //
+// It refuses a context holding no ledger at all (errUnjoined), the one context in which the
+// rewording would be told to nobody: there the update runs at once while the event reaches no
+// ledger to publish it, leaving the row reworded and the request's readers none the wiser. A
+// settlement's ledger and the block-id backfill's are in the context of the writes they own, so
+// this refuses neither.
+//
 // The new question, the approval it encodes, the references it cites and its edited_at are worked
 // out here; the update, the references' writes, the append and the stamp are one step (write).
 // edited_at is clock_timestamp(), read here rather than in the update, so the event's copy of the
@@ -116,6 +115,9 @@ func RewriteApprovalAsk(
 	version int,
 	summary, serverURL string,
 ) error {
+	if ledgerFrom(ctx) == nil {
+		return errUnjoined
+	}
 	sink := eventSink(ctx)
 	previous := model.NewAskEditPrevious(*ask)
 	quiet := version != ask.Approval.Version && ask.Approval.RequestedVersion < ask.Approval.Version

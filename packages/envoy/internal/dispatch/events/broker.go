@@ -311,14 +311,14 @@ func agentEventSessionID(e model.Event) (string, error) {
 }
 
 // eventOwnerLock is the owner lock of e's owner, false for an ownerless event (a session-addressed
-// message), which has no owner row and no lock.
+// message), which has no owner row and no lock. An event on an issue or a document names its
+// owner as every other row of that collaboration does (store.OwnerOf); a project event, which no
+// such row has, names the project.
 func eventOwnerLock(e model.Event) (store.Owner, bool) {
-	switch {
-	case e.IssueKey != nil:
-		return store.IssueOwner(*e.IssueKey), true
-	case e.ArtifactID != nil:
-		return store.ArtifactOwner(*e.ArtifactID), true
-	case e.ProjectKey != nil:
+	if owner := store.OwnerOf(e.IssueKey, e.ArtifactID); owner != nil {
+		return *owner, true
+	}
+	if e.ProjectKey != nil {
 		return store.ProjectOwner(*e.ProjectKey), true
 	}
 	return store.Owner{}, false
