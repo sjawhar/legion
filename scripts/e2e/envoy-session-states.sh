@@ -82,14 +82,14 @@
 # ---- the named checks ---------------------------------------------------------------------------
 # Each prints `PASS <name>` or `FAIL <name>: <reason>`, every selected check runs whatever the one
 # before it did, and the last line says how many ran and how many passed. The eight requirements of
-# this issue's proof map onto eleven names, because requirements 3 and 7 each hold separate things
+# this issue's proof map onto twelve names, because requirements 3 and 7 each hold separate things
 # whose needs differ and a reader has to be told which of them held:
 #   1  stalled-session-reads-unresponsive     (3) -> 3a send-to-stalled-session-is-stored
 #   2  bus-outage-keeps-claims                       3b stored-deliveries-arrive-once
 #   4  role-claim-survives-lookups                   3c send-to-serving-port-is-refused
-#   5  issue-claim-refuses-the-stalled-holder  6  gone-only-past-the-horizon
-#   8  max-age-change-reaches-both-listeners  (7) -> 7a every-plugin-shows-the-state
-#                                                    7b every-plugin-names-a-stored-follower
+#   5  issue-claim-refuses-the-stalled-holder        3d role-route-reaches-its-holder
+#   6  gone-only-past-the-horizon             (7) -> 7a every-plugin-shows-the-state
+#   8  max-age-change-reaches-both-listeners         7b every-plugin-names-a-stored-follower
 #
 # ---- what the run starts, and what stops it ------------------------------------------------------
 # A NATS server (internal/testnats/cmd/natsd), two Envoy listeners on ports held from the kernel's
@@ -138,6 +138,7 @@ checks=(
   "bus-outage-keeps-claims dispatch"
   "send-to-stalled-session-is-stored"
   "stored-deliveries-arrive-once omp dispatch model"
+  "role-route-reaches-its-holder omp dispatch model"
   "send-to-serving-port-is-refused"
   "role-claim-survives-lookups"
   "issue-claim-refuses-the-stalled-holder dispatch"
@@ -263,6 +264,7 @@ maxage_pid=
 shortlistener_pid=
 dispatch_pid=
 exceptions_pid=
+role_forwards_pid=
 omp_pid=
 omp_fd=
 claude_pid=
@@ -339,6 +341,7 @@ cleanup() {
   stop_agent "$omp_pid"
   stop_agent "$claude_pid"
   stop_pid "$exceptions_pid"
+  stop_pid "$role_forwards_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$shortlistener_pid"
   stop_pid "$maxage_pid"
@@ -772,6 +775,12 @@ if [ -n "$needs_dispatch" ]; then
     fail "the database $database has no pgvector; ENVOY_SESSION_STATES_PG_DSN must name a PostgreSQL carrying it"
   mkdir -p "$work/web-dist"
   keep_port dispatch_keeper dispatch_port
+  # Dispatch is given the windows the two listeners judge a record by, as a deployment must give
+  # them the same (ENVOY_SESSION_LIVE_WINDOW, ENVOY_SESSION_GONE_HORIZON, cmd/dispatch/settings.go):
+  # its outbox reads the role and session buckets itself to resolve a role route's holder
+  # (roleHolderWindows, roles.NewBuckets), and at its own five-minute default it would call a
+  # holder live that both listeners already read unresponsive and forward a role-routed event at a
+  # session that answers nothing.
   start_kept dispatch dispatch_keeper DISPATCH_LISTEN_FD -- env -i PATH="$PATH" HOME=/nonexistent \
     XDG_CONFIG_HOME=/nonexistent XDG_DATA_HOME=/nonexistent DISPATCH_LISTEN_FD=3 \
     DATABASE_URL="$database_url" DISPATCH_AGENT_TOKEN="$(cat "$work/dispatch-token")" \
@@ -779,7 +788,8 @@ if [ -n "$needs_dispatch" ]; then
     DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_SERVER_URL="http://127.0.0.1:$dispatch_port" \
     DISPATCH_SIGNING_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" \
     DISPATCH_WEB_DIST="$work/web-dist" ENVOY_URL="http://127.0.0.1:$port_a" \
-    ENVOY_TOKEN="$(cat "$work/envoy-token")" NATS_URLS="$nats_url" "$work/bin/envoy-dispatch"
+    ENVOY_TOKEN="$(cat "$work/envoy-token")" ENVOY_SESSION_LIVE_WINDOW="$live_window" \
+    ENVOY_SESSION_GONE_HORIZON="$gone_horizon" NATS_URLS="$nats_url" "$work/bin/envoy-dispatch"
   dispatch_url=http://127.0.0.1:$dispatch_port
   await_start dispatch "$dispatch_pid" 120 "Dispatch to serve" \
     curl -fsS --max-time 3 "$dispatch_url/healthz"
@@ -797,6 +807,22 @@ dispatch_api() { # dispatch_api METHOD PATH [BODY]
   answer=$evidence/answers/$check.dispatch.$RANDOM.json
   local -a args=(-sS --max-time 20 -o "$answer" -w '%{http_code}' -X "$method"
     -H "Authorization: Bearer $(cat "$work/dispatch-token")")
+  [ -z "$body" ] || args+=(-H 'content-type: application/json' --data "$body")
+  api_status=$(curl "${args[@]}" "$dispatch_url$path" 2>>"$evidence/logs/curl.log") || api_status=000
+  [ "$api_status" = 200 ] || [ "$api_status" = 201 ]
+}
+
+# dispatch_person METHOD PATH [BODY] is dispatch_api as a person makes the same call: the trusted
+# identity header this run starts Dispatch with (DISPATCH_IDENTITY=header:X-Dispatch-User,
+# DISPATCH_IDENTITY_HEADER_TRUSTED=1) and no bearer at all, which is what makes the actor a user
+# rather than this run's agent (api/server.go). Only a person's write wakes an issue's route:
+# events.Broker.Notify ends `return e.Actor.Kind == "user"`, and eventDestinations adds the
+# issue's own route to an event's destinations only for an event that notifies, so the same
+# comment written over the agent bearer is a comment on the issue's topic and nothing more.
+dispatch_person() { # dispatch_person METHOD PATH [BODY]
+  local method=$1 path=$2 body=${3:-} login=ess-person
+  answer=$evidence/answers/$check.person.$RANDOM.json
+  local -a args=(-sS --max-time 20 -o "$answer" -w '%{http_code}' -X "$method" -H "X-Dispatch-User: $login")
   [ -z "$body" ] || args+=(-H 'content-type: application/json' --data "$body")
   api_status=$(curl "${args[@]}" "$dispatch_url$path" 2>>"$evidence/logs/curl.log") || api_status=000
   [ "$api_status" = 200 ] || [ "$api_status" = 201 ]
@@ -1218,6 +1244,180 @@ check_stored_deliveries_arrive_once() {
   [ ! -s "$work/exceptions.jsonl" ] ||
     refuse "an exception landed on notifications.envoy.exceptions.*: $(head -c 200 "$work/exceptions.jsonl")" || return 1
   note "the mention and the direct message each arrived once after SIGCONT; the role publish was refused with the claim kept"
+}
+
+# ---- 3d. a Dispatch event routed to a role reaches its holder ------------------------------------------------
+# The role arm of the same requirement, driven through Dispatch's own outbox rather than the
+# listener's publish route: an issue routed to `role:<role>`, a person's comment on it, and
+# Dispatch resolving the holder itself and forwarding the event to the holder's own agent subject
+# (internal/dispatch/outbox/role.go). Three facts decide whether anything is routed at all, and
+# getting one of them wrong leaves zero forwards for the wrong reason:
+#   - the holder is this run's own Oh My Pi session, which registers the delivery capabilities a
+#     write may ask of it and answers a forward's receipt itself (packages/pi-envoy's
+#     expectsLaneReceipt); a session this check registered on the wire would advertise none;
+#   - the comment is a person's (dispatch_person), the one actor whose write notifies and so
+#     reaches the issue's route at all;
+#   - the forward lands on `notifications.agent.<holder>`, never on `notifications.role.*`, under
+#     a dedupe key beginning `envoy.role.forward.` (internal/contracts/dedupe.go).
+# The live holder is this check's own control: without it, the zero the stalled arm reads would
+# say "held for its holder" and "routed nowhere at all" in the same breath.
+#
+# While the holder is unresponsive Dispatch holds that event rather than storing a copy for it:
+# forwardOf answers an error for session.Unresponsive, so the destination is backed off and
+# retried, the role route is not counted reached, and nothing is sent. The claim and its
+# claimed_at stand through the stall, and one SIGCONT later exactly one forward arrives.
+
+# watch_role_forwards SESSION subscribes to that session's own agent subject over core NATS and
+# appends every message that lands on it, whole and on one line, to $work/role-forwards.jsonl. It
+# answers none of them: the holder's own subscription sends a forward's receipt, and a receipt
+# from the rig would hide a holder that never sent one.
+watch_role_forwards() {
+  : >"$work/role-forwards.jsonl"
+  # shellcheck disable=SC2016 # the bun program is passed verbatim; ${…} inside it is JavaScript's
+  (cd "$root" && ESS_NATS_URL=$nats_url ESS_SUBJECT="notifications.agent.$1" \
+    ESS_OUT=$work/role-forwards.jsonl exec bun -e '
+    import { appendFileSync } from "node:fs";
+    import { connect } from "nats";
+    const nc = await connect({ servers: process.env.ESS_NATS_URL });
+    const subscription = nc.subscribe(process.env.ESS_SUBJECT);
+    await nc.flush();
+    console.log(`subscribed ${process.env.ESS_SUBJECT}`);
+    const decoder = new TextDecoder();
+    for await (const message of subscription) {
+      appendFileSync(process.env.ESS_OUT, `${decoder.decode(message.data).replace(/\s+/g, " ")}\n`);
+    }
+  ') >>"$evidence/logs/role-forwards.log" 2>&1 &
+  role_forwards_pid=$!
+  wait_until 60 "the watcher of notifications.agent.$1 to subscribe" \
+    grep -q "subscribed notifications.agent.$1" "$evidence/logs/role-forwards.log"
+}
+
+# role_forwards MARKER counts the role forwards naming MARKER that landed on the holder's agent
+# subject: the messages carrying both MARKER and the dedupe prefix every role forward's key begins
+# with. Counting messages rather than forwards would read any other send to the same session — the
+# subjects of this run are shared between its checks — as this event's forward.
+role_forwards() {
+  local count
+  count=$(grep -F -e "$1" -- "$work/role-forwards.jsonl" | grep -c -F -e 'envoy.role.forward.') || count=0
+  printf '%s\n' "$count"
+}
+
+# role_forwards_at_least MARKER N: at least N of them have landed, for wait_until.
+role_forwards_at_least() { [ "$(role_forwards "$1")" -ge "$2" ]; }
+
+# outbox_event ISSUE MARKER EXPRESSION prints EXPRESSION over the one comment of ISSUE the person
+# wrote naming MARKER, out of Dispatch's own database: what the outbox came to for an event is in
+# no answer it serves. `published_at` is set only once every destination of the event is reached,
+# each reached destination is added to `published_destinations` under its own subject — a role
+# route's is the role's topic, which the batch forwards from (addRoute) — `publish_error` holds why
+# a destination that is still pending was backed off, and `attempt_count` is how often it has been
+# tried (recordBatch, internal/dispatch/outbox/publisher.go).
+#
+# The actor is read as well as the marker because the holder is a real agent session: it is handed
+# the comment and is free to answer it on the issue, and a reply of its own quoting the marker
+# would otherwise be a second row of this read and leave every comparison below false.
+outbox_event() {
+  psql "$database_url" -X -At -q -v ON_ERROR_STOP=1 -c \
+    "select $3 from events where issue_key = '$1' and type = 'comment.created'
+       and actor ->> 'kind' = 'user' and payload::text like '%$2%'"
+}
+
+# outbox_event_is ISSUE MARKER EXPRESSION WANT is outbox_event as a predicate, for wait_until. A
+# `::text` of a condition is `true` or `false`, which is what every WANT below is spelled in.
+outbox_event_is() { [ "$(outbox_event "$1" "$2" "$3")" = "$4" ]; }
+
+check_role_route_reaches_its_holder() {
+  local role=ess-roleroute-$$ issue marker reached record claimed_at live held resumed attempts
+  [ -n "$omp_pid" ] || omp_start || return 1
+  [ -n "$omp_session" ] || omp_session=$(omp_session_id)
+  wait_until 180 "the Oh My Pi session to be live" state_is "$port_a" "$omp_session" '' live || return 1
+  api "$port_a" POST /v1/roles/set "$(jq -cn --arg s "$omp_session" --arg r "$role" '{session_id:$s,role:$r}')" ||
+    refuse "the session could not take the role $role: $(head -c 200 "$answer")" || return 1
+  issue=$(make_issue "$omp_session" "A role route reaches its holder") ||
+    refuse "could not create the proof's issue" || return 1
+  dispatch_api PATCH "/api/v1/issues/$issue" \
+    "$(jq -cn --arg s "$omp_session" --arg r "$role" '{route:("role:" + $r),actor:{id:$s,kind:"session"}}')" ||
+    refuse "routing $issue to role:$role answered $api_status: $(head -c 300 "$answer")" || return 1
+  watch_role_forwards "$omp_session" || return 1
+  reached="(published_at is not null)::text || ' ' || ('notifications.role.$role' = any(published_destinations))::text"
+  # A marker no other check's writes carry, and one phrase per arm, so neither arm can be counted
+  # for the other.
+  marker=ess-roleroute-$RANDOM$RANDOM
+  note "$issue is routed to role:$role, whose holder is the live $omp_session"
+  # The control: with the holder live, a person's comment on the routed issue is forwarded once.
+  dispatch_person POST "/api/v1/issues/$issue/comments" \
+    "$(jq -cn --arg m "live $marker" '{body:$m}')" ||
+    refuse "the person's comment on the routed issue answered $api_status: $(head -c 300 "$answer")" || return 1
+  wait_until 180 "the role forward to reach the live holder" role_forwards_at_least "live $marker" 1 || return 1
+  # A second copy would land behind the first, so each count is taken a settling period after the
+  # one it waited for arrived, and the subject's whole traffic is kept as evidence.
+  sleep 20
+  live=$(role_forwards "live $marker")
+  cp -f "$work/role-forwards.jsonl" "$evidence/answers/$check.forwards.jsonl"
+  [ "$live" -eq 1 ] ||
+    refuse "the live holder's agent subject carries $live role forwards naming 'live $marker'; a role-routed event reaches its holder exactly once" || return 1
+  wait_until 60 "the event forwarded to the live holder to be published" \
+    outbox_event_is "$issue" "live $marker" "$reached" 'true true' || return 1
+  note "with the holder live, the person's comment was forwarded once to notifications.agent.$omp_session"
+  # The arm this check exists for: the same write while the holder is unresponsive.
+  record=$(role_record "$role")
+  claimed_at=$(jq -r '.claimed_at' <<<"$record")
+  kill -STOP "$omp_pid" || refuse "could not stop Oh My Pi" || return 1
+  wait_until 180 "the holder to read unresponsive" \
+    state_is "$port_a" "$omp_session" unresponsive unresponsive || return 1
+  dispatch_person POST "/api/v1/issues/$issue/comments" \
+    "$(jq -cn --arg m "stalled $marker" '{body:$m}')" ||
+    refuse "the person's comment for the stalled holder answered $api_status: $(head -c 300 "$answer")" || return 1
+  # Dispatch has read the holder and held the event: the destination is backed off with the
+  # holder's own state as the reason, which is the one thing that tells a hold apart from an event
+  # the outbox has not reached yet.
+  wait_until 180 "Dispatch to hold the event for the unresponsive holder" \
+    outbox_event_is "$issue" "stalled $marker" "(coalesce(publish_error, '') like '%is unresponsive%')::text" true || return 1
+  sleep 30
+  held=$(role_forwards "stalled $marker")
+  cp -f "$work/role-forwards.jsonl" "$evidence/answers/$check.forwards.jsonl"
+  [ "$held" -eq 0 ] ||
+    refuse "$held role forwards naming 'stalled $marker' landed on the stalled holder's agent subject; an event whose role holder is unresponsive is held, not pushed at it" || return 1
+  outbox_event_is "$issue" "stalled $marker" "$reached" 'false false' ||
+    refuse "the held event reads published and role-route-reached '$(outbox_event "$issue" "stalled $marker" "$reached")', not 'false false': $(outbox_event "$issue" "stalled $marker" "coalesce(publish_error, 'no error')")" || return 1
+  note "the held event's reason is $(outbox_event "$issue" "stalled $marker" "coalesce(publish_error, 'none')")"
+  # The claim is where it was, and the lookup says so rather than reading as a free role.
+  record=$(role_record "$role")
+  [ "$(jq -r '.holder_session_id' <<<"$record")" = "$omp_session" ] ||
+    refuse "envoy_roles names $(jq -r '.holder_session_id' <<<"$record") while its holder's event waits, not $omp_session" || return 1
+  [ "$(jq -r '.claimed_at' <<<"$record")" = "$claimed_at" ] ||
+    refuse "the role's claimed_at moved while its holder was stalled: $(jq -r '.claimed_at' <<<"$record"), was $claimed_at" || return 1
+  role_reason_is "$port_a" "$role" holder_lapsed ||
+    refuse "the role lookup for the stalled holder answered $(head -c 200 "$answer")" || return 1
+  jq -e --arg h "$omp_session" '.holder == $h and .holder_state == "unresponsive" and .claim_released == false' "$answer" >/dev/null ||
+    refuse "the role lookup does not name the stalled holder, its state and its kept claim: $(head -c 300 "$answer")" || return 1
+  # It answers again, and the held event is forwarded — once. The outbox doubles its wait from a
+  # second between attempts (internal/dispatch/retry), so the forward follows the heartbeat by up
+  # to the delay the attempts of the stall had reached.
+  kill -CONT "$omp_pid" || refuse "could not continue Oh My Pi" || return 1
+  wait_until 180 "the holder to be live again" state_is "$port_a" "$omp_session" '' live || return 1
+  wait_until 600 "the held event to be forwarded once the holder answers again" \
+    role_forwards_at_least "stalled $marker" 1 || return 1
+  sleep 30
+  resumed=$(role_forwards "stalled $marker")
+  cp -f "$work/role-forwards.jsonl" "$evidence/answers/$check.forwards.jsonl"
+  [ "$resumed" -eq 1 ] ||
+    refuse "$resumed role forwards naming 'stalled $marker' arrived after SIGCONT; a held event is forwarded exactly once" || return 1
+  outbox_event_is "$issue" "stalled $marker" "$reached" 'true true' ||
+    refuse "after SIGCONT the event reads published and role-route-reached '$(outbox_event "$issue" "stalled $marker" "$reached")', not 'true true'" || return 1
+  # Nothing anywhere calls the hold a failure: the outbox never gave the event up (its attempts
+  # stayed under retry.DeadLetterAttempts, the tenth), neither log names a failed or given-up
+  # delivery, and nothing landed on the exceptions topic.
+  attempts=$(outbox_event "$issue" "stalled $marker" attempt_count)
+  [ "$attempts" -lt 10 ] ||
+    refuse "the held event was tried $attempts times, the dead-letter threshold the outbox gives an event up at" || return 1
+  ! grep -qE 'agent delivery failed|deferred|given up' "$evidence/logs/listener_a.log" ||
+    refuse "the listener's log names a failed, deferred or given-up delivery for a held role forward" || return 1
+  ! grep -qE 'given up|delivery failed|forward refused' "$evidence/logs/dispatch.log" ||
+    refuse "Dispatch's log names a failed, given-up or refused delivery: $(grep -m1 -E 'given up|delivery failed|forward refused' "$evidence/logs/dispatch.log" | head -c 200)" || return 1
+  [ ! -s "$work/exceptions.jsonl" ] ||
+    refuse "an exception landed on notifications.envoy.exceptions.*: $(head -c 200 "$work/exceptions.jsonl")" || return 1
+  note "held through the stall over $attempts attempts, the role forward arrived once after SIGCONT with the claim untouched"
 }
 
 # ---- 3c. a send to a stalled session that receives on a port is refused ---------------------------------------
