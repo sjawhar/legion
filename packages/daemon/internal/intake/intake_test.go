@@ -827,18 +827,19 @@ func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
 			}
 			decoded := decode()
 			kind := golden.Payload["kind"]
+			issueBranch := claim.IssueBranch("GOLDEN-1")
 			switch kind {
 			case "push":
 				if decoded.Fact != nil {
 					t.Fatalf("%s's push to %v decoded %#v, want no fact for a branch that is no issue's", repository, golden.Payload["ref"], decoded.Fact)
 				}
-				golden.Payload["ref"] = "refs/heads/" + claim.IssueBranch("GOLDEN-1")
+				golden.Payload["ref"] = "refs/heads/" + issueBranch
 				decoded = decode()
 			case "pr":
 				if decoded.Fact != nil {
 					t.Fatalf("%s's pull request on %v decoded %#v, want no fact for a branch that is no issue's", repository, golden.Payload["head_ref"], decoded.Fact)
 				}
-				golden.Payload["head_ref"] = claim.IssueBranch("GOLDEN-1")
+				golden.Payload["head_ref"] = issueBranch
 				decoded = decode()
 			}
 			if (kind == "pr" || kind == "review" || kind == "push") && decoded.Fact == nil {
@@ -859,7 +860,7 @@ func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
 				}
 				want := Push{
 					Repo:   repository.String(),
-					Branch: claim.IssueBranch("GOLDEN-1"),
+					Branch: issueBranch,
 					Before: field("before"),
 					After:  field("after"),
 					Pusher: field("pusher"),

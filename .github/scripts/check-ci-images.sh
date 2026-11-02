@@ -107,10 +107,8 @@
 # a ground that holds nothing any more is a ground nobody reads again. An entry naming a file
 # the tree does not hold admits nothing, and is left alone. The sweep walks the tree with
 # workflow_paths.walk, which skips .git, .jj, node_modules, .venv and vendor. This sweep skips
-# two more things itself: .legion (Legion's per-issue run data, written by a deployment whose
-# daemon still keeps handoffs in files, which a branch carries until the cutover of
-# sjawhar/legion#2354 reaches it) and this
-# check's own two files, whose text names the registry to find it.
+# two more things itself: .legion (Legion's per-issue run data, which a working tree may still
+# carry) and this check's own two files, whose text names the registry to find it.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
 # read green locally.

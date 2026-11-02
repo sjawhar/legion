@@ -2361,12 +2361,12 @@ func TestAWorkflowFileNameIsOneValidSubjectSegment(t *testing.T) {
 	}
 }
 
-// TestGithubPayloadPushCarriesExactlyTheKeysTheDaemonReads normalizes a captured real GitHub push
-// body (sjawhar/legion PR #966, commit 538bbf1a) and asserts the push payload's exact key set: the
-// ten fields the listener publishes, and none of changed_paths, changed_paths_truncated or forced,
-// which no daemon reads since sjawhar/legion#2354 moved Legion's handoffs onto their Dispatch
-// issues.
-func TestGithubPayloadPushCarriesExactlyTheKeysTheDaemonReads(t *testing.T) {
+// TestGithubPayloadPushCarriesExactlyTheKeysTheListenerPublishes normalizes a captured real GitHub
+// push body (sjawhar/legion PR #966, commit 538bbf1a) and asserts the push payload's exact key set:
+// the ten fields the listener publishes, and none of changed_paths, changed_paths_truncated or
+// forced, which no daemon reads since sjawhar/legion#2354 moved Legion's handoffs onto their
+// Dispatch issues.
+func TestGithubPayloadPushCarriesExactlyTheKeysTheListenerPublishes(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "push_handoff_only.json"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -2395,7 +2395,7 @@ func TestGithubPayloadPushCarriesExactlyTheKeysTheDaemonReads(t *testing.T) {
 		"compare_url":  "https://github.com/sjawhar/legion/compare/da6d40f735b3...538bbf1ab6b9",
 	}
 	if !maps.Equal(want, payload) {
-		t.Fatalf("push payload keys = %v, want %v\ngot: %v", slices.Sorted(maps.Keys(payload)), slices.Sorted(maps.Keys(want)), payload)
+		t.Fatalf("push payload keys = %v, want %v; payload = %v", slices.Sorted(maps.Keys(payload)), slices.Sorted(maps.Keys(want)), payload)
 	}
 }
 

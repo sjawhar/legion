@@ -80,9 +80,14 @@ func TestTheLargestEnvelopeOfEachKindTheDaemonReadsIsStored(t *testing.T) {
 				capped: []string{"action", "title", "body", "author", "url", "state", "submitted_at", "commit_id", "head_sha"},
 			},
 			{
-				event:  "push",
-				body:   largestPush(repository, filler.rune, over),
-				capped: []string{"ref", "before", "after", "pusher", "head_subject", "compare_url"},
+				event: "push",
+				body: object{
+					"ref": "refs/heads/" + strings.Repeat(filler.rune, 5000), "before": over, "after": over,
+					"compare": over, "repository": repository, "pusher": object{"name": over},
+					"sender": object{"login": over}, "head_commit": object{"message": over},
+					"commits": []any{object{}},
+				},
+				capped: []string{"ref", "before", "after", "pusher", "sender", "head_subject", "compare_url"},
 			},
 			{
 				event: "workflow_run",
@@ -146,16 +151,5 @@ func TestTheLargestEnvelopeOfEachKindTheDaemonReadsIsStored(t *testing.T) {
 				t.Logf("the stored %s is %d bytes on a %d-byte subject", tc.event, len(stored.Data), len(stored.Subject))
 			})
 		}
-	}
-}
-
-// largestPush is a push whose every copied text is over and whose ref is 5,000 runes.
-func largestPush(repository object, filler, over string) object {
-	return object{
-		"ref": "refs/heads/" + strings.Repeat(filler, 5000), "before": over, "after": over,
-		"compare": over, "forced": true, "repository": repository, "pusher": object{"name": over},
-		"head_commit": object{"message": over}, "commits": []any{object{
-			"added": []any{}, "modified": []any{}, "removed": []any{},
-		}},
 	}
 }
