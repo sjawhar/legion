@@ -72,8 +72,9 @@ type Sender interface {
 	// does not capture answers ErrNotCaptured.
 	PublishAsync(item contracts.Envelope) <-chan error
 	// Request sends item over core NATS to subject, which can differ from item.Topic, with a reply
-	// inbox, and returns a channel that receives the outcome exactly once: nil once its receiver
-	// answered it, or why it did not.
+	// inbox, and returns a channel that receives the outcome exactly once: nil once the stream
+	// that captures subject acknowledged the copy it stored, or why it did not. No receiver
+	// answers a request (window.Request).
 	Request(subject string, item contracts.Envelope, opts RequestOptions) <-chan error
 	// Probe flushes the sender's connection within timeout: nil once the server answered on a
 	// connection that is still current, and otherwise an error wrapping ErrUnavailable.
@@ -299,18 +300,24 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 const requestReplies = 4
 
 // Request publishes item's encoding to subject over core NATS on the window's connection, with a
-// reply inbox it subscribes first and, when opts.MsgID is not empty, a Nats-Msg-Id header of it. It
-// is pinned and refused as a send of the window is: a subject NATS would not accept answers
+// reply inbox it subscribes first and a Nats-Msg-Id header of opts.MsgID, which every request
+// carries: an empty one is refused ErrNoForwardMsgID before anything is sent. It is pinned and
+// refused as a send of the window is: a subject NATS would not accept answers
 // ErrRefused, and a window whose connection was lost or reconnected answers ErrUnavailable, both in
 // the channel when Request returns, before anything is sent. Otherwise the channel receives:
 //
 //   - nil on the stream's acknowledgement of a copy it holds, at a sequence and without an error,
 //     a duplicate's included (answers): the request is stored on a subject the stream captures,
-//     and that acknowledgement is its whole outcome, since no receiver answers a request. Any
-//     other reply is passed over and the wait goes on: an acknowledgement with an error, the
+//     and that acknowledgement is its whole outcome, since no receiver answers a request. A reply
+//     that is neither an acknowledgement nor a refusal is passed over and the wait goes on: the
 //     server's no-responders answer, and anything a subscriber of the subject sends;
-//   - under a MsgID, the outcome of the send the stream's acknowledgement of a duplicate with no
-//     sequence (ErrNotStored) calls for: the request goes out once more, to the same inbox and
+//   - the stream's refusal of the copy, the moment it comes back: an acknowledgement that carries
+//     an error settles the request as that error, a full stream's as ErrStreamFull
+//     (streamRefusal). It never wraps ErrNotAcknowledged, which says the stream gave no answer at
+//     all, and the request does not wait out opts.Timeout for an answer that is already in, as a
+//     window's PublishAsync (acknowledged) and Client.StartRequestStoredTo's Wait do not;
+//   - the outcome of the send the stream's acknowledgement of a duplicate with no sequence
+//     (ErrNotStored) calls for: the request goes out once more, to the same inbox and
 //     without its Nats-Msg-Id, which the record of that id at sequence 0 does not match, and the
 //     acknowledgement of the copy the stream then stores answers. A request makes that send at
 //     most once, under the checks sendJetStream's resend makes: a window whose deadline has
@@ -362,9 +369,11 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 	if err != nil {
 		return nil, w.unsent(err, len(data))
 	}
-	msg := &nats.Msg{Subject: subject, Reply: inbox, Data: data}
-	if opts.MsgID != "" {
-		msg.Header = nats.Header{nats.MsgIdHdr: []string{opts.MsgID}}
+	msg := &nats.Msg{
+		Subject: subject,
+		Reply:   inbox,
+		Data:    data,
+		Header:  nats.Header{nats.MsgIdHdr: []string{opts.MsgID}},
 	}
 	deadline := time.Now().Add(cmp.Or(opts.Timeout, publishAcknowledgementTimeout))
 	before := observe(w.conn)
@@ -443,17 +452,22 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 			}
 			return nil
 		}
-		resendable, resent := opts.MsgID != "", false
+		resent := false
 		// outcome names what reply settles the request as, and reports false for a reply that
-		// settles nothing, so the wait goes on. The stream's acknowledgement of a duplicate with
-		// no sequence has the request sent once more without its id, at most once per request and
-		// only while the request still waits (resending), and settles it only when that send is
-		// fenced or fails, since otherwise the resend's own acknowledgement answers.
+		// settles nothing, so the wait goes on. The stream's refusal of the copy settles the
+		// request as that refusal, since the stream answered and nothing later changes its answer
+		// (streamRefusal). The stream's acknowledgement of a duplicate with no sequence has the
+		// request sent once more without its id, at most once per request and only while the
+		// request still waits (resending), and settles it only when that send is fenced or fails,
+		// since otherwise the resend's own acknowledgement answers.
 		outcome := func(reply *nats.Msg, resending bool) (bool, error) {
 			if answers(reply) {
 				return true, nil
 			}
-			if !resending || !resendable || resent || !notStoredReply(reply) {
+			if refusal := streamRefusal(reply); refusal != nil {
+				return true, fmt.Errorf("bus: request to %q: the stream refused the copy: %w", subject, refusal)
+			}
+			if !resending || resent || !notStoredReply(reply) {
 				return false, nil
 			}
 			resent = true
@@ -548,15 +562,30 @@ func acknowledgement(reply *nats.Msg) (replyAck, bool) {
 	return ack, true
 }
 
-// answers reports whether reply answers a Request: the stream's acknowledgement of a copy it
-// holds, at a sequence and without an error, a duplicate's included. Nothing else answers one -
-// no session subscribes to its agent subject, and a reply a subscriber of the subject did send
-// is passed over. An acknowledgement of a duplicate with no sequence answers nothing either: the
-// stream holds no copy of the request, which goes out once more without its id instead
-// (notStoredReply, request).
+// answers reports whether reply answers a Request with the copy it asked for: the stream's
+// acknowledgement of a copy it holds, at a sequence and without an error, a duplicate's included.
+// Nothing else answers one that way - no session subscribes to its agent subject, and a reply a
+// subscriber of the subject did send is passed over. An acknowledgement of a duplicate with no
+// sequence answers nothing either: the stream holds no copy of the request, which goes out once
+// more without its id instead (notStoredReply, request). An acknowledgement that carries an error
+// is the stream's refusal, and settles the request as that refusal (streamRefusal).
 func answers(reply *nats.Msg) bool {
 	ack, ok := acknowledgement(reply)
 	return ok && ack.Error == nil && ack.Sequence > 0
+}
+
+// streamRefusal names the stream's refusal of a Request's copy, as reply carries it: the error
+// the server sent in the acknowledgement's place, a full stream's as ErrStreamFull, which is how
+// every other path hands that refusal to its caller (streamFull, acknowledged,
+// PendingForward.Wait). Every other reply is nil. The refusal is the stream's own answer, so it
+// never wraps ErrNotAcknowledged, which says the stream gave none, and it settles the request at
+// once rather than leaving it to run out its timeout.
+func streamRefusal(reply *nats.Msg) error {
+	ack, ok := acknowledgement(reply)
+	if !ok || ack.Error == nil {
+		return nil
+	}
+	return streamFull(ack.Error)
 }
 
 // notStoredReply reports whether reply is the stream's acknowledgement of a duplicate with no

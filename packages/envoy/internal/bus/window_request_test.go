@@ -10,6 +10,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/bus/bustest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -220,6 +221,40 @@ func TestARequestToASubjectNATSRefusesIsRefusedAtOnce(t *testing.T) {
 	default:
 		t.Fatal("a Request to an invalid subject returned with no answer")
 	}
+}
+
+// A Request the stream refuses is answered by that refusal the moment it comes back, not after
+// the request's timeout: the stream answered, so a full stream's refusal reaches the caller as
+// bus.ErrStreamFull, as it does through a window's PublishAsync and through
+// Client.StartRequestStoredTo's Wait, and never as bus.ErrNotAcknowledged, which says the stream
+// gave no answer at all. Dispatch's outbox waits roleForwardAckTimeout for a role forward's
+// answer, so a refusal left to that timeout holds the forward's whole chain for five seconds and
+// is counted as a copy that might yet exist.
+func TestARequestAFullStreamRefusesIsAnsweredByThatRefusalAtOnce(t *testing.T) {
+	const (
+		limit = 16 << 10
+		// timeout is the outbox's own wait for a role forward's answer (roleForwardAckTimeout),
+		// and settleWithin is well inside it: the refusal is in on the first reply, and a request
+		// that waits it out is the defect this test is for.
+		timeout      = 5 * time.Second
+		settleWithin = time.Second
+	)
+	_, _, client := requestClient(t, bus.WithStreamMaxBytes(limit))
+	bustest.FillStream(t, client, 1024)
+
+	holder := contracts.AgentSubject("ses_request_full")
+	item := forwardEnvelope("full")
+	started := time.Now()
+	err := answerOf(t, client.WindowUntil(nil).Request(holder, item,
+		bus.RequestOptions{MsgID: bus.ForwardMsgID(item.DedupeKey, holder), Timeout: timeout}), 30*time.Second)
+	elapsed := time.Since(started)
+	if !errors.Is(err, bus.ErrStreamFull) || errors.Is(err, bus.ErrNotAcknowledged) || errors.Is(err, bus.ErrRefused) {
+		t.Fatalf("a Request the full stream refused = %v after %s, want bus.ErrStreamFull and neither bus.ErrNotAcknowledged nor bus.ErrRefused", err, elapsed)
+	}
+	if elapsed > settleWithin {
+		t.Fatalf("the full stream's refusal answered the Request after %s, want it within %s: the refusal settles the request, and is not waited out to its %s timeout", elapsed, settleWithin, timeout)
+	}
+	t.Logf("the full stream's refusal answered the Request after %s: %v", elapsed, err)
 }
 
 // Many Requests in flight on one window, sent from several goroutines while others publish on it,

@@ -85,14 +85,15 @@ func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(
 		}
 	}
 	// refused fills the stream, forwards item to holder under opts, which the full stream refuses
-	// with an error acknowledgement that answers nothing, and purges the stream, leaving the
-	// leader holding the forward's id at sequence 0 and room to store the forward.
+	// with an error acknowledgement that settles the forward as ErrStreamFull at once, and purges
+	// the stream, leaving the leader holding the forward's id at sequence 0 and room to store the
+	// forward.
 	refused := func(round int, holder string, item contracts.Envelope, opts RequestOptions) {
 		t.Helper()
 		fill(round)
 		err := answer(client.WindowUntil(nil).Request(holder, item, opts))
-		if !errors.Is(err, ErrNotAcknowledged) {
-			t.Fatalf("round %d: a forward into the full stream = %v, want ErrNotAcknowledged", round, err)
+		if !errors.Is(err, ErrStreamFull) || errors.Is(err, ErrNotAcknowledged) {
+			t.Fatalf("round %d: a forward into the full stream = %v, want ErrStreamFull and no ErrNotAcknowledged", round, err)
 		}
 		if n := held(holder); n != 0 {
 			t.Fatalf("round %d: the full stream holds %d copies on %s, want none", round, n, holder)

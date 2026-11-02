@@ -579,8 +579,10 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 			// its holder's resolution held pending sent nothing at all, and is counted under that
 			// holder rather than as a failure of the bus; a forward NATS took whose stored copy
 			// the stream did not acknowledge is unanswered, which the request reports as not
-			// acknowledged with its publish confirmed; every other failure, an unconfirmed
-			// publish among them, is a failure.
+			// acknowledged with its publish confirmed; every other failure is a failure, an
+			// unconfirmed publish among them and a forward the stream refused the copy of (a full
+			// stream's bus.ErrStreamFull), which is no copy that might yet exist: the stream
+			// answered, that it stored nothing.
 			switch forward := send.dest.forward; {
 			case errors.Is(err, bus.ErrPublishDenied):
 				deps.countPublishFailure("denied")
