@@ -4537,15 +4537,38 @@ describe("the literal grammar, widened to forms with no expansion", () => {
     const BODY = "Done.\nSee the note.\n\n- one\n- two";
     const quoted = (flag: string, text: string) =>
       `dispatch comment --issue X-1 ${flag} "$(cat <<'EOF'\n${text}\nEOF\n)"`;
+    /** What bash really hands the CLI for `command`, as argv. */
+    const bashArgv = (command: string) =>
+      execFileSync("bash", ["-c", command.replace(/^dispatch/, "printf '%s\\0'")], {
+        encoding: "utf8",
+      })
+        .split("\0")
+        .filter((word) => word !== "");
     test("gives the CLI what bash gives it, for every flag that carries a body", () => {
-      for (const flag of ["--body", "--body-file", "--question", "--reason"]) {
-        const command = quoted(flag, BODY);
-        const printed = execFileSync(
-          "bash",
-          ["-c", command.replace(/^dispatch/, "printf '%s\\0'")],
-          { encoding: "utf8" }
-        );
-        expect(core.commandArgv(command)).toEqual(printed.split("\0").filter((w) => w !== ""));
+      for (const flag of ["--body", "--body-file", "--question", "--reason"])
+        expect(core.commandArgv(quoted(flag, BODY))).toEqual(bashArgv(quoted(flag, BODY)));
+    });
+    // Every form the gate reads as literal must give bash's own argv, or the gate reviews text
+    // that is not what is sent. Each body below sends a form that an earlier revision read and
+    // bash did not: a word split or a glob, a delimiter line bash ends earlier, a `cat` whose
+    // input is not the here-document, and a body whose quotes or parenthesis send a scan for the
+    // closing `)` past the end of the command.
+    test("every form it reads as literal matches bash, and no other is read", () => {
+      for (const command of [
+        // Read: the shapes the fix is for.
+        `dispatch comment --issue X-1 --body "$(cat <<'EOF'\nIt's one, 1) two, a " quote\nEOF\n)"`,
+        `dispatch comment --issue X-1 --body "$(cat <<"EOF"\nplain\nEOF\n)"`,
+        `dispatch comment --issue X-1 --body "$(cat - <<'EOF'\nwith a dash\nEOF\n)"`,
+        `dispatch comment --issue X-1 --body "$(cat <<-'EOF'\n\twith tabs\n\tEOF\n)"`,
+        // Not read: bash word-splits and globs an unquoted substitution.
+        `dispatch comment --issue X-1 --body $(cat <<'EOF'\nok --issue Y-9\nEOF\n)`,
+        // Not read: bash removes the delimiter's quoting, so the body ends at `#$`.
+        `dispatch comment --issue X-1 --body "$(cat <<"#\\$"\nshown\n#$\necho SMUGGLED\n#$\n)"`,
+        // Not read: `cat` on its own line reads the shell's input, not the here-document.
+        `dispatch comment --issue X-1 --body "$(cat\n<<'EOF'\nnot the body\nEOF\n)"`,
+      ]) {
+        const argv = core.commandArgv(command);
+        if (argv !== undefined) expect(argv).toEqual(bashArgv(command));
       }
     });
     test("is in the literal grammar, so the write is reviewed", () => {
