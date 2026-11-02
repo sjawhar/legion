@@ -83,11 +83,18 @@ func (s *supervision) reconcilePodUpdates(ctx context.Context, claims []supervis
 // A group whose claims record a pod the runtime no longer has ends the round open over it at
 // that sweep, and decides nothing else (groupDrift, podGone, endRoundOverAGonePod). It is one of
 // the two readings that say a pod went, the other being a different pod in its place, and the
-// round ends on whichever the sweep reaches first. Neither reading has to come before the
-// relaunch of the pod's roles, because no process in the pod that replaced this one can change
-// this round: a claim relaunched into another pod leaves the round where it stood
-// (supervise's Claim.leftPodRound), answered or not, and the report is read from those frozen
-// parts whenever the sweep gets to them.
+// round ends on whichever the sweep reaches first.
+//
+// Which reading that is, and when it comes, changes nothing the issue is told, because the
+// report is read from the round's own record rather than from where any claim's process is now.
+// The round records, on each claim it asked, the round that claim left and whether it had
+// answered when it left (supervise's leftPodRoundAt), and only the round's end clears either.
+// So a claim relaunched into the pod that replaced this one is a member of the round still, with
+// the part the dead pod left it; a role first started in that new pod is no member and is named
+// nothing; and an earlier sweep's end landing on some claims before others takes those claims
+// out of the round rather than into the report. What the pod took with it is the members who
+// neither answered nor left having answered (lostClaims), which is a different question from
+// whom a replacement waits for (waitingClaims).
 func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string, group []supervise.Claim, now time.Time) {
 	slices.SortFunc(group, func(a, b supervise.Claim) int { return strings.Compare(string(a.Token), string(b.Token)) })
 	pod, split := groupPod(group)

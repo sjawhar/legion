@@ -789,9 +789,9 @@ func TestPodUpdateReplacesThePodWhenTheDriftClearsUnderAnOpenRound(t *testing.T)
 // another one, which the displaced path brought each role back into. The first is the runtime
 // reading the pod gone, which ends the round at the sweep that reads it
 // (TestPodUpdateEndsTheRoundAtTheFirstReadOfAGonePod). Which of them the sweep reaches first
-// decides nothing but the log line: a claim relaunched into the new pod leaves the round where
-// it stood (supervise's Claim.leftPodRound), so the report is the same either way. A claim that
-// records no pod at all says nothing of the kind.
+// decides nothing but the log line: the report is read from the round's own record of the
+// claims it asked and what each had done when it left (supervise's Claim.UpdateLeftRound), so
+// it is the same either way. A claim that records no pod at all says nothing of the kind.
 func TestPodUpdateWritesOnTheIssueWhenThePodWentWithoutItsRound(t *testing.T) {
 	rig := newPodUpdateRig(t, readyWorker(claim.RoleImplementer), readyWorker(claim.RoleTester))
 	rig.drifts(podUpdateDrift)

@@ -3906,11 +3906,12 @@ What such a round waits on that only a person can clear is a claim no task reach
 A pod that goes before its round is over, replaced where it stood for a failure of its own, has the daemon write on the issue which roles had not answered and that the work they did not push went with the disk.
 Two readings say the pod went:
 the runtime answering that the pod the claims record is not there, and the claims recording another pod in its place.
-Whichever of them a sweep reaches first ends the round, and decides that message from the answers recorded at that moment, read from the claims' own machines (`endRoundOverAGonePod`):
-a round every blocking claim had answered lost nothing, so nothing is written on the issue at all.
-Which reading comes first does not change the message, because a claim whose process is relaunched into another pod leaves the round where it stood, answered or not, and takes no further part in it:
-no process of the pod that replaced this one may answer that round, have an answer withdrawn by a turn of its own, or be asked again, and the round's own task waiting for such a claim is dropped rather than sent into the new pod.
-So the report is read from parts the dead pod left, whenever the sweep gets to them.
+Whichever of them a sweep reaches first ends the round, and every sweep asks it before the round waits on anything, because each of those waits is a wait on the pod.
+The message is decided from the round's own record and not from where any claim's process is now (`endRoundOverAGonePod`):
+the round records, on each claim it asked, the round that claim left and whether it had answered when it left, and only the round's end clears either.
+So a worker relaunched into the pod that replaced this one is still a member of the round, with the part the dead pod left it; a role first started in that new pod is no member and is named nothing; and an earlier sweep's end landing on some claims before others takes those claims out of the round rather than into the message.
+What the pod took with it is the members who neither answered nor left having answered, so a round every member had answered lost nothing and nothing is written on the issue at all.
+That is a different question from whom a replacement waits for, which stays every blocking claim that has not answered and has not left: a claim the round has not asked yet still holds the pod, and is asked at the next tick.
 While no claim of the issue records a pod at all — every role suspended, or the one live role relaunching — the round waits, because no locator is evidence either way;
 and a round whose workers have all answered but whose pod no live claim records asks the runtime about that pod, ending only if it is gone and waiting otherwise.
 
