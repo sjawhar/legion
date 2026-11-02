@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-251",
+  "previousHandoff": "92fde20e29da331a7d59703d27f672b6408a2314",
+  "headReviewed": "the handoff push above 898ce744f5cc (the handoff import; code head 67e3bbc66d49)",
+  "completed": "2026-11-02T06:17:00Z",
+  "decision": "approved",
+  "round": "narrowed round (architect): only review 5732651189's five items, fixed in 67e3bbc6",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "accepted": [
+    "The three route libs write `startup:` / `setupWizard: false` in place of `setupVersion: 2`. startup.setupWizard is a boolean setting of the pinned 18.13.3 (default true). Each heredoc has one `startup:` key. A key-file profile rendered here parses to startup {setupWizard: false} with no setupVersion. The libs' 47 tests pass, and bash -n passes. The tester saw no wizard even at setupVersion 0 with this key, and saw the wizard without it.",
+    "The box-login comment no longer names the pinned build.",
+    "README trees-parked now describes tree 5's write and its set-back before the questions, as the script does them.",
+    "The blank line before ## dispatch-user-turns.sh is back.",
+    "model-endpoint.sh's header and README's lib/model-endpoint.sh section name parked-decision-devbox.sh."
+  ],
+  "keyFindings": [],
+  "thermonuclear": "Not run: the delta is a test-profile config key in three e2e libs and prose, no runtime code. The pair at 79fd4772 covered the rest of the round.",
+  "ci": "CI head 898ce744 (the import commit, .legion/ only, started pull_request runs; it cancelled b3475694's run). The approval waits for ci-ok and pr-title green there.",
+  "handoffImport": "legion handoffs import (898ce744) removed .legion/INFRA-251/ at 07:20Z, ahead of the deploy of #2354. The running daemon (d86f8de8, booted 00:20Z) still takes a committed handoff, so this round commits review.json again."
+}
