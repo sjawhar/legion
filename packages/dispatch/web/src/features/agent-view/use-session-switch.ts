@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { Message, MessageRead } from "../../api/types";
+import type { CreateAgentMessageInput, Message, MessageRead } from "../../api/types";
 import { rowAnsweredWithError } from "../conversation/delivery";
 
 /** How long the page waits for the session to answer a switch, from the moment Dispatch answered
@@ -15,10 +15,23 @@ export interface SwitchRequest {
   readonly value: string;
 }
 
-/** What a switch sends the session: the line a person would type at its terminal, the value as
- *  the session listed it and never rewritten. */
-export function switchCommand(request: SwitchRequest): string {
-  return request.kind === "model" ? `/model ${request.value}` : `/effort ${request.value}`;
+/**
+ * What a switch sends the session: the line a person would type at its terminal, the value as
+ * the session listed it and never rewritten, and `connected_only`.
+ *
+ * `connected_only` is the one thing that tells this send from every other. A `/model` or
+ * `/effort` line applies to the session that reads it, so one stored for a session that is not
+ * running would change its model at an unknown later time, which is worse than no switch at
+ * all. The listener refuses a stopped target instead, Dispatch records the attempt failed with
+ * `the session is stopped`, and the header says so (case 1 below). Every other message to that
+ * session is stored for it and handed over when it runs again.
+ */
+export function switchMessageInput(request: SwitchRequest): CreateAgentMessageInput {
+  return {
+    body: request.kind === "model" ? `/model ${request.value}` : `/effort ${request.value}`,
+    connected_only: true,
+    delivery: "steer",
+  };
 }
 
 /** Where a switch is: its send is out (`posting`), Dispatch stored it and the page waits for the
@@ -59,13 +72,21 @@ const NO_ANSWER = `No answer came from the session within ${SWITCH_ANSWER_DEADLI
 const ANSWER_LOST =
   "The switch was sent, but Dispatch lost its answer; the session's reply shows in the thread. The header shows the model and thinking level the session last reported.";
 
+/** Why a queued attempt is no answer: the listener stored the switch for a session that is not
+ *  running, which only a Dispatch that does not read `connected_only` does
+ *  (`switchMessageInput`). Nothing is running the line now, so the page says so at once rather
+ *  than holding the pickers for its deadline. */
+const QUEUED_REASON =
+  "it is stopped, and the switch was stored for it rather than run. Switch again once it is running.";
+
 /**
  * The session's answer to the switch `messageId`, as the stored thread holds it: its reply, quoted
  * exactly, or, while the switch still waits, its latest attempt failing with an error. A failed
  * attempt is the session's answer only when the session's own error reply failed it
  * (`rowAnsweredWithError`); one Dispatch failed itself means no answer came. A delivery the session
- * accepted as its user's turn has not failed, whatever a later send recorded. Undefined while there
- * is neither.
+ * accepted as its user's turn has not failed, whatever a later send recorded. Neither is a queued
+ * attempt: the listener stored the switch and no session has read it, so the deadline decides.
+ * Undefined while there is none of these.
  */
 function storedAnswer(
   stored: readonly MessageRead[],
@@ -97,7 +118,10 @@ function storedAnswer(
  * `/effort`, so it ends when the session answers that message, which `stored` (the session's
  * stored thread, refetched on each message event) carries:
  *
- * 1. Dispatch's answer to the send already records a failed attempt (no live session took it).
+ * 1. Dispatch's answer to the send already records a failed attempt (no live session took it,
+ *    or the session is stopped and the send asked for a running one), or a queued attempt,
+ *    which a stopped session's switch becomes on a Dispatch that does not read
+ *    `connected_only`: either way no session is running the line.
  * 2. The session's reply to the message appears, including one already there when the send
  *    answered.
  * 3. The message's latest attempt turns failed with an error: the session's own error reply, or a
@@ -168,8 +192,9 @@ export function useSessionSwitch(
         return answer;
       }
       const attempt = answer.deliveries.at(-1);
-      if (attempt?.state === "failed") {
-        const reason = attempt.error ?? "the attempt failed";
+      if (attempt?.state === "failed" || attempt?.state === "queued") {
+        const reason =
+          attempt.state === "queued" ? QUEUED_REASON : (attempt.error ?? "the attempt failed");
         setCurrent((previous) =>
           previous?.id === id
             ? {

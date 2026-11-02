@@ -1658,7 +1658,12 @@ test("a mode no selected agent advertises leaves Send dead, and Send says so and
   }
 });
 
-test("with one of two selected agents gone from the registry, Send reaches the live one and names the one left out", async ({
+// INFRA-626. A selected session that leaves the listener's live list is still a recipient: Envoy
+// may know it and it may simply be stopped, in which case the send is stored for it and reaches
+// it when it runs again. Only the listener can tell that session from one it has never heard of,
+// so the composer leaves the judgment to the server, which names on the broadcast whatever it
+// excluded.
+test("a selected agent gone from the registry stays in the send, with no reason on its chip", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the reason");
@@ -1680,14 +1685,13 @@ test("with one of two selected agents gone from the registry, Send reaches the l
     // Bravo leaves; the page learns of it on its next agent poll, and names it by its ID since
     // the registry no longer holds its title, with its state - not running - before the name.
     await setSessionLive(bravo.session_id, false);
-    const send = composer.getByRole("button", { name: "Send to 1" });
-    await expect(send).toBeEnabled({ timeout: 30_000 });
-    await expect(send).toHaveAccessibleDescription(
-      "Excluded: Not running session:bravo-se… (no live session). Nothing is sent to them, and no other mode is substituted."
-    );
     await expect(
-      composer.getByRole("button", { name: /^session:bravo-se… · no live session/ })
-    ).toBeVisible();
+      composer.getByRole("button", { exact: true, name: "session:bravo-se… ✕" })
+    ).toBeVisible({ timeout: 30_000 });
+    const send = composer.getByRole("button", { name: "Send to 2" });
+    await expect(send).toBeEnabled();
+    await expect(send).not.toHaveAccessibleDescription(/Excluded/);
+    await expect(composer.getByText(/^Excluded:/)).toHaveCount(0);
   } finally {
     await alice.close();
   }

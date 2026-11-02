@@ -7,7 +7,13 @@ import {
   test,
 } from "@playwright/test";
 
-import { type FakeSession, getSentMessages, setLiveSessions, setSessionSendStatus } from "./agents";
+import {
+  type FakeSession,
+  getSentMessages,
+  setLiveSessions,
+  setSessionSendStatus,
+  setSessionStopped,
+} from "./agents";
 import {
   baseUrl,
   e2eAgentToken,
@@ -706,6 +712,43 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
     await expect(model).toBeEnabled();
     await expect(send).toBeEnabled();
     await expectPicked(page, "anthropic/model-a", "auto");
+    await expectNoSidewaysScroll(page, testInfo);
+  } finally {
+    await context.close();
+  }
+});
+
+// INFRA-626. Every other message to a session Envoy knows and that is not running is stored for
+// it and handed over when it runs again. A switch is the one send that must not be: `/model` and
+// `/effort` apply to the session that reads them, so one stored would change a model at an
+// unknown later time. The switch asks for a session that is running now (`connected_only`), the
+// listener refuses a stopped one, and the header says so at once rather than queueing silently.
+test("a switch to a session that is not running is refused rather than stored for it", async ({
+  browser,
+}, testInfo) => {
+  const session = liveSession(20);
+  const id = session.session_id;
+  await setLiveSessions([session]);
+  await publishAgentStreamFrame(id, freshReplay(id), "replay");
+  const { context, page } = await viewer(browser, testInfo, "alice");
+  try {
+    await page.goto(livePath(id));
+    await expectPicked(page, "anthropic/model-a", "auto");
+    const { model, status, thinking } = header(page);
+
+    await setSessionStopped(id, true);
+    await model.selectOption("anthropic/model-b");
+    await expect(status).toHaveText("No answer came from the session: the session is stopped");
+    // The pickers come straight back and the header still reads what the session last
+    // reported: nothing was changed, and nothing will be.
+    await expect(model).toBeEnabled();
+    await expect(thinking).toBeEnabled();
+    await expectPicked(page, "anthropic/model-a", "auto");
+
+    // The refusal is the listener's, and it is the switch's own request that asked for it: every
+    // other send leaves `connected_only` out and is queued for a stopped session.
+    const sends = await getSentMessages();
+    expect(sends.map((send) => [send.target_session, send.connected_only])).toEqual([[id, true]]);
     await expectNoSidewaysScroll(page, testInfo);
   } finally {
     await context.close();

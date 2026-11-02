@@ -75,6 +75,7 @@ export type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  DeliveryAttemptState,
   DeliveryCapability,
   DeliveryColorFacet,
   DeliveryComponent,

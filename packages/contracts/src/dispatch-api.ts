@@ -1276,6 +1276,27 @@ export interface AskEdit {
   readonly at: string;
 }
 
+/**
+ * The four states one delivery attempt, of a message or of a mention, is in.
+ *
+ * `pending` is an attempt Dispatch committed and has not settled: it is before the listener
+ * call, or its outcome was never learned. `sent` and `queued` are both the listener having
+ * taken the message, and every reader that asks whether it took it counts the two alike - the
+ * outbox publishes no second copy, the delivery sweep settles neither as failed, and the
+ * session may take either as its own turn. They differ in one thing: a sent message is with a
+ * session that is running now, and a queued one waits in the consumer of a session the listener
+ * knows and that is not running, which gets it when it runs again, within the
+ * `DELIVERY_DUPLICATE_WINDOW_MS` the stream keeps it. `failed` is everything else, and only a
+ * failed attempt may be retried: a queued attempt is already stored, so a repeat would store a
+ * second copy.
+ */
+export type DeliveryAttemptState = "pending" | "sent" | "queued" | "failed";
+
+/** What a delivery receipt in the event log carries: an attempt that settled, never `pending`,
+ *  because the sender that appends the receipt holds the attempt's claim and settles the row in
+ *  the statement that appends it. */
+export type SettledDeliveryState = Exclude<DeliveryAttemptState, "pending">;
+
 export interface CommentMention {
   readonly target: string;
   readonly delivery: DeliveryCapability;
@@ -1294,7 +1315,7 @@ export interface CommentDelivery {
    *  (`DELIVERY_DUPLICATE_WINDOW_MS` states where, and the limits). `envelope_id` is then null.
    *  Absent on a row written before the field existed, which reads as false. */
   readonly duplicate?: boolean;
-  readonly state: "pending" | "sent" | "failed";
+  readonly state: DeliveryAttemptState;
   readonly error: string | null;
   readonly resolve_error: string | null;
   readonly reply_id: string | null;
@@ -1315,7 +1336,7 @@ export interface CommentDeliveryEventPayload {
   /** A receipt is only ever appended with a settled outcome: the sender that records it holds
    *  the attempt's claim, and both reply handlers settle the row in the statement that appends
    *  theirs. The attempt row itself reads `pending` between its commit and that outcome. */
-  readonly state: "sent" | "failed";
+  readonly state: SettledDeliveryState;
   /** The stream already held this message: an earlier attempt landed, so this one is recognised as
    *  a repeat and not handed to the mentioned session again (`DELIVERY_DUPLICATE_WINDOW_MS`).
    *  Absent means false. */
@@ -1679,13 +1700,14 @@ export interface MessageDelivery {
    */
   readonly duplicate?: boolean;
   /**
-   * `pending` is an attempt Dispatch has committed but not yet sent, or whose send it never
-   * learned the outcome of: the row is written before the listener call and settled by a
-   * second transaction after it, so no Envoy send holds a database connection. A retry
-   * resumes a pending attempt no live sender still holds, under its original idempotency key,
-   * so the listener deduplicates a send that did land.
+   * What became of this attempt (`DeliveryAttemptState`). `pending` is an attempt Dispatch has
+   * committed but not yet sent, or whose send it never learned the outcome of: the row is
+   * written before the listener call and settled by a second transaction after it, so no Envoy
+   * send holds a database connection. A retry resumes a pending attempt no live sender still
+   * holds, under its original idempotency key, so the listener deduplicates a send that did
+   * land.
    */
-  readonly state: "pending" | "sent" | "failed";
+  readonly state: DeliveryAttemptState;
   readonly error: string | null;
   readonly reply_id: string | null;
   readonly created_at: string;
@@ -1778,7 +1800,7 @@ export interface MessageDeliveryEventPayload {
   readonly session_id: string;
   readonly target?: string;
   readonly title: string;
-  readonly state: "sent" | "failed";
+  readonly state: SettledDeliveryState;
   /** The stream already held this message: an earlier attempt landed, so this one is recognised as
    *  a repeat and not handed to the recipient again (`DELIVERY_DUPLICATE_WINDOW_MS`). Absent means
    *  false. */
@@ -2942,6 +2964,13 @@ export interface CreateMessageInput {
   readonly target?: string;
   readonly delivery?: MessageDeliveryMode;
   readonly urgency?: "low" | "med" | "high" | "blocking";
+  /** Ask that this message reach a session that is running now or not at all. The send is made
+   *  with the listener's `connected_only`, which refuses a session the listener knows and that
+   *  is not running rather than storing the message for it, and the attempt records that
+   *  refusal as its failure, `the session is stopped`. Absent, which is every message but the
+   *  live view's model and thinking switch, a stopped session is a recipient whose attempt is
+   *  recorded `queued` and which gets the message when it runs again. */
+  readonly connected_only?: boolean;
   readonly actor?: Actor;
 }
 
@@ -2953,6 +2982,11 @@ export interface CreateAgentMessageInput {
   readonly in_reply_to?: string;
   /** The id of the block of the message `in_reply_to` names that the reply answers (`b2`). */
   readonly in_reply_to_block?: string;
+  /** Ask that this message reach a session that is running now or not at all
+   *  (`CreateMessageInput.connected_only`). The live view's model and thinking switch sets it,
+   *  because a `/model` or `/effort` line applies to the session that reads it, and one stored
+   *  for a session that is not running would change its model at an unknown later time. */
+  readonly connected_only?: boolean;
 }
 
 /** The targeted session's answer to one delivery attempt of a message
@@ -3361,7 +3395,7 @@ const CommentDeliverySchema = z.object({
   // A stripping object: without this line the flag is dropped from every agent-bound comment
   // frame, since this schema is nested inside the passthrough payload schemas.
   duplicate: z.boolean().optional(),
-  state: z.enum(["pending", "sent", "failed"]),
+  state: z.enum(["pending", "sent", "queued", "failed"]),
   error: z.string().nullable(),
   resolve_error: z.string().nullable(),
   reply_id: z.string().nullable(),
@@ -3481,7 +3515,7 @@ export const MessageDeliveryEventPayloadSchema = z.object({
   session_id: z.string().optional(),
   target: z.string().optional(),
   title: z.string().optional(),
-  state: z.enum(["sent", "failed"]).optional(),
+  state: z.enum(["sent", "queued", "failed"]).optional(),
   // A stripping object: without this line the flag is dropped from every agent-bound
   // message.delivery frame.
   duplicate: z.boolean().optional(),
