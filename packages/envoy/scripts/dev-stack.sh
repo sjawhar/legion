@@ -205,11 +205,21 @@ DEVICE_SECRET_FILE="$WORK_DIR/device-client-secret"
 # of its exchange and as the actor token of a person's sign-in. The issuer mints it through a
 # device-flow client of its own, so the machine's audience and the person's are two audiences and
 # neither token is spendable where the other is. The account is a Google service account's shape
-# in an example project; nothing here reaches Google.
+# in an example project; nothing here reaches Google. BROKER_VM_EXCHANGE_ACCOUNTS below gives
+# that account the person and the project a controller's box is listed with in production, so the
+# Dispatch access token this machine trades its identity for acts for that person and writes that
+# one project; the entry fixes no session, so each process names its own (AGENT_SECRETS_SESSION).
 MACHINE_CLIENT_ID="dev-stack-machine"
 MACHINE_SECRET_FILE="$WORK_DIR/machine-client-secret"
 FLEET_SERVICE="example-fleet"
 FLEET_ACCOUNT="example-fleet@example-project.iam.gserviceaccount.com"
+# A second fleet, listed in BROKER_VM_EXCHANGE_ACCOUNTS below, so the stack carries both kinds of
+# machine the broker mints for: this one's token acts for a person and writes that person's
+# project, as a controller's box does, while example-fleet above is listed in no such entry and
+# gets a token that names its service and no person, which Dispatch refuses every write. A stack
+# with only one of the two could prove only half of what this change does.
+PERSON_FLEET_SERVICE="example-controller"
+PERSON_FLEET_ACCOUNT="example-controller@example-project.iam.gserviceaccount.com"
 METADATA_SCRIPT="$WORK_DIR/dev-metadata.py"
 
 BROKER_DB="dev_stack_broker_${RUN_SUFFIX}"
@@ -436,7 +446,8 @@ env -i PATH="$PATH" \
   BROKER_EXCHANGE_ACCOUNTS="$EXCHANGE_ACCOUNT=$EXCHANGE_PROJECT=$APPROVER_LOGIN" \
   BROKER_GOOGLE_OIDC_ISSUER="$ISSUER_URL" \
   BROKER_GOOGLE_OIDC_AUDIENCE="$MACHINE_CLIENT_ID" \
-  BROKER_VM_SERVICES="$FLEET_SERVICE=$FLEET_ACCOUNT" \
+  BROKER_VM_SERVICES="$FLEET_SERVICE=$FLEET_ACCOUNT $PERSON_FLEET_SERVICE=$PERSON_FLEET_ACCOUNT" \
+  BROKER_VM_EXCHANGE_ACCOUNTS="$PERSON_FLEET_ACCOUNT=$EXCHANGE_PROJECT=$APPROVER_LOGIN" \
   BROKER_SIGNIN_DEVICE_AUDIENCE="$DEVICE_CLIENT_ID" \
   BROKER_SERVICE_LOGINS="legion-daemon=$REGISTRAR_ACCOUNT" \
   "$BIN_DIR/broker" >"$BROKER_LOG" 2>&1 &
@@ -560,12 +571,14 @@ issuer's loopback sign-in control and the pending code is approved at once, whic
 stack's stand-in for a person typing a code in at Google. The token is cached until it is a
 quarter spent, so a renewal gets a token of its own.
 """
-import http.server, json, socket, sys, threading, time, urllib.parse, urllib.request
+import http.server, json, os, socket, sys, threading, time, urllib.parse, urllib.request
 
 ISSUER = "$ISSUER_URL"
 CLIENT_ID = "$MACHINE_CLIENT_ID"
 SECRET_FILE = "$MACHINE_SECRET_FILE"
-ACCOUNT = "$FLEET_ACCOUNT"
+# Which machine this stand-in is: the service-only fleet by default, or the one that acts for a
+# person when the caller names it. Two of these on two ports is how one stack serves both.
+ACCOUNT = os.environ.get("DEV_STACK_METADATA_ACCOUNT") or "$FLEET_ACCOUNT"
 PORT_FILE = "$WORK_DIR/metadata-port"
 IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity"
 CACHE_SECONDS = 600
@@ -672,12 +685,22 @@ dev-stack: ready.
   export DEV_STACK_REGISTRAR_TOKEN_FILE=$REGISTRAR_TOKEN_FILE
   export DEV_STACK_LISTENER_TOKEN_FILE=$LISTENER_TOKEN_FILE
   export DEV_STACK_MACHINE_ACCOUNT=$FLEET_ACCOUNT
+  export DEV_STACK_PERSON_MACHINE_ACCOUNT=$PERSON_FLEET_ACCOUNT
   export DEV_STACK_METADATA_SCRIPT=$METADATA_SCRIPT
 
-  the Go token client, for a session that trades this machine's identity or signs a person in:
+  the token clients (Go and TypeScript alike), for a session that trades this machine's identity
+  or signs a person in. The exchange's answer is a Dispatch access token acting for
+  $APPROVER_LOGIN on the project $EXCHANGE_PROJECT, under the session the caller names:
 
   export AGENT_SECRETS_MACHINE_IDENTITY=metadata
   export AGENT_SECRETS_MACHINE_AUDIENCE=$MACHINE_CLIENT_ID
+  export AGENT_SECRETS_SESSION=<this process's own session name>
+
+  Two machines, and the stand-in is whichever one you start it as. Unset, it is $FLEET_ACCOUNT,
+  whose token names its service and no person: it reads that service's secrets and Dispatch
+  refuses its every write. With DEV_STACK_METADATA_ACCOUNT=$PERSON_FLEET_ACCOUNT it is the fleet
+  BROKER_VM_EXCHANGE_ACCOUNTS lists, whose token acts for $APPROVER_LOGIN and writes
+  $EXCHANGE_PROJECT. Start one of each, on ports of their own, to drive both.
   export AGENT_SECRETS_SIGNIN_ISSUER=$ISSUER_URL
   export AGENT_SECRETS_SIGNIN_CLIENT_ID=$DEVICE_CLIENT_ID
   export AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE=$DEVICE_SECRET_FILE
