@@ -296,8 +296,13 @@ export function useMarginItems(
   blockPlacements: ReadonlyMap<string, MarkPlacement>,
   blockFilterId: string | undefined,
   {
+    documentShown = false,
     held = NO_THREADS,
   }: {
+    /** Whether the document whose margin this is has reported its layout: the issue page keeps
+     *  its Spec editor mounted while the Conversation covers it, so without this the decisions
+     *  of every issue page would be read where nothing shows them. */
+    readonly documentShown?: boolean;
     /** Threads whose card's reply holds a send of its own - out, or refused - each of which stays
      *  in the list it was in, open or resolved, whoever resolves or reopens it meanwhile: moving
      *  it between them would remount its card, and the composer and what it holds with it. */
@@ -464,8 +469,10 @@ export function useMarginItems(
     [placement, sortedThreads]
   );
   // The decisions that shaped the issue's spec, beside it alone: each one at every spec block it
-  // links (a replaced decision shaped nothing the spec says now), in the spec's order.
-  const showsDecisions = owner?.kind === "issue" && visibleArtifact?.primary === true;
+  // links (a replaced decision shaped nothing the spec says now), in the spec's order. Read only
+  // once that spec is on screen, since the issue page keeps it mounted under the Conversation.
+  const showsDecisions =
+    owner?.kind === "issue" && visibleArtifact?.primary === true && documentShown;
   const decisionsView = useQuery(issueDecisionsQuery(issueKey ?? "", showsDecisions));
   const decisions = useMemo<DecisionMarginItem[]>(() => {
     if (!showsDecisions) return [];

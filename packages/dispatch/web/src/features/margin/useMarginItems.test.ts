@@ -756,7 +756,8 @@ function DecisionItems({ document }: { document: Artifact }) {
       ["p-b", { pos: 4, top: 40 }],
       ["p-a", { pos: 12, top: 72 }],
     ]),
-    undefined
+    undefined,
+    { documentShown: true }
   );
   return createElement(
     "output",

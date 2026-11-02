@@ -166,6 +166,16 @@ export function useMarginSheet(): MarginSheetModel {
     (eventId: number) => removePin(eventItemId({ id: eventId })),
     [removePin]
   );
+  // Only the report of the document whose cards this margin shows. A document the route has
+  // left can stay registered behind the next route's loading view - Suspense keeps the old page
+  // mounted, hidden, until the new page's code has arrived and its throttled reveal commits -
+  // and its report would read a press there as the reader working a placed document; an issue's
+  // Spec stays registered under the Conversation and withdraws its layout, which is what tells
+  // the decisions read that nothing shows them.
+  const placementsPublished =
+    placementsReported &&
+    visibleArtifact !== undefined &&
+    documentBridge?.artifactId === visibleArtifact.id;
   const {
     actionFailure,
     answeredAsksPending,
@@ -189,6 +199,7 @@ export function useMarginSheet(): MarginSheetModel {
     retryItem,
     threads,
   } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId, {
+    documentShown: placementsPublished,
     held: heldReplyKeys,
   });
   const onEdit = useCallback(
@@ -547,10 +558,7 @@ export function useMarginSheet(): MarginSheetModel {
     // left can stay registered behind the next route's loading view - Suspense keeps the old
     // page mounted, hidden, until the new page's code has arrived and its throttled reveal
     // commits - and its report would read a press there as the reader working a placed document.
-    placementsPublished:
-      placementsReported &&
-      visibleArtifact !== undefined &&
-      documentBridge?.artifactId === visibleArtifact.id,
+    placementsPublished,
     routeItemId,
     routeItemKey,
     setHoveredItemId,
