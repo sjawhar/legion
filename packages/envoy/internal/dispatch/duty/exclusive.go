@@ -116,7 +116,8 @@ func periodBoundary(due time.Time, period time.Duration) time.Time {
 // connection whose unlock failed. None runs on the pass's context. pgx ends a connection when the
 // context of its statement in flight is cancelled, and a lease connection ended that way cannot run
 // the unlock: the lease goes only when Postgres ends that session. Exclusive reads the pass's
-// context after the take and after the period read instead, and starts no pass once it has ended.
+// context after the take and after the period read instead, and starts no pass when either check
+// finds it ended.
 //
 // A context that cannot be cancelled must still have a deadline. On a half-open connection, one
 // whose network path has gone away without an RST, a send draws neither an answer nor an error, so
@@ -132,18 +133,15 @@ func periodBoundary(due time.Time, period time.Duration) time.Time {
 // session holds on it; and the close is a Terminate message and a socket close. It is the same five
 // seconds pglisten.DefaultPingTimeout gives the keepalive ping and the close of a connection that
 // listener gives up on (internal/pglisten/listener.go), chosen there against this same half-open
-// connection. A call that reaches the bound fails, and a lease whose unlock fails is given back by
-// closing its connection (freeLeaseOn).
+// connection. A call that reaches the bound fails, and a lock whose unlock fails is given back by
+// closing its connection (FreeSessionLock, which gives every session lock's unlock this bound).
 const leaseCallTimeout = 5 * time.Second
 
-// leaseCall is the context of one statement on the lease's own connection (leaseCallTimeout).
+// leaseCall is the context of one statement on a session lock's own connection: a lease's, or any
+// lock FreeSessionLock gives back (leaseCallTimeout).
 func leaseCall() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), leaseCallTimeout)
 }
-
-// errLeaseNotHeld is pg_advisory_unlock answering false: the session this pass ran on did not hold
-// the lease it was about to give back, so what that connection holds is unknown.
-var errLeaseNotHeld = errors.New("the unlock reports this session did not hold the lease")
 
 // Exclusive runs pass exactly when this process takes the lease named name and that loop's period
 // is not already served, and reports whether it ran. It is the once-per-period guard a periodic
@@ -315,36 +313,12 @@ func reportFailure(name, message string, err error) {
 	slog.Error(message, "lease", name, "error", err)
 }
 
-// freeLeaseOn unlocks name's lease on the connection that took it and gives that connection back.
-// The unlock runs under leaseCall, because the pass's ctx is cancelled at shutdown and a lease must
-// be given back then too, and because an unbounded unlock on a half-open connection would hold the
-// loop's goroutine here for the life of the process and never reach the close below.
-//
-// A connection whose unlock fails - including by reaching that deadline - or reports that the
-// session held nothing, may still hold the lease, and the pool would hand it to the next pass,
-// which would take a lease it already holds and unlock it twice over. So it is destroyed instead
-// of returned: hijacked out of the pool and closed, which ends the session and drops whatever it
-// holds. The timed-out unlock is the case that needs this most, since nothing at all is known of
-// that session, and it is the path by which the lease is released by closing the session rather
-// than by the unlock. The close is given a leaseCall of its own, since the unlock's is spent by the
-// time its failure is what brings us here.
+// freeLeaseOn gives name's lease back on the connection that took it, and that connection back to
+// the lease pool (FreeSessionLock). It logs every failure, ErrSessionClosed included: a lease
+// connection is closed before its unlock only by a statement under leaseCall that failed, so the
+// line says the lease went with its session rather than by its unlock.
 func freeLeaseOn(conn *pgxpool.Conn, name string) {
-	ctx, cancel := leaseCall()
-	defer cancel()
-	freed := false
-	err := conn.QueryRow(ctx, freeLease, leaseNamespace, name).Scan(&freed)
-	if err == nil && !freed {
-		err = errLeaseNotHeld
-	}
-	if err == nil {
-		conn.Release()
-		return
-	}
-	slog.Error("dispatch duty: free the lease", "lease", name, "error", err)
-	dead := conn.Hijack()
-	closeCtx, closeCancel := leaseCall()
-	defer closeCancel()
-	if err := dead.Close(closeCtx); err != nil {
-		slog.Error("dispatch duty: close the lease's connection", "lease", name, "error", err)
+	if err := FreeSessionLock(conn, freeLease, leaseNamespace, name); err != nil {
+		slog.Error("dispatch duty: free the lease", "lease", name, "error", err)
 	}
 }
