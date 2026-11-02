@@ -2,9 +2,9 @@ import { type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "
 import { Link } from "react-router-dom";
 
 import {
-  askUrgencyHighBorder,
   card,
-  inlineWarningText,
+  decisionUnsureBorder,
+  decisionUnsureText,
   linkHoverText,
   linkText,
   selectedCardBg,
@@ -40,7 +40,7 @@ export function DecisionCard({
       aria-label={`Decision: ${decision.heading}`}
       className={`rounded-xl border p-3 text-sm shadow-sm ${
         active ? `${selectedCardBorder} ${selectedCardBg}` : card
-      } ${decision.unsure ? `border-l-4 ${askUrgencyHighBorder}` : ""}`}
+      } ${decision.unsure ? `border-l-4 ${decisionUnsureBorder}` : ""}`}
       data-decision-unsure={decision.unsure ? "true" : undefined}
       data-margin-item={item.id}
       onClick={(event) => {
@@ -61,7 +61,7 @@ export function DecisionCard({
       <p className={`flex flex-wrap gap-x-2 text-xs ${textMutedOnSelectedCard}`}>
         <span>{decision.kind === "person" ? "A person's decision" : "Agent's decision"}</span>
         {decision.unsure ? (
-          <span className={`font-semibold ${inlineWarningText}`}>Unsure</span>
+          <span className={`font-semibold ${decisionUnsureText}`}>Unsure</span>
         ) : null}
       </p>
       <h3 className={`mt-1 font-medium ${textPrimaryOnSurface}`}>
