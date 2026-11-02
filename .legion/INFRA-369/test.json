@@ -2,72 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-369",
-  "previousHandoff": "983c9e49d76814c12db7d575e34162d95c2d8dda",
-  "completed": "2026-11-02T01:25:22Z",
-  "round": "round 10, the review round: the four findings of review 5730937246, at code head a1f7ac3ef357 and handoff head dc01e217d0d6",
-  "scope": {
-    "givenBy": "the architect of INFRA-156, Envoy 8ef3232fa2adb8abd1d026bfa2e59938",
-    "scopedTo": "the live-room test's room read, the consolidated helper, the shared block-pointer table's new row, the migration comment, check-ci-filters.sh and a CI read",
-    "whyNothingElseReran": "The whole of 420ab3d4..dc01e217 is five files and no production code: a test (api/block_pointers_test.go), a test helper (api/approval_carry_test.go), a comment (store/ask_blocks_migrations_test.go), and the two halves of the shared block-pointer table (contracts/src/dispatch-block-ref.ts and pmdoc/testdata/block-pointer-values.json), which are data read by tests. The migration directory is untouched, so the two application orders proven at 3e4f9289 and re-proven at 8105eb4f still describe this head, and rounds 8 and 9 stand."
+  "previousHandoff": "8104369c5d154907179462f43c31987d0722ef8e",
+  "completed": "2026-11-02T05:36:50Z",
+  "round": "round 11: no code changed since the round-10 pass. The implementer only reran the flaky dispatch-memory job; this round confirms the diff is .legion/ only and every check at the code head is green.",
+  "noCodeChange": {
+    "codeHead": "a1f7ac3ef35703d2e8fc055720b65a2707b35921",
+    "handoffHeadRound10": "8104369c5d154907179462f43c31987d0722ef8e",
+    "handoffHeadRound11": "b8d56c676989460c1a090371fb4a16cb3aa0eb7b",
+    "diff": "8104369c..b8d56c67 is one commit touching one file, .legion/INFRA-369/implement.json (17 insertions, 34 deletions). No path outside .legion/. The code head is unchanged at a1f7ac3e, so round 10's verification stands and nothing of it re-ran.",
+    "whyTheImplementerPushed": "A flaky dispatch-memory bound (dispatch://INFRA-985): attempt 1 of that job tripped a noisy memory ceiling; attempt 2 reads 183 MiB and passes. No source, test or fixture changed."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-driven independently rather than read. The implementer's claim is that the four findings are closed; I re-ran each on the real surface and, for three of them, wrote a control that makes the fixed code red. Control 1: the live-room test's three room reads pointed at a document id that does not exist (00000000-0000-4000-8000-000000000000) now FAIL at block_pointers_test.go:221 with 'read document text: status=404 body={\"code\":\"ARTIFACT_NOT_FOUND\",\"error\":\"artifact not found\"}', so the read is checked. Control 2 restores the deleted status-blind helper verbatim and reads the same bad id: the four refusal subtests all PASS, because each compares an empty string with an empty string, and only the final accepted-write assertion fails at line 283 - which is the finding exactly, and the measure of what the fix bought. Control 3 flips the new row's ok to true: three real entry points refuse it (ParseBlockPointerValue, parseTypedAttributeValue, validateAttributeValue), so the row is decided by live code and not merely present. Control 4 drifts the Go half of the table: the contracts parity test goes red ('the Go schema's table of block[] values is the same table'), so the twins are held together by a live guard."
+    "how": "The round-10 proof stands unchanged because no code moved: the diff from the round-10 pass to this head is .legion/ only and the code head is still a1f7ac3e. Re-verification of the change surface is neither required nor done this round, by the architect's direction (Envoy 325f168047a12b8d904f1f7a8dc95ef7); the four review findings were driven on the real surface in round 10 (handoff 8104369c) with a control per finding."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review finding 1: the live-room test's room read checks its status, so a failing read fails the test instead of comparing two empty strings.",
-      "surface": "The Go server's own live document room on PostgreSQL 17 in the issue's pod, driven through Docs.Join and the HTTP text route, as the answer route writes an answer.",
-      "command": "DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test ./internal/dispatch/api/ -run 'TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom' -count=1 -timeout 20m",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 2.546s. documentMarkdown (ask_block_edit_settlement_test.go:94) fails the test on any status but 200; the deleted artifactMarkdown read none.",
-      "headSha": "a1f7ac3ef3570c8a1b1e31d6c3a0b37e0e5a9e28",
-      "negativeControl": "The three room reads repointed at document id 00000000-0000-4000-8000-000000000000: FAIL at block_pointers_test.go:221, 'read document text: status=404 body={\"code\":\"ARTIFACT_NOT_FOUND\",\"error\":\"artifact not found\"}'. The counter-control is the stronger one: the deleted status-blind helper restored verbatim and given the same bad id leaves all four refusal subtests PASSING on \"\" == \"\", failing only the last assertion at line 283 - so before this fix the test's unchanged-room assertion was vacuous for every refusal case it exists to check."
-    },
-    {
-      "criterion": "Review finding 3: the shared block-pointer table carries the pinned project-document ask-part row, in both halves, and live code decides it.",
-      "surface": "The real validator in packages/envoy/internal/dispatch/pmdoc, reading the table from testdata, and the contracts parity test reading the same file from packages/contracts.",
-      "command": "DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test ./internal/dispatch/pmdoc/ -run 'BlockPointer' -count=1 -timeout 20m; and (cd packages/contracts && bun test src/dispatch-block-ref.test.ts)",
-      "observed": "Go ok in 0.024s over 49 rows, each row run through ParseBlockPointerValue, parseTypedAttributeValue and validateAttributeValue; contracts 124 pass, 0 fail, 203 expect() calls. The new row is dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b2@v1, 'a part of a revision of a project document's ask', refused with 'is a block of an ask: a block[] attribute points only at a block of a document'.",
-      "headSha": "a1f7ac3ef3570c8a1b1e31d6c3a0b37e0e5a9e28",
-      "negativeControl": "Two. The row's ok flipped to true: FAIL on three separate entry points, pointers_test.go:121, :140 and :150, each naming that exact value and that exact sentence - so the row is decided, not decoration. And the Go half's why text drifted to 'drifted': the contracts test goes red, '(fail) the Go schema's table of block[] values is the same table', 123 pass 1 fail - so the two halves cannot drift apart unnoticed."
-    },
-    {
-      "criterion": "Review finding 2: the copied write helper is gone, one helper writes, and both of its callers still pass.",
-      "surface": "The same live room, through both callers: the refusal caller that asserts on the error and the approval-carry caller that wants the write to succeed.",
-      "command": "DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test ./internal/dispatch/api/ -run 'ApprovalCarry|Carry|BlockPointer|AskBlockEditSettlement' -count=1 -timeout 25m",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 23.635s. setLiveBlockAttributes now delegates to setBlockAttributes and fails the test where that write is refused; the duplicated transaction, Docs.Join, ledger and commit are gone from approval_carry_test.go, and the copied artifactMarkdown is deleted in favour of the existing documentMarkdown.",
-      "headSha": "a1f7ac3ef3570c8a1b1e31d6c3a0b37e0e5a9e28",
-      "negativeControl": "Control 1 above is this helper's own: it is the read inside the consolidated path, and pointing it at a missing document makes the test red, so the consolidation did not quietly drop the assertion it carried."
-    },
-    {
-      "criterion": "Review finding 4: the migration comment states something true and enforced, not stale.",
-      "surface": "The migration set on disk and the migrationid rule that governs it, plus the ask-block migration tests on the real database.",
-      "command": "DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test ./internal/dispatch/store/ -run 'TestAnOlderBuildsWriteLeavesTheAskBlocksOwed|TestTheAskBlockMigrationsOweEveryStoredAsk' -count=1 -v -timeout 25m",
-      "observed": "Both PASS, ok in 2.942s. The comment's claim checks out at its source: migrationid/migrationid.go:53 records Dispatch's closing as 0161_delivery_run_warnings.up.sql at 161, the highest numbered file on disk is 0161 and eight migrations since are timestamped, and migrationid.go:138 refuses a numbered migration above the closing by name. So 'No numbered migration can move beforeAskBlocks' is enforced, not merely asserted, and the comment's replacement - that a timestamped migration sorting between 161 and 20261101143211 is what would move it - is the real remaining case.",
-      "headSha": "a1f7ac3ef3570c8a1b1e31d6c3a0b37e0e5a9e28",
-      "negativeControl": "The change to this file is comment text alone: every added and removed line of ask_blocks_migrations_test.go in a1f7ac3e begins with //, and the two consts are untouched, so no test behaviour rides on it."
-    },
-    {
-      "criterion": "The repository's own CI-filter gate still holds with the changed files.",
-      "surface": "The gate script over .github/workflows/ci.yaml.",
-      "command": "bash .github/scripts/check-ci-filters.sh",
-      "observed": "exit 0. 'every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'.",
-      "headSha": "a1f7ac3ef3570c8a1b1e31d6c3a0b37e0e5a9e28",
-      "negativeControl": "Not re-run this round: the gate's own red was established in round 8 and no workflow file moved since."
+      "criterion": "No code changed since the round-10 pass, so the bare gate is the whole of this round: every required check at the code head is green.",
+      "surface": "GitHub check runs at the code head a1f7ac3e, read on GitHub.",
+      "command": "gh api repos/sjawhar/legion/commits/a1f7ac3ef35703d2e8fc055720b65a2707b35921/check-runs?per_page=100",
+      "observed": "The latest run of every check name is success or skipped: 28 success, 5 skipped, none failing. The only cancelled runs are four superseded pr-title attempts from 00:50Z; pr-title's latest two runs at 01:20Z and 01:22Z are both success. The issue record carries checksVerdict: green.",
+      "headSha": "a1f7ac3ef35703d2e8fc055720b65a2707b35921",
+      "negativeControl": "Not applicable: this round establishes no behavioural criterion. The behavioural controls are in the round-10 handoff (8104369c), one per review finding; none is re-run because no code moved."
     }
   ],
   "ci": {
-    "readAt": "2026-11-02T01:25:22Z",
-    "codeHead": "a1f7ac3ef3570c8a1b1e31d6c3a0b37e0e5a9e28",
-    "observed": "25 queued, 3 success, 4 skipped, 4 cancelled, no failure. Read as running and not waited for; the reviewer reads the head's checks itself.",
-    "handoffHead": "dc01e217d0d6618812d03630e02b2d20b592b480 reports no check runs, as a handoff-only push carrying skip-checks: true should."
+    "readAt": "2026-11-02T05:36:50Z",
+    "codeHead": "a1f7ac3ef35703d2e8fc055720b65a2707b35921",
+    "observed": "Latest run per check: 28 success, 5 skipped, 0 failing. checksVerdict green on the record.",
+    "handoffHead": "b8d56c676989460c1a090371fb4a16cb3aa0eb7b reports no check runs, as a handoff-only push carrying skip-checks: true should; the daemon carries the code head's green verdict to it."
   },
-  "environmentNotes": [
-    "Two tests of ./internal/dispatch/store fail in this pod and are not defects and not of this change: TestCensusDoesNotExemptACatalogMigrationAnEventTriggerRunsOn ('permission denied to create event trigger', SQLSTATE 42501) and TestTouchedTablesOfEveryMigrationAreTheTablesItLocks ('permission denied to terminate process', SQLSTATE 42501). The pod's test role legion_test is not a superuser (pg_roles.rolsuper = f; the only superuser is legion, whose TCP login pg_hba.conf rejects), and both tests need superuser rights. Both files are byte-identical to main (0 diff lines from trunk() to dc01e217), and main's own dispatch lane is green at f0fe8da8 (run 41354763661, jobs dispatch, dispatch-memory, dispatch-multiprocess and dispatch-browser-multiprocess all success), so they pass in CI's database. I caught them only because my -run filter was wider than the scope; they are recorded here rather than in failures.",
-    "LEGION_TEST_PG_DSN was already set by the pod after the relaunch, so no Postgres of my own was started this round."
-  ],
-  "workspaceNote": "The workspace was recreated by the 00:39Z image restart (Oh My Pi 18.13.3, pi-envoy 14.0.0, plugin contract 44). Nothing of mine was lost: my round-9 handoff was pushed at 983c9e49 before the restart, and the implementer's then-uncommitted work reached origin as a1f7ac3e and dc01e217.",
   "findings": []
 }
