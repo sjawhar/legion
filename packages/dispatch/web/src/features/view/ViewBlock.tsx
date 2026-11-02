@@ -147,6 +147,7 @@ interface DataEntry {
   readonly id?: string;
   readonly name?: string;
   readonly ref: string;
+  readonly status?: number;
   readonly text?: string;
   readonly version?: number;
 }
@@ -164,6 +165,10 @@ function answerCause(status: number | undefined, what: string): string {
     status === undefined ? "Dispatch could not be reached" : `Dispatch answered ${status}`;
   return `${answer} for this ${what}`;
 }
+
+/** No read has failed: the lines a block starts with, and the map it keeps while every read
+ *  answers its text. */
+const noReadCauses: ReadonlyMap<string, string> = new Map();
 
 /** The file one summary read names, resolved to what the block needs of it. An issue's summary
  *  carries every document of that issue, so one read serves every file of one issue. */
@@ -275,6 +280,9 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
   const [silent, setSilent] = useState(false);
   const [head, setHead] = useState<{ address: string; cause: string | undefined }>();
   const [sent, setSent] = useState(false);
+  /** Why the bytes of a data file did not arrive, by reference, as the newest send found it.
+   *  A later read of the same file that answers its text takes its line away again. */
+  const [readCauses, setReadCauses] = useState(noReadCauses);
   const holder = useRef<HTMLDivElement>(null);
   /** The frame that is running now, and the call that sends it the newest data: the two things
    *  the effect that owns a frame lends to the renders and effects around it. */
@@ -343,6 +351,10 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     } else {
       bytes += state.size;
       entry = { id: state.id, name: state.name, ref: state.ref, version: grant.version };
+      const failure = readCauses.get(state.ref);
+      if (failure !== undefined) {
+        lines.push({ cause: failure, ref: state.ref });
+      }
     }
     entries.push(entry);
     cover += grant === undefined ? " none" : ` ${grant.id}`;
@@ -435,11 +447,46 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     let readyTimer = 0;
     let sendTimer = 0;
 
+    /** One data file's bytes as the page gets them, or why they did not arrive. The three
+     *  causes are different: an answer that is not `ok` carries its status, a `fetch` that
+     *  rejects carries no status, and bytes that are not UTF-8 text are `not-text`. */
+    const readVersion = async (
+      entry: DataEntry,
+      id: string,
+      version: number
+    ): Promise<DataEntry> => {
+      const { name, ref } = entry;
+      const response = await fetch(versionAddress(id, version), {
+        credentials: "same-origin",
+      }).catch(() => undefined);
+      if (response === undefined || !response.ok) {
+        return { error: "read-failed", ref, status: response?.status };
+      }
+      const bytes = await response.arrayBuffer().catch(() => undefined);
+      if (bytes === undefined) {
+        return { error: "read-failed", ref };
+      }
+      try {
+        return {
+          contentType: response.headers.get("Content-Type") ?? "application/octet-stream",
+          name,
+          ref,
+          text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+          version,
+        };
+      } catch {
+        // The decode is the only throw here, so these bytes are not UTF-8 text. This one file
+        // goes to the page as `not-text`, and every other file still goes with it.
+        return { error: "not-text", ref };
+      }
+    };
+
     /** Sends the newest version of every file the grants cover. The bytes are read as the
      *  message goes out, so ten uploads inside one wait cost one read of the newest version. */
     const send = async (): Promise<void> => {
       const held = texts.current;
       const files: DataEntry[] = [];
+      const failures = new Map<string, string>();
       for (const entry of entriesRef.current) {
         const { id, version } = entry;
         if (id === undefined || version === undefined) {
@@ -448,22 +495,16 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
         }
         let read = held.get(id);
         if (read?.version !== version) {
-          read = await fetch(versionAddress(id, version), { credentials: "same-origin" }).then(
-            async (response) =>
-              response.ok
-                ? {
-                    contentType: response.headers.get("Content-Type") ?? "application/octet-stream",
-                    name: entry.name,
-                    ref: entry.ref,
-                    text: new TextDecoder("utf-8", { fatal: true }).decode(
-                      await response.arrayBuffer()
-                    ),
-                    version,
-                  }
-                : { error: "unreadable", ref: entry.ref },
-            () => ({ error: "not-text", ref: entry.ref })
-          );
+          read = await readVersion(entry, id, version);
           if (read.text === undefined) {
+            // The reader gets a line for this file, and the page gets the entry beside the
+            // files that did answer their text.
+            failures.set(
+              read.ref,
+              read.error === "not-text"
+                ? "this file is not UTF-8 text"
+                : answerCause(read.status, "file")
+            );
             files.push(read);
             continue;
           }
@@ -474,6 +515,12 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       if (stopped || loads > 1) {
         return;
       }
+      // The same set of lines is the same map, which is no new render.
+      setReadCauses((old) =>
+        old.size === failures.size && [...failures].every(([ref, cause]) => old.get(ref) === cause)
+          ? old
+          : failures
+      );
       sentAt = Date.now();
       // The page's origin is opaque, so there is no origin to name but any.
       frame.contentWindow?.postMessage({ files, type: "dispatch-view:data" }, "*");
