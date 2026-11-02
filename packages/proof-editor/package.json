@@ -31,6 +31,7 @@
   "scripts": {
     "typecheck": "bunx tsc --noEmit -p tsconfig.check.json",
     "upstream-declarations": "bun scripts/upstream-declarations.ts",
+    "parity-fuzz": "bun scripts/parity-fuzz.ts",
     "test": "bun test src/tests tests",
     "lint": "bunx biome check ."
   },

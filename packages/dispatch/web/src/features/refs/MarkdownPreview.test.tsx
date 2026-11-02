@@ -1,12 +1,13 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ComponentProps, ReactNode } from "react";
 
 import { api } from "../../api/client";
 import type { IssueReferenceSummary } from "../../api/types";
 import { MarkdownPreview } from "./MarkdownPreview";
+import { installFakeParseWorker, restoreParseWorker } from "./parse-worker-fixture";
 
 /**
  * `MarkdownPreview` on its own: the inputs a real surface hands it that the one-fixture surface
@@ -258,17 +259,23 @@ test("a line break inside a paragraph reads as a space, so nothing after it fall
   }
 });
 
-test("a long body is parsed whole, so formatting past any visible cut renders and leaves no syntax", async () => {
+// Past `markdownWorkerThreshold` the preview's body is parsed off the page, so this row drives
+// the faked worker (`parse-worker-fixture.ts`): the clamp it proves - the whole body parsed,
+// never the two lines the reader can see - is the one the dashboard applies to a body that size.
+test("a long body is parsed whole in the worker, so formatting past any visible cut renders and leaves no syntax", async () => {
+  const worker = installFakeParseWorker();
   const { preview, view } = renderPreview({
     lines: 2,
     markdown: `${"word ".repeat(400)}**held** and [docs](https://example.com/docs)`,
   });
   try {
+    await act(() => worker.answer(0));
     await waitFor(() => expect(preview().querySelector("strong")?.textContent).toBe("held"));
     expect(preview().textContent).not.toContain("**");
     expect(preview().textContent).not.toContain("](");
     expect(preview().textContent?.endsWith("held and docs")).toBe(true);
   } finally {
+    restoreParseWorker();
     view.unmount();
   }
 });

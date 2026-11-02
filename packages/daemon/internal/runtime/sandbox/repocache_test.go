@@ -820,6 +820,96 @@ func TestReconcileOrphansKeepsAMappedCacheAndRetiresAnUnmappedOne(t *testing.T) 
 	}
 }
 
+// A cache pod created under a ServiceAccount other than the configured one is made again, as one
+// on another image is (accountDrift beside imageDrift): the account is fixed for the pod's life,
+// so the cache's pod reaches the configured one no other way, and the pod the sweep makes names
+// it. The Sandbox and the volume holding the clone are kept through the replacement: a drifted
+// account costs a new pod, not a new clone. A cache pod already on the configured account is left
+// alone, and one still sending or queueing a tar waits for its streams to end, whichever drift is
+// replacing it.
+func TestEnsureRepositoryCacheReplacesACachePodRunningAnotherServiceAccount(t *testing.T) {
+	name := CacheSandboxName(testProject, cacheRepo)
+	// cacheOn is a rig configured to run its pods as otherAccount, holding a Running cache
+	// Sandbox and a live pod of it on podAccount, whose /healthz counts serving streams when the
+	// case gives it any.
+	cacheOn := func(t *testing.T, podAccount string, serving int) (*rig, *logBuffer) {
+		t.Helper()
+		live := cachePod(cacheRepo, "uid-pod-old", "uid-cache", testImage, corev1.PodRunning)
+		live.Spec.ServiceAccountName = podAccount
+		var routes map[string]string
+		if serving > 0 {
+			served := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(workspace.CacheRepositoryHeader, cacheRepo.String())
+				n := serving
+				_ = json.NewEncoder(w).Encode(repocache.Health{Ready: true, Repo: cacheRepo.String(), Streams: &n})
+			}))
+			t.Cleanup(served.Close)
+			live.Status.PodIP = "10.0.0.5"
+			routes = map[string]string{"10.0.0.5:8418": served.Listener.Addr().String()}
+		}
+		logs := &logBuffer{}
+		g := newRig(t, []k8sruntime.Object{cacheObject(t, cacheRepo, "uid-cache", modeRunning, ""), live}, withLog(logs),
+			withOptions(func(o *Options) { o.Pod.ServiceAccount = otherAccount }))
+		if routes != nil {
+			g.r.cacheDial = (&podNetwork{routes: routes}).dial
+		}
+		g.clearActions()
+		return g, logs
+	}
+
+	t.Run("a cache pod on another ServiceAccount is made again", func(t *testing.T) {
+		g, _ := cacheOn(t, "", 0)
+		before := g.sandbox(name)
+		if err := g.r.EnsureRepositoryCache(g.ctx, cacheRepo); err != nil {
+			t.Fatalf("EnsureRepositoryCache: %v", err)
+		}
+		var suspended, running bool
+		for _, w := range g.writes() {
+			if w.resource == "sandboxes" && w.verb == "patch" {
+				suspended = suspended || modePatched(t, w.patch, modeSuspended)
+				running = running || modePatched(t, w.patch, modeRunning)
+			}
+		}
+		if !suspended || !running {
+			t.Errorf("the ensure of a cache pod on another account suspended %t and set Running %t, want both: writes %v", suspended, running, g.writes())
+		}
+		after := g.sandbox(name)
+		if after == nil || after.UID != before.UID || !jsonEqual(t, after.Spec.VolumeClaimTemplates, before.Spec.VolumeClaimTemplates) {
+			t.Fatalf("the cache Sandbox is %+v, want %s kept with its volume %+v", after, before.UID, before.Spec.VolumeClaimTemplates)
+		}
+		if got := after.Spec.PodTemplate.Spec.ServiceAccountName; got != otherAccount {
+			t.Errorf("the pod template the replacement wrote runs as %q, want the configured %s", got, otherAccount)
+		}
+	})
+
+	t.Run("a cache pod on the configured ServiceAccount is left alone", func(t *testing.T) {
+		g, _ := cacheOn(t, otherAccount, 0)
+		if err := g.r.EnsureRepositoryCache(g.ctx, cacheRepo); err != nil {
+			t.Fatalf("EnsureRepositoryCache: %v", err)
+		}
+		for _, w := range g.writes() {
+			if w.resource == "sandboxes" || w.resource == "pods" {
+				t.Errorf("a cache pod on the configured account was written: %s", w)
+			}
+		}
+	})
+
+	t.Run("a cache pod on another ServiceAccount serving a stream waits", func(t *testing.T) {
+		g, logs := cacheOn(t, "", 2)
+		if err := g.r.EnsureRepositoryCache(g.ctx, cacheRepo); err != nil {
+			t.Fatalf("EnsureRepositoryCache: %v", err)
+		}
+		for _, w := range g.writes() {
+			if w.resource == "sandboxes" || w.resource == "pods" {
+				t.Errorf("a cache pod on another account sending 2 streams was replaced: %s", w)
+			}
+		}
+		if !strings.Contains(logs.String(), "repository cache pod is replaced once it serves no stream") {
+			t.Errorf("the waiting replacement was not logged:\n%s", logs)
+		}
+	})
+}
+
 // A mapped repository whose cache cannot be made — its owner's token cannot be minted — is logged
 // as the sweep's warning naming the cache and tried at the next sweep; ReconcileOrphans answers
 // nil, since its error holds the claims' launches back at boot and each launch ensures its own
