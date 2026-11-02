@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +60,9 @@ type ErrQuoteNotFound struct {
 	// Matches is how many places the quote did match, nonzero only when an occurrence was out
 	// of range: the quote is right and the occurrence is not.
 	Matches int
+	// Cells is the text of each table cell a quote written as a row's cells reached for, when its
+	// pipes are the boundaries between cells rather than text a cell holds (tableCellsQuoted).
+	Cells []string
 }
 
 func (e *ErrQuoteNotFound) Error() string {
@@ -66,6 +70,12 @@ func (e *ErrQuoteNotFound) Error() string {
 		return fmt.Sprintf(
 			"%squote %q matches %d places, so that occurrence is out of range; occurrence is zero-based; nearest blocks: %s",
 			e.prefix(), e.Quote, e.Matches, pmdoc.QuoteBlocks(e.Nearest),
+		)
+	}
+	if len(e.Cells) > 0 {
+		return fmt.Sprintf(
+			`%squote %q not found: it runs across table cells, and " | " is the boundary markdown writes between two cells, not text either cell holds; a quote matches inside one table cell, so quote one cell's own text, such as %s, and change several cells with one replace each in the same batch`,
+			e.prefix(), e.Quote, quotedCells(e.Cells),
 		)
 	}
 	return fmt.Sprintf(`%squote %q not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: %s`, e.prefix(), e.Quote, pmdoc.QuoteBlocks(e.Nearest))
@@ -97,13 +107,31 @@ func (e *ErrAnchorAmbiguous) Error() string {
 type ErrQuoteSpansBlocks struct {
 	opIndex
 	Quote string
+	// Cells is the text of the table cells the quote starts and ends in, when either is a cell.
+	Cells []string
 }
 
 func (e *ErrQuoteSpansBlocks) Error() string {
+	if len(e.Cells) > 0 {
+		return fmt.Sprintf(
+			"%squote %q spans more than one block, reaching across table cells; a quote matches inside one table cell, so quote one cell's own text, such as %s, and change several cells with one replace each in the same batch",
+			e.prefix(), e.Quote, quotedCells(e.Cells),
+		)
+	}
 	return fmt.Sprintf(
 		"%squote %q spans more than one block; a quote-anchored edit stays inside one block, so quote text from a single block, or address whole blocks by id",
 		e.prefix(), e.Quote,
 	)
+}
+
+// quotedCells lists cell texts for error text as `"a", "b"`: a cell's text can hold a pipe, so the
+// list is not written with the ` | ` QuoteBlocks writes between nearest blocks.
+func quotedCells(cells []string) string {
+	quoted := make([]string, len(cells))
+	for index, cell := range cells {
+		quoted[index] = strconv.Quote(cell)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func (e *ErrQuoteSpansBlocks) Unwrap() error { return pmdoc.ErrTargetSpansBlocks }
@@ -1066,7 +1094,7 @@ func applyOperation(tree *batchTree, op model.EditOp, budget *pmdoc.WriteBudget)
 			return nil, err
 		}
 		if plainText && pmdoc.TargetSpansBlocks(tree.node, target) {
-			return nil, &ErrQuoteSpansBlocks{Quote: anchor}
+			return nil, quoteSpansBlocks(tree, anchor, target)
 		}
 		valid, err := tree.validated("InsertTableRows")
 		if err != nil {
@@ -1320,9 +1348,21 @@ func findEditQuote(tree *batchTree, field, quote string, occurrence *int) (pmdoc
 		return pmdoc.Range{}, err
 	}
 	if pmdoc.TargetSpansBlocks(tree.node, r) {
-		return pmdoc.Range{}, &ErrQuoteSpansBlocks{Quote: quote}
+		return pmdoc.Range{}, quoteSpansBlocks(tree, quote, r)
 	}
 	return r, nil
+}
+
+// quoteSpansBlocks is the refusal of quote, whose match r reaches past one textblock, naming the
+// table cells it starts and ends in when either is a cell.
+func quoteSpansBlocks(tree *batchTree, quote string, r pmdoc.Range) error {
+	var cells []string
+	for _, position := range []int{r.From, r.To} {
+		if cell, ok := tableCellAt(tree.node, position, position); ok && !slices.Contains(cells, cell) {
+			cells = append(cells, cell)
+		}
+	}
+	return &ErrQuoteSpansBlocks{Quote: quote, Cells: cells}
 }
 
 func resolveEditQuote(tree *batchTree, field, quote string, occurrence *int) (pmdoc.Range, error) {
@@ -1336,6 +1376,11 @@ func resolveEditQuote(tree *batchTree, field, quote string, occurrence *int) (pm
 	}
 	var missing *pmdoc.ErrQuoteNotFound
 	if errors.As(err, &missing) {
+		if missing.Matches == 0 {
+			if cells := tableCellsQuoted(tree.node, finder, quote); len(cells) > 0 {
+				return pmdoc.Range{}, &ErrQuoteNotFound{Quote: quote, Cells: cells}
+			}
+		}
 		if delimiter, unbalanced := pmdoc.UnbalancedInlineMark(quote); unbalanced {
 			// The quote may simply be wrong about the text and merely carry an odd delimiter, so
 			// the nearest blocks that would fix an ordinary miss stay in the message.
@@ -1354,6 +1399,94 @@ func resolveEditQuote(tree *batchTree, field, quote string, occurrence *int) (pm
 		return pmdoc.Range{}, &ErrQuoteSpansBlocks{Quote: quote}
 	}
 	return pmdoc.Range{}, err
+}
+
+// maxCellQuoteParts bounds how many of a missed quote's pipe-separated parts tableCellsQuoted
+// looks up, and maxCellQuoteMatches how many matches of each it reads, so a miss costs a bounded
+// number of walks of the document however long the quote or common its words.
+const (
+	maxCellQuoteParts   = 16
+	maxCellQuoteMatches = 32
+)
+
+// tableCellsQuoted reads a quote that matched nothing as a table row written in markdown: its text
+// between pipes not escaped `\|`, each trimmed, a leading and trailing pipe allowed. It answers the
+// text of each table cell one of those parts matches inside, in the order of the parts, each cell
+// once, preferring for each later part the match nearest the first part's cell, so the cells of
+// one row are named. A quote with no such pipe, or whose parts match inside no table cell, answers
+// none, and its miss reads as any other.
+func tableCellsQuoted(doc *pmdoc.Node, finder *pmdoc.QuoteFinder, quote string) []string {
+	parts := cellQuoteParts(quote)
+	if len(parts) > maxCellQuoteParts {
+		parts = parts[:maxCellQuoteParts]
+	}
+	var cells []string
+	near := 0
+	for _, part := range parts {
+		matches, err := finder.NearestFirst(part, near)
+		if err != nil {
+			continue
+		}
+		for _, match := range matches[:min(len(matches), maxCellQuoteMatches)] {
+			cell, ok := tableCellAt(doc, match.From, match.To)
+			if !ok {
+				continue
+			}
+			if len(cells) == 0 {
+				near = match.From
+			}
+			if !slices.Contains(cells, cell) {
+				cells = append(cells, cell)
+			}
+			break
+		}
+	}
+	return cells
+}
+
+// cellQuoteParts is quote split at each pipe a backslash does not escape, as a markdown table row
+// is split into cells, each part trimmed and its `\|` read as the pipe a cell holds; empty parts
+// are dropped. A quote with no such pipe is no row, and has no parts.
+func cellQuoteParts(quote string) []string {
+	var parts []string
+	var part strings.Builder
+	split := false
+	flush := func() {
+		if text := strings.TrimSpace(part.String()); text != "" {
+			parts = append(parts, text)
+		}
+		part.Reset()
+	}
+	for index := 0; index < len(quote); index++ {
+		switch {
+		case quote[index] == '\\' && index+1 < len(quote) && quote[index+1] == '|':
+			part.WriteByte('|')
+			index++
+		case quote[index] == '|':
+			split = true
+			flush()
+		default:
+			part.WriteByte(quote[index])
+		}
+	}
+	flush()
+	if !split {
+		return nil
+	}
+	return parts
+}
+
+// tableCellAt is the text of the table cell whose paragraph holds the range from..to, and reports
+// false when no table cell's paragraph holds all of it.
+func tableCellAt(doc *pmdoc.Node, from, to int) (string, bool) {
+	at, ok := pmdoc.ContainingTextblock(doc, from)
+	if !ok || to > at.Content.To || len(at.Ancestors) == 0 {
+		return "", false
+	}
+	if parent := at.Ancestors[0].Type; parent != "table_cell" && parent != "table_header" {
+		return "", false
+	}
+	return pmdoc.TextContent(at.Node), true
 }
 
 func insertTarget(tree *batchTree, field, anchor string, occurrence *int) (pmdoc.Range, bool, error) {

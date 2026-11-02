@@ -2262,6 +2262,59 @@ func TestApplyOperationInsertWithACrossBlockQuoteAnchorNamesTheQuote(t *testing.
 	}
 }
 
+// A quote that runs across table cells - a row as markdown writes it, with " | " between the
+// cells - matches no text, because " | " is the boundary between two cells and neither cell holds
+// it. The miss says so and names each cell's own text to quote, for a replace, a delete and an
+// insert anchor alike, rather than ranking blocks against a quote that opens with a pipe. The same
+// row quoted with the pipes left out reaches across the cells, and that refusal names them too.
+func TestApplyOperationQuoteAcrossTableCellsNamesTheCellsToQuote(t *testing.T) {
+	tree, err := parseInput("Intro.\n\n| Item | Owner |\n| --- | --- |\n| Cut freezes run as build-pool pods | MACH; worker PoolFreeze |\n| Literal | x \\| y |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const cells = `"Cut freezes run as build-pool pods", "MACH; worker PoolFreeze"`
+	for name, op := range map[string]model.EditOp{
+		"a replace":                         {Op: "replace", Find: "Cut freezes run as build-pool pods | MACH; worker PoolFreeze", With: "x | y"},
+		"a replace with the row's own pipes": {Op: "replace", Find: "| Cut freezes run as build-pool pods | MACH; worker PoolFreeze |", With: "x"},
+		"a delete":                          {Op: "delete", Find: "build-pool pods | MACH; worker"},
+		"an insert anchor":                  {Op: "insert", Markdown: "x", After: "Cut freezes run as build-pool pods | MACH; worker PoolFreeze"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := applyAlone(tree, op)
+			var missing *ErrQuoteNotFound
+			if !errors.As(err, &missing) {
+				t.Fatalf("cross-cell quote = %v, want *ErrQuoteNotFound", err)
+			}
+			message := missing.Error()
+			for _, want := range []string{"one table cell", `" | " is the boundary`, cells} {
+				if !strings.Contains(message, want) {
+					t.Fatalf("cross-cell quote = %q, want it to contain %q", message, want)
+				}
+			}
+		})
+	}
+
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Item Owner", With: "x"})
+	var spans *ErrQuoteSpansBlocks
+	if !errors.As(err, &spans) {
+		t.Fatalf("quote reaching across two cells = %v, want *ErrQuoteSpansBlocks", err)
+	}
+	if message := spans.Error(); !strings.Contains(message, "one table cell") || !strings.Contains(message, `"Item", "Owner"`) {
+		t.Fatalf("quote reaching across two cells = %q, want it to name the cells to quote", message)
+	}
+
+	// A cell that holds " | " itself is quoted with it, as before.
+	if _, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "x | y", With: "x or y"}); err != nil {
+		t.Fatalf("quote of a cell holding a pipe = %v, want it to match", err)
+	}
+	// A quote holding a pipe that no table cell answers is an ordinary miss.
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Intro | Outro", With: "x"})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || strings.Contains(missing.Error(), "table cell") || !strings.Contains(missing.Error(), "nearest blocks") {
+		t.Fatalf("pipe quote with no cell = %v, want the ordinary miss with its nearest blocks", err)
+	}
+}
+
 // An out-of-range occurrence is a miss like any other: it names the quote, how many places it
 // did match, and the nearest blocks — not a bare "target not found" (Rev1326).
 func TestApplyOperationOutOfRangeOccurrenceNamesTheQuoteAndMatchCount(t *testing.T) {
