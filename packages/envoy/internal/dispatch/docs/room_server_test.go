@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -109,6 +110,26 @@ func TestHoldOpenRefusesRoomThatNoLongerHoldsItsDocument(t *testing.T) {
 	}
 	if gates := closeGates(service); gates != 0 {
 		t.Fatalf("%d close gates kept after the refusal", gates)
+	}
+}
+
+// A close whose caller stopped waiting must not still take a free room. Evict receives its
+// context from an API caller, and a cancellation before the close begins leaves the resident
+// editor connected for the next request rather than reporting a close that happened after its
+// caller gave up.
+func TestEvictWithACancelledContextLeavesTheRoomResident(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load document room: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := service.Evict(ctx, artifactID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("evict with a cancelled context = %v, want %v", err, context.Canceled)
+	}
+	if service.srv.GetDoc(artifactID) == nil {
+		t.Fatal("evict with a cancelled context closed the resident room")
 	}
 }
 

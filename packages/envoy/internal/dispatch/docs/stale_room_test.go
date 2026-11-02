@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
+	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -23,6 +25,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // Two envoy-dispatch processes serve one Postgres, and a room resident in one of them never
@@ -635,6 +638,70 @@ func TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen(t *testing.T
 	}
 	if !closed {
 		t.Fatal("the close of the room whose write has ended closed nothing")
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
+// ygo closes no room another caller is inside: a browser's join, or an Apply - a write's publish, a
+// read loading the room. The evictor's close of a room behind the head meets one as it meets an
+// open write: it closes nothing, keeps the room's window for a later try, lifts its reservation,
+// so the caller inside keeps the room it is in and a write after it is not refused, and warns of
+// nothing, since a browser joining the room is no fault. Once the caller has left, the same close
+// closes the room.
+func TestARoomBehindTheHeadThatAnotherCallerIsInsideIsClosedOnceItLeaves(t *testing.T) {
+	pair := newProcessPair(t)
+	evictor := newStaleRoomEvictor(pair.taskA)
+	pair.leaveTaskABehind(t, 2, model.Actor{Kind: "user", ID: "bob"}, "Bob types once.\n")
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	live := pair.taskA.srv.GetDoc(pair.artifactID)
+	inside, leave := make(chan struct{}), make(chan struct{})
+	applied := make(chan error, 1)
+	go func() {
+		applied <- pair.taskA.srv.Apply(withOwnerVerified(context.Background()), pair.artifactID, func(*crdt.Doc, func(func(*crdt.Transaction))) {
+			close(inside)
+			<-leave
+		})
+	}()
+	<-inside
+	left := false
+	leaveRoom := func() {
+		if !left {
+			left = true
+			close(leave)
+			if err := <-applied; err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+				t.Errorf("the Apply inside the room: %v", err)
+			}
+		}
+	}
+	t.Cleanup(leaveRoom)
+
+	if evictor.documentChanged(context.Background(), pair.artifactID) {
+		t.Fatal("the evictor closed the room another caller was inside")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != live {
+		t.Fatal("the room was closed under the caller inside it")
+	}
+	if wake := evictor.wakeIn(); wake <= 0 {
+		t.Fatalf("the attempt that found a caller inside the room spent the room's window (wakeIn = %s)", wake)
+	}
+	state := pair.taskA.lockState(pair.artifactID)
+	reloading := state.reloading
+	pair.taskA.unlockState(pair.artifactID, state)
+	if reloading {
+		t.Fatal("the close held off by a caller inside the room left its reservation, which refuses every write")
+	}
+	if warned := logs.String(); warned != "" {
+		t.Errorf("the close held off by a caller inside the room warned:\n%s", warned)
+	}
+
+	leaveRoom()
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, live)
+	if err != nil {
+		t.Fatalf("close the room once the caller has left it: %v", err)
+	}
+	if !closed {
+		t.Fatal("the close of the room the caller left closed nothing")
 	}
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 }

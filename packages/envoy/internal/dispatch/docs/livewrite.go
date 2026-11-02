@@ -867,9 +867,9 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 //
 // The update is already durable, so the room's persistence must not append it again: the
 // suppression slot the publish queues is finished by the room's own update observer, with the
-// bytes ygo's persistence observer is handed next (onLoadDocument), never after Apply returns. A
-// room whose persistence worker CloseRoom retired under this Apply hands the commit to ygo's
-// stranded persistence on this goroutine, which would otherwise wait on this slot for good.
+// bytes ygo's persistence observer is handed next (onLoadDocument), never after Apply returns, so
+// the room's worker never waits on it for the rest of this Apply. No close retires the room's
+// worker under this Apply: ygo refuses a close while a caller is inside the room (roomServer).
 //
 // The origin carries rendering, the operation's own rendering of what the update leaves, and
 // inRoom, set where the update reaches the room instance and before it is applied: whether that
@@ -913,7 +913,8 @@ func (s *Service) publishLiveUpdate(room string, update []byte, version persiste
 		return fmt.Errorf("merge committed live document write: %w", err)
 	}
 	if err := s.srv.BroadcastUpdate(ctx, room, applied); err != nil {
-		// A room CloseRoom retired under this Apply has no peer left to tell.
+		// A room the publish's Apply left, and a close retired before this broadcast, has no peer
+		// left to tell.
 		if errors.Is(err, websocket.ErrRoomNotFound) {
 			return nil
 		}

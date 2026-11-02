@@ -133,9 +133,10 @@ type Service struct {
 	// registered, or after settleLastPeer took the timer and counted the settlement running. Nil
 	// outside tests; tests use it to open a write in that window.
 	beforeSettleStart func(room string)
-	// afterReadWarm runs after a version capture or VerifyMark has warmed a room and before the
-	// version takes its document lock and reads it. Nil outside tests; tests use it to evict the
-	// warmed room or edit it in that window.
+	// afterReadWarm runs after a version capture or VerifyMark has warmed a room - VerifyMark's once
+	// the Apply that warmed it has returned, since no close retires a room an Apply is inside - and
+	// before the version takes its document lock and reads it. Nil outside tests; tests use it to
+	// evict the warmed room or edit it in that window.
 	afterReadWarm func(room string)
 	// afterCaptureAuthorsTake runs after a room-backed version capture has bounded the in-flight
 	// credits it lists and before it reads the room. Nil outside tests; tests use it to edit the
@@ -651,27 +652,17 @@ func New(deps Deps) *Service {
 	srv.MaxPendingItems = maxUpdateItems
 	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
 	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an
-	// Apply on a room no peer is in returns (reearth/ygo#269, in the pinned fork). Eager eviction,
-	// ygo's default, evicts the room the moment its last peer leaves, even while
-	// a Server.Apply is inside its callback on that room (sjawhar/ygo v1.51.3-sami.1,
-	// provider/websocket/peer.go:496-580 checks peers alone): the callback's write then lands on
-	// the evicted room and reaches the store only through its retiring persistence worker, while
-	// the next access has already loaded the store without it and serves, and takes, the next
-	// write on a state missing the first. The two writes, each made from the same document, merge
-	// into a document neither wrote, which can hold no block at all. Idle eviction refuses a
-	// room any Apply holds (evictIdleRoom's inflight check) and counts its idle time from the last
-	// Apply's return, and the sweeper flushes the room before it evicts it, so every write a room
-	// the sweeper evicts has taken is durable before a successor can load. CloseRoom
-	// checks peers alone too (Server.CloseRoom), and the service still calls it to close an
-	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
-	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
-	// stranded persistence, on the committing goroutine: the room's doc.OnUpdate observer, which
-	// loadRoom registers (provider/websocket/server.go:1784-1826) and which runs on the goroutine
-	// that committed once the commit has released the document's lock (crdt/doc.go:647-652), calls
-	// persistStranded (persistence.go:126-164) after the room's persistence worker retires. The
-	// service's CloseRoom waits for a repair's commit (roomServer), so a repair never meets it; a
-	// published write's suppression slot is finished before ygo's persistence observer runs
-	// (onLoadDocument), so that persistence never waits on the publish it is running in.
+	// Apply on a room no peer is in returns (reearth/ygo#269). Idle eviction refuses a room any
+	// Apply holds (evictIdleRoom's inflight check) and counts its idle time from the last Apply's
+	// return, and the sweeper flushes the room before it evicts it, so every write a room the
+	// sweeper evicts has taken is durable before a successor can load. No other close retires a
+	// room under a caller either: ygo's CloseRoom answers ErrRoomInUse while an Apply, a relay
+	// Inject or a browser's join is inside the room (reearth/ygo#342), so the service's closes of
+	// an issue's rooms (SetIssueClosed), of a room with an editor at Shutdown and of a room it
+	// evicts (evictRoom) wait for those callers to leave (roomServer.closeWhenFree), and its close
+	// of a room behind the durable head runs inside its own Apply on the room
+	// (roomServer.closeInstance, ygo's CloseRoomWithin). A write's commit into a room therefore
+	// reaches that room's own persistence worker.
 	srv.RoomIdleTimeout = roomIdleTimeout
 
 	service.srv = newRoomServer(srv)
@@ -777,7 +768,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				s.followUpSettlement(room.name, s.settleRoomWithin(drainCtx, room.name, room.generation))
 			}
 			if room.connected {
-				if err := s.srv.CloseRoom(room.name, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+				if err := s.srv.closeRoom(ctx, room.name, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
 					slog.Warn("dispatch: close document peers before shutdown", "room", room.name, "error", err)
 				}
 			}
@@ -907,7 +898,7 @@ func (s *Service) Quiesce(ctx context.Context) error {
 		state.lastActor = nil
 		state.unsettled = false
 		state.mu.Unlock()
-		if err := s.evictRoom(room, state); err != nil && firstErr == nil {
+		if err := s.evictRoom(ctx, room, state); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		return true
@@ -1980,6 +1971,8 @@ func (s *Service) reloadRoomBehindHead(ctx context.Context, room string, state *
 	reservation.owesSettlement = true
 	closed, err := s.closeReservedRoom(ctx, reservation)
 	switch {
+	case errors.Is(err, websocket.ErrRoomInUse):
+		leftOpen("another caller is inside the room, which ygo closes no room under; the settlement is armed again")
 	case err != nil:
 		slog.Warn("dispatch: close a document room its settlement found behind the durable head; the settlement is armed again",
 			"room", room, "error", err)
@@ -1997,14 +1990,16 @@ var errRoomCloseHeldOff = errors.New("the close of the room is held off")
 
 // closeRoomBehindHead closes live, room's resident instance, which the stale-room evictor found
 // behind the durable head, so the next access loads the document at the head. It closes nothing,
-// and answers errRoomCloseHeldOff, while something of this process holds the room open: an open
-// live write, or a close reserved for an instance the room no longer holds, whose reservation
-// refuses the writer slot of the instance that replaced it until that close returns. The second
-// close answers for its own instance, not for live, so live is closed only by trying again. Both
-// are read under the state lock that reserves the close (reserveRoomCloseLocked), so no writer is
-// admitted between the check and the close. The other writers of this process are not asked
-// about, for the reason the evictor's own check gives (hasOpenLiveWrite): they take the
-// document's lock, and the evictor's confirmation under that lock already orders them.
+// and answers errRoomCloseHeldOff, while something holds the room open: an open live write of this
+// process, a close reserved for an instance the room no longer holds, whose reservation refuses
+// the writer slot of the instance that replaced it until that close returns, or another caller
+// inside the room, which ygo closes no room under (websocket.ErrRoomInUse): a browser joining, or
+// another Apply. The second close answers for its own instance, not for live, so live is closed
+// only by trying again. The first two are read under the state lock that reserves the close
+// (reserveRoomCloseLocked), so no writer is admitted between the check and the close. The other
+// writers of this process are not asked about, for the reason the evictor's own check gives
+// (hasOpenLiveWrite): they take the document's lock, and the evictor's confirmation under that
+// lock already orders them.
 //
 // It closes nothing, and answers false with no error, when the room is another close's or another
 // instance's: live is no longer the instance room holds, the room failed (its own eviction
@@ -2039,6 +2034,9 @@ func (s *Service) closeRoomBehindHead(ctx context.Context, room string, live *cr
 		// The room failed while the close ran, and the failure refused the close's Apply
 		// (allowInject): the failure's own eviction closes it.
 		return false, nil
+	}
+	if errors.Is(err, websocket.ErrRoomInUse) {
+		return false, errRoomCloseHeldOff
 	}
 	return closed, err
 }
@@ -2129,18 +2127,20 @@ func (s *Service) closeReservedRoom(ctx context.Context, reservation roomCloseRe
 // makes takes (roomServer), so a check of the instance made before the close can be stale by the
 // time ygo looks: the sweep retires live, a load replaces it, and the close drops the
 // replacement's browsers and the state a write on it holds. So the close runs inside a
-// Server.Apply on the room, which the idle sweep never retires while an Apply is in it (sjawhar/ygo
-// v1.51.3-sami.1, provider/websocket/idle_sweep.go, evictIdleRoom: an Apply holds the room's
-// in-flight count from entry until it returns, whatever idle stamp a leaving browser puts on the
-// room meanwhile), with the close gate held (roomServer.closeInstance): a room that still holds
-// live once both are held is the room ygo then closes. A room already gone from the name is not
-// loaded for the check; one retired between that look and the Apply is loaded by the Apply at the
-// head, and left open. The Apply waits for no failed room's recovery (WithoutRecoveryWait): a
-// failed room's own eviction closes it. It is the service's own injection, not a caller's write,
-// so it carries the service's mark (withOwnerVerified): allowInject refuses an unmarked injection
-// on a closed issue, and this close has to run on one - a room loaded while the issue was open and
-// left behind the head by the other process's write is closed whenever its issue closed, rather
-// than kept resident with text the store no longer holds until its idle minute runs out.
+// Server.Apply on the room, which the idle sweep never retires while an Apply is in it (ygo's
+// evictIdleRoom: an Apply holds the room's in-flight count from entry until it returns, whatever
+// idle stamp a leaving browser puts on the room meanwhile), with the close gate held
+// (roomServer.closeInstance): a room that still holds live once both are held is the room ygo then
+// closes, through CloseRoomWithin, the close of a caller inside its own Apply. Another caller
+// inside the room - a browser joining, another Apply - holds the close off, and it answers
+// websocket.ErrRoomInUse, closing nothing. A room already gone from the name is not loaded for the
+// check; one retired between that look and the Apply is loaded by the Apply at the head, and left
+// open. The Apply waits for no failed room's recovery (WithoutRecoveryWait): a failed room's own
+// eviction closes it. It is the service's own injection, not a caller's write, so it carries the
+// service's mark (withOwnerVerified): allowInject refuses an unmarked injection on a closed issue,
+// and this close has to run on one - a room loaded while the issue was open and left behind the
+// head by the other process's write is closed whenever its issue closed, rather than kept resident
+// with text the store no longer holds until its idle minute runs out.
 func (s *Service) closeRoomInstance(ctx context.Context, room string, live *crdt.Doc) (closed bool, err error) {
 	if s.srv.GetDoc(room) != live {
 		return false, nil
@@ -2482,8 +2482,13 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 		// state's closed flag says nothing about it - a connection's own registration
 		// (addConnection) or a load after the reopen committed makes a state that reads the issue
 		// open while a browser on it was admitted read-only. A room still loading is closed once
-		// its load has returned: ygo's CloseRoom waits for the load's ready barrier.
-		_ = s.srv.CloseRoom(room, true)
+		// its load has returned: ygo's CloseRoom waits for the load's ready barrier. A room a
+		// caller is inside - a write's publish, a read, a browser's join - is closed once that
+		// caller has left (roomServer.closeRoom).
+		if err := s.srv.closeRoom(ctx, room, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+			slog.Warn("dispatch: close a document room of an issue that closed or reopened; its browsers keep the admission they had",
+				"issue", issueKey, "room", room, "error", err)
+		}
 	}
 }
 
@@ -2535,9 +2540,15 @@ func (s *Service) lastActorPersisted(room string, creditSeq uint64) {
 // room as failed. Tests, including those in package api, call it to force a room to reload. It
 // checks nothing about the room: the service's own closes of a room behind the durable head go
 // through closeRoomBehindHead and reloadRoomBehindHead, which reserve the room first
-// (reserveRoomCloseLocked) and close the instance they checked (closeRoomInstance).
-func (s *Service) Evict(_ context.Context, artifactID string) error {
-	return s.evictRoom(artifactID, s.invalidateForEviction(artifactID))
+// (reserveRoomCloseLocked) and close the instance they checked (closeRoomInstance). A room a
+// caller is inside is closed once that caller has left, or left open, with ctx's error, when ctx
+// ends first; a caller whose ctx has already ended closes nothing. A caller inside its own Apply
+// on the room must not call it, since it would wait for itself.
+func (s *Service) Evict(ctx context.Context, artifactID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.evictRoom(ctx, artifactID, s.invalidateForEviction(artifactID))
 }
 
 // evictFailed is a failed room's eviction (failRoomLocked): it closes the room that runs on
@@ -2601,8 +2612,11 @@ func (s *Service) invalidateForEviction(room string) *roomState {
 // that room is credited and recorded on it. Dropping the record outright lost all of that: the
 // person's keystrokes were credited to nobody, the document forgot its issue was closed, and the
 // settlement the new load armed was left to a timer that found its record gone (INFRA-352).
-func (s *Service) evictRoom(room string, state *roomState) error {
-	return s.forgetEvicted(room, state, s.srv.CloseRoom(room, true))
+//
+// A room a caller is inside is closed once that caller has left (roomServer.closeRoom), bounded by
+// ctx.
+func (s *Service) evictRoom(ctx context.Context, room string, state *roomState) error {
+	return s.forgetEvicted(room, state, s.srv.closeRoom(ctx, room, true))
 }
 
 // forgetEvicted is an eviction's end once its close has returned err: it settles state, the

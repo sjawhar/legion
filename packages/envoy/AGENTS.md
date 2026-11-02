@@ -288,6 +288,8 @@ its `CloseRoom`, which shadows ygo's, so a call written against ygo's API is gat
 That close waits for a repair committing into the room and refuses new repairs while it closes;
 a repair never waits for a close and gives the write up as for a replaced room (`holdOpen`).
 `roomServer` says why a close retiring the room's worker under a repair's commit hung (LEGION-498).
+ygo closes no room a caller is inside - a `Server.Apply`, a relay `Inject`, or a browser's join before its peer registers - and answers `ErrRoomInUse` instead (`reearth/ygo#342`), so a close from outside the room waits for those callers to leave, letting go of the gate between its tries (`roomServer.closeWhenFree`, bounded by its caller's context), and the close of a room behind the durable head, which runs inside the service's own `Server.Apply` on the room, is ygo's `CloseRoomWithin`;
+a caller inside its own Apply on a room never calls `CloseRoom` on it, since it would wait for itself.
 A room's close gate lives only while a close or a repair holds or waits on it.
 A repair's suppression slot that its settlement discarded is consumed by that repair's own update alone, since another writer's update can reach the room's worker first.
 The gate removes the repair-close cycle, but `compactIfIdle` remains for non-repair worker exits:
@@ -644,11 +646,9 @@ Two such writes, each a diff of the same document, merge into a document neither
 the healthy-room probe met it as a socket closed with `DOC_SCHEMA`.
 The idle sweeper evicts a room only while no Apply holds it, counts its idle minute from its last peer leaving or the last Apply on it returning, and flushes it before it evicts it (`provider/websocket/idle_sweep.go`), so every write a room the sweeper evicts has taken is durable before another instance of it loads, and a peer that returns within the minute rejoins the warm room.
 `TestAHealthyRoomUnderWritesIsNeverRefused` checks every load of a room against the writes its earlier instances took, and `TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is evicted and reads back what the API wrote.
-ygo's `CloseRoom` checks only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`), for a room with an editor at `Shutdown`, to evict one (`evictRoom`), and to close a room behind the durable head (`roomServer.closeInstance`):
-a write that commits on a room it has retired reaches the store through ygo's stranded persistence, on the committing goroutine (`provider/websocket/persistence.go`).
-A committed write's publish (`publishLiveUpdate`) is already durable and suppresses that append;
-the room's own update observer finishes its suppression slot before ygo's persistence observer runs (`onLoadDocument`), so the stranded append never waits on the publish it runs inside, and the publish, its request and the document's writer slot are released (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
-A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
+ygo's `CloseRoom` refuses a room a caller is inside as well (`ErrRoomInUse`), so no close the service makes - an issue's rooms (`SetIssueClosed`), a room with an editor at `Shutdown`, an eviction (`evictRoom`), a failed room's eviction (`evictFailed`) - retires a room under a write: each waits for the callers inside to leave, and the close of a room behind the durable head runs inside the service's own Apply (`roomServer.closeInstance`, `CloseRoomWithin`).
+A committed write's publish (`publishLiveUpdate`) is already durable and suppresses the room's own append of it;
+the room's own update observer finishes its suppression slot before ygo's persistence observer runs (`onLoadDocument`), so the room's worker never waits on it, and a close asked for while the publish is inside the room closes it once the publish, its request and the document's writer slot are released (`TestAPublishSurvivesACloseOfItsRoomAskedForWhileItRuns`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
 
 The service keeps a document's state (`docs.roomState`, `docs/roomstate.go`:
 its connected browsers, writer slot, settlement timer, pending authors) only while ygo holds a room for it, loaded or loading, or something on the document still holds the state;
@@ -683,7 +683,8 @@ its other writers take the document's lock, which already orders them with the e
 Until the close has returned the room's writer slot is refused, `503 DOC_SERVICE_UNAVAILABLE` as on a failed room, rather than handed to a write the close would then retire the instance under: the case that check exists to rule out.
 The refused write's retry lands on the room that replaces the closed one.
 The close reaches only the instance that was checked, never a room that replaced it:
-ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep retires a room without the close gate, so the close checks the instance again inside a `Server.Apply` on the room, which the sweep never retires, with the close gate held (`closeRoomInstance`);
+ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep retires a room without the close gate, so the close checks the instance again inside a `Server.Apply` on the room, which the sweep never retires, with the close gate held, and closes it through ygo's `CloseRoomWithin`, the close of a caller inside its own Apply (`closeRoomInstance`);
+another caller inside the room (a browser joining, another Apply) holds that close off, as an open write does, and the evictor tries again a window later;
 a room the sweep or another close retired first is left to the room that holds the document now, the reservation is lifted, and a settlement the reservation ended is armed again on it.
 A reservation outlasts its instance when the room is replaced before the close returns (`reservedFor`);
 the evictor tries the replacement again once that close has returned.
