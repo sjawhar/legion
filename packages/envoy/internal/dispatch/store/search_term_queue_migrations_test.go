@@ -17,12 +17,13 @@ const (
 	searchTermQueueTriggers = 20261101182522
 )
 
-// 20261101182522 is five functions and five triggers and nothing else, which is what lets one
-// migration carry all five: the pre-deploy census refuses any migration that locks a table above
-// its size limit, and the exemption that lifts the limit is per migration, not per table. No
-// statement in it reads a row, so the time it holds its locks does not grow with any of the five
-// tables (pgmigrate tableSizeExemption). The limit is injected at one byte so the test needs no
-// gigabyte, over a database at 20261101182515, where the item tables are already above that.
+// 20261101182522 is its lock_timeout set, five functions and five triggers and nothing else, which
+// is what lets one migration carry all five: the pre-deploy census refuses any migration that locks
+// a table above its size limit, and the exemption that lifts the limit is per migration, not per
+// table. No statement in it reads a row, so the time it holds its locks does not grow with any of
+// the five tables (pgmigrate tableSizeExemption). The limit is injected at one byte so the test
+// needs no gigabyte, over a database at 20261101182515, where the item tables are already above
+// that.
 func TestCensusExemptsTheSearchTermQueueTriggersFromTheTableLimit(t *testing.T) {
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, searchTermTotalsColumns)

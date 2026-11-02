@@ -21,9 +21,10 @@ import (
 //     language is not exempt: creating a C function loads its library, which can run any code;
 //   - create trigger, of any form: it takes SHARE ROW EXCLUSIVE on its table and writes
 //     pg_trigger, and the trigger runs only on later writes, never on the rows already there;
-//   - set and reset (VariableSetStmt): a run-time parameter of the transaction, which takes no
-//     lock, reads no row and names no table, so it cannot make a migration's lock window grow
-//     with any table. A migration that bounds its own lock wait sets lock_timeout
+//   - set and reset (VariableSetStmt), local or session, set role included: a run-time parameter,
+//     which takes no lock, reads no row and names no table, so it cannot make a migration's lock
+//     window grow with any table, and the other statements are still held to the kinds above.
+//     A migration that bounds its own lock wait sets lock_timeout
 //     (0066_asks_handed_back_reply_fkey, 20261101182522_search_term_queue_triggers), and that
 //     line must not be what costs it an exemption the rest of its statements earn.
 //

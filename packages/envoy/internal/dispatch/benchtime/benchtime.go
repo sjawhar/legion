@@ -9,7 +9,7 @@
 // connection for the whole pair, so the cold cache is paid once and by both sides; alternating
 // runs, so a drift in the machine moves both sides together; the first run discarded, so a cache
 // fill is not counted and eleven readings decide the median; and the plan printed beside the
-// number, because A8 asks for the plan as well as the time.
+// number, because a time alone does not say why a statement costs what it costs.
 //
 // A before text is the text the caller measures against: for every pair committed here, the text
 // the release before migration 20261101182419 ran, which each package already holds as its
@@ -18,8 +18,8 @@
 // A statement whose gain needs an index or a table this change adds has no such pair: no one
 // schema holds both sides of it. Head measures the after side of those alone, and their before
 // side is the same measurement run against a database migrated from the release before this one,
-// whose migrations stop at 0157 where this change's run from 20261101182419 to 20261101182522;
-// that is protocol 2.
+// which holds none of this change's migrations, 20261101182419 to 20261101182522; that is
+// protocol 2.
 //
 // It is an ordinary package rather than a _test.go file because all three statement-owning
 // packages (api, refs, docs) run it and Go cannot share test-only code across packages, which is
@@ -158,8 +158,8 @@ func (r *Runner) Pair(t *testing.T, name string, before, after Statement) {
 // Head measures the head side of a statement that has no protocol 1 pair, because its gain needs
 // an index or a table this change adds and one schema cannot hold both sides of that. It sets no
 // bound: the before side of such a statement is this same measurement, run against a database
-// migrated from the release before this one, whose migrations stop at 0157, and seam 7's
-// two-commit run is what puts the two together.
+// migrated from the release before this one, which holds none of this change's migrations, and
+// seam 7's two-commit run is what puts the two together.
 func (r *Runner) Head(t *testing.T, name string, head Statement) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {

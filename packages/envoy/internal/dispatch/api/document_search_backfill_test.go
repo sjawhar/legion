@@ -86,13 +86,13 @@ func countRows(t *testing.T, database *store.Store, statement string) int64 {
 	return count
 }
 
-// A4. The fill, run the way a boot runs it. The three migrations of the document-search table
+// A4. The fill, run the way a boot runs it. 20261101182447's table and 20261101182454's trigger
 // are undone, and the documents are then written as a build without this change writes them,
 // with no table to fill. 20261101182447 and 20261101182454 are applied, one more version is
 // written in the window between 20261101182454 and the fill, which the trigger catches, and the
-// fill writes the rest. Search then answers what main's own statement answers over the same
-// rows, which is what says the filled table holds each document's latest version and no older
-// one.
+// fill writes the rest. Search then answers what the release before this change answers over
+// the same rows, which is what says the filled table holds each document's latest version and
+// no older one.
 func TestTheBackfillLeavesSearchAnsweringWhatMainsStatementDoes(t *testing.T) {
 	ctx := context.Background()
 	handler, database := newTestHandlerWithStore(t)
@@ -249,8 +249,8 @@ func TestAVersionCommittedWhileTheFillRunsIsNotReplacedByTheOlderOneItRead(t *te
 	notes := uploadIssueDocument(t, handler, issue.Key, "field-notes.md", "# Field notes\n\nQuagga sightings in the north.\n")
 	applyStoreMigration(t, database, documentSearchTableMigration)
 	applyStoreMigration(t, database, documentSearchTriggerMigration)
-	// Every document of the issue but this one, whose row the fill must leave alone: the
-	// issue's own spec document is a document the fill writes too.
+	// Every document with markdown, the raced one and the issue's own spec document included;
+	// the fill writes a row for each but the raced one, whose row it must leave alone.
 	documents := documentsWithMarkdown(t, database)
 
 	writing, err := database.Pool.Begin(ctx)

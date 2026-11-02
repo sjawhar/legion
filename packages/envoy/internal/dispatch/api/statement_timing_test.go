@@ -53,7 +53,7 @@ const (
 //     before side and present for the after. One database cannot be both, so each of these is
 //     measured here as its head side, with its plan, and seam 7's two-commit run takes the
 //     before side by running this same measurement against a database migrated from the release
-//     before this change, whose migrations stop at 0157.
+//     before this change, which holds none of this change's migrations.
 //
 // Every pair's before text is the text that release runs, which this package already holds as an
 // oracle - issue_list_equality_test.go, agent_activity_test.go and issue_children_test.go - read
@@ -136,10 +136,10 @@ func TestStatementTimings(t *testing.T) {
 	})
 	// The probe is the one document-arm statement whose before text runs on either schema: it
 	// reads artifact_versions through a lateral, and this release's schema still holds that
-	// table. So on the after side it is a pair, main's text and this one alternately on one
-	// database, which is the reading R6's bound is judged on and which the runner fails when
-	// the after median is not below the before. On the before side there is no after text to
-	// run, so main's own is measured alone, as the other four document-arm statements are.
+	// table. So on the after side it is a pair, the release before this change's text and this
+	// one alternately on one database, which is the reading the probe's gain is judged on and
+	// which the runner fails when the after median is not below the before. On the before side
+	// there is no after text to run, so the before text is measured alone there.
 	//
 	// The pair's subject is subjects.ProbeLexemes, the project's twenty commonest words, not
 	// the three the other statements are measured on. On three words the arm looks a handful
@@ -150,8 +150,8 @@ func TestStatementTimings(t *testing.T) {
 	// the document arm, where the two texts' plans differ: four runs there read 20.533 ms to
 	// 19.581 ms, 20.685 to 19.506, 20.648 to 19.484 and 20.626 to 19.774.
 	//
-	// The after text binds the lexemes ORed as $5; main's builds that tsquery in a CTE of its
-	// own and takes four arguments.
+	// The after text binds the lexemes ORed as $5; the before text builds that tsquery in a CTE
+	// of its own and takes four arguments.
 	mainProbeArguments := []any{subjects.Project, lexemes, "", (*string)(nil)}
 	if side.relatedProbeSQL != relatedProbeSQL {
 		runner.Head(t, "relatedProbeSQL"+label, benchtime.Statement{SQL: side.relatedProbeSQL, Args: mainProbeArguments})

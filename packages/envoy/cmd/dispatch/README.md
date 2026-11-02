@@ -1517,18 +1517,22 @@ Its census answers `0`: it reads no row, rewrites none and refuses none, and eve
 No operator follow-up.
 
 Migration `20261101182522_search_term_queue_triggers` creates the five functions and the five triggers that fill `20261101182508`'s queue:
-`asks` on `insert or delete or update of question, options, answer`, `comments` on `body`, `issues` on `key, title`, `messages` on `body` — the columns each item's search vector is built from (`0057`–`0061`)
+`asks` on `insert or delete or update of question, options, answer, search`, `comments` on `body, search`, `issues` on `key, title, search`, `messages` on `body, search` — the columns each item's search vector is built from (`0057`–`0061`) and the vector itself, since a write that sets `search` directly is a change to what the project holds and nothing else would see it
 — and `document_search` on `insert or update of search`, which is where a document's change is taken from, because `20261101182447`'s table already holds exactly the vector the refresh counts and `20261101182454`'s trigger writes it inside the `artifact_versions` write.
 The event broker advances `issues.last_seq` and `artifacts.last_seq` on every event and neither column is in a list here, so an event append queues nothing.
 Each trigger is one insert that reads no row, which is what holds the writes to the 10% this change allows them.
-Ten statements, every one a `create function` or a `create trigger`, which is what exempts the migration from the census's table-size limit (`internal/pgmigrate/exempt.go`):
+Eleven statements, a `set` and then each a `create function` or a `create trigger`, which is what exempts the migration from the census's table-size limit (`internal/pgmigrate/exempt.go`):
 the exemption is per migration and not per table, so one migration carries all five where five would have taken five lock windows and four more migrations.
 `create trigger` takes `SHARE ROW EXCLUSIVE` on its table
 — reads are not held, writes wait for the commit
 — and the five are taken in one fixed order, `asks`, `comments`, `issues`, `messages`, then `document_search`, so two migrations written to this rule cannot each hold a lock the other waits for.
 The four item tables are small (the census of 2026-10-30 gives `comments` 110 MiB and `messages` 20 MiB), and the functions, which lock no table, are created first, so the lock window is the five `create trigger` statements alone.
-Every migration's lock wait is bounded at `pgmigrate.LockTimeout`, five seconds, with `pgmigrate.LockTimeoutAttempts` attempts;
-a holder that outlives all three fails the migration and the pod's boot with it, the release before it keeps serving, and a retry is safe because the failed attempt's transaction rolled back.
+The migration still holds each table's lock while it waits for the next, and a live writer that writes two of these tables in the other order closes a cycle with it:
+a comment write that goes on to write `asks`, as for `0066`, or a version write, whose insert takes `document_search` through `20261101182454`'s trigger and whose task-progress update then takes `issues`.
+So it sets its own `lock_timeout` of 500 ms, shorter than `deadlock_timeout` (1 s by default), as `0066` does:
+it gives up first (`55P03`, nothing applied), the writer finishes, and the runner applies it again, `pgmigrate.LockTimeoutAttempts` times, three, two seconds apart, then at the next boot.
+The cost is `0066`'s too: a holder that outlasts half a second on every attempt fails that boot, an autovacuum of `asks`, `comments`, `issues` or `messages` among them where `deadlock_timeout` is not shorter, which the census refuses (below);
+the release before keeps serving, and a retry is safe because the failed attempt's transaction rolled back.
 Its census answers `0`: a trigger runs only on later writes and rewrites no row already stored.
 The operator follow-up is the queue itself:
 each row carries a copy of an item's old vector, a 660 KB document's included, so if the refresh loop stops, `select count(*) from search_term_queue` grows, and the recovery is a full build, which the refresh already runs for a project whose snapshot is null.
@@ -1596,8 +1600,8 @@ It refuses:
 
 - a table a migration names above 1 GiB (`pgmigrate.CensusTableLimit`, table, indexes and TOAST), whose rows it then does not count:
   a migration that locks a table that size needs another shape (`CONCURRENTLY`, batches).
-  A migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, or a `create trigger`, as Postgres's own parser reads them (libpg_query, run in pure Go by `github.com/wasilibs/go-pgquery`), is exempt:
-  each does its work in the catalog and reads no row of the table, so the time it holds its lock does not grow with the table.
+  A migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, a `create trigger`, or a `set` or `reset` of a run-time parameter, as Postgres's own parser reads them (libpg_query, run in pure Go by `github.com/wasilibs/go-pgquery`), is exempt:
+  each does its work in the catalog or in the session's settings and reads no row of the table, so the time it holds its lock does not grow with the table, and a migration that bounds its own lock wait with `set local lock_timeout` keeps the exemption its other statements earn.
   A function in another language is not exempt, since creating a C function loads its library, which can run any code;
   and no migration is exempt while an enabled event trigger runs on `create function`, `create procedure` or `create trigger`, since it runs code of its own, and the size refusal then names it.
   The report still prints the table's size beside the limit and says why the migration is exempt, and its lock holders refuse it as they refuse any other.
@@ -1619,7 +1623,7 @@ It refuses:
 - an autovacuum worker holding a lock on a touched table, only when Postgres will not cancel it for the migration.
   Postgres cancels an autovacuum that holds a lock another session waits for once that session has waited `deadlock_timeout`, so an autovacuum passes at any age, with the grant or without (to a role without it, autovacuum is the holder that runs as no role), except an anti-wraparound vacuum, which Postgres does not cancel, or one on a server whose `deadlock_timeout` is not shorter than a lock timeout the migration waits under:
   the runner's five seconds, or the one its own `SET LOCAL lock_timeout` sets, which Postgres reads in a savepoint of the census's (a value it refuses there refuses the migration).
-  `0066` sets 500 ms, so an autovacuum on `asks` or `comments` refuses it at the default one second.
+  `0066` sets 500 ms, so an autovacuum on `asks` or `comments` refuses it at the default one second, and `20261101182522_search_term_queue_triggers` sets the same, so an autovacuum on `asks`, `comments`, `issues` or `messages` refuses it.
   Postgres marks a vacuum anti-wraparound when it launches it, in its activity, which only a role with `pg_read_all_stats` can read, and which Postgres records only with `track_activities` on;
   where the census cannot read it, it refuses every vacuum of a table past its freeze age (`age(relfrozenxid)` or the multixact age at its `autovacuum_freeze_max_age`), one launched before the table passed it included;
 

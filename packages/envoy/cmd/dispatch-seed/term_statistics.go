@@ -15,24 +15,25 @@ import (
 
 // The term-statistics build of the release before migration 20261101182515, and the choice
 // between it and this release's. This command ends a seed with one build for every project,
-// and the measurement protocol runs it with --no-migrate against a database migrated from main
-// as well as against one migrated to this head. Main's search_term_totals carries no snapshot
-// column and its schema no search_term_queue, so this release's build reads columns and tables
-// that are not there: every project of such a database would fail, and the seed would report a
-// data set whose term statistics were never built.
+// and the measurement protocol runs it with --no-migrate against a database migrated from that
+// release as well as against one migrated to this head. That release's search_term_totals
+// carries no snapshot column and its schema no search_term_queue, so this release's build reads
+// columns and tables that are not there: every project of such a database would fail, and the
+// seed would report a data set whose term statistics were never built.
 //
-// The statements below are a literal copy of main's refreshSearchTermStats, nothing built from
-// this release's own constants: built from them, an edit to one would move this copy with it and
-// the server's equality tests, which hold this release's build to what main's writes, would hold
-// nothing. api/related_terms_oracle_test.go holds the same copy as the oracle of those tests. Two
-// copies of a released text cannot drift, because the text they copy is frozen: main's release is
-// out and this is what it ran.
+// The statements below are a literal copy of that release's refreshSearchTermStats, nothing
+// built from this release's own constants: built from them, an edit to one would move this copy
+// with it and the server's equality tests, which hold this release's build to what the release
+// before writes, would hold nothing. api/related_terms_oracle_test.go holds the same copy as the
+// oracle of those tests. Two copies of a released text cannot drift, because the text they copy
+// is frozen: that release is out and this is what it ran.
 
-// searchTermItemsBeforeSnapshotsSQL is main's searchTermItemsSQL, which {project} stands in for
-// the project key of as it does there. It differs from this release's in its document arm alone,
-// which reads every artifact's latest version through a lateral join over artifact_versions where
-// this release's reads document_search (migration 20261101182447): a database at main's schema
-// has no document_search, and one at this head answers the same rows through either.
+// searchTermItemsBeforeSnapshotsSQL is the release before's searchTermItemsSQL, which {project}
+// stands in for the project key of as it does there. It differs from this release's in its
+// document arm alone, which reads every artifact's latest version through a lateral join over
+// artifact_versions where this release's reads document_search (migration 20261101182447): a
+// database at that release's schema has no document_search, and one at this head answers the
+// same rows through either.
 const searchTermItemsBeforeSnapshotsSQL = `
 select i.search from issues i where i.project_key = {project}
 union all
@@ -52,17 +53,17 @@ select k.search from asks k
 union all
 select m.search from messages m join issues i on i.key = m.issue_key where i.project_key = {project}`
 
-// searchTermItemsBeforeSnapshotsTSStat is main's searchTermItemsTSStat: the items statement as
-// the format() string ts_stat's query is built from in SQL, %1$L quoting the project key as a
-// literal so the key never enters SQL text by Go concatenation.
+// searchTermItemsBeforeSnapshotsTSStat is the release before's searchTermItemsTSStat: the items
+// statement as the format() string ts_stat's query is built from in SQL, %1$L quoting the project
+// key as a literal so the key never enters SQL text by Go concatenation.
 var searchTermItemsBeforeSnapshotsTSStat = strings.ReplaceAll(searchTermItemsBeforeSnapshotsSQL, "{project}", "%1$L")
 
-// searchTermStatsBeforeSnapshotsPrelude is the three statements main's refresh runs before its
-// rebuild, in the order it runs them: the claim that makes the project's totals row exist, the
-// row lock that serialises two refreshes of one project, and the clear of the project's lexemes
-// the rebuild then writes again. The row the claim writes carries items and refreshed_at and
-// nothing else, which is every column main's search_term_totals has. Each takes the project key
-// as $1.
+// searchTermStatsBeforeSnapshotsPrelude is the three statements that release's refresh runs
+// before its rebuild, in the order it runs them: the claim that makes the project's totals row
+// exist, the row lock that serialises two refreshes of one project, and the clear of the
+// project's lexemes the rebuild then writes again. The row the claim writes carries items and
+// refreshed_at and nothing else, which is every column that release's search_term_totals has.
+// Each takes the project key as $1.
 var searchTermStatsBeforeSnapshotsPrelude = []string{
 	`insert into search_term_totals (project_key, items, refreshed_at) values ($1, 0, now())
 on conflict (project_key) do nothing`,
@@ -70,8 +71,8 @@ on conflict (project_key) do nothing`,
 	`delete from search_term_stats where project_key = $1`,
 }
 
-// searchTermStatsRebuildBeforeSnapshots is main's searchTermStatsRebuild, the statement the
-// release before this one runs for every project every ten minutes. It writes items and
+// searchTermStatsRebuildBeforeSnapshots is the release before's searchTermStatsRebuild, the
+// statement that release runs for every project every ten minutes. It writes items and
 // refreshed_at and nothing else: it takes no snapshot, leaves whatever snapshot the row holds in
 // place, and drops no queued change.
 //
@@ -93,9 +94,9 @@ returning items`
 //
 // The schema is read once, from the catalogue, rather than by running this release's build and
 // falling back on its error: an error-driven fallback cannot tell a missing column from a real
-// failure, so a build that failed for its own reason would be retried as main's and write
-// statistics nobody asked for, where this step has to fail its command when the build genuinely
-// fails.
+// failure, so a build that failed for its own reason would be retried as the release before's
+// and write statistics nobody asked for, where this step has to fail its command when the build
+// genuinely fails.
 const searchTermTotalsSnapshotColumn = `select exists (
   select 1 from information_schema.columns
    where table_schema = current_schema() and table_name = 'search_term_totals'
@@ -105,8 +106,8 @@ const searchTermTotalsSnapshotColumn = `select exists (
 // schemas the database carries, and is what this command's last step calls: a database migrated
 // to this head is built by api.RefreshEverySearchTermStats, exactly as a running server builds
 // it, so the first measured pass over the seeded data is a step pass and not a first-use full
-// build; a database migrated from main, which the measurement protocol seeds with --no-migrate,
-// is built by main's own four statements.
+// build; a database migrated from the release before, which the measurement protocol seeds with
+// --no-migrate, is built by that release's own four statements.
 //
 // A project whose build fails is logged and the rest are built, as a server's pass does it. The
 // caller's own count of the rows built is what fails the command: a build runs in one
@@ -123,9 +124,9 @@ func buildEverySearchTermStats(ctx context.Context, pool *store.Pool) error {
 	return buildEverySearchTermStatsBeforeSnapshots(ctx, pool)
 }
 
-// buildEverySearchTermStatsBeforeSnapshots is one whole pass of main's build: every project, each
-// in its own transaction, and no sweep of the queued changes, which is a table main's schema does
-// not have.
+// buildEverySearchTermStatsBeforeSnapshots is one whole pass of the release before's build: every
+// project, each in its own transaction, and no sweep of the queued changes, which is a table that
+// release's schema does not have.
 func buildEverySearchTermStatsBeforeSnapshots(ctx context.Context, pool *store.Pool) error {
 	started := time.Now()
 	projects, err := searchTermStatsProjects(ctx, pool)
@@ -164,8 +165,8 @@ func searchTermStatsProjects(ctx context.Context, pool *store.Pool) ([]string, e
 
 // refreshSearchTermStatsBeforeSnapshots rebuilds one project's statistics as the release before
 // this one does it: the claim, the row lock, the clear and the counting rebuild, the four
-// statements of main's refreshSearchTermStats, in one transaction. It answers the project's item
-// count, the picker's N.
+// statements of that release's refreshSearchTermStats, in one transaction. It answers the
+// project's item count, the picker's N.
 func refreshSearchTermStatsBeforeSnapshots(ctx context.Context, pool *store.Pool, project string) (int, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {

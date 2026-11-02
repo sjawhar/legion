@@ -76,16 +76,17 @@ func seedTestDatabase(t *testing.T) (*store.Store, *seedRun) {
 }
 
 // TestSeedBuildsTermStatisticsOnMainsSchema seeds the shape the measurement protocol's "before"
-// side seeds: a database migrated from a checkout of main, filled by this tool with
-// --no-migrate. Its search_term_totals carries no snapshot column (migration 20261101182515)
-// and the build of this release reads one, so without the step choosing its build by the schema
-// every project fails and the seed reports a data set whose term statistics were never built.
+// side seeds: a database migrated from a checkout of the release before this change, filled by
+// this tool with --no-migrate. Its search_term_totals carries no snapshot column (migration
+// 20261101182515) and the build of this release reads one, so without the step choosing its
+// build by the schema every project fails and the seed reports a data set whose term statistics
+// were never built.
 //
 // The two columns are dropped from a database migrated to the head rather than the schema being
-// migrated from main, because a test process has no checkout of main to migrate from. Dropping
-// them leaves search_term_totals the shape migration 0139 gave it, which is the shape the step
-// reads the catalogue for; the rest of main's schema is older still, and the step's build reads
-// nothing of it that this head does not also have.
+// migrated from that release, because a test process has no checkout of it to migrate from.
+// Dropping them leaves search_term_totals the shape migration 0139 gave it, which is the shape
+// the step reads the catalogue for; the rest of that release's schema is older still, and the
+// step's build reads nothing of it that this head does not also have.
 func TestSeedBuildsTermStatisticsOnMainsSchema(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
@@ -109,8 +110,8 @@ func TestSeedBuildsTermStatisticsOnMainsSchema(t *testing.T) {
 		t.Fatalf("the term statistics were built for %d projects, not %d", built, len(run.plan.projects))
 	}
 	// Every project's row holds a counted item total and the moment it was counted, which is
-	// every column main's search_term_totals has, and lexemes to go with it: a row claimed and
-	// never rebuilt would carry 0 items and no statistics.
+	// every column that release's search_term_totals has, and lexemes to go with it: a row
+	// claimed and never rebuilt would carry 0 items and no statistics.
 	var unbuilt int
 	if err := database.Pool.QueryRow(ctx, `
 		select count(*) from projects p

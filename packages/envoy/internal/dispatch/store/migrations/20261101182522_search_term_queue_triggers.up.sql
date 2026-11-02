@@ -44,18 +44,23 @@
 -- Under the runner's five-second bound either side can lose that race, and the runner retries
 -- only 55P03 (store/store.go RetryLockTimeouts), so a deadlock either answers a request 500 or
 -- fails the boot. Half a second, shorter than deadlock_timeout (1 s by default), makes this
--- migration give up first instead, before either deadlock check runs: it fails the boot with
--- 55P03 having applied nothing, the writer finishes, and the next boot applies it. This is 0074's
+-- migration give up first instead, before either deadlock check runs: it fails with 55P03 having
+-- applied nothing, the writer finishes, and the runner applies it again, up to
+-- pgmigrate.LockTimeoutAttempts times in the same boot, then at the next boot. This is 0074's
 -- rule - never hold one table's lock while waiting for another's - kept the way 0066 keeps it.
+-- It carries 0066's cost too: Postgres cancels an autovacuum that holds a lock only after the
+-- waiter has waited deadlock_timeout, so an autovacuum of asks, comments, issues or messages
+-- outlasts this migration's wait. The census refuses the migration while one holds a lock on
+-- those tables (internal/pgmigrate/census.go, cancelsAutovacuum), and one that holds it through
+-- every attempt fails that boot; the release before keeps serving, and the next boot applies it.
 --
 -- The pre-deploy census exempts the migration from its table-size limit because every statement
--- in it is a create function or a create trigger
+-- in it is a set, a create function or a create trigger
 -- (internal/pgmigrate/exempt.go tableSizeExemption), and the exemption is per migration, not per
 -- table; the four item tables are small (the census of 2026-10-30 gives comments 110 MiB and
 -- messages 20 MiB), and document_search is this release's own table. `create trigger` takes
 -- SHARE ROW EXCLUSIVE on its table: a read is not held, every write of that table waits for the
--- commit, and the migration waits for the writes already in flight, bounded by
--- pgmigrate.LockTimeout.
+-- commit, and the migration waits for the writes already in flight, for the half second above.
 --
 -- The functions come first and the triggers after, because creating a plpgsql function writes
 -- pg_proc and locks no table, so the lock window is the five create trigger statements alone.

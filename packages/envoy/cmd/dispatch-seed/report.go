@@ -19,8 +19,9 @@ import (
 // be measuring a first-use full build.
 //
 // The build is the one the database's own schema carries: the measurement protocol seeds a
-// database migrated from main with --no-migrate and this tool, where the refresh of this release
-// reads a search_term_totals column and a queue table that are not there.
+// database migrated from the release before this change with --no-migrate and this tool, where
+// the refresh of this release reads a search_term_totals column and a queue table that are not
+// there.
 func (r *seedRun) buildTermStatistics(ctx context.Context) error {
 	if err := buildEverySearchTermStats(ctx, r.database.Pool); err != nil {
 		return err
