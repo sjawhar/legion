@@ -218,6 +218,9 @@ func startBrokerPairDraining(t *testing.T, binary string, drains [2]time.Duratio
 			Binary:             binary,
 			NoWaitForListening: true,
 			Env: append([]string{
+				// These rows log machines in through the device grant, so the page a person
+				// types the code into is named; it is optional and off by default.
+				"BROKER_MACHINE_LOGIN_URL=" + testMachineLoginURL,
 				"BROKER_DATABASE_URL=" + pair.DatabaseURL,
 				"BROKER_LISTEN_ADDR=127.0.0.1:0",
 				"BROKER_PUBLIC_URL=" + multiprocessPublicURL,
@@ -325,6 +328,8 @@ func startSoloBroker(t *testing.T, binary string, drain time.Duration) *soloBrok
 		Binary:             binary,
 		NoWaitForListening: true,
 		Env: append([]string{
+			// As the pair's: this row logs a machine in through the device grant.
+			"BROKER_MACHINE_LOGIN_URL=" + testMachineLoginURL,
 			"BROKER_DATABASE_URL=" + solo.DatabaseURL,
 			"BROKER_LISTEN_ADDR=127.0.0.1:0",
 			"BROKER_PUBLIC_URL=http://127.0.0.1:0",

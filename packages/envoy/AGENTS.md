@@ -4591,23 +4591,32 @@ A check neither answers a person nor stops the broker.
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required, and the only database variable:
 nothing is substituted into it; a URL naming a user and no password whose host ends in `.rds.amazonaws.com`, for which `pgconn.ParseConfig` finds no password (none in the URL, `PGPASSWORD` or a passfile), sets `Config.DatabaseIAM` and must read as that one host with `sslmode=verify-full` and an `sslrootcert` file's pool (not `sslrootcert=system`), or `Load` refuses naming the host and never the URL;
 `cmd/broker` then loads the AWS config once, before `store.Open`, and passes `store.WithTokenMinter(rdsAuthTokens(awsCfg))` (`cmd/broker/rdsauth.go`, so `internal/broker/store` imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new connection), `BROKER_PUBLIC_URL` (required;
-absolute URL, no path — the broker's own address, the request object's `aud` and the launcher proof's `htu`), `BROKER_MACHINE_LOGIN_URL` (required, and unchanged by the approval page;
-absolute http(s) URL — Dispatch's `/credentials/machine` page, the device grant's `verification_uri`, where a person types a machine login's code), `BROKER_SIGNIN_ISSUER` / `BROKER_SIGNIN_CLIENT_ID` / `BROKER_SIGNIN_CLIENT_SECRET_FILE` / `BROKER_SIGNIN_DOMAIN` (all four required, `config.SignInSettings` in that order;
+absolute URL, no path — the broker's own address, the request object's `aud` and the launcher proof's `htu`), `BROKER_MACHINE_LOGIN_URL` (optional, and unchanged by the approval page;
+absolute http(s) URL — Dispatch's `/credentials/machine` page, the device grant's `verification_uri`, where a person types a machine login's code.
+Unset, there is no page to send a person to, so the broker composes no device grant at all (`oauth.New`, which validates the URL only when it is given): `POST /v1/oauth/device_authorization` is not mounted and answers 404, the token endpoint answers `unsupported_grant_type` for a device code, and the metadata document below names neither the device code nor a device authorization endpoint, while the token exchange, introspection and revocation are served as ever.
+A boot logs which of the two it is, `machine login device grant state=on verification_uri=…` or `state=off`.
+Set, the device grant is what it has always been), `BROKER_SIGNIN_ISSUER` / `BROKER_SIGNIN_CLIENT_ID` / `BROKER_SIGNIN_CLIENT_SECRET_FILE` / `BROKER_SIGNIN_DOMAIN` (all four required, `config.SignInSettings` in that order;
 the broker's own OpenID Connect client, through which a person signs in to the approval page, and the Workspace domain an ID token's `hd` must name beside a verified email.
 The issuer is an absolute `https` URL, or `http` only to a loopback host for a run on one machine, and its discovery document is read at each client check, the first of which `cmd/broker` takes at startup, and for the page at the first sign-in each process serves, kept once a read succeeds (`oidc.CodeFlow`'s own discovery, which retries a failed read at most every 5 s); a read that fails stops neither the boot nor the machines the broker serves, so a provider outage never stops it serving them.
 The secret is read from the file at startup and trimmed, through the `_FILE` convention below; a bare `BROKER_SIGNIN_CLIENT_SECRET` is one of the removals `Load` refuses, so the secret is never in the environment.
 `parseSignIn` collects every missing one and refuses with all of them named, `the broker's approval page needs <the four>; missing <those unset>`, so a half-configured deployment learns the whole gap at once), `BROKER_SIGNIN_SESSION_SECONDS` (default 86400, min 1, max 86400;
 how long one sign-in lasts from the moment it is made, never extended — `broker end-sessions <login>` is what ends them sooner), `BROKER_API_ACCOUNTS` (optional;
-whitespace-separated `<caller>=<service account>` entries, such as `dispatch=system:serviceaccount:example-ns:example-dispatch`:
-the ServiceAccounts that reach the routes `accountAuth` authenticates
+whitespace-separated `<caller>=<account>` entries, each account of one of two kinds.
+A Kubernetes service account is written as the subject its projected token carries, `dispatch=system:serviceaccount:example-ns:example-dispatch`;
+a Google service account is written as `google:` and the account's address, `listener=google:example-listener@example-project.iam.gserviceaccount.com`.
+The kinds are told apart by the entry's own text and never by guessing at its shape: a Kubernetes subject already names its kind, and the `google:` tag names the other, so an address with a typo in it is refused as the kind it was written as.
+These are the accounts that reach the routes `accountAuth` authenticates
 — the machine-login and revoke routes Dispatch's server calls on a person's behalf, the lists it reads, and the introspection route a resource server reads an access token back through.
-Each caller presents its own projected token for `BROKER_K8S_OIDC_AUDIENCE`, verified against `BROKER_K8S_OIDC_ISSUER` as every other ServiceAccount token is, so this needs that pair;
-a token living longer than an hour from its issue is refused, as a service login's is.
+A Kubernetes caller presents its own projected token for `BROKER_K8S_OIDC_AUDIENCE`, verified against `BROKER_K8S_OIDC_ISSUER` as every other ServiceAccount token is, and is looked up by the token's `sub`, so an entry of that kind needs that pair;
+a Google caller presents its machine's own identity token for `BROKER_GOOGLE_OIDC_AUDIENCE` — the one audience every machine of the deployment already holds a token for, so the Envoy listener on a VM presents what its metadata server already hands it and no VM mints a second token — verified against `BROKER_GOOGLE_OIDC_ISSUER`, and is looked up by the token's `email`, so an entry of that kind needs `BROKER_GOOGLE_OIDC_AUDIENCE` (and that audience needs `BROKER_VM_SERVICES`, below) and no cluster at all.
+Which verifier judges a presented token is the token's own issuer, so neither kind is ever judged by the other's verifier.
+A token living longer than an hour from its issue is refused, as a service login's is.
 The caller's name (lowercase letters, digits and hyphens, at most 64) decides what that account may do:
 the broker's own table (`api.AccountFor`, `internal/broker/api/routes_table.go`) knows `dispatch`, which reaches every one of those routes, and `listener`, which reaches `POST /v1/oauth/introspect` alone, since the Envoy listener reads a token back and relays no person's decision.
 A name that table does not know refuses the boot, naming it and the names it knows, so a typo never becomes a listed caller that reaches nothing and a new caller is a deliberate edit to that table.
-A namespace's `default` account is refused, as is an account given twice, since each account names one caller.
-Keyed by account, each answering its caller and that caller's powers.
+A namespace's `default` account is refused, as is a Google address no machine may prove — a project's default accounts and Google-managed service agents, the rule `BROKER_VM_SERVICES` holds its accounts to — and so is an account given twice, since each account names one caller.
+Keyed by account, Kubernetes entries in `Config.APIAccounts` and Google ones in `Config.GoogleAPIAccounts`, each answering its caller and that caller's powers.
+The refusals are one taxonomy for both kinds: `401 ACCOUNT_TOKENS_OFF` for a broker told about neither issuer, `401 ACCOUNT_TOKEN_EXPIRED`, `401 ACCOUNT_TOKEN_INVALID` (a token that does not verify, one of no issuer the broker trusts, and a Google token naming no verified `email`, since that claim is what names the caller), `401 ACCOUNT_TOKEN_TOO_LONG_LIVED`, and `403 ACCOUNT_NOT_LISTED` for a sound token of an account the setting does not name.
 Unset, no caller reaches those routes, which is how a local run without a cluster leaves them), `BROKER_SECRETS_STORE` (optional;
 `aws-secrets-manager`, the default, or `gcp-secret-manager`:
 which store the secrets live in, deciding the prefix's form and which key variable is read), `BROKER_SECRETS_PREFIX` (required;
@@ -4733,21 +4742,32 @@ It also checks where those codes are produced:
 every helper `Response` literal that is not `OK: true` must name its fields and set `Code` to a documented `Code*` constant, and every `int`-returning function in `cmd/agent-secrets` (and every `os.Exit` there) may return only `0`, `1`, a documented `exit*` constant or another such function's result.
 The CLI reference is the built binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 40 HTTP routes
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 41 HTTP routes
 — a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the contract for every row is the broker's design overview.
+`GET /.well-known/oauth-authorization-server` is the broker's RFC 8414 authorization server metadata, a `public` row, since it is what a client reads before it holds any credential (`internal/broker/api/handlers_metadata.go`):
+`issuer` and every endpoint built from `BROKER_PUBLIC_URL` as the broker resolved it, as every other absolute URL the broker writes is;
+`token_endpoint`, `introspection_endpoint` and `revocation_endpoint`, each a route a caller could not otherwise find;
+`device_authorization_endpoint`, only while the broker serves the device grant;
+`grant_types_supported`, the refresh grant and the RFC 8693 exchange always and the device code only then, written out because RFC 8414's default for it is the authorization code and implicit grants, which this broker does not have;
+`response_types_supported`, which is empty, RFC 8414 requiring the member of a server that has no authorization endpoint as much as of one that has;
+`token_endpoint_auth_methods_supported`, `["none"]`, written out because its default is `client_secret_basic` and neither registered client presents a credential;
+`dpop_signing_alg_values_supported` (RFC 9449 Section 5.1), read off the composed provider, since a client that cannot sign a proof the broker takes gets no token at all;
+and `subject_token_types_supported`, the broker's own member — RFC 8693 registers none and RFC 8414 names nothing of the kind, so it is named after RFC 8693's own `subject_token_type` parameter — listing the types this deployment's exchange registered, which is what a caller puts in that parameter.
+The grants, the token types and the algorithms are read from the provider that serves them (`oauth.Provider.GrantTypes`, `SubjectTokenTypes`, `DPoPSigningAlgorithms`, `DeviceGrant`), and `api`'s own `TestTheMetadataPathsAreRoutesTheBrokerMounts` holds every path the document names to a row of the table, so the document cannot name an endpoint the broker does not mount.
+The row is mounted only with the OAuth provider, as the `/v1/oauth/` rows are.
 Each row's handler is wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `renewAuth`, `accountAuth`, `accountAuthAfterRecordKind`, `serviceAuth`, `signInAuth`), which fixes both the credential `server.authenticate` checks and the caller the handler receives (a launcher `enroll.Credential`, an enrollment id, the `approval.Session` a `signInAuth` row's page reads, or, for an `accountAuth` route, the name `BROKER_API_ACCOUNTS` gives the calling service
 — which is all that credential says, so every such handler takes its subject from the path or body:
 a decision or a revoke names the deciding human in `approver`, and a list the person it lists for in `?approver=`, which Dispatch filled from its own session;
 an empty one is `400 APPROVER_REQUIRED`.
 That word is good for a machine login's decision and a revoke alone; a secret request's approve and deny refuse every caller `403 DECIDE_ON_BROKER_PAGE`, and the person decides it on a `signInAuth` row instead), so a handler cannot be wired to the wrong kind of caller.
-A bad credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `accountAuth`, `ACCOUNT_TOKENS_OFF` on a broker that trusts no Kubernetes issuer, `ACCOUNT_TOKEN_EXPIRED`, `ACCOUNT_TOKEN_INVALID` and `ACCOUNT_TOKEN_TOO_LONG_LIVED` for a token that names no `iat` or whose `exp` lies more than `machine.MaxTokenLoginLifetime` plus the proof skew past it, with two 403s:
+A bad credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `accountAuth`, `ACCOUNT_TOKENS_OFF` on a broker told about neither issuer its callers present a token from, `ACCOUNT_TOKEN_EXPIRED`, `ACCOUNT_TOKEN_INVALID` and `ACCOUNT_TOKEN_TOO_LONG_LIVED` for a token that names no `iat` or whose `exp` lies more than `machine.MaxTokenLoginLifetime` plus the proof skew past it, with two 403s:
 `ACCOUNT_NOT_LISTED`, for a sound token of an account `BROKER_API_ACCOUNTS` does not name
 — the credential is good and it is the broker's list that refuses
 — and `ACCOUNT_LACKS_POWER`, for a listed caller reaching a route its name does not carry, naming that caller and that route.
 No refusal repeats the token.
 Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`) or `relaysDecisions` (the twelve routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through, the two decide rows and the two person sign-in rows among them), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on an `accountAuth` row that declares none).
 The two `accountAuthAfterRecordKind` rows declare `relaysDecisions` as well, and `decideRecord` checks it against that same table once it has read the record's kind and authenticated its own caller, since `authenticate` reads no credential for them; that test passes over them, being no `accountAuth` rows, and `cmd/broker/account_powers_test.go` is what pins them, driving each as the `listener` caller and reading `403 ACCOUNT_LACKS_POWER`.
-`accountCaller` is the check a daemon's token login makes (`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy);
+`accountCaller` is the check a daemon's token login makes (`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy, and it takes a Google identity token as well as a Kubernetes one, judged by whichever verifier the token's own issuer names (`BROKER_API_ACCOUNTS`, above));
 `serviceAuth` is that same check, taken as the whole of a route's authentication:
 the handler is given the service `BROKER_SERVICE_LOGINS` says the calling account logs in as, a token of an account that list does not name is `403 ACCOUNT_NOT_LISTED` and every other refusal is `accountCaller`'s, and the class holds `POST /v1/oauth/exchange/pod-sessions` alone.
 It is a class rather than a power of `accountAuth`'s because the two lists are two authorities:
@@ -4836,6 +4856,10 @@ Revoking ends all three in one transaction (`enroll.Service.RevokePersonSignIn`)
 Only access tokens, since an exchanged trade is answered no refresh token.
 `GET /v1/person-signins?person=<email>` lists a person's live sign-ins by machine and `POST /v1/person-signins/{id}/revoke` (body `{"person"}`) ends one (`handlers_ui_personsignin.go`);
 both are `accountAuth(relaysDecisions)`, the power only `dispatch` holds, and both name the person the caller gives, which Dispatch filled from its own session, as every relayed list and revoke does — an empty one is `400 PERSON_REQUIRED`, and a sign-in of anyone else is answered `404 NOT_FOUND` as an id nothing has, so nobody learns another person's sign-ins by trying ids.
+That sign-in's credential is on the sign-ins list and on no other: `enroll.Service.LiveCredentials` drops it and `RevokeCredential` answers `ErrNoCredential` for it, both by reading its `subject` (`exchange.PersonSubject`, `PersonSubjectAccount`), so `GET /v1/launcher-credentials` never lists it and `POST /v1/launcher-credentials/{id}/revoke-by-approver` answers `404 NOT_FOUND` for it.
+It names its fleet's service, which is what put it on the machine-logins list before, where `record.MayDecide` lets anyone signed in end a service's login — and ending it alone ended nothing, the `person_signins` row minting it again at the box's next trade.
+The fix is in the two readers of `launcher_credentials` rather than in `MayDecide`, which judges a record's kind, approver and service and is given no subject: a sign-in's credential has no record at all, and the fact that tells it apart is the subject it is keyed by.
+
 The minted token names the person and, as the `machine` claim and the introspection answer's `machine` field, the machine's account;
 the RFC 8693 `act` claim the library writes beside it records the same delegation as the actor token's own subject spells it.
 

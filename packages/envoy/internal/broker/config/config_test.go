@@ -71,15 +71,31 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
-// TestLoadRequiresMachineLoginURL: the page a person types a machine login's code into is
-// required, and must be an absolute http(s) URL, since the device grant names it to the machine.
-func TestLoadRequiresMachineLoginURL(t *testing.T) {
-	for _, v := range []string{"", "/credentials/machine", "dispatch.example/credentials/machine", "ftp://dispatch.example/x", "https:///x"} {
+// TestTheMachineLoginURLIsOptionalAndHeldToItsForm: the page a person types a machine login's
+// code into is not required — a broker without it serves no device grant and starts all the
+// same, which is the deployment whose machines hold a cloud identity and whose people never
+// type a code — and a page that is given must still be an absolute http(s) URL, since the
+// device grant names it to the machine.
+func TestTheMachineLoginURLIsOptionalAndHeldToItsForm(t *testing.T) {
+	for _, v := range []string{"/credentials/machine", "dispatch.example/credentials/machine", "ftp://dispatch.example/x", "https:///x"} {
 		e := validEnv()
 		e["BROKER_MACHINE_LOGIN_URL"] = v
 		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_MACHINE_LOGIN_URL") {
 			t.Errorf("Load(BROKER_MACHINE_LOGIN_URL=%q) = %v, want a refusal naming it", v, err)
 		}
+	}
+	for _, unset := range []string{"", "   "} {
+		e := validEnv()
+		e["BROKER_MACHINE_LOGIN_URL"] = unset
+		cfg, err := Load(env(e))
+		if err != nil || cfg.MachineLoginURL != "" {
+			t.Errorf("Load(BROKER_MACHINE_LOGIN_URL=%q) = (%q, %v), want a broker that starts with no machine login page", unset, cfg.MachineLoginURL, err)
+		}
+	}
+	e := validEnv()
+	delete(e, "BROKER_MACHINE_LOGIN_URL")
+	if cfg, err := Load(env(e)); err != nil || cfg.MachineLoginURL != "" {
+		t.Fatalf("Load with no BROKER_MACHINE_LOGIN_URL = (%q, %v), want a broker that starts with no machine login page", cfg.MachineLoginURL, err)
 	}
 	cfg, err := Load(env(validEnv()))
 	if err != nil || cfg.MachineLoginURL != "https://dispatch.internal.example/credentials/machine" {
@@ -1181,18 +1197,22 @@ func withK8sIssuer() map[string]string {
 	return e
 }
 
+// exampleListenerAccount is the placeholder Google service account a listed caller on a VM runs
+// as, as BROKER_API_ACCOUNTS names it; this repository is public, so no real account appears.
+const exampleListenerAccount = "example-listener@example-project.iam.gserviceaccount.com"
+
 // TestLoadReadsTheAPIAccounts pins BROKER_API_ACCOUNTS: whitespace-separated <caller>=<account>
 // entries keyed by account, each answering the caller and the powers its name carries, none when
-// unset, and refusals naming the entry for one that is not of that form, a namespace's default
-// account and an account named twice. It needs the cluster issuer, since the broker verifies
-// those callers' tokens against it.
+// unset, and refusals naming the entry for one that is not of either form, a namespace's default
+// account and an account named twice. A Kubernetes entry needs the cluster issuer, since the
+// broker verifies that caller's token against it.
 func TestLoadReadsTheAPIAccounts(t *testing.T) {
 	cfg, err := Load(env(validEnv()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.APIAccounts != nil {
-		t.Fatalf("APIAccounts = %v, want nil when BROKER_API_ACCOUNTS is unset", cfg.APIAccounts)
+	if cfg.APIAccounts != nil || cfg.GoogleAPIAccounts != nil {
+		t.Fatalf("APIAccounts = %v and GoogleAPIAccounts = %v, want neither when BROKER_API_ACCOUNTS is unset", cfg.APIAccounts, cfg.GoogleAPIAccounts)
 	}
 	e := withK8sIssuer()
 	e["BROKER_API_ACCOUNTS"] = " dispatch=system:serviceaccount:example-ns:example-dispatch\nlistener=system:serviceaccount:example-ns:example-listener "
@@ -1206,8 +1226,8 @@ func TestLoadReadsTheAPIAccounts(t *testing.T) {
 		"system:serviceaccount:example-ns:example-dispatch": dispatchCaller,
 		"system:serviceaccount:example-ns:example-listener": listenerCaller,
 	}
-	if !maps.Equal(cfg.APIAccounts, want) {
-		t.Fatalf("APIAccounts = %v, want %v", cfg.APIAccounts, want)
+	if !maps.Equal(cfg.APIAccounts, want) || cfg.GoogleAPIAccounts != nil {
+		t.Fatalf("APIAccounts = %v and GoogleAPIAccounts = %v, want %v and no Google caller", cfg.APIAccounts, cfg.GoogleAPIAccounts, want)
 	}
 	for _, bad := range []string{
 		"dispatch", "=system:serviceaccount:a:b", "Dispatch=system:serviceaccount:a:b",
@@ -1228,6 +1248,71 @@ func TestLoadReadsTheAPIAccounts(t *testing.T) {
 	e["BROKER_API_ACCOUNTS"] = "dispatch=system:serviceaccount:example-ns:example-dispatch"
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_K8S_OIDC_ISSUER") {
 		t.Errorf("BROKER_API_ACCOUNTS with no token issuer: err = %v, want a refusal naming BROKER_K8S_OIDC_ISSUER", err)
+	}
+}
+
+// TestLoadReadsAGoogleAPIAccount pins the other kind of BROKER_API_ACCOUNTS entry: an account
+// written google:<address> is a Google service account, kept apart from the Kubernetes accounts
+// and keyed by the address its identity token carries in email, which is how the Envoy listener
+// calls from a VM that holds no Kubernetes token. It needs BROKER_GOOGLE_OIDC_AUDIENCE, the
+// audience that token must carry, and not the cluster's issuer; a Google address no machine may
+// prove is refused here as BROKER_VM_SERVICES refuses it; and the two kinds live side by side.
+func TestLoadReadsAGoogleAPIAccount(t *testing.T) {
+	listenerCaller, _ := api.AccountFor("listener")
+	dispatchCaller, _ := api.AccountFor("dispatch")
+
+	e := validVMEnv()
+	e["BROKER_API_ACCOUNTS"] = "listener=google:" + exampleListenerAccount
+	cfg, err := Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantGoogle := map[string]api.Account{exampleListenerAccount: listenerCaller}
+	if !maps.Equal(cfg.GoogleAPIAccounts, wantGoogle) || cfg.APIAccounts != nil {
+		t.Fatalf("GoogleAPIAccounts = %v and APIAccounts = %v, want %v and no Kubernetes caller: a Google entry needs no cluster at all", cfg.GoogleAPIAccounts, cfg.APIAccounts, wantGoogle)
+	}
+
+	both := validVMEnv()
+	both["BROKER_K8S_OIDC_ISSUER"] = "https://oidc.eks.example.invalid/id/EXAMPLE"
+	both["BROKER_K8S_OIDC_AUDIENCE"] = "agent-secrets"
+	both["BROKER_API_ACCOUNTS"] = "dispatch=system:serviceaccount:example-ns:example-dispatch listener=google:" + exampleListenerAccount
+	cfg, err = Load(env(both))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantK8s := map[string]api.Account{"system:serviceaccount:example-ns:example-dispatch": dispatchCaller}
+	if !maps.Equal(cfg.APIAccounts, wantK8s) || !maps.Equal(cfg.GoogleAPIAccounts, wantGoogle) {
+		t.Fatalf("APIAccounts = %v, GoogleAPIAccounts = %v; want %v and %v: each entry goes to the list its own kind is verified from", cfg.APIAccounts, cfg.GoogleAPIAccounts, wantK8s, wantGoogle)
+	}
+
+	noAudience := validEnv()
+	noAudience["BROKER_API_ACCOUNTS"] = "listener=google:" + exampleListenerAccount
+	_, err = Load(env(noAudience))
+	if err == nil || !strings.Contains(err.Error(), "BROKER_GOOGLE_OIDC_AUDIENCE") {
+		t.Errorf("a Google API account with no Google audience: err = %v, want a refusal naming BROKER_GOOGLE_OIDC_AUDIENCE, the audience its token must carry", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "BROKER_K8S_OIDC_ISSUER") {
+		t.Errorf("a Google API account was refused for the cluster's issuer: %v: a Google caller presents no Kubernetes token", err)
+	}
+
+	for _, bad := range []string{
+		"listener=google:",
+		"listener=google:example-listener@example-project.IAM.gserviceaccount.com",
+		"listener=google:123456789-compute@developer.gserviceaccount.com",
+		"listener=google:service-123456@gcp-sa-pubsub.iam.gserviceaccount.com",
+		"listener=google:ada@example.com",
+	} {
+		e := validVMEnv()
+		e["BROKER_API_ACCOUNTS"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_API_ACCOUNTS") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("BROKER_API_ACCOUNTS = %q: err = %v, want a refusal naming the setting and the entry", bad, err)
+		}
+	}
+
+	twice := validVMEnv()
+	twice["BROKER_API_ACCOUNTS"] = "dispatch=google:" + exampleListenerAccount + " listener=google:" + exampleListenerAccount
+	if _, err := Load(env(twice)); err == nil || !strings.Contains(err.Error(), exampleListenerAccount) {
+		t.Errorf("BROKER_API_ACCOUNTS naming one Google account twice: err = %v, want a refusal naming the account", err)
 	}
 }
 

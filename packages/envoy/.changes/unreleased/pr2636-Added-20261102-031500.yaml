@@ -1,0 +1,26 @@
+kind: Added
+body: |
+  The broker now publishes RFC 8414 authorization server metadata at
+  `GET /.well-known/oauth-authorization-server`, with no credential: its issuer and its token,
+  introspection and revocation endpoints, all built from `BROKER_PUBLIC_URL`; the grants it
+  serves; the one client authentication method it takes (`none`); the algorithms a DPoP proof
+  may be signed with; and, under `subject_token_types_supported`, the token types its RFC 8693
+  exchange accepts, since neither RFC registers a member for them.
+  `BROKER_MACHINE_LOGIN_URL` is no longer required: with no page for a person to type a code
+  into, the broker serves no device grant at all — `POST /v1/oauth/device_authorization` is not
+  mounted and answers 404, and the metadata names neither the device code nor a device
+  authorization endpoint — while the token exchange, introspection and revocation are served as
+  ever; with the page set the device grant is what it was.
+  `BROKER_API_ACCOUNTS` now takes a Google service account beside a Kubernetes one, written
+  `listener=google:example-listener@example-project.iam.gserviceaccount.com`: such a caller
+  presents its machine's own Google identity token for `BROKER_GOOGLE_OIDC_AUDIENCE`, verified
+  against `BROKER_GOOGLE_OIDC_ISSUER` and looked up by the token's `email` rather than a
+  Kubernetes subject, which is how a listener running on a VM reads a token back. A Google entry
+  needs `BROKER_GOOGLE_OIDC_AUDIENCE` where a Kubernetes one needs `BROKER_K8S_OIDC_ISSUER`, and
+  both kinds keep one refusal taxonomy.
+  A person's sign-in credential is no longer listed or revocable as a machine login: it is on
+  the sign-ins list alone, and `POST /v1/person-signins/{id}/revoke` is what ends it, together
+  with the sign-in row that would otherwise mint it again.
+time: 2026-11-02T03:15:00.000000000Z
+custom:
+  Issue: pr2636

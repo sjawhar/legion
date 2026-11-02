@@ -811,7 +811,11 @@ func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Iss
 	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": [`+strings.Join(rows, ",\n")+`]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The machine-login page is named here because the rows these brokers serve include a
+	// machine login's own device grant (token_revocation_test.go); it is optional, and the
+	// broker main_test.go's productionEnv starts serves none.
 	return []string{
+		"BROKER_MACHINE_LOGIN_URL=" + testMachineLoginURL,
 		"BROKER_DATABASE_URL=" + databaseURL,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",

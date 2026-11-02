@@ -20,6 +20,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,7 +49,11 @@ type Config struct {
 	// run, so the setting is what lets a deployment trade how often a caller renews against how
 	// long a revoked credential's last token stays spendable.
 	AccessLifetime time.Duration
-	// VerificationURL is the page a person types the user code into.
+	// VerificationURL is the page a person types the user code into. Empty is a broker that
+	// serves no device grant at all (BROKER_MACHINE_LOGIN_URL unset, which is allowed): New then
+	// composes none of the RFC 8628 factories, DeviceGrant answers false, the token endpoint
+	// answers unsupported_grant_type for a device code, and the broker mounts no device
+	// authorization route and names no device code in its metadata document.
 	VerificationURL string
 	// ProofSkew is BROKER_PROOF_SKEW_SECONDS: a DPoP proof is accepted while the broker's clock is
 	// within this of its iat, as every other broker proof is (proof.Verifier.Skew), give or take
@@ -67,6 +72,17 @@ type Provider struct {
 	strategy *codeStrategy
 	// exchange is Config.Exchange, which the exchange's own step decides by.
 	exchange ExchangeConfig
+	// deviceGrant is whether Config.VerificationURL named a page, so the RFC 8628 factories are
+	// composed: what the broker mounts its device authorization route on, and what its metadata
+	// document says.
+	deviceGrant bool
+	// grantTypes is every grant type composed below, subjectTokenTypes every token type the
+	// exchange registered as a subject token, and dpopAlgorithms every algorithm a DPoP proof
+	// may be signed with. All three are read where the provider is composed, so the metadata
+	// document cannot name a grant, a token type or an algorithm this provider does not serve.
+	grantTypes        []string
+	subjectTokenTypes []string
+	dpopAlgorithms    []string
 	// reservations are the session names the exchange's entries fix, each mapped to the
 	// principal it belongs to, which reserveSessions holds before this provider's first exchange.
 	reservations map[string]string
@@ -75,6 +91,26 @@ type Provider struct {
 	reserved  atomic.Bool
 	reserving sync.Mutex
 }
+
+// DeviceGrant reports whether this provider serves the device authorization grant (RFC 8628),
+// which it does only when it was built with a verification URL. The broker mounts POST
+// /v1/oauth/device_authorization only when it does.
+func (p *Provider) DeviceGrant() bool { return p.deviceGrant }
+
+// GrantTypes is every grant type this provider serves, as RFC 8414's grant_types_supported
+// lists them, read off the factories New composed.
+func (p *Provider) GrantTypes() []string { return slices.Clone(p.grantTypes) }
+
+// SubjectTokenTypes is every token type this provider's RFC 8693 exchange takes as a subject
+// token, sorted: the types it registered, less the machine's actor token type, which is an actor
+// token and no subject. An issuer the broker was not told about registers no type, so this is
+// what this deployment accepts rather than what the broker could accept.
+func (p *Provider) SubjectTokenTypes() []string { return slices.Clone(p.subjectTokenTypes) }
+
+// DPoPSigningAlgorithms is every asymmetric algorithm a DPoP proof presented to this provider
+// may be signed with (RFC 9449's dpop_signing_alg_values_supported), read from the composed
+// configuration, so a client told one of these is told what the proof check will actually take.
+func (p *Provider) DPoPSigningAlgorithms() []string { return slices.Clone(p.dpopAlgorithms) }
 
 // ErrLoginEnded is the TokenHooks.Before error (wrapped or not) that refuses a token request
 // invalid_grant: the machine login has ended, so its client stops using it. Any other Before error
@@ -120,12 +156,21 @@ func (r *Refusal) Error() string { return r.Code + ": " + r.Message }
 // request's proof names. It is the exchange's wiring too, so it sets the decision the store's
 // GetSubjectForTokenExchange calls (Store.ExchangeSubject): the store holds no policy of its
 // own, and the grant is composed here whether or not any issuer is.
+//
+// The device grant is the one part a deployment may leave out: Config.VerificationURL is the
+// page a person types the user code into, and with no page there is nowhere to send them, so a
+// provider built without one composes none of the RFC 8628 factories. An empty URL is therefore
+// accepted; any other URL that does not parse is still refused, since a page nobody can reach is
+// worse than no page at all.
 func New(c Config, store *oauthstore.Store) (*Provider, error) {
 	if len(c.Secret) < 32 {
 		return nil, fmt.Errorf("oauth: the secret is %d bytes, want at least 32", len(c.Secret))
 	}
-	if _, err := url.ParseRequestURI(c.VerificationURL); err != nil {
-		return nil, fmt.Errorf("oauth: verification URL: %w", err)
+	deviceGrant := c.VerificationURL != ""
+	if deviceGrant {
+		if _, err := url.ParseRequestURI(c.VerificationURL); err != nil {
+			return nil, fmt.Errorf("oauth: verification URL: %w", err)
+		}
 	}
 	if c.DeviceLifetime <= 0 || c.RefreshLifetime <= 0 || c.AccessLifetime <= 0 {
 		return nil, fmt.Errorf("oauth: the device lifetime (%v), refresh lifetime (%v) and access lifetime (%v) must all be positive", c.DeviceLifetime, c.RefreshLifetime, c.AccessLifetime)
@@ -178,25 +223,46 @@ func New(c Config, store *oauthstore.Store) (*Provider, error) {
 	}
 	cfg.ClientAuthenticationStrategy = newExchangeClientAuth(store, cfg)
 	strategy := &codeStrategy{HMACCoreStrategy: compose.NewOAuth2HMACStrategy(cfg)}
+	// The RFC 8628 factories are composed only for a broker that serves the device grant, each
+	// in the place the full list had it, so every other handler is composed in the order it was.
+	//
 	// The RFC 8693 factories run in the order compose/compose_rfc8693.go states: the grant
 	// handler first, so the 'act' claim is on the session before a token-type handler issues
 	// anything, and the actor-token validation last, so the token-type handlers have put an actor
 	// token on the session for it to read. The ID token type is left out: this provider issues no
 	// ID tokens, and that factory asserts the composed strategy to an issuing interface
 	// codeStrategy has no reason to answer.
-	provider := compose.Compose(cfg, store, strategy,
-		compose.RFC8628DeviceAuthorizeFactory, compose.RFC8628UserAuthorizeFactory,
-		compose.RFC8628DeviceAuthorizeTokenFactory, compose.OAuth2RefreshTokenGrantFactory,
-		compose.OAuth2TokenRevocationFactory, compose.OAuth2TokenIntrospectionFactory,
-		compose.DPoPDeviceAuthorizeFactory, compose.DPoPTokenFactory,
+	var factories []compose.Factory
+	grantTypes := []string{string(oauth2.GrantTypeRefreshToken), string(oauth2.GrantTypeTokenExchange)}
+	if deviceGrant {
+		factories = append(factories, compose.RFC8628DeviceAuthorizeFactory, compose.RFC8628UserAuthorizeFactory,
+			compose.RFC8628DeviceAuthorizeTokenFactory)
+		grantTypes = append([]string{string(oauth2.GrantTypeDeviceCode)}, grantTypes...)
+	}
+	factories = append(factories, compose.OAuth2RefreshTokenGrantFactory,
+		compose.OAuth2TokenRevocationFactory, compose.OAuth2TokenIntrospectionFactory)
+	if deviceGrant {
+		factories = append(factories, compose.DPoPDeviceAuthorizeFactory)
+	}
+	factories = append(factories, compose.DPoPTokenFactory,
 		compose.RFC8693TokenExchangeGrantFactory, compose.RFC8693AccessTokenTypeFactory,
 		compose.RFC8693RefreshTokenTypeFactory, compose.RFC8693CustomJWTTypeFactory,
 		compose.RFC8693ActorTokenValidationFactory)
+	provider := compose.Compose(cfg, store, strategy, factories...)
 	reservations := map[string]string{}
 	for _, reservation := range c.Exchange.Policy.Reservations() {
 		reservations[reservation.Session] = reservation.Principal
 	}
-	p := &Provider{oauth: provider, store: store, strategy: strategy, exchange: c.Exchange, reservations: reservations}
+	p := &Provider{
+		oauth: provider, store: store, strategy: strategy, exchange: c.Exchange,
+		deviceGrant: deviceGrant, grantTypes: grantTypes,
+		subjectTokenTypes: subjectTokenTypes(cfg.RFC8693TokenTypes),
+		// Read from the configuration the provider was composed with rather than written down
+		// again here, so the document names what the proof check will take. The library's own
+		// configuration ignores the context this lookup takes.
+		dpopAlgorithms: cfg.GetDPoPAllowedJWSAlgorithms(context.Background()),
+		reservations:   reservations,
+	}
 	// A provider built with no store serves no request at all and is only ever inspected, as the
 	// broker's route wiring test inspects it, so there is nothing there to give the decision to.
 	if store != nil {

@@ -475,7 +475,12 @@ func main() {
 		slog.Info("token exchange", "state", "on", "kubernetes", cfg.ExchangeK8sAudience != "", "github", cfg.ExchangeGitHubIssuer != "",
 			"accounts", len(cfg.ExchangeAccounts), "workflows", len(cfg.ExchangeWorkflows), "machines", len(cfg.ExchangeGoogleAccounts))
 	}
-	// verification_uri is Dispatch's machine-login page, where the person types the code.
+	// verification_uri is Dispatch's machine-login page, where the person types the code. With
+	// no page (BROKER_MACHINE_LOGIN_URL unset) the provider composes no device grant at all:
+	// the broker mounts no device authorization route and its metadata document names no device
+	// code, while the token endpoint, the exchange, introspection and revocation are served as
+	// ever. The line says which of the two this broker is, so an operator reads it off the boot
+	// rather than out of a 404.
 	provider, err := oauth.New(oauth.Config{
 		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL,
 		AccessLifetime:  time.Duration(cfg.AccessTokenSeconds) * time.Second,
@@ -484,6 +489,11 @@ func main() {
 		Exchange:  exchangeConfig,
 	}, oauthStore)
 	fatal(err)
+	if provider.DeviceGrant() {
+		slog.Info("machine login device grant", "state", "on", "verification_uri", cfg.MachineLoginURL)
+	} else {
+		slog.Info("machine login device grant", "state", "off", "detail", "BROKER_MACHINE_LOGIN_URL is unset, so no person types a code and POST /v1/oauth/device_authorization is not served")
+	}
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
@@ -542,8 +552,17 @@ func main() {
 	// their own next five-minute reload (policyRefresh) anyway. Neither the caller's 200 nor the
 	// process is worth failing over a notification Postgres would not take.
 	notify := reread.Notifier(st.Pool, senderID)
+	// A Google caller's verifier is built only where the broker was told about Google, and it
+	// is an interface field, so it is assigned through a variable rather than inline: a nil
+	// *oidc.Verifier put straight into the field would be an interface that is not nil, and
+	// every Google caller would fault instead of being refused ACCOUNT_TOKENS_OFF.
+	var googleCallers api.GoogleVerifier
+	if discovered.GoogleIdentities != nil {
+		googleCallers = enroll.GoogleVMVerifier{Verifier: discovered.GoogleIdentities}
+	}
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, RereadOverallLimit: rereadOverall,
 		APIAccounts: cfg.APIAccounts, AccountTokens: pod,
+		GoogleAPIAccounts: cfg.GoogleAPIAccounts, GoogleAccountTokens: googleCallers,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
@@ -808,6 +827,11 @@ type verifiers struct {
 	// GoogleKeys is the Google issuer's published keys, nil on a broker with no Google audience,
 	// which registers no Google subject token type.
 	GoogleKeys *oidc.Keys
+	// GoogleIdentities verifies a listed caller's own Google identity token, against the same
+	// issuer and audience as those keys, nil where GoogleKeys is. It is how a caller on a VM —
+	// the Envoy listener — authenticates on the routes BROKER_API_ACCOUNTS names it for,
+	// holding no Kubernetes token at all.
+	GoogleIdentities *oidc.Verifier
 }
 
 // discoverVerifiers reads the key sets of the token issuers the broker trusts (keysFor, issuerKeys
@@ -841,6 +865,11 @@ func discoverVerifiers(ctx context.Context, cfg config.Config, keysFor keysFunc)
 	slog.Info("google vm identity", "issuer", cfg.GoogleOIDCIssuer, "audience", cfg.GoogleOIDCAudience,
 		"services", strings.Join(slices.Compact(services), ","), "fleets", len(cfg.ExchangeGoogleAccounts))
 	found.GoogleKeys = googleKeys
+	// One verifier on that key set, for a listed caller that holds a Google identity rather
+	// than a Kubernetes one: the audience is BROKER_GOOGLE_OIDC_AUDIENCE, the one every machine
+	// of the deployment already holds a token for, so such a caller presents the token its
+	// metadata server already hands it.
+	found.GoogleIdentities = oidc.NewWithKeys(cfg.GoogleOIDCIssuer, cfg.GoogleOIDCAudience, googleKeys)
 	return found, nil
 }
 

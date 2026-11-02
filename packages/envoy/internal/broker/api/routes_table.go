@@ -220,6 +220,16 @@ type apiRoute struct {
 // https://sjawhar.github.io/legion/broker/reference/api/) prints it and refuses a row without one.
 func routes() []apiRoute {
 	return []apiRoute{
+		// The broker's own OAuth 2.0 authorization server metadata (RFC 8414): its issuer, its
+		// token, device authorization, introspection and revocation endpoints, the grants it
+		// serves, how a client authenticates at the token endpoint, the algorithms a DPoP proof
+		// may be signed with, and the subject token types its RFC 8693 exchange takes. It names
+		// the device code and the device authorization endpoint only while the broker serves
+		// the device grant, which is while BROKER_MACHINE_LOGIN_URL is set. It needs no
+		// credential: it is what a client reads before it holds one, and every word of it is
+		// already public in the broker's own reference. Mounted only when the broker runs its
+		// OAuth provider, since with none it would name endpoints that are not there.
+		{http.MethodGet, "/.well-known/oauth-authorization-server", public((*server).authorizationServerMetadata)},
 		// Enroll a session's or pod's signing key under the caller's machine credential.
 		{http.MethodPost, "/v1/enrollments", launcherAuth((*server).createEnrollment)},
 		// Revoke an enrollment made under the caller's machine credential's operator, or a pod

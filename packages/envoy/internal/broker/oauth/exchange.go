@@ -256,6 +256,22 @@ type PersonSignIn struct {
 // ErrSignInRevoked when that person has revoked that box key.
 type PersonSignIns func(ctx context.Context, in PersonSignIn) error
 
+// subjectTokenTypes is every type in types a caller may present as a subject token, sorted: all
+// of them but the machine's actor token type, which the exchange registers beside the person's
+// own so that a person's trade can carry it, and which is no subject of its own. It is read off
+// the registered types rather than built from the configuration a second time, so what the
+// metadata document names is exactly what the library will accept.
+func subjectTokenTypes(types map[string]oauth2.RFC8693TokenType) []string {
+	names := make([]string, 0, len(types))
+	for name := range types {
+		if name != oauthwire.ActorTokenTypeMachine {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
 // tokenTypes are the token types the library registers for the exchange, keyed by the exact
 // string a request names them with.
 //

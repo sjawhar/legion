@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -857,6 +858,12 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 // Service set. Each login names who approved it, the login its approved event records, or "" for a
 // token login, which no person approved. The sentinel record.AnyoneApprover and an empty login list
 // nothing. OwnLiveCredentials lists the person's own machines' alone.
+//
+// A person's sign-in on a machine holds a launcher credential too, and that one is never listed
+// here: it is one person's, it is already listed as that person's sign-in
+// (store.Store.PersonSignIns), and ending it alone would end nothing, since the sign-in row
+// behind it mints it again at the box's next trade. Its subject says so
+// (exchange.PersonSubject), which is what signInCredential reads.
 func (s *Service) LiveCredentials(ctx context.Context, person string) ([]LiveCredential, error) {
 	return s.liveCredentials(ctx, person, true)
 }
@@ -866,6 +873,19 @@ func (s *Service) LiveCredentials(ctx context.Context, person string) ([]LiveCre
 // person's own machine lists them (GET /v1/operator/machines).
 func (s *Service) OwnLiveCredentials(ctx context.Context, person string) ([]LiveCredential, error) {
 	return s.liveCredentials(ctx, person, false)
+}
+
+// signInCredential reports whether a launcher credential's subject is a person's sign-in on a
+// machine rather than a machine's own identity or a Kubernetes account: the one fact that tells
+// the sign-ins list's credentials from the machine-logins list's, written by exchange.PersonSubject
+// and read back by exchange.PersonSubjectAccount. nil is a credential a person approved, which
+// has no subject at all.
+func signInCredential(subject *string) bool {
+	if subject == nil {
+		return false
+	}
+	_, isSignIn := exchange.PersonSubjectAccount(*subject)
+	return isSignIn
 }
 
 // liveCredentials is LiveCredentials, every service's login among them only when services is set.
@@ -885,7 +905,15 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[LiveCredential])
+	live, err := pgx.CollectRows(rows, pgx.RowToStructByPos[LiveCredential])
+	if err != nil {
+		return nil, err
+	}
+	// A sign-in's credential names its fleet's service, so the query above would take it for a
+	// service's login. Which list a credential belongs on is its subject's to say, and the
+	// subject is read here rather than matched in SQL so that exchange.PersonSubject's shape is
+	// written down once.
+	return slices.DeleteFunc(live, func(c LiveCredential) bool { return signInCredential(c.Subject) }), nil
 }
 
 // RevokeCredential ends launcher credential id on the word of person, expired or not: from then on
@@ -899,7 +927,10 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 // longer names its account), and a person's own machine's only as the approver of the
 // launcher_credential record it was minted from (ErrNotApprover); the sentinel
 // record.AnyoneApprover and an empty login revoke nothing. An unknown id, like a credential with
-// neither a record nor a token login's subject, is ErrNoCredential. actor
+// neither a record nor a token login's subject, is ErrNoCredential, and so is a person's
+// sign-in's credential, which is no machine login: it is ended whole, with the sign-in row that
+// mints it, by RevokePersonSignIn, and ending it here would leave that row to mint it again at
+// the box's next trade. actor
 // is what every row it writes records as having done it, which the caller proved:
 // "human:<person>" for a revoke Dispatch relays from its signed-in person,
 // "launcher:<credential id>" for one the person's own machine login makes. Revoking a credential
@@ -926,19 +957,27 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 	}
 	defer tx.Rollback(ctx)
 	var approver, host string
-	var service *string
+	var service, subject *string
 	var revokedAt *time.Time
 	// A token login's credential has no record, so no approver: as every service's login, anyone
 	// signed in may revoke it (record.MayDecide), and its service logs in again with its token at
 	// its next call, under a new credential, unless BROKER_SERVICE_LOGINS no longer names its account.
-	err = tx.QueryRow(ctx, `select coalesce(r.approver, ''), c.service, c.host, c.revoked_at from launcher_credentials c
+	err = tx.QueryRow(ctx, `select coalesce(r.approver, ''), c.service, c.subject, c.host, c.revoked_at from launcher_credentials c
 		left join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
-		where c.id = $1 and (r.id is not null or c.subject is not null) for no key update of c`, id).Scan(&approver, &service, &host, &revokedAt)
+		where c.id = $1 and (r.id is not null or c.subject is not null) for no key update of c`, id).Scan(&approver, &service, &subject, &host, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNoCredential
 	}
 	if err != nil {
 		return err
+	}
+	// A sign-in's credential names its fleet's service and no record, so the rule below would
+	// read it as a service's login and let anyone signed in end it. It is one person's, it is
+	// listed as that person's sign-in and not here (liveCredentials), and the revoke that means
+	// anything is RevokePersonSignIn's, which ends the sign-in row with it; so this route does
+	// not find it, exactly as it does not find a login of another kind than it lists.
+	if signInCredential(subject) {
+		return ErrNoCredential
 	}
 	var svc string
 	if service != nil {
