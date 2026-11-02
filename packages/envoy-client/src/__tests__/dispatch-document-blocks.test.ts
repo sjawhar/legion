@@ -180,12 +180,17 @@ describe("readDocumentBlocks", () => {
     ).rejects.toThrow();
   });
 
-  test("a filename two documents answer to names no one document, and is no first upload", async () => {
+  // plan.md's slug, `plan`, is the filename of the document an older Dispatch stored as plan-2:
+  // the reference is the slug's document, as Dispatch's own routes resolve it.
+  test("a reference that is one document's slug and another's filename reads the slug's document", async () => {
     const { fetchImpl } = dispatch();
     const client = new DispatchClient(SERVER, "token", fetchImpl);
-    await expect(
-      readDocumentBlocks(client, { issue: "DSP-1", artifact: "plan" }, context)
-    ).rejects.toThrow('"plan" names 2 documents on this issue; use the id');
+    const read = await readDocumentBlocks(client, { issue: "DSP-1", artifact: "plan" }, context);
+    expect(read === "not-found" ? read : [read.name, read.slug, read.blocks[0]?.id]).toEqual([
+      "plan.md",
+      "plan",
+      "plan-1",
+    ]);
   });
 
   // Each target, the document's own name as Dispatch stores it, and its first block.

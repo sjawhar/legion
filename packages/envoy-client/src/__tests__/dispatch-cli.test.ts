@@ -795,6 +795,43 @@ describe("the dispatch CLI", () => {
     }
   });
 
+  // Dispatch's own refusal that carries no key back says its keyed layer did not judge the
+  // request, so the carried sighting is set aside: the write asks /healthz instead of being sent
+  // again, and the call's save leaves the sighting out of state.json, so the next call trusts
+  // nothing it carried. A client that kept the sighting would resend through its 15 s of pauses;
+  // the test's 30 s bound lets that show as five posts rather than as a timeout.
+  test("a Dispatch refusal that echoes no key drops the carried sighting from state.json", async () => {
+    const origin = `http://127.0.0.1:${server.port}`;
+    const file = join(stateDir, "sessions", "ses-1", "state.json");
+    mkdirSync(join(stateDir, "sessions", "ses-1"), { recursive: true });
+    const keyedLayer = { [origin]: new Date(Date.now() - 60_000).toISOString() };
+    writeFileSync(file, JSON.stringify({ advice: [], pictures: [], follows: [], keyedLayer }));
+    nextProcess("ses-1");
+    let posts = 0;
+    let probes = 0;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const { pathname } = new URL(request.url);
+      if (pathname === "/healthz") {
+        probes++;
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      }
+      if (request.method === "POST" && pathname === "/api/v1/issues/DSP-1/messages") {
+        posts++;
+        return Response.json({ code: "INTERNAL", error: "database is down" }, { status: 503 });
+      }
+      return fetch(request);
+    }) as typeof fetch;
+    const { code } = await run(
+      ["message", "--issue", "DSP-1", "--body", "Deliverable landed."],
+      omp,
+      "",
+      fetchImpl
+    );
+    expect({ code, posts, probes }).toEqual({ code: 1, posts: 1, probes: 1 });
+    expect(JSON.parse(readFileSync(file, "utf-8")).keyedLayer).toEqual({});
+  }, 30_000);
+
   test("a read from a Dispatch server older than the repository fields answers, warning on stderr", async () => {
     const { code, stdout, stderr } = await run(["read", "--issue", "DSP-3"], omp);
     expect(code).toBe(0);
