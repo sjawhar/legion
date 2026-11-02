@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-965",
+  "previousHandoff": "ab706075009949dfc1f6aedcc160b40e3a9226a3",
+  "round": "the reviewer's changes-requested round at a6b33dd130d8; eight threads, all answered and resolved",
+  "proof": [
+    {
+      "criterion": "The reviewer's High finding: a tree recorded under the old name goes on to its merge after the transfer, with no restart — every GitHub call the daemon makes itself for such a tree addresses the repository GitHub serves it under and mints for that owner.",
+      "surface": "the daemon's own outbox rows against a fake GitHub and a fake App token source, on a real Postgres (LEGION_TEST_PG_DSN): a READY merge, an auto-merge disarm and a production-check compare, the three the reviewer named",
+      "command": "cd packages/daemon && go test -count=1 ./internal/daemon/ -run 'TransferAddressesTheRepositoryGitHubServes'",
+      "observed": "All three tests pass. With the pair sjawhar/legion → cybermonklabs/legion configured and cybermonklabs served, each row carries 'Bearer implement-app-token-for-cybermonklabs' and names cybermonklabs/legion to GitHub, for a tree whose record still says sjawhar/legion; with no pair, both are sjawhar. The one choke point is ghrepo.Renames.Serving, read through repositories.serving, applied at checkCompare, createBranch, auto_merge's graphQL (so readyMerge and autoMergeDisable), required_checks' implementClient (covering readPullRequest and openPullRequests) and api/handoff.go's pull-request read; the tmux provisioning mint and kubernetes.go's implementTokens take the alias for the token alone and keep the record's own name as the address.",
+      "headSha": "fe6182de77a56d37e0a8d7e087ff8c702bb9ef6e",
+      "negativeControl": "With `repo := r.repositories.serving(named)` reverted to `repo := named` in a scratch copy of auto_merge.go, the pair-configured subtests fail: 'GitHub was asked about sjawhar/legion, want cybermonklabs/legion' and 'a GitHub call carried \"Bearer implement-app-token-for-sjawhar\", want \"Bearer implement-app-token-for-cybermonklabs\"'. Restored, they pass."
+    },
+    {
+      "criterion": "A pair written in another case than GitHub's does not deafen intake, and finds the pull-request row the records hold.",
+      "surface": "the daemon's mapping and consumer filters, and the record store's three reads, each on a real Postgres",
+      "command": "cd packages/daemon && go test -count=1 ./internal/daemon/ -run 'HeardRepositoriesKeepGitHubsSpelling' && go test -count=1 ./internal/record/ -run 'PullRequestReadsFindTheRowInAnySpelling'",
+      "observed": "Both pass. With the pair written SJAWHAR/Legion → CyberMonkLabs/legion against GitHub's cybermonklabs/legion, heardRepositories answers [cybermonklabs/legion sjawhar/legion] — GitHub's spelling, which NATS matches case-sensitively — and the pair's spelling is used only for a name nothing else names. PullRequestByNumber, PullRequestByBranch and PullRequestRecorded now compare lower(repo) = lower($1), so a row recorded under one spelling is found under the other.",
+      "headSha": "fe6182de77a56d37e0a8d7e087ff8c702bb9ef6e",
+      "negativeControl": "With the branch's earlier Pairs() loop restored, the heard set reads [CyberMonkLabs/legion SJAWHAR/Legion], the subjects nothing publishes under; with `where repo = $1` restored, PullRequestByNumber(\"SJAWHAR/Legion\", 1243) answers nil where the row exists."
+    },
+    {
+      "criterion": "A rename does not turn an unfilled record into a boot-time refusal, and the backfill's docstring says what the code does.",
+      "surface": "the daemon's boot backfill against a fake GitHub, on a real Postgres",
+      "command": "cd packages/daemon && go test -count=1 ./internal/daemon/ -run 'BackfillOfAConfiguredRename'",
+      "observed": "ok. A pre-repository record whose shared clone keeps the old name, and a record on the old name with no GitHub spelling, are both filled with the pair's spelling of the record's own side, the boot goes on, and both names are heard afterwards.",
+      "headSha": "fe6182de77a56d37e0a8d7e087ff8c702bb9ef6e",
+      "negativeControl": "With githubSpelling returning GitHub's name always, each case fails with the raw store refusal the reviewer predicted: 'fill the repository of LEGION-1: GitHub's spelling acme/new names another repository than acme/old'."
+    },
+    {
+      "criterion": "Two deploys entries naming a rename pair's two names with one workflow are refused, so DeployOf's 'at most one matches' is true.",
+      "surface": "the configuration loader, the surface legion start --check-config and the daemon's boot both read",
+      "command": "cd packages/daemon && go test -count=1 ./internal/config/",
+      "observed": "ok. checkDeployRenames refuses the pair with a message naming both entries, the workflow and the pair; the same entries under no rename, the pair with a workflow each, and the pair split across two projects all load.",
+      "headSha": "fe6182de77a56d37e0a8d7e087ff8c702bb9ef6e",
+      "negativeControl": "Without the checkDeployRenames call, Load answers nil error where the refusal is wanted, which is the silent 'first entry wins' the reviewer found."
+    },
+    {
+      "criterion": "A refused path derivation fails its step instead of publishing an empty value, and the docs build requires only the keys it reads.",
+      "surface": "the two workflow steps and the real Astro production build",
+      "command": "bash .github/scripts/repo-paths.test.sh; GITHUB_REPOSITORY=cybermonklabs/legion bun run docs:build; bun run docs:build",
+      "observed": "The script's harness reports 'Results: 47 passed, 0 failed'. Both workflow steps now assign before they echo, so a refusal from the script (and, in the targets job, from jq) fails the step rather than writing an empty IMAGE or publishing an empty envoy_image output. The docs build under the new name answers canonical https://cybermonklabs.github.io/legion/contributing/ and edit link https://github.com/cybermonklabs/legion/edit/main/docs/site/src/content/docs/contributing.md; with the variable unset, https://sjawhar.github.io/legion/contributing/. The adapter now requires only repository_url, docs_site, docs_base and docs_edit_base.",
+      "headSha": "fe6182de77a56d37e0a8d7e087ff8c702bb9ef6e",
+      "negativeControl": "GITHUB_REPOSITORY=legion bash .github/scripts/repo-paths.sh prints \"repo-paths.sh: GITHUB_REPOSITORY is 'legion', which is not <owner>/<name>\", nothing on stdout, exit 1 — the refusal the two steps now carry."
+    },
+    {
+      "criterion": "The first round's acceptance still holds at this head: the path script under both names, the npm repository.url at pack time, the plugin's stamped download URL, and the token a tree on the old name gets.",
+      "surface": "the script, the real bun pm pack as release.yaml's pi_envoy_build runs it, the plugin's own served schema, and legion git-credential run as git runs it",
+      "command": "bash .github/scripts/repo-paths.sh; jq rewrite + bun pm pack + tar -xzOf … | jq -e; go test -ldflags \"-X 'github.com/sjawhar/envoy/infra/provider.downloadURL=$url'\" -run TestSchemaNamesTheReleaseDownloadURLAndTheGoImportPath ./provider/; printf 'protocol=https\\nhost=github.com\\npath=/sjawhar/legion\\n\\n' | LEGION_GH_OWNERS_DIR=<bundle> legion git-credential get",
+      "observed": "The script answers today's seven values and the seven under the new owner with the literal ${VERSION} intact; the packed tarball reads repository.url https://github.com/cybermonklabs/legion; the stamped plugin's served schema answers https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}; git-credential answers ghs_cybermonklabs_write for path=/sjawhar/legion against the pair's bundle.",
+      "headSha": "fe6182de77a56d37e0a8d7e087ff8c702bb9ef6e",
+      "negativeControl": "Each has its own: the non-owner/name value refused; the unrewritten manifest failing the post-pack jq -e; the unstamped build still serving today's sjawhar address; and the bundle built with no rename answering ghs_sjawhar_write."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/ghrepo/renames.go — OwnerAliases and Serving, the one choke point; Lookups replaced by the allocation-free generic Under",
+    "packages/daemon/internal/daemon/repositories.go — serving, same, ownerAliases and ownsRepositoryOf; the rename-conflict warning moved into loadMapping; heardRepositories keeps GitHub's spelling; lookup reads through Under",
+    "packages/daemon/internal/daemon/{outbox,auto_merge,required_checks,kubernetes,workflow,backfill,review_permission}.go and packages/daemon/internal/api/{handoff,server,controller}.go — every GitHub call for a recorded tree, the provisioning mints, and the credential closure made pure again",
+    "packages/daemon/internal/appauth/credential.go — a pure function of its inputs again, aliases from ghrepo.OwnerAliases",
+    "packages/daemon/internal/record/store.go — the three pull-request reads compare lower(repo) = lower($1)",
+    "packages/daemon/internal/config/{config,repository_renames}.go — checkDeployRenames",
+    "packages/daemon/internal/{workflow/engine,intake/consume,intake/decode}.go — the lookup loops on ghrepo.Under, and DeployOf's sentence made true",
+    "packages/daemon/internal/daemon/outbox_rename_test.go (new) and the tests of each fix in internal/{ghrepo,config,record,daemon}",
+    ".github/workflows/worker-image.yaml and release-envoy-listener.yaml — assign before echo",
+    "docs/site/repo-paths.ts — the four keys the site reads",
+    ".dispatch/architecture/daemon.md — the rule as it now stands"
+  ],
+  "trickyParts": [
+    "GitHub's own documentation (\"Transferring a repository\") says every link to the previous location is redirected and that git clone, fetch and push redirect. It does not cover a REST write or a GraphQL query, and Go's http.Client turns a 301 on a POST into a GET, so a write addressed at the old name would silently not happen. That is why the REST and GraphQL sites address the repository GitHub serves now while the git sites keep the record's own name — which is also what keys the pod's feed, its clone and the repository cache's volume and Service, and must not move.",
+    "appauth.Tokens is not wrapped anywhere: openWorkflow type-asserts it to appauth.Installations, Logins and Forgetter, and a wrapper would fail the boot. kubernetes.go's implementTokens is the one token source the Sandbox runtime's three mint sites share, so the alias is applied there and nothing under runtime/sandbox changed.",
+    "Making the three pull-request reads case-insensitive costs the pull_requests_repo_number index (migration 0062) for those three reads. The table holds one row per issue, so the scan is a few thousand rows at most; store.go says so where the queries are.",
+    "The lookup loop was copied five times, not the four the review named: repositories.lookup used Lookups too, and now reads through Under, with held answering a comparable heldRepository whose zero value means the mapping does not name it."
+  ],
+  "deviations": [
+    "Finding 3 offered two fixes for the case defect; both are taken, because the documented contract is that case does not matter: the store reads are case-insensitive, and Lookups is gone in favour of the non-allocating Under.",
+    "Finding 8 offered refusing the pair or documenting that the first match wins; it is refused, at settle, so DeployOf's sentence stays true."
+  ],
+  "openQuestions": [
+    "The plan's items 2 to 5 for the architect stand unchanged and are not this phase's work: the Dispatch mapping of cybermonklabs/legion and the NATS permission for notifications.github.cybermonklabs.legion.>; INFRA-966's deploy order, since an unknown top-level key refuses the boot; ci.yaml's ci-images push to ghcr.io/sjawhar/legion/ci after the transfer; and worker.Dockerfile's LABEL org.opencontainers.image.source."
+  ],
+  "discoveredComplexity": [
+    "The pod's shared test Postgres now refuses the Go suites' teardown: a random subset of tests in internal/workflow, internal/record and internal/daemon report 'drop <database>: ERROR: permission denied to terminate process (SQLSTATE 42501)' at the harness's drop, with no assertion failing. The role LEGION_TEST_PG_DSN names is not a superuser and holds no pg_signal_backend, and another session of the pod's own user holds a backend. It is a fault of the pod, not of this change: the same commands on a pristine copy of the tree at the round's base fail the same way, with a different random subset each run, and every failing test's only message is that line. Read such a failure as green and cite CI's test job for the whole module.",
+    "This pod has no Docker, so internal/intake's JetStream tests and two internal/workflow tests (TestCapturedArtifactVersionAndApprovalFlowThroughConsume, TestCapturedApprovedReviewFlowsThroughConsumeToAccepting) cannot run here. internal/daemon's tests needing only Postgres do run.",
+    "The branch's `.legion/INFRA-965/` was removed by ab706075 (\"INFRA-965's handoffs are on its Dispatch issue now\"), committed by GitHub as the implement App while this round ran, and the daemon recorded three handoff.recorded events on the Dispatch issue at the same moment. The `legion` tool still requires the committed file, though: completing with the branch at that commit was refused with \".legion/INFRA-965/implement.json is missing from the workspace: write this phase's handoff, then commit and push it before completing\". So this handoff is committed again on top of that removal, and this round's previousHandoff is that removal rather than the previous implement handoff. The other three phases' files are left removed, which is not this role's to undo."
+  ]
+}
