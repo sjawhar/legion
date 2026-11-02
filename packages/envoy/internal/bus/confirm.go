@@ -21,8 +21,8 @@ var ErrPublishDenied = errors.New("NATS denied the publish")
 // accepted: a core publish confirmPublished cannot confirm - not known to be denied, and not known
 // to be accepted either - and the timeout of a window's Request whose flush failed or could not
 // confirm the publish (window.request). That second case is what it is exported for: a caller that
-// counts a request which ran out of time reads it to tell a forward NATS took, whose holder sent
-// no receipt, from one that is not known to have reached the server at all.
+// counts a request which ran out of time reads it to tell a forward NATS took, which the stream
+// did not acknowledge, from one that is not known to have reached the server at all.
 var ErrPublishUnconfirmed = errors.New("publish not known to have been accepted")
 
 // publishConfirmed publishes msg on conn with publish, flushes within ctx's deadline, and confirms

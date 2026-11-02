@@ -1701,7 +1701,8 @@ func ForwardMsgID(dedupeKey, subject string) string {
 // lasting copy is the stored one, so the name the stream keeps it under is what holds it to one
 // copy per message and recipient however often the forward is sent, and every caller has that
 // name (ForwardMsgID). An unnamed forward is stored again by every attempt, so
-// StartRequestStoredTo refuses it rather than send it.
+// StartRequestStoredTo refuses it rather than send it, as a window's Request does
+// (RequestOptions.MsgID).
 var ErrNoForwardMsgID error = refusal("a forward without a " + nats.MsgIdHdr)
 
 // ErrForwardNotStored is returned by a forward's Wait when the stream's acknowledgement that it

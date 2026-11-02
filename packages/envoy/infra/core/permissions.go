@@ -195,11 +195,10 @@ func DispatchPermissions(machineID string) Permissions {
 }
 
 // SessionPermissions is the grant any agent session needs, with * for the session id. Publish:
-// reply inboxes (the receipt a role delivery waits for, the receipt of each relay frame, and the
-// answer to a presence probe), then its agent stream's frames
-// (contracts.AgentStreamFramesSubject). Subscribe: its own relay subject (bus.DeliverSubject),
-// the subject the listener that owns the session publishes every message of the session's
-// consumer (bus.SessionConsumerName) on, then the presence subject
+// reply inboxes (the receipt of each relay frame and the answer to a presence probe), then its
+// agent stream's frames (contracts.AgentStreamFramesSubject). Subscribe: its own relay subject
+// (bus.DeliverSubject), the subject the listener that owns the session publishes every message of
+// the session's consumer (bus.SessionConsumerName) on, then the presence subject
 // (notifications.envoy.presence.<session id>), then its agent stream's control subject
 // (contracts.AgentStreamControlSubject). A session subscribes to no notification topic that
 // carries a message: it receives what its consumer delivers, on the relay subject, and nothing

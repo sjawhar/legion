@@ -1884,12 +1884,15 @@ func TestAFrozenPublisherSendsNothingWhenItResumes(t *testing.T) {
 	scene.requireOnceAndInOrder(t)
 }
 
-// A role's events reach the role's holder once and in order, and a role that moves between two
-// events sends the one after the move to the session holding it then: the outbox resolves the
-// holder of each send it makes (roles.ResolveHolder) and marks each event published once the
-// stream stored the copy it forwarded, which no session answers. In the first case the holder's
-// connection drops between the two events and comes back; in the second the role moves between
-// them, and the second event reaches the new holder, the old one not taking it.
+// A role's events reach the role's holder once and in order, and a role that moves sends the
+// event the move found undelivered, or written after it, to the session holding the role then:
+// the outbox resolves the holder of each send it makes (roles.ResolveHolder) and marks each
+// event published once the stream stored the copy it forwarded, which no session answers. In
+// the first case the holder's connection drops between the two events and comes back; in the
+// second the role moves between them, and the second event reaches the new holder, the old one
+// not taking it; in the third the role moves while the forward of an event is outstanding - the
+// stream has not acknowledged it - and the event reaches the holder the move made, once, with
+// no copy left for the holder it left.
 func TestARoleHolderWhoseConnectionMovesGetsTheEventOnceAndInOrder(t *testing.T) {
 	pair := startOutboxPair(t)
 	rig := newSessionRig(t, pair.nats)
@@ -1955,6 +1958,65 @@ func TestARoleHolderWhoseConnectionMovesGetsTheEventOnceAndInOrder(t *testing.T)
 		requireCommentsPublished(t, pair, leaving, first)
 		requireCommentsPublished(t, pair, arriving, second)
 	})
+
+	t.Run("the role moves while a forward of it is unacknowledged", func(t *testing.T) {
+		role := "unacknowledged-" + name
+		leaving := newTestSession(t, rig, "ses_"+name+"_stranded", contracts.AgentSubject("ses_"+name+"_stranded"))
+		arriving := newTestSession(t, rig, "ses_"+name+"_taking", contracts.AgentSubject("ses_"+name+"_taking"))
+		rig.registerHolder(t, role, leaving.id)
+		rig.registerSession(t, arriving.id)
+		key := routedIssue(t, role)
+		js, err := rig.conn.JetStream()
+		if err != nil {
+			t.Fatalf("JetStream context: %v", err)
+		}
+		head := streamHead(t, js)
+		// From here the stream captures the arriving session's agent subject alone, so the
+		// forward to the holder of the moment is stored nowhere and nothing acknowledges it,
+		// which is a forward outstanding: the event stays unpublished with its attempt counted
+		// while the leaving session still holds the role, and its core subscription is handed
+		// each forward all the same.
+		capturing := narrowAgentCapture(t, js, arriving.id)
+		first := writeComment(t, key, "Event N.")
+		waitUntil(t, outboxDeliveryWithin, "the holder being handed the forward", takes(leaving, first))
+		forwarded := leaving.takenComments()[first]
+		row, event := forwarded.eventRow(t), forwarded.event
+		waitUntil(t, outboxDeliveryWithin, "the forward the stream did not acknowledge being counted against the event", func() bool {
+			var attempts int
+			var failure *string
+			var published *time.Time
+			if err := pair.database.Pool.QueryRow(context.Background(),
+				`select attempt_count, publish_error, published_at from events where id = $1`, row).Scan(&attempts, &failure, &published); err != nil {
+				t.Fatalf("read event %s: %v", event, err)
+			}
+			if published != nil {
+				t.Fatalf("event %s was published though the stream stored no forward of it", event)
+			}
+			return attempts > 0 && failure != nil && strings.Contains(*failure, bus.ErrNotAcknowledged.Error())
+		})
+
+		// The role moves with that forward still unacknowledged, and the stream captures every
+		// agent subject again from here, so a forward to the session the role left would be
+		// stored like any other.
+		if err := rig.claimRole(role, arriving.id); err != nil {
+			t.Fatalf("move the role: %v", err)
+		}
+		capturing()
+
+		waitUntil(t, outboxDeliveryWithin, "the new holder taking the event", takes(arriving, first))
+		requireCommentsPublished(t, pair, arriving, first)
+		if frames := framesOfComment(arriving, first); frames != 1 {
+			t.Errorf("the session the role moved to was handed the event %d times, want the one forward that was made once it held the role", frames)
+		}
+		if copies := storedCopiesOf(t, js, head, contracts.AgentSubject(arriving.id), event); copies != 1 {
+			t.Errorf("the stream holds %d copies of event %s on %s, want the one the new holder's consumer delivers",
+				copies, event, contracts.AgentSubject(arriving.id))
+		}
+		if copies := storedCopiesOf(t, js, head, contracts.AgentSubject(leaving.id), event); copies != 0 {
+			t.Errorf("the stream holds %d copies of event %s on %s, want none: the session the role left is delivered what its consumer holds, and nothing of this event is its to read",
+				copies, event, contracts.AgentSubject(leaving.id))
+		}
+	})
 }
 
 // receiveWithin is what a row's hook sent on done, waiting up to 10 s for it, and fails the test
@@ -1993,6 +2055,78 @@ func requireCommentsPublished(t *testing.T, pair *dispatchPair, holder *testSess
 		})
 	}
 	pair.requireRunning(t)
+}
+
+// narrowAgentCapture has the stream capture the agent subjects of holders alone, in place of
+// every agent subject, and lets it capture them all again when the returned func is called or
+// the test ends. A forward to any other session is then stored nowhere, so nothing acknowledges
+// it and the batch that sent it waits out its window, which is the shape a forward goes
+// unanswered in; the session's own core subscription is handed it all the same. The processes'
+// keepers leave the narrowed list alone: a keeper puts back only a subject of this binary's that
+// no subject the stream holds overlaps (bus.keptSubjects), and a holder's agent subject overlaps
+// notifications.agent.>.
+func narrowAgentCapture(t *testing.T, js natsgo.JetStreamContext, holders ...string) func() {
+	t.Helper()
+	info, err := js.StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the notification stream: %v", err)
+	}
+	capturing, narrowed := info.Config, info.Config
+	narrowed.Subjects = slices.DeleteFunc(slices.Clone(capturing.Subjects), func(subject string) bool {
+		return subject == contracts.AgentTopicPrefix+">"
+	})
+	for _, holder := range holders {
+		narrowed.Subjects = append(narrowed.Subjects, contracts.AgentSubject(holder))
+	}
+	update := func(config *natsgo.StreamConfig, what string) {
+		if _, err := js.UpdateStream(config); err != nil {
+			t.Fatalf("%s the stream's agent subjects: %v", what, err)
+		}
+	}
+	update(&narrowed, "narrow")
+	restore := sync.OnceFunc(func() { update(&capturing, "restore") })
+	t.Cleanup(restore)
+	return restore
+}
+
+// framesOfComment is how many frames of comment id's event reached session, repeats included: a
+// forward sent twice is handed to a core subscriber twice, whatever the stream keeps of it.
+func framesOfComment(session *testSession, id string) int {
+	frames := 0
+	for _, frame := range session.allFrames() {
+		if frame.commentID == id {
+			frames++
+		}
+	}
+	return frames
+}
+
+// storedCopiesOf is how many messages the stream holds past head on subject that carry event,
+// read by sequence so the read creates nothing on the server (readStreamMessagesFrom).
+func storedCopiesOf(t *testing.T, js natsgo.JetStreamContext, head uint64, subject, event string) int {
+	t.Helper()
+	info, err := js.StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the notification stream: %v", err)
+	}
+	copies := 0
+	for seq := head + 1; seq <= info.State.LastSeq; seq++ {
+		msg, err := js.GetMsg(bus.Stream, seq)
+		if err != nil {
+			if errors.Is(err, natsgo.ErrMsgNotFound) {
+				continue
+			}
+			t.Fatalf("read message %d of the notification stream: %v", seq, err)
+		}
+		var item contracts.Envelope
+		if msg.Subject != subject || json.Unmarshal(msg.Data, &item) != nil {
+			continue
+		}
+		if item.EventID == event {
+			copies++
+		}
+	}
+	return copies
 }
 
 // ───── the delivery durables ────────────────────────────────────────────────

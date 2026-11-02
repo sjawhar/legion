@@ -1507,12 +1507,13 @@ type registeredSession struct {
 // answers none, and that answer stands (sessionDelivery.register). The gap is the one thing this
 // loop keeps of its own, in a flag, because only the pass that creates the consumer is told its
 // start fell below the stream's first sequence (bus.SessionConsumers.Ensure): a pass that is
-// given no consumer answers no gap at all, and a pass that finds the consumer already made
-// answers none. The flag starts false, turns on at the first pass whose answer reports a gap and
-// never off again, and the answer this registration returns carries it. It holds within this
-// registration's passes alone: the session's next registration finds the consumer there and is
-// told no gap, so this answer is the only one telling the session that messages it would have
-// been delivered are gone.
+// given no consumer answers nothing at all, and a pass that finds the consumer already made
+// answers a gap of false, every answer carrying the flag (sessionDelivery.consumerFor). The flag
+// starts false, turns on at the first pass whose answer reports a gap and never off again, and
+// the answer this registration returns carries it. It holds within this registration's passes
+// alone: the session's next registration finds the consumer there and is told no gap, so this
+// answer is the only one telling the session that messages it would have been delivered are
+// gone.
 //
 // A registration this listener can give no consumer is refused, which the caller answers by
 // name: a session is delivered to through its own consumer alone, so such a registration must
@@ -1551,7 +1552,7 @@ func (d *listenerDeps) registerSession(
 		if refusal != nil {
 			return registeredSession{}, refusal, nil
 		}
-		if pass.answer != nil && pass.answer.Gap != nil && *pass.answer.Gap {
+		if pass.answer != nil && *pass.answer.Gap {
 			gap = true
 		}
 		registered.delivery = pass
@@ -1565,9 +1566,7 @@ func (d *listenerDeps) registerSession(
 			registered.row = row
 			if slices.Equal(row.Topics, plan.Topics) {
 				if registered.delivery.answer != nil {
-					answer := *registered.delivery.answer
-					answer.Gap = &gap
-					registered.delivery.answer = &answer
+					registered.delivery.answer.Gap = &gap
 				}
 				return registered, nil, nil
 			}

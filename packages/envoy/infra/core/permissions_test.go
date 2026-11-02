@@ -165,7 +165,7 @@ func TestSessionPresenceSubjectIsStoredByNoStream(t *testing.T) {
 // check finds.
 func TestSessionPermissionsRefuseASubscribeToReplyInboxes(t *testing.T) {
 	publish, subscribe := renderedRules(t, core.SessionPermissions())
-	require.Contains(t, publish, "_INBOX.>", "a session publishes the receipt a role delivery waits for")
+	require.Contains(t, publish, "_INBOX.>", "a session publishes the receipt of each relay frame and the answer to a presence probe")
 	for _, entry := range subscribe {
 		require.False(t, admitsInbox(entry), "the session's subscribe entry %q admits a reply inbox", entry)
 	}

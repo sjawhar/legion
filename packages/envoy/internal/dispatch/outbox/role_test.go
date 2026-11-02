@@ -368,17 +368,17 @@ func TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgeme
 	}
 }
 
-// A holder with no serving port is no different: every Oh My Pi and Claude Code session
-// registers without one (session.SessionEntry.Port 0) and answers no forward either, since it is
-// delivered its stored copy from its own consumer by the listener's relay. Its forward counts as
-// reached on the stream's acknowledgement too, so the event is published on its first attempt
-// with the role recorded, and the owner's next event follows in the same batch rather than
-// waiting behind it.
+// A holder registered for consumer delivery is no different: every Oh My Pi and Claude Code
+// session registers with no serving port and no subscription of its own
+// (session.DeliveryConsumer), and answers no forward either, since it is delivered its stored
+// copy from its own consumer by the listener's relay. Its forward counts as reached on the
+// stream's acknowledgement too, so the event is published on its first attempt with the role
+// recorded, and the owner's next event follows in the same batch rather than waiting behind it.
 func TestARoleRouteToAHolderWithNoServingPortIsPublishedOnTheStreamsAcknowledgement(t *testing.T) {
 	rig := newRoleRig(t)
-	const role, holder = "reviewer", "ses_no_port"
+	const role, holder = "reviewer", "ses_consumer_delivery"
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
+	rig.claim(t, role, holder, session.SessionEntry{Delivery: session.DeliveryConsumer})
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	first := rig.routedEvent(t, "T-1", role, alice)
 	second := rig.laterEvent(t, "T-1", alice)
@@ -538,8 +538,9 @@ func TestARoleRouteWhoseHolderIsTheActorIsPublishedWithoutAForward(t *testing.T)
 }
 
 // One holder's forward that Dispatch's grant denies fails only its own event: in a batch of 50
-// role-routed events on distinct issues, each with a live self-subscribed holder that answers, the
-// 49 others are published with no attempt counted, and the denied one is backed off.
+// role-routed events on distinct issues, each with a live self-subscribed holder whose forward
+// the stream stores, the 49 others are published with no attempt counted, and the denied one is
+// backed off.
 func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 	const events, denied = 50, 17
 	holderOf := func(index int) string { return fmt.Sprintf("ses_holder_%02d", index) }
@@ -560,14 +561,6 @@ func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 	t.Cleanup(conn.Close)
 	rig := newRoleRigOn(t, url, client, conn)
 
-	sub, err := conn.Subscribe(contracts.AgentTopicPrefix+">", func(*natsgo.Msg) {})
-	if err != nil {
-		t.Fatalf("subscribe the holders: %v", err)
-	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
-	if err := conn.Flush(); err != nil {
-		t.Fatalf("flush the holders' subscription: %v", err)
-	}
 	seeded := make([]model.Event, events)
 	for index := range events {
 		role := fmt.Sprintf("lane-%02d", index)
