@@ -18,14 +18,19 @@ import (
 // blockPointerTestSchema is the shipped schema (its callout included) with two test types: a
 // requirement, and a claim whose serves attribute is a block[] attribute pointing only at
 // requirements, or attributes when given. Call it before useTestBlockSchema swaps the schema.
-func blockPointerTestSchema(attributes map[string]BlockAttributeSchema) BlockSchema {
+func blockPointerTestSchema(attributes BlockAttributes) BlockSchema {
 	if attributes == nil {
-		attributes = map[string]BlockAttributeSchema{"serves": {Kind: "block[]", Targets: []string{"requirement"}}}
+		attributes = oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList, Targets: []string{"requirement"}})
 	}
 	return BlockSchema{Version: schema.Version, Types: append(slices.Clone(schema.Types),
-		BlockTypeSchema{Name: "requirement", Content: BlockContentParagraphs, Render: "host", Attributes: map[string]BlockAttributeSchema{}},
+		BlockTypeSchema{Name: "requirement", Content: BlockContentParagraphs, Render: "host", Attributes: BlockAttributes{}},
 		BlockTypeSchema{Name: "claim", Content: BlockContentParagraphs, Render: "host", Attributes: attributes},
 	)}
+}
+
+// oneAttribute is a type's attributes when it declares exactly one, which most of these cases do.
+func oneAttribute(name string, attr BlockAttributeSchema) BlockAttributes {
+	return BlockAttributes{{Name: name, BlockAttributeSchema: attr}}
 }
 
 // useTestBlockSchema makes value the block schema for the rest of t, restoring the one before by
@@ -50,37 +55,38 @@ func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
 		t.Fatalf("validate the test schema: %v", err)
 	}
 	pointer := func(targets ...string) BlockAttributeSchema {
-		return BlockAttributeSchema{Kind: "block[]", Targets: targets}
+		return BlockAttributeSchema{Kind: BlockAttributeBlockList, Targets: targets}
 	}
 	for _, targets := range [][]string{nil, {}, {"requirement", "claim", "callout", "paragraph", "heading", "table", "blockquote", "bullet_list", "code_block"}} {
-		if err := validateBlockSchema(blockPointerTestSchema(map[string]BlockAttributeSchema{"serves": pointer(targets...)})); err != nil {
+		if err := validateBlockSchema(blockPointerTestSchema(oneAttribute("serves", pointer(targets...)))); err != nil {
 			t.Errorf("targets %v: %v, want valid", targets, err)
 		}
 	}
-	refused := map[string]map[string]BlockAttributeSchema{
-		"a name that is not lower case":            {"Serves": pointer("requirement")},
-		"a name that is a structural kind":         {"mentions": pointer("requirement")},
-		"a name that is the blocks' own kind":      {"part_of": pointer("requirement")},
-		"a target the schema does not declare":     {"serves": pointer("nope")},
-		"a list item target":                       {"serves": pointer("list_item")},
-		"a table cell target":                      {"serves": pointer("table_cell")},
-		"targets on a string array":                {"serves": {Kind: "string[]", Targets: []string{"requirement"}}},
-		"a default pointing at a block":            {"serves": {Kind: "block[]", Default: []string{"dispatch://CORE-1/spec#b-x"}}},
-		"a default that is not a block reference":  {"serves": {Kind: "block[]", Default: []string{"x"}}},
-		"a default that is not an array of string": {"serves": {Kind: "block[]", Default: "dispatch://CORE-1/spec#b-x"}},
+	refused := map[string]BlockAttributes{
+		"a name that is not lower case":            oneAttribute("Serves", pointer("requirement")),
+		"a name that is a structural kind":         oneAttribute("mentions", pointer("requirement")),
+		"a name that is the blocks' own kind":      oneAttribute("part_of", pointer("requirement")),
+		"a target the schema does not declare":     oneAttribute("serves", pointer("nope")),
+		"a list item target":                       oneAttribute("serves", pointer("list_item")),
+		"a table cell target":                      oneAttribute("serves", pointer("table_cell")),
+		"targets on a string array":                oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeStringList, Targets: []string{"requirement"}}),
+		"a default pointing at a block":            oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList, Default: []string{"dispatch://CORE-1/spec#b-x"}}),
+		"a default that is not a block reference":  oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList, Default: []string{"x"}}),
+		"a default that is not an array of string": oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList, Default: "dispatch://CORE-1/spec#b-x"}),
 	}
 	for name, attributes := range refused {
 		if err := validateBlockSchema(blockPointerTestSchema(attributes)); err == nil {
 			t.Errorf("%s: the schema validates, want it refused", name)
 		}
 	}
-	if err := validateBlockSchema(blockPointerTestSchema(map[string]BlockAttributeSchema{"serves": {Kind: "block[]", Default: []string{}}})); err != nil {
+	if err := validateBlockSchema(blockPointerTestSchema(oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList, Default: []string{}}))); err != nil {
 		t.Errorf("an empty default: %v, want valid", err)
 	}
 
 	twice := blockPointerTestSchema(nil)
-	twice.Types = append(twice.Types, BlockTypeSchema{Name: "proof", Content: BlockContentParagraphs, Render: "host", Attributes: map[string]BlockAttributeSchema{
-		"serves": pointer(), "note": {Kind: "string"},
+	twice.Types = append(twice.Types, BlockTypeSchema{Name: "proof", Content: BlockContentParagraphs, Render: "host", Attributes: BlockAttributes{
+		{Name: "serves", BlockAttributeSchema: pointer()},
+		{Name: "note", BlockAttributeSchema: BlockAttributeSchema{Kind: BlockAttributeString}},
 	}})
 	useTestBlockSchema(t, twice)
 	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"serves"}) {
@@ -259,14 +265,12 @@ func TestCheckBlockPointersRefusesATargetOfADisallowedType(t *testing.T) {
 	// A draft holds the same attribute name as text, which a retype into a claim makes a pointer;
 	// a loose block holds it as a pointer to any block, which a retype into a claim narrows.
 	value.Types = append(value.Types,
-		BlockTypeSchema{Name: "draft", Content: BlockContentParagraphs, Render: "host", Attributes: map[string]BlockAttributeSchema{
-			"serves": {Kind: "string"},
-		}},
-		BlockTypeSchema{Name: "loose", Content: BlockContentParagraphs, Render: "host", Attributes: map[string]BlockAttributeSchema{
-			"serves": {Kind: "block[]"},
-		}},
+		BlockTypeSchema{Name: "draft", Content: BlockContentParagraphs, Render: "host",
+			Attributes: oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeString})},
+		BlockTypeSchema{Name: "loose", Content: BlockContentParagraphs, Render: "host",
+			Attributes: oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList})},
 	)
-	anyBlock := blockPointerTestSchema(map[string]BlockAttributeSchema{"serves": {Kind: "block[]"}})
+	anyBlock := blockPointerTestSchema(oneAttribute("serves", BlockAttributeSchema{Kind: BlockAttributeBlockList}))
 	useTestBlockSchema(t, value)
 	const (
 		requirement = "dispatch://CORE-1/spec#b-r1"

@@ -188,7 +188,7 @@ func TestABlockSchemaRefusesAnAttributeNamingTheBlockID(t *testing.T) {
 	for _, name := range []string{"id", BlockIDAttr} {
 		err := validateBlockSchema(BlockSchema{Version: 1, Types: []BlockTypeSchema{{
 			Name: "test", Content: BlockContentParagraphs, Render: "host",
-			Attributes: map[string]BlockAttributeSchema{name: {Kind: "string"}},
+			Attributes: oneAttribute(name, BlockAttributeSchema{Kind: BlockAttributeString}),
 		}}})
 		if err == nil || !strings.Contains(err.Error(), "names the block id") {
 			t.Errorf("an attribute named %q: validateBlockSchema = %v, want it refused", name, err)
@@ -823,7 +823,7 @@ func TestSchemaSupportsTypedBlockContentRules(t *testing.T) {
 					Name:       "test",
 					Content:    BlockContentRule(content),
 					Render:     "host",
-					Attributes: map[string]BlockAttributeSchema{},
+					Attributes: BlockAttributes{},
 				}},
 			})
 			if err != nil {
@@ -881,7 +881,7 @@ func TestTypedBlockContentRulesValidateTheirChildSequences(t *testing.T) {
 				BlockTypeSchema{
 					Name:       "test",
 					Content:    tc.content,
-					Attributes: map[string]BlockAttributeSchema{},
+					Attributes: BlockAttributes{},
 				},
 			)
 			if (err == nil) != tc.valid {

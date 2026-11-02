@@ -19,39 +19,9 @@ import (
 //go:embed schema/blocks.json
 var blockSchemaJSON []byte
 
-// BlockSchema describes the typed document nodes that every Dispatch client supports.
-type BlockSchema struct {
-	Version int               `json:"version"`
-	Types   []BlockTypeSchema `json:"types"`
-}
-
-// BlockContentRule describes the block children a typed node may contain.
-type BlockContentRule string
-
-const (
-	BlockContentParagraphs                   BlockContentRule = "paragraph+"
-	BlockContentBlocks                       BlockContentRule = "block+"
-	BlockContentParagraphsOptionalBulletList BlockContentRule = "paragraph+ bullet_list?"
-)
-
-// BlockTypeSchema describes one typed ProseMirror block.
-type BlockTypeSchema struct {
-	Name       string                          `json:"name"`
-	Content    BlockContentRule                `json:"content"`
-	Render     string                          `json:"render"`
-	Attributes map[string]BlockAttributeSchema `json:"attributes"`
-}
-
-// BlockAttributeSchema describes a typed block attribute. Targets limits a `block[]` attribute to
-// blocks of the named types (a typed block the schema declares, or a built-in block the link graph
-// holds, builtInBlockNode); absent or empty, it points at any block. No other kind carries it.
-type BlockAttributeSchema struct {
-	Kind    string   `json:"kind"`
-	Choices []string `json:"choices,omitempty"`
-	Default any      `json:"default,omitempty"`
-	Server  bool     `json:"server,omitempty"`
-	Targets []string `json:"targets,omitempty"`
-}
+// The schema's shape - BlockSchema, BlockTypeSchema, BlockAttributeSchema, BlockContentRule and
+// the attribute kinds - is declared in packages/contracts/schemas/block-schema.schema.json and
+// generated into schema_generated.go, which blocks.json above is read into.
 
 var schema BlockSchema
 var schemaTypes map[string]BlockTypeSchema
@@ -83,10 +53,10 @@ func installSchema(value BlockSchema) {
 	for _, typ := range value.Types {
 		schemaTypes[typ.Name] = typ
 		var names []string
-		for name, attr := range typ.Attributes {
-			if attr.Kind == "block[]" {
-				kinds[name] = struct{}{}
-				names = append(names, name)
+		for _, attr := range typ.Attributes {
+			if attr.Kind == BlockAttributeBlockList {
+				kinds[attr.Name] = struct{}{}
+				names = append(names, attr.Name)
 			}
 		}
 		if len(names) > 0 {
@@ -162,26 +132,32 @@ func validateBlockSchema(value BlockSchema) error {
 		if typ.Render != "host" {
 			return fmt.Errorf("type %q has unsupported render %q", typ.Name, typ.Render)
 		}
-		for name, attr := range typ.Attributes {
+		seenAttributes := make(map[string]struct{}, len(typ.Attributes))
+		for _, attr := range typ.Attributes {
+			name := attr.Name
 			if !directiveName(name) {
 				return fmt.Errorf("type %q attribute %q is invalid", typ.Name, name)
 			}
+			if _, duplicate := seenAttributes[name]; duplicate {
+				return fmt.Errorf("type %q attribute %q is declared twice", typ.Name, name)
+			}
+			seenAttributes[name] = struct{}{}
 			// A typed block's markdown reads `id="…"` as its block id (TypedBlockIDAttribute), and
 			// its tree holds that id as blockId, so neither can name an attribute.
 			if name == "id" || name == BlockIDAttr {
 				return fmt.Errorf("type %q attribute %q names the block id, which no attribute may", typ.Name, name)
 			}
-			if err := validateAttributeSchema(typ.Name, name, attr); err != nil {
+			if err := validateAttributeSchema(typ.Name, name, attr.BlockAttributeSchema); err != nil {
 				return err
 			}
 		}
 	}
 	// A target names a type of the whole schema, so it is checked once every name is known.
 	for _, typ := range value.Types {
-		for _, name := range slices.Sorted(maps.Keys(typ.Attributes)) {
-			for _, target := range typ.Attributes[name].Targets {
+		for _, attr := range typ.Attributes {
+			for _, target := range attr.Targets {
 				if _, typed := seenTypes[target]; !typed && !builtInBlockNode(target) {
-					return fmt.Errorf("type %q attribute %q targets %q, which is neither a type the schema declares nor a built-in block the link graph holds", typ.Name, name, target)
+					return fmt.Errorf("type %q attribute %q targets %q, which is neither a type the schema declares nor a built-in block the link graph holds", typ.Name, attr.Name, target)
 				}
 			}
 		}
@@ -213,8 +189,10 @@ func validBlockContentRule(rule BlockContentRule) bool {
 
 func normalizeSchemaDefaults(value *BlockSchema) error {
 	for typeIndex := range value.Types {
-		for name, attr := range value.Types[typeIndex].Attributes {
-			if (attr.Kind != "string[]" && attr.Kind != "block[]") || attr.Default == nil {
+		attributes := value.Types[typeIndex].Attributes
+		for attrIndex := range attributes {
+			attr := &attributes[attrIndex]
+			if (attr.Kind != BlockAttributeStringList && attr.Kind != BlockAttributeBlockList) || attr.Default == nil {
 				continue
 			}
 			items, ok := attr.Default.([]any)
@@ -225,12 +203,11 @@ func normalizeSchemaDefaults(value *BlockSchema) error {
 			for index, item := range items {
 				text, ok := item.(string)
 				if !ok {
-					return fmt.Errorf("type %q attribute %q default contains %T", value.Types[typeIndex].Name, name, item)
+					return fmt.Errorf("type %q attribute %q default contains %T", value.Types[typeIndex].Name, attr.Name, item)
 				}
 				normalized[index] = text
 			}
 			attr.Default = normalized
-			value.Types[typeIndex].Attributes[name] = attr
 		}
 	}
 	return nil
@@ -242,11 +219,12 @@ var linkKindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 func validateAttributeSchema(typeName, name string, attr BlockAttributeSchema) error {
 	switch attr.Kind {
-	case "string", "bool", "enum", "string[]", "block[]", "actor", "timestamp":
+	case BlockAttributeString, BlockAttributeBool, BlockAttributeEnum, BlockAttributeStringList,
+		BlockAttributeBlockList, BlockAttributeActor, BlockAttributeTimestamp:
 	default:
 		return fmt.Errorf("type %q attribute %q has unknown kind %q", typeName, name, attr.Kind)
 	}
-	if attr.Kind == "block[]" {
+	if attr.Kind == BlockAttributeBlockList {
 		if !linkKindPattern.MatchString(name) {
 			return fmt.Errorf("type %q attribute %q is a block[] attribute, whose name is the kind of the links it makes and must match %s", typeName, name, linkKindPattern)
 		}
@@ -256,7 +234,7 @@ func validateAttributeSchema(typeName, name string, attr BlockAttributeSchema) e
 	} else if attr.Targets != nil {
 		return fmt.Errorf("type %q attribute %q has targets, which only a block[] attribute may carry", typeName, name)
 	}
-	if attr.Kind == "enum" {
+	if attr.Kind == BlockAttributeEnum {
 		if len(attr.Choices) == 0 {
 			return fmt.Errorf("type %q attribute %q enum has no choices", typeName, name)
 		}
@@ -275,7 +253,7 @@ func validateAttributeSchema(typeName, name string, attr BlockAttributeSchema) e
 		if err := validateAttributeValue(attr, attr.Default); err != nil {
 			return fmt.Errorf("type %q attribute %q default: %w", typeName, name, err)
 		}
-		if items, _ := stringSlice(attr.Default); attr.Kind == "block[]" && len(items) > 0 {
+		if items, _ := stringSlice(attr.Default); attr.Kind == BlockAttributeBlockList && len(items) > 0 {
 			return fmt.Errorf("type %q attribute %q default must be absent or [], since a block[] default would point every new block at the same blocks", typeName, name)
 		}
 	}
@@ -284,11 +262,11 @@ func validateAttributeSchema(typeName, name string, attr BlockAttributeSchema) e
 
 func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 	switch attr.Kind {
-	case "string", "actor":
+	case BlockAttributeString, BlockAttributeActor:
 		if _, ok := value.(string); !ok {
 			return fmt.Errorf("must be a string, got %T", value)
 		}
-	case "timestamp":
+	case BlockAttributeTimestamp:
 		text, ok := value.(string)
 		if !ok {
 			return fmt.Errorf("must be an RFC 3339 timestamp string, got %T", value)
@@ -296,11 +274,11 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 		if _, err := time.Parse(time.RFC3339, text); err != nil {
 			return fmt.Errorf("must be an RFC 3339 timestamp: %w", err)
 		}
-	case "bool":
+	case BlockAttributeBool:
 		if _, ok := value.(bool); !ok {
 			return fmt.Errorf("must be a bool, got %T", value)
 		}
-	case "enum":
+	case BlockAttributeEnum:
 		text, ok := value.(string)
 		if !ok {
 			return fmt.Errorf("must be one of %s, got %T", strings.Join(attr.Choices, ", "), value)
@@ -311,7 +289,7 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 			}
 		}
 		return fmt.Errorf("must be one of %s, got %q", strings.Join(attr.Choices, ", "), text)
-	case "string[]":
+	case BlockAttributeStringList:
 		switch items := value.(type) {
 		case []string:
 			for _, item := range items {
@@ -329,7 +307,7 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 		default:
 			return fmt.Errorf("must be a string array, got %T", value)
 		}
-	case "block[]":
+	case BlockAttributeBlockList:
 		items, ok := stringSlice(value)
 		if !ok {
 			return fmt.Errorf("must be an array of block references, got %T", value)
@@ -389,18 +367,18 @@ func parseTypedAttributeValue(attr BlockAttributeSchema, raw any) (any, error) {
 		return nil, fmt.Errorf("must be encoded as a string, got %T", raw)
 	}
 	switch attr.Kind {
-	case "string", "enum", "actor", "timestamp":
+	case BlockAttributeString, BlockAttributeEnum, BlockAttributeActor, BlockAttributeTimestamp:
 		if err := validateAttributeValue(attr, text); err != nil {
 			return nil, err
 		}
 		return text, nil
-	case "bool":
+	case BlockAttributeBool:
 		value, err := strconv.ParseBool(text)
 		if err != nil {
 			return nil, fmt.Errorf("must be true or false")
 		}
 		return value, nil
-	case "string[]":
+	case BlockAttributeStringList:
 		var value []string
 		if err := json.Unmarshal([]byte(text), &value); err != nil {
 			return nil, fmt.Errorf("must be a JSON string array: %w", err)
@@ -409,7 +387,7 @@ func parseTypedAttributeValue(attr BlockAttributeSchema, raw any) (any, error) {
 			return nil, err
 		}
 		return value, nil
-	case "block[]":
+	case BlockAttributeBlockList:
 		return ParseBlockPointerValue(text)
 	default:
 		return nil, fmt.Errorf("has unknown kind %q", attr.Kind)
@@ -418,32 +396,24 @@ func parseTypedAttributeValue(attr BlockAttributeSchema, raw any) (any, error) {
 
 func defaultAttributes(typ BlockTypeSchema) Attrs {
 	attrs := make(Attrs, len(typ.Attributes))
-	for name, attr := range typ.Attributes {
+	for _, attr := range typ.Attributes {
 		if attr.Default != nil {
-			attrs[name] = cloneSchemaValue(attr.Default)
+			attrs[attr.Name] = cloneSchemaValue(attr.Default)
 		}
 	}
 	return attrs
 }
 
+// renderTypedAttributes writes a typed block's directive attributes in the order its type
+// declares them (schema/blocks.json), which is the order every reader of the markdown sees.
 func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 	id, ok := n.Attrs[BlockIDAttr].(string)
 	if !ok || id == "" {
 		return "", fmt.Errorf("%w: typed block %q is missing blockId", ErrSchema, n.Type)
 	}
 	parts := []string{TypedBlockIDAttribute(id)}
-	names := make([]string, 0, len(typ.Attributes))
-	for name := range typ.Attributes {
-		names = append(names, name)
-	}
-	sort.SliceStable(names, func(left, right int) bool {
-		if n.Type != "ask" {
-			return names[left] < names[right]
-		}
-		return askAttributeRank(names[left]) < askAttributeRank(names[right])
-	})
-	for _, name := range names {
-		definition := typ.Attributes[name]
+	for _, attribute := range typ.Attributes {
+		name, definition := attribute.Name, attribute.BlockAttributeSchema
 		if name == "invalid" && definition.Server {
 			continue
 		}
@@ -456,19 +426,19 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 		}
 		var encoded string
 		switch definition.Kind {
-		case "string", "enum", "actor", "timestamp":
+		case BlockAttributeString, BlockAttributeEnum, BlockAttributeActor, BlockAttributeTimestamp:
 			text, ok := value.(string)
 			if !ok {
 				return "", fmt.Errorf("%w: typed block %q attribute %q must be a string", ErrSchema, n.Type, name)
 			}
 			encoded = text
-		case "bool":
+		case BlockAttributeBool:
 			flag, ok := value.(bool)
 			if !ok {
 				return "", fmt.Errorf("%w: typed block %q attribute %q must be a bool", ErrSchema, n.Type, name)
 			}
 			encoded = strconv.FormatBool(flag)
-		case "string[]":
+		case BlockAttributeStringList:
 			items, ok := stringSlice(value)
 			if !ok {
 				return "", fmt.Errorf("%w: typed block %q attribute %q must be a string array", ErrSchema, n.Type, name)
@@ -478,7 +448,7 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 				return "", fmt.Errorf("%w: encode typed block %q attribute %q: %v", ErrSchema, n.Type, name, err)
 			}
 			encoded = string(jsonValue)
-		case "block[]":
+		case BlockAttributeBlockList:
 			// Joined by one space, as ParseBlockPointerValue reads them. The joined value still
 			// passes through escapeDirectiveAttribute and strconv.Quote below, which leave a
 			// canonical reference unchanged: it holds none of the characters they escape.
@@ -521,30 +491,6 @@ func stringSlice(value any) ([]string, bool) {
 	}
 }
 
-func askAttributeRank(name string) int {
-	switch name {
-	case "urgency":
-		return 0
-	case "multiple":
-		return 1
-	case "state":
-		return 2
-	case "answered_by":
-		return 3
-	case "answered_at":
-		return 4
-	case "selected":
-		return 5
-	case "answer":
-		return 6
-	case "copied_from":
-		return 7
-	case "copied_from_document":
-		return 8
-	default:
-		return 9
-	}
-}
 func cloneSchemaValue(value any) any {
 	switch current := value.(type) {
 	case []string:

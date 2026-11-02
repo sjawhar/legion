@@ -1,0 +1,40 @@
+{
+  "nodes": [
+    "ask",
+    "blockquote",
+    "bullet_list",
+    "callout",
+    "code_block",
+    "doc",
+    "footnote_definition",
+    "footnote_reference",
+    "frontmatter",
+    "hardbreak",
+    "heading",
+    "hr",
+    "html",
+    "image",
+    "list_item",
+    "ordered_list",
+    "paragraph",
+    "table",
+    "table_cell",
+    "table_header",
+    "table_header_row",
+    "table_row",
+    "text"
+  ],
+  "marks": [
+    "dispatchAsk",
+    "emphasis",
+    "inlineCode",
+    "link",
+    "proofApproved",
+    "proofAuthored",
+    "proofComment",
+    "proofFlagged",
+    "proofSuggestion",
+    "strike_through",
+    "strong"
+  ]
+}
