@@ -1,0 +1,168 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-609",
+  "previousHandoff": "",
+  "plan": "dispatch://INFRA-609/artifact/plan-md (version 1). Read it before anything else: it carries the task list, the per-criterion surfaces and commands, and the deploy ordering.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker — the phase mechanics this role runs on: the workspace binding, the split-per-phase commit, the handoff, the push and its trailer rule, and the stop rules a refused completion needs.",
+      "skill://legion-worker/references/cleanup-deletion.md — this issue deletes code, a helper, two constants, nine test rows, five test helpers and documentation; that reference is the completeness rule for a deletion.",
+      "skill://legion-worker/references/pr-body.md — the pull request body, the six-field proof every criterion of plan.md section 5 records, and the simplify pass over the removed code.",
+      "skill://legion-worker/references/findings.md — plan.md section 7 lists four items that are not this change's to fix; that reference says which go to the architect and which go nowhere.",
+      "skill://legion-worker/references/tools.md — the two e2e proofs of A1b need a PostgreSQL (LEGION_TEST_PG_DSN is already set in the pod) and write under TMPDIR, which is the issue's volume."
+    ],
+    "test": [
+      "skill://legion-worker — the tester's phase, its handoff and the read-only rule once a red takes the phase back.",
+      "skill://legion-worker/references/pr-body.md — the evidence shape, and the rule that evidence names the surface a user reaches: A1b alone proves nothing about the listener, so the tester must run A1a and A1c-pre beside it.",
+      "skill://legion-worker/references/tools.md — ci-red-no-takeover.sh and no-required-checks.sh both run in a Legion pod against the pod's own PostgreSQL; no-required-checks.sh takes about seven minutes."
+    ],
+    "review": [
+      "skill://legion-worker — the reviewer's phase, what it fixes itself (prose) and what goes back (code or behaviour).",
+      "skill://legion-worker/references/merge-gate.md — the approval of a head by SHA and what READY compares, which this change's retro commits sit under.",
+      "skill://legion-worker/references/review-threads.md — replying on, listing and resolving threads, and judging a bot's finding.",
+      "skill://legion-worker/references/cleanup-deletion.md — judging whether the removal is complete, which is what A2 and A3 are: the reviewer re-runs both greps rather than reading the diff alone."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1. A1's central clause is not checkable at the merge: 'a push reaches the daemon as an envelope without the three fields' describes the deployed listener, and the merge deploys nothing, so the 'commit before' negative control distinguishes nothing. The two hosted e2e proofs write the fields themselves, so they are circular as a listener proof.",
+        "answer": "Departure D2. plan.md section 5 splits it into A1a (the normalizer and the webhook handler over a captured real GitHub body, with the parent commit as a real control), A1b (a real daemon completing a phase, ci-red-no-takeover.sh and no-required-checks.sh), A1c-pre (the shared golden joins the listener's output to the daemon's decoder, machine-checked), and A6 (the production reading after the listener pin moves, which is the implementer's production check and reports pending until then)."
+      },
+      {
+        "finding": "F2. 'Confirm first that no running daemon is older than INFRA-177's release' reads as a precondition on writing the code, is really a deploy-ordering gate, and the spec names no command for it. legion state --json does carry a release discriminator, daemon.schemaVersion, which the planner's brief said it did not.",
+        "answer": "plan.md section 6 states the gate as one command, curl -s \"<daemon url>/legion/v1/state\" | jq '.daemon.schemaVersion' >= 20261101144900 (docs/kubernetes.md:4184-4187), gives the measured reading for this deployment (67, so the gate is closed today), gives the code for what a wrong order costs, and names the ordering as the architect's to own before sign-off (section 7 item 1). The code change is written now because it is inert until the pin moves."
+      },
+      {
+        "finding": "F3. The .legion/-on-main clause cannot hold as written: main carries none today so the negative control is empty, 35 open pull requests will add paths after this merge, and a human already ruled (dispatch://LINUX-101) that no one deletes a root handoff directory on main because it may be a live tree's only copy.",
+        "answer": "Departure D3. Task T9 measures at the implementation head and again at the head handed to retro, deletes whatever it finds, and records the command, its output, main's commit and the UTC time. A4's control is a branch that carries one, not main. The set the spec means is the import's 'removal deferred: <KEY> is in <phase>' log (docs/kubernetes.md:4208-4209), and that run has not happened; section 7 item 2 puts the choice to wait for the cutover to the architect."
+      },
+      {
+        "finding": "F3b. A one-time search cannot hold while 35 branches carry the path; the root-cause fix would be a repository check refusing a head that carries .legion/.",
+        "answer": "Rejected with its reason, in T9: this pull request's own branch carries .legion/INFRA-609/ because the deployment below schemaVersion 20261101144900 still writes file handoffs, so such a check would refuse the change that adds it. The recurrence is bounded by the cutover, and a permanent gate for a one-time condition is machinery against STRATEGY.md's 'Delete what isn't used'."
+      },
+      {
+        "finding": "F4. The census predicate excludes the one note it was written for: pr2620.md was added to main at 2026-11-01T20:42:22Z, before the spec's 2026-11-02T00:21Z line, so the rerun as written selects only #2354's own three correct notes.",
+        "answer": "Departure D4. T7 uses the predicate the governing rule needs, #2354's branch merge base 0642a37a, and runs the census as docs/solutions/legion/a-mechanism-removal-reruns-its-learnings-census-...-pr2354.md defines it. The result is sixteen files with their lines, listed in T7."
+      },
+      {
+        "finding": "F4b. Several notes carry a status: superseded line naming an unrelated supersession while their handoff sentences still read as live, and one note's status line itself teaches the mechanism. Whether those are in scope decides about eleven edits.",
+        "answer": "Decided in T7: a status line naming a different supersession does not exempt a note, because a reader still reads its sentences as live; a note whose status names sjawhar/legion#2354 is already handled. docs/solutions/daemon/handoff-schema-migration-patterns.md:11, whose status line teaches the mechanism, is re-statused."
+      },
+      {
+        "finding": "F5. Change says remove the fields from 'any code, test or document that still names them' while A1 exempts docs/solutions/ and test data; the two disagree, and this change removes a mechanism, so the repository's own rule obliges a census over its own vocabulary.",
+        "answer": "Departures D5 and D6. T7 runs two vocabularies, M1 (the handoff) and M2 (changed_paths, changed_paths_truncated, githubPushChangedPaths, maxPushChangedPaths, maxPushChangedPathRunes, ClassifyPush, HandoffOnly, and forced as a field name). docs/solutions/daemon/webhook-rule-across-listener-and-daemon.md, status active and M2's own learning, has its sections 2 and 4 put in the past tense with its dated evidence left as written. A2 enumerates the exemption."
+      },
+      {
+        "finding": "F6. packages/envoy/.changes/unreleased/pr2354-Added-20261028-104008.yaml:16-18 says the listener still sends the three fields. It is unreleased, so it and this change's fragment fold into one release that both asserts and denies them, and it is exempt from A1 under no reading.",
+        "answer": "Departure D5. T6 deletes that one sentence after checking that packages/envoy/CHANGELOG.md has not folded it (its head is [27.2.0] and the sentence is not there), adds this change's own Removed fragment to packages/envoy, and adds one to packages/contracts for the golden, as #2354 did for its fixture change. No CHANGELOG.md is edited."
+      },
+      {
+        "finding": "F7. 'its contract in packages/contracts' names a package that declares no push payload field; three readings give three different diffs.",
+        "answer": "Departure D1. The four real places are named: packages/envoy/internal/contracts (normalize.go, export_test.go), packages/envoy/AGENTS.md:3986-3991, packages/contracts/fixtures/github-envelopes/push.json, and the changelog. packages/contracts/src needs no change."
+      },
+      {
+        "finding": "F8. 'test data' in A1 is undefined, and one reading costs 106 file renames.",
+        "answer": "T3 enumerates it: the raw GitHub webhook bodies (packages/envoy/internal/contracts/testdata/push_handoff_only.json, packages/envoy/scripts/fixtures/github/push.json) are GitHub's own and are not touched; the 323 reduceGithubEvent records are named by the SHA-256 of their .input and the replay ignores the fields, so they are left alone; the generated golden is regenerated, not exempt; the daemon's recorded envelope and the two synthetic live-test payloads are updated."
+      },
+      {
+        "finding": "F9. The regenerated golden is read by another package, so the plan must say which daemon tests run and keep the CI reads map accurate.",
+        "answer": "T3 and T4 require go -C packages/daemon test ./internal/intake ./internal/daemon, note that .github/scripts/ci_job_reads.py:226 already declares intake_test.go reading github-envelopes/*, and require .github/scripts/check-ci-filters.sh in A5."
+      },
+      {
+        "finding": "F10. .github/scripts/check-ci-images.sh:110-111 grounds its sweep exclusion on '.legion (Legion's per-issue run data, which a retro removes)', which #2354 falsified; no clause of the spec reaches it.",
+        "answer": "Departure D7. T8 corrects the sentence in this pull request, since it is a clear defect in a file this tree depends on, and keeps SWEEP_SKIP_DIRS = {\".legion\"} at :217 because branches still carry .legion/ until the cutover, this pull request's own among them. Its test file is .github/scripts/check-ci-images.test.sh."
+      },
+      {
+        "finding": "F11. Removing forced makes a conforming listener indistinguishable from a pre-LEGION-33 one, a discriminator packages/envoy/AGENTS.md:3990 and normalize.go:1509-1512 promise to any consumer, not only to the Legion daemon.",
+        "answer": "T5 rewrites the whole push bullet at AGENTS.md:3986-3991 rather than deleting its last sentence, and T1 corrects normalize.go's two comments. Within this repository no consumer reads the marker: the daemon's push decoder reads seven keys and none of the three, and agent delivery renders the payload generically (packages/envoy-client/src/delivery.ts:1089-1160). A consumer outside the tree is the architect's to confirm, and section 7 carries it."
+      },
+      {
+        "finding": "F12. legion handoffs import and packages/daemon/internal/handoffimport/ exist only for the cutover, STRATEGY.md says to delete what is not used, and no issue owns their removal.",
+        "answer": "T10 decides it, with the reason: the cutover has not run and the importer is what runs it, so its removal is ordered after the last deferred issue. Not this change's. Section 7 item 4 tells the architect that it has no owner; this tree files no issue for it."
+      },
+      {
+        "finding": "F13. The deploy gate and the production reading concern a private deployment and a digest pin, and this repository is public.",
+        "answer": "plan.md writes 'where the deployment is defined' and names no deployment repository, host or account; it lives on Dispatch, not in the tree. This handoff, which is committed, does the same. No per-deployment reading goes in the tree, a commit message or the pull request text; .github/scripts/check-private-names.sh in A5 is the gate."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Change: 'Remove the three fields from the listener's push envelope, from its contract in packages/contracts, and from any code, test or document that still names them.'",
+      "plan": "The contract is in four places and packages/contracts/src is not one of them: packages/envoy/internal/contracts (normalize.go:821-841, 1378-1421, 1423-1435, 1509-1512; export_test.go:7-10), packages/envoy/AGENTS.md:3986-3991, the generated golden packages/contracts/fixtures/github-envelopes/push.json, and the changelog.",
+      "evidence": "grep -rl 'changed_paths' packages/contracts/src is empty; packages/contracts/src/subject.ts:195-233 declares push subjects only. No Go struct, const list or json tag declares the push payload's field set; it is the inline map literal at normalize.go:823-841.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "A1: 'A push to a Legion branch reaches the daemon as an envelope without the three fields, and the daemon completes a phase on it. Negative control: at the commit before, the envelope carries them.'",
+      "plan": "Split into A1a (the normalizer and the webhook handler over a captured real GitHub push body, negative control at the parent commit), A1b (a real daemon completing a phase over a real PostgreSQL and nats-server), A1c-pre (the shared golden joins producer to consumer, machine-checked before the merge) and A6 (the production reading after the listener's digest pin moves, reported by the implementer's production check, pending until then).",
+      "evidence": "The merge publishes a listener image and cuts a release (.github/workflows/release-envoy-listener.yaml) but deploys nothing: the pin is a digest where the deployment is defined, and nothing under .github/workflows/ moves it. So at the merge the production envelope is unchanged and the 'commit before' control distinguishes nothing.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1 becomes A1a, A1b, A1c-pre and A6, each with its own surface, command and control.",
+          "A6 is a production reading after a deploy this pull request does not perform, so it is the production check rather than a sign-off gate."
+        ]
+      }
+    },
+    {
+      "spec": "Change: 'A search of main for .legion/ after this pull request merges finds nothing; before it, it lists each such directory, the negative control.'",
+      "plan": "Measure at the implementation head and again at the head handed to retro, delete whatever is found, and record the command, its output, main's commit and the UTC time. The negative control is a branch that carries a .legion/ path, not main. No repository check is added.",
+      "evidence": "git ls-files | grep -c '^\\.legion/' is 0 and git log b552205c..origin/main -- '.legion/' is empty, so the control cannot be produced. The set the clause means is the import's 'removal deferred: <KEY> is in <phase>' log (docs/kubernetes.md:4208-4209), and the import has not run: this deployment's daemon reports schemaVersion 67.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A4's negative control moves from main to an open branch that carries a .legion/ path.",
+          "A4 is vacuous until the cutover runs, and the pull request says so rather than claiming a sweep it did not make."
+        ]
+      }
+    },
+    {
+      "spec": "Also in scope: 'rerun INFRA-177 retro census over main ... to correct any other note main added after 2026-11-02T00:21Z.'",
+      "plan": "Run the census with the predicate the governing rule needs, #2354's branch merge base 0642a37a, over both the handoff vocabulary and this change's own, and correct the sixteen files T7 lists with their lines.",
+      "evidence": "git log --diff-filter=A on the note the spec names prints 05d6578981a4 2026-11-01T20:42:22Z (#2620), before the spec's line, so the rerun as written selects only #2354's own three correct notes. docs/solutions/legion/a-retro-census-is-run-against-main-...-pr2354.md:26-51 defines the predicate and the correction rule.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The census corrects sixteen docs/solutions files rather than one: the note the spec names plus fifteen that #2354's own census did not reach, nine further hits recorded as judgment calls in the pull request body, and about 109 left as already handled, still live, or dated evidence.",
+        "acceptance": [
+          "A3 is the two vocabulary greps leaving no note that teaches either mechanism as a present step, with each remaining hit classified in the pull request body."
+        ]
+      }
+    },
+    {
+      "spec": "A1: 'A search of the repository outside docs/solutions/ and test data finds no reference to them.'",
+      "plan": "The exemption is enumerated (raw GitHub webhook bodies, the reduceGithubEvent records, the CHANGELOGs) and the generated golden is regenerated rather than exempted; the unreleased fragment packages/envoy/.changes/unreleased/pr2354-Added-20261028-104008.yaml loses its last sentence, which asserts the fields are still sent.",
+      "evidence": "That fragment is in neither exempted class and is unreleased (packages/envoy/CHANGELOG.md's head is [27.2.0] and the sentence is not folded), so it and this change's fragment would fold into one release that both asserts and denies the fields. packages/envoy/internal/contracts/testdata/push_handoff_only.json:40 is GitHub's own boolean and must not be touched; the 106 reduceGithubEvent records are named by their input's SHA-256 (classify/fixtures_test.go:80-88).",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A2's search names its exemptions by path and its one substring false positive, packages/envoy/internal/broker/api/unchanged_paths_test.go."
+        ]
+      }
+    },
+    {
+      "spec": "The spec treats the three fields as inert and scopes the documentation work to the docs/solutions census of the handoff mechanism.",
+      "plan": "This change removes a mechanism of its own, so the census runs over its vocabulary too, and docs/solutions/daemon/webhook-rule-across-listener-and-daemon.md has its sections 2 and 4 put in the past tense with its dated evidence left as written.",
+      "evidence": "docs/solutions/legion/a-mechanism-removal-reruns-its-learnings-census-at-every-forward-merge-...-pr2354.md binds any change that removes a mechanism. That note is status: active and its sections 2 and 4 are entirely about changed_paths, changed_paths_truncated and the deploy-skew degradation; packages/envoy/AGENTS.md:3990 and normalize.go:1509-1512 promise the absence marker to any consumer.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Adds docs/solutions/daemon/webhook-rule-across-listener-and-daemon.md and one sentence of external-red-and-phase-ownership.md to the documentation work, and makes T5 a rewrite of the whole push bullet rather than a deletion of its last sentence."
+      }
+    },
+    {
+      "spec": "The spec names no work outside packages/envoy, packages/contracts, packages/daemon and docs/solutions.",
+      "plan": "Correct .github/scripts/check-ci-images.sh:110-111, whose sweep exclusion is grounded on '.legion (Legion's per-issue run data, which a retro removes)'. Keep the skip itself at :217.",
+      "evidence": "No retro removes .legion/ since sjawhar/legion#2354, so the ground is false while the code it grounds is still right: branches carry .legion/ until the cutover, this pull request's own branch among them. It is a clear defect in a file this tree depends on, which the no-deferral rule fixes here.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Adds .github/scripts/check-ci-images.sh and its test .github/scripts/check-ci-images.test.sh to the change."
+      }
+    }
+  ]
+}
