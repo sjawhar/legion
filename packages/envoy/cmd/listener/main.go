@@ -59,11 +59,11 @@ type listenerDeps struct {
 	streamInfo streamInfoLookup
 	// delivery is the config main hands the delivery handlers (the role lane, the live lane and the
 	// durable), wired once, so the publish route forwards through its forwardRole, records each
-	// session it confirms in its dedupeCache (so the handlers do not push that key to it again), and
-	// writes each send's delivery line and delivery_status count through its logger and
+	// session it confirms in its dedupeCache (so the handlers do not deliver that key to it again),
+	// and writes each send's delivery line and delivery_status count through its logger and
 	// messagesDelivered, reading as the role lane's do, beside the route's own request record
 	// (request_record.go). The route never reads that dedupeCache, since the handlers also
-	// record a self-subscribed session whose push they skipped without hearing from it.
+	// record a self-subscribed session whose delivery they skipped without hearing from it.
 	delivery *listenerDeliveryHandlerConfig
 	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
 	// through the route, which only the route writes. A send skips a holder or recipient recorded
@@ -929,21 +929,15 @@ func main() {
 		endListenerKVWatchers(ctx, caches)
 	})
 
-	deliver := session.Deliverer{
-		MachineID:    cfg.MachineID,
-		HostBridge:   os.Getenv("ENVOY_HOST_BRIDGE"),
-		RequestLimit: 30 * time.Second,
-	}
+	deliver := session.Deliverer{MachineID: cfg.MachineID}
 
 	dedupeCache := dedupe.New(10 * time.Minute)
 
-	// attemptCache tracks (dedupe_key, session_id) pairs BEFORE delivery to
-	// prevent phantom duplicates when slow serves accept prompt_async but
-	// the HTTP client times out before receiving 204. Keyed by DedupeKey
-	// (not EventID) because fan-out normalization can produce multiple
-	// envelopes with the same EventID but distinct DedupeKeys. The existing
-	// dedupeCache records only successful deliveries (post-delivery) and
-	// cannot catch this slow-204 case. See #389.
+	// attemptCache tracks (dedupe_key, session_id) pairs BEFORE a delivery is reported, so a
+	// second copy of the same event read while the first is still being placed is a skip rather
+	// than a second delivery. Keyed by DedupeKey (not EventID) because fan-out normalization can
+	// produce multiple envelopes with the same EventID but distinct DedupeKeys. The existing
+	// dedupeCache records only successful deliveries (post-delivery) and cannot catch that case.
 	//
 	// attemptCacheTTL is named because the unplaceable retry below is bounded against it: a
 	// message whose retries outlived its attempt entry would have each redelivery recorded
@@ -981,13 +975,11 @@ func main() {
 		// (unplaceableDeferrals, unplaceable_delivery.go).
 		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
-	// The durable path's pushes to serving-port sessions run off its handler, on one worker per
-	// session (servePortWorkers), so a port slow to accept holds up no other session's delivery;
-	// the role lane's forwards run off its handler (roleForwarder): the handler resolves each role
-	// message's holder and hands the forward over, and the forwards to one holder are published in
-	// order while each waits for its outcome on its own. Both are wired here, last, so every seam
-	// of the configuration they copy is set (wireDeliveryWorkers).
-	deliveryConfig, stopWorkers := wireDeliveryWorkers(deliveryConfig)
+	// The role lane's forwards run off its handler (roleForwarder): the handler resolves each
+	// role message's holder and hands the forward over, and the forwards to one holder are
+	// published in order while each waits for its outcome on its own. It is wired here, last, so
+	// every seam of the configuration it copies is set (wireDeliveryWorkers).
+	deliveryConfig = wireDeliveryWorkers(deliveryConfig)
 	roleForwards := deliveryConfig.roleForwards
 
 	// The role lane is a core-NATS queue subscription on a connection of its own with finite pending
@@ -1050,14 +1042,13 @@ func main() {
 	// The parts a shutdown ends, gathered once: every end of a start that serves /v1 passes them
 	// to shutdownListener.
 	parts := listenerParts{
-		server:      server,
-		client:      client,
-		lane:        lane,
-		live:        live,
-		delivery:    delivery,
-		relays:      relays,
-		stopWorkers: stopWorkers,
-		caches:      caches,
+		server:   server,
+		client:   client,
+		lane:     lane,
+		live:     live,
+		delivery: delivery,
+		relays:   relays,
+		caches:   caches,
 	}
 
 	// From here a SIGTERM or SIGINT is an ordered shutdown: /v1 serves from the next step, and the
@@ -1225,17 +1216,15 @@ type listenerLoops struct {
 // listenerParts are the parts of a started listener that shut down: server is the /v1 HTTP server,
 // client the main bus connection, lane the role lane, live the live topics lane's client (nil when
 // the lane is off), delivery the session-consumer connection, relays the relay of its consumers
-// (nil when it does not run), stopWorkers the end of the delivery workers (wireDeliveryWorkers),
-// and caches the KV caches whose watchers are retired last.
+// (nil when it does not run), and caches the KV caches whose watchers are retired last.
 type listenerParts struct {
-	server      *http.Server
-	client      *bus.Client
-	lane        roleLane
-	live        *bus.Client
-	delivery    *sessionDelivery
-	relays      *sessionRelays
-	stopWorkers func(context.Context)
-	caches      []listenerCache
+	server   *http.Server
+	client   *bus.Client
+	lane     roleLane
+	live     *bus.Client
+	delivery *sessionDelivery
+	relays   *sessionRelays
+	caches   []listenerCache
 }
 
 // shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
@@ -1248,13 +1237,12 @@ func shutdownListener(logger *logging.Logger, parts listenerParts, loops listene
 	}
 
 	// Ordered shutdown:
-	// 1. Session relays and serving-port workers — publish no frame, push to no port and ack nothing
-	//    more; the messages they hold are delivered again once their ack wait runs out.
+	// 1. Session relays — publish no frame and ack nothing more; the messages they hold are
+	//    delivered again once their ack wait runs out.
 	// 2. HTTP server — stop accepting new requests, drain in-flight.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	parts.relays.stop(shutdownCtx)
-	parts.stopWorkers(shutdownCtx)
 	if err := parts.server.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}

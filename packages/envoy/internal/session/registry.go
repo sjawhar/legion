@@ -29,26 +29,20 @@ type SessionEntry struct {
 	Driving        bool `json:"driving,omitempty"`
 	SelfSubscribed bool `json:"self_subscribed,omitempty"`
 	// Host is the machine the client-reported `machineID()` (envoy-client's
-	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, and the
-	// address its owning listener reaches it at (Deliverer.hostFor), unless the session runs on
-	// that listener's machine (it registered through it, or Host is that listener's machine id)
-	// and its configured HostBridge wins. Only the owning listener delivers
-	// to the session; another leaves it to the owner (ErrWrongMachine), whatever Host says. The
-	// owner is the listener the session's stored subscription names, the one store.Registry.Match
-	// fans its topics out on, else, with no subscription stored, the one MachineID names (any
-	// listener when that is empty
-	// too). MachineID is the registering listener's own ENVOY_MACHINE_ID, whether every session
-	// registers through one shared listener or each machine runs its own; a re-registration
-	// through another listener moves it, while the stored subscription keeps its first listener's.
-	// Host is empty for a session whose plugin predates this field (subscribeBody had no "host");
-	// its owning listener then falls back to host.docker.internal when the session registered
-	// through it, else to MachineID, and HostOrMachine falls back to MachineID so every display
+	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, as
+	// opposed to MachineID, which is the registering listener's own ENVOY_MACHINE_ID, whether
+	// every session registers through one shared listener or each machine runs its own; a
+	// re-registration through another listener moves it, while the stored subscription keeps its
+	// first listener's. No delivery reads Host: a message reaches the session from its own
+	// consumer, relayed by the listener the entry names, or on the session's own subscription,
+	// wherever its process runs. Host is empty for a session whose plugin predates this field
+	// (subscribeBody had no "host"), and HostOrMachine falls back to MachineID so every display
 	// caller sees a populated value.
 	Host string `json:"host,omitempty"`
 	// Delivery is DeliveryConsumer when the session registered for consumer delivery and the
 	// listener it registered through holds its session consumer (bus.SessionConsumers): the
 	// session's stored messages reach it from that consumer, relayed by the listener that owns it,
-	// so the durable path acknowledges them with no push and no exception
+	// so the durable path acknowledges them with nothing to deliver and no exception
 	// (Deliverer.DeliverWithResultForEntry). Empty for a session on the core path: a plugin that did
 	// not ask, an older listener, or a hub that refused the consumer.
 	Delivery string `json:"delivery,omitempty"`
@@ -84,9 +78,9 @@ type SessionEntry struct {
 const DeliveryConsumer = "consumer"
 
 // ConsumerHoldsStored reports whether the session's own consumer holds the stored message of
-// stream sequence storedSeq, so no delivery path owes it a push: a session on consumer delivery is
-// held every message at or after the sequence its consumer starts at (ConsumerStart). A durable
-// message below that start is in no consumer — a push NAKed, or a message deferred, before the
+// stream sequence storedSeq, so no delivery path owes it anything: a session on consumer delivery
+// is held every message at or after the sequence its consumer starts at (ConsumerStart). A
+// durable message below that start is in no consumer — one NAKed, or deferred, before the
 // consumer was created, and redelivered after it — and the durable path delivers it as it would
 // for a session with no consumer at all. storedSeq 0 names a message that is not the durable's
 // copy of a stored one (a core or live frame), whose stored copy the consumer holds whatever its
