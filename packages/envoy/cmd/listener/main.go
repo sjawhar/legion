@@ -40,9 +40,11 @@ type listenerDeps struct {
 	registry *store.Registry
 	sessions *session.SessionRegistry
 	// known is the store of every session that registered in the last 30 days
-	// (session.KnownSessions), nil on a listener whose NATS user may not open its bucket and in a
-	// test that builds the handlers without it. Every method of it is safe on a nil store, so no
-	// call site checks.
+	// (session.KnownSessions). A listener whose NATS user may not open its bucket holds a store
+	// that answers no record and writes none until an attempt of its own opens the bucket; nil
+	// here is a listener that could not build a JetStream context and a test that builds the
+	// handlers without a store. Every method of it is safe on a nil store, so no call site
+	// checks.
 	known *session.KnownSessions
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
@@ -927,16 +929,20 @@ func main() {
 	// The known-session store answers which sessions registered in the last 30 days, whether or
 	// not they are registered now; no delivery depends on it, so it never stops a start. A
 	// listener whose NATS user may not open the bucket - its grant not yet applied, which is what
-	// production runs until the hub is replaced - logs this one line naming the bucket and keeps
-	// running on a nil store, whose reads answer no record and whose writes do nothing
-	// (session.KnownSessions).
+	// production runs between this image and the grant - keeps the store, which answers no record
+	// and writes none until an attempt of its own opens the bucket, so the grant applied after
+	// this start is picked up with no restart. That attempt waits seconds, not the 10 the
+	// listener's other stores wait, so /v1 opens below as promptly as it does on a listener whose
+	// bucket opens (session.OpenKnownSessions). The store logs the bucket it could not open and
+	// the attempt that opened it; this line is the one failure that leaves no store at all, a
+	// connection that gives no JetStream context, which answers as an empty store does.
 	known, knownErr := session.OpenKnownSessions(
 		client.Conn,
 		session.WithKnownSessionReplicas(cfg.NATSReplicas),
 		session.WithKnownSessionLogger(logger.Slog()),
 	)
 	if knownErr != nil {
-		logger.Warn("the known-session store is not open; no session's 30-day record is written or read until this listener's NATS user may open the bucket",
+		logger.Warn("the known-session store was not built; no session's 30-day record is written or read for the life of this listener",
 			slog.String("bucket", bus.KnownSessionBucket), slog.String("error", knownErr.Error()))
 	}
 
@@ -948,7 +954,8 @@ func main() {
 	//
 	// Bounded at 30s, as its neighbour is, and it fails open: the store answers from whatever the
 	// watcher has delivered, and the warn below says the cache may be partly filled. Nothing here
-	// stops a start. A nil store, the listener that could not open the bucket, waits for nothing.
+	// stops a start. A store whose bucket is not open, and a nil one, wait for nothing: neither
+	// has a cache to fill, and a start must not spend this budget on a bucket it may not open.
 	knownCacheReadyCtx, knownCacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := known.WaitForCacheReady(knownCacheReadyCtx); err != nil {
 		logger.Warn("known-session cache warm-up did not complete; the store serves from a partly filled cache, so a stopped session may read as unknown and a publish's recipient count low",
@@ -965,13 +972,12 @@ func main() {
 	client.AddDrainHook(func(ctx context.Context) {
 		endListenerKVWatchers(ctx, caches)
 	})
-	// The known-session store keeps its own watcher the same way, outside listenerCaches: a
-	// listener that could not open its bucket has no store to name there, and the self-health
-	// monitor must not restart a listener over a cache no delivery reads.
-	if known != nil {
-		client.AddReconnectHook(func(conn *nats.Conn) error { return known.Rewatch(conn) })
-		client.AddDrainHook(func(ctx context.Context) { known.EndWatch(ctx) })
-	}
+	// The known-session store keeps its own watcher the same way, outside listenerCaches: the
+	// self-health monitor must not restart a listener over a cache no delivery reads. Both hooks
+	// are safe on a store whose bucket is not open, which keeps the connection for its next
+	// attempt, and on no store at all.
+	client.AddReconnectHook(func(conn *nats.Conn) error { return known.Rewatch(conn) })
+	client.AddDrainHook(func(ctx context.Context) { known.EndWatch(ctx) })
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,

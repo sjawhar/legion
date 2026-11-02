@@ -213,8 +213,10 @@ func TestAHundredUnchangedHeartbeatsWriteTheRecordAtMostTwice(t *testing.T) {
 	}
 }
 
-// A subscription change writes the record too: an unsubscribe sets the session consumer's filter
-// to what is left, and the record follows with the topics the registry still stores.
+// A subscription change writes the record too, for a session the relay serves a consumer: the
+// unsubscribe route writes it from the topics the registry still stores, beside the refollow that
+// sets the consumer's filter to what is left. Neither waits on the other, so the record is right
+// whatever the consumer call did.
 func TestARefollowWritesTheKnownSessionRecord(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	clock := time.Now()
@@ -240,6 +242,9 @@ func TestARefollowWritesTheKnownSessionRecord(t *testing.T) {
 	if !slices.Contains(registered.Topics, dropped) {
 		t.Fatalf("the registered record's topics are %v, want the topic the unsubscribe will remove", registered.Topics)
 	}
+	if entry, err := rig.deps.sessions.Get("ses_refollow"); err != nil || entry.Delivery != session.DeliveryConsumer {
+		t.Fatalf("ses_refollow's entry is %#v (error %v), want one that records consumer delivery: this test covers the session the relay serves a consumer", entry, err)
+	}
 
 	clock = clock.Add(session.KnownSessionRefreshAge + time.Minute)
 	rig.post(t, "/v1/interests/unsubscribe", `{"session_id":"ses_refollow","topics":["`+dropped+`"]}`)
@@ -259,9 +264,49 @@ func TestARefollowWritesTheKnownSessionRecord(t *testing.T) {
 	}
 }
 
-// A listener whose NATS user may not open the bucket runs without the store: the routes that
-// write a record carry no nil check, so a registration and a clean stop answer as they always
-// have, and every read answers no record.
+// A session whose interests an operator removes through the admin route stops being counted too:
+// that route is the unsubscribe's other call site, and a record left naming the topics the
+// session no longer follows would keep telling a publish that it gets the message.
+func TestRemovingASessionsInterestsThroughTheAdminRouteEmptiesItsRecord(t *testing.T) {
+	rig := setupKnownRig(t)
+	team := "notifications.team.deploy-squad"
+	rig.subscribe(t, "ses_admin_removed", []string{team})
+	registered, ok := rig.known.Get("ses_admin_removed")
+	if !ok {
+		t.Fatal("the registration wrote no known-session record")
+	}
+	if !slices.Contains(registered.Topics, team) {
+		t.Fatalf("the registered record's topics are %v, want the team topic the removal will take", registered.Topics)
+	}
+
+	rig.clock = rig.clock.Add(session.KnownSessionRefreshAge + time.Minute)
+	mux := http.NewServeMux()
+	registerV1Routes(mux, rig.deps, "test-machine", logging.New("test"))
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/v1/interests/ses_admin_removed", nil))
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("DELETE /v1/interests/ses_admin_removed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	after, ok := rig.known.Get("ses_admin_removed")
+	if !ok {
+		t.Fatal("the removal took the known-session record; it must stay, naming no topic")
+	}
+	if len(after.Topics) != 0 {
+		t.Errorf("the record's topics are %v, want none: the route removed every interest the session had", after.Topics)
+	}
+	if after.LastSeen != rig.clock.UnixMilli() {
+		t.Errorf("the record's last_seen = %d, want the removal's clock %d", after.LastSeen, rig.clock.UnixMilli())
+	}
+	if got := rig.known.Match(team); len(got) != 0 {
+		t.Errorf("the team topic still matches %#v, so a publish on it would count a session that no longer follows it", got)
+	}
+}
+
+// A listener whose NATS user may not open the bucket runs on a store that answers no record: the
+// routes that write one carry no check of their own, so a registration and a clean stop answer as
+// they always have, and every read answers no record. A nil store, this test's, is that listener
+// with no JetStream context at all.
 func TestTheRoutesServeAListenerWithNoKnownSessionStore(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	deps := &listenerDeps{registry: registry, sessions: sessions}
@@ -286,5 +331,41 @@ func TestTheRoutesServeAListenerWithNoKnownSessionStore(t *testing.T) {
 	}
 	if got := deps.known.Match("notifications.team.deploy-squad"); len(got) != 0 {
 		t.Errorf("a listener with no known-session store matched %#v, want none", got)
+	}
+}
+
+// A listener whose NATS user may not open the bucket yet carries neither recipient count, as one
+// with no store at all does (TestAListenerWithNoKnownSessionStoreCarriesNeitherCount): the count
+// it could make is the live sessions alone, and the records that make it whole are the ones its
+// grant does not let it read. This is the configuration production runs between this image and
+// the grant, and the store it holds there is open for business in every way but the bucket.
+func TestAListenerWhoseKnownSessionBucketIsNotOpenCarriesNeitherCount(t *testing.T) {
+	seed, public := testnats.User(t)
+	grant := testnats.StartNkeyGranted(t, public, listenerGrantBeforeSessionConsumers()...)
+	t.Setenv("NATS_NKEY_SEED", seed)
+	client, err := bus.ConnectOwningStream([]string{grant.URL}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the listener's user: %v", err)
+	}
+	t.Cleanup(client.Close)
+	known, err := session.OpenKnownSessions(client.Conn, session.WithKnownSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the known-session store over a bucket the grant does not carry: %v", err)
+	}
+	t.Cleanup(known.StopWatch)
+	if known.Opened() {
+		t.Fatal("the bucket opened under a grant that does not carry it, so this test says nothing about a listener that cannot open it")
+	}
+
+	harness := newListenerDeliveryHarnessOn(t, client, nil)
+	waitForRegistry(t, harness.registry)
+	deps := harness.publishDeps(t)
+	deps.known = known
+	recipients, connected := recipientCounts(deps, "notifications.team.deploy-squad", "ses_sender", func() []store.Interest {
+		t.Error("the count walked the interest rows, which it has no answer to put them in")
+		return nil
+	})
+	if recipients != nil || connected != nil {
+		t.Errorf("the counts are %v and %v, want both left out while the bucket is not open", recipients, connected)
 	}
 }

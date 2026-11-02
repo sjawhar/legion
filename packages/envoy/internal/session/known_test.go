@@ -1,14 +1,20 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // openKnown opens the known-session store on the package's shared NATS server, with a clock the
@@ -133,8 +139,8 @@ func TestKnownSessionsAnswerNoRecordPastTheRetention(t *testing.T) {
 	}
 }
 
-// Every method is safe on a nil store, the listener that could not open the bucket: no record, no
-// match, and writes that do nothing.
+// Every method is safe on a nil store, the listener that could not build a JetStream context: no
+// record, no match, and writes that do nothing.
 func TestNilKnownSessionsAnswersNothingAndPanicsNowhere(t *testing.T) {
 	var known *KnownSessions
 	if record, ok := known.Get("ses_any"); ok || record.SessionID != "" {
@@ -160,6 +166,120 @@ func TestNilKnownSessionsAnswersNothingAndPanicsNowhere(t *testing.T) {
 	}
 	known.StopWatch()
 	known.EndWatch(context.Background())
+}
+
+// knownBucketGrant is the publish grant a NATS user needs to open the known-session bucket,
+// watch it and write it. A listener's user carries these once the grant that follows this image
+// is applied; until then it carries none of them, which is the listener below.
+func knownBucketGrant() []string {
+	stream := "KV_" + bus.KnownSessionBucket
+	return []string{
+		"$JS.API.INFO",
+		"$JS.API.STREAM.INFO." + stream,
+		"$JS.API.STREAM.CREATE." + stream,
+		"$JS.API.DIRECT.GET." + stream + ".>",
+		"$JS.API.STREAM.MSG.GET." + stream,
+		"$KV." + bus.KnownSessionBucket + ".>",
+		"$JS.API.CONSUMER.CREATE." + stream + ".>",
+		"$JS.API.CONSUMER.DELETE." + stream + ".>",
+		"$JS.FC." + stream + ".>",
+	}
+}
+
+// A store whose NATS user may not open the bucket opens all the same, within one attempt's wait:
+// it stops no start, waits for no cache, answers no record and writes nothing, and says so once.
+// When the grant arrives - production applies it after the image that reads these records - an
+// attempt of its own opens the bucket, with no restart, and the store writes and reads from then
+// on. The denial is the server's own: the user's publish grant names none of the bucket's
+// subjects, so the request is dropped as a denied JetStream request is in production, and the
+// attempt costs the whole wait rather than ending on a refusal.
+func TestAKnownSessionStoreOpensItsDeniedBucketOnceTheGrantArrives(t *testing.T) {
+	seed, public := testnats.User(t)
+	grant := testnats.StartNkeyGranted(t, public, "nothing.this.store.uses")
+	conn, err := testnats.ConnectSeed(t, grant.URL, seed)
+	if err != nil {
+		t.Fatalf("connect as the user whose grant does not carry the bucket: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	var logs bytes.Buffer
+	var logsMu sync.Mutex
+	logged := func() string {
+		logsMu.Lock()
+		defer logsMu.Unlock()
+		return logs.String()
+	}
+
+	started := time.Now()
+	known, err := OpenKnownSessions(conn,
+		WithKnownSessionReplicas(1),
+		WithKnownSessionLogger(slog.New(slog.NewTextHandler(lockedWriter{&logs, &logsMu}, nil))),
+		// The production schedule's first wait is a second and its cap five minutes, which a
+		// test would spend waiting; every attempt it makes is the same.
+		withKnownSessionRetry(100*time.Millisecond, 500*time.Millisecond))
+	opening := time.Since(started)
+	if err != nil {
+		t.Fatalf("open the store over a bucket its user may not open: %v", err)
+	}
+	if known == nil {
+		t.Fatal("no store over a bucket its user may not open; the listener has nothing to answer reads with")
+	}
+	t.Cleanup(known.StopWatch)
+	if opening > 2*knownBucketOpenWait {
+		t.Fatalf("the open took %s, want it bounded by the %s one attempt waits: the listener's start waits here before it opens /v1",
+			opening, knownBucketOpenWait)
+	}
+	t.Logf("the open over a denied bucket took %s", opening)
+
+	waited := time.Now()
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelReady()
+	if err := known.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("WaitForCacheReady over a bucket that is not open: %v, want nil", err)
+	}
+	if elapsed := time.Since(waited); elapsed > time.Second {
+		t.Fatalf("the cache gate waited %s on a bucket that is not open, want it to wait for nothing", elapsed)
+	}
+
+	const denied = "ses_denied_bucket"
+	topic := "notifications.team.deploy-squad"
+	if err := known.RecordWithin(context.Background(), KnownSession{SessionID: denied, Topics: []string{topic}}); err != nil {
+		t.Fatalf("RecordWithin over a bucket that is not open: %v, want nil", err)
+	}
+	if record, ok := known.Get(denied); ok {
+		t.Errorf("Get over a bucket that is not open answered %#v, want no record", record)
+	}
+	if got := matchedIDs(known, topic); len(got) != 0 {
+		t.Errorf("Match over a bucket that is not open answered %v, want none", got)
+	}
+	if warnings := strings.Count(logged(), "level=WARN"); warnings != 1 {
+		t.Fatalf("the store logged %d WARN lines over a bucket it may not open, want the one that names it:\n%s", warnings, logged())
+	}
+
+	grant.Grant(t, knownBucketGrant()...)
+
+	deadline := time.Now().Add(30 * time.Second)
+	for known.watch() == nil && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if known.watch() == nil {
+		t.Fatalf("the store did not open the bucket within 30s of the grant:\n%s", logged())
+	}
+	if err := known.RecordWithin(context.Background(), KnownSession{SessionID: denied, Topics: []string{topic}}); err != nil {
+		t.Fatalf("record once the grant arrived: %v", err)
+	}
+	record, ok := known.Get(denied)
+	if !ok {
+		t.Fatal("the store holds no record of the session written once the grant arrived")
+	}
+	if !slices.Equal(record.Topics, []string{topic}) {
+		t.Errorf("the record's topics are %v, want the written %q", record.Topics, topic)
+	}
+	if warnings := strings.Count(logged(), "level=WARN"); warnings != 1 {
+		t.Errorf("the store logged %d WARN lines, want the one the first failed open wrote and none per attempt:\n%s", warnings, logged())
+	}
+	if opens := strings.Count(logged(), "the known-session bucket is open"); opens != 1 {
+		t.Errorf("the store logged the open %d times, want one line:\n%s", opens, logged())
+	}
 }
 
 // knownSessionMemoryBound is what the records and the subject index of 100,000 sessions may cost

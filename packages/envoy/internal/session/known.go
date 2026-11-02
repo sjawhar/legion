@@ -17,11 +17,11 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// KnownSessionRetention is how long a session stays known after its last registration, refollow or
-// clean stop: the envoy_known_sessions bucket's TTL, and the window a record's own last_seen is
-// read against (KnownSessions.Get). It is well past the 72 hours Envoy keeps a session's messages,
-// so a suspended Legion session that resumes under the same id is still known when its queued
-// messages are delivered.
+// KnownSessionRetention is how long a session stays known after its last registration, interest
+// change or clean stop: the envoy_known_sessions bucket's TTL, and the window a record's own
+// last_seen is read against (KnownSessions.Get). It is well past the 72 hours Envoy keeps a
+// session's messages, so a suspended Legion session that resumes under the same id is still known
+// when its queued messages are delivered.
 const KnownSessionRetention = 30 * 24 * time.Hour
 
 // KnownSessionRefreshAge is how young a stored record must be for a write of the same content to
@@ -41,6 +41,38 @@ const KnownSessionRefreshAge = 10 * time.Minute
 // its deadline out on its own (Get, MatchEach), so the pass is only there to give the memory
 // back, and an hour's delay in doing that changes no answer.
 const knownSessionSweepInterval = time.Hour
+
+// knownBucketOpenWait bounds every JetStream request one attempt to open the bucket makes, and so
+// the whole attempt: a bucket this listener's NATS user may not open is refused by the server
+// dropping the request, which costs the wait in full. The listener opens /v1 behind this attempt,
+// so the wait is what a start pays for a bucket it cannot open; 2 seconds is far past a healthy
+// open, whose leader has already answered the JetStream requests of every bucket opened before
+// this one (cmd/listener/main.go opens the stream, the interest, role, session and CI buckets
+// first), and far below the 10 seconds every other store of the listener waits, which no start
+// can afford for a store no delivery depends on. An attempt this wait gives up on costs nothing
+// but a retry.
+const knownBucketOpenWait = 2 * time.Second
+
+// knownBucketServeWait is the wait every bucket call made after the open gets: the cache
+// watcher's, and a write's (RecordWithin), which its caller's own context bounds besides
+// (bus.Bounded). It is the 10 seconds the listener's other stores give their bucket calls
+// (store.Open, OpenSessionRegistry, cistore.Open): the short wait above is for the attempt a
+// start waits on, and giving a write or a watch that wait would make a cluster that is merely
+// slow look like one that refuses.
+const knownBucketServeWait = 10 * time.Second
+
+// knownBucketRetryFirst and knownBucketRetryMax are the waits between the attempts that follow a
+// bucket that did not open: the first, then twice the one before it up to the cap, until an
+// attempt opens the bucket or the store is stopped. The grant that lets a listener open this
+// bucket is applied after the image that reads it, so a listener started before the grant picks
+// the bucket up within the cap of the grant arriving, with no restart. Past the cap a denied
+// listener asks 12 times an hour, for as long as it runs: one dropped request and one
+// permissions violation in the server's log each, and nothing in its own, since only the first
+// failure is logged (OpenKnownSessions) and only a success after it (reopenUntilStopped).
+const (
+	knownBucketRetryFirst = time.Second
+	knownBucketRetryMax   = 5 * time.Minute
+)
 
 // KnownSession is one record of the envoy_known_sessions bucket, keyed by session id: a session
 // that registered within KnownSessionRetention, whether it is registered now or not. Its Topics
@@ -76,6 +108,11 @@ type knownSessionsOpts struct {
 	replicas int
 	log      *slog.Logger
 	now      func() time.Time
+	// retryFirst and retryMax are the waits between the attempts to open a bucket that did not
+	// open, knownBucketRetryFirst and knownBucketRetryMax unless a test shortens them
+	// (withKnownSessionRetry, export_test.go).
+	retryFirst time.Duration
+	retryMax   time.Duration
 }
 
 // WithKnownSessionReplicas sets the copies the bucket is created with, and raised to, as the
@@ -107,63 +144,194 @@ func WithKnownSessionClock(now func() time.Time) KnownSessionsOption {
 // recipients per request against up to ~100,000 records, which neither a per-key Get nor a
 // linear scan can serve.
 //
-// A nil *KnownSessions is the degraded listener: one whose NATS user may not open the bucket
-// starts without the store and keeps running, so every method here is safe on a nil receiver and
-// answers as an empty store does - no record, no match, and a write that does nothing. Call sites
-// therefore carry no nil check of their own.
+// A store whose bucket is not open is the degraded listener: one whose NATS user may not open the
+// bucket keeps the store, which answers no record and no match and whose writes do nothing, and
+// opens the bucket as soon as an attempt of its own succeeds (reopenUntilStopped). A nil
+// *KnownSessions answers the same way, for a listener that could not build a JetStream context at
+// all and for a test that builds the handlers without a store, so every method here is safe on a
+// nil receiver and no call site carries a nil check.
 type KnownSessions struct {
 	now func() time.Time
 	log *slog.Logger
+	// replicas is the copies the bucket is created with, kept for the attempts that follow a
+	// bucket that did not open, and retryFirst and retryMax are the waits between them.
+	replicas   int
+	retryFirst time.Duration
+	retryMax   time.Duration
 
 	mu      sync.RWMutex
 	records map[string]cachedKnown
 	topics  *store.TopicMatcher
 
-	// watcher feeds the records from the bucket and holds the handle the store writes through.
+	// openMu guards conn and watcher: both are written when the bucket opens, which is at
+	// OpenKnownSessions for a listener whose user may open it and at a later attempt for one
+	// whose grant arrives while it runs.
+	openMu sync.RWMutex
+	// conn is the connection the bucket is opened on, the one the store was opened with until a
+	// Rewatch moves the store to another.
+	conn *nats.Conn
+	// watcher feeds the records from the bucket and holds the handle the store writes through,
+	// nil until the bucket opens.
 	watcher *kvwatch.Watcher
 
-	// stopped ends the sweep goroutine; stopOnce closes it once, whichever of StopWatch and
-	// EndWatch comes first.
+	// stopped ends the sweep goroutine and the attempts to open the bucket; stopOnce closes it
+	// once, whichever of StopWatch and EndWatch comes first.
 	stopped  chan struct{}
 	stopOnce sync.Once
 }
 
 // OpenKnownSessions opens the envoy_known_sessions bucket, creating it with a 30-day TTL
 // (KnownSessionRetention) on file storage, and starts the watcher that keeps its records in
-// memory and the sweep that gives back the memory of the records that aged out. Its error is the
-// bucket's: the listener logs it once and runs without the store (a nil *KnownSessions), since no
-// delivery depends on these records.
+// memory and the sweep that gives back the memory of the records that aged out.
+//
+// A bucket that does not open within knownBucketOpenWait - a listener whose NATS user may not
+// open it, which is what production runs between the image that reads these records and the grant
+// that allows them - is no error and stops no start: the store is returned, logs the one WARN
+// below, answers no record and writes nothing, and goes on attempting the bucket in the
+// background until one succeeds (reopenUntilStopped). The error is the JetStream context's alone,
+// which leaves no store to open anything with; the caller then runs on a nil *KnownSessions,
+// which answers as this store does and never opens.
 func OpenKnownSessions(conn *nats.Conn, options ...KnownSessionsOption) (*KnownSessions, error) {
-	opts := knownSessionsOpts{replicas: 1, now: time.Now}
+	opts := knownSessionsOpts{
+		replicas:   1,
+		now:        time.Now,
+		retryFirst: knownBucketRetryFirst,
+		retryMax:   knownBucketRetryMax,
+	}
 	for _, o := range options {
 		o(&opts)
 	}
-	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
-	if err != nil {
-		return nil, err
-	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
-		Bucket:   bus.KnownSessionBucket,
-		TTL:      KnownSessionRetention,
-		Replicas: opts.replicas,
-		Storage:  nats.FileStorage,
-	})
-	if err != nil {
+	// A connection that gives no JetStream context can open nothing, now or later. It is this
+	// function's one error, read here so the caller is answered it rather than meeting it on
+	// every attempt; each attempt builds a context of its own, on the connection it runs against.
+	if _, err := knownJetStream(conn); err != nil {
 		return nil, err
 	}
 	s := &KnownSessions{
-		now:     opts.now,
-		log:     opts.log,
-		records: map[string]cachedKnown{},
-		topics:  store.NewTopicMatcher(),
-		stopped: make(chan struct{}),
+		now:        opts.now,
+		log:        opts.log,
+		replicas:   opts.replicas,
+		retryFirst: opts.retryFirst,
+		retryMax:   opts.retryMax,
+		records:    map[string]cachedKnown{},
+		topics:     store.NewTopicMatcher(),
+		conn:       conn,
+		stopped:    make(chan struct{}),
 	}
-	s.watcher = kvwatch.New("known session store", kv, s.applyWatched, s.resetCache, kvwatch.WithLogger(opts.log))
-	// The watcher fills the records in the background, as the session registry's does: a
-	// synchronous read of every key blocks for seconds when the bucket's leader is remote.
-	s.watcher.Start()
+	kv, err := openKnownBucket(conn, opts.replicas)
+	if err != nil {
+		s.logger().Warn("the known-session bucket is not open; this listener answers no session's 30-day record and writes none until an attempt of its own opens the bucket",
+			slog.String("bucket", bus.KnownSessionBucket), slog.String("error", err.Error()))
+		go s.reopenUntilStopped()
+	} else {
+		s.startWatch(kv)
+	}
 	go s.sweepUntilStopped()
 	return s, nil
+}
+
+// knownJetStream is the JetStream context one attempt to open the bucket makes its requests
+// through: every one of them waits knownBucketOpenWait rather than the 10 seconds nats.go gives
+// its own by default.
+func knownJetStream(conn *nats.Conn) (nats.JetStreamContext, error) {
+	return conn.JetStream(nats.MaxWait(knownBucketOpenWait))
+}
+
+// openKnownBucket makes one attempt to open the bucket on conn, creating it with the retention
+// and the copies the deployment asks for when it is not there. The attempt waits
+// knownBucketOpenWait, so one whose requests the server drops - a user whose grant does not carry
+// the bucket - costs that and no more.
+//
+// The handle it returns is opened again on a context with the wait every other store of the
+// listener gives its bucket calls, since the store's writes and its cache watcher go through that
+// handle and must not give up on a cluster that is merely slow: a write is bounded by its
+// caller's own context (RecordWithin, bus.Bounded), and the open's short wait is for the attempt
+// a start waits on, not for the work that follows it.
+func openKnownBucket(conn *nats.Conn, replicas int) (bus.KeyValue, error) {
+	opening, err := knownJetStream(conn)
+	if err != nil {
+		return bus.KeyValue{}, err
+	}
+	if _, err := bus.EnsureKeyValue(opening, &nats.KeyValueConfig{
+		Bucket:   bus.KnownSessionBucket,
+		TTL:      KnownSessionRetention,
+		Replicas: replicas,
+		Storage:  nats.FileStorage,
+	}); err != nil {
+		return bus.KeyValue{}, err
+	}
+	serving, err := conn.JetStream(nats.MaxWait(knownBucketServeWait))
+	if err != nil {
+		return bus.KeyValue{}, err
+	}
+	return bus.OpenKeyValue(serving, bus.KnownSessionBucket)
+}
+
+// startWatch installs the watcher of the bucket kv is a handle on, and starts it: the watcher
+// fills the records in the background, as the session registry's does, since a synchronous read
+// of every key blocks for seconds when the bucket's leader is remote. A store already stopped
+// installs nothing, so a bucket that opens during a shutdown leaves no watcher behind: StopWatch
+// and EndWatch take openMu to read the watcher, so one installed here is theirs to stop and one
+// installed after them is not installed at all.
+func (s *KnownSessions) startWatch(kv bus.KeyValue) {
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	select {
+	case <-s.stopped:
+		return
+	default:
+	}
+	s.watcher = kvwatch.New("known session store", kv, s.applyWatched, s.resetCache, kvwatch.WithLogger(s.log))
+	s.watcher.Start()
+}
+
+// reopenUntilStopped attempts the bucket again, waiting retryFirst and then twice the wait before
+// it up to retryMax, until an attempt opens it or the store is stopped. Each attempt runs on the
+// connection the store holds now, which a Rewatch may have replaced. The one line it logs is the
+// success: the failure was logged when the store opened, and a line per attempt would be one a
+// minute for the life of a listener whose grant never arrives.
+func (s *KnownSessions) reopenUntilStopped() {
+	for wait := s.retryFirst; ; wait = min(2*wait, s.retryMax) {
+		timer := time.NewTimer(wait)
+		select {
+		case <-s.stopped:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		s.openMu.RLock()
+		conn := s.conn
+		s.openMu.RUnlock()
+		kv, err := openKnownBucket(conn, s.replicas)
+		if err != nil {
+			continue
+		}
+		s.logger().Info("the known-session bucket is open; this listener writes and reads the 30-day records from now on",
+			slog.String("bucket", bus.KnownSessionBucket))
+		s.startWatch(kv)
+		return
+	}
+}
+
+// watch is the store's watcher, or nil while its bucket is not open. A nil store has none either,
+// so one read of this covers both.
+func (s *KnownSessions) watch() *kvwatch.Watcher {
+	if s == nil {
+		return nil
+	}
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	return s.watcher
+}
+
+// Opened reports whether the store's bucket is open, so its answers are the bucket's. A store
+// whose NATS user may not open the bucket answers false until an attempt of its own opens it,
+// and a nil store for good; both answer no record and write nothing meanwhile. A caller whose
+// own answer would mean something narrower than it names then - a publish's recipient count,
+// which these records are half of - leaves that answer out instead of sending the live sessions
+// alone (cmd/listener/recipients.go).
+func (s *KnownSessions) Opened() bool {
+	return s.watch() != nil
 }
 
 // logger is the logger WithKnownSessionLogger set, or the default one.
@@ -229,10 +397,13 @@ func (s *KnownSessions) Match(topic string) []KnownSession {
 // sent, so the throttle holds across every listener that serves the session, exactly as
 // store.Registry.UpsertWithin's does for an interest row.
 //
-// The caller never fails its request over this: a registration, a refollow and a stop each answer
-// whatever the write did, and the error is for the call site's WARN.
+// The caller never fails its request over this: a registration, an unsubscribe and a stop each
+// answer whatever the write did, and the error is for the call site's WARN. A store whose bucket
+// is not open writes nothing and answers nil, as a nil store does: its reads answer no record
+// either, so nothing it could write would be read.
 func (s *KnownSessions) RecordWithin(ctx context.Context, record KnownSession) error {
-	if s == nil || record.SessionID == "" {
+	watcher := s.watch()
+	if watcher == nil || record.SessionID == "" {
 		return nil
 	}
 	now := s.now()
@@ -257,7 +428,7 @@ func (s *KnownSessions) RecordWithin(ctx context.Context, record KnownSession) e
 			return nil
 		}
 	}
-	kv := s.watcher.KV()
+	kv := watcher.KV()
 	revision, answered, err := bus.Bounded(ctx, func() (uint64, error) { return kv.Put(record.SessionID, buf) })
 	if !answered {
 		return fmt.Errorf("write the known-session record of %s: %w", record.SessionID, err)
@@ -291,42 +462,62 @@ func (s *KnownSessions) TouchWithin(ctx context.Context, sessionID string) error
 }
 
 // Rewatch moves the cache's watcher and the handle the store writes through to conn
-// (kvwatch.Watcher.Rewatch), after a reconnect.
+// (kvwatch.Watcher.Rewatch), after a reconnect. A store whose bucket is not open has no watcher
+// to move: it keeps conn for the attempts that follow, so the attempt that opens the bucket makes
+// its requests on the connection the listener holds now.
 func (s *KnownSessions) Rewatch(conn *nats.Conn) error {
 	if s == nil {
 		return nil
 	}
-	return s.watcher.Rewatch(conn)
+	s.openMu.Lock()
+	s.conn = conn
+	watcher := s.watcher
+	s.openMu.Unlock()
+	if watcher == nil {
+		return nil
+	}
+	return watcher.Rewatch(conn)
 }
 
 // WaitForCacheReady blocks until the watcher has delivered every existing record, or until ctx is
-// done. Callers bound ctx and proceed on error: the store answers from whatever it holds.
+// done. Callers bound ctx and proceed on error: the store answers from whatever it holds. A store
+// whose bucket is not open waits for nothing and answers nil: it has no cache to fill, and the
+// listener's start must not spend its caller's budget on a bucket it may not open.
 func (s *KnownSessions) WaitForCacheReady(ctx context.Context) error {
-	if s == nil {
+	watcher := s.watch()
+	if watcher == nil {
 		return nil
 	}
-	return s.watcher.WaitReady(ctx)
+	return watcher.WaitReady(ctx)
 }
 
-// StopWatch retires the cache's watcher and the sweep for a shutdown.
+// StopWatch retires the cache's watcher and the sweep for a shutdown, and stops the attempts to
+// open a bucket that is not open.
 func (s *KnownSessions) StopWatch() {
 	if s == nil {
 		return
 	}
 	s.stopSweep()
-	s.watcher.Stop()
+	if watcher := s.watch(); watcher != nil {
+		watcher.Stop()
+	}
 }
 
 // EndWatch ends the cache's watcher and the sweep at shutdown, within ctx, while the connection
-// still carries requests (kvwatch.Watcher.End).
+// still carries requests (kvwatch.Watcher.End), and stops the attempts to open a bucket that is
+// not open.
 func (s *KnownSessions) EndWatch(ctx context.Context) {
 	if s == nil {
 		return
 	}
 	s.stopSweep()
-	s.watcher.End(ctx)
+	if watcher := s.watch(); watcher != nil {
+		watcher.End(ctx)
+	}
 }
 
+// stopSweep ends the sweep goroutine and any attempt to open the bucket, and keeps a bucket that
+// opens after it from installing a watcher (startWatch).
 func (s *KnownSessions) stopSweep() {
 	s.stopOnce.Do(func() { close(s.stopped) })
 }

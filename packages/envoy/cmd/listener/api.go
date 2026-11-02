@@ -77,9 +77,9 @@ type sendResponse struct {
 // recipientCounts made just before the message was published: how many sessions other than the
 // sender follow the topic, and how many of those hold a session entry now. They are pointers so
 // that a count of zero is carried rather than omitted - "no other session subscribes" is the
-// answer that matters most - and nil, left out, where there is no count to give: a listener with
-// no known-session store sends neither, as does a role topic, whose answer names its holder. An
-// older client reads neither field.
+// answer that matters most - and nil, left out, where there is no count to give: a listener whose
+// known-session store cannot answer sends neither, as does a role topic, whose answer names its
+// holder. An older client reads neither field.
 type publishResponse struct {
 	contracts.Envelope
 	Holder              string `json:"holder,omitempty"`
@@ -764,7 +764,8 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 // (session.KnownSessions.TouchWithin): the session stopped cleanly, and a publish on a topic it
 // followed still counts it as a recipient, since Envoy keeps its messages for 72 hours and it can
 // resume under the same id. A delete that removed nothing leaves the record alone, and a known
-// store this listener could not open does nothing at all; neither outcome changes this answer.
+// store whose bucket this listener has not opened does nothing at all; neither outcome changes
+// this answer.
 func deleteSessionHandler(sessions *session.SessionRegistry, known *session.KnownSessions, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -1835,7 +1836,12 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
-		// A consumer-delivery session's consumer stops filtering on the topics just removed.
+		// The session now follows what is left of its topics: its known-session record says so,
+		// so a publish stops counting it as a recipient of the ones just removed, and its
+		// consumer, when the relay serves it one, stops filtering on them. The record is written
+		// within this route's budget and before the consumer call, which has a budget of its own:
+		// the count is what this change is for, and it must not wait on a consumer.
+		recordFollowedTopics(ctx, d, body.SessionID, logger)
 		d.consumers.refollow(r.Context(), d, body.SessionID)
 		removed := body.Topics
 		if removed == nil {
@@ -1847,7 +1853,11 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 
+	// A DELETE here removes every interest of a session, so its record is left naming none and a
+	// publish counts it for nothing, and its consumer is refollowed on what is left, as the
+	// unsubscribe route's are.
 	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry, d.sessions, func(ctx context.Context, sessionID string) {
+		recordFollowedTopics(ctx, d, sessionID, logger)
 		d.consumers.refollow(ctx, d, sessionID)
 	}))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))

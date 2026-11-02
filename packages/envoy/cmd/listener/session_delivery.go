@@ -307,10 +307,10 @@ func (m *sessionDelivery) granted() {
 // filter. A failure is logged, not returned: the consumer then still delivers a topic the session
 // no longer follows, and the plugin drops a frame no followed topic matches.
 //
-// A filter the consumer took is also the session's known-session record brought up to date, with
-// the topics the registration stored rather than the filter's own (session.KnownSessions). A
-// refollow whose update failed, and one whose consumer is gone, write nothing: the filter is not
-// what this record would claim. A failed write is logged like the rest and fails nothing.
+// The session's known-session record is not this function's: it names the topics the session
+// follows, which an unsubscribe changes whatever the session's delivery mode, while this filter
+// names the ones its consumer carries. Each call site writes the record itself
+// (recordFollowedTopics).
 func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, sessionID string) {
 	if m == nil || m.consumers == nil {
 		return
@@ -330,10 +330,32 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	unlock := m.locks.lock(sessionID)
 	err = m.consumers.UpdateFilter(ctx, sessionID, sessionConsumerFilter(sessionID, topics))
 	unlock()
+	if err != nil && !errors.Is(err, bus.ErrSessionConsumerNotFound) {
+		m.logger.Warn("session consumer filter update failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
+}
+
+// recordFollowedTopics brings sessionID's known-session record up to date with the topics its
+// stored interest row now holds, which is what a publish counts its recipients against
+// (session.KnownSessions): every route that changes a session's interests calls it, so a topic a
+// session has left stops being counted whether the session holds its own NATS connection or the
+// relay serves it a consumer. The record is about the topics the session follows, not about the
+// consumer's filter, so nothing here reads the entry's delivery mode and a listener with no
+// session-consumer connection writes it too; the filter is refollow's, beside this.
+//
+// The rest of the record is the session's entry, as the registration wrote it. A session the
+// registry holds no entry for writes nothing: it is stopped or gone, and a stop keeps the record
+// it had (deleteSessionHandler). A listener whose known-session bucket is not open writes nothing
+// either. A failed write is this WARN and nothing else: the route answers whatever the write did.
+func recordFollowedTopics(ctx context.Context, d *listenerDeps, sessionID string, logger *logging.Logger) {
+	entry, err := d.sessions.Get(sessionID)
 	if err != nil {
-		if !errors.Is(err, bus.ErrSessionConsumerNotFound) {
-			m.logger.Warn("session consumer filter update failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
-		}
+		return
+	}
+	topics, err := storedInterestTopics(ctx, d.registry, sessionID)
+	if err != nil {
+		logger.Warn("known-session record left unchanged: the session's interests could not be read",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return
 	}
 	if err := d.known.RecordWithin(ctx, session.KnownSession{
@@ -343,7 +365,7 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 		Topics:           topics,
 		ClientInstanceID: entry.ClientInstanceID,
 	}); err != nil {
-		m.logger.Warn("known-session record not written after a filter change",
+		logger.Warn("known-session record not written after an interest change",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	}
 }

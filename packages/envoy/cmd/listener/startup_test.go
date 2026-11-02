@@ -625,3 +625,67 @@ func listenerJSONRecord(t *testing.T, p *listenerProcess, name string) map[strin
 	}
 	return nil
 }
+
+// knownSessionBucketGrant is the publish grant a NATS user needs to open the known-session
+// bucket, watch it and write it. The listener's grant carries these only once the grant that
+// follows this image is applied; the grant a hub carries before it
+// (listenerGrantBeforeSessionConsumers) carries none of them.
+func knownSessionBucketGrant() []string {
+	stream := "KV_" + bus.KnownSessionBucket
+	return []string{
+		"$JS.API.STREAM.INFO." + stream,
+		"$JS.API.STREAM.CREATE." + stream,
+		"$JS.API.DIRECT.GET." + stream + ".>",
+		"$JS.API.STREAM.MSG.GET." + stream,
+		"$KV." + bus.KnownSessionBucket + ".>",
+		"$JS.API.CONSUMER.CREATE." + stream + ".>",
+		"$JS.API.CONSUMER.DELETE." + stream + ".>",
+		"$JS.FC." + stream + ".>",
+	}
+}
+
+// v1OpenWithoutTheBucket is how long after it began listening a listener whose NATS user may not
+// open the known-session bucket may take to open /v1. Every caller through the port is refused
+// 503 "service starting" until it does, and this is the configuration production runs between
+// this image and the grant that lets it open the bucket, so the start must not wait the bucket
+// out: a denied JetStream request is dropped rather than refused, so waiting it out costs the
+// whole JetStream wait. A healthy listener opens /v1 in tens of milliseconds; this bound is well
+// above one attempt's wait (session.OpenKnownSessions) and well below the 10 seconds the default
+// wait cost.
+const v1OpenWithoutTheBucket = 5000
+
+// A listener whose NATS user may not open the known-session bucket opens /v1 without waiting the
+// bucket out, keeps running, and opens the bucket itself once the grant arrives - the order
+// production applies them in - with no restart.
+func TestTheListenerOpensV1AndPicksUpTheBucketItMayNotOpenYet(t *testing.T) {
+	seed, public := testnats.User(t)
+	grant := testnats.StartNkeyGranted(t, public, listenerGrantBeforeSessionConsumers()...)
+	t.Setenv("NATS_NKEY_SEED", seed)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), grant.URL, "test-machine", "NATS_NKEY_SEED="+seed)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("the listener's output:\n%s", listener.Output.String())
+		}
+	})
+
+	listener.WaitForOutput(t, "envoy-listener /v1 open")
+	record := listenerJSONRecord(t, listener, "envoy-listener /v1 open")
+	if record == nil {
+		t.Fatalf("the listener logged no JSON record for its /v1 open:\n%s", listener.Output.String())
+	}
+	opened, ok := record["since_listening_ms"].(float64)
+	if !ok {
+		t.Fatalf("the /v1 open record %v carries no since_listening_ms", record)
+	}
+	if opened > v1OpenWithoutTheBucket {
+		t.Fatalf("/v1 opened %.0f ms after this listener began listening, want within %d: every caller is refused 503 service starting until it does",
+			opened, v1OpenWithoutTheBucket)
+	}
+	t.Logf("/v1 opened %.0f ms after the listener began listening, over a bucket its user may not open", opened)
+	if !strings.Contains(listener.Output.String(), bus.KnownSessionBucket) {
+		t.Fatalf("the listener never named the bucket it could not open, so this test proved nothing about it:\n%s", listener.Output.String())
+	}
+
+	grant.Grant(t, append(listenerGrantBeforeSessionConsumers(), knownSessionBucketGrant()...)...)
+	listener.WaitForOutput(t, "the known-session bucket is open")
+}

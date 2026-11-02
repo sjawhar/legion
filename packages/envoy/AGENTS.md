@@ -2633,12 +2633,17 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   The code that needs a live session or a role holder therefore never reads it:
   `registered` (`cmd/listener/role_holder.go`), `laneHolderFresh` (`cmd/listener/delivery.go`) and the interest reaper each ask the store whose record ends when the session stops.
   Its readers are `/v1/messages/send` for a target the session registry holds no entry for, `/v1/messages/publish` for its recipient counts, and `/v1/registry/<session_id>?include_stopped=1`.
-  A record is written at a registration whose consumer call did not fail (`sessionDeliveryOutcome.recorded`), at a filter change (`sessionDelivery.refollow`) and at a `DELETE /v1/sessions/<session_id>` that removed an entry, which is a clean stop.
+  A record is written at a registration whose consumer call did not fail (`sessionDeliveryOutcome.recorded`), at every change of a session's interests (`recordFollowedTopics`, which the unsubscribe route and the admin interests route each call) and at a `DELETE /v1/sessions/<session_id>` that removed an entry, which is a clean stop.
+  The interest change writes the record whatever the session's delivery mode, deliberately: the record says which topics a session follows and the consumer's filter says which of those the stream carries, and while the write sat inside `sessionDelivery.refollow`, which returns early for a session that holds its own NATS connection and has no consumer, a session that unsubscribed kept the topic in its record and a publish told its sender a running session got a message nobody got.
   A write of content equal to the stored record is skipped while that record is younger than `session.KnownSessionRefreshAge` (10 minutes), so a session's 90-second heartbeat costs one write per refresh age however many listeners serve the session;
   the comparison reads the stored record, as `store.Registry.UpsertWithin`'s does for an interest row, so the throttle holds across every listener.
   The bucket is in `bus.ListenerBuckets()`, so envoy-infra grants it to the listener, to the host user a host's sessions share and to Dispatch (`packages/envoy/infra/core/permissions.go`, and `packages/envoy/infra/README.md` for what that widens).
-  A listener whose NATS user may not open the bucket logs one line naming it and runs without the store:
-  every read then answers as an empty store does, every write does nothing, and the publish route answers no counts at all.
+  A listener whose NATS user may not open the bucket logs one line naming it and runs without it:
+  every read then answers as an empty store does, every write does nothing, and the publish route answers no counts at all (`session.KnownSessions.Opened`).
+  That listener does not wait for the bucket at its start and does not give it up for the life of the process.
+  One open attempt is bounded at `knownBucketOpenWait` (2 seconds) rather than the 10-second JetStream `MaxWait` the other stores take, because a denied JetStream request is dropped by the server rather than refused, so the attempt costs its whole wait and the start blocks on it before `/v1` opens; by then the stream and the four other buckets have been answered over the same API, so two seconds is far past a healthy remote leader.
+  A failed attempt is retried in the background, first after a second and doubling to a five-minute cap, so the grant release that follows the listener's image pin is picked up without a restart, and the open logs one line when it succeeds.
+  Once the bucket is open its handle is opened again on the ordinary wait, so only the attempt a start waits on is shortened.
 
 - `store.Open` snapshots the revision of every stored claim (`roleRevisions`, `internal/store/kv.go`) so a restored claim keeps its grace only while the bucket still holds the revision the restart read.
   It takes that snapshot from one watch over the bucket's existing keys, as the interest, session and CI caches read theirs (`internal/kvwatch`), so listener readiness costs one pass over the bucket rather than a round trip per claim (LEGION-360).

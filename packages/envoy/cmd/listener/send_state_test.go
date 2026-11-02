@@ -336,17 +336,7 @@ func listenerGrantWithoutPresence() []string {
 		}
 		allow = append(allow, subject)
 	}
-	stream := "KV_" + bus.KnownSessionBucket
-	return append(allow,
-		"$JS.API.STREAM.INFO."+stream,
-		"$JS.API.STREAM.CREATE."+stream,
-		"$JS.API.DIRECT.GET."+stream+".>",
-		"$JS.API.STREAM.MSG.GET."+stream,
-		"$KV."+bus.KnownSessionBucket+".>",
-		"$JS.API.CONSUMER.CREATE."+stream+".>",
-		"$JS.API.CONSUMER.DELETE."+stream+".>",
-		"$JS.FC."+stream+".>",
-	)
+	return append(allow, knownSessionBucketGrant()...)
 }
 
 // Acceptance A4, its third part: a listener whose NATS user may not publish the presence request
