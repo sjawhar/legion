@@ -471,9 +471,9 @@ no mode on disk until the gate's first main-agent `bash` or `eval` call, and non
 gate does not load — a write outside the literal form there posts with a warning. **An operator
 who selects block through the arm should also set `OMP_ASKGATE=block` for a hard guarantee**,
 which holds from the session's start and through a failed load. Three refusals follow neither
-mode: a match of the rules check (below), which refuses the write in both modes; no model role;
-and a gate that did not load, the last two refusing each literal call they would review in both
-modes, since neither can review anything.
+mode: a match of the rules check (below), which refuses the write in both modes; a session with no
+model at all (below); and a gate that did not load, the last two refusing each literal call they
+would review in both modes, since neither can review anything.
 
 **The rules check.** A call that opens a new ask for the person gets a second model call, beside
 the charter call and on the same chain, deadline and transcript. That call knows two rules
@@ -538,11 +538,19 @@ session with a UI, and adds it to that call's own result. It is not one of the n
 shows at its start.
 
 **The model.** Both checks ask the session's `askgate` model role (`modelRoles.askgate`). When that
-role is not set, they ask the `default` role. A model that answers with an error passes the request
-to the next model of that role's `retry.fallbackChains` chain, on the same provider. When neither
-role resolves, the gate refuses the write in both modes and names the two roles. A session whose
-main model is on another provider than the gate's model is not reviewed: its transcript stays on
-that provider.
+role is not set, they ask the `default` role. When neither role is set, as in a session started
+without the settings that name them, they ask the session's own model, and the result of every
+such call says so: `AskGate reviewed this call with this session's own model, <provider/id>,
+because neither modelRoles.askgate nor modelRoles.default is set`, or, when that review gave no
+verdict, `AskGate asked this session's own model, <provider/id>, to review this call`. The note
+also says that a model which reviews a write of its own session is a weaker review than a separate
+model, and names `modelRoles.askgate` as the setting that gives the gate a model of its own; the
+entry records that model as `sessionModel`. A model that answers with an error passes the request
+to the next model of the `retry.fallbackChains` chain omp keys by the role in use, or by the
+session's model alone when no role is set, on the same provider. Only a session with no model at
+all, neither role nor a model of its own, is refused, in both modes, with the two roles named. A
+session whose main model is on another provider than the gate's model is not reviewed: its
+transcript stays on that provider.
 
 **When a write posts unreviewed.** Each of these lets the write out, records an `advisor-gate`
 entry with its outcome, and hands the agent a note that says the write went out unreviewed and
@@ -597,8 +605,10 @@ carries, as `dispatch_ask issue=ACME-1`. An `unreadable` entry, and the `unmarke
 writes from the CLI's own ledger line, carry none: neither has the arguments to name one. The
 third attempt (`outcome: "breaker"`) counts the refusals of
 one thing on one such target, and `revisesForKey` counts every `revise` on it, the `warn` ones
-included, since its counts last started again. A call that opens a new ask adds the fields of the
-rules check:
+included, since its counts last started again. An entry whose review ran on the session's own
+model, because neither model role is set, carries `sessionModel`, that model's `provider/id`;
+`model` names the model that answered, another one only when that model's chain was walked. A
+call that opens a new ask adds the fields of the rules check:
 
 - `rule`: `no_change` or `untried_access`, the rule that the first matching ask broke. The gate
   sets it exactly when the rules check refused the call.

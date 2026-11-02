@@ -157,18 +157,22 @@
 //     warn-mode charter revise sends the call, so it never advances the breaker, while a rules
 //     match refuses in either mode and always does. An allow, a rebuttal or a trip resets the
 //     target, every thing on it.
-//   - no-model-role / skipped: neither `@askgate` (modelRoles.askgate) nor `@default` resolves, or
-//     the session's primary model is on another provider than the gate's. Nothing is rendered or
-//     sent. With no model role the call is refused in both modes, naming the roles to set; it never
+//   - no-model-role / skipped: the session has no model at all (neither `@askgate`
+//     (modelRoles.askgate) nor `@default` resolves, and it has no primary model of its own), or the
+//     session's primary model is on another provider than the gate's. Nothing is rendered or
+//     sent. With no model the call is refused in both modes, naming the roles to set; it never
 //     counts toward the halt, since a halt would let the writes out. Another provider lets it run.
-//   - verdict: `@askgate` is asked once, else `@default`, raced against the deadline. A model
-//     that answers with an error (a provider 404 or 5xx) hands the request to the next model of
-//     the role's retry.fallbackChains, as omp resolves it for the role in use (`fallbackModels`),
-//     within the same deadline and on the primary's provider only; the entry records the model
-//     that answered as `model` and each one that failed first in `failedModels`. Its
-//     system prompt is askgate-system.md and rules.md, nothing else. The user message
-//     (askgate-request.md) carries the agent under review as data: its system prompt and the
-//     newest 256 KiB of its context (the fork's buildSessionContext), every piece XML-escaped
+//   - verdict: `@askgate` is asked once, else `@default`, else the session's own primary model,
+//     raced against the deadline. A review on the session's own model (`sessionModel` on the
+//     entry) tells the agent so on every decision it reaches (`noteSessionModel`): the
+//     author's own model judged the write, a weaker review than another model's. A model that
+//     answers with an error (a provider 404 or 5xx) hands the request to the next model of the
+//     chain omp resolves for the role in use, or for the session's model alone with no role
+//     (`fallbackModels`), within the same deadline and on the primary's provider only; the entry
+//     records the model that answered as `model` and each one that failed first in
+//     `failedModels`. Its system prompt is askgate-system.md and rules.md, nothing else. The user
+//     message (askgate-request.md) carries the agent under review as data: its system prompt and
+//     the newest 256 KiB of its context (the fork's buildSessionContext), every piece XML-escaped
 //     inside its own block, then the call. The last line of the answer must be
 //     {"decision":"allow"} or {"decision":"revise","reason":"…"}. The reason reaches the agent
 //     verbatim but for a tag-opening `<` (see `agentFacing`), capped at 8 KiB, and is recorded
@@ -365,7 +369,9 @@ export const ADVISOR_GATE_RECORD_ENTRY_TYPE = "advisor-gate-record";
 /**
  * The model roles the gate asks, in order: `askgate` when it is configured, else `default`, so a
  * session with no askgate role runs the gate on its own default model. The role used keys its
- * retry.fallbackChains chain, walked on a model error.
+ * retry.fallbackChains chain, walked on a model error. A session where neither resolves (one
+ * started without the settings that name them) is reviewed on its own primary model, under no
+ * role, and told so (`resolveModel`).
  */
 export const GATE_ROLES = ["askgate", "default"] as const;
 export type GateRole = (typeof GATE_ROLES)[number];
@@ -406,10 +412,10 @@ export interface GateEntry {
   /**
    * `revise`: the call was not passed as sent (a revise verdict; a new ask a rule matched, in
    * either mode; in block mode a call given up without a verdict, a literal call whose file the
-   * gate could not read, or a gated write the CLI found no marker for, `unmarked`; in any mode no
-   * model role or a gate that did not load). A call was refused exactly when this is `revise` and
-   * either `verdictMode` is `block`, `outcome` is `no-model-role` or `load-failed`, or `rule` is
-   * set.
+   * gate could not read, or a gated write the CLI found no marker for, `unmarked`; in any mode a
+   * session with no model at all or a gate that did not load). A call was refused exactly when
+   * this is `revise` and either `verdictMode` is `block`, `outcome` is `no-model-role` or
+   * `load-failed`, or `rule` is set.
    */
   decision: "allow" | "revise";
   outcome:
@@ -452,6 +458,12 @@ export interface GateEntry {
   reviewedText?: string;
   /** `provider/id` that answered (or, with no answer, the last one asked), on every entry that reached the model call. */
   model?: string;
+  /**
+   * `provider/id` of the session's own model, on every entry that reached the model call in a
+   * session where neither model role resolves: the review ran on the author's own model, which the
+   * agent was told. `model` differs from it only when that model's chain was walked.
+   */
+  sessionModel?: string;
   /** Each model of the chain that answered with an error before `model` was asked, with that error. */
   failedModels?: Array<{ model: string; error: string }>;
   /** The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's handler ceiling. */
@@ -563,11 +575,16 @@ interface Deps {
   appendFile: (p: string, text: string) => void;
   complete: (req: CompleteRequest) => Promise<Completion>;
   /**
-   * The models after `primary` in `role`'s retry.fallbackChains chain, in the order omp walks it,
+   * The models after `primary` in the retry.fallbackChains chain omp keys by `role`, or by `primary`
+   * alone when there is no role (a review on the session's own model), in the order omp walks it,
    * resolved to the session's available models; empty when the chain is empty or model fallback is
    * off. Bound in the entry to omp's own chain resolution.
    */
-  fallbackModels: (ctx: GateCtx, primary: GateModel, role: GateRole) => readonly GateModel[];
+  fallbackModels: (
+    ctx: GateCtx,
+    primary: GateModel,
+    role: GateRole | undefined
+  ) => readonly GateModel[];
   /** The primary's context as its model sees it: the fork's buildSessionContext over this session's branch. */
   contextMessages: (ctx: GateCtx) => readonly Message[];
   /** The runner's ceiling for a tool_call handler: extensionHandlers.toolCallTimeoutMs, read when asked. */
@@ -2004,7 +2021,7 @@ const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
   shutdown:
     "AskGate did not send this call: the session shut down before a verdict came back. Send it again from a live session if it is still wanted.",
 };
-/** The refusal for a call in a session where no model role the gate asks resolves. */
+/** The refusal for a call in a session with no model at all: no role the gate asks resolves, and it has no model of its own. */
 const NO_MODEL_ROLE_REFUSAL = `AskGate did not send this call: it reviews each Dispatch write before it posts, and this session has no model for it. Set modelRoles.askgate or modelRoles.default in the Oh My Pi settings, then send the call again. To turn AskGate off for this session, set askgate.enabled to false in the session's envoy.json.`;
 /**
  * The refusal for a write that no review stands behind and whose record could not be written.
@@ -2136,6 +2153,33 @@ const renderUnreviewed = (outcome: GateEntry["outcome"], reason: string | undefi
     outcome === "halted" ? cause : `AskGate did not review this Dispatch write: ${cause}`;
   return `<advisor-gate advisor="AskGate" outcome="${outcome}">\n${opening}${why}. The call ran unreviewed.\n</advisor-gate>`;
 };
+/**
+ * A call's result once its review ran on the session's own model (`sessionModel`), because neither
+ * role the gate asks resolves: the author's own model judged its write, a weaker review than a
+ * separate model's, so the agent, and every later reader of its result, is told so and how to give
+ * the gate a model of its own. A refusal carries the note in its reason, any other result as
+ * context. `reviewed` is false when that review gave no verdict, which the result already says.
+ */
+function noteSessionModel(
+  result: ToolCallResult,
+  sessionModel: string,
+  reviewed: boolean
+): ToolCallResult {
+  const opening = reviewed
+    ? `AskGate reviewed this call with this session's own model, ${sessionModel}, because`
+    : `AskGate asked this session's own model, ${sessionModel}, to review this call, because`;
+  const note = `${opening} neither modelRoles.askgate nor modelRoles.default is set. A model that reviews a write of its own session is a weaker review than a separate model. Set modelRoles.askgate in the Oh My Pi settings to have another model review.`;
+  if (result?.block) return { ...result, reason: `${result.reason ?? ""}\n${note}` };
+  return {
+    ...result,
+    additionalContext: [
+      result?.additionalContext,
+      `<advisor-gate advisor="AskGate" model="session">\n${note}\n</advisor-gate>`,
+    ]
+      .filter((part) => part !== undefined)
+      .join("\n"),
+  };
+}
 /**
  * The flags a refused file's text can go through instead: a `--<field>-file` reads `-` as stdin and
  * any other path as a file. An upload's `--path` (and `--path-file`, which names it) is a path the
@@ -2629,14 +2673,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           }
         : pass(cause, fields);
     /**
-     * A session in which no model role the gate asks resolves: refused in both modes, since the write
-     * would otherwise post unreviewed, and never toward the halt, which would let every later write out.
+     * A session with no model at all, neither a role the gate asks nor a model of its own: refused
+     * in both modes, since the write would otherwise post unreviewed, and never toward the halt,
+     * which would let every later write out.
      */
     const noModelRole: Decision = {
       fields: {
         decision: "revise",
         outcome: "no-model-role",
-        reason: "neither modelRoles.askgate nor modelRoles.default resolves to a model",
+        reason:
+          "neither modelRoles.askgate nor modelRoles.default resolves to a model, and the session has no model of its own",
       },
       result: { block: true, reason: NO_MODEL_ROLE_REFUSAL },
       effect: "none",
@@ -2659,13 +2705,20 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             result: { additionalContext: renderUnreadable(found, mode) },
             effect: "none",
           };
-    /** The first of the gate's roles that resolves to a model in this session, with that model. */
-    const resolveRole = (ctx: GateCtx): { role: GateRole; model: GateModel } | undefined => {
+    /**
+     * The model the gate reviews with: the first of its roles that resolves in this session, with
+     * that role; else the session's own primary model, with no role (a session started without the
+     * settings that name the roles), whose every decision says so (`noteSessionModel`); undefined
+     * only for a session with no model at all.
+     */
+    const resolveModel = (
+      ctx: GateCtx
+    ): { role: GateRole | undefined; model: GateModel } | undefined => {
       for (const role of GATE_ROLES) {
         const model = ctx.models.resolve(`@${role}`);
         if (model) return { role, model };
       }
-      return undefined;
+      return ctx.model === undefined ? undefined : { role: undefined, model: ctx.model };
     };
 
     /**
@@ -2839,10 +2892,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     const decide = async (call: GatedCall): Promise<Decision> => {
       const { event, ctx, started, base, key, rebuttal, override, kept, stop, directory, upload } =
         call;
-      // Before any path that lets the write out: a session with no model role refuses in both
+      // Before any path that lets the write out: a session with no model at all refuses in both
       // modes, and a rebuttal, a halt, a breaker trip or a shutdown is no exception, since none
       // of them is a review and the gate cannot review anything at all here.
-      const resolved = resolveRole(ctx);
+      const resolved = resolveModel(ctx);
       if (resolved === undefined) return noModelRole;
       if (rebuttal !== undefined) {
         breaker.reset(key);
@@ -2879,8 +2932,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // Raced from handler entry, so each render of this call counts against the runner's ceiling too.
       const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
       stop.arm(Math.max(0, deadlineMs - (deps.now() - started)));
-      // A model that answers with an error hands the request to the next one in the role's chain, inside
-      // the same deadline. Only models on the primary's provider are asked: the transcript stays there.
+      // A model that answers with an error hands the request to the next one in its chain (the
+      // role's, or with no role the session model's own), inside the same deadline. Only models on
+      // the primary's provider are asked: the transcript stays there.
       const chain = [
         model,
         ...deps.fallbackModels(ctx, model, role).filter((next) => next.provider === model.provider),
@@ -2944,6 +2998,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         deadlineMs,
         reviewedText: args,
         charterLatencyMs: charterWalk.elapsedMs,
+        // A review on the session's own model says so on every decision it reaches.
+        ...(role === undefined ? { sessionModel: `${model.provider}/${model.id}` } : {}),
         // Both calls' prompts and spend are the gated call's own.
         promptBytes: (charterWalk.called.promptBytes ?? 0) + (ruled?.promptBytes ?? 0),
         ...(addUsage(charterWalk.called.usage, ruled?.usage) ?? {}),
@@ -3383,9 +3439,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             kept = back.kept;
           }
           base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
-          // Before the dry run and before any path that lets the write out: with no model role
+          // Before the dry run and before any path that lets the write out: with no model at all
           // the gate can review nothing, and every one of those paths would otherwise allow.
-          if (resolveRole(ctx) === undefined) decision = noModelRole;
+          if (resolveModel(ctx) === undefined) decision = noModelRole;
           else {
             // One stop for everything this call waits on: its dry run, its document read and
             // both model calls.
@@ -3402,7 +3458,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               if ("cause" in run) decision = givenUp(mode, run.cause);
               else if ("unreadable" in run) {
                 if (halted) decision = pass("halted");
-                else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)
+                else if (ctx.model?.provider !== resolveModel(ctx)?.model.provider)
                   decision = pass("skipped", {
                     reason: `primary on ${ctx.model?.provider ?? "no model"}`,
                   });
@@ -3477,6 +3533,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         // verdict, so it does not count toward the halt.
         decision = pass("error", { reason: messageOf(error) });
       }
+      // A review on the session's own model says so in the result, whatever the decision.
+      const { sessionModel } = decision.fields;
+      if (sessionModel !== undefined)
+        decision = {
+          ...decision,
+          result: noteSessionModel(
+            decision.result,
+            sessionModel,
+            decision.fields.outcome === "verdict" || decision.fields.rule !== undefined
+          ),
+        };
       // Settled once and recorded once, each on its own, so neither failing can repeat the other.
       try {
         settle(decision.effect, ctx);

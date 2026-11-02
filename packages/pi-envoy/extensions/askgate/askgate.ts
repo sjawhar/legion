@@ -14,7 +14,8 @@
 // from omp's own resolution (`resolveRetryFallbackChainKey` and `findRetryFallbackCandidates`,
 // walked depth-first into each fallback's own chain as the eval `completion()` bridge walks it),
 // keyed by the model role the gate used, because `ctx.models.resolve` returns the role's first
-// model only.
+// model only. A review on the session's own model, in a session where neither role resolves, has
+// no role: its chain is the one omp keys by that model alone.
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { selfOwner, setRecordMode } from "@legion/envoy-client/askgate-marker";
@@ -192,8 +193,16 @@ async function loadAskGate(
     import("@oh-my-pi/pi-coding-agent/session/settings"),
   ]);
 
-  /** The models after `primary` in `role`'s chain, each followed by its own chain, deduplicated; none when model fallback is off. */
-  const fallbackModels = (ctx: unknown, primary: GateModel, role: GateRole): GateModel[] => {
+  /**
+   * The models after `primary` in the chain omp keys by `role` (or by `primary` alone when the
+   * gate reviews with the session's own model, under no role), each followed by its own chain,
+   * deduplicated; none when model fallback is off.
+   */
+  const fallbackModels = (
+    ctx: unknown,
+    primary: GateModel,
+    role: GateRole | undefined
+  ): GateModel[] => {
     const retry = cfgRetry.get(settings);
     if (!retry.enabled || !retry.modelFallback) return [];
     const registry = (ctx as Ctx).modelRegistry;
@@ -227,7 +236,8 @@ async function loadAskGate(
       }
     };
     walk(
-      settings.getModelRole(role) ?? `${primary.provider}/${primary.id}`,
+      (role === undefined ? undefined : settings.getModelRole(role)) ??
+        `${primary.provider}/${primary.id}`,
       primary as Model,
       role
     );

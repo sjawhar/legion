@@ -12,7 +12,7 @@
 // is what pairs each with the refusal it overrode — and every write that reached the `dispatch`
 // CLI outside the form the gate reads, whose `outcome` is `unmarked`, where the write carries at
 // least one ask for a person (`asksCarried`). A call that is none of those (no new ask, an
-// unreadable command, a session with no model role) records nothing.
+// unreadable command, a session with no model at all) records nothing.
 //
 // What it never carries: no ask text, no quote, no reason, no reviewed arguments. `DecisionRecord`
 // is the whole of it, which is why a document of these needs no privacy decision before it ships.

@@ -430,7 +430,7 @@ const POSTED_CASES = ["nochange-rebuttal", "tried"];
 const BILLING_READ = "orgs/example-org/settings/billing/actions";
 
 /** Whether the gate refused the call an entry records, as AskGate defines a refusal: a revise in
- * block mode, or in either mode one for a session with no model role, for a gate that did not
+ * block mode, or in either mode one for a session with no model at all, for a gate that did not
  * load, or for a rules match. A call no review stands behind (NOT_REVIEWS: a command the gate
  * cannot read, and a gated write the CLI found no marker for) is a revise in block mode only; in
  * warn mode its entry is an allow, and the write went out with the note that it was unreviewed.
