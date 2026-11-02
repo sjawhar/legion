@@ -237,6 +237,20 @@ above says how to run it).
   temporary file, not the rename onto `session-id`. The heartbeat is the fallback. On shutdown
   (stdin end, SIGTERM, SIGINT, SIGHUP) drain NATS, deregister the session, close the transport, and
   let the stdio process exit.
+- The listener's connection check is this session's own subscription and no registered interest:
+  `notifications.envoy.presence.<session id>`, held outside `createChannelForwarder`, so it
+  never reaches `forwarder.topics()`, a registration's topic list or an unsubscribe. Every
+  request on it is answered at once with `{"session_id": …, "client_instance_id": …}`
+  (`presenceReply` in `packages/envoy/cmd/listener/presence.go`), built before the first request
+  and awaiting nothing: the listener waits one second, so a plugin that is alive but slow reads
+  as stopped. A registration sends `presence: true` only after a flush came back on a
+  subscription nats.js has not closed (`confirmPresence`), since a NATS server refuses a
+  subscription asynchronously and a session that declares a check it cannot answer reads
+  connected to every sender while nothing of it is there. A refused subscription declares
+  nothing and costs the session nothing else. The subscription moves with the id on a `/clear`
+  handoff, so the id left behind is answered by nobody, is read again on each nats.js
+  `reconnect` (`refreshPresence`, which registers when the verdict changed), and is dropped at
+  shutdown.
 - The listener merges each registration's topics into the entry and never removes one. So every
   registry write (register, unsubscribe, deregister, the handoff) goes through the session's one
   `serialized` chain, a registration reads the id and topics when it runs, and a topic leaves the

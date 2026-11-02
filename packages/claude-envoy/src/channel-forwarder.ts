@@ -37,6 +37,15 @@ export interface ChannelInboundMessage extends ChannelBrokerMessage {
 
 export interface ChannelTopicSubscription extends AsyncIterable<ChannelBrokerMessage> {
   unsubscribe(): void
+  /**
+   * Whether this subscription is closed, as nats.js's own `Subscription.isClosed()` answers.
+   * A NATS server refuses a subscription asynchronously, and nats.js closes the one it refused
+   * (`Subscriptions.handleError`), so a flush that comes back on a subscription this answers
+   * `false` for is the server's acceptance of it — which is how the presence subscription knows
+   * whether its registration may declare the listener's connection check
+   * (`envoy-channel-server.ts`).
+   */
+  isClosed(): boolean
 }
 
 /** A nats.js connection status event; only its `type` is read. */

@@ -337,6 +337,21 @@ session runs: `plugin` `@sjawhar/pi-envoy` and `plugin_version` the `version` of
 `package.json` (imported, so the release's bundle carries the version the release wrote there), and
 the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and `envoy_sessions`, show both.
 
+The listener's connection check is this session's own subscription and no registered interest:
+`notifications.envoy.presence.<session id>`, held outside the `subscriptions` map as the
+agent-stream control subject is, so nothing that lists, unregisters or recovers this session's
+topics ever sees it and no registration carries it as a topic. Every request on it is answered at
+once with `{"session_id": …, "client_instance_id": …}` (`presenceReply` in
+`packages/envoy/cmd/listener/presence.go`), built before the first request and awaiting nothing:
+the listener waits one second, so a plugin that is alive but slow reads as stopped. A registration
+sends `presence: true` only after a flush came back on a subscription nats.js has not closed
+(`confirmPresence`), since a NATS server refuses a subscription asynchronously and a session that
+declares a check it cannot answer reads connected to every sender while nothing of it is there; a
+refused subscription declares nothing and costs the session nothing else. The pass that opens the
+session's agent subject opens this one (`watchPresence`), so a change of session id moves it and
+the id left behind is answered by nobody, and every nats.js `reconnect` reads the verdict again
+(`recheckPresence`, which registers when it changed).
+
 ## Consumer delivery
 
 The listener holds a durable consumer for the session and relays it to the session in stream

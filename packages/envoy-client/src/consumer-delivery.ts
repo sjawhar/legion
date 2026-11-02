@@ -21,6 +21,36 @@ export function deliverSubject(sessionID: string): string {
   return `${DELIVER_SUBJECT_PREFIX}${sessionID}`;
 }
 
+/**
+ * The core subject the listener asks a session's own plugin on whether it still holds a NATS
+ * connection: this prefix and the session id. The stream does not store it, and no grant beyond
+ * `notifications.>` is needed for it. The listener's `bus.PresenceSubjectPrefix` is the same.
+ */
+export const PRESENCE_SUBJECT_PREFIX = "notifications.envoy.presence.";
+
+/**
+ * The subject one session answers the listener's connection check on. A plugin subscribes to its
+ * own and to no other: until each session has a NATS user of its own, a session subscribed to
+ * another's would answer the check for it and make a stopped session read connected.
+ */
+export function presenceSubject(sessionID: string): string {
+  return `${PRESENCE_SUBJECT_PREFIX}${sessionID}`;
+}
+
+/**
+ * What a plugin answers on its presence subject, and the one definition of that shape for both
+ * hosts. The listener compares `session_id` alone, which is the whole question — something of
+ * this session is here now; it logs `client_instance_id` and never compares it, so a predecessor
+ * process of the same session that still holds the subscription reads connected. The listener's
+ * own copy is `presenceReply` in `packages/envoy/cmd/listener/presence.go`.
+ */
+export function presenceReplyBody(sessionID: string, clientInstanceID: string | undefined): string {
+  return JSON.stringify({
+    session_id: sessionID,
+    ...(clientInstanceID === undefined ? {} : { client_instance_id: clientInstanceID }),
+  });
+}
+
 /** The headers of a relay frame. */
 export const RelayHeader = {
   /** The subject the stream stored the message on. */
