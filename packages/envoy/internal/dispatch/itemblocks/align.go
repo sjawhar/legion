@@ -3,6 +3,7 @@ package itemblocks
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 )
 
@@ -27,7 +28,15 @@ type Stored struct {
 // ids by rule 1, or the start and the end without one. next is as Split returns it, each block's
 // Hash set. counter is the next number to mint, above every number stored holds. It returns the
 // ids in next's order and the counter after the last id minted.
-func Align(stored []Stored, next []Block, counter int) ([]string, int) {
+//
+// A block whose type replaced names is replaced rather than reworded: rule 3 never gives such a
+// block's id to a block of new text, so the new text is a new block (rule 4) and the one it
+// replaces is removed (rule 5). Rules 1 and 2 are unchanged, so a block of such a type whose text
+// did not change keeps its id and one whose text comes back takes its id back. An ask's answer
+// part is such a block: a later answer is a new answer, by whoever gave it, rather than an edit
+// of the one before it, so a reference to the answer it replaced reads removed where a reference
+// to a reworded option reads changed. A caller that replaces no type passes none.
+func Align(stored []Stored, next []Block, counter int, replaced ...string) ([]string, int) {
 	ids := make([]string, len(next))
 	taken := make([]bool, len(stored))
 	untaken := indexUntaken(stored, taken)
@@ -48,7 +57,7 @@ func Align(stored []Stored, next []Block, counter int) ([]string, int) {
 			continue
 		}
 		match := untaken.take(false, block.Hash)
-		if match < 0 {
+		if match < 0 && !slices.Contains(replaced, block.Type) {
 			match = reworded(stored, taken, block.Type, lower[index], upper[index])
 		}
 		if match >= 0 {

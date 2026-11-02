@@ -22,7 +22,8 @@ session <id>"}`; each send leaves exactly one `listener send` record in
 `outcome` and `status`; and a send whose bus is gone is refused `503` with
 `{"error":"envoy: the message bus did not answer: …"}` and `Retry-After: 1`
 inside the sending client's five-second deadline, both over curl and through
-`createEnvoyClient`, which raises an `EnvoyApiError` rather than timing out. The
+`createEnvoyClient`, which raises an `EnvoySendUnconfirmedError` naming its resend key, with
+the listener's 503 `EnvoyApiError` as its last answer, rather than timing out. The
 bus-down step runs last, because it ends the run's NATS.
 
 ```bash
@@ -39,7 +40,7 @@ The run writes its reusable evidence to `packages/envoy/out/e2e/`:
 - `bus-down-send-response.json`, `bus-down-send-headers.txt`,
   `bus-down-send-result.txt` — the bus-down 503 body, its headers, and its
   status and `time_total`
-- `bus-down-client-error.json` — the `EnvoyApiError` the real client raised for it
+- `bus-down-client-error.json` — the `EnvoySendUnconfirmedError` the real client raised for it
 
 The OS chooses the NATS and listener ports, and each URL is built from the port
 its own process reports. `E2E_NATS_PORT` or `E2E_PORT` sets a port explicitly:

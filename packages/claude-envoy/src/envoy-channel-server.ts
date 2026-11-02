@@ -1567,6 +1567,7 @@ export async function executeEnvoyTool(
         sourceSessionID: identity.id,
         targetSessionID: args.session_id,
         message: args.message,
+        ...(args.idempotency_key === undefined ? {} : { idempotencyKey: args.idempotency_key }),
         ...toMessageMetadata(args),
       })
       return {

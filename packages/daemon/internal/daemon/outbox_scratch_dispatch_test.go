@@ -208,7 +208,8 @@ func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scrat
 	}
 	t.Cleanup(admin.Close)
 	database := "dispatch_scratch_test_" + outboxSuffix(t)
-	if _, err := admin.Exec(ctx, "create database "+database); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(ctx, "create database "+database+" strategy file_copy"); err != nil {
 		t.Fatalf("create scratch Dispatch database: %v", err)
 	}
 	t.Cleanup(func() {
