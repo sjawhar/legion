@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-179",
-  "previousHandoff": "d6f5da408263b7d1cfede68b4839e0b8ed50b661",
+  "previousHandoff": "ef6199b38c677c9f0e6108bbd91495001bc7859d",
   "proof": [
     {
       "criterion": "A2: a person sees each refusal's reason; a permanent 4413 drops only the refused edit, 4503 keeps it and retries, DOC_NEEDS_REBUILD offers the rebuild, a read-only viewer's saved edits are kept and sent later",
@@ -78,5 +78,8 @@
     "Defect found and fixed: a keystroke during a full budget's collection waited up to 3.4 s, because the peer hook read its room's replica through a weak pointer and the collector blocks weak-to-strong conversions from mark termination on; the hook now reads a strongly listed roomWeighing record (7aa22a46).",
     "Defect found and fixed: envoy-go-race-docs was killed (exit 143) on this branch's heads: the decode-cap fixtures carried 0.8-9.5 GB under -race; they and the heap measurements skip under -race, every concurrency test at the cap still runs (ad26b927)."
   ],
-  "openQuestions": []
+  "openQuestions": [
+    "CI run 41384281471 on code head 8fe39bb3 was still queued, with no runner, at this completion (2026-11-02 ~05:10Z): its race-docs job and the broker enroll test are not read yet; it is not green by absence.",
+    "Typing: run 3 of five peaked at 1.326 s, against 184-249 ms in the other four; under the 2 s assertion, and in the run where four apply/copy pairs were held at once (the longest 6.062 s)."
+  ]
 }
