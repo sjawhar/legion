@@ -159,8 +159,8 @@ func (v IdleView) RootStanding() Standing {
 // It is the one gate every path that acts on an idle or released pod reads — the idle rule, a
 // wake applied inside a fact, a wake the outbox takes for a delivery it holds, and the store's
 // own authorization of a release's teardown — because a pod whose tree has stopped being the
-// workflow's is a close's to stop, never a release's to take or a wake's to bring back. Those
-// four sit in three packages that cannot import one another, which is why the rule lives here.
+// workflow's is a close's to stop, never a release's to take or a wake's to bring back. The store
+// is one of the four and sits below workflow, so the rule lives here, where both reach it.
 func InWorkflowNotLingering(issue, root Standing, outOfWorkflow func(status string) bool) bool {
 	return issue.inWorkflow(outOfWorkflow) && root.inWorkflow(outOfWorkflow)
 }

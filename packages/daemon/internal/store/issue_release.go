@@ -76,7 +76,8 @@ const (
 	ReleaseCauseUnauthorized
 )
 
-// String is the cause's name, which the daemon maps to the hold it records.
+// String is the cause's name in a log line or a test's message. The hold the daemon records for
+// a cause is the daemon's own mapping (releaseHold), not this name.
 func (c ReleaseCause) String() string {
 	switch c {
 	case ReleaseCauseOvertaken:

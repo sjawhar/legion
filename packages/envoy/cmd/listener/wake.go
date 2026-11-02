@@ -154,9 +154,9 @@ func publishWithinBudget(budget context.Context, client *bus.Client, item contra
 // goroutine for as long as wakeReportBudget, and during a bus outage every role send with no
 // holder and every message nothing can place raises one, so an unbounded reporter turns a
 // minutes-long outage into a goroutine and a report's worth of memory per such request. Past
-// the cap a report is dropped and said so: the listener has not reached the stream for minutes,
-// which its own liveness report already tells every daemon, and a daemon that reads no fresh
-// report releases no pod — so there is no released pod left for the dropped report to wake.
+// the cap a report is dropped and said so in the listener's log. The wake it carried is lost
+// until its sender tries again or, for a phase worker whose phase is open, the daemon's
+// backstop runs out: a pod the daemon released before the outage stays released.
 const wakeReportsInFlight = 64
 
 // wakeReporter publishes wake reports off the paths that raise them: under the listener's own

@@ -247,9 +247,10 @@ func stillReleasedRoles(ctx context.Context, tx pgx.Tx, project, issue string, s
 	return roles, rows.Err()
 }
 
-// ClearIssueRelease forgets the mark of issue's release, whether the release finished or was
-// cancelled, on the pool: the teardown's own call, outside any transaction. A mark already gone
-// is success, so a retried finish finishes.
+// ClearIssueRelease forgets the mark of issue's release once the release finished, on the pool:
+// the teardown's own call, outside any transaction. A cancel forgets its mark itself, in the
+// transaction that queues its resumes (CancelIssueRelease). A mark already gone is success, so a
+// retried finish finishes.
 func (s *Store) ClearIssueRelease(ctx context.Context, project, issue string) error {
 	if err := deleteIssueRelease(ctx, s.pool, project, issue); err != nil {
 		return fmt.Errorf("clear the release mark of %s: %w", issue, err)
