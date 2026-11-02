@@ -47,7 +47,7 @@ func TestTheBootFillsRecordsWithNoRepository(t *testing.T) {
 		github := newRepositoryGitHub(t, "release/v7.1")
 		github.fullName = "Acme/Widgets"
 		return &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"},
-			defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+			defaultBranches: newDefaultBranches(roleTokens{}, nil, github.url, defaultBranchTTL, time.Now)}
 	}
 
 	t.Run("Dispatch resolves none for some", func(t *testing.T) {
@@ -67,7 +67,7 @@ func TestTheBootFillsRecordsWithNoRepository(t *testing.T) {
 		w := seed(t)
 		github := newRepositoryGitHub(t, "release/v7.1")
 		github.fullName = "Acme/Widgets"
-		w.defaultBranches = newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)
+		w.defaultBranches = newDefaultBranches(roleTokens{}, nil, github.url, defaultBranchTTL, time.Now)
 		client := &listingDispatch{summaries: []dispatch.IssueSummary{
 			{Key: "LEGION-7", ResolvedRepo: "acme/widgets"}, {Key: "LEGION-9", ResolvedRepo: "acme/widgets"}, {Key: "LEGION-12", ResolvedRepo: "acme/widgets"},
 		}}

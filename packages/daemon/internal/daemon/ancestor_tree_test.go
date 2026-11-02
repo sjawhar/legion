@@ -137,7 +137,7 @@ func TestPrepareReadsTheDispatchChainAboveAParent(t *testing.T) {
 			}
 			repos := newRepositories("LEGION", ghrepo.Renames{})
 			repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
-			branches := newDefaultBranches(roleTokens{}, "", defaultBranchTTL, time.Now)
+			branches := newDefaultBranches(roleTokens{}, repos, "", defaultBranchTTL, time.Now)
 			branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}
 			client := &chainDispatch{issues: map[string]dispatch.Issue{}, failing: tc.failing}
 			for _, issue := range tc.shown {
@@ -282,7 +282,7 @@ func TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree(t *
 	}
 	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
-	branches := newDefaultBranches(roleTokens{}, "", defaultBranchTTL, time.Now)
+	branches := newDefaultBranches(roleTokens{}, repos, "", defaultBranchTTL, time.Now)
 	branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}
 	client := &chainDispatch{issues: map[string]dispatch.Issue{
 		tree:   shownUnder(tree, "in_progress", "", true),
@@ -357,7 +357,7 @@ func newAncestryLine(t *testing.T, tree string, recorded ...record.Issue) *ances
 	}
 	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
-	branches := newDefaultBranches(roleTokens{}, "", defaultBranchTTL, time.Now)
+	branches := newDefaultBranches(roleTokens{}, repos, "", defaultBranchTTL, time.Now)
 	branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}
 	client := &chainDispatch{issues: map[string]dispatch.Issue{tree: shownUnder(tree, "in_progress", "", true)}}
 	log := quietLogger()

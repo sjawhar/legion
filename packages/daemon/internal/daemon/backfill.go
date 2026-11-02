@@ -48,12 +48,16 @@ func backfillRepositories(ctx context.Context, pool *pgxpool.Pool, records recor
 // clone keeps the old one: that refuses the boot, naming the clone, since the record's spelling
 // and GitHub's would name two repositories; the operator maps the new name in Dispatch or removes
 // the clone. A rename the deployment configures (renames) names one repository, so a transfer the
-// pair already covers refuses no boot: the record is filled with the name its clone keeps and
-// with the pair's spelling of that same name as GitHub's spelling, never with the name the
-// repository moved to, since a record's two repository columns must name one repository
-// (record.Store.FillIssueRepository). The record keeps the name it was recorded under for its
-// whole life, and heardRepositories hears the pair's other name too, so the events GitHub now
-// publishes under the name it moved to still reach it.
+// pair already covers refuses no boot. The read of GitHub is made of the repository the mapping
+// serves Dispatch's resolution as (named, which maps every read through repositories.serving):
+// after the transfer only the new owner's installation covers the repository, so a read minted
+// for the resolved name's owner would be refused and would refuse the boot. What that read
+// answers is the name GitHub holds, the pair's other side, and the record is filled with the name
+// its clone keeps and with the pair's spelling of that same name as GitHub's spelling, never with
+// the name the repository moved to, since a record's two repository columns must name one
+// repository (record.Store.FillIssueRepository). The record keeps the name it was recorded under
+// for its whole life, and heardRepositories hears the pair's other name too, so the events GitHub
+// now publishes under the name it moved to still reach it.
 func fillRepositories(ctx context.Context, pool *pgxpool.Pool, records record.Store, client dispatch.Client, project, stateDir string, named *defaultBranches, renames ghrepo.Renames, log *slog.Logger) error {
 	var unfilled []record.Issue
 	pulls := map[string]record.PullRequest{}
@@ -219,9 +223,12 @@ func recordedSpelling(renames ghrepo.Renames, recorded string, github ghrepo.Rep
 // naming the record, so the boot never subscribes to a repository in a spelling its events are not
 // published under. So does a repository GitHub renamed, since the record's repository never
 // changes; only a pre-release build of this daemon left records with no GitHub spelling. A rename
-// the deployment configures (renames) is no such rename: GitHub holds the record's repository
-// under the pair's other name, and the record is named with the pair's spelling of its own name
-// (recordedSpelling), which keeps it one repository and lets the boot go on.
+// the deployment configures (renames) is no such rename: the read is made of the repository the
+// mapping serves the record's one as (named, which maps every read through
+// repositories.serving), since after the transfer only the new owner's installation covers it,
+// and GitHub answers with the pair's other name. The record is then named with the pair's
+// spelling of its own name (recordedSpelling), which keeps it one repository and lets the boot
+// go on.
 func nameRepositories(ctx context.Context, pool *pgxpool.Pool, records record.Store, project string, named *defaultBranches, renames ghrepo.Renames, log *slog.Logger) error {
 	var unnamed []record.Issue
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {

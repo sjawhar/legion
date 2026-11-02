@@ -160,7 +160,7 @@ func TestTheMappingServesOnlyRepositoriesBothAppsAreInstalledOn(t *testing.T) {
 		{Repo: "zeta/tools", Project: "LEGION"},
 		{Repo: "other/thing", Project: "OTHER", Default: true},
 	}}
-	branches := newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)
+	branches := newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)
 
 	accepted, refused, _, err := readMapping(context.Background(), client, "LEGION", installs)
 	if err != nil {
@@ -620,7 +620,7 @@ func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
 	ctx := context.Background()
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@release/v7.1", "zeta/tools": "zeta/tools@main"})
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION", ghrepo.Renames{}),
-		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+		defaultBranches: newDefaultBranches(roleTokens{}, nil, github.url, defaultBranchTTL, time.Now)}
 	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}, {Repo: ghrepo.MustParse("zeta/tools")}}, nil)
 	if repo, branch, err := w.issueRepository(ctx, "LEGION-9"); err != nil || repo.String() != "Acme/Widgets" || branch != "release/v7.1" {
 		t.Fatalf("an unrecorded issue works %s@%s, %v; want the default Acme/Widgets@release/v7.1", repo, branch, err)
@@ -639,7 +639,7 @@ func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
 	ctx := context.Background()
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@main"})
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION", ghrepo.Renames{}),
-		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+		defaultBranches: newDefaultBranches(roleTokens{}, nil, github.url, defaultBranchTTL, time.Now)}
 	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		return w.records.PutIssue(ctx, tx, record.Issue{Key: "LEGION-2", Tree: "LEGION-2", Project: "LEGION", Title: "root", Phase: phase.Implementing,

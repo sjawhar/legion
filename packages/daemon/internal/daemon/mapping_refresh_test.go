@@ -97,7 +97,7 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 		installs.missing = map[string]bool{}
 	}
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatch: client, dispatchProject: "LEGION", installs: installs,
-		repositories: newRepositories("LEGION", ghrepo.Renames{}), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), log: quietLogger(),
+		repositories: newRepositories("LEGION", ghrepo.Renames{}), defaultBranches: newDefaultBranches(roleTokens{}, nil, github.url, defaultBranchTTL, time.Now), log: quietLogger(),
 		mappingChanged: make(chan struct{}, 1)}
 	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, NoteUnread: w.noteUnread, DesignGate: config.DesignGateOff}, quietLogger())
 	w.engine, w.admission = engine, admit.New(w.records, engine, 3, "LEGION", quietLogger())
@@ -499,7 +499,7 @@ func TestAnAdmissionWhosePreparationFailedIsPreparedAsDispatchNowShowsIt(t *test
 				client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true}, dispatch.RepoProject{Repo: "zeta/tools", Project: "LEGION"})
 			}
 			github := &failingGitHub{named: map[string]string{"acme/widgets": "acme/widgets@main", "zeta/tools": "zeta/tools@main"}}
-			w.defaultBranches = newDefaultBranches(roleTokens{}, github.start(t), 0, time.Now)
+			w.defaultBranches = newDefaultBranches(roleTokens{}, w.repositories, github.start(t), 0, time.Now)
 			client.issue = dispatch.Issue{Key: "LEGION-305", Status: "todo", HandedOver: true, ResolvedRepo: repo, LastSeq: 1}
 			fact := intake.DispatchIssue{Key: "LEGION-305", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: repo}
 			if tc.heldFirst {
@@ -960,7 +960,7 @@ func TestAServedRepositoryKeptOnItsLastAnswerHoldsNoOtherRepositoryBack(t *testi
 	url := github.start(t)
 	w, _, installs, _ := mappingRigWith(t, installs, func(w *workflowRuntime) {
 		// Every read of a repository's name asks GitHub again, as one older than its TTL does.
-		w.defaultBranches = newDefaultBranches(roleTokens{}, url, 0, time.Now)
+		w.defaultBranches = newDefaultBranches(roleTokens{}, w.repositories, url, 0, time.Now)
 	})
 	if !served(w, "acme/widgets") || served(w, "zeta/tools") {
 		t.Fatalf("served %v at boot, want acme/widgets alone", w.repositories.Accepted())

@@ -203,7 +203,7 @@ func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *test
 	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos,
-		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+		defaultBranches: newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)}
 	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
@@ -265,7 +265,7 @@ func TestAnAdmissionWhoseApplyFailedIsAppliedAsDispatchNowShowsIt(t *testing.T) 
 	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos,
-		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+		defaultBranches: newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)}
 	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 	// The first apply fails, as a database error would, while the person withdraws the issue; each

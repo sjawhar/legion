@@ -77,7 +77,7 @@ func mappingChangeAtRuntime(t *testing.T, ackWait, delay time.Duration) {
 	installs := &installations{missing: map[string]bool{}, delay: delay}
 	w := &workflowRuntime{mappingChanged: make(chan struct{}, 1),
 		pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", installs: installs,
-		repositories: newRepositories("CAPTURE", ghrepo.Renames{}), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now),
+		repositories: newRepositories("CAPTURE", ghrepo.Renames{}), defaultBranches: newDefaultBranches(roleTokens{}, nil, github.url, defaultBranchTTL, time.Now),
 		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	if err := w.loadMapping(context.Background()); err != nil {

@@ -112,7 +112,7 @@ func TestPrepareIssueReadsWhoSetTheLabelOfAnUnrecordedTriageRoot(t *testing.T) {
 			// as today, with no wait for a read of the mapping.
 			repos := newRepositories("LEGION", ghrepo.Renames{})
 			repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
-			branches := newDefaultBranches(roleTokens{}, "", defaultBranchTTL, time.Now)
+			branches := newDefaultBranches(roleTokens{}, repos, "", defaultBranchTTL, time.Now)
 			branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}
 			client := &eventLogDispatch{logs: tc.logs, logErr: tc.logErr}
 			client.issues = map[string]dispatch.Issue{key: shownUnder(key, "todo", "", true)}

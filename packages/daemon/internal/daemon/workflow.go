@@ -104,7 +104,9 @@ type workflowRuntime struct {
 	// defaultBranches is each repository as GitHub names it and its default branch, read under
 	// githubAPI and kept defaultBranchTTL: what an issue's record takes its repository and default
 	// branch from when it is first recorded (ResolveRepository), and what the mapping serves each
-	// repository as (nameAccepted).
+	// repository as (nameAccepted). Every read of it is made of the repository the mapping serves
+	// the asked-for one as (repositories.serving), so a name recorded before a configured
+	// rename's transfer is read on the installation that holds the repository now.
 	defaultBranches *defaultBranches
 	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
 	// boot, refreshMapping on a mapping change); installs answers each App's installation on a
@@ -279,7 +281,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
-		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
+		defaultBranches: newDefaultBranches(tokens, repos, githubAPI, defaultBranchTTL, time.Now),
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
 	if err := w.loadMapping(ctx); err != nil {
