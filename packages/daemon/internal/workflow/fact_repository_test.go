@@ -176,7 +176,7 @@ func TestAGitHubFactNamingARenamedRepositoryAppliesToTheTreeRecordedUnderItsOldN
 				if pr := after.PR; pr == nil || pr.ReviewSeen.ID != 7 {
 					t.Fatalf("LEGION-209's pull request = %+v, want the review it has seen recorded as 7", pr)
 				}
-				reviewer := phaseRowOf(t, after.Phases, claim.RoleReviewer)
+				reviewer := phaseRowIn(t, after.Phases, claim.RoleReviewer)
 				if reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head != "head" {
 					t.Fatalf("the reviewer's row = %+v, want its round decided by an approval of head", reviewer)
 				}
@@ -244,7 +244,7 @@ func TestAPullRequestOpenAtTheTransferTakesTheFactsNamingTheRepositoryItMovedTo(
 		{
 			name: "a push of a commit",
 			fact: func(repo string) intake.Fact {
-				return intake.Push{Repo: repo, Branch: "legion/LEGION-209", Before: "head", After: "pushed-head", Forced: new("false"), Pusher: "author", Sender: "author"}
+				return intake.Push{Repo: repo, Branch: "legion/LEGION-209", Before: "head", After: "pushed-head", Pusher: "author", Sender: "author"}
 			},
 			want: func(t *testing.T, after recordSnapshot) {
 				t.Helper()
@@ -294,7 +294,7 @@ func TestAPullRequestOpenAtTheTransferTakesTheFactsNamingTheRepositoryItMovedTo(
 				if pr := after.PR; pr == nil || pr.ReviewSeen.ID != 7 {
 					t.Fatalf("LEGION-209's pull request = %+v, want the review it has seen recorded as 7", pr)
 				}
-				reviewer := phaseRowOf(t, after.Phases, claim.RoleReviewer)
+				reviewer := phaseRowIn(t, after.Phases, claim.RoleReviewer)
 				if reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head != "head" {
 					t.Fatalf("the reviewer's row = %+v, want its round decided by an approval of head", reviewer)
 				}
@@ -339,8 +339,9 @@ func TestAPullRequestOpenAtTheTransferTakesTheFactsNamingTheRepositoryItMovedTo(
 	}
 }
 
-// phaseRowOf is role's row among rows.
-func phaseRowOf(t *testing.T, rows []record.PhaseRow, role claim.Role) record.PhaseRow {
+// phaseRowIn is role's row among rows, which a snapshot already read; handoff_test.go's
+// phaseRowOf reads the record itself.
+func phaseRowIn(t *testing.T, rows []record.PhaseRow, role claim.Role) record.PhaseRow {
 	t.Helper()
 	for _, row := range rows {
 		if row.Role == role {

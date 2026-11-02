@@ -1,4 +1,5 @@
 import { afterAll, afterEach, describe, expect, jest, mock, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
@@ -1779,7 +1780,7 @@ console.log(JSON.stringify(args, null, 2));
       {
         script: `dispatch ask --issue X-1 --question-file - --dry-run <<'EOF'\n${QUESTION}EOF`,
         cwd: work,
-        timeoutMs: 10_000,
+        timeoutMs: core.DRY_RUN_TIMEOUT_MS,
       },
     ]);
     const args = { issue: "X-1", question: QUESTION };
@@ -3057,7 +3058,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       expect(g.dryRuns[0]).toMatchObject({
         script: "cd sub >/dev/null && pwd -P",
         cwd: work,
-        timeoutMs: 10_000,
+        timeoutMs: core.DRY_RUN_TIMEOUT_MS,
       });
       // The dry run names the file as the call wrote it: the gate copies nothing.
       expect(g.dryRuns[1]?.script).toBe(
@@ -3066,7 +3067,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       expect(g.dryRuns[2]).toMatchObject({
         script: "cd inner >/dev/null && pwd -P",
         cwd: path.join(work, "sub"),
-        timeoutMs: 10_000,
+        timeoutMs: core.DRY_RUN_TIMEOUT_MS,
       });
       expect(g.dryRuns[3]?.script).toBe(
         "cd inner >/dev/null && dispatch message --issue X-1 --body-file note.txt --dry-run"
@@ -3182,15 +3183,74 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     ]);
     expect(g.entries[0].reason).toContain("unknown flag --fail");
   });
-  test("a dry-run past its limit is recorded as an error and the command runs", async () => {
+  // A dry run contacts no Dispatch server, so only a busy machine makes it slow: the gate runs a
+  // cut run once more within half the call's deadline, and the review keeps the rest. The clock
+  // here moves only as each stand-in run spends its whole limit.
+  test("a dry-run cut at its limit runs once more within half the deadline, and the call is reviewed", async () => {
+    let clock = 1_000_000;
+    let runs = 0;
+    const g = bind({
+      env: { ...STUB, OMP_ASKGATE: "block" },
+      cwd: work,
+      now: () => clock,
+      dryRun: async (script, runOpts) => {
+        runs += 1;
+        if (runs > 1) return core.spawnDryRun(script, runOpts);
+        clock += runOpts.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
+    });
+    expect(await g.bash("b1", ASK)).toBeUndefined();
+    // The deadline is 90 s at a 120 s ceiling: 20 s first, then what is left of its 45 s half.
+    expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([core.DRY_RUN_TIMEOUT_MS, 25_000]);
+    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "verdict" }]);
+    expect(g.calls.filter(isCharter)).toHaveLength(1);
+  }, 30_000);
+  test("a dry-run cut twice runs the call unreviewed and tells the agent why and what to do", async () => {
+    let clock = 1_000_000;
     const g = bind({
       env: { OMP_ASKGATE: "block" },
       cwd: work,
-      dryRun: async () => ({ exitCode: null, stdout: "", stderr: "", timedOut: true }),
+      now: () => clock,
+      dryRun: async (_script, runOpts) => {
+        clock += runOpts.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
+    });
+    const result = await g.bash("b1", ASK);
+    expect(result?.block).toBeUndefined();
+    expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([core.DRY_RUN_TIMEOUT_MS, 25_000]);
+    expect(g.calls).toHaveLength(0);
+    expect(g.entries).toMatchObject([
+      { tool: "dispatch_ask", outcome: "error", deadlineMs: 90_000 },
+    ]);
+    expect(g.entries[0].reason).toBe(
+      "dispatch ask --dry-run did not finish within 20000 ms, nor within 25000 ms when run again"
+    );
+    const note = result?.additionalContext ?? "";
+    expect(note).toContain(g.entries[0].reason ?? "");
+    expect(note).toContain("contacts no Dispatch server");
+    expect(note).toContain("The call ran unreviewed: read back what it posted");
+  });
+  test("at a short deadline the reads keep to half of it, and a run cut there is not run again", async () => {
+    let clock = 1_000_000;
+    const g = bind({
+      env: { OMP_ASKGATE: "block" },
+      cwd: work,
+      // A 30 s ceiling holds the deadline at 25 s, so the reads get 12.5 s.
+      ceiling: 30_000,
+      now: () => clock,
+      dryRun: async (_script, runOpts) => {
+        clock += runOpts.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
     });
     expect((await g.bash("b1", ASK))?.block).toBeUndefined();
-    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "error" }]);
-    expect(g.entries[0].reason).toContain("10000 ms");
+    expect(g.dryRuns.map((run) => run.timeoutMs)).toEqual([12_500]);
+    expect(g.entries).toMatchObject([{ outcome: "error", deadlineMs: 25_000 }]);
+    expect(g.entries[0].reason).toBe(
+      "dispatch ask --dry-run did not finish within 12500 ms, and the call's deadline left no time to run it again"
+    );
   });
   test("the runner kills a dry-run that outlives its limit", async () => {
     const began = Date.now();
@@ -3872,7 +3932,9 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the copy in docs)\n`));
       // The directory comes from the command's own cd and then pwd -P, run as the dry run runs.
       expect(g.dryRuns.map((run) => run.script)).toContain("cd docs >/dev/null && pwd -P");
-      expect(g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === 10_000)).toBe(true);
+      expect(
+        g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === core.DRY_RUN_TIMEOUT_MS)
+      ).toBe(true);
     });
     // The second final review of #2159: Oh My Pi at its pin takes a leading `cd X &&` into the
     // call's directory with no CDPATH (`extractLeadingCdTarget`, then `resolveToCwd`), and its
@@ -4260,8 +4322,9 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       await expectUnread("dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat");
     });
     // What Dispatch stores as a markdown document: an upload of inline text (`--content`,
-    // `--content-file`), whatever its name, or a `--path` file the CLI sends as text/markdown (its
-    // name ends in .md or .markdown); and the gate also reviews any upload whose name ends in .md.
+    // `--content-file`), which the CLI takes only under a name ending in .md or .markdown or with
+    // no extension, or a `--path` file the CLI sends as text/markdown (its name ends in .md or
+    // .markdown); and the gate also reviews any upload whose name ends in .md.
     fs.writeFileSync(path.join(work, "notes.txt"), "The person said: ship it on Friday.\n");
     fs.writeFileSync(path.join(work, "name-md.txt"), "brief.md\n");
     fs.writeFileSync(path.join(work, "name-png.txt"), "shot.png\n");
@@ -4296,12 +4359,9 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       ])
         await expectUnread(command);
     });
-    test("(l) inline text is a markdown document whatever its name, and so is a --path file named .md", async () => {
+    test("(l) inline text is a markdown document, and so is a --path file named .md", async () => {
       const g = bind({ env: STUB, cwd: work });
-      await g.bash(
-        "u14",
-        "dispatch artifact --issue DSP-1 --name shot.png --content-file notes.txt"
-      );
+      await g.bash("u14", "dispatch artifact --issue DSP-1 --name notes --content-file notes.txt");
       await g.bash("u15", "dispatch artifact --issue DSP-1 --name notes --path brief.md");
       expect(g.calls).toHaveLength(2);
       for (const call of g.calls) expect(call.user).toContain(uploadRule);
@@ -4525,6 +4585,84 @@ describe("the literal grammar, widened to forms with no expansion", () => {
       "rg -n dispatch src",
     ])
       expect(core.nonLiteralCause(command)).toBeUndefined();
+  });
+
+  // A body written as `--body "$(cat <<'EOF' … EOF)"` is a command
+  // substitution, so every flag's value was an expansion the gate could not read and the write
+  // posted unreviewed with a warning the writer can miss. The text is written out in the command,
+  // so the gate reads it and reviews the write. The flag was never the discriminator: a literal
+  // `--body hi` was always read, and an unquoted delimiter still expands and still is not.
+  describe("a quoted here-document in a command substitution", () => {
+    const BODY = "Done.\nSee the note.\n\n- one\n- two";
+    const quoted = (flag: string, text: string) =>
+      `dispatch comment --issue X-1 ${flag} "$(cat <<'EOF'\n${text}\nEOF\n)"`;
+    /** What bash really hands the CLI for `command`, as argv. */
+    const bashArgv = (command: string) =>
+      execFileSync("bash", ["-c", command.replace(/^dispatch/, "printf '%s\\0'")], {
+        encoding: "utf8",
+      })
+        .split("\0")
+        .filter((word) => word !== "");
+    test("gives the CLI what bash gives it, for every flag that carries a body", () => {
+      for (const flag of ["--body", "--body-file", "--question", "--reason"])
+        expect(core.commandArgv(quoted(flag, BODY))).toEqual(bashArgv(quoted(flag, BODY)));
+    });
+    // Every form the gate reads as literal must give bash's own argv, or the gate reviews text
+    // that is not what is sent. Each body below sends a form that an earlier revision read and
+    // bash did not: a word split or a glob, a delimiter line bash ends earlier, a `cat` whose
+    // input is not the here-document, and a body whose quotes or parenthesis send a scan for the
+    // closing `)` past the end of the command.
+    test("every form it reads as literal matches bash, and no other is read", () => {
+      // [the command, whether the gate reads it]. A row the gate reads must also give bash's own
+      // argv; a row it refuses must be refused, since "not read" is half of what the fix claims.
+      for (const [command, read] of [
+        // Read: the shapes the fix is for.
+        [
+          `dispatch comment --issue X-1 --body "$(cat <<'EOF'\nIt's one, 1) two, a " quote\nEOF\n)"`,
+          true,
+        ],
+        [`dispatch comment --issue X-1 --body "$(cat <<"EOF"\nplain\nEOF\n)"`, true],
+        [`dispatch comment --issue X-1 --body "$(cat - <<'EOF'\nwith a dash\nEOF\n)"`, true],
+        [`dispatch comment --issue X-1 --body "$(cat <<-'EOF'\n\twith tabs\n\tEOF\n)"`, true],
+        // Not read: bash word-splits and globs an unquoted substitution.
+        [`dispatch comment --issue X-1 --body $(cat <<'EOF'\nok --issue Y-9\nEOF\n)`, false],
+        // Not read: bash removes the delimiter's quoting, so the body ends at `#$`.
+        [
+          `dispatch comment --issue X-1 --body "$(cat <<"#\\$"\nshown\n#$\necho SMUGGLED\n#$\n)"`,
+          false,
+        ],
+        // Not read: `cat` on its own line reads the shell's input, not the here-document.
+        [`dispatch comment --issue X-1 --body "$(cat\n<<'EOF'\nnot the body\nEOF\n)"`, false],
+        // Not read: bash refuses an unpaired backtick in the delimiter with a syntax error.
+        [`dispatch comment --issue X-1 --body "$(cat <<"A\`B"\nhi\nA\`B\n)"`, false],
+      ] as Array<[string, boolean]>) {
+        const argv = core.commandArgv(command);
+        if (read) {
+          expect(argv).toBeDefined();
+          expect(argv).toEqual(bashArgv(command));
+        } else {
+          expect(argv).toBeUndefined();
+        }
+      }
+    });
+    test("is in the literal grammar, so the write is reviewed", () => {
+      expect(core.scopedCommand(quoted("--body", BODY))).toBeDefined();
+      expect(core.nonLiteralCause(quoted("--body", BODY))).toBeUndefined();
+    });
+    test("an unquoted delimiter expands in the body, so it stays outside", () => {
+      const command = `dispatch comment --issue X-1 --body "$(cat <<EOF\nhi $USER\nEOF\n)"`;
+      expect(core.scopedCommand(command)).toBeUndefined();
+      // The value holds `$` over several lines, which is named before an expansion in a value.
+      expect(core.nonLiteralCause(command)?.cause).toBe("lines-expansion");
+    });
+    test("a command after the body is no here-document, and stays outside", () => {
+      const command = `dispatch comment --issue X-1 --body "$(cat <<'EOF'\nhi\nEOF\nid)"`;
+      expect(core.scopedCommand(command)).toBeUndefined();
+    });
+    test("a second operand reads a file, and stays outside", () => {
+      const command = `dispatch comment --issue X-1 --body "$(cat q.md <<'EOF'\nhi\nEOF\n)"`;
+      expect(core.scopedCommand(command)).toBeUndefined();
+    });
   });
 
   /** What the CLI prints for a gated write with no marker, built on consumeMarker's own reason. */

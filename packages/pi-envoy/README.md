@@ -284,6 +284,20 @@ dispatch artifact --issue LEGION-1 --name spec.md --content-file - <<'EOF'
 EOF
 ```
 
+Inline content is stored as a Markdown document, so `--content` and `--content-file` take only a
+`--name` that ends in `.md` or `.markdown` or has no extension. The command refuses any other name
+(`rows.jsonl`, `sizes.tsv`, `rows.jsonl.1`, `plan v1.2`) before it sends anything and names
+`--path`, which stores a file whose path does not end in `.md` or `.markdown` as its bytes,
+unchanged, under that name. A document title with a dot near its end takes `--content` once it
+ends in `.md`.
+
+`dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>` records a Legion phase
+handoff on its issue as this session: the file's text, one JSON object, is stored exactly as
+written, and each write is the phase's next version. Keep the file outside the workspace (such as
+`$TMPDIR/<KEY>-<phase>.json`), since jj snapshots every file in it.
+`dispatch handoff-read --issue <KEY> --phase <phase>` prints one line naming the record's version,
+id, session and time, then the body exactly as stored; `--version <n>` reads an earlier version.
+
 Lifecycle and scope decisions between Legion roles go through `envoy_publish` to the owning
 architect's role topic; Dispatch is for durable questions to the human and the shared
 document, not for coordination between roles.
@@ -306,7 +320,12 @@ reviews these calls:
 Every other Dispatch command is outside the gate, and its text posts unreviewed: among them
 `dispatch issue-update --reason`, `dispatch resolve-ask --reason` and `dispatch suggest`.
 
-The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name
+The gate reads the arguments from the command's own `--dry-run`. The dry run sends nothing and
+contacts no Dispatch server, so a slow one most likely means a busy machine. The reads, the dry
+run and the `cd`'s `pwd -P` probe, take at most half the call's deadline: the first run of each
+is cut at 20 s, or sooner when that half ends sooner, and a run cut there is run once more with
+what is left of that half (25 s at the 90 s default), when at least 2 s of it is left. The
+review keeps the other half. An upload that reads its name
 from a file (`--name-file`) is decided from the name the dry run prints. `--path-file` is refused:
 its content names a file the gate does not read before Dispatch opens it. An upload whose name or
 path holds an expansion (`"$NAME"`) is outside the form the gate reads. The gate reads each file
@@ -551,7 +570,7 @@ why. The note reaches a headless session too:
 | Outcome | What happened |
 | --- | --- |
 | `timeout` | the review did not answer within its deadline |
-| `error` | the review failed: a model error, a handler exception, or a dry run that failed |
+| `error` | the review failed: a model error, a handler exception, or a dry run that failed; a dry run that timed out twice, or once with no time left to run it again, gets a note that the machine was busy and that the agent should read back what the write posted |
 | `no-verdict` | the model answered with no verdict the gate could read |
 | `halted` | three calls in a row reached no verdict, and the gate is paused for the session |
 | `skipped` | the session's main model is on another provider than the gate's |

@@ -170,6 +170,8 @@ CLAUDE_ENVOY_BUILD = reads(
         (".claude-plugin/marketplace.json", "packages/claude-envoy/tests/envoy-channel-server.test.ts:7"),
         (".github/scripts/check-private-names.sh", "packages/claude-envoy/scripts/verify-build.sh checks the build with it"),
         (".github/scripts/release-push.sh", "packages/claude-envoy/scripts/verify-build.sh runs its check-built; the job runs its extract-built"),
+        (".github/workflows/claude-envoy-rebuild.yaml",
+         "packages/claude-envoy/tests/build-inputs.test.ts holds its on.push.paths to the files scripts/build-inputs.txt matches"),
 )
 
 

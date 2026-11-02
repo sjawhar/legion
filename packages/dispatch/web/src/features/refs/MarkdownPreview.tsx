@@ -1,3 +1,4 @@
+import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useCallback, useRef } from "react";
 
 import { markdownClassName, useMarkdownHeadline } from "./markdown-engine";
@@ -17,16 +18,46 @@ const CLAMP_CLASS: Record<1 | 2 | 3, string> = {
   3: "line-clamp-3",
 };
 
+/** A textblock's words where it holds nothing but text with no marks on it, which is what a
+ *  preview can put in as plain words rather than as serialized inline content; `undefined` for
+ *  one holding a mark, a hard break, a reference or a picture, which the serializer must write
+ *  itself. */
+function unmarkedText(node: ProseMirrorNode): string | undefined {
+  let text = "";
+  for (let child = 0; child < node.content.childCount; child += 1) {
+    const inline = node.content.child(child);
+    if (!inline.isText || inline.marks.length > 0) {
+      return undefined;
+    }
+    text += inline.text ?? "";
+  }
+  return text;
+}
+
 /**
  * Every textblock's inline content, marks intact, on one line: a heading's words, then the
  * paragraph's bold and code and links, then each list item, space-separated. (Not
  * `MarkdownBody`'s inline flattening, whose later blocks are plain text: a preview whose first
  * block is a heading would lose the formatting of everything after it.) A code block's text goes
  * inside a `<code>`, so it reads as code and `linkifyDispatchRefs` leaves it alone.
+ *
+ * Blocks holding nothing but unmarked words go in as one text node, however many they are: a
+ * preview is one run of text, and a body of thousands of plain blocks - the 8,000 items of a
+ * list - would otherwise put 16,000 nodes into the page for the three lines a reader sees, which
+ * is ~2 s of WebKit's thread to style and lay out (sjawhar/legion#2519). What the preview reads
+ * is the same either way, character for character.
  */
 const paintOneLine: PaintMarkdown = (element, parsed, serializer) => {
   element.replaceChildren();
   let first = true;
+  /** The plain words waiting to go in, so a run of them lands as one node. */
+  let plain = "";
+  const putThePlainWordsIn = (): void => {
+    if (plain !== "") {
+      element.appendChild(document.createTextNode(plain));
+      plain = "";
+    }
+  };
   parsed.descendants((node) => {
     if (!node.isTextblock) {
       return true;
@@ -35,11 +66,18 @@ const paintOneLine: PaintMarkdown = (element, parsed, serializer) => {
       return false;
     }
     if (!first) {
-      element.appendChild(document.createTextNode(" "));
+      plain += " ";
     }
     first = false;
+    const isCode = node.type.spec.code === true;
+    const words = isCode ? undefined : unmarkedText(node);
+    if (words !== undefined) {
+      plain += words;
+      return false;
+    }
+    putThePlainWordsIn();
     const content = serializer.serializeFragment(node.content);
-    if (node.type.spec.code === true) {
+    if (isCode) {
       const code = document.createElement("code");
       code.appendChild(content);
       element.appendChild(code);
@@ -48,6 +86,7 @@ const paintOneLine: PaintMarkdown = (element, parsed, serializer) => {
     }
     return false;
   });
+  putThePlainWordsIn();
   // A hard break inside a paragraph would start a second visual line inside a one-line
   // preview; the preview is one run of text, so it reads as a space.
   for (const br of element.querySelectorAll("br")) {
@@ -217,8 +256,10 @@ function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
  * phrases to wrap in a `<mark>` of `highlightClassName` once rendered (a search hit's matched
  * words; see `markPhrases`); a reference whose source holds one is marked whole, since its
  * words are replaced by its title. Until the engine has answered (one pre-paint commit once it
- * is loaded on the page) the element is empty; when the engine cannot load, the literal source
- * renders as text with `data-markdown-fallback`, as `MarkdownBody` does.
+ * is loaded on the page) the element is empty; a source too long for the page's own thread holds
+ * its own text, clamped, marked `data-markdown-pending`, until the parse worker answers
+ * (`markdown-engine.ts`); and when the engine cannot load, the literal source renders as text
+ * with `data-markdown-fallback`, as `MarkdownBody` does.
  */
 export function MarkdownPreview({
   className = "",
@@ -278,7 +319,7 @@ export function MarkdownPreview({
     },
     [highlightClassName, highlightKey, lead, links]
   );
-  const { isFallback, portals } = useRenderedMarkdown(root, markdown, paintOneLine, {
+  const { isFallback, isPending, portals } = useRenderedMarkdown(root, markdown, paintOneLine, {
     pictures: "inline",
     decorate,
   });
@@ -288,6 +329,7 @@ export function MarkdownPreview({
     <span
       className={`${CLAMP_CLASS[lines]} ${markdownClassName} max-w-none ${className}`}
       data-markdown-fallback={isFallback || undefined}
+      data-markdown-pending={isPending || undefined}
       data-markdown-preview=""
       ref={root}
       title={title?.text}

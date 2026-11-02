@@ -53,11 +53,16 @@
 //     prints, and an upload that is no markdown document runs with no entry. The gate learns
 //     the exact arguments by running that command with `--dry-run` after the command name, in the
 //     call's working directory (then its `cd`, as the call will) and environment, its
-//     here-document still on stdin and without its `2>&1` and its pipe stage, under a 10 s limit,
-//     and reviews the JSON it prints. A dry-run that fails, times out or prints no JSON object
-//     is recorded as `error` and the call runs (the CLI refuses arguments it cannot parse,
-//     before it sends anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
-//     reviewed. An upload given with `--path` prints the path, not the text. Every file whose
+//     here-document still on stdin and without its `2>&1` and its pipe stage, and reviews the
+//     JSON it prints. The reads (the dry run, and the `cd`'s `pwd -P` probe) take at most half
+//     the call's deadline: the first run of each is cut at 20 s, or sooner when that half ends
+//     sooner, and a run cut there is run once more with what is left of that half, when at
+//     least 2 s of it is left (`DRY_RUN_TIMEOUT_MS`). A dry-run that fails, times out again or
+//     prints no JSON object is recorded as `error` and the call runs (the CLI refuses arguments
+//     it cannot parse, before it sends anything); a dry run that timed out tells the agent it
+//     contacts no Dispatch server, so the likely cause is a busy machine, and to read back what
+//     the write posted. A `dispatch` command with `--dry-run` or `--help` sends nothing and is
+//     not reviewed. An upload given with `--path` prints the path, not the text. Every file whose
 //     text the write posts, that path and each `--<field>-file`, is read in place before the
 //     model is asked, and the call runs as written. The model reviews those bytes (an upload's
 //     as `content`), and the marker binds the sha256 of each file in argv order. The CLI reads
@@ -301,8 +306,9 @@ const SPEC_FLAGS = ["--spec", "--spec-file"];
 /**
  * `dispatch artifact` is reviewed only as an upload of a markdown document. Dispatch stores an
  * upload as one when the CLI sends it as text/markdown: inline text (`--content`, `--content-file`),
- * whatever its name, or a `--path` file whose own name ends in `.md` or `.markdown`, since Bun takes
- * a file's type from its path. The gate also reviews an upload whose `--name` ends in `.md`.
+ * which the CLI takes only under a name ending in `.md` or `.markdown` or with no extension, or a
+ * `--path` file whose own name ends in `.md` or `.markdown`, since Bun takes a file's type from its
+ * path. The gate also reviews an upload whose `--name` ends in `.md`.
  */
 const UPLOAD_COMMAND = "artifact";
 /** The upload flags whose text is the document itself. */
@@ -313,7 +319,16 @@ const INDIRECT_FLAGS = ["--name-file", "--path-file"];
 const NO_SEND_FLAGS = ["--dry-run", "--help"];
 const REBUTTAL_KEY = "advisor_rebuttal";
 const REBUTTAL_FLAG = "--advisor-rebuttal";
-export const DRY_RUN_TIMEOUT_MS = 10_000;
+// A read script (the dry run, and the `cd`'s `pwd -P` probe) contacts no Dispatch server, so a
+// slow one most likely means a busy machine. Its first run is cut at DRY_RUN_TIMEOUT_MS, above
+// every dry run the gate saw finish on a shared dev box in the week of 2026-10-27 (p99 7.2 s,
+// longest 12.3 s; that box ran at about six runnable processes per core while it was measured).
+// A run cut there is run once more with what is left of the reads' share of the call's deadline
+// (READ_SHARE), when that is at least MIN_RETRY_MS; the review keeps the rest, which at the 90 s
+// default is 45 s, above the p95 of a reviewed call's whole gate time (42 s, its dry run included).
+export const DRY_RUN_TIMEOUT_MS = 20_000;
+const READ_SHARE = 0.5;
+const MIN_RETRY_MS = 2_000;
 const GATE_TIMEOUT_MS = 90_000;
 // The runner refuses a tool_call handler that outlives extensionHandlers.toolCallTimeoutMs, so the
 // gate's deadline stays this far under it: room for the aborted call to report its usage
@@ -454,7 +469,11 @@ export interface GateEntry {
   model?: string;
   /** Each model of the chain that answered with an error before `model` was asked, with that error. */
   failedModels?: Array<{ model: string; error: string }>;
-  /** The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's handler ceiling. */
+  /**
+   * The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's
+   * handler ceiling. On every entry that reached the model call, and on an `error` entry whose
+   * dry run failed, since the reads raced half of it.
+   */
   deadlineMs?: number;
   /** Every attempt's spend of both calls, the aborted one included. */
   usage?: Usage;
@@ -758,6 +777,66 @@ type ShellToken =
   | { kind: "redirect"; fd: string; op: string; target?: string; start: number; end: number }
   | { kind: "comment"; start: number; end: number };
 
+/**
+ * The literal text of a `$(cat <<'EOF' … EOF)` at `from`, or undefined. A command substitution
+ * is an expansion the gate cannot read, but this one is already written out: `cat` with no
+ * operand and one here-document whose delimiter is quoted takes no input of its own and expands
+ * nothing, so its output is the body as it stands in the command. Reading it keeps a write whose
+ * body is a here-document inside the literal grammar, where it is reviewed, rather than posting
+ * it unreviewed with a warning the writer can miss.
+ *
+ * Only where bash gives the same bytes, which is **inside double quotes alone**: unquoted, bash
+ * splits the output into words and expands each as a glob, so a body of `ok --issue Y-9` becomes
+ * three arguments and one holding `/etc/host*` becomes file names. The caller passes only the
+ * double-quoted site.
+ *
+ * The shape: `cat`, an optional `-`, `<<` or `<<-` (whose body and delimiter line have leading
+ * tabs stripped), a delimiter in quotes, and nothing after the body's closing delimiter but
+ * blanks and the closing parenthesis. Three narrowings each answer a way bash reads it otherwise:
+ * a double-quoted delimiter takes no backslash, since bash removes the quoting and `"#\$"` ends
+ * the body at `#$`; no blank of the opener may be a newline, since `cat` on its own line reads
+ * the shell's own input and not the here-document; and the end is found from the delimiter line
+ * rather than by scanning for the parenthesis, since a body holding `It's`, a lone `"` or `1)`
+ * sends such a scan past the command.
+ */
+function heredocSubstitution(
+  text: string,
+  from: number
+): { end: number; value: string } | undefined {
+  if (!text.startsWith("$(", from)) return undefined;
+  const opener =
+    /^[^\S\n]*cat[^\S\n]+(?:-[^\S\n]+)?<<(-?)[^\S\n]*(?:'([^']*)'|"([^"\\`]*)")[^\S\n]*\n/.exec(
+      text.slice(from + 2)
+    );
+  if (opener === null) return undefined;
+  const delimiter = opener[2] ?? opener[3] ?? "";
+  if (delimiter === "") return undefined;
+  const strip = opener[1] === "-";
+  const body: string[] = [];
+  let index = from + 2 + opener[0].length;
+  while (index <= text.length) {
+    const stop = text.indexOf("\n", index);
+    const line = text.slice(index, stop === -1 ? text.length : stop);
+    if ((strip ? line.replace(/^\t+/, "") : line) === delimiter) {
+      // Past the body only blanks and the closing parenthesis may stand: anything else is another
+      // command (`… EOF; id)`) or an unclosed substitution, and neither is this literal.
+      const rest = text.slice(stop === -1 ? text.length : stop + 1);
+      const close = /^\s*\)/.exec(rest);
+      if (close === null) return undefined;
+      return {
+        end: (stop === -1 ? text.length : stop + 1) + close[0].length,
+        // Command substitution strips the trailing newlines of what it captures.
+        value: body.join("\n").replace(/\n+$/, ""),
+      };
+    }
+    if (stop === -1) break;
+    body.push(strip ? line.replace(/^\t+/, "") : line);
+    index = stop + 1;
+  }
+  // No closing delimiter: bash would read on past the command, so this is no literal.
+  return undefined;
+}
+
 /** Where a `$(…)`, `${…}` or backtick expansion that starts at `from` ends, quotes and nesting
  * followed roughly: a mistake here can only move a cause, since any `$` or backtick is unread. */
 function expansionEnd(text: string, from: number): number {
@@ -832,6 +911,13 @@ function readWord(text: string, from: number): WordToken {
       while (index < text.length && text[index] !== '"') {
         const inner = text[index];
         if (REFUSED_DOUBLE_QUOTED.includes(inner)) {
+          // A `$(cat <<'EOF' … EOF)` is written out in the command: take its text as literal.
+          const here = inner === "$" ? heredocSubstitution(text, index) : undefined;
+          if (here !== undefined) {
+            value += here.value;
+            index = here.end;
+            continue;
+          }
           unread.push(inner);
           refused = true;
           if (inner === "\\") {
@@ -851,6 +937,8 @@ function readWord(text: string, from: number): WordToken {
       if (refused && part.includes("\n")) linesExpansion ??= part.split("\n")[0];
       index++;
     } else if (char === "$" || char === "`") {
+      // No here-document is read here: unquoted, bash splits a substitution's output into words
+      // and expands each as a glob, so its text is not what the CLI gets (heredocSubstitution).
       unread.push(char);
       const end = Math.max(expansionEnd(text, index), index + 1);
       expand(index, end);
@@ -2137,6 +2225,13 @@ const renderUnreviewed = (outcome: GateEntry["outcome"], reason: string | undefi
   return `<advisor-gate advisor="AskGate" outcome="${outcome}">\n${opening}${why}. The call ran unreviewed.\n</advisor-gate>`;
 };
 /**
+ * The note of a write whose dry run did not finish in time, run again once where the deadline
+ * left room. The dry run contacts no Dispatch server, so the cause is the machine, and the one
+ * thing the agent can do is check what the write posted.
+ */
+const renderSlowDryRun = (reason: string) =>
+  `<advisor-gate advisor="AskGate" outcome="error">\nAskGate did not review this Dispatch write: ${agentFacing(reason)}. A dry run only checks the arguments on this machine and contacts no Dispatch server, so the likely cause is a busy machine, not Dispatch. The call ran unreviewed: read back what it posted, and correct it if it is wrong.\n</advisor-gate>`;
+/**
  * The flags a refused file's text can go through instead: a `--<field>-file` reads `-` as stdin and
  * any other path as a file. An upload's `--path` (and `--path-file`, which names it) is a path the
  * CLI sends as it is, `-` included, so an upload's text goes through `--content-file`, and its
@@ -2595,21 +2690,25 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
     /**
      * The write goes out. Every outcome `UNREVIEWED_CAUSE` names hands the agent a note saying it
-     * went out unreviewed and why, also `abandoned` and `shutdown`, whose note reaches the agent
-     * only where its call goes on after its tool, run or session ended.
+     * went out unreviewed and why (`note` in place of that one, where the cause has its own), also
+     * `abandoned` and `shutdown`, whose note reaches the agent only where its call goes on after
+     * its tool, run or session ended.
      */
     const pass = (
       outcome: GateEntry["outcome"],
       fields: Partial<GateEntry> = {},
-      effect: Decision["effect"] = "none"
-    ): Decision => {
-      const note = renderUnreviewed(outcome, fields.reason);
-      return {
-        fields: { decision: "allow", outcome, ...fields },
-        ...(note === undefined ? {} : { result: { additionalContext: note } }),
-        effect,
-      };
-    };
+      effect: Decision["effect"] = "none",
+      note: string | undefined = renderUnreviewed(outcome, fields.reason)
+    ): Decision => ({
+      fields: { decision: "allow", outcome, ...fields },
+      ...(note === undefined ? {} : { result: { additionalContext: note } }),
+      effect,
+    });
+    /**
+     * This call's deadline, raced from handler entry: OMP_ASKGATE_TIMEOUT_MS or 90 s, held under
+     * the runner's handler ceiling, which is read again on each call.
+     */
+    const callDeadlineMs = () => Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
     /**
      * A call given up without a verdict: its call, its run or the session ended first. Not the gate's
      * failure, so it never counts toward the halt. No verdict is not permission: block mode refuses it
@@ -2877,7 +2976,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       if (ctx.model?.provider !== model.provider)
         return pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
       // Raced from handler entry, so each render of this call counts against the runner's ceiling too.
-      const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
+      const deadlineMs = callDeadlineMs();
       stop.arm(Math.max(0, deadlineMs - (deps.now() - started)));
       // A model that answers with an error hands the request to the next one in the role's chain, inside
       // the same deadline. Only models on the primary's provider are asked: the transcript stays there.
@@ -3038,7 +3137,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           files: FileDigest[];
           directory: () => Promise<string | undefined>;
         }
-      | { failure: string }
+      | { failure: string; slow?: true }
       | { unreadable: UnreadableCommand }
       | { cause: GivenUpCause }
       | { unscoped: true };
@@ -3046,7 +3145,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       scoped: ScopedCommand,
       input: Input,
       ctx: GateCtx,
-      stop: Stop
+      stop: Stop,
+      readsEnd: number
     ): Promise<DryRun> => {
       // The bash tool's own resolution: `~` is home, a bare `/` is the session's directory, and a
       // relative path resolves against it.
@@ -3073,28 +3173,49 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           throw new Error("the gate's deadline fired while its dry run was still reading");
         return stop.cause;
       };
-      /** Runs one script as the dry run runs: in `cwd`, under the limit, stopped with the call. */
+      /** Runs one script as the dry run runs: in `cwd`, under `limitMs`, stopped with the call. */
       const runScript = async (
-        script: string
+        script: string,
+        limitMs: number
       ): Promise<{ run: DryRunResult } | { cause: GivenUpCause }> => {
         // Stopped like a waiting model call: the run's stop or the session's shutdown kills it.
         const run = await deps.dryRun(script, {
           cwd,
           env,
-          timeoutMs: DRY_RUN_TIMEOUT_MS,
+          timeoutMs: limitMs,
           signal: stop.signal,
         });
         const cause = abandoned();
         return cause === undefined ? { run } : { cause };
       };
-      /** The script's stdout, or why it gave none: a stop, the limit, or an exit other than 0. */
-      type Ran = { stdout: string; stderr: string } | { failure: string } | { cause: GivenUpCause };
+      /**
+       * The script's stdout, or why it gave none: a stop, the limit, or an exit other than 0. A run
+       * cut at its limit (`slow`) is run once more with what is left of the reads' share of the
+       * deadline (`readsEnd`), when that is at least MIN_RETRY_MS: only a busy machine slows it.
+       */
+      type Ran =
+        | { stdout: string; stderr: string }
+        | { failure: string; slow?: true }
+        | { cause: GivenUpCause };
       const stdoutOf = async (script: string, what: string): Promise<Ran> => {
-        const ran = await runScript(script);
+        const firstMs = Math.max(0, Math.min(DRY_RUN_TIMEOUT_MS, readsEnd - deps.now()));
+        let ran = await runScript(script, firstMs);
         if ("cause" in ran) return ran;
+        let retryMs: number | undefined;
+        if (ran.run.timedOut) {
+          const leftMs = readsEnd - deps.now();
+          if (leftMs >= MIN_RETRY_MS) {
+            retryMs = leftMs;
+            ran = await runScript(script, retryMs);
+            if ("cause" in ran) return ran;
+          }
+        }
         const { run } = ran;
         if (run.timedOut)
-          return { failure: `${what} did not finish within ${DRY_RUN_TIMEOUT_MS} ms` };
+          return {
+            failure: `${what} did not finish within ${firstMs} ms, ${retryMs === undefined ? "and the call's deadline left no time to run it again" : `nor within ${retryMs} ms when run again`}`,
+            slow: true,
+          };
         if (run.exitCode !== 0) {
           const printed = clipBytes((run.stdout || run.stderr).trim(), GATE_PRINTED_MAX_BYTES);
           return { failure: `${what} exited ${run.exitCode ?? "on a signal"}: ${printed}` };
@@ -3391,7 +3512,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             // both model calls.
             const stop = openStop(event.toolCallId);
             try {
-              const run = await readArgs(scoped, event.input, ctx, stop);
+              // The reads take at most READ_SHARE of the call's deadline, raced from handler
+              // entry as the review is, which keeps the rest.
+              const deadlineMs = callDeadlineMs();
+              const readsEnd = started + Math.floor(deadlineMs * READ_SHARE);
+              const run = await readArgs(scoped, event.input, ctx, stop, readsEnd);
               // An upload its dry run shows is no markdown document passes as an ungated call
               // does, with no entry and no marker, which the CLI needs for no such upload; an
               // override flag on it is still removed, since the CLI would refuse it, and put
@@ -3409,8 +3534,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 else decision = unreadableCall(run.unreadable, checks);
               }
               // The CLI refuses arguments it cannot parse before it sends anything, so the
-              // command runs.
-              else if ("failure" in run) decision = pass("error", { reason: run.failure });
+              // command runs. A dry run the machine was too busy to finish says so. The entry
+              // names the deadline whose half the reads raced.
+              else if ("failure" in run)
+                decision = pass(
+                  "error",
+                  { reason: run.failure, deadlineMs },
+                  "none",
+                  run.slow ? renderSlowDryRun(run.failure) : undefined
+                );
               else {
                 dryRun = { args: run.args, files: run.files };
                 const { key, label } = breakerKey(scoped.tool, run.review);
