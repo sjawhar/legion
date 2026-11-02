@@ -20,3 +20,13 @@ const (
 // not tell the two apart. At 4,096 blocks the walks' quadratic growth dominates: 1.5 to 2.5 times
 // for Update against 11.4 to 21.3 for that write.
 var alternatingBlocks = []int{4_096}
+
+// tagShapeSizes stop at 256 KiB under -race, in one step of sixteen times: growthVerdict allows a
+// step growthAllowance times its growth, 64 times here, which a quadratic cost (256 times) still
+// exceeds, where steps of four times would allow sixteen, all a quadratic cost grows by. Rendering
+// `<a b="x;a@b.cc ">` repeated grows linearly - 0.76 s at 256 KiB, 1.14 s at 512 KiB and 2.61 s at
+// a mebibyte without -race, on a two-core pod - but it costs about fifteen times its parse, and on
+// a slow runner -race's instrumentation took the mebibyte past the one-minute deadline per call the
+// test then had (perCallDeadline). A write of that shape never reaches 512 KiB: the 65,536 elements
+// one upload may make refuse it first.
+var tagShapeSizes = []int{16 << 10, 256 << 10}
