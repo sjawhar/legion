@@ -401,9 +401,9 @@ func (r *renderer) block(n *Node, prefix string) {
 		}
 		// The browser editor's parser reads the lines of a definition a list item holds as the
 		// item's, so in a tight item a blank line between two of its blocks would spread the item.
-		around := r.itemBelowQuotes()
+		tightAround := r.inTightItemBelowQuotes()
 		r.enter(n, prefix+definitionIndent)
-		if around != nil && around.Attrs["spread"] != true {
+		if tightAround {
 			r.itemBlocks(n.Children, false, prefix, prefix+definitionIndent, false)
 		} else {
 			r.blocksNoTrailing(n.Children, prefix+definitionIndent)
@@ -445,6 +445,14 @@ func (r *renderer) block(n *Node, prefix string) {
 			r.blocksNoTrailing(n.Children, prefix)
 		}
 		r.blanksEndingQuotedList(n.Children, prefix, true)
+		// A spread item whose only written block is this one has no blank line between two of its
+		// own blocks to be spread by, so the line that spreads it stands inside the typed block,
+		// above its closing fence, where the browser editor's parser reads it as the item's
+		// (typedBlankSpreadsItem). A footnote definition the item holds reads that line as its end
+		// and as the item's alike, and is refused by name instead (typedDefinitionBlankInItem).
+		if !r.inFootnote() && itemWritesOnly(r.itemBelowQuotes(), n) {
+			r.writeSyntax("\n" + strings.TrimRight(prefix, " "))
+		}
 		r.leave()
 		r.writeSyntax("\n" + prefix + fence)
 	}
@@ -582,6 +590,20 @@ func spreadElsewhere(blocks []*Node) bool {
 	return false
 }
 
+// itemWritesOnly reports whether block is the one block item writes, an empty paragraph it opens
+// with writing nothing (opensWithUnwrittenParagraph): no blank line between two of item's blocks
+// is written there, so a spread item is spread by a line inside block alone.
+func itemWritesOnly(item, block *Node) bool {
+	if item == nil || item.Attrs["spread"] != true {
+		return false
+	}
+	children := item.Children
+	if opensWithUnwrittenParagraph(item) {
+		children = children[1:]
+	}
+	return len(children) == 1 && children[0] == block
+}
+
 // opensWithUnwrittenParagraph reports whether item's first block is an empty paragraph with another
 // block after it, which the renderer writes as nothing, the next block on the marker's line.
 func opensWithUnwrittenParagraph(item *Node) bool {
@@ -613,18 +635,12 @@ func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string
 			blanks := 0
 			previous := blocks[index-1]
 			if spread || afterParagraph && child.Type == "paragraph" || previous.Type == "table" && continuesTable(child) ||
-				!opensAfterParagraph(child) && blockEndsInParagraph(previous) {
+				!opensAfterBlock(previous, child) && blockEndsInParagraph(previous) || mergesIntoQuote(previous, child) {
 				blanks = 1
 			}
 			if isList(previous) {
-				after, exact := r.blanksAfterList(previous, child)
-				switch {
-				case exact:
+				if after, exact := r.blanksAfterList(previous, child); exact {
 					blanks = after
-				// One blank line keeps a block that cannot open on the line after a paragraph off
-				// the paragraph the list ends in.
-				case !isList(child) && !opensAfterParagraph(child) && endsInParagraph(previous):
-					blanks = 1
 				}
 			} else if previous.Type == "footnote_definition" && r.scope().quotes > 0 && !quoteListOrDefinition(child) {
 				// In a quote the blank lines after a footnote definition are the definition's, an

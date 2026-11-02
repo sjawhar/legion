@@ -10,17 +10,22 @@ import (
 // A delete op renders the document it leaves and stores that rendering with no read-back, so a
 // rendering markdown reads as fewer blocks than it was given stores a document holding less than
 // the delete left. The blocks of a typed block in a tight list item are written on consecutive
-// lines, which merges three pairs: a paragraph after a quote the quote's lazy line takes, a list
-// that interrupts no paragraph read as its text, and an empty item's marker read as a setext
-// underline. One blank line keeps each apart (itemBlocks), and the item then reads back spread.
+// lines, which merges pairs: a paragraph after a quote the quote's lazy line takes, a list that
+// interrupts no paragraph read as its text, an empty item's marker read as a setext underline, a
+// quote after a quote the one marker opens, and a table after a list read as the paragraph the
+// list ends in. One blank line keeps each apart (itemBlocks), and the item then reads back
+// spread. The item's own blocks are written the same way, so the last pair merges there too.
 //
 // Each row deletes the fenced code block between the pair and reads the version the settlement
 // stored, so what is checked is the bytes a person's next read gives back.
 func TestDeletingABlockOfATypedBlockInATightItemKeepsTheBlocksApart(t *testing.T) {
 	const callout = ":::callout{#c1 kind=\"note\" title=\"T\"}"
+	const table = "  | h | i |\n  | --- | --- |\n  | c | d |\n"
 	for _, test := range []struct {
 		name, markdown, stored string
 		blocks                 int
+		// inItem marks a document whose deleted block is the item's own, held by no typed block.
+		inItem bool
 	}{
 		{
 			name:     "a paragraph after a quote",
@@ -40,6 +45,25 @@ func TestDeletingABlockOfATypedBlockInATightItemKeepsTheBlocksApart(t *testing.T
 			stored:   "- a\n  " + callout + "\n  q\n\n  - \n  :::\n- b\n",
 			blocks:   2,
 		},
+		{
+			name:     "a quote after a quote",
+			markdown: "- a\n  " + callout + "\n  > q\n  ```\n  x\n  ```\n  > r\n  :::\n- b\n",
+			stored:   "- a\n  " + callout + "\n  > q\n\n  > r\n  :::\n- b\n",
+			blocks:   2,
+		},
+		{
+			name:     "a table after a list",
+			markdown: "- a\n  " + callout + "\n  - q\n  ```\n  x\n  ```\n" + table + "  :::\n- b\n",
+			stored:   "- a\n  " + callout + "\n  - q\n\n" + table + "  :::\n- b\n",
+			blocks:   2,
+		},
+		{
+			name:     "a table after a list among the item's own blocks",
+			markdown: "- a\n  - q\n  ```\n  x\n  ```\n" + table + "- b\n",
+			stored:   "- a\n  - q\n\n" + table + "- b\n",
+			blocks:   3,
+			inItem:   true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := newTestService(t)
@@ -58,8 +82,12 @@ func TestDeletingABlockOfATypedBlockInATightItemKeepsTheBlocksApart(t *testing.T
 			}
 			// The blocks the delete left are the blocks the stored version reads back as.
 			back := liveTree(t, service, artifactID)
-			if held := len(back.Children[0].Children[0].Children[1].Children); held != test.blocks {
-				t.Fatalf("the typed block reads back holding %d blocks, want %d", held, test.blocks)
+			holder := back.Children[0].Children[0]
+			if !test.inItem {
+				holder = holder.Children[1]
+			}
+			if held := len(holder.Children); held != test.blocks {
+				t.Fatalf("the delete's holder reads back holding %d blocks, want %d", held, test.blocks)
 			}
 		})
 	}

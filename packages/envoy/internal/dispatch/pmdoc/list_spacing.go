@@ -74,10 +74,6 @@ func browserListSpacing(root ast.Node, source []byte) error {
 				reason = "an empty list item followed by a blank line inside another list item, where goldmark ends the outer item and the browser editor does not"
 			}
 		case *ast.List:
-			if holdsTypedBlankInDefinition(node, lines) {
-				reason = typedDefinitionBlankInItem
-				break
-			}
 			reason = readListSpacing(node, lines)
 		}
 		if reason != "" {
@@ -104,13 +100,15 @@ func goldmarkSpreadsItemsBeforeBlanks(list *ast.List) bool {
 
 // readExactListSpacing reads, in a document holding no shape only the browser editor's parser and
 // this one read alike, each list whose spacing the lines alone decide as that parser reads it
-// (readListSpacing), and leaves every other list to goldmark's looseness. It names the two lists it
-// cannot leave there, where that looseness reads an item the browser editor spreads as tight: one
-// in a typed block in a footnote definition with a blank line at or after it
+// (readListSpacing), and leaves every other list to goldmark's looseness. It names the three lists
+// it cannot leave there, where that looseness reads an item the browser editor spreads as tight:
+// one in a typed block in a footnote definition with a blank line at or after it
 // (typedFootnoteListBlank), where that editor spreads the item a blank line follows and never the
 // list, and goldmark's looseness then reads the list tight, or spreads it, or leaves that item
-// holding one block unspread; and one whose item holds a typed block with a blank line that
-// editor reads as spacing the item inside it (typedBlankInItem).
+// holding one block unspread; one whose item holds a typed block with a blank line that editor
+// reads as spacing the item inside it (typedBlankInItem); and one whose item holds a footnote
+// definition whose typed block holds such a line, which that editor reads as the definition's end
+// and as the item's alike (typedDefinitionBlankInItem).
 func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		switch node := node.(type) {
@@ -120,11 +118,11 @@ func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 			if !entering {
 				return ast.WalkContinue, nil
 			}
-			if holdsTypedBlankInDefinition(node, lines) {
+			reason := readListSpacing(node, lines)
+			if reason == typedDefinitionBlankInItem {
 				refusal = typedDefinitionBlankInItem
 				return ast.WalkStop, nil
 			}
-			reason := readListSpacing(node, lines)
 			if reason == typedFootnoteListBlank && !goldmarkSpreadsItemsBeforeBlanks(node) {
 				refusal = typedFootnoteListBlank
 				return ast.WalkStop, nil
@@ -228,6 +226,11 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 	quote, quoted := ancestor[*ast.Blockquote](list)
 	directive, typed := ancestor[*typedDirective](list)
 	definition, footnoted := ancestor[*extensionast.Footnote](list)
+	// A blank line inside a typed block a footnote definition in one of list's items holds is read
+	// as that definition's end and as a blank line of the item alike, and refused by name.
+	if holdsTypedBlankInDefinition(list, lines) {
+		return typedDefinitionBlankInItem
+	}
 	// In a typed block in a footnote definition, whatever quotes or typed blocks stand between, the
 	// browser editor reads a blank line at or after a list as spacing it by what follows.
 	if typed && footnoted && isAncestor(definition, directive) {
@@ -398,7 +401,7 @@ func typedBlankSpreadsATightItem(list *ast.List, lines sourceLines) bool {
 // one of them opens, a typed block with such a blank line inside it (typedBlankInItem). It looks
 // through no quote, list or footnote definition: that parser counts a blank line inside a quote
 // or a list as that container's, and the blank lines a definition ends with as the definition's
-// (typedBlankInDefinition).
+// (typedDefinitionBlankInItem).
 func typedBlankUnder(container ast.Node, lines sourceLines) bool {
 	return eachTypedBlockUnder(container, false, lines.typedBlankSpreadsItem)
 }
@@ -544,9 +547,10 @@ func quotedListSpread(list *ast.List, in quotedList, lines sourceLines) bool {
 	// parser, which ends at that fence, so blank lines after it are not the list's, and the fence
 	// decides below. Where no fence closes that block, it ends with the item the next one follows,
 	// and the last of those lines is that item's own ending, which it drops, so one more spaces
-	// the list (typedBlankEndNeeds).
+	// the list (typedBlankEndNeeds) - but only where that item stands outside the block, the
+	// block's own items ending where any other list's do.
 	if _, enclosingItem := next.(*ast.ListItem); enclosingItem && (!in.inDirective || !in.directive.Closed || isAncestor(within, next)) {
-		if in.inDirective && !in.directive.Closed {
+		if in.inDirective && !in.directive.Closed && !isAncestor(within, next) {
 			threshold++
 		}
 		return lines.blanksBefore(startOf(next), blank) >= threshold

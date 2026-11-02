@@ -340,10 +340,11 @@ func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, 
 // answer as caller text, which they are for the growth check, so an answer would still send a
 // notice. Block ids are left out too (pmdoc.Node.Equal): a stored version carries only a typed
 // block's id, and each parse mints the others afresh. A list's and a list item's spread is left
-// out as well (stripListSpread): a document stored before the reader learned to read a blank
-// line inside a typed block in a list item as that item's reads back spread where the live tree
-// is tight, and that difference is the reader's, not a person's. A version that does not read
-// back is not judged, and its notice goes.
+// out as well, but only of a list whose item holds a typed block (stripListSpread): that is the
+// shape whose reading changed, a document stored before the reader learned to read a blank line
+// inside a typed block in a list item as that item's reading back spread where the live tree is
+// tight. A person's own spacing edit of any other list still sends its notice. A version that
+// does not read back is not judged, and its notice goes.
 func serverStateOnly(before, after string) bool {
 	beforeTree, err := pmdoc.ParseRendering(before)
 	if err != nil {
@@ -360,16 +361,42 @@ func serverStateOnly(before, after string) bool {
 	return beforeTree.Equal(afterTree)
 }
 
-// stripListSpread takes the spread off every list and list item of tree, so that two readings
-// that differ in it alone compare equal (serverStateOnly).
+// stripListSpread takes the spread off each list whose item holds a typed block, and off that
+// list's items, so that two readings that differ in it alone compare equal (serverStateOnly). A
+// list no item of which holds one keeps its spread, since no reading of this change moved it.
 func stripListSpread(node *pmdoc.Node) {
 	switch node.Type {
-	case "bullet_list", "ordered_list", "list_item":
-		delete(node.Attrs, "spread")
+	case "bullet_list", "ordered_list":
+		if listItemHoldsTypedBlock(node) {
+			delete(node.Attrs, "spread")
+			for _, item := range node.Children {
+				delete(item.Attrs, "spread")
+			}
+		}
 	}
 	for _, child := range node.Children {
 		stripListSpread(child)
 	}
+}
+
+// listItemHoldsTypedBlock reports whether an item of list holds a typed block among its own
+// blocks, or in a footnote definition it holds, whose lines that item's reading counts as its own.
+func listItemHoldsTypedBlock(list *pmdoc.Node) bool {
+	for _, item := range list.Children {
+		for _, block := range item.Children {
+			if pmdoc.IsTypedBlock(block.Type) {
+				return true
+			}
+			if block.Type == "footnote_definition" {
+				for _, held := range block.Children {
+					if pmdoc.IsTypedBlock(held.Type) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // editNoticeVersionMarkdown reads the markdown of artifactID's version number, and reports whether that

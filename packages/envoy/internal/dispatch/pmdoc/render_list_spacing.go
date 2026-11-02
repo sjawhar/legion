@@ -260,15 +260,15 @@ func isList(n *Node) bool {
 
 // opensAfterParagraph reports whether block opens on the line after a paragraph without a blank
 // line: a quote, a code block (written fenced), a heading written on one line, a rule, a typed
-// block, a footnote definition, a table, whose header row interrupts a paragraph as GitHub's
-// tables do, a bullet list, or an ordered list starting at one, whose first item holds something
-// (an empty item interrupts no paragraph, emptyItemGuard).
+// block, a footnote definition, a bullet list, or an ordered list starting at one, whose first
+// item holds something (an empty item interrupts no paragraph, emptyItemGuard). A table is
+// opensAfterBlock's to answer, since the block before it decides.
 func opensAfterParagraph(block *Node) bool {
 	if _, typed := typedBlock(block.Type); typed {
 		return true
 	}
 	switch block.Type {
-	case "blockquote", "code_block", "hr", "footnote_definition", "table":
+	case "blockquote", "code_block", "hr", "footnote_definition":
 		return true
 	case "heading":
 		return !holdsHardBreak(block.Children)
@@ -279,6 +279,25 @@ func opensAfterParagraph(block *Node) bool {
 		return !holdsOnlyAnEmptyParagraph(block.Children[0])
 	}
 	return false
+}
+
+// opensAfterBlock reports whether child, written on the line after previous with no blank line
+// between them, opens as itself: what opensAfterParagraph says of it, except for a table, whose
+// header row interrupts a paragraph of its own container as GitHub's tables do, while after a
+// list, a quote or another container it is read as one more line of the paragraph that container
+// ends in, which the line continues at the container's own indentation.
+func opensAfterBlock(previous, child *Node) bool {
+	if child.Type == "table" {
+		return previous.Type == "paragraph"
+	}
+	return opensAfterParagraph(child)
+}
+
+// mergesIntoQuote reports whether child, written on the line after previous with no blank line
+// between them, is read as part of a quote previous ends in rather than as itself: a quote opens
+// with the very marker that continues the quote before it, so both parsers read the two as one.
+func mergesIntoQuote(previous, child *Node) bool {
+	return previous.Type == "blockquote" && child.Type == "blockquote"
 }
 
 // continuesTable reports whether block's first line, written on the line after a table's last row,

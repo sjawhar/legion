@@ -115,13 +115,11 @@ func browserTextColumn(block ast.Node, lines sourceLines) int {
 
 // sourceLines is where each line of a source starts, which of its lines indented code holds past
 // where goldmark ends the code (held): those are the code's, not blank, wherever a blank line is
-// counted (heldCodeLines); and what each typed block's blank lines were read as
-// (typedBlankSpreadsItem), which every item of a list asks for twice.
+// counted (heldCodeLines).
 type sourceLines struct {
-	source  []byte
-	starts  []int
-	held    map[int]bool
-	spreads map[*typedDirective]bool
+	source []byte
+	starts []int
+	held   map[int]bool
 	// keptLast is whether lastLineColumns kept the last line (lastLineKeptAttr).
 	keptLast bool
 }
@@ -133,7 +131,7 @@ func newSourceLines(source []byte) sourceLines {
 			starts = append(starts, index+1)
 		}
 	}
-	return sourceLines{source: source, starts: starts, spreads: map[*typedDirective]bool{}}
+	return sourceLines{source: source, starts: starts}
 }
 
 func (l sourceLines) lineOf(position int) int {
@@ -249,7 +247,9 @@ func (l sourceLines) lastBefore(line int, past func([]byte) bool) int {
 // typed's content strip from every line they continue: as far past the quotes' content as typed's
 // own opening line starts, its list item's indentation and the block's own among it
 // (typedDirectiveParser.Continue). What is left of such a line for typed's content is its line
-// ending alone, so the browser editor's parser reads it as no line of typed.
+// ending alone, so the browser editor's parser reads it as no line of typed. A line holding a
+// marker and a tab alone is that parser's own case (markerTabEndsLine): it never reads such a line
+// as typed's, whatever the columns the tab spans.
 func (l sourceLines) holdsOnlyBlockIndent(line, depth int, typed *typedDirective) bool {
 	if line < 0 || leadingQuoteMarkers(l.text(line)) != depth {
 		return false
@@ -259,8 +259,41 @@ func (l sourceLines) holdsOnlyBlockIndent(line, depth int, typed *typedDirective
 	if !whitespaceLine(l.text(line)[past-start:]) {
 		return false
 	}
+	if depth > 0 && l.markerTabEndsLine(start, depth) {
+		return false
+	}
 	indent := l.textColumn(startOf(typed)) - l.quoteContentColumn(startOf(typed), depth)
 	return l.textColumn(past)-l.quoteContentColumn(start, depth) <= indent
+}
+
+// markerTabEndsLine reports whether position's line holds count quote markers and a tab alone, the
+// tab right after the innermost marker and the line ending right after the tab. The quote takes one
+// column of such a tab, and the browser editor's parser leaves what is left of it in the line rather
+// than as indentation a block inside the quote strips from the lines it continues: measured against
+// the headless engine, such a line is a line of a typed block's content at every indentation the
+// block can carry, where a line of spaces at or within that indentation is none, and so is a line
+// whose tab another character follows.
+func (l sourceLines) markerTabEndsLine(position, count int) bool {
+	for ; count > 0; count-- {
+		for position < len(l.source) && (l.source[position] == ' ' || l.source[position] == '\t') {
+			position++
+		}
+		if position >= len(l.source) || l.source[position] != '>' {
+			return false
+		}
+		position++
+		if count == 1 {
+			if position >= len(l.source) || l.source[position] != '\t' {
+				return false
+			}
+			position++
+			return position >= len(l.source) || l.source[position] == '\n'
+		}
+		if position < len(l.source) && l.source[position] == ' ' {
+			position++
+		}
+	}
+	return false
 }
 
 // blanksThroughOuterQuotes is how many blank lines come right before position's line in depth
@@ -316,19 +349,7 @@ func (l sourceLines) blank(line int, blank func([]byte) bool) bool {
 //     block, the last of the blank lines ending it is the item's ending rather than a blank line
 //     of the item, except at the end of a quote-less document and before the list's next item,
 //     where that parser ends the item past them (typedBlankEndNeeds).
-//
-// The answer is read once for each typed block (spreads), since every item of a list is asked for
-// it twice, once to set the item's spread and once to decide whether the list is refused.
 func (l sourceLines) typedBlankSpreadsItem(directive *typedDirective) bool {
-	if spread, read := l.spreads[directive]; read {
-		return spread
-	}
-	spread := l.readTypedBlankSpreadsItem(directive)
-	l.spreads[directive] = spread
-	return spread
-}
-
-func (l sourceLines) readTypedBlankSpreadsItem(directive *typedDirective) bool {
 	next := nextBlock(directive)
 	end, byFence := l.typedBlockEnd(directive, next)
 	depth := quoteDepth(directive)
@@ -351,13 +372,36 @@ func (l sourceLines) readTypedBlankSpreadsItem(directive *typedDirective) bool {
 	if ending == 0 || kept[end-1] {
 		return false
 	}
+	// A whitespace-only line wider than the block's own indentation holds content for the block to
+	// that parser, which a paragraph after the block continues lazily, so the item's lines carry no
+	// blank line there. A container opening after such a line, and the end of the source, leave it
+	// the item's (typedBlankEndNeeds). Where the block's content ends in a list, such a line is
+	// the item's all the same when its whitespace ends in a tab: measured against the headless
+	// engine, a line of `\t` or ` \t` there spreads the item, while `   ` and `\t ` do not. In a
+	// quote every such line is the item's, the quote's own content ending at it.
+	if depth == 0 && next != nil && isParagraph(next) && !l.holdsOnlyBlockIndent(end-1, depth, directive) &&
+		!(endsInList(directive) && l.whitespaceEndsInTab(end-1)) {
+		return false
+	}
 	return ending >= typedBlankEndNeeds(byFence, depth, next)
+}
+
+// endsInList reports whether node's content ends in a list.
+func endsInList(node ast.Node) bool {
+	_, list := node.LastChild().(*ast.List)
+	return list
+}
+
+// whitespaceEndsInTab reports whether line's text ends in a tab, its line ending apart.
+func (l sourceLines) whitespaceEndsInTab(line int) bool {
+	text := bytes.TrimRight(l.text(line), "\n")
+	return len(text) > 0 && text[len(text)-1] == '\t'
 }
 
 // typedBlankInside reports whether any blank line stands inside typed block directive, between
 // its opening line and where its lines end (typedBlockEnd), outside the code it holds. It is
 // what a footnote definition's typed block is judged by, where this reader decides no such line
-// (typedBlankInDefinition).
+// (holdsTypedBlankInDefinition, typedDefinitionBlankInItem).
 func (l sourceLines) typedBlankInside(directive *typedDirective) bool {
 	end, _ := l.typedBlockEnd(directive, nextBlock(directive))
 	first := l.lineOf(startOf(directive)) + 1
@@ -367,8 +411,9 @@ func (l sourceLines) typedBlankInside(directive *typedDirective) bool {
 // typedBlankEndNeeds is how many blank lines ending a typed block in a list item the browser
 // editor's parser reads as blank lines of that item (typedBlankSpreadsItem): one above a closing
 // fence, which is no ending of the item; one where the item ends with the source outside a quote,
-// or where the list's next item follows, which that parser reads past the lines; and two
-// otherwise, the last being the item's own ending, which it drops.
+// or where the list's next item follows, which that parser reads past the lines; one before a
+// quote, a list or a footnote definition, which opens on the line right after them and takes none
+// of them as its own; and two otherwise, the last being the item's own ending, which it drops.
 func typedBlankEndNeeds(byFence bool, depth int, next ast.Node) int {
 	if byFence {
 		return 1
@@ -377,6 +422,9 @@ func typedBlankEndNeeds(byFence bool, depth int, next ast.Node) int {
 		return 1
 	}
 	if next == nil && depth == 0 {
+		return 1
+	}
+	if next != nil && startsContainer(next) {
 		return 1
 	}
 	return 2

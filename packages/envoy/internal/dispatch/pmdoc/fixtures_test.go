@@ -147,13 +147,15 @@ func TestFixturesAreWithinSchema(t *testing.T) {
 		"quoted-item-nested-callout-list-ending-in-a-blank-line", "quoted-item-typed-block-code-ending-in-a-blank-line",
 		"quoted-item-typed-blocks-ending-in-blank-lines", "quoted-item-unclosed-callout-paragraph-ending-in-two-blank-lines",
 		"quoted-items-holding-a-closed-callout", "quoted-items-spaced-around-callouts-holding-an-unclosed-fence",
-		"quoted-lists-before-a-container-in-an-outer-quote", "quoted-lists-in-quoted-typed-blocks", "quoted-typed-block-list-ends",
+		"quoted-lists-before-a-container-in-an-outer-quote", "quoted-lists-in-quoted-typed-blocks",
+		"quoted-typed-block-inner-list-ends", "quoted-typed-block-list-ends",
 		"quoted-unclosed-fence-at-the-document-end", "quotes-nested-100-deep", "setext-underlines-after-delimiter-like-lines", "softbreak",
 		"strikethrough-run-lengths",
 		"tab-indented-list-markers", "table-cell-pipes", "table-header-rows-of-other-cell-counts", "table-then-setext-underline", "table",
 		"tables-then-empty-items", "task-markers", "tasks",
 		"twice-quoted-item-callout-fence-ending-in-a-blank-line", "typed-block-definitions-before-a-lone-tag-line",
-		"typed-block-in-a-quote-ending-in-blank-lines", "typed-block-list-ending-in-a-line-of-spaces", "typed-block-opening-a-list-item-then-blank-lines",
+		"typed-block-in-a-quote-ending-in-blank-lines", "typed-block-items-before-a-container",
+		"typed-block-list-ending-in-a-line-of-spaces", "typed-block-opening-a-list-item-then-blank-lines",
 		"typed-blocks-nested-32-deep", "unclosed-fences-before-the-next-block", "unicode", "writer-spells-a-flanked-letter-after-a-backslash",
 	}
 	if len(fixtures) != len(wantNames) {
