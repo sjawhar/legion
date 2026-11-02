@@ -2,34 +2,87 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-627",
-  "previousHandoff": "",
-  "headReviewed": "294358fc5c22568cee9e9071bdfd4db1ae6bb9f4",
-  "codeHead": "d74ea872eac47a3c282e7b9feaed3aede8ffc67d",
+  "previousHandoff": "a1be3cf90ef279a045b3782cbdce0d8e34423ae4",
+  "round": "2, at code head 29b084dac6da (handoff head cea3659e16cf), after the implementer's three commits answering round 1.",
+  "headReviewed": "cea3659e16cf8912715e02dbd87445cc83beb8b2",
+  "codeHead": "29b084dac6da1b5cd9564b4c3d13a9edb97f2785",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 9,
-  "ci": "Read 2026-11-01T23:16Z: required set is ci-ok and pr-title (rulesets; no branch protection). CI head d74ea872 (run 41358832794) still queued, only changes and pr-title completed success; compare d74ea872...294358fc is handoffs-only (2 files). A REQUEST_CHANGES does not wait on CI.",
-  "thermonuclear": "Both run at 294358fc: deep-review CHANGES (6 findings), code-quality CHANGES (10 findings). Each judged below; the ones not carried are listed under notCarried with the reason.",
+  "important": 4,
+  "minor": 6,
+  "ci": "Read 2026-11-02T01:33Z: required set ci-ok and pr-title (rulesets; no branch protection). CI head 29b084da, run 41366903592, created 00:23:39Z, still queued with only changes and pr-title (41367279245) completed success; compare 29b084da...cea3659e is handoffs-only (2 files). A request for changes does not wait on CI.",
+  "thermonuclear": "Both ran on this round's diff (d74ea872..29b084da). Deep review: one medium (reproduced with a test in a scratch copy) and three minors. Code quality: one blocking (sweep.go over 1000 lines) and seven low. Judged below.",
+  "round1Threads": {
+    "accepted": [
+      "PRRT_kwDORFy7ds6yfdkO",
+      "PRRT_kwDORFy7ds6yfdkR",
+      "PRRT_kwDORFy7ds6yfdkV",
+      "PRRT_kwDORFy7ds6yfdkY",
+      "PRRT_kwDORFy7ds6yfdka",
+      "PRRT_kwDORFy7ds6yfdkd",
+      "PRRT_kwDORFy7ds6yfdkh",
+      "PRRT_kwDORFy7ds6yfdkk"
+    ],
+    "standing": [
+      "PRRT_kwDORFy7ds6yfdkQ (adoption does not cover a live older-build claim or a record created during a long rollback)",
+      "PRRT_kwDORFy7ds6yfdkT (stray margin has no test)",
+      "PRRT_kwDORFy7ds6yfdkg (sweep.go is still 1012 lines)"
+    ]
+  },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:1119", "description": "putRecord answers a non-conflict write failure exactly as a lost compare-and-set, so writeRecord returns (0, false, nil): the claim path reports ClaimedElsewhere with the sweep still Complete, the cursor moves past the record's entry, the claim's new entry is later deleted as a stray, and an unlisted open delivery is never asked for again. backfillIndex likewise counts such a record indexed and sets the marker. Before the index, the whole-bucket read re-decided it next sweep, so this is a regression of the one loss the design guards against."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:682", "description": "A record an older build rewrites loses Pending (base's record struct has no such field). openDue then deletes its entry as a stray, the marker keeps backfillIndex from running for up to 72h, and decide's upgrade write reaches only listed deliveries, so a refusal-only delivery outside the listing is lost during a rolling deploy and after a rollback then roll-forward within 72h. The comment at 712-715 says neither needs a rule."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:489", "description": "errPendingNotWritten after a request was made drops a Redelivered/RequestRefused/Expired decision from the report; the comment's reason is false on that path."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:683", "description": "The stray repair can delete an entry another sweeper (an operator run, which takes no lease) has just Put and is about to name in its record write."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/architecture/importer.go:452", "description": "failed() records on context.WithoutCancel(parent); parent is the flight's base context, so the wrapper drops the owner cancellation Close relies on and Close can wait without bound on a database that stopped answering. parent itself has no sync deadline."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/architecture/importer.go:246", "description": "SyncProject's ctx.Err() break duplicates Sync's own first check and makes the doc's 'attempting each … answers each source's outcome' false."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/index.go:69", "description": "Dead code: attention's NextAttemptAt.IsZero branch (pendingFor's clamp already gives now), parsePendingKey's unused at, and openDue's seen map, which its own comment says never fires."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:1152", "description": "sweep.go grows to 1197 lines and importer.go to 1056 while index.go exists for the index: move the index code (openDue, backfillIndex, writeRecord, dropPending, indexMarked, errPendingNotWritten) into index.go and the flight code into its own file."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md:272", "description": "Prose: 'waiting' in the running sweep is not only a listed delivery; an entry keyed to the sweep's own minute that is due later in that minute is decided Waiting too (same wording in sweep.go:34-35)."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/index.go:10", "description": "Prose: comments that narrate the change rather than the code (index.go:10-11, 22-23; sweep.go:589-590; sweep_test.go:1329; importer_test.go:718-719)."},
-    {"severity": "minor", "file": ".github/workflows/docs-pages.yaml:33", "description": "Prose: three block labels carry wrong pattern counts: *bun_install 16 over a block of 15, *legion_command 57 over 59, *dispatch_server 42 over 50. Convention: the label counts the block below it."}
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:654",
+      "description": "An adopted record (no Pending) held by an older build's claim that has not expired returns ClaimedElsewhere before any index write, so the adopted entry is never moved forward; the cursor passes it, the marker blocks the back-fill, and a refusal-only unlisted delivery is never asked for again. The deep review reproduced it with a test. Fix: on that path, when Pending is empty and not a dry run, Put pendingFor's entry (keyed at the claim's end) without writing the record, and return errPendingNotWritten if the Put fails."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/redeliver/index.go:261",
+      "description": "A record an older build creates during a rollback that outlasts Lookback, whose requests GitHub only refuses, has no entry, is not listed, and is not back-filled while the marker stands (up to 72 h, which can outlast the delivery). The comment says a rollback and roll-forward inside three days is covered. Fix: let the new build detect a cursor an older build wrote (a field in cursorRecord the older build drops) and run the back-fill then; correct the comment."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/redeliver/index.go:291",
+      "description": "backfillIndex's !written branch (a back-fill write that lost its compare-and-set must not mark the bucket) has no test that fails when it is removed (tester's mutation run)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/redeliver/index.go:218",
+      "description": "openDue's stray margin has no test that fails when it is removed (tester's mutation run). The margin is also about one minute, not cursorOverlap, because keys are truncated to the minute."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/redeliver/sweep.go:990",
+      "description": "sweep.go is 1012 lines, still over 1000. Move the bucket layer (record helpers, readState/writeState/openState, cursor and record reads and writes, isConflict, scanOpenRecords with openRecord/sortOpenRecords) into a file of its own."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/redeliver/index.go:324",
+      "description": "Only errNotWritten is ever matched; the two sub-sentinels are names nothing checks. Keep one sentinel and put the kind in the message; collapse backfillIndex's two branches into one if !written."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/redeliver/index.go:172",
+      "description": "Comments now false: index.go:172-173 (cursorOverlap's clock-skew note lives in sweep.go; 'this minute' is wrong), index.go:226-227 (no decision takes an adopted entry over; it stays until TTL when behind the floor), index.go:344-346 (the 'behind the floor' reason holds only for the first write), sweep.go:487-490 (writes did land on the outcome paths; retention expiry is no GitHub answer)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/redeliver/sweep_test.go:1467",
+      "description": "TestARefusedRecordWriteLeavesTheDeliveryForTheNextSweep's doc describes an indexed record behind the floor; the test fails a listed delivery whose Create is refused, so only the Complete and cursor checks catch the regression. Fix the comment or build the index-only case."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/redeliver/sweep_test.go:1742",
+      "description": "The assertion that the adopted entry is still in the bucket pins a leftover stray; the Redelivered and record-names-a-held-entry checks already prove adoption."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/dispatch/README.md:272",
+      "description": "waiting in the running sweep also counts an adopted entry whose record an older build rewrote with a future NextAttemptAt; README.md:272-273 and sweep.go:35-37 omit it."
+    }
   ],
   "notCarried": [
-    "Deep 5 (the starter's Idempotency-Key commit hook rides into the flight): not a defect. markRequestKeyCommitted acts only while the starter's handler runs (request_keys.go:1077), a takeover needs the holder's lease to lapse, which it does not while the handler runs, and a joined caller's unmarked key re-runs an idempotent sync.",
-    "Quality 2 (syncCount copies api/server.go backgroundWork): the two differ (refuse after close), the copy is ~40 lines and says so, and sharing it means a new package plus an edit of api/server.go outside this change; not required.",
-    "Quality 3 (writeRecord mutates Pending through its pointer): the simplify pass chose this shape and each caller that patches Pending says why; not a defect.",
-    "Quality 6 (two drain styles): style, not a defect.",
-    "Quality 9 (joinInBackground sleeps 500 ms): a joining caller makes no observable call, the helper says so, and the tester's mutation of the freshness loop turned the test red; not a defect."
+    "Quality 8 (docs-pages.yaml's *dispatch_server label says 50, the ci.yaml anchor holds 53): the label counts the block under it, which is the convention named in round 1; not a defect."
   ],
-  "prose": "The three prose findings are handed to the implementer in this round rather than committed by the reviewer: the code goes back anyway, and a reviewer push now would cancel the queued CI run at d74ea872, which the architect asked not to do."
+  "prose": "Prose findings go to the implementer in this round: the code goes back anyway, and a push of mine would cancel CI run 41366903592, still queued at 29b084da."
 }
