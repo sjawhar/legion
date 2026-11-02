@@ -389,16 +389,18 @@ describe("DispatchClient's writes", () => {
       { echo: false }
     );
     const { retry, advance } = pacing();
-    const dispatch = client(probed.fetchImpl, retry);
+    // A client lives at most its 60 s deadline, so each call five minutes apart has its own; what
+    // the process learned of the layer outlives them.
+    const dispatch = () => client(probed.fetchImpl, retry);
 
     // The probe answers at 0 s, before the 1 s pause.
-    await expect(dispatch.comment("DSP-1", comment)).resolves.toEqual(posted);
+    await expect(dispatch().comment("DSP-1", comment)).resolves.toEqual(posted);
     expect(probed.probes).toHaveLength(1);
     advance(KEYED_LAYER_MEMORY_MS - 2_000);
-    await expect(dispatch.comment("DSP-1", comment)).resolves.toEqual(posted);
+    await expect(dispatch().comment("DSP-1", comment)).resolves.toEqual(posted);
     expect(probed.probes).toHaveLength(1);
     advance(1);
-    await expect(dispatch.comment("DSP-1", comment)).resolves.toEqual(posted);
+    await expect(dispatch().comment("DSP-1", comment)).resolves.toEqual(posted);
     expect(probed.probes).toHaveLength(2);
     expect(probed.sent).toHaveLength(6);
 
@@ -410,13 +412,13 @@ describe("DispatchClient's writes", () => {
       { health: { status: "ok" } }
     );
     const clock = pacing();
-    const rolledBack = client(echoed.fetchImpl, clock.retry);
-    await rolledBack.comment("DSP-1", comment);
+    const rolledBack = () => client(echoed.fetchImpl, clock.retry);
+    await rolledBack().comment("DSP-1", comment);
     clock.advance(KEYED_LAYER_MEMORY_MS - 1);
-    await expect(rolledBack.comment("DSP-1", comment)).resolves.toEqual(posted);
+    await expect(rolledBack().comment("DSP-1", comment)).resolves.toEqual(posted);
     expect(echoed.probes).toEqual([]);
     clock.advance(KEYED_LAYER_MEMORY_MS);
-    await expect(failure(rolledBack.comment("DSP-1", comment))).resolves.toBeInstanceOf(
+    await expect(failure(rolledBack().comment("DSP-1", comment))).resolves.toBeInstanceOf(
       DispatchGatewayError
     );
     expect(echoed.probes).toHaveLength(1);
@@ -727,7 +729,7 @@ describe("DispatchClient's writes", () => {
     const error = await failure(
       client(
         stalled.fetchImpl,
-        { ...DISPATCH_WRITE_RETRY, pausesMs: [60_000], withinMs: 120_000 },
+        { ...DISPATCH_WRITE_RETRY, pausesMs: [30_000], withinMs: 120_000 },
         stop
       ).comment("DSP-1", comment)
     );
@@ -851,6 +853,91 @@ describe("DispatchClient's writes", () => {
         "was cut off (its only attempt), and an attempt of the write may have reached Dispatch, " +
         "so it may or may not have taken effect: check whether it did before retrying it."
     );
+  });
+
+  const keyedTail =
+    ". Dispatch finishes an attempt it received whatever this command does, so read the write " +
+    "back before you send it again: a new command sends it under a new key.";
+
+  // The client's 60 s deadline counts from when it was made, so a write that begins late in the
+  // client's life asks no later than 55 s after that, not 55 s after its own first attempt.
+  test("no ask starts more than 55 s after the client was made", async () => {
+    const { retry, advance, stall } = stalling();
+    const { fetchImpl, sent } = scripted([stall, ...Array.from({ length: 20 }, () => inFlight())]);
+    const dispatch = client(fetchImpl, retry);
+    // Earlier calls of the same client took 30 s of its deadline.
+    advance(30_000);
+
+    const error = await failure(dispatch.comment("DSP-1", comment));
+
+    // Cut at 50 s, then asked at 51 and 53 s; the next ask would start at 56 s.
+    expect(sent).toHaveLength(3);
+    expect(error.message).toBe(
+      "KEY_IN_FLIGHT: an earlier request with this key is still running (the last of 3 " +
+        "attempts), and Dispatch was still running an earlier attempt of the write, so it may or " +
+        `may not have taken effect${keyedTail}`
+    );
+  });
+
+  // The /healthz probe runs after the bound was read and takes time of its own, up to its 5 s.
+  test("the bound is read again after the /healthz probe answers", async () => {
+    const { retry, advance, stall } = stalling();
+    const dispatch = scripted([stall, replayed()]);
+    const slowProbe = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/healthz")) advance(4_000);
+      return dispatch.fetchImpl(input, init);
+    }) as typeof fetch;
+    const late = client(slowProbe, retry);
+    advance(31_000);
+
+    const error = await failure(late.comment("DSP-1", comment));
+
+    // Cut at 51 s, the probe answers at 55 s, and an ask a second later would pass the bound.
+    expect(dispatch.sent).toHaveLength(1);
+    expect(dispatch.probes).toHaveLength(1);
+    expect(error.message).toBe(
+      "POST http://dispatch.test/api/v1/issues/DSP-1/comments made no progress for 0.02 s, so it " +
+        "was cut off (its only attempt), and an attempt of the write may have reached Dispatch, " +
+        `so it may or may not have taken effect${keyedTail}`
+    );
+  });
+
+  // Whether the write may be asked again is decided afresh at each answer; that the call saw the
+  // keyed layer judge it, which the message says, is never forgotten.
+  test("a refusal the keyed layer did not judge stops the asking but keeps what the call saw", async () => {
+    const { fetchImpl, sent, probes } = scripted(
+      [inFlight(), refusal(429, "RATE_LIMITED", "slow down"), replayed()],
+      { echo: (request) => request === 1, health: { status: "ok" } }
+    );
+
+    const error = await failure(client(fetchImpl, pacing().retry).comment("DSP-1", comment));
+
+    expect(sent).toHaveLength(2);
+    expect(probes).toHaveLength(1);
+    expect(error).toBeInstanceOf(DispatchWriteUnsettledError);
+    expect(error.message).toBe(
+      "RATE_LIMITED: slow down (the last of 2 attempts), and an earlier attempt of the write may " +
+        `have reached Dispatch, so it may or may not have taken effect${keyedTail}`
+    );
+  });
+
+  // Each repeat of an upload sends its whole body again, so an upload keeps the schedule alone.
+  test("an upload Dispatch may still be running keeps the five-attempt schedule", async () => {
+    const { retry, pauses, stall } = stalling();
+    const { fetchImpl, sent } = scripted([stall, ...Array.from({ length: 20 }, () => inFlight())]);
+
+    const error = await failure(
+      client(fetchImpl, retry).artifact("DSP-1", {
+        name: "build.tar",
+        file: new Blob([new Uint8Array(1 << 20)]),
+        actor,
+      })
+    );
+
+    // Cut at 20 s, then asked at 21, 23 and 27 s; 8 s more would pass 30 s.
+    expect(sent).toHaveLength(4);
+    expect(pauses).toEqual([1_000, 2_000, 4_000]);
+    expect(error).toBeInstanceOf(DispatchWriteUnsettledError);
   });
 
   test("a retried upload sends the bytes and boundary its first attempt sent", async () => {
