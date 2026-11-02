@@ -1,0 +1,66 @@
+{
+ "schemaVersion": 1,
+ "phase": "implement",
+ "issue": "INFRA-592",
+ "previousHandoff": "3b887c23192d39f10c0937d1fda4959784c96606",
+ "proof": [
+  {
+   "criterion": "Tester round 15 item 1: a reader steadily above the floor is answered in full however large a one-Write answer is; a reader below the floor or one that stops is still cut",
+   "surface": "go test against a superuser Postgres 16 on this pod (DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres, byte-order collation), TMPDIR=/legion/scratch/tmp GOMAXPROCS=3 GOMEMLIMIT=8GiB, pod a3b7ca88-ec0d-47f6-b4be-127d58e04bfe",
+   "command": "go test -p 1 -count=3 -run '^TestAReaderSteadilyAboveTheFloorIsAnsweredInFullOverARealConnection$|^TestAReaderThatStopsReadingIsCutWithinTheSendBuffersDrain$' ./internal/dispatch/api/",
+   "observed": "The tester's red test (e53714b9, unmodified: its diff against e53714b9 has no deleted line) passes 3 of 3 (21-24 s each); the stopped-reader test passes. Mechanism (a5ac5cc2): each answer slice's write deadline is now + idle + min(handed bytes, tcp_wmem max)/floor (movingDeadline.drain, maxSendBuffer).",
+   "headSha": "7dc94d85e0f1578f227058b83fc9cca6bac95985",
+   "negativeControl": "Without the change (buffered:true removed): 'a reader at 200 KiB/s was cut 15.799s in, after 3190495 of 4194304 bytes: unexpected EOF'."
+  },
+  {
+   "criterion": "Tester round 15 item 1 on the real binary: readers at 40, 60, 100 and 150 KB/s finish a file written in one Write; 15 KB/s and a stopped reader are cut",
+   "surface": "Dispatch binary of the merged head 1fec558f in INFRA-589's load stack on pod a3b7ca88-ec0d-47f6-b4be-127d58e04bfe, GET /api/v1/issues/{key}/artifacts/sr8-bin/versions/1 (an 8 MiB file version served in one Write) by a paced reader with a 16 KiB receive buffer",
+   "command": "python3 /legion/scratch/tmp/infra-592/slowread.py <dispatch port> <issue> <rate> for 40000 60000 100000 150000 15000, and STOP_AFTER=10 HOLD=240 for a reader that stops and holds the connection; server elapsed from the access log",
+   "observed": "40, 60, 100, 150 KB/s complete in 209.7, 139.8, 83.9, 55.9 s; 15 KB/s cut by the server at 70.4 s after 1,769,472 bytes (the floor after the minute's grace); the stopped reader cut at 149.3 s after 4,205,857 bytes handed (20 s + 4 MiB at 32 KiB/s). Same at 92d9138d before the merge.",
+   "headSha": "1fec558fff30d67a24d028e7742b6a11852de144",
+   "negativeControl": "The 15 KB/s and the stopped reader are the negative controls; before the change the tester's 40-150 KB/s readers were cut at 20.0-20.2 s."
+  },
+  {
+   "criterion": "Tester round 15 item 2: 1x refusals; decision (architect's (a)): writes wait 2 s, reads 1 s, refusals inside a stall main also has are the designed answer",
+   "surface": "INFRA-589's load reproduction on pod a3b7ca88-ec0d-47f6-b4be-127d58e04bfe, fresh seed by base main 99565624, adjacent base/head pairs with nothing else of mine running",
+   "command": "LOADTEST_SRC=<base|head> bash loadtest/run-step.sh r16-{base,head}-1x-{a..e} --events 4 --sessions 400 --requests 60 (head 92d9138d), and r17-{base,head}-1x-a at the merged head 1fec558f",
+   "observed": "Head refused 0/26/0/9/0 writes and 0/385/10/114/0 reads in the five r16 pairs, 1 write and 97 reads in r17; base none (no admission). The refusing runs are 10-16 s stalls where Postgres runs request statements 1-5 s at under one CPU (the references read heaviest), few lock waits; 5 s buckets past a 3 s p99: base 3,3,1,1,3,1, head 5,2,0,3,0,4; base's worst bucket p99 8.8 s. Admission unit test TestAWriteWaitsForRoomPastAReadsWait passes (92d9138d). Runs: dispatch://INFRA-592/artifact/infra-592-implementer-r16-r16-<step>-tar-gz, dispatch://INFRA-592/artifact/infra-592-implementer-r17-r17-<step>-tar-gz.",
+   "headSha": "1fec558fff30d67a24d028e7742b6a11852de144",
+   "negativeControl": "With one wait for both classes the unit test fails ('refused after 101.9ms, want after its 1s wait'); base runs are the load control."
+  },
+  {
+   "criterion": "Tester round 15 item 3 and 10x at the merged head: excess refused 429, no collapse; read refusal p99 measured",
+   "surface": "INFRA-589's load reproduction on pod a3b7ca88-ec0d-47f6-b4be-127d58e04bfe, base main abc15e01 / head 1fec558f adjacent pair",
+   "command": "LOADTEST_SRC=<base|head> bash loadtest/run-step.sh r17-{base,head}-10x-a --events 40 --sessions 1000 --requests 600",
+   "observed": "Head: every refusal 429 OVERLOADED, 0 connection failures, 5.94 events/s committed, 11,975 reads (66.5/s), write refusal p50 2,008 / p99 2,176 / max 4,117 ms, read refusal p50 25 / p90 68 / p99 223 ms. Read-refusal p99 across rounds 215-1,017 ms, now stated in the PR body. Runs: dispatch://INFRA-592/artifact/infra-592-implementer-r17-r17-head-10x-a-tar-gz.",
+   "headSha": "1fec558fff30d67a24d028e7742b6a11852de144",
+   "negativeControl": "Base in the same pair: 1.49 events/s committed, 6,937 write timeouts, 3 reads served: dispatch://INFRA-592/artifact/infra-592-implementer-r17-r17-base-10x-a-tar-gz."
+  },
+  {
+   "criterion": "The suites pass after the forward merges",
+   "surface": "go test against a superuser Postgres 16 on this pod (DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25433/postgres, byte-order collation), TMPDIR=/legion/scratch/tmp GOMAXPROCS=3 GOMEMLIMIT=8GiB, pod a3b7ca88-ec0d-47f6-b4be-127d58e04bfe",
+   "command": "At 1fec558f/0dab6f86: go test -p 1 -count=1 ./internal/dispatch/api/ ./internal/dispatch/docs/ ./internal/dispatch/delivery/... ./internal/dispatch/admission/; at the merge ae28f6b4 (worker): ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/outbox/... ./internal/dispatch/duty/ ./internal/dispatch/routes/, infra/gcp ConnectionsPer, check-ci-filters, semantic-line-breaks; at 92d9138d: cmd/dispatch, store, delivery",
+   "observed": "Every package ok except api's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses to run on a byte-order database; ConnectionsPerProcess = 92 = dispatchConnectionsPerPod.",
+   "headSha": "7dc94d85e0f1578f227058b83fc9cca6bac95985",
+   "negativeControl": "The api failure is the test's own refusal ('this test's database already orders \"a\" after \"B\"'), the same on main; the pod's LEGION_TEST_PG_DSN role lacks superuser, so store tests run against a Postgres of my own."
+  }
+ ],
+ "filesChanged": [
+  "packages/envoy/internal/dispatch/api/body_drain.go, server.go, request_bounds_test.go (answer slice deadline allows for the kernel's send buffer; new stopped-reader test)",
+  "packages/envoy/internal/dispatch/admission/admission.go and tests in admission, api and docs (per-class wait: reads 1 s, writes 2 s)",
+  "packages/envoy/AGENTS.md, cmd/dispatch/README.md, .dispatch/architecture/dispatch-store.md, .changes/unreleased/pr2402-{admission,request-body-and-answer-bounds,connection-budget}.yaml, store/acquire.go comment",
+  "Forward merges 754e1888 (#2519, #2640), ae28f6b4 (#2395, #2354, #2650), 1fec558f (#2652, #2644), 7dc94d85 (the issue branch's 3b887c23)"
+ ],
+ "trickyParts": [
+  "The handler cannot see the connection (the red test serves through plain httptest), so the answer deadline allows for what the kernel may hold, min(handed, tcp_wmem max), rather than measuring it; the cost is that a stopped reader is cut within about 148 s instead of 20 s.",
+  "#2395's outbox needs two connections and its own listener: ConnectionsPerProcess 92, and the acquire-bound comment no longer calls the outbox its pool's only caller.",
+  "#2652 reads an upload's target by name or slug; uploadDocuments takes the writer gate of the same document."
+ ],
+ "deviations": [
+  "1x does not refuse nothing: refusals inside stalls that main also shows are the designed answer, by INFRA-514's architect's decision (a) at 02:52Z; the five-pair numbers are in the PR body's 1x line.",
+  "The workspace was recreated mid-round (new pod a3b7ca88); measurements were repeated there, so this round's numbers come from that pod.",
+  "Handoffs moved to Dispatch records on main (#2354) and the issue branch (3b887c23); the running daemon still records handoffCommit (contract 44), so this handoff is the committed file my plugin reports.",
+  "Leftover check: every load step, sampler and suite I started has exited; the superuser test Postgres on 127.0.0.1:25433 stays up for the next phases."
+ ],
+ "openQuestions": []
+}
