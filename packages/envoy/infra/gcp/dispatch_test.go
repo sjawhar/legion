@@ -1432,6 +1432,40 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 	}
 }
 
+// On a preview that creates the front door's TLS Role, its binding's roleRef name is unknown until
+// the Role has an ID, so pulumi-kubernetes sends the API server no dry run of the binding, which an
+// account without the bind verb (the deployment's CI account) would see refused as "not found"
+// while the Role does not exist. On an apply the binding names the Role.
+func TestDispatchFrontDoorBindingWaitsForItsRoleOnPreview(t *testing.T) {
+	const bindingType = "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
+	for _, preview := range []bool{false, true} {
+		m := newMocks()
+		m.Preview = preview
+		err := m.Run(func(ctx *pulumi.Context) error {
+			var providers []pulumi.ProviderResource
+			for _, newProvider := range []func(*pulumi.Context) (pulumi.ProviderResource, error){newGCPProvider, newRandomProvider, newTailscaleProvider} {
+				provider, err := newProvider(ctx)
+				if err != nil {
+					return err
+				}
+				providers = append(providers, provider)
+			}
+			_, err := gcp.NewDispatch(ctx, "example-dispatch", dispatchArgs(), pulumi.Providers(providers...))
+			return err
+		})
+		require.NoError(t, err, "preview=%v", preview)
+		ref := m.Named(t, bindingType, "example-dispatch-tailnet-tls").Inputs["roleRef"].ObjectValue()
+		require.Equal(t, "Role", ref["kind"].StringValue(), "preview=%v", preview)
+		name := ref["name"]
+		if preview {
+			// The mock monitor unmarshals inputs without keeping unknowns, so an unknown arrives as null.
+			require.True(t, name.IsNull() || name.IsComputed(), "roleRef name on a preview = %v, want unknown until the Role exists", name)
+		} else {
+			require.Equal(t, "example-dispatch-tailnet-tls", name.StringValue())
+		}
+	}
+}
+
 // The TLS Secret holds what cert-publish writes and nothing the program declares: it is registered
 // with no data and with its data ignored, so no preview plans to undo a published certificate, and
 // no pod template carries its checksum, so a renewed certificate rolls no pod.
