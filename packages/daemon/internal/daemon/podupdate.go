@@ -81,12 +81,13 @@ func (s *supervision) reconcilePodUpdates(ctx context.Context, claims []supervis
 // pod went is a different pod in its place.
 //
 // A group whose claims record a pod the runtime no longer has ends the round open over it at
-// that sweep, and decides nothing else (groupDrift, podGone, endRoundOverAGonePod). It is the
-// one place a round ends on something other than its own replacement, and it ends there rather
-// than at the tick that reads the claims recording the pod that replaced this one: inside that
-// window every role is relaunched into the new pod, and each of those processes' turns and
-// answers is counted by its machine against the old pod's round. The issue would then be told
-// work was lost where every worker had answered, or told nothing where work really was lost.
+// that sweep, and decides nothing else (groupDrift, podGone, endRoundOverAGonePod). It is one of
+// the two readings that say a pod went, the other being a different pod in its place, and the
+// round ends on whichever the sweep reaches first. Neither reading has to come before the
+// relaunch of the pod's roles, because no process in the pod that replaced this one can change
+// this round: a claim relaunched into another pod leaves the round where it stood
+// (supervise's Claim.leftPodRound), answered or not, and the report is read from those frozen
+// parts whenever the sweep gets to them.
 func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string, group []supervise.Claim, now time.Time) {
 	slices.SortFunc(group, func(a, b supervise.Claim) int { return strings.Compare(string(a.Token), string(b.Token)) })
 	pod, split := groupPod(group)

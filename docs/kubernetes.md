@@ -3906,10 +3906,13 @@ What such a round waits on that only a person can clear is a claim no task reach
 A pod that goes before its round is over, replaced where it stood for a failure of its own, has the daemon write on the issue which roles had not answered and that the work they did not push went with the disk.
 Two readings say the pod went:
 the runtime answering that the pod the claims record is not there, and the claims recording another pod in its place.
-The first sweep that reads the pod gone ends the round, and decides that message from the answers recorded at that moment, read from the claims' own machines (`endRoundOverAGonePod`):
+Whichever of them a sweep reaches first ends the round, and decides that message from the answers recorded at that moment, read from the claims' own machines (`endRoundOverAGonePod`):
 a round every blocking claim had answered lost nothing, so nothing is written on the issue at all.
-It ends there rather than at the sweep that reads the claims recording the pod that replaced this one, because inside that window each role is relaunched into the new pod one at a time, and every turn and every answer of those processes is counted by its machine against the round of a pod they never ran in.
-While no claim of the issue records a pod at all — every role suspended, or the one live role relaunching — the round waits, because no locator is evidence either way.
+Which reading comes first does not change the message, because a claim whose process is relaunched into another pod leaves the round where it stood, answered or not, and takes no further part in it:
+no process of the pod that replaced this one may answer that round, have an answer withdrawn by a turn of its own, or be asked again, and the round's own task waiting for such a claim is dropped rather than sent into the new pod.
+So the report is read from parts the dead pod left, whenever the sweep gets to them.
+While no claim of the issue records a pod at all — every role suspended, or the one live role relaunching — the round waits, because no locator is evidence either way;
+and a round whose workers have all answered but whose pod no live claim records asks the runtime about that pod, ending only if it is gone and waiting otherwise.
 
 What a pod's disk carries is therefore the issue's work in progress and nothing more:
 the clone and the jj workspace, the issue's scratch and caches, uv's Pythons and packages, the workspace's CodeGraph index and each role's state home with Oh My Pi's logs under it.

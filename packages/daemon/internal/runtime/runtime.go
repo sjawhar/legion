@@ -174,10 +174,11 @@ var ErrSessionFileMissing = errors.New("the recorded session file is missing")
 // work it lost, and replaces a pod that is already gone.
 //
 // The round open over such a place ends at the sweep that reads this, with what was lost read
-// from the answers recorded by then (internal/daemon's endRoundOverAGonePod). Waiting instead
-// for the claims to record the pod that replaced this one leaves that round open across the
-// relaunch of every role into the new pod, and each new process's turns and answers are counted
-// against the round of a pod it never ran in.
+// from the answers recorded by then (internal/daemon's endRoundOverAGonePod). That sweep need
+// not come before the roles are relaunched into the pod that replaced this one: a claim
+// relaunched elsewhere leaves the round where it stood, so no process of the new pod can answer
+// for, or withdraw an answer about, work that died with the old disk (supervise's
+// Claim.leftPodRound).
 var ErrPodGone = errors.New("the pod the locator records is not there")
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch
