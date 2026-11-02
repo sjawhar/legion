@@ -34,7 +34,7 @@ function statusText(line: CredentialSessionLine): string {
  * checked. A request's id is an unsigned claim (`session.ts`), and an unlisted id's name is its
  * short form `session:<8>…`, which a forged id (or any session started in the same minute)
  * shares; so the person approving reads the whole id, and the state in words rather than only
- * the mark's ring. The full id breaks anywhere, so it never widens the record page's grid.
+ * the mark's ring. The full id breaks anywhere, so it never widens the machine page's grid.
  */
 function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
   return (
@@ -47,7 +47,7 @@ function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): R
 }
 
 /**
- * The credential request's session: the Inbox row and the record page both render this one
+ * The credential request's session: the Inbox row and the machine page's facts both render this
  * component (LEGION-587), so a running, not-running, couldn't-check or unnamed session always
  * reads identically in both places. Each id is an `AgentName` and its full id, and a line says
  * in words when its session isn't running or could not be checked. Takes the agents list (and
