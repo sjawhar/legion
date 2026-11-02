@@ -140,6 +140,7 @@ export interface ToolArgumentsByOperation {
   readonly send: MessageMetadataArguments & {
     readonly session_id: string;
     readonly message: string;
+    readonly idempotency_key?: string;
   };
   readonly publish: MessageMetadataArguments & { readonly topic: string; readonly message: string };
   readonly setRole: { readonly role: string };
@@ -197,12 +198,18 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. The confirmation names the recipient's state. A message to an unresponsive session is stored and reaches it when it answers again, so an unresponsive recipient is not a failed send and no reason to send to someone else instead. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. The confirmation names the recipient's state. A message to an unresponsive session is stored and reaches it when it answers again, so an unresponsive recipient is not a failed send and no reason to send to someone else instead. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
     arguments: (schema) => ({
       session_id: schema
         .string()
         .describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
       ...messageArguments(schema),
+      idempotency_key: schema
+        .string()
+        .describe(
+          "Only to send again a message whose envoy_send was not confirmed delivered: the idempotency_key that error named. Omit it for a new message."
+        )
+        .optional(),
     }),
     operation: EnvoyToolOperation.send,
   },
@@ -272,7 +279,11 @@ export function sendConfirmationText(result: {
   readonly recipientState: SessionState;
   readonly confirmed: boolean;
   readonly lastSeen?: number;
+  readonly duplicate: boolean;
 }): string {
+  if (result.duplicate) {
+    return `sent to ${result.recipient} once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy`;
+  }
   const since =
     result.lastSeen === undefined ? "" : ` since ${new Date(result.lastSeen).toISOString()}`;
   const state =
@@ -302,6 +313,13 @@ export function sessionsOnMachine(
 const envoyToolSchemas = new Map<EnvoyToolOperation, z.ZodType>();
 
 /**
+ * The idempotency key envoy_send takes: the transport's `crypto.randomUUID()`. The listener stores
+ * a send once per target and key only for a key of this shape (`MINTED_DEDUPE_KEY_PATTERN`), so a
+ * resend under any other key would be a second delivery.
+ */
+const SEND_IDEMPOTENCY_KEY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
  * Validates an Envoy tool call on real zod in one pass and returns its typed arguments,
  * or throws a `ToolInputError` naming every problem. Hosts register the tools with
  * lenient argument validation, so this is the single place a bad call is refused.
@@ -321,5 +339,17 @@ export function parseEnvoyToolArguments<Operation extends EnvoyToolOperation>(
   if (!parsed.success) {
     throw new ToolInputError(spec.name, formatZodIssues(parsed.error.issues, schema, spec.name));
   }
-  return parsed.data as ToolArgumentsByOperation[Operation];
+  const { data } = parsed;
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    "idempotency_key" in data &&
+    typeof data.idempotency_key === "string" &&
+    !SEND_IDEMPOTENCY_KEY.test(data.idempotency_key)
+  ) {
+    throw new ToolInputError(spec.name, [
+      `idempotency_key must be the key an unconfirmed send named, a lower-case UUID; got ${JSON.stringify(data.idempotency_key)}`,
+    ]);
+  }
+  return data as ToolArgumentsByOperation[Operation];
 }

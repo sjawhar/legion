@@ -8013,32 +8013,19 @@ describe("executeDispatchTool", () => {
       fetchImpl,
     });
 
-  test("a bare project reference that is one document's slug and another's filename is refused", async () => {
+  // Dispatch's own document routes take a reference's slug match first, and a filename only when
+  // no slug matches (resolveDocumentReference), so a bare reference that is one document's slug and
+  // another's filename is the slug's document here too: the pairs an older Dispatch stored, a
+  // `plan-v2-2` named `plan-v2` beside `plan v2`, stay readable and editable by slug.
+  test("a bare project reference that is one document's slug and another's filename is the slug's document", async () => {
     const documents = [
       projectDocument("artifact-v2", "plan-v2", "plan v2"),
       projectDocument("artifact-v2-2", "plan-v2-2", "plan-v2"),
     ];
     const requests: string[] = [];
     const fetchImpl = projectDispatch(documents, requests);
-    const refusal =
-      '"plan-v2" names 2 documents on this project; use the id: artifact-v2 (plan-v2, plan v2), artifact-v2-2 (plan-v2-2, plan-v2)';
-    await expect(readDocument({ project: "GREF", artifact: "plan-v2" }, fetchImpl)).rejects.toThrow(
-      refusal
-    );
-    await expect(
-      executeDispatchTool({
-        tool: "dispatch_comment",
-        args: { project: "GREF", artifact: "plan-v2", body: "Looks good." },
-        cwd: "/workspace",
-        host: "omp",
-        config,
-        env: {},
-        exec: repoExec("owner/repo"),
-        fetchImpl,
-      })
-    ).rejects.toThrow(refusal);
-    expect(requests.filter((request) => !request.startsWith("GET "))).toEqual([]);
     for (const [reference, id] of [
+      ["plan-v2", "artifact-v2"],
       ["plan v2", "artifact-v2"],
       ["plan-v2-2", "artifact-v2-2"],
       ["artifact-v2", "artifact-v2"],
@@ -8046,6 +8033,7 @@ describe("executeDispatchTool", () => {
       const result = await readDocument({ project: "GREF", artifact: reference }, fetchImpl);
       expect(result.text).toBe(`# ${id}`);
     }
+    expect(requests.filter((request) => !request.startsWith("GET "))).toEqual([]);
   });
 
   test("a bare project reference that is one document's id and another's slug resolves as the id", async () => {
@@ -8110,8 +8098,9 @@ describe("executeDispatchTool", () => {
   });
 
   // A dispatch:// reference's document part is a slug, the address the dashboard and Dispatch's
-  // own routes use, so it names one document even where the same text is another's filename.
-  test("a dispatch:// document reference resolves by slug, never refused for a filename clash", async () => {
+  // own routes use, so it names one document even where the same text is another's filename; a
+  // bare reference reads the same way.
+  test("a dispatch:// or bare document reference resolves by slug, never refused for a filename clash", async () => {
     const requests: string[] = [];
     const documents = [
       projectDocument("artifact-v2", "plan-v2", "plan v2"),
@@ -8135,9 +8124,8 @@ describe("executeDispatchTool", () => {
       const issue = await readDocument({ ref }, clashing);
       expect(issue.text).toBe("# artifact-v2");
     }
-    await expect(readDocument({ issue: "DSP-42", artifact: "spec-v2" }, clashing)).rejects.toThrow(
-      '"spec-v2" names 2 documents on this issue; use the id'
-    );
+    const bare = await readDocument({ issue: "DSP-42", artifact: "spec-v2" }, clashing);
+    expect(bare.text).toBe("# artifact-v2");
   });
 
   test("renders a no-new-version document edit and forwards its summary and precondition", async () => {
@@ -12076,10 +12064,11 @@ test("an issue document reference resolves to the document's id as the Dispatch 
 });
 
 // Dispatch suffixes a slug two documents would share, so on one issue a document's filename can be
-// another's slug: `spec v2` has slug `spec-v2`, and a document named `spec-v2` gets `spec-v2-2`.
-// Such a reference names two documents, so it is refused rather than taken by slug, and the hint
-// names each document's id. A reference only one document answers to still resolves.
-test("a reference that is one document's slug and another's filename is refused as ambiguous", async () => {
+// another's slug: `spec v2` has slug `spec-v2`, and a document an older Dispatch stored under the
+// name `spec-v2` has `spec-v2-2`. Such a reference is the slug's document, as Dispatch's own routes
+// resolve it (the slug first, then a filename). Only a reference two documents answer to the same
+// way, a filename they share, is refused, and its hint names each one's slug.
+test("a reference that is one document's slug and another's filename is the slug's document", async () => {
   const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
     response({
       key: "DSP-42",
@@ -12089,13 +12078,19 @@ test("a reference that is one document's slug and another's filename is refused 
         { id: "artifact-notes", slug: "notes-md", name: "notes.md", primary: false },
         { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc", primary: false },
         { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", kind: "doc", primary: false },
+        { id: "artifact-draft", slug: "draft-md", name: "draft.md", kind: "doc", primary: false },
+        {
+          id: "artifact-draft-2",
+          slug: "draft-md-2",
+          name: "draft.md",
+          kind: "doc",
+          primary: false,
+        },
       ],
     });
   const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
-  await expect(resolveIssueDocumentId(client, "DSP-42", "spec-v2")).rejects.toThrow(
-    '"spec-v2" names 2 documents on this issue; use the id: artifact-v2 (spec-v2, spec v2), artifact-v2-2 (spec-v2-2, spec-v2)'
-  );
   for (const [reference, id] of [
+    ["spec-v2", "artifact-v2"],
     ["spec v2", "artifact-v2"],
     ["spec-v2-2", "artifact-v2-2"],
     ["artifact-v2-2", "artifact-v2-2"],
@@ -12103,6 +12098,9 @@ test("a reference that is one document's slug and another's filename is refused 
   ] as const) {
     expect(await resolveIssueDocumentId(client, "DSP-42", reference)).toBe(id);
   }
+  await expect(resolveIssueDocumentId(client, "DSP-42", "draft.md")).rejects.toThrow(
+    '"draft.md" names 2 documents on this issue; use a slug: draft-md (draft.md), draft-md-2 (draft.md)'
+  );
 });
 
 const anchoredRow: TablePosition = {

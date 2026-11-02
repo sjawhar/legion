@@ -55,6 +55,7 @@ describe("envoyToolSpecs", () => {
     expect(Object.keys(send?.arguments(schemaApi) ?? {}).sort()).toEqual([
       "expects_reply",
       "expires_at",
+      "idempotency_key",
       "in_reply_to",
       "message",
       "session_id",
@@ -160,6 +161,7 @@ describe("sendConfirmationText", () => {
         recipient: "ses_peer",
         recipientState: "live",
         confirmed: true,
+        duplicate: false,
       })
     ).toBe("sent evt_1 to ses_peer (live)");
     expect(
@@ -168,6 +170,7 @@ describe("sendConfirmationText", () => {
         recipient: "ses_peer",
         recipientState: "unresponsive",
         confirmed: false,
+        duplicate: false,
       })
     ).toBe(
       "sent evt_1 to ses_peer (unresponsive, so it is stored until that session answers; An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or until 20 minutes have passed since its last_seen, the time of its last registration.) (recipient unconfirmed by listener)"
@@ -185,8 +188,51 @@ describe("sendConfirmationText", () => {
         recipientState: "unresponsive",
         confirmed: true,
         lastSeen: 1_762_000_000_000,
+        duplicate: false,
       })
     ).toContain("(unresponsive since 2025-11-01T12:26:40.000Z, so it is stored until");
+  });
+});
+
+describe("envoy_send resend", () => {
+  const key = "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80";
+
+  test("takes the idempotency_key an unconfirmed send named", () => {
+    expect(
+      parseEnvoyToolArguments("send", { session_id: "ses_b", message: "hi", idempotency_key: key })
+    ).toEqual({ session_id: "ses_b", message: "hi", idempotency_key: key });
+  });
+
+  test("refuses a key the listener would not store once", () => {
+    for (const idempotency_key of ["retry-1", key.toUpperCase(), `${key}0`]) {
+      expect(() =>
+        parseEnvoyToolArguments("send", { session_id: "ses_b", message: "hi", idempotency_key })
+      ).toThrow(ToolInputError);
+    }
+  });
+
+  test("says a resend the listener already held stored no second copy", () => {
+    const envelope = { event_id: "event-2" };
+    expect(
+      sendConfirmationText({
+        envelope,
+        recipient: "ses_b",
+        recipientState: "live",
+        confirmed: true,
+        duplicate: true,
+      })
+    ).toBe(
+      "sent to ses_b once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy"
+    );
+    expect(
+      sendConfirmationText({
+        envelope,
+        recipient: "ses_b",
+        recipientState: "live",
+        confirmed: true,
+        duplicate: false,
+      })
+    ).toBe("sent event-2 to ses_b (live)");
   });
 });
 
@@ -250,7 +296,7 @@ describe("message metadata", () => {
     expect(failure.problems).toEqual([
       "message is required (string)",
       'expects_reply must be one of none|optional|required; got "no"',
-      'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at',
+      'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at, idempotency_key',
     ]);
     expect(failure.message).toContain("envoy_send was not called: 3 problems");
   });
