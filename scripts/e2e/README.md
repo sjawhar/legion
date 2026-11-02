@@ -2935,6 +2935,7 @@ The transcript records the duration of each wait.
   Each service and container stops.
   Once both tmux servers are gone, the script stops what the agent sessions started detached (`stop_agent_daemons`):
   Oh My Pi runs a session's background services, the blob broker and its tunnel helper among them, under a per-project daemon broker in a session of its own, which writes `broker.pid` in its runtime directory under the run's work directory.
+  On the pinned build each service runs in a session of its own and ends when its broker ends.
   For each `broker.pid` there, each process of that broker's session is stopped when it carries that runtime directory in `OMP_DAEMON_RUNTIME_DIR` or is one of the run's processes.
   No process is stopped for its working directory alone.
   Every process of the run then ends within 600 s; a survivor fails the check, and the check first prints its `ps` line (pid, ppid, process group, session, start time and command line).

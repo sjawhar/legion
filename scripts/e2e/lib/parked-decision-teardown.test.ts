@@ -6,13 +6,16 @@ import { scriptFunctions } from "./script-functions";
 
 // stop_agent_daemons (parked-decision-devbox.sh), the teardown of what the run's Oh My Pi sessions
 // start detached: a per-project daemon broker, a session leader of its own that writes broker.pid
-// in its runtime directory, and the services it supervises. The stand-in below is started from a
-// tmux pane as Oh My Pi starts its broker, `setsid` into a session of its own with
-// OMP_DAEMON_RUNTIME_DIR set, and runs two members: a service working outside the run's directory,
-// found by that variable, and a helper working inside it. tmux kill-server ends the pane and leaves
-// all three alive, which is how the devbox run at 6512c7fc failed cleanup-is-complete. Where no
-// tmux is on PATH (CI installs it after this job's step), the pane is a session of its own that the
-// test ends as kill-server ends a pane: SIGHUP, then SIGKILL, to the pane's session.
+// in its runtime directory, and the services it supervises. On the pinned build each service runs
+// in a session of its own and ends when its broker ends; the stand-in instead keeps its two members
+// in its own session, so the test also holds the function to every member of a broker's session.
+// The stand-in is started from a tmux pane as Oh My Pi starts its broker, `setsid` into a session
+// of its own with OMP_DAEMON_RUNTIME_DIR set, and runs two members: a service working outside the
+// run's directory, found by that variable, and a helper working inside it. tmux kill-server ends
+// the pane and leaves all three alive, as the brokers outlived cleanup-is-complete in the devbox
+// run at 6512c7fc. Where no tmux is on PATH (CI installs it after this job's step), the pane is a
+// session of its own that the test ends as kill-server ends a pane: SIGHUP, then SIGKILL, to the
+// pane's session.
 const e2e = join(import.meta.dir, "..");
 const root = join(e2e, "..", "..");
 const scriptPath = join(e2e, "parked-decision-devbox.sh");

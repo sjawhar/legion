@@ -527,12 +527,13 @@ wait_for_run_processes() {
 # for every pane and controller of the run. tmux kill-server ends the panes, not those sessions:
 # the devbox run at 6512c7fc left four such processes alive through cleanup-is-complete's 600 s
 # wait, each beside a blob-tunnel log. This reads every broker.pid under $work and signals each
-# process of that broker's session (session id equal to the broker's pid, which the services it
-# supervises and their helpers inherit, the broker itself gone or not), TERM first and KILL after
-# 10 s. A member is signalled only when it also carries that runtime directory in
+# process of that broker's session (session id equal to the broker's pid, the broker itself gone or
+# not), TERM first and KILL after 10 s. On the pinned build that is the broker alone: it spawns each
+# service detached, a session of its own, and ends its services and their helpers when it ends, even
+# by SIGKILL. A member is signalled only when it also carries that runtime directory in
 # OMP_DAEMON_RUNTIME_DIR or is one of the run's by run_processes's reading, so a session the kernel
 # later gave the same id is left alone. It finds nothing by working directory alone: what it misses,
-# cleanup-is-complete's wait still names.
+# a service whose broker did not end it among them, cleanup-is-complete's wait still names.
 stop_agent_daemons() {
   local file dir real leader p stat sid line env_dir i alive
   local -a run=() targets=() environ=()
