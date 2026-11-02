@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-992",
+  "previousHandoff": "",
+  "plan": "dispatch://INFRA-992/artifact/plan-md",
+  "scope": "This issue builds item 1 of the spec in sjawhar/legion (the RoleBinding's roleRef waits on the Role's ID; the Tailscale Service is declared with no tags; one test per half that fails on the old code; the README sentences that state the old contract; one changelog fragment), and item 2, the envoy-infra release its merge cuts. Items 3 and acceptance A1 to A3, which are theorem-labs/agent-infra's, cannot be reached from this issue: the release tag exists only after this issue's own merge, and that merge closes the issue; and a Legion issue is bound to one repository, so the daemon merges only the pull request on legion/INFRA-992 of sjawhar/legion. The planner sent the architect the measured facts for a child issue on theorem-labs/agent-infra.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker and its references pr-body.md, default-branch-check.md and skip-checks-trailer.md: the proof shape the handoff and the pull-request body take, the App identity check before each push, and which push carries the skip-checks trailer.",
+      "packages/envoy/infra/AGENTS.md: the rules a change to a component keeps (resolve then require then register, refusals that name their input, byte-exact texts), the release contract that says which files cut a version, and the test harness the new tests use.",
+      "skill://ce-simplify-code: the simplify pass on the settled change before the phase ends.",
+      "skill://dispatch and skill://dispatch-first: the pull request's Dispatch link and any finding that must reach a person."
+    ],
+    "test": [
+      "skill://legion-worker and its reference pr-body.md: what a proof is, so each acceptance line is re-run with its own negative control.",
+      "packages/envoy/infra/AGENTS.md, 'Tests': the three commands the envoy-infra-go job of .github/workflows/ci.yaml runs and what each harness proves and does not prove.",
+      "skill://legion-worker/references/tools.md: the rule that a tool install and any unpacked copy go under the issue's volume at /legion/scratch/tmp."
+    ],
+    "review": [
+      "skill://legion-worker and its references review-threads.md and merge-gate.md: how a round is answered and what the approval of a head means.",
+      "packages/envoy/infra/AGENTS.md: the component rules and the release contract the change must keep, which decide whether the pull request's title cuts the release the plan expects.",
+      "skill://plain-words and skill://asd-ste100: the README and changelog text, which a reader outside this tree reads."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1. The pin move cannot touch dispatch/ alone: envoy/Pulumi.yaml and dispatch/Pulumi.yaml share one generated SDK, envoy-select picks envoy/ and legion/ with it, and the envoy/ apply replaces the NATS hub VM, because the hub's rendered authorization changed between envoy-infra-v7.0.0 and main.",
+        "answer": "The plan records every measurement under 'What the agent-infra work faces' and puts the agent-infra pull request outside this issue, with the recommendation that the architect open one child issue of INFRA-63 on theorem-labs/agent-infra whose spec carries those facts and schedules the hub VM window before its sign-off."
+      },
+      {
+        "finding": "F2. Delivery items 2 and 3 and all three acceptance criteria land after this issue closes, outside its repository.",
+        "answer": "The plan states this with its evidence (release-envoy-infra.yaml runs only on a push to main; handoff.go's implementationPullRequest reads only legion/INFRA-992 of sjawhar/legion) and grades this issue on acceptance A1 to A6, which are all provable at the merging head or in the production check. The decomposition is the architect's, and the planner sent it."
+      },
+      {
+        "finding": "F3. Nothing previews dispatch/ or envoy/ before the merge, so agent-infra's convention asks for a per-release census of the pin jump.",
+        "answer": "Recorded as item 5 of 'What the agent-infra work faces', naming the tags the census covers and the two measurements that start it."
+      },
+      {
+        "finding": "F4. Acceptance names deploy@ and a cluster-grants/ apply, which no Legion pod can reach; the pod's gh is also refused agent-infra's Actions API (measured 403).",
+        "answer": "Recorded as item 7 of 'What the agent-infra work faces', with the measurement, so the agent-infra issue names an identity and a machine for each line; INFRA-71's answer about requesting admin Google Cloud rights from the credential broker is named as the route to test before anyone is asked."
+      },
+      {
+        "finding": "F5. Removing the Service's tags ends the tailnet-policy path that grants svc:<hostname> through the hosts' tags, which the component's README offers.",
+        "answer": "T4 removes that sentence and two others, A5 checks the README, and T6's fragment states the behaviour change. The decision 'The release is a patch, cut by a fix: title' says why the change is not a major."
+      },
+      {
+        "finding": "F6. Whether any release is cut at all is decided by the pull request's title, since the daemon's merge writes it as the squash subject.",
+        "answer": "T5 fixes the title's form and says why, and A6 reads the release run's version and the release's archives rather than assuming a version."
+      },
+      {
+        "finding": "F7. Taking #2661 over has unstated work: it carries no changelog fragment, and the tags half inverts an existing test and three README sentences.",
+        "answer": "T1 carries and retires #2661, T3 inverts TestDispatchDeclaresItsTailscaleService, T4 lists each README place, T6 adds the fragment after the pull request is open."
+      },
+      {
+        "finding": "F8. Only the component's own tests can carry 'a test that fails on v7.0.0's code'; no test in agent-infra's dispatch/ can see a remote component's child.",
+        "answer": "T2 proves the binding's property at the plugin boundary through pulumitest.Construct, which is the artifact a consumer installs, and T8 measures both tests red on the starting tree."
+      },
+      {
+        "finding": "F9. The agent-infra edit set is larger than the issue states (two goldens, two test files and two READMEs beyond the transform and the rule).",
+        "answer": "Enumerated as item 6 of 'What the agent-infra work faces'."
+      },
+      {
+        "finding": "F10. 'Merges one at a time' names no mechanism: agent-infra's merge queue batches up to four pull requests.",
+        "answer": "Recorded as item 8 of 'What the agent-infra work faces', naming what the agent-infra issue must decide and check."
+      },
+      {
+        "finding": "F11. 'Neither creates nor replaces the Service or the RoleBinding' rests on the live Service's tags and on a preview nobody has run.",
+        "answer": "The plan states that the resolved roleRef name does not change, so no live binding changes, and leaves the live-Service reading to the agent-infra issue, whose census (item 5) is the gate."
+      },
+      {
+        "finding": "F12. 'The Tags input is removed or ignored for the Service' has two readings, and dropping the component's tags input would break the front door's nodes.",
+        "answer": "C2 chooses the narrow reading in one sentence: only the tailscale.ServiceArgs field goes; the tags input stays required and still renders --advertise-tags for the nodes, which A2 checks."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "What this issue delivers, item 3: 'In theorem-labs/agent-infra, one pull request' that moves dispatch/'s pin, deletes the dropServiceTags transform and removes #1284's bind rule; and acceptance criteria A1, A2 and A3, which read that pull request's merge run, the cluster-grants/ apply and production Dispatch.",
+      "plan": "This issue builds and proves only the sjawhar/legion half and the release its merge cuts. The plan records the measured facts the agent-infra pull request faces and recommends that the INFRA-63 architect open one child issue of INFRA-63 on theorem-labs/agent-infra, blocked by this one, to carry item 3 and those three acceptance criteria.",
+      "evidence": ".github/workflows/release-envoy-infra.yaml runs on a push to main and its build job carries if: github.ref == 'refs/heads/main', so the envoy-infra tag the agent-infra pin needs exists only after this issue's own pull request merges, and that merge is what closes this issue. agent-infra's envoy/envoy-infra-version.sh refuses a pin that is not a released X.Y.Z and one the generated SDK does not carry, so the agent-infra pull request cannot pass its own CI before the tag. dispatch read --issue INFRA-992 prints 'Repository: sjawhar/legion (own)', and packages/daemon/internal/api/handoff.go's implementationPullRequest reads the open pull request on claim.IssueBranch in issue.GitHubRepo alone.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The agent-infra pull request and acceptance criteria A1 to A3 leave this issue's scope; this issue is graded on acceptance A1 to A6 of the plan, which are provable in sjawhar/legion at the merging head and in the production check.",
+        "acceptance": [
+          "Dropped here: 'The merge run of the agent-infra pull request previews and applies dispatch/ as deploy@ with Apply success.'",
+          "Dropped here: 'After cluster-grants/ is applied without the bind rule, a server-side dry run of a RoleBinding to a Role that does not exist yet, as deploy@ in the dispatch namespace, answers NotFound.'",
+          "Dropped here: 'dispatch.tail12ec1c.ts.net answers through svc:dispatch before and after the apply.'",
+          "Added here: the release envoy-infra-v<version> that the merge cuts carries both changes, read from the release run, the release's archives and the tagged source."
+        ]
+      }
+    },
+    {
+      "spec": "What this issue delivers, item 3, first bullet: the agent-infra pull request 'moves dispatch/'s component pin to that release'; and acceptance A1, which names dispatch/ alone.",
+      "plan": "The plan records that the pin move necessarily moves envoy/'s pin too and that its merge applies envoy/, dispatch/ and legion/, with a NATS hub VM replacement, so the work is a scheduled deploy rather than a dispatch/-only apply.",
+      "evidence": "envoy/Pulumi.yaml:7 and dispatch/Pulumi.yaml:7 both pin envoy-infra@7.0.0 and share the generated SDK at envoy/sdks/sjawhar-envoy-infra, which envoy/envoy-infra-version.sh holds equal to each pin. .github/scripts/envoy-select picks a program by the first path element of a changed file, so the regenerated SDK selects envoy/, and its own rule adds legion/. envoy/main.go still declares envoy-infra:gcp:NatsHub, and packages/envoy/infra/gcp/testdata/cloud-config.golden changed between envoy-infra-v7.0.0 and main, which packages/envoy/infra/AGENTS.md says replaces every hub's VM on its next update; agent-infra's envoy/README.md measures that replacement at 3 min 51 s to 3 min 59 s with NATS and the listener down.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The agent-infra work carries envoy/ and legion/ as well as dispatch/, and needs a deploy window set before its own sign-off."
+      }
+    }
+  ]
+}
