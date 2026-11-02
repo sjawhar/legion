@@ -445,6 +445,17 @@ func (s *server) queueFileVersion(
 	`, artifactID, number, content, input.contentType, size, sha, authors, version.Named, summary, createdAt)
 }
 
+// recordDocumentTaskProgress records the task count of the document a write just stored.
+// readBack is the rendering that write stored, read back by its own parse (docs'
+// Ledger.ReadBackOf): the count reads that tree rather than parsing the same markdown again, and
+// parses markdown itself when the write left none.
+func recordDocumentTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, readBack *pmdoc.Node, markdown string) error {
+	if readBack != nil {
+		return docs.RecordTaskProgress(ctx, tx, artifactID, readBack)
+	}
+	return docs.RecordTaskProgressMarkdown(ctx, tx, artifactID, markdown)
+}
+
 func (s *server) storeArtifact(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -546,6 +557,10 @@ func (s *server) storeArtifact(
 		documentSummary = &input.summary
 	}
 	var documentMarkdown string
+	// documentReadBack is the rendering this write stored, read back by its own parse (docs'
+	// Ledger.ReadBackOf), which the task count and the advice's blocks read in place of parsing
+	// the same markdown again (recordDocumentTaskProgress, documentBlocksFor).
+	var documentReadBack *pmdoc.Node
 	var documentChanges model.ReferenceChanges
 	if kind == "doc" {
 		if created {
@@ -565,8 +580,9 @@ func (s *server) storeArtifact(
 		// The version credits the uploader alone, and holds the upload's write to the document,
 		// which clears the credit of every edit that write read when it changed the document.
 		ledger.WroteVersion(artifact.ID, version)
+		documentReadBack = ledger.ReadBackOf(artifact.ID, documentMarkdown)
 		// The count is queued after the version's insert, so it names that version (LEGION-542).
-		if err := docs.RecordTaskProgressMarkdown(documentCtx, tx, artifact.ID, documentMarkdown); err != nil {
+		if err := recordDocumentTaskProgress(documentCtx, tx, artifact.ID, documentReadBack, documentMarkdown); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -651,7 +667,7 @@ func (s *server) storeArtifact(
 	s.publish(appendedEvents(published...)...)
 	var blocks *documentBlocks
 	if kind == "doc" {
-		blocks = readDocumentBlocks(documentMarkdown)
+		blocks = documentBlocksFor(documentReadBack, documentMarkdown)
 	}
 	if advice != nil {
 		advice.documentBlocks = blocks

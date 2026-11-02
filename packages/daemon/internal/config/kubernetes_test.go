@@ -1450,10 +1450,15 @@ func TestLoadForValidationAcceptsBindUnspecifiedWithAdvertiseHost(t *testing.T) 
 // operator and each live harness run fill in their gateway's.
 const operatorRouteAudience = "operator-audience"
 
+// operatorRouteAccount is the ServiceAccount the tests fill into the operator route's placeholder,
+// as an operator and each live harness run fill in their own.
+const operatorRouteAccount = "operator-account"
+
 // operatorRoutePod is the operator route the Go live harnesses run on
-// (deploy/kubernetes/operator-route/pod.yml), its token audience filled in with audience when that
-// is not empty, indented to sit under `runtime.kubernetes.pod`.
-func operatorRoutePod(t *testing.T, audience string) string {
+// (deploy/kubernetes/operator-route/pod.yml), its token audience filled in with audience and its
+// ServiceAccount with account, each when that one is not empty, so a test may leave either
+// placeholder standing on its own. It is indented to sit under `runtime.kubernetes.pod`.
+func operatorRoutePod(t *testing.T, audience, account string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
 	if err != nil {
@@ -1462,6 +1467,9 @@ func operatorRoutePod(t *testing.T, audience string) string {
 	pod := string(raw)
 	if audience != "" {
 		pod = strings.ReplaceAll(pod, "${MODEL_TOKEN_AUDIENCE}", audience)
+	}
+	if account != "" {
+		pod = strings.ReplaceAll(pod, "${POD_SERVICE_ACCOUNT}", account)
 	}
 	var indented strings.Builder
 	for _, line := range strings.SplitAfter(pod, "\n") {
@@ -1476,9 +1484,21 @@ func operatorRoutePod(t *testing.T, audience string) string {
 // load: nothing expands the placeholder, and a pod carrying a token for its text would have every
 // model call refused.
 func TestLoadForValidationRefusesTheOperatorRouteWithItsAudienceUnfilled(t *testing.T) {
-	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n"+operatorRoutePod(t, "")), noEnv)
+	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n"+operatorRoutePod(t, "", "")), noEnv)
 	if err == nil || !strings.Contains(err.Error(), `.service_account_token.audience "${MODEL_TOKEN_AUDIENCE}" is an unfilled placeholder`) {
 		t.Fatalf("LoadForValidation = %v, want the unfilled audience placeholder refused", err)
+	}
+}
+
+// The sibling of the test above, and a pair rather than one test because readPod reads the volumes
+// before the ServiceAccount: the unfilled audience is refused first, so only a route whose
+// audience is filled ever reaches the account's own refusal. A copy taken as it stands with the
+// gateway's audience put in, and the account placeholder left standing, is refused too: nothing
+// expands the placeholder, and the API server admits no pod for an account that does not exist.
+func TestLoadForValidationRefusesTheOperatorRouteWithItsAccountUnfilled(t *testing.T) {
+	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n"+operatorRoutePod(t, operatorRouteAudience, "")), noEnv)
+	if err == nil || !strings.Contains(err.Error(), `runtime.kubernetes.pod.service_account "${POD_SERVICE_ACCOUNT}" is an unfilled placeholder: put the ServiceAccount the pods run as in its place`) {
+		t.Fatalf("LoadForValidation = %v, want the unfilled ServiceAccount placeholder refused", err)
 	}
 }
 
@@ -1529,7 +1549,7 @@ runtime:
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production
     context: legion-daemon@example
     pod:
-`+operatorRoutePod(t, operatorRouteAudience))
+`+operatorRoutePod(t, operatorRouteAudience, operatorRouteAccount))
 
 	cfg, err := LoadForValidation(path, noEnv)
 	if err != nil {
@@ -1544,7 +1564,7 @@ runtime:
 	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@example" || block.Resources != DefaultResources() || block.Scheduling.NodeSelector != nil {
 		t.Errorf("kubernetes block = %+v, want the restricted context, both pods' default reservations, and no node selector", *block)
 	}
-	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != "legion-worker" || len(pod.Volumes) != 2 || len(pod.VolumeMounts) != 3 ||
+	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != operatorRouteAccount || len(pod.Volumes) != 2 || len(pod.VolumeMounts) != 3 ||
 		pod.Env["PI_CONFIG_FILES"] != "/etc/legion-operator/overlay.yml" {
 		t.Errorf("the operator pod settled as %+v, want the fixture's account, two volumes, three mounts, and its overlay", pod)
 	}
