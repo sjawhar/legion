@@ -1637,6 +1637,7 @@ export async function executeEnvoyTool(
         sourceSessionID: identity.id,
         targetSessionID: args.session_id,
         message: args.message,
+        ...(args.idempotency_key === undefined ? {} : { idempotencyKey: args.idempotency_key }),
         ...toMessageMetadata(args),
       })
       // The text says what the target was when Envoy stored the message; the fields beside it

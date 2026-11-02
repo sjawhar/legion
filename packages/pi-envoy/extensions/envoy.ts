@@ -3952,10 +3952,12 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(JSON.stringify(inbox, null, 2), { count: inbox.length });
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "session_id");
+          const idempotencyKey = parameters.idempotency_key;
           const result = await client.send({
             sourceSessionID: await replyAddress(context),
             targetSessionID,
             message: stringFor(parameters, "message"),
+            ...(typeof idempotencyKey === "string" ? { idempotencyKey } : {}),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
           // The text says what the target was; the details say it in a field, with the moment a

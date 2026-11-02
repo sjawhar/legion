@@ -146,6 +146,7 @@ export interface ToolArgumentsByOperation {
   readonly send: MessageMetadataArguments & {
     readonly session_id: string;
     readonly message: string;
+    readonly idempotency_key?: string;
   };
   readonly publish: MessageMetadataArguments & { readonly topic: string; readonly message: string };
   readonly setRole: { readonly role: string };
@@ -203,12 +204,18 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} ${SEND_STATES}`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} ${SEND_STATES} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within ${STORED_MESSAGE_HOURS} hours, and Envoy drops it as a repeat if the first copy arrived.`,
     arguments: (schema) => ({
       session_id: schema
         .string()
         .describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
       ...messageArguments(schema),
+      idempotency_key: schema
+        .string()
+        .describe(
+          "Only to send again a message whose envoy_send was not confirmed delivered: the idempotency_key that error named. Omit it for a new message."
+        )
+        .optional(),
     }),
     operation: EnvoyToolOperation.send,
   },
@@ -277,12 +284,28 @@ function lastSeenText(lastSeen: number): string {
 }
 
 /**
+ * What a send says when the listener already held it under this target and idempotency key: the
+ * resend stored nothing, so one copy is there and no second one.
+ */
+const STORED_ONCE =
+  "an earlier attempt under the same idempotency_key was already stored, so this one stored no " +
+  "second copy";
+
+/**
  * The envoy_send confirmation line both hosts show the model.
  *
  * A connected target is sent to. A stopped one is queued: Envoy stored the message on that
  * session's topic and it arrives if the session runs again within the stream's
  * {@link STORED_MESSAGE_HOURS} hours. The queued line says `queued`, never `sent`, because
  * nothing read the message and a model told "sent" waits for an answer that is not coming.
+ *
+ * A `duplicate` answer is a resend of a message the listener already stored under the same
+ * idempotency key. It stored nothing this time, so this answer's event id names no stored copy
+ * and the line leaves the id out; the target's state still chooses the verb, because a stopped
+ * target's one stored copy is waiting rather than delivered.
+ *
+ * `confirmed` is false only for a listener too old to echo the recipient, which is also too old
+ * to answer a state, so the unconfirmed note belongs to the connected line alone.
  */
 export function sendConfirmationText(result: {
   readonly envelope: { readonly event_id: string };
@@ -290,11 +313,19 @@ export function sendConfirmationText(result: {
   readonly confirmed: boolean;
   readonly state: SessionState;
   readonly lastSeen?: number;
+  readonly duplicate: boolean;
 }): string {
   if (result.state === "stopped") {
     const seen =
       result.lastSeen === undefined ? "" : ` (last seen ${lastSeenText(result.lastSeen)})`;
-    return `queued ${result.envelope.event_id} for ${result.recipient}: the session is stopped${seen}; if it runs again within ${STORED_MESSAGE_HOURS} hours, it gets the message`;
+    const waits = `the session is stopped${seen}; if it runs again within ${STORED_MESSAGE_HOURS} hours, it gets the message`;
+    if (result.duplicate) {
+      return `queued once for ${result.recipient}: ${STORED_ONCE}; ${waits}`;
+    }
+    return `queued ${result.envelope.event_id} for ${result.recipient}: ${waits}`;
+  }
+  if (result.duplicate) {
+    return `sent to ${result.recipient} once: ${STORED_ONCE}`;
   }
   return `sent ${result.envelope.event_id} to ${result.recipient}, which is connected${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
 }
@@ -350,6 +381,13 @@ export function sessionsOnMachine(
 const envoyToolSchemas = new Map<EnvoyToolOperation, z.ZodType>();
 
 /**
+ * The idempotency key envoy_send takes: the transport's `crypto.randomUUID()`. The listener stores
+ * a send once per target and key only for a key of this shape (`MINTED_DEDUPE_KEY_PATTERN`), so a
+ * resend under any other key would be a second delivery.
+ */
+const SEND_IDEMPOTENCY_KEY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
  * Validates an Envoy tool call on real zod in one pass and returns its typed arguments,
  * or throws a `ToolInputError` naming every problem. Hosts register the tools with
  * lenient argument validation, so this is the single place a bad call is refused.
@@ -369,5 +407,17 @@ export function parseEnvoyToolArguments<Operation extends EnvoyToolOperation>(
   if (!parsed.success) {
     throw new ToolInputError(spec.name, formatZodIssues(parsed.error.issues, schema, spec.name));
   }
-  return parsed.data as ToolArgumentsByOperation[Operation];
+  const { data } = parsed;
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    "idempotency_key" in data &&
+    typeof data.idempotency_key === "string" &&
+    !SEND_IDEMPOTENCY_KEY.test(data.idempotency_key)
+  ) {
+    throw new ToolInputError(spec.name, [
+      `idempotency_key must be the key an unconfirmed send named, a lower-case UUID; got ${JSON.stringify(data.idempotency_key)}`,
+    ]);
+  }
+  return data as ToolArgumentsByOperation[Operation];
 }

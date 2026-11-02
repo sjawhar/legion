@@ -56,6 +56,7 @@ describe("envoyToolSpecs", () => {
     expect(Object.keys(send?.arguments(schemaApi) ?? {}).sort()).toEqual([
       "expects_reply",
       "expires_at",
+      "idempotency_key",
       "in_reply_to",
       "message",
       "session_id",
@@ -142,6 +143,56 @@ describe("envoyToolSpecs", () => {
   });
 });
 
+describe("envoy_send resend", () => {
+  const key = "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80";
+
+  test("takes the idempotency_key an unconfirmed send named", () => {
+    expect(
+      parseEnvoyToolArguments("send", { session_id: "ses_b", message: "hi", idempotency_key: key })
+    ).toEqual({ session_id: "ses_b", message: "hi", idempotency_key: key });
+  });
+
+  test("refuses a key the listener would not store once", () => {
+    for (const idempotency_key of ["retry-1", key.toUpperCase(), `${key}0`]) {
+      expect(() =>
+        parseEnvoyToolArguments("send", { session_id: "ses_b", message: "hi", idempotency_key })
+      ).toThrow(ToolInputError);
+    }
+  });
+
+  test("says a resend the listener already held stored no second copy", () => {
+    const envelope = { event_id: "event-2" };
+    const sent = { envelope, recipient: "ses_b", confirmed: true, state: "connected" } as const;
+    expect(sendConfirmationText({ ...sent, duplicate: true })).toBe(
+      "sent to ses_b once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy"
+    );
+    expect(sendConfirmationText({ ...sent, duplicate: false })).toBe(
+      "sent event-2 to ses_b, which is connected"
+    );
+  });
+
+  test("a resend for a stopped target is queued once, and never says sent", () => {
+    const text = sendConfirmationText({
+      envelope: { event_id: "event-2" },
+      recipient: "ses_b",
+      confirmed: true,
+      state: "stopped",
+      lastSeen: Date.UTC(2026, 10, 2, 9, 15),
+      duplicate: true,
+    });
+
+    expect(text).toBe(
+      "queued once for ses_b: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy; the session is stopped (last seen 2026-11-02T09:15:00Z); if it runs again within 72 hours, it gets the message"
+    );
+    // Acceptance A7 holds for the resend too: the one stored copy waits on a session that is
+    // not running, so the line says queued and leaves out the event id of the copy it did not
+    // store.
+    expect(text).toMatch(/^queued \S+ for /);
+    expect(text).not.toContain("sent");
+    expect(text).not.toContain("event-2");
+  });
+});
+
 describe("message metadata", () => {
   test("maps validated wire fields to the client input shape", () => {
     const metadata = MessageMetadataSchema.parse({
@@ -202,7 +253,7 @@ describe("message metadata", () => {
     expect(failure.problems).toEqual([
       "message is required (string)",
       'expects_reply must be one of none|optional|required; got "no"',
-      'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at',
+      'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at, idempotency_key',
     ]);
     expect(failure.message).toContain("envoy_send was not called: 3 problems");
   });
@@ -289,6 +340,7 @@ describe("sendConfirmationText", () => {
     recipient: "ses_target",
     confirmed: true,
     state: "connected",
+    duplicate: false,
   } as const;
   // 2026-11-02T09:15:00Z, as the listener sends it: unix milliseconds.
   const lastSeen = Date.UTC(2026, 10, 2, 9, 15);

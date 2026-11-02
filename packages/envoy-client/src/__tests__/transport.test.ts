@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { MINTED_DEDUPE_KEY_PATTERN } from "@legion/contracts";
 import { machineID } from "../machine";
 import {
   createEnvoyClient,
   type DeliveryAnswer,
   EnvoyApiError,
+  EnvoySendUnconfirmedError,
   newClientInstanceID,
 } from "../transport";
 
@@ -706,6 +708,27 @@ describe("EnvoyClient", () => {
     ).rejects.toBeInstanceOf(EnvoyApiError);
   });
 
+  test("a 409 whose body does not arrive stays a typed API error, sent once", async () => {
+    let calls = 0;
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async () => {
+        calls += 1;
+        const body = new ReadableStream({
+          pull(controller) {
+            controller.error(new TypeError("body lost"));
+          },
+        });
+        return new Response(body, { status: 409 });
+      },
+    });
+
+    await expect(
+      client.setRole({ sessionID: "ses_x", role: "controller", soft: true })
+    ).rejects.toBeInstanceOf(EnvoyApiError);
+    expect(calls).toBe(1);
+  });
+
   test("lists listener sessions and retains their registration metadata, plugin or none", async () => {
     const unversioned = {
       session_id: "ses_sender",
@@ -817,6 +840,220 @@ describe("EnvoyClient", () => {
 
     expect(idempotencyKeys).toHaveLength(2);
     expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+  });
+
+  test("a send no attempt of which is answered is not confirmed delivered, and names the key a resend reuses", async () => {
+    const idempotencyKeys: string[] = [];
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { readonly idempotency_key: string };
+        idempotencyKeys.push(body.idempotency_key);
+        // What AbortSignal.timeout raises when the listener holds the request past the deadline.
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      },
+    });
+
+    const error = await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_target", message: "hello" })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+
+    expect(idempotencyKeys).toHaveLength(2);
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+    const key = idempotencyKeys[0] as string;
+    // The listener's test of a dedupe key a repeat is recognised by, so a resend under the key the
+    // error names cannot deliver the message twice.
+    expect(`agent.ses_target.${key}`).toMatch(new RegExp(MINTED_DEDUPE_KEY_PATTERN));
+    expect(error).toBeInstanceOf(EnvoySendUnconfirmedError);
+    expect(error).toMatchObject({
+      targetSessionID: "ses_target",
+      idempotencyKey: key,
+      attempts: 2,
+      resendSafe: true,
+    });
+    expect((error as Error).message).toBe(
+      "The send to ses_target is not confirmed delivered: the listener did not answer " +
+        "(The operation timed out.) on the last of 2 attempts. It may or may not have arrived. " +
+        `Sending it again with idempotency_key ${key} within 72 hours is the safe resend: ` +
+        "Envoy drops it as a repeat if the first copy arrived (a recipient that restarted in " +
+        "between can rarely see it twice)."
+    );
+  });
+
+  test("a send refused after an unanswered attempt stays unconfirmed: that attempt may have stored it", async () => {
+    let calls = 0;
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async () => {
+        calls += 1;
+        if (calls === 1) throw new DOMException("The operation timed out.", "TimeoutError");
+        return Response.json({ error: "no live session ses_target" }, { status: 404 });
+      },
+    });
+
+    const error = await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_target", message: "hello" })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+
+    expect(calls).toBe(2);
+    expect(error).toBeInstanceOf(EnvoySendUnconfirmedError);
+    expect((error as EnvoySendUnconfirmedError).message).toStartWith(
+      "The send to ses_target is not confirmed delivered: the listener answered 404 " +
+        "(no live session ses_target) on the last of 2 attempts. It may or may not have arrived."
+    );
+  });
+
+  test("a send whose 2xx answer does not parse is not confirmed delivered", async () => {
+    const recorded = recordFetch([new Response("{", { status: 200 })]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const error = await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_target", message: "hello" })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+
+    expect(error).toBeInstanceOf(EnvoySendUnconfirmedError);
+    expect((error as EnvoySendUnconfirmedError).last).toBeInstanceOf(SyntaxError);
+  });
+
+  test("a send under a key no repeat is recognised by does not call a resend safe", async () => {
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async () => {
+        throw new TypeError("connection refused");
+      },
+    });
+
+    for (const [targetSessionID, idempotencyKey] of [
+      ["ses_target", "retry-1"],
+      ["ses.dotted", "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80"],
+    ] as const) {
+      const error = await client
+        .send({ sourceSessionID: "ses_sender", targetSessionID, message: "hello", idempotencyKey })
+        .then(
+          () => undefined,
+          (thrown: unknown) => thrown
+        );
+
+      expect(error).toMatchObject({ resendSafe: false });
+      expect((error as Error).message).toEndWith(
+        `Envoy cannot recognise a resend under idempotency_key ${idempotencyKey} as a repeat ` +
+          "(the key is not a lower-case UUID, or the session id holds a dot): ask the recipient " +
+          "whether it arrived before sending it again."
+      );
+    }
+  });
+
+  test("a send whose last attempt the listener answered with a 5xx is not confirmed delivered", async () => {
+    const refusal = () =>
+      Response.json(
+        { error: "envoy: the message bus did not answer: context deadline exceeded" },
+        { status: 503 }
+      );
+    const recorded = recordFetch([refusal(), refusal()]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const error = await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_target", message: "hello" })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+
+    expect(recorded.requests).toHaveLength(2);
+    expect(error).toBeInstanceOf(EnvoySendUnconfirmedError);
+    const unconfirmed = error as EnvoySendUnconfirmedError;
+    expect(unconfirmed.last).toBeInstanceOf(EnvoyApiError);
+    expect((unconfirmed.last as EnvoyApiError).details.status).toBe(503);
+    expect(unconfirmed.message).toStartWith(
+      "The send to ses_target is not confirmed delivered: the listener answered 503 " +
+        "(envoy: the message bus did not answer: context deadline exceeded) on the last of 2 " +
+        "attempts. It may or may not have arrived. Sending it again with idempotency_key "
+    );
+  });
+
+  test("a send the listener refused with a 4xx is that refusal, sent once", async () => {
+    const recorded = recordFetch([
+      Response.json({ error: "no live session ses_target" }, { status: 404 }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const error = await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_target", message: "hello" })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+
+    expect(recorded.requests).toHaveLength(1);
+    expect(error).toBeInstanceOf(EnvoyApiError);
+    expect(error).not.toBeInstanceOf(EnvoySendUnconfirmedError);
+    expect((error as Error).message).toBe("no live session ses_target");
+  });
+
+  test("a refusal whose body does not arrive is still the listener's refusal, sent once", async () => {
+    let calls = 0;
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async () => {
+        calls += 1;
+        const body = new ReadableStream({
+          pull(controller) {
+            controller.error(new TypeError("body lost"));
+          },
+        });
+        return new Response(body, { status: 409 });
+      },
+    });
+
+    const error = await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_target", message: "hello" })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+
+    expect(calls).toBe(1);
+    expect(error).toBeInstanceOf(EnvoyApiError);
+    expect((error as EnvoyApiError).details.status).toBe(409);
+  });
+
+  test("a resend under the named key sends that key and reports the listener's repeat", async () => {
+    const key = "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80";
+    const recorded = recordFetch([
+      jsonResponse({
+        event_id: "event-resent",
+        source: "agent",
+        source_event_id: "agent.ses_sender.event-resent",
+        source_session: "ses_sender",
+        topic: "notifications.agent.ses_target",
+        dedupe_key: `agent.ses_target.${key}`,
+        issued_at: 1,
+        payload_summary: "hello",
+        trace_id: "trace-resent",
+        recipient: "ses_target",
+        duplicate: true,
+      }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.send({
+      sourceSessionID: "ses_sender",
+      targetSessionID: "ses_target",
+      message: "hello",
+      idempotencyKey: key,
+    });
+
+    expect(await recorded.requests[0]?.json()).toMatchObject({ idempotency_key: key });
+    expect(result).toMatchObject({ recipient: "ses_target", confirmed: true, duplicate: true });
   });
 
   test("retries a delivered publish with one generated idempotency key", async () => {

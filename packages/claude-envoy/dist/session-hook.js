@@ -15145,7 +15145,8 @@ function fieldKinds(spec) {
       nullable,
       required: required.has(field),
       ...description === undefined ? {} : { description },
-      ...values === undefined ? {} : { values }
+      ...values === undefined ? {} : { values },
+      shape: inner === undefined ? [] : shapeLines(inner, "")
     });
   }
   return fields;
@@ -15179,6 +15180,58 @@ function kindOf(field, node) {
     default:
       return "json";
   }
+}
+function withoutNull(node) {
+  const members = (node.anyOf ?? [node]).filter((member) => member.type !== "null");
+  return members.length === 1 ? members[0] : undefined;
+}
+function typeName(node) {
+  if (node.anyOf !== undefined)
+    return node.anyOf.map(typeName).join(" or ");
+  if (node.enum !== undefined)
+    return node.enum.map(String).join("|");
+  switch (node.type) {
+    case "string":
+      return "text";
+    case "integer":
+    case "number":
+    case "boolean":
+    case "null":
+      return node.type;
+    case "object":
+      return "object";
+    case "array":
+      return node.items === undefined ? "list" : `list of ${pluralTypeName(node.items)}`;
+    default:
+      return "any JSON";
+  }
+}
+function pluralTypeName(node) {
+  if (node.type === "object")
+    return "objects";
+  if (node.type === "integer")
+    return "integers";
+  if (node.type === "number")
+    return "numbers";
+  return typeName(node);
+}
+function shapeLines(node, indent) {
+  const item = node.type === "array" ? node.items : undefined;
+  const properties = (item ?? node).properties;
+  if (properties === undefined)
+    return [];
+  const required = new Set((item ?? node).required ?? []);
+  return [
+    `${indent}${item === undefined ? "Its keys:" : "Each item's keys:"}`,
+    ...Object.entries(properties).flatMap(([key, child]) => {
+      const about = [required.has(key) ? "required" : undefined, typeName(child)].filter((part) => part !== undefined).join("; ");
+      const inner = withoutNull(child);
+      return [
+        `${indent}  ${key} (${about})${child.description === undefined ? "" : `: ${child.description}`}`,
+        ...inner === undefined ? [] : shapeLines(inner, `${indent}    `)
+      ];
+    })
+  ];
 }
 function singular(field) {
   return field.endsWith("s") ? field.slice(0, -1) : field;
@@ -15227,10 +15280,17 @@ function flagTable(tool, fields) {
         field,
         action: "json",
         value: "<json>",
-        text: `Every option as a JSON list of {label, description?}, in place of --${singular(name)}.`
+        text: [`Every option as a JSON list, in place of --${singular(name)}.`, ...info.shape].join(`
+`)
       });
     } else if (kind === "json") {
-      add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
+      add(`--${name}-json`, {
+        field,
+        action: "json",
+        value: "<json>",
+        text: [about, ...info.shape].filter((line) => line !== "").join(`
+`)
+      });
       add(`--${name}-json-file`, {
         field,
         action: "json-file",
@@ -15508,7 +15568,8 @@ function commandHelp(tool) {
     surface.spec.description,
     "",
     "Flags:",
-    ...commandFlagTable(tool).flatMap((row) => row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, `      ${row.text}`]),
+    ...commandFlagTable(tool).flatMap((row) => row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, ...row.text.split(`
+`).map((line) => `      ${line}`)]),
     "",
     `Example: ${commandLine(tool, surface.spec.example)}`,
     ""
@@ -18511,16 +18572,11 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const byId = artifacts.find((candidate) => candidate.id === artifactReference);
   if (byId !== undefined)
     return byId;
-  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
-  if (bySlug !== undefined) {
-    const named = byName.filter((candidate) => candidate.id !== bySlug.id && candidate.kind === "doc");
-    if (named.length > 0) {
-      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
-    }
+  if (bySlug !== undefined)
     return bySlug;
-  }
+  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -18575,10 +18631,10 @@ async function documentTargets(client, resolution) {
   };
 }
 var documentHintLimit = 8;
-function documentReferenceProblem(reference, documents, owner, use) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => use === "id" ? `${document.id} (${document.slug}, ${document.name})` : `${document.slug} (${document.name})`);
+function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
+  const hints = documents.slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return use === undefined ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}` : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
+  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
