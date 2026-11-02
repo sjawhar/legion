@@ -231,7 +231,7 @@ func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 }
 
 // peakRuns is how many fresh servers peaksAboveIdle measures a request on.
-const peakRuns = 3
+const peakRuns = 5 // scratch: five runs
 
 // peaksAboveIdle runs during on runs fresh servers, each started for it and stopped after, and
 // returns each server's peak above idle. One run's peak is the memory the request holds plus the
