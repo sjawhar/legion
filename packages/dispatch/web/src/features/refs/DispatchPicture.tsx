@@ -70,7 +70,7 @@ function BlockPicture({
       if (!isPlainClick(event)) return;
       event.preventDefault();
       event.stopPropagation();
-      lightbox = openPictureLightbox(element.ownerDocument, src, caption);
+      lightbox = openPictureLightbox(element.ownerDocument, src, caption) ?? lightbox;
     };
     element.addEventListener("click", open);
     return () => {
@@ -99,7 +99,8 @@ function BlockPicture({
  * click; `inline` (a one-line place: an option label, a clamped preview) shows the 40 px thumbnail
  * beside its caption. Until a version-less source's summary is read, and for a target that is no
  * picture the browser can draw - a document or another file referenced with the picture syntax,
- * a version whose bytes fail - it reads as a plain reference to it, its `RefLink`.
+ * a version whose bytes fail - it reads as a plain reference to it, its `RefLink`. A failed load
+ * is that version's: a newer latest version draws again.
  */
 export function DispatchPicture({
   caption,
@@ -110,7 +111,7 @@ export function DispatchPicture({
   route: DispatchReferenceRoute;
   variant: "block" | "inline";
 }): ReactNode {
-  const [failed, setFailed] = useState(false);
+  const [failedSrc, setFailedSrc] = useState<string>();
   const named = referencedArtifact(route);
   const pinned = named?.version;
   const latest = useReferenceTarget(
@@ -123,7 +124,7 @@ export function DispatchPicture({
       : pinned === undefined
         ? latest
         : artifactVersionPath(named.owner, named.slug, pinned);
-  if (failed || src === undefined) {
+  if (src === undefined || src === failedSrc) {
     return <RefLink route={route} />;
   }
   return variant === "inline" ? (
@@ -132,12 +133,12 @@ export function DispatchPicture({
         alt=""
         className={pictureThumbnailClassName}
         loading="lazy"
-        onError={() => setFailed(true)}
+        onError={() => setFailedSrc(src)}
         src={src}
       />{" "}
       {caption}
     </>
   ) : (
-    <BlockPicture caption={caption} onError={() => setFailed(true)} src={src} />
+    <BlockPicture caption={caption} onError={() => setFailedSrc(src)} src={src} />
   );
 }

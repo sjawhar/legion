@@ -173,6 +173,38 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  test("a version-less picture whose latest version fails to load draws the next version", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />
+      </QueryClientProvider>
+    );
+
+    try {
+      const v2 = await within(view.container).findByRole("img", { name: "shot.png" });
+      fireEvent.error(v2);
+      await waitFor(() =>
+        expect(within(view.container).queryByRole("img", { name: "shot.png" })).toBeNull()
+      );
+      // An upload of version 3 refreshes the summary, as its event does.
+      act(() => {
+        queryClient.setQueryData(
+          ["issue-summary", "CORE-1"],
+          issueSummary([{ ...picture, latest_version: 3 }])
+        );
+      });
+      const v3 = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(v3.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
   test("a picture line that pins no version and names a document reads as its reference", async () => {
     const notes: IssueReferenceSummaryDocument = {
       id: "artifact-notes",

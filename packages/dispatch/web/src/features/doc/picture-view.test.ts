@@ -257,6 +257,46 @@ test("destroying the view closes the full-size layer its picture opened", () => 
   expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
 });
 
+test("only the picture that opened the full-size layer closes it", () => {
+  const view = (src: string) => pictureView(picture(src, "shot.png"), document, noCaret, noWatch);
+  const first = view("dispatch://CORE-1/artifact/shot-png@v1");
+  const second = view("dispatch://CORE-1/artifact/shot-png@v2");
+  const click = () => new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+  pictureOf(first.dom as HTMLElement).dispatchEvent(click());
+  // A click that reaches the second picture while the first's layer is open opens nothing.
+  pictureOf(second.dom as HTMLElement).dispatchEvent(click());
+  expect(document.querySelectorAll('[data-testid="picture-lightbox"]')).toHaveLength(1);
+
+  second.destroy?.();
+  expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+  first.destroy?.();
+  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+});
+
+test("a replaced version's late load error leaves the newer picture, and a failed load draws again on its next report", () => {
+  const latest = fakeWatch("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
+    document,
+    noCaret,
+    latest.watch
+  );
+  const dom = view.dom as HTMLElement;
+  const v3 = pictureOf(dom);
+
+  latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
+  v3.dispatchEvent(new Event("error"));
+  const v4 = pictureOf(dom);
+  expect(v4.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
+
+  v4.dispatchEvent(new Event("error"));
+  expect(dom.querySelector("img")).toBeNull();
+  latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
+  expect(pictureOf(dom).getAttribute("src")).toBe(
+    "/api/v1/issues/CORE-1/artifacts/shot-png/versions/4"
+  );
+});
+
 test("a plain click on a picture opens it at full size; a modified click does not", () => {
   const img = pictureOf(wrapper("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"));
 

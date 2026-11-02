@@ -17,20 +17,20 @@ export function isPlainClick(event: MouseEvent): boolean {
  * Opens the picture at `src` at full size over the page, in a modal `<dialog>` appended to the
  * body: as large as its own pixels, never larger than the screen. A click anywhere or Escape
  * closes it, and the browser gives the focus back to what held it. Only one is open at a time: a
- * second call while one is open (a click that reached a picture before the first layer covered
- * it) answers the open one. Plain DOM, so the rendered bodies' `DispatchPicture` and the document
- * editors' picture node view open the same layer. The bytes route serves a picture as an
- * attachment, so opening its URL in a tab would download it; the `<img>` here draws it as the
- * page's own pictures do.
+ * call while one is open (a click that reached a picture before the first layer covered it)
+ * opens nothing and answers undefined, so only the caller that opened the layer holds it and
+ * closes it when its picture leaves the page. Plain DOM, so the rendered bodies'
+ * `DispatchPicture` and the document editors' picture node view open the same layer. The bytes
+ * route serves a picture as an attachment, so opening its URL in a tab would download it; the
+ * `<img>` here draws it as the page's own pictures do.
  */
 export function openPictureLightbox(
   document: Document,
   src: string,
   caption: string
-): HTMLDialogElement {
-  const open = document.querySelector<HTMLDialogElement>('dialog[data-testid="picture-lightbox"]');
-  if (open !== null) {
-    return open;
+): HTMLDialogElement | undefined {
+  if (document.querySelector('dialog[data-testid="picture-lightbox"]') !== null) {
+    return undefined;
   }
   const dialog = document.createElement("dialog");
   dialog.className = lightboxClassName;

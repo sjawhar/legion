@@ -91,7 +91,11 @@ export function pictureView(
   dom.dataset.dispatchDocPicture = buildDispatchReference(route);
   let link: HTMLAnchorElement | undefined;
   let lightbox: HTMLDialogElement | undefined;
+  // The path the wrapper shows a picture of, undefined while it shows the link: a report of the
+  // same path is skipped, and one after a failed load draws again.
+  let shown: string | undefined;
   const showLink = () => {
+    shown = undefined;
     link = fallbackLink(route, document, placeCaretAfter);
     dom.replaceChildren(link);
   };
@@ -101,15 +105,19 @@ export function pictureView(
     img.setAttribute("loading", "lazy");
     img.className = pictureClassName;
     // The listener and the picture's place in the wrapper come before `src`, so an error the
-    // browser raises at once is caught and replaces the picture rather than preceding it.
-    img.addEventListener("error", showLink);
+    // browser raises at once is caught and replaces the picture rather than preceding it. A
+    // picture a newer version already replaced falls back to nothing.
+    img.addEventListener("error", () => {
+      if (img.parentNode === dom) showLink();
+    });
     // ProseMirror selects the node on mousedown and mouseup; the click after them opens it.
     img.addEventListener("click", (event) => {
       if (!isPlainClick(event)) return;
       event.preventDefault();
-      lightbox = openPictureLightbox(document, src, picture.caption);
+      lightbox = openPictureLightbox(document, src, picture.caption) ?? lightbox;
     });
     link = undefined;
+    shown = src;
     dom.replaceChildren(img);
     img.setAttribute("src", src);
   };
@@ -119,11 +127,9 @@ export function pictureView(
   } else if (named.version !== undefined) {
     showPicture(artifactVersionPath(named.owner, named.slug, named.version));
   } else {
-    let shown: string | undefined;
     showLink();
     stopWatching = watchPicture(route, (src) => {
       if (src === shown) return;
-      shown = src;
       if (src === undefined) showLink();
       else showPicture(src);
     });
