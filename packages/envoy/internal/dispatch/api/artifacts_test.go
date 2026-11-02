@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -536,6 +537,64 @@ func TestMissingIssueDocumentRouteListsItsSlugsAndNames(t *testing.T) {
 	}](t, response)
 	if response.Code != http.StatusNotFound || !strings.Contains(raw, `"code":"ARTIFACT_NOT_FOUND"`) || body.Error != want {
 		t.Fatalf("missing document route: status=%d body=%s, want 404 %q", response.Code, raw, want)
+	}
+}
+
+// TestMissingDocumentOnABusyOwnerNamesTheClosestAndCountsTheRest holds the hint for an owner with
+// more documents than it lists: the documents whose slug or filename is nearest the missing
+// reference come first, the newest fill the rest, and the hint says how many the owner holds and
+// which route lists them all.
+func TestMissingDocumentOnABusyOwnerNamesTheClosestAndCountsTheRest(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	names := []string{"prediction-P1.md"}
+	for index := range 10 {
+		names = append(names, fmt.Sprintf("notes-%d.md", index))
+	}
+	for _, name := range names {
+		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+			"name": name, "content": "# " + name + "\n",
+		}, "alice")
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create %s: status=%d body=%s", name, created.Code, created.Body.String())
+		}
+	}
+	for index := range 11 {
+		createProjectDocument(t, handler, "TEST", fmt.Sprintf("runbook-%d.md", index), "# Runbook\n")
+	}
+
+	newest := func(prefix string, from, to int) string {
+		var labels []string
+		for index := from; index >= to; index-- {
+			labels = append(labels, fmt.Sprintf("%s-%d-md (%s-%d.md)", prefix, index, prefix, index))
+		}
+		return strings.Join(labels, ", ")
+	}
+	for _, test := range []struct {
+		target string
+		want   string
+	}{
+		{
+			target: "/api/v1/issues/" + issue.Key + "/artifacts/prediction-P1-md",
+			want: `document "prediction-P1-md" not found by slug; this issue's 12 documents include: ` +
+				"prediction-p1-md (prediction-P1.md), " + newest("notes", 9, 3) +
+				"; GET /api/v1/issues/" + issue.Key + "/artifacts lists them all",
+		},
+		{
+			target: "/api/v1/projects/TEST/artifacts/Runbook-2-md",
+			want: `document "Runbook-2-md" not found by slug; this project's 11 documents include: ` +
+				"runbook-2-md (runbook-2.md), " + newest("runbook", 9, 3) +
+				"; GET /api/v1/projects/TEST/artifacts?unlinked=true lists them all",
+		},
+	} {
+		response := dispatchRequest(t, handler, http.MethodGet, test.target, nil, "alice")
+		raw := response.Body.String()
+		body := decodeBody[struct {
+			Error string `json:"error"`
+		}](t, response)
+		if response.Code != http.StatusNotFound || body.Error != test.want {
+			t.Fatalf("missing document %s: status=%d body=%s\nwant 404 %q", test.target, response.Code, raw, test.want)
+		}
 	}
 }
 

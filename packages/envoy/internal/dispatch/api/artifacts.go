@@ -15,6 +15,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1294,19 +1295,121 @@ func (s *server) loadDocumentReferences(ctx context.Context, q queryer, target a
 	return documents, nil
 }
 
+// documentReferenceError refuses a reference that names none of the owner's documents. An owner
+// with more documents than the hint lists (documentHintLimit) is named with its count, the
+// documents nearest the reference first (documentsNearest), and the route that lists them all.
 func documentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {
 	scope := "this project's"
+	everyDocument := "/api/v1/projects/" + target.Project + "/artifacts?unlinked=true"
 	if target.IssueKey != nil {
 		scope = "this issue's"
+		everyDocument = "/api/v1/issues/" + *target.IssueKey + "/artifacts"
+	}
+	if len(documents) <= documentHintLimit {
+		return errorf(
+			http.StatusNotFound,
+			"ARTIFACT_NOT_FOUND",
+			`document %q not found by slug; %s documents: %s`,
+			reference,
+			scope,
+			documentReferenceLabels(documents),
+		)
 	}
 	return errorf(
 		http.StatusNotFound,
 		"ARTIFACT_NOT_FOUND",
-		`document %q not found by slug; %s documents: %s`,
+		`document %q not found by slug; %s %d documents include: %s; GET %s lists them all`,
 		reference,
 		scope,
-		documentReferenceLabels(documents),
+		len(documents),
+		documentReferenceLabels(documentsNearest(reference, documents)),
+		everyDocument,
 	)
+}
+
+// documentsNearest orders documents, given oldest first, for a hint about reference: those whose
+// slug or filename is close to it (documentCloseness) first, nearest first, then every other one,
+// each group newest first. envoy-client's documentsNearest orders an issue's documents by the
+// same rule for the hint the dispatch command gives.
+func documentsNearest(reference string, documents []model.Artifact) []model.Artifact {
+	type ranked struct {
+		document model.Artifact
+		index    int
+		distance int
+		near     bool
+	}
+	rankedDocuments := make([]ranked, len(documents))
+	for index, document := range documents {
+		distance, near := documentCloseness(reference, document.Slug, document.Name)
+		rankedDocuments[index] = ranked{document: document, index: index, distance: distance, near: near}
+	}
+	slices.SortStableFunc(rankedDocuments, func(a, b ranked) int {
+		if a.near != b.near {
+			if a.near {
+				return -1
+			}
+			return 1
+		}
+		if a.near && a.distance != b.distance {
+			return a.distance - b.distance
+		}
+		return b.index - a.index
+	})
+	ordered := make([]model.Artifact, len(rankedDocuments))
+	for index, document := range rankedDocuments {
+		ordered[index] = document.document
+	}
+	return ordered
+}
+
+// documentCloseness compares a reference with a document's slug and filename, letter case
+// ignored: the smaller edit distance of the two, and whether the document is close to it - within
+// a third of the reference's length (at least 2 edits), or one holding the other where the one held
+// is at least 4 characters long.
+func documentCloseness(reference, slug, name string) (int, bool) {
+	wanted := []rune(strings.ToLower(reference))
+	limit := max(2, len(wanted)/3)
+	distance := limit + 1
+	contained := false
+	for _, candidate := range []string{slug, name} {
+		label := []rune(strings.ToLower(candidate))
+		distance = min(distance, boundedEditDistance(wanted, label, limit))
+		if (len(wanted) >= 4 && strings.Contains(string(label), string(wanted))) ||
+			(len(label) >= 4 && strings.Contains(string(wanted), string(label))) {
+			contained = true
+		}
+	}
+	return distance, contained || distance <= limit
+}
+
+// boundedEditDistance is the Levenshtein distance between a and b in characters, or limit+1 once
+// it is known to be more than limit.
+func boundedEditDistance(a, b []rune, limit int) int {
+	if len(a)-len(b) > limit || len(b)-len(a) > limit {
+		return limit + 1
+	}
+	previous := make([]int, len(b)+1)
+	current := make([]int, len(b)+1)
+	for j := range previous {
+		previous[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		current[0] = i
+		smallest := current[0]
+		for j := 1; j <= len(b); j++ {
+			substitution := previous[j-1]
+			if a[i-1] != b[j-1] {
+				substitution++
+			}
+			current[j] = min(previous[j]+1, current[j-1]+1, substitution)
+			smallest = min(smallest, current[j])
+		}
+		if smallest > limit {
+			return limit + 1
+		}
+		previous, current = current, previous
+	}
+	return min(previous[len(b)], limit+1)
 }
 
 func ambiguousDocumentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {
