@@ -69,6 +69,7 @@ jobs:
   build:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -125,6 +126,7 @@ jobs:
     needs: build
     if: always() && needs.build.result == 'success' && needs.build.outputs.changed == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # actions: write is for `gh workflow run`, which starts the fresh run; the push itself uses the
     # deploy key, held only by the "Land the build on main" step's env.
     permissions:

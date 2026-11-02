@@ -11,6 +11,7 @@ import {
   patchIssue,
   snoozeAsk,
 } from "./api";
+import { selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -122,30 +123,20 @@ test("groups an issue and document's asks while rows remain the flat keyboard li
       page.locator(`[data-inbox-group-header="issue:${singletonIssue.key}"]`)
     ).toHaveCount(0);
 
+    // The reading column follows the list's one order: the Inbox selects its first row, `j`
+    // walks down it and `k` walks back up, bands, groups and all.
     const expectedForward = await inboxRows(page);
     await page.locator("body").focus();
-    const forward: string[] = [];
-    for (const _ of expectedForward) {
-      await page.keyboard.press("j");
-      forward.push(
-        await page.evaluate(() => document.activeElement?.getAttribute("data-inbox-row") ?? "")
-      );
+    for (const [index, id] of expectedForward.entries()) {
+      if (index > 0) await page.keyboard.press("j");
+      await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", id);
     }
-    expect(forward).toEqual(expectedForward);
 
     const expectedBackward = [...expectedForward].reverse();
-    await page.evaluate(() => {
-      const active = document.activeElement;
-      if (active instanceof HTMLElement) active.blur();
-    });
-    const backward: string[] = [];
-    for (const _ of expectedBackward) {
-      await page.keyboard.press("k");
-      backward.push(
-        await page.evaluate(() => document.activeElement?.getAttribute("data-inbox-row") ?? "")
-      );
+    for (const [index, id] of expectedBackward.entries()) {
+      if (index > 0) await page.keyboard.press("k");
+      await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", id);
     }
-    expect(backward).toEqual(expectedBackward);
   } finally {
     await alice.close();
   }

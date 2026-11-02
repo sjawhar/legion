@@ -25,6 +25,63 @@ type Range struct {
 var ErrTargetNotFound = errors.New("target not found")
 var ErrTargetSpansBlocks = errors.New("target spans textblocks")
 
+// ErrMarkNotAllowed is the refusal of a mark on text that stands where the schema allows no mark of
+// its type: an ask's in a code block, or any anchor's in front matter. The refusal is a
+// *MarkNotAllowedError, which is ErrSchema too, so a caller that only knows ErrSchema still sees
+// it, and one that wrote the text itself can tell it apart from a fault of the document or the
+// server.
+var ErrMarkNotAllowed = errors.New("mark not allowed on this text")
+
+// MarkNotAllowedError is MarkRange's refusal of Mark on text in Textblock, the textblock holding the
+// text: "code_block", or "" for text no paragraph, heading or code block holds.
+type MarkNotAllowedError struct {
+	Mark      string
+	Textblock string
+	// At is where the text run holding the refused text begins in the document - its block's whole
+	// text, not where the refused range starts. A code block or the front matter holds its text as
+	// one run, so two refusals with the same Textblock and At are one place, and two with different
+	// At are two places of one kind.
+	At int
+}
+
+func (e *MarkNotAllowedError) Error() string {
+	return fmt.Sprintf("%s: mark %q is not allowed in %s", ErrSchema, e.Mark, e.Place())
+}
+
+// Is reports err as ErrMarkNotAllowed and as ErrSchema.
+func (e *MarkNotAllowedError) Is(target error) bool {
+	return target == ErrMarkNotAllowed || target == ErrSchema
+}
+
+// Place names, for a person, where the refused text stands: "a code block", or "the front matter"
+// for text no textblock holds, since in a document inside the schema only front matter holds text
+// outside a paragraph, heading or code block.
+func (e *MarkNotAllowedError) Place() string {
+	singular, _ := e.place()
+	return singular
+}
+
+// PlacePlural names several places of the kind the refused text stands in, for a count to stand
+// before: "code blocks". It is empty where a document inside the schema holds one place of the
+// kind at most - the front matter - so a caller counting the places a quote landed in names that
+// one as Place names it however often the quote landed there.
+func (e *MarkNotAllowedError) PlacePlural() string {
+	_, plural := e.place()
+	return plural
+}
+
+// place is where the refused text stands, as a person says it of one such place and of several,
+// held as one mapping so the singular and the plural never name different things.
+func (e *MarkNotAllowedError) place() (singular, plural string) {
+	switch e.Textblock {
+	case "":
+		return "the front matter", ""
+	case "code_block":
+		return "a code block", "code blocks"
+	}
+	return e.Textblock, e.Textblock + "s"
+}
+
 // ErrQuoteNotFound reports a quote miss with up to three closest rendered textblocks, in
 // document order among equals, and how many places the quote did match — nonzero only when an
 // occurrence was out of range. It unwraps ErrTargetNotFound so callers can preserve their
@@ -104,12 +161,17 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 	return NewQuoteFinder(doc).Find(quote, occurrence, near)
 }
 
-// QuoteFinder answers FindQuote for many quotes over one document. It validates the document and
-// flattens its text once, at its first Find, and every later Find reuses that text and the forms
-// derived from it, so a write that resolves many quotes against one tree walks it once rather than
-// once a quote. The document must not change while the finder is in use.
+// QuoteFinder answers FindQuote for many quotes over one document. It flattens the document's
+// text once, at its first match (Find or NearestFirst), and every later match reuses that text and
+// the forms derived from it, so a write that resolves many quotes against one tree walks it once
+// rather than once a quote. A finder from NewQuoteFinder validates the document there too, at that
+// first match; one from ValidDocument.QuoteFinder holds a tree validated already and never
+// validates it again. The document must not change while the finder is in use.
 type QuoteFinder struct {
-	doc      *Node
+	doc *Node
+	// valid says the document was validated before the finder was made (ValidDocument.QuoteFinder),
+	// so the first match of a quote flattens its text without validating it again.
+	valid    bool
 	prepared bool
 	err      error
 	text     flattenedText
@@ -120,50 +182,25 @@ func NewQuoteFinder(doc *Node) *QuoteFinder {
 	return &QuoteFinder{doc: doc}
 }
 
+// QuoteFinder is a finder over d's tree whose first match does not validate it again; every answer
+// is NewQuoteFinder's for the same tree. The zero ValidDocument holds no tree, so its finder
+// answers FindQuote's error for a nil document.
+func (d ValidDocument) QuoteFinder() *QuoteFinder {
+	return &QuoteFinder{doc: d.doc, valid: true}
+}
+
 // Find is FindQuote(doc, quote, occurrence, near): the same range or the same error.
 func (f *QuoteFinder) Find(quote string, occurrence, near *int) (Range, error) {
-	return f.find(quote, occurrence, near, true)
-}
-
-// FindDiscardingMiss is Find for a caller that drops a miss: where Find returns an
-// *ErrQuoteNotFound, it returns ErrTargetNotFound itself, without ranking the document's blocks
-// for the nearest ones, which costs another walk of the document a miss. Every other result is
-// Find's.
-func (f *QuoteFinder) FindDiscardingMiss(quote string, occurrence, near *int) (Range, error) {
-	return f.find(quote, occurrence, near, false)
-}
-
-func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss bool) (Range, error) {
-	if f.doc == nil {
-		return Range{}, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
-	}
-	if !f.prepared {
-		f.prepared = true
-		if f.err = f.doc.Validate(); f.err == nil {
-			f.text = buildFlattenedText(f.doc)
-		}
-	}
-	if f.err != nil {
-		return Range{}, f.err
+	matches, err := f.matches(quote)
+	if err != nil {
+		return Range{}, err
 	}
 	doc, text := f.doc, f.text
-	var matches []quoteMatch
-	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
-		matches = headingQuoteMatches(doc, text, quote[len(marker):])
-	} else {
-		matches = quoteMatches(text, quote)
-	}
 	if len(matches) == 0 {
-		if !describeMiss {
-			return Range{}, ErrTargetNotFound
-		}
 		return Range{}, quoteNotFound(doc, quote)
 	}
 	if occurrence != nil {
 		if *occurrence < 0 || *occurrence >= len(matches) {
-			if !describeMiss {
-				return Range{}, ErrTargetNotFound
-			}
 			miss := quoteNotFound(doc, quote)
 			var missing *ErrQuoteNotFound
 			if errors.As(miss, &missing) {
@@ -177,16 +214,9 @@ func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss boo
 		return matches[0].Range, nil
 	}
 	if near != nil {
-		best := matches[0]
-		bestDistance := distance(best.From, *near)
-		for _, match := range matches[1:] {
-			candidateDistance := distance(match.From, *near)
-			if candidateDistance < bestDistance || (candidateDistance == bestDistance && match.From < best.From) {
-				best = match
-				bestDistance = candidateDistance
-			}
-		}
-		return best.Range, nil
+		// MinFunc returns the first least match, which nearerFirst's earlier-of-two-as-near tie
+		// makes the first NearestFirst lists.
+		return slices.MinFunc(matches, nearerFirst(*near)).Range, nil
 	}
 
 	candidates := make([]Candidate, 0, len(matches))
@@ -197,6 +227,64 @@ func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss boo
 		})
 	}
 	return Range{}, &ErrTargetAmbiguous{Target: quote, Candidates: candidates}
+}
+
+// NearestFirst is every range quote matches, as Find matches it, ordered as Find with near chooses
+// among them: the nearest to near first, and of two as near, the earlier. Find with near returns
+// its first. A quote that matches nothing is ErrTargetNotFound itself, without ranking the
+// document's blocks for the nearest ones the way Find's miss does, which costs another walk of the
+// document: a caller that drops the miss pays nothing to describe it. A caller whose first choice
+// cannot carry what it writes there takes the next.
+func (f *QuoteFinder) NearestFirst(quote string, near int) ([]Range, error) {
+	matches, err := f.matches(quote)
+	if err != nil {
+		return nil, err
+	}
+	if len(matches) == 0 {
+		return nil, ErrTargetNotFound
+	}
+	slices.SortFunc(matches, nearerFirst(near))
+	ranges := make([]Range, len(matches))
+	for index, match := range matches {
+		ranges[index] = match.Range
+	}
+	return ranges, nil
+}
+
+// nearerFirst orders two matches of one quote as Find with near chooses between them: the nearer to
+// near first, and of two as near, the earlier. NearestFirst sorts by it and Find takes its least,
+// so the range Find chooses and the first NearestFirst lists are one rule, held in one place.
+func nearerFirst(near int) func(left, right quoteMatch) int {
+	return func(left, right quoteMatch) int {
+		if byDistance := distance(left.From, near) - distance(right.From, near); byDistance != 0 {
+			return byDistance
+		}
+		return left.From - right.From
+	}
+}
+
+// matches is every match of quote in the finder's document, preparing the document at the first
+// call: a heading quote's headings, otherwise the plain matcher cascade's.
+func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
+	if f.doc == nil {
+		return nil, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
+	}
+	if !f.prepared {
+		f.prepared = true
+		if !f.valid {
+			f.err = f.doc.Validate()
+		}
+		if f.err == nil {
+			f.text = buildFlattenedText(f.doc)
+		}
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
+		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
+	}
+	return quoteMatches(f.text, quote), nil
 }
 
 // TargetSpansBlocks reports whether r is not wholly contained by one
@@ -331,10 +419,53 @@ func (t flattenedText) normalizedForm() ([]rune, []range16) {
 	return t.forms.normalized, t.forms.spans
 }
 
+// flattenedTextSize is how much buildFlattenedText's second pass appends over doc: units is how
+// many UTF-16 units it writes, which is one positions entry and one marks entry each, and bytes is
+// how many bytes the builder holds. It walks the document once more (Walk), measuring no node and
+// allocating nothing, which costs less than the doubling the appends pay for without it.
+//
+// Per text node the count is exact. nulAsReplacement writes each U+0000 as U+FFFD, three bytes in
+// place of one but one UTF-16 unit either way, so only the byte count moves for it; len16 counts
+// the units of the text as it stands, replaced or not.
+//
+// The gaps are counted high: the second pass writes a space, one position and one mark only
+// between two text nodes whose ProseMirror ranges do not touch, and this counts one gap for every
+// text node after the first.
+//
+// The count sets capacity alone (Grow, make with a capacity), so it decides how often the build
+// grows a buffer and nothing about what the build writes: a count that comes out low costs a
+// regrowth, and one that comes out high leaves capacity unused. Low is possible for a text holding
+// invalid UTF-8, where len counts a stray byte once and the build writes the U+FFFD that ranging
+// over it yields, three bytes.
+func flattenedTextSize(doc *Node) (units, bytes int) {
+	texts := 0
+	Walk(doc, func(node *Node) bool {
+		if node.Type != "text" {
+			return true
+		}
+		texts++
+		units += len16(node.Text)
+		bytes += len(node.Text) + 2*strings.Count(node.Text, "\x00")
+		return true
+	})
+	if texts > 0 {
+		units += texts - 1
+		bytes += texts - 1
+	}
+	return units, bytes
+}
+
+// buildFlattenedText reads doc's inline text into one string with the index the matchers read it
+// through. The string and the index are allocated once, at the size the document measures
+// (flattenedTextSize), rather than grown: growing the index copied the whole of it at every
+// doubling, which on a document whose paragraph is a mebibyte long was most of what a cold
+// one-word edit allocated (sjawhar/legion#2522).
 func buildFlattenedText(doc *Node) flattenedText {
+	units, bytes := flattenedTextSize(doc)
 	var out strings.Builder
-	var positions []int
-	var marks []inlineMarkup
+	out.Grow(bytes)
+	positions := make([]int, 0, units)
+	marks := make([]inlineMarkup, 0, units)
 	lastEnd := -1
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type != "text" {
@@ -955,12 +1086,19 @@ type MarkRef struct {
 	ID   string
 }
 
+// Marked is a mark identity in the tree with the `by` attribute its first run carries, empty
+// when it has none.
+type Marked struct {
+	MarkRef
+	By string
+}
+
 // ListMarks returns each distinct Proof or Dispatch mark identity in document
-// order. doc must be a tree Validate accepts: the walk descends into every
-// node's children and computes no positions.
-func ListMarks(doc *Node) []MarkRef {
+// order, with the author its first run names. doc must be a tree Validate accepts: the walk
+// descends into every node's children and computes no positions.
+func ListMarks(doc *Node) []Marked {
 	seen := make(map[MarkRef]struct{})
-	var refs []MarkRef
+	var marked []Marked
 	Walk(doc, func(node *Node) bool {
 		if node.Type != "text" {
 			return true
@@ -978,11 +1116,12 @@ func ListMarks(doc *Node) []MarkRef {
 				continue
 			}
 			seen[ref] = struct{}{}
-			refs = append(refs, ref)
+			by, _ := mark.Attrs["by"].(string)
+			marked = append(marked, Marked{MarkRef: ref, By: by})
 		}
 		return true
 	})
-	return refs
+	return marked
 }
 
 // MarkAttrs returns a copy of the attributes on the first matching mark run: FindMarks' Attrs,
@@ -1063,7 +1202,7 @@ func (w *MarkWriter) Mark(txn *crdt.Transaction, r Range, mark Mark) error {
 	last := first
 	for ; last < len(spans) && spans[last].From < r.To; last++ {
 		if !markAllowedInTextblock(mark.Type, spans[last].textblock) {
-			return fmt.Errorf("%w: mark %q is not allowed in %s", ErrSchema, mark.Type, spans[last].textblock)
+			return &MarkNotAllowedError{Mark: mark.Type, Textblock: spans[last].textblock, At: spans[last].From}
 		}
 	}
 	if first == last {

@@ -53,6 +53,7 @@ const schemas: Record<string, z.ZodType> = {
   "controller-github-credential.json": LegionControllerCredentialResponse,
   "error.json": LegionErrorResponse,
   "operator-claim.json": LegionOperatorClaimResponse,
+  "operator-forget-session.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
   "grant.json": LegionGrantResponse,
   "handoff-complete.json": LegionHandoffCompleteResponse,
@@ -291,6 +292,50 @@ test("a check report is a completion without a commit", () => {
   ).toBeFalse();
 });
 
+// A file-backed phase's completion names the Dispatch handoff record the worker wrote: the
+// planner, tester and reviewer report it alone, the implementer with the commit it pushed. A record
+// is named by a non-empty id and a positive version.
+test("a phase completion names its handoff record", () => {
+  const planner = {
+    grantId: "grant-208",
+    summary: "Planned.",
+    verdict: "",
+    ready: false,
+    handoffId: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
+    handoffVersion: 1,
+  };
+  expect(LegionHandoffCompleteRequest.safeParse(planner).success).toBeTrue();
+  expect(
+    LegionHandoffCompleteRequest.safeParse({ ...planner, commit: "abc123" }).success
+  ).toBeTrue();
+  expect(LegionHandoffCompleteRequest.safeParse({ ...planner, handoffId: "" }).success).toBeFalse();
+  for (const handoffVersion of [0, -1, 1.5]) {
+    expect(
+      LegionHandoffCompleteRequest.safeParse({ ...planner, handoffVersion }).success
+    ).toBeFalse();
+  }
+});
+
+// The state shows the record a worker's completion of its current file-backed phase named, its id
+// and positive version; a worker that named none shows no field.
+test("the state golden carries a worker's handoff record", () => {
+  const state = fixture("state.json") as {
+    issues: Record<string, { workers: Record<string, { handoffRecord?: unknown }> }>;
+  };
+  const planner = state.issues["LEGION-208"]?.workers.planner;
+  if (planner === undefined) {
+    throw new Error("state fixture lacks LEGION-208's planner");
+  }
+  expect(planner.handoffRecord).toEqual({ id: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", version: 1 });
+
+  planner.handoffRecord = { id: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", version: 0 };
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+  planner.handoffRecord = { id: "", version: 1 };
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+  planner.handoffRecord = undefined;
+  expect(LegionStateResponse.safeParse(state).error?.issues ?? []).toEqual([]);
+});
+
 // An architect's backward move names the issue it moves from accepting; a phase worker's may
 // leave it out, since its grant names its own.
 test("a backward move may name its issue", () => {
@@ -315,7 +360,15 @@ test("every workflow request has a strict schema", () => {
     [
       "handoff complete",
       LegionHandoffCompleteRequest,
-      { grantId: "grant-208", summary: "completed", verdict: "", ready: false, commit: "abc123" },
+      {
+        grantId: "grant-208",
+        summary: "completed",
+        verdict: "",
+        ready: false,
+        commit: "abc123",
+        handoffId: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
+        handoffVersion: 2,
+      },
     ],
     [
       "issue status",
@@ -779,6 +832,87 @@ test("the state golden carries the daemon's settings with no credential, and the
   expect(text).not.toMatch(/BEGIN .*PRIVATE KEY/);
   expect(text).not.toMatch(/postgres:\/\//);
   expect(text).not.toMatch(/:\/\/[^/@\s]+:[^/@\s]+@/);
+});
+
+// The lag of the daemon's durable consumers (contract 43): the golden carries a caught-up consumer,
+// one whose info NATS did not answer and one stalled with messages waiting; a state with no
+// workflow carries an empty list; the oldest and the last handled are null rather than absent, an
+// unknown field and a negative count are refused, and the list cannot be dropped: a plugin from
+// before the field refuses the state, which is what the bump is for.
+test("the state golden carries each durable consumer's lag, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.consumers).toEqual([
+    {
+      name: "legion-go-LEGION-dispatch",
+      waiting: 0,
+      oldestAt: null,
+      oldestAgeSeconds: null,
+      lastHandledAt: "2026-09-22T09:17:50Z",
+      stalled: false,
+    },
+    {
+      name: "legion-go-LEGION-dispatch-server",
+      waiting: 0,
+      oldestAt: null,
+      oldestAgeSeconds: null,
+      lastHandledAt: null,
+      stalled: false,
+      unavailable: "read the consumer's info: context deadline exceeded",
+    },
+    {
+      name: "legion-go-LEGION-github",
+      waiting: 412,
+      oldestAt: "2026-09-22T09:05:34Z",
+      oldestAgeSeconds: 754,
+      lastHandledAt: "2026-09-22T09:16:41Z",
+      stalled: true,
+    },
+  ]);
+  expect(LegionStateResponse.parse(fixture("state-stage3.json")).consumers).toEqual([]);
+
+  const absent = fixture("state.json") as { consumers: Record<string, unknown>[] };
+  delete absent.consumers[0]?.oldestAt;
+  expect(LegionStateResponse.safeParse(absent).success).toBeFalse();
+
+  const unknown = fixture("state.json") as { consumers: Record<string, unknown>[] };
+  unknown.consumers = [{ ...unknown.consumers[0], pending: 3 }];
+  expect(LegionStateResponse.safeParse(unknown).success).toBeFalse();
+
+  const negative = fixture("state.json") as { consumers: Record<string, unknown>[] };
+  negative.consumers = [{ ...negative.consumers[0], waiting: -1 }];
+  expect(LegionStateResponse.safeParse(negative).success).toBeFalse();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.consumers;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
+// Each served repository Dispatch's GitHub App is not known to be installed on (contract 43): the
+// golden carries one with its reason, a state with none carries an empty list, an entry without
+// its reason is refused, and the list cannot be dropped: a plugin from before the field refuses
+// the state.
+test("the state golden names each served repository without the webhook App, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.repositories.withoutWebhookApp).toEqual([
+    {
+      repo: "zeta/tools",
+      reason:
+        "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes",
+    },
+  ]);
+  expect(
+    LegionStateResponse.parse(fixture("state-stage3.json")).repositories.withoutWebhookApp
+  ).toEqual([]);
+
+  const reasonless = fixture("state.json") as {
+    repositories: { withoutWebhookApp: Record<string, unknown>[] };
+  };
+  delete reasonless.repositories.withoutWebhookApp[0]?.reason;
+  expect(LegionStateResponse.safeParse(reasonless).success).toBeFalse();
+
+  const dropped = fixture("state.json") as { repositories: Record<string, unknown> };
+  delete dropped.repositories.withoutWebhookApp;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is

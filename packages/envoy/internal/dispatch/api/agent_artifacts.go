@@ -20,13 +20,15 @@ import (
 // agentOwnsFilesOnly is the refusal of a markdown document uploaded to an agent's conversation.
 const agentOwnsFilesOnly = "an agent's conversation holds files and images; a document belongs to an issue or a project"
 
-// agentArtifactByNameSQL and agentArtifactSlugTakenSQL are an upload's two lookups by owner for an
-// agent's conversation, $1 the session id and $2 the name or the slug. They compare session_id,
-// which artifactOwnerKey's session arm is built from, rather than that expression, which no index
-// holds, so the partial index artifacts_session_id (0071) serves both lookups every upload makes
-// under the conversation's lock instead of a scan of every owner's artifacts.
+// agentArtifactByNameOrSlugSQL and agentArtifactSlugTakenSQL are an upload's two lookups by owner
+// for an agent's conversation, $1 the session id and $2 the name or the slug, read as
+// artifactByNameOrSlugSQL and artifactSlugTakenSQL read theirs. They compare session_id, which
+// artifactOwnerKey's session arm is built from, rather than that expression, which no index holds,
+// so the partial index artifacts_session_id (0071) serves both lookups every upload makes under the
+// conversation's lock instead of a scan of every owner's artifacts.
 const (
-	agentArtifactByNameSQL    = `select ` + artifactColumns + ` from artifacts where session_id = $1 and name = $2`
+	agentArtifactByNameOrSlugSQL = `select ` + artifactColumns + ` from artifacts where session_id = $1 and $2 in (name, slug)
+		order by slug = $2 desc limit 1`
 	agentArtifactSlugTakenSQL = `select exists(select 1 from artifacts where session_id = $1 and slug = $2)`
 )
 
@@ -86,6 +88,12 @@ func (s *server) loadAgentArtifact(ctx context.Context, q queryer, r *http.Reque
 }
 
 // POST /api/v1/agents/{session_id}/artifacts
+//
+// A caller whose credential proved a session reaches this only for its own conversation:
+// withinSessionScope refuses another session's path before the handler runs, so what is left
+// here is the authentication every route makes and the session id's own shape. A person's
+// cookie proves no session and uploads into the conversation it names, which is how a person
+// puts a file in front of an agent.
 func (s *server) uploadAgentArtifact(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return

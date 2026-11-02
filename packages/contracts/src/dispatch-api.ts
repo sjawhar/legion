@@ -30,6 +30,12 @@ export type Actor =
       /** The subject of the verified service token that authenticated the write
        *  (`system:serviceaccount:<namespace>:<name>`); absent under any other bearer. */
       readonly service?: string;
+      /** The one project key the write's credential may write. The server reads it from an
+       *  access token the secrets broker issued for that project and never from a body, as it
+       *  reads `service` from a service token; it is absent under every credential that names
+       *  none, a browser cookie, a personal token and a broker token scoped to its person
+       *  included. */
+      readonly project?: string;
     }
   /** A server-owned writer, such as the architecture importer
    *  (`{kind: "system", id: "architecture-importer"}`). */
@@ -59,15 +65,27 @@ export function serviceSubjectLabel(subject: string): string {
   return subject;
 }
 
-export type BlockAttributeKind = "string" | "bool" | "enum" | "string[]" | "actor" | "timestamp";
+export type BlockAttributeKind =
+  | "string"
+  | "bool"
+  | "enum"
+  | "string[]"
+  | "block[]"
+  | "actor"
+  | "timestamp";
 
 export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";
 
+// A `block[]` attribute points at blocks: canonical block references (parseBlockPointerValue in
+// dispatch-block-ref.ts), each making an edge of the attribute's name (GraphEdgeKind). `targets`,
+// which only a `block[]` attribute carries, limits the types of the blocks it points at; absent
+// or empty, it points at any block.
 export interface BlockAttributeSchema {
   readonly kind: BlockAttributeKind;
   readonly choices?: readonly string[];
   readonly default?: string | boolean | readonly string[];
   readonly server?: boolean;
+  readonly targets?: readonly string[];
 }
 
 export interface BlockTypeSchema {
@@ -237,6 +255,22 @@ export interface WriteAdvice {
    * little of the text before each. Omitted when there are none.
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
+  /**
+   * The approval a document write superseded: the version it stored replaced the one a person
+   * had approved, so that approval is stale until someone approves the new version. A Legion
+   * design gate is such an approval, so this write closed it. Set by a document edit and by an
+   * upload that replaced an existing document, and only on the write that superseded the
+   * approval: a write on a document nobody approved, one whose approval was already stale, and
+   * one whose version carried that approval forward (the approval carry) each omit it.
+   */
+  readonly superseded_approval?: {
+    /** The version a person approved, the one this write superseded. */
+    readonly approved_version: number;
+    /** The version this write stored. */
+    readonly version: number;
+    /** Who gave that approval. */
+    readonly approved_by: string;
+  };
   /**
    * The related-item check (LEGION-550), set on an issue or ask creation: the items
    * most like what was just filed, any past decision that matches, and what the check did
@@ -1049,6 +1083,83 @@ export interface MyRepliesResponse {
   readonly total: number;
   readonly limit: number;
   readonly offset: number;
+}
+
+/** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per
+ *  relation, each spelling the phrase a reader prints: a person answered the session's ask,
+ *  replied in its ask's thread, replied in a comment thread it wrote in, commented on a document it
+ *  wrote, commented on an issue routed to it, mentioned it, sent it a message (direct, on an issue,
+ *  or a broadcast's copy), or replied to its message. Mirrored in Go as the
+ *  `model.SessionAnswerRelation*` constants. */
+export const SESSION_ANSWER_RELATIONS = [
+  "answered_your_ask",
+  "replied_on_your_ask",
+  "replied_in_a_comment_thread",
+  "commented_on_a_document",
+  "commented_on_an_issue",
+  "mentioned_you",
+  "sent_you_a_message",
+  "replied_to_your_message",
+] as const;
+
+export type SessionAnswerRelation = (typeof SESSION_ANSWER_RELATIONS)[number];
+
+/** One thing a person wrote that Dispatch delivered to a session, on
+ *  `GET /api/v1/agents/{session_id}/answers`: an ask's current answer, a comment at its current
+ *  body, or a message. The list holds each `(kind, id)` once, whichever ways it reached the
+ *  session. Mirrors `model.SessionAnswer`. */
+export interface SessionAnswer {
+  /** `answer` is an ask's current answer, `comment` a comment (a reply in an ask's thread
+   *  included), `message` a message. */
+  readonly kind: "answer" | "comment" | "message";
+  /** What the item is to the session. */
+  readonly relation: SessionAnswerRelation;
+  /** The ask's id for an answer, else the comment's or the message's id. */
+  readonly id: string;
+  /** When the person wrote it (RFC 3339, UTC): the current answer's time, or the comment's or the
+   *  message's creation. The window and the order both read it. */
+  readonly at: string;
+  /** When a comment's body was last edited; absent on a comment never edited, and on an answer or
+   *  a message. */
+  readonly edited_at?: string;
+  /** The person who wrote it: the list carries nothing an agent or the system wrote. */
+  readonly author: Extract<Actor, { readonly kind: "user" }>;
+  /** The person's words in full, never cut: the answer's text (`""` when the answer chose options
+   *  only), the comment's current body, or the message's body. */
+  readonly text: string;
+  /** An answer's chosen option labels, in the order the person chose them; absent when it chose
+   *  none, and on a comment or a message. */
+  readonly selected?: string[];
+  /** `true` on an answer when the ask has more than one answer, so this one replaced an earlier
+   *  one; absent otherwise. */
+  readonly replaced?: true;
+  /** The ask the item answers or replies in, with the session's whole question (a reader cuts
+   *  it): present on an answer and on a reply in an ask's thread, absent otherwise. */
+  readonly ask?: { readonly id: string; readonly question: string };
+  /** The issue (key and title) or the project document holding the item; null for a direct
+   *  message, which is on no issue. */
+  readonly owner: OpenAskOwner | null;
+  /** The item's `dispatch://` address (`dispatch://KEY/ask/ID`, `dispatch://KEY/comment/ID`,
+   *  `dispatch://KEY/message/ID`, or `dispatch://PROJECT/artifact/SLUG/ask/ID` and `/comment/ID`
+   *  on a project document); null for a direct message, which has no address. */
+  readonly ref: string | null;
+  /** Relative Dispatch deep link to the item, as `DISPATCH_HREF_REFERENCES` lists the shapes, or
+   *  `/agents/SESSION/live` for a direct message. */
+  readonly href: string;
+}
+
+/** `GET /api/v1/agents/{session_id}/answers`: what people wrote to one session since `since`,
+ *  newest first. Mirrors `model.SessionAnswersResponse`. */
+export interface SessionAnswersResponse {
+  readonly session_id: string;
+  /** The window's start the server applied (RFC 3339, UTC): the request's `since`, or 72 hours
+   *  before the read when it named none. */
+  readonly since: string;
+  /** How many items the window holds, `max_chars` notwithstanding. */
+  readonly total: number;
+  /** Newest first by `at`, then by `id`. With `max_chars`, the list stops after the item whose
+   *  `text` takes the running sum of text lengths past it, so it can be shorter than `total`. */
+  readonly items: SessionAnswer[];
 }
 
 export interface AskOption {
@@ -2026,6 +2137,10 @@ export interface ArtifactReferences {
   readonly referenced_by: ReferencedBy[];
 }
 
+// GraphEdgeKind is an edge's kind: one of the structural kinds, or the name of a typed block's
+// `block[]` attribute (BlockAttributeSchema), whose pointers are edges of that kind. The block
+// schema decides those names (Go's pmdoc.LinkKinds), so any other string is admitted beside the
+// structural ones, which keep their completion; none of them is ever an attribute's name.
 export type GraphEdgeKind =
   | "mentions"
   | "child_of"
@@ -2037,7 +2152,8 @@ export type GraphEdgeKind =
   | "followed_by"
   | "part_of"
   | "depends_on"
-  | "affects";
+  | "affects"
+  | (string & {});
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
@@ -2363,6 +2479,45 @@ export const IssueDeployedEventPayloadSchema = z.strictObject({
 export type IssueDeployedEventPayload = z.infer<typeof IssueDeployedEventPayloadSchema>;
 
 /**
+ * One phase handoff without its body: what `GET /api/v1/issues/{key}/handoffs` lists, newest
+ * first, and what `POST /api/v1/issues/{key}/handoffs/{phase}` answers. `phase` is a lowercase slug
+ * (Legion writes `plan`, `implement`, `test` and `review`), `version` counts from 1 within the
+ * issue and phase, and `author` is the session that wrote it.
+ */
+export interface HandoffSummary {
+  readonly id: string;
+  readonly issue_key: string;
+  readonly phase: string;
+  readonly version: number;
+  readonly author: Actor;
+  readonly created_at: string;
+}
+
+/**
+ * One phase handoff with its body, as `GET /api/v1/issues/{key}/handoffs/{phase}/latest` and
+ * `GET /api/v1/handoffs/{id}` answer it. `body` is the exact text the session wrote: one JSON
+ * object of at most `DISPATCH_HANDOFF_BODY_MAX` bytes, never reformatted.
+ */
+export interface Handoff extends HandoffSummary {
+  readonly body: string;
+}
+
+/**
+ * `handoff.recorded`: a session recorded version `version` of the issue's `phase` handoff, the
+ * record `handoff_id`. It never carries the body; a reader fetches the record by id. Appended in
+ * the write's own transaction and published on the issue's subject as every issue event is.
+ * Strict: the Go writer (`HandoffRecordedEventPayload` in
+ * `packages/envoy/internal/dispatch/model`) emits exactly these three fields.
+ */
+export const HandoffRecordedPayloadSchema = z.strictObject({
+  handoff_id: z.string(),
+  phase: z.string(),
+  version: z.number().int().positive(),
+});
+
+export type HandoffRecordedPayload = z.infer<typeof HandoffRecordedPayloadSchema>;
+
+/**
  * The subject Dispatch announces its server fleet's build on, directly on the bus rather than
  * through the outbox (it is no issue's, document's or project's event), as an Envoy envelope with
  * `source` `dispatch` whose payload is `DispatchServerStartedPayload`. One envelope each time the
@@ -2397,6 +2552,9 @@ interface DispatchEventBase {
   readonly project?: string;
   readonly seq: number;
   readonly actor: Actor;
+  /** Whether the event wakes the issue's route, claimant and authors (`events.Notify`), so an
+   *  agent's own event is not a wake. A reader following an owner topic on the bus skips on the
+   *  published copy's `quiet` instead (`PublishedDispatchEvent`). */
   readonly notify: boolean;
   readonly created_at: string;
 }
@@ -2450,6 +2608,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "issue.deployed";
       readonly payload: IssueDeployedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "handoff.recorded";
+      readonly payload: HandoffRecordedPayload;
     })
   | (DispatchEventBase & {
       readonly type: "artifact.created";
@@ -2617,10 +2779,13 @@ export const AUTH_NO_IDENTITY = "NO_IDENTITY";
 export interface AuthenticatedUser {
   readonly kind: "user";
   readonly login: string;
-  /** The decimal id of the newest event when Dispatch answered. Every read the page makes after
-   *  this answer holds every event at or below it, so the event feed resumes from it on its first
+  /** The decimal id at or below which every event is final (committed or rolled back for good)
+   *  when Dispatch answered. Every read the page makes after this answer holds every event at or
+   *  below it, so the event feed resumes from it on its first
    *  subscription and replays exactly what committed since. Always answered: a server that cannot
-   *  read the head answers `503 EVENT_HEAD_UNAVAILABLE` rather than a whoami without one, and a
+   *  answer the head answers a 503 rather than a whoami without one (`EVENT_HEAD_UNAVAILABLE` while
+   *  no event id is proven final yet, which ends on its own; `EVENT_HEAD_READ_FAILED` when its
+   *  database does not answer), and a
    *  server older than the field serves no `/ws/live` either, so no page of this release ever
    *  reads one of its answers. */
   readonly event_head: string;
@@ -2730,10 +2895,20 @@ export interface ListUsersResponse {
 
 /** GET /api/v1/whoami: a person by lowercase email (`login`), or an agent with its personal
  *  token's owner (a lowercase email) — null under the shared token or a verified service token —
- *  and that service token's subject, null unless one authenticated the request. */
+ *  and that service token's subject, null unless one authenticated the request. `session` is the
+ *  session the credential itself proved, which only an access token the secrets broker issued
+ *  does, and `project` the one project key that credential lets the caller write, null where it
+ *  names none. Both are absent from a Dispatch older than broker-issued tokens, which a client
+ *  reads as an older build rather than as null. */
 export type WhoamiResponse =
   | { readonly kind: "user"; readonly login: string }
-  | { readonly kind: "agent"; readonly owner: string | null; readonly service: string | null };
+  | {
+      readonly kind: "agent";
+      readonly owner: string | null;
+      readonly service: string | null;
+      readonly session?: string | null;
+      readonly project?: string | null;
+    };
 
 export interface CreateAskInput {
   readonly question: string;
@@ -3081,6 +3256,21 @@ export const DispatchEventSchema = z.object({
 });
 
 export type InboundDispatchEvent = z.infer<typeof DispatchEventSchema>;
+
+/**
+ * One event as Dispatch's outbox publishes it to NATS: the event this API serves, plus `quiet`.
+ *
+ * `quiet` is whether the event carries nothing for a reader following its owner topic
+ * (`events.Quiet` in envoy): a delivery receipt, an anchor refresh, settings or per-viewer
+ * bookkeeping, a targeted message its session already had, an ask edit that only moved a version,
+ * or a version nobody named. That is what such a reader skips on, where `notify` answers only
+ * whether the event wakes the issue's route, claimant and authors - false for every event an agent
+ * wrote, so a reader skipping on it drops the activity a session subscribed to the issue asked
+ * for. It is optional because a frame published before Dispatch stated it carries none, and such a
+ * frame is judged by `notify` instead. The API's own event shape carries no `quiet`: the outbox
+ * adds it to the copy it publishes.
+ */
+export type PublishedDispatchEvent = DispatchEvent & { readonly quiet?: boolean };
 
 export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),

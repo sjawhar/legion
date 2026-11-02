@@ -140,7 +140,7 @@ func TestClaudeBridgeExitsOnceTheShimHasReadEveryFrame(t *testing.T) {
 		}
 		types = append(types, frame.Type)
 	}
-	if want := []string{"response", "agent_start", "tool_execution_start", "agent_end"}; !slices.Equal(types, want) {
+	if want := []string{"response", "agent_start", "tool_execution_start", "agent_end", "prompt_result"}; !slices.Equal(types, want) {
 		t.Errorf("the shim read frames %q, want %q:\n%s", types, want, p.logged())
 	}
 	if len(left) > 0 {

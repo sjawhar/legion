@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -16,6 +16,7 @@ import {
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
+import { brokerPage } from "./brokerPage";
 import { CredentialDecisionButtons } from "./CredentialDecisionButtons";
 import { CredentialRecordFacts } from "./CredentialRecordFacts";
 import { credentialRecordQuery } from "./record";
@@ -34,12 +35,16 @@ function CredentialDecision({ decided }: { decided: CredentialDecisionEvent }): 
 }
 
 /**
- * The credential-record approval page: an approver reaches `/credentials/:recordId` from the
- * inbox's credential-requests section (or a shared link), sees the broker's facts and the
- * agent's stated reason, and, for a pending `agent_secret` record, approves or denies it with one
- * click — Dispatch names the viewer's own login, and the broker decides whether it is the
- * record's approver. A `launcher_credential` (machine) record never gets buttons here (ruling
- * 13 - only its typed code selects it); it links to `MachineLoginPage` instead.
+ * The credential-record approval page: an approver reaches `/credentials/:recordId` from a link
+ * made before the Inbox linked the broker, or from a shared one. A secret request is decided on
+ * the secrets broker's own page now, so once the record read names that page this one replaces
+ * the browser's location with it, leaving no Dispatch entry in the history to go back to. A
+ * broker older than that page names none, and the page then does what it did before: it shows the
+ * broker's facts and the agent's stated reason, and for a pending `agent_secret` record approves
+ * or denies it with one click, Dispatch naming the viewer's own login and the broker deciding
+ * whether it is the record's approver. A `launcher_credential` (machine) record never gets
+ * buttons here (ruling 13 - only its typed code selects it); it links to `MachineLoginPage`
+ * instead, and the broker names no page for it.
  */
 export function CredentialRecordPage(): ReactNode {
   const { recordId } = useParams<{ recordId: string }>();
@@ -68,6 +73,18 @@ export function CredentialRecordPage(): ReactNode {
     write: (_variables, bounds) => api.denyCredentialRecord(recordId ?? "", {}, bounds),
   });
 
+  // The forward runs in an effect rather than during the render, because it leaves the
+  // application: replacing the location is a side effect, and a render that performed one would
+  // run it again on every re-render the query makes. `replace` rather than an assignment, so the
+  // back button returns to wherever the person came from rather than to this page, which would
+  // forward them again.
+  const page = brokerPage(query.data?.approve_url);
+  useEffect(() => {
+    if (page !== null) {
+      window.location.replace(page);
+    }
+  }, [page]);
+
   useDocumentTitle("Credential request · Dispatch");
 
   if (recordId === undefined) {
@@ -85,6 +102,20 @@ export function CredentialRecordPage(): ReactNode {
         message="Could not load this credential request."
         onRetry={() => void query.refetch()}
       />
+    );
+  }
+
+  // The effect above is already sending the browser to the broker; this is what a person sees if
+  // the browser has not left yet, and the link is what they follow if it never does.
+  if (page !== null) {
+    return (
+      <p className={textMutedOnCanvas}>
+        This request is decided on the secrets broker.{" "}
+        <a className={`underline ${linkText} ${linkHoverText}`} href={page}>
+          Open its page there
+        </a>
+        .
+      </p>
     );
   }
 

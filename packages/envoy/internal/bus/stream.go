@@ -87,6 +87,26 @@ func ListenerQueue(machineID string) string {
 	return "envoy-listener-" + strings.ReplaceAll(machineID, " ", "-")
 }
 
+// RoleLaneQueue is the queue group every listener subscribes the role lanes in, whatever its
+// machine, so NATS hands each role message to one listener and the holder's stream copy is
+// forwarded once. A listener whose NATS user may not subscribe in it (a hub whose grant predates
+// it) subscribes in its machine's group, ListenerQueue, instead (ConnectRoleLane).
+const RoleLaneQueue = "envoy-roles"
+
+// DeliverSubjectPrefix begins the relay subject a listener publishes a session's consumer
+// messages on, DeliverSubject. No stream subject captures it (StreamCaptures), so a relay frame
+// travels over core NATS and the stream stores nothing twice.
+const DeliverSubjectPrefix = NotificationTopicPrefix + "envoy.deliver."
+
+// DeliverSubject is the relay subject of session sessionID: the subject the listener that owns the
+// session publishes each message of its consumer (SessionConsumerName) on, and the session
+// subscribes to. Every message a session gets travels on it; a plain subscription of the session's
+// own carries only a lane receipt, a live ad-hoc topic and the core fallback ("Session consumers"
+// in packages/envoy/AGENTS.md).
+func DeliverSubject(sessionID string) string {
+	return DeliverSubjectPrefix + sessionID
+}
+
 // ListenerLiveQueue is the queue group the listener of machine machineID subscribes its live lane in
 // (every notifications topic, over core NATS), so NATS hands each message to one of the machine's
 // listeners while a rolling deploy runs two. It must differ from ListenerQueue: NATS merges
@@ -489,15 +509,16 @@ func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfi
 }
 
 // keptSubjects is the subject list the keeper writes: the deployed list, then each of own, this
-// binary's subjects, that the list lacks, that captures no role lane (subjectCapturesRoleLanes) and
-// that overlaps no deployed subject. It only adds: unlike a start (reconcileSubjects) it removes and
-// replaces nothing, so two releases with different subject lists never switch the stream back and
-// forth, and a subject of this binary's that another release's overlapping one replaced stays
-// replaced until this binary's next start.
+// binary's subjects, that the list lacks and that overlaps no deployed subject. It does not check
+// own for a subject that captures a role lane, because no subject this binary compiles captures
+// one, which TestStreamConfigExcludesRoleLanes in stream_config_test.go guarantees. It only adds:
+// unlike a start (reconcileSubjects) it removes and replaces nothing, so two releases with
+// different subject lists never switch the stream back and forth, and a subject of this binary's
+// that another release's overlapping one replaced stays replaced until this binary's next start.
 func keptSubjects(deployed, own []string) []string {
 	kept := slices.Clone(deployed)
 	for _, subject := range own {
-		if subjectCapturesRoleLanes(subject) || slices.ContainsFunc(kept, func(other string) bool { return subjectsOverlap(subject, other) }) {
+		if slices.ContainsFunc(kept, func(other string) bool { return subjectsOverlap(subject, other) }) {
 			continue
 		}
 		kept = append(kept, subject)

@@ -28,8 +28,10 @@ func TestPaneVariableRefusalNamesWhyAndNeverTheValue(t *testing.T) {
 		{"PI_CODING_AGENT_DIR", "/srv/agent", session},
 		{"PI_CONFIG_DIR", ".elsewhere", session},
 		{"CLAUDE_CONFIG_DIR", "/srv/claude", claude},
-		{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0", claude},
 		{"CLAUDE_CODE_DISABLE_CRON", "0", claude},
+		// Claude Code's background tasks are the operator's to set, as its other variables are: the
+		// runtime sets nothing that turns them off, so no value of the operator's is overridden.
+		{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0", ""},
 		{"ENVOY_TOKEN_FILE", "/etc/acme/envoy", "it points at the launch secret ENVOY_TOKEN, which the runtime hands every launch as a file of the launch's own"},
 		{"NATS_NKEY_SEED_FILE", "/etc/acme/seed", "it points at the launch secret NATS_NKEY_SEED, which the runtime hands every launch as a file of the launch's own"},
 		{"DATABASE_URL", "postgres://acme:" + password + "@db.internal.example/widgets", withSecret},

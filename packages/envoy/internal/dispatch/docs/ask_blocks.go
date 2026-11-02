@@ -681,7 +681,25 @@ func readAskBlockStrictly(node *pmdoc.Node) error {
 	return pmdoc.AskContentError(node)
 }
 
+// parseAskBlock is the ask settlement reads in node, or why it cannot be read: a block no
+// paragraph of which holds text asks nothing, and settlement leaves its row as it was.
 func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
+	block, err := parseAskBlockLeniently(node)
+	if err != nil {
+		return askBlock{}, err
+	}
+	if block.question == "" {
+		return askBlock{}, fmt.Errorf("ask block %q has an empty question", block.id)
+	}
+	return block, nil
+}
+
+// parseAskBlockLeniently is parseAskBlock with its one refusal of an empty question left off: the
+// block comes back carrying the question its paragraphs hold, "" where none of them holds text.
+// Every other refusal of the parse is given here, so a block read this way and one read strictly
+// differ in their question alone. The ask-edit route reads a block leniently to repair it, since
+// an ask edit carrying a question writes one into the block (SetAskBlockText).
+func parseAskBlockLeniently(node *pmdoc.Node) (askBlock, error) {
 	blockID, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
 	urgency, _ := node.Attrs["urgency"].(string)
 	multiple, _ := node.Attrs["multiple"].(bool)
@@ -701,24 +719,17 @@ func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
 				if len(item.Children) == 0 {
 					return askBlock{}, fmt.Errorf("ask block %q has an empty option", blockID)
 				}
-				label, description, found := strings.Cut(strings.TrimSpace(pmdoc.TextContent(item.Children[0])), ": ")
-				if !found {
-					description = ""
-				}
-				label = strings.TrimSpace(label)
-				if label == "" {
+				option := optionOfItem(item)
+				if option.Label == "" {
 					return askBlock{}, fmt.Errorf("ask block %q has an option without a label", blockID)
 				}
-				options = append(options, model.AskOption{Label: label, Description: strings.TrimSpace(description)})
+				options = append(options, option)
 			}
 		default:
 			return askBlock{}, fmt.Errorf("ask block %q has unsupported body node %q", blockID, child.Type)
 		}
 	}
 	question := strings.TrimSpace(strings.Join(questionParts, "\n\n"))
-	if question == "" {
-		return askBlock{}, fmt.Errorf("ask block %q has an empty question", blockID)
-	}
 	return askBlock{node: node, id: blockID, question: question, options: options, multiple: multiple, urgency: urgency}, nil
 }
 

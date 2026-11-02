@@ -165,8 +165,35 @@ func seedRemote(t *testing.T, root, defaultBranch string) string {
 	return remote
 }
 
-// runSetup runs a fixture command, never under a GIT_CONFIG_PARAMETERS a test planted for
-// provisioning's processes alone.
+// fixtureEnvironment is os.Environ() without the git configuration and identity of whatever
+// process runs the tests: a Legion issue pod hands every one of them a GIT_CONFIG_* block, a
+// role's GitHub credential helper and core.hooksPath=/dev/null among it, and GIT_AUTHOR_*/
+// GIT_COMMITTER_* of its own, none of which a fixture may read — a fixture is the repository the
+// test wrote, not the pod's. GIT_DIR, GIT_WORK_TREE and GIT_ALTERNATE_OBJECT_DIRECTORIES go for
+// the same reason, and the three provisioning variables so that no fixture reaches the pod's
+// token or its repository cache (cmd/legion's runtimeOptionalEnv drops those three for
+// `provision`). The block itself goes through withoutGitConfigPairs, which owns which entries
+// make it up, so a pair a caller appends (fromOrigin's) is the whole block git then reads.
+// JJ_CONFIG stays: TestMain sets it deliberately, and newLocalRunnerOnBranch sets it again.
+func fixtureEnvironment() []string {
+	return slices.DeleteFunc(withoutGitConfigPairs(os.Environ()), func(entry string) bool {
+		key := environmentKey(entry)
+		for _, prefix := range []string{"GIT_AUTHOR_", "GIT_COMMITTER_"} {
+			if strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+		return slices.Contains([]string{
+			"GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_WORK_TREE",
+			"GIT_ALTERNATE_OBJECT_DIRECTORIES", "LEGION_PROVISION_TOKEN_FILE",
+			"LEGION_REPOSITORY_CACHE_URL", "LEGION_REPOSITORY_CACHE_TOKEN_FILE",
+		}, key)
+	})
+}
+
+// runSetup runs a fixture command under fixtureEnvironment, so it reads neither a
+// GIT_CONFIG_PARAMETERS a test planted for provisioning's processes alone nor the git
+// configuration of the process that runs the tests.
 func runSetup(t *testing.T, dir string, argv ...string) string {
 	t.Helper()
 	return runSetupWith(t, dir, nil, argv...)
@@ -177,12 +204,7 @@ func runSetupWith(t *testing.T, dir string, env []string, argv ...string) string
 	t.Helper()
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Dir = dir
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "GIT_CONFIG_PARAMETERS=") {
-			command.Env = append(command.Env, entry)
-		}
-	}
-	command.Env = append(command.Env, "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+	command.Env = append(fixtureEnvironment(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
 	command.Env = append(command.Env, env...)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -915,7 +937,7 @@ func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	}
 	push := exec.Command("jj", "git", "push", "--named", "legion/WIDGETS-99=@", "--allow-empty-description")
 	push.Dir = working.Dir
-	push.Env = append(os.Environ(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
+	push.Env = append(fixtureEnvironment(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
 	if output, err := push.CombinedOutput(); err != nil {
 		t.Fatalf("a tree agent's push: %v\n%s", err, output)
 	}

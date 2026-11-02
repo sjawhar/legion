@@ -30,9 +30,12 @@ afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step();
 });
 
-/** The system prompt of a request the gate sends: its own text heads it. */
+/** The system prompt of a request the charter check sends: its own frame heads it. */
 const isGateRequest = (request: Request): boolean =>
   JSON.stringify(request.body.system ?? "").includes("You are AskGate.");
+/** The rules check's own frame, which a `dispatch ask` brings beside the charter call. */
+const isRuleRequest = (request: Request): boolean =>
+  JSON.stringify(request.body.system ?? "").includes("You are AskGate's rule check.");
 
 /** The scripted bash call: a `dispatch ask` by the stand-in's literal path, which the gate reads. */
 const ask = (dispatch: string) =>
@@ -55,8 +58,9 @@ const CLI_ENTRY = path.join(
 const ASKS = "/api/v1/issues/DSP-1/asks";
 
 /**
- * One real session: a `dispatch` on disk, a stand-in model that answers `gateAnswer` to every gate
- * request and `firstTurn(dispatch)` to the session's first turn, then one prompt run to its end.
+ * One real session: a `dispatch` on disk, a stand-in model that answers `gateAnswer` to every
+ * charter request, no match to every rules request, and `firstTurn(dispatch)` to the session's
+ * first turn, then one prompt run to its end.
  * The `dispatch` is a stand-in whose --dry-run prints the arguments and whose send prints that it
  * sent, or, with `cli: "real"`, a shim that runs the real CLI from source against the fake Dispatch
  * the stand-in serves, which records each ask it takes. `envoyJson` is the session's envoy.json and
@@ -102,6 +106,11 @@ async function runSession(options: {
   let turns = 0;
   const { requests, base } = serveStandin(cleanup, (url, body) => {
     if (url.pathname === "/anthropic/v1/messages") {
+      if (isRuleRequest({ path: url.pathname, body }))
+        return new Response(
+          messageStream([{ type: "text", text: '{"matches": [], "reason": ""}' }], "rules"),
+          { headers: { "content-type": "text/event-stream" } }
+        );
       if (isGateRequest({ path: url.pathname, body }))
         return new Response(messageStream([{ type: "text", text: options.gateAnswer }], "gate"), {
           headers: { "content-type": "text/event-stream" },
@@ -206,6 +215,15 @@ test.skipIf(omp === undefined && !onActions)(
     );
     expect(gate).toHaveLength(1);
     expect(JSON.stringify(gate[0]?.body.messages)).toContain("Ship the release today?");
+    // The `dispatch ask` opens a new ask, so the rules check asks the model beside the charter check.
+    const rules = requests.filter(
+      (request) => request.path === "/anthropic/v1/messages" && isRuleRequest(request)
+    );
+    expect(rules).toHaveLength(1);
+    // The request body is JSON, so the listed ask is looked for as JSON escapes it.
+    expect(JSON.stringify(rules[0]?.body.messages)).toContain(
+      JSON.stringify('<ask n="1" kind="ask">\nShip the release today?\n</ask>').slice(1, -1)
+    );
 
     expect(await gateEntries(sessions)).toMatchObject([
       {
@@ -213,6 +231,9 @@ test.skipIf(omp === undefined && !onActions)(
         outcome: "verdict",
         decision: "allow",
         model: "standin/standin-model",
+        ruleOutcome: "none",
+        ruleModel: "standin/standin-model",
+        target: "dispatch_ask issue=DSP-1",
       },
     ]);
   },
@@ -244,7 +265,10 @@ for (const [language, code] of [
       });
 
       const main = requests.filter(
-        (request) => request.path === "/anthropic/v1/messages" && !isGateRequest(request)
+        (request) =>
+          request.path === "/anthropic/v1/messages" &&
+          !isGateRequest(request) &&
+          !isRuleRequest(request)
       );
       expect(main.length).toBeGreaterThanOrEqual(2);
       const next = JSON.stringify(main.at(-1)?.body.messages);
@@ -273,7 +297,12 @@ const asksPosted = (requests: readonly Request[]) =>
 const lastTurn = (requests: readonly Request[]) =>
   JSON.stringify(
     requests
-      .filter((request) => request.path === "/anthropic/v1/messages" && !isGateRequest(request))
+      .filter(
+        (request) =>
+          request.path === "/anthropic/v1/messages" &&
+          !isGateRequest(request) &&
+          !isRuleRequest(request)
+      )
       .at(-1)?.body.messages
   );
 const PYTHON_PASSTHROUGH = ["eval:", "  envPassthrough:", "    prefixes: [DISPATCH_, ENVOY_]"];

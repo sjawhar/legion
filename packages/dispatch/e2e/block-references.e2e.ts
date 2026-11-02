@@ -8,6 +8,7 @@ import {
   editArtifact,
   editComment,
   getArtifact,
+  getArtifactText,
   getIssue,
 } from "./api";
 import { blockId } from "./editor";
@@ -205,6 +206,58 @@ test("a pinned link keeps the text of the version it pins, says how the block st
   const removedCard = await openCard(page, removed);
   await expect(removedCard).toContainText(`Removed in version ${pinned + 2}`);
   await expect(removedCard).toContainText("P ships on Friday.");
+});
+
+test("a block reference a person made keeps resolving after an upload that leaves its block alone", async ({
+  page,
+}) => {
+  const issue = await createIssue({
+    project: "CORE",
+    spec:
+      "The retry policy is this issue's subject.\n\n" +
+      "The retry cap holds at three attempts.\n\n" +
+      "The rollout waits on review.\n",
+    title: "Uploaded spec",
+  });
+  const specId = issue.primary_artifact_id;
+  const cited = "The retry cap holds at three attempts.";
+  const citedId = await blockId(specId, cited);
+  const spec = (await getIssue(issue.key)).artifacts.find((artifact) => artifact.id === specId);
+  if (spec === undefined) {
+    throw new Error(`${issue.key} has no primary document`);
+  }
+  await createComment(issue.key, {
+    body: `We cap it per dispatch://${issue.key}/spec#b-${citedId}.`,
+  });
+  const before = await latestVersion(specId);
+
+  // A whole document posted under the document's own name is a new version of it through
+  // `docs.ReplaceText`, the path `dispatch artifact` takes. This one holds the document's own
+  // text with one other paragraph changed, so the cited paragraph is left exactly as it was.
+  const { markdown } = await getArtifactText(specId);
+  const uploaded = markdown.replace(
+    "The rollout waits on review.",
+    "The rollout waits on the staging run."
+  );
+  expect(uploaded).not.toBe(markdown);
+  expect(uploaded).toContain(cited);
+  await createIssueArtifact(issue.key, { content: uploaded, name: spec.name });
+  await expect.poll(() => latestVersion(specId)).toBe(before + 1);
+
+  // The reference still names a block of the live document, so it reads that paragraph's text and
+  // opens the document at it.
+  await page.goto(`/issues/${issue.key}/conversation`);
+  const link = page
+    .getByRole("list", { name: "Conversation turns" })
+    .getByRole("link", { name: cited });
+  await expect(link).toHaveAttribute("href", `/issues/${issue.key}/spec#b-${citedId}`);
+  // The id the comment names is still the id `GET /api/v1/artifacts/{id}/blocks` gives that
+  // paragraph, not one the upload re-minted.
+  expect(await blockId(specId, cited)).toBe(citedId);
+
+  await link.click();
+  await expect(page).toHaveURL(`/issues/${issue.key}/spec#b-${citedId}`);
+  await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(cited);
 });
 
 // A link to a block of a comment reads the block's graph read, which is fetched again only by an

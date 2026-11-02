@@ -1,7 +1,0 @@
-kind: Fixed
-body: |-
-    Roles of an open issue now stay live and idle between phases, while a root waits on a person,
-    and when a child enters a new run. The daemon suspends or ends a claim only when the issue
-    leaves the workflow, an operator suspends it, a claim moves to another tree, or a production
-    check runs after the issue is done.
-time: 2026-10-29T19:47:58Z

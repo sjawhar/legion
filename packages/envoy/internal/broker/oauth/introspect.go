@@ -9,40 +9,8 @@ import (
 	"authelia.com/provider/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 )
-
-// Introspection is what the broker knows about one of its access tokens, the RFC 7662 answer
-// Dispatch reads a token back through. This provider's tokens are opaque, so everything here
-// comes from the row the token is stored in rather than from the token's own bytes, and a token
-// the broker has revoked or let expire is simply not live.
-//
-// The JSON names are RFC 7662's where it has one and the broker's own where it does not; the
-// route serialises this struct and adds no field of its own.
-type Introspection struct {
-	// Active is whether the token is live: one of the broker's access tokens, not revoked, not
-	// expired. Everything else is set only when it is.
-	Active bool `json:"active"`
-	// Session is the session the token's writes are recorded as.
-	Session string `json:"session,omitempty"`
-	// Person is the person the session acts for.
-	Person string `json:"person,omitempty"`
-	// ProjectScope is what Project means: ProjectScopeNamed or ProjectScopePerson. A machine
-	// login's own token, which no exchange decided for, carries neither this nor Project.
-	ProjectScope string `json:"project_scope,omitempty"`
-	// Project is the one project key a ProjectScopeNamed token may write.
-	Project string `json:"project,omitempty"`
-	// Scope is the OAuth scope the token was granted, space-separated as RFC 7662 spells it.
-	Scope string `json:"scope,omitempty"`
-	// ExpiresAt is when the token expires, in seconds since the epoch (RFC 7662's 'exp'), so a
-	// caller that remembers an affirmative answer can keep it no longer than the token lives.
-	ExpiresAt int64 `json:"exp,omitempty"`
-	// ClientID is the OAuth client the token was issued to.
-	ClientID string `json:"client_id,omitempty"`
-	// Thumbprint is the JWK thumbprint of the key the token is DPoP-bound to (RFC 9449's 'jkt').
-	// It is what makes a stolen token useless: whoever reads this answer checks the caller's
-	// proof against it.
-	Thumbprint string `json:"jkt,omitempty"`
-}
 
 // Introspect is what the broker knows about token, for the introspection route to answer with.
 //
@@ -61,18 +29,18 @@ type Introspection struct {
 // outage, or a row it could not decode — because answering that as "not live" would both deny a
 // sound token and hide the outage; notLive is how the two are told apart, and brokerFailure makes
 // that error say which of the two it was.
-func (p *Provider) Introspect(ctx context.Context, token string) (Introspection, error) {
+func (p *Provider) Introspect(ctx context.Context, token string) (oauthwire.Introspection, error) {
 	kind, request, err := p.oauth.IntrospectToken(ctx, token, oauth2.AccessToken, oauthstore.NewExchangeSession())
 	if err != nil {
 		if notLive(err) {
-			return Introspection{}, nil
+			return oauthwire.Introspection{}, nil
 		}
-		return Introspection{}, brokerFailure(err)
+		return oauthwire.Introspection{}, brokerFailure(err)
 	}
 	if kind != oauth2.AccessToken {
-		return Introspection{}, nil
+		return oauthwire.Introspection{}, nil
 	}
-	answer := Introspection{Active: true, Scope: strings.Join(request.GetGrantedScopes(), " ")}
+	answer := oauthwire.Introspection{Active: true, Scope: strings.Join(request.GetGrantedScopes(), " ")}
 	if client := request.GetClient(); client != nil {
 		answer.ClientID = client.GetID()
 	}

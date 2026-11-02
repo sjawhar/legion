@@ -64,12 +64,13 @@ sides needed fixing.
 
 ## The fix (session side only)
 
-`packages/pi-envoy/extensions/envoy.ts` — after every successful heartbeat `registerSession()`,
-`reassertRole` runs: `GET /v1/roles/<role>`; if the listener does not name this session, a soft
-`POST /v1/roles/set` (no `previous_session_id`); the listener's atomic soft-claim rule is the
-arbiter — a 409 (different live holder) drops the local claim, warns once, and ends
-re-assertion, with no transcript entry so `omp --resume` can still arbitrate later. A landed
-claim (`"reclaimed"`) or the first healthy tick after a *failed registration*
+`reassertRole` — now in `packages/pi-envoy/src/registration-state.ts`, called from
+`ensureHeartbeat` in `packages/pi-envoy/extensions/envoy.ts` — runs after every successful
+heartbeat `registerSession()`: `GET /v1/roles/<role>`; if the listener does not name this
+session, a soft `POST /v1/roles/set` (no `previous_session_id`); the listener's atomic
+soft-claim rule is the arbiter — a 409 (different live holder) drops the local claim, warns
+once, and ends re-assertion, with no transcript entry so `omp --resume` can still arbitrate
+later. A landed claim (`"reclaimed"`) or the first healthy tick after a *failed registration*
 (`"reregistered"`) fires `onEnvoyRoleRegained(role, reason)` on the process-wide
 `LEGION_ROLE_CLAIM_BRIDGE` slot.
 
@@ -177,7 +178,13 @@ one code path (plan R3; see
 [unsubscribe-resurrection](unsubscribe-resurrection.md) for the same authoritative-write
 principle). A 409 drops only `claimedRoleTopic` — no `envoy-role-claim` release entry — so a
 later `omp --resume` soft-reclaims from the transcript and the listener arbitrates again (R2).
-Recording a release would make that resume give up a role nobody holds.
+Recording a release would make that resume give up a role nobody holds. Since INFRA-404 that
+later reclaim names the session it continues as `previous_session_id`, and the listener moves
+the role off that predecessor only when the predecessor has no live registry entry, when its
+live entry carries the reclaiming client instance's own id, or when either side carries no
+client instance id. A predecessor another client instance still runs keeps the role, and the
+reclaim is refused naming it. The refused session keeps running and stays registered, without
+the role, and does not claim again at each heartbeat.
 
 ### 7. Recovery hooks need a failure-category × lifecycle × completion-boundary matrix, not "an outage test"
 

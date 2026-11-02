@@ -836,6 +836,12 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     appendRepliedBlock(targets, event);
     return targets;
   }
+  if (event.type === "handoff.recorded") {
+    // A handoff write lands in the issue's handoff list; its log line is the `["events", key]`
+    // target above.
+    targets.push({ queryKey: ["handoffs", key] });
+    return targets;
+  }
   if (event.type === "subscription.removed") {
     targets.push({ queryKey: ["subscribers", key] });
     return targets;

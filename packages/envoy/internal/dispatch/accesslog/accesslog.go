@@ -35,6 +35,9 @@ const (
 	KindToken = "token"
 	// KindService is a verified Kubernetes service-account token, by its subject.
 	KindService = "service"
+	// KindBrokerToken is an access token the secrets broker issued, presented under the DPoP
+	// scheme and proved against the key it is bound to, by the person its session acts for.
+	KindBrokerToken = "broker-token"
 	// KindSharedToken is the deployment's shared agent token with no session named: it proves
 	// no owner, so the line names none.
 	KindSharedToken = "shared-token"
@@ -159,9 +162,11 @@ func HandlerFunc(route string, next http.HandlerFunc) http.HandlerFunc {
 
 // Note records who the server took this request's sender for. The authentication layer calls it
 // wherever it resolves a caller, and the last resolution wins: a bearer is noted by what its
-// token proved and then by the session it named, which is the caller a reader wants. Since that
-// session is text the caller wrote, a session named after a bearer credential keeps the
-// credential as the line's `credential`: `token:<owner>`, `service:<subject>` or `shared-token`.
+// token proved and then by the session it named, which is the caller a reader wants. A session
+// named after a credential of its own keeps that credential as the line's `credential`:
+// `token:<owner>`, `service:<subject>`, `broker-token:<person>` or `shared-token`. For the first
+// three that session is text the caller wrote, except under a broker-issued token, where the
+// token itself names it.
 func Note(ctx context.Context, kind, id string) {
 	rec, _ := ctx.Value(callerKey{}).(*recorder)
 	if rec == nil {
@@ -171,7 +176,7 @@ func Note(ctx context.Context, kind, id string) {
 	switch {
 	case kind == KindSession && rec.kind == KindSharedToken:
 		rec.credential = KindSharedToken
-	case kind == KindSession && (rec.kind == KindToken || rec.kind == KindService):
+	case kind == KindSession && (rec.kind == KindToken || rec.kind == KindService || rec.kind == KindBrokerToken):
 		rec.credential = rec.kind + ":" + rec.id
 	case kind != KindSession:
 		rec.credential = ""

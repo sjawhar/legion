@@ -7,7 +7,7 @@ tags:
   - verification
   - envoy
 date: 2026-10-14
-status: active
+status: superseded in part by sjawhar/legion#2422 — packages/envoy/AGENTS.md has no multi-kilobyte line any more (one sentence per line); the word-diff check against the committed text stands
 module: packages/envoy/AGENTS.md
 related_issues:
   - "LEGION-752"

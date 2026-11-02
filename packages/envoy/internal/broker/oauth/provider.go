@@ -143,6 +143,17 @@ func New(c Config, store *oauthstore.Store) (*Provider, error) {
 		AccessTokenLifespan:         c.AccessLifetime,
 		RefreshTokenLifespan:        c.RefreshLifetime,
 		RefreshTokenScopes:          []string{},
+		// A revocation ends the token it was handed and no other (handler/oauth2/revocation.go).
+		// The library's default is to end a request's refresh tokens as well as its access
+		// tokens, whichever kind was presented, and the broker's own RevokeRefreshToken ends more
+		// than tokens: it ends the launcher credential the refresh family names, as its answer to
+		// a reused refresh token (oauthstore.Store.Reused). Revoking one of a dev box session's
+		// access tokens would then end that machine's whole login, its sessions and its grants,
+		// recorded against the reuse actor, which is not what ending one token asks for. RFC 7009
+		// Section 2.1 makes revoking the refresh token beside an access token a MAY, so the
+		// narrow reading is the conformant one; presenting the refresh token itself still ends
+		// the family, which is what a caller asking for that presents.
+		RevokeRefreshTokensExplicit: true,
 		DPoPEnabled:                 true,
 		DPoPEnforce:                 true,
 		// The library accepts a proof from DPoPClockSkew before its iat until DPoPProofLifespan
@@ -338,6 +349,76 @@ func (p *Provider) Token(w http.ResponseWriter, r *http.Request, hooks TokenHook
 		resp.SetExtra(k, v)
 	}
 	p.oauth.WriteAccessResponse(ctx, w, request, resp)
+}
+
+// Revoke is the RFC 7009 revocation endpoint: it ends one of the tokens this broker issued, an
+// exchanged access token included, which is the only way such a token stops being honoured
+// before its own expiry. From the moment this commits, introspection answers active false for
+// it.
+//
+// The library authenticates the client, looks the token up as a refresh token and then as an
+// access token, refuses a token issued to another client than the one named
+// (ErrUnauthorizedClient), and ends what it found. The whole of that runs in one transaction
+// (oauthstore.TxFrom carries it) because the store's RevokeRefreshToken writes only through the
+// transaction it is handed and fails outside one, and because a revocation that ended a family's
+// refresh tokens and then failed to end its access tokens would leave a token live that the
+// caller was told was gone.
+//
+// The answer is RFC 7009 Section 2.2's: 200 for a token this broker revoked and 200 for a token
+// it has never heard of, since the client can do nothing with the difference and the request's
+// purpose — that the token not work — holds either way. A token it cannot read for a storage
+// failure is the library's 500, not a false 200.
+func (p *Provider) Revoke(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	txCtx, err := p.store.BeginTX(ctx)
+	if err != nil {
+		p.writeRevocationError(ctx, w, oauth2.ErrServerError.WithWrap(err).WithDebugError(err))
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = p.store.Rollback(txCtx)
+		}
+	}()
+	if err := p.oauth.NewRevocationRequest(txCtx, r); err != nil {
+		p.writeRevocationError(ctx, w, err)
+		return
+	}
+	if err := p.store.Commit(txCtx); err != nil {
+		p.writeRevocationError(ctx, w, oauth2.ErrServerError.WithWrap(err).WithDebugError(err))
+		return
+	}
+	committed = true
+	p.oauth.WriteRevocationResponse(ctx, w, nil)
+}
+
+// writeRevocationError answers err as RFC 7009's refusal, logging a server error's cause as
+// writeError does: the library's own answer carries no body for a 500, so the log is the only
+// record of what the broker failed at.
+func (p *Provider) writeRevocationError(ctx context.Context, w http.ResponseWriter, err error) {
+	if oauth2.ErrorToRFC6749Error(err).CodeField >= http.StatusInternalServerError {
+		slog.Error("broker: OAuth revocation failed", "error", oauth2.ErrorToDebugRFC6749Error(err))
+	}
+	p.oauth.WriteRevocationResponse(ctx, w, err)
+}
+
+// RegisterPodSession records that the pod podUID of the service account account may exchange
+// under the session name session, and answers when that registration runs out
+// (oauthstore.PodSessionRetention from now, extended by every later write). It is what
+// POST /v1/oauth/exchange/pod-sessions does once it has verified the pod's own token, and the
+// only way a row the exchange's gate reads is written.
+//
+// The policy decides what may be registered, in the same words the exchange refuses a pod with
+// (exchange.Set.Registration): a token bound to no pod, an account no entry lists and an entry
+// that fixes a session are each refused, the last because the name such an entry writes under is
+// the configuration's and its pods need no registration at all. A caller maps those sentinels
+// onto its own refusals; anything else is the store's.
+func (p *Provider) RegisterPodSession(ctx context.Context, account, podUID, session string) (time.Time, error) {
+	if err := p.exchange.Policy.Registration(account, podUID, session); err != nil {
+		return time.Time{}, err
+	}
+	return p.store.RegisterPodSession(ctx, podUID, session)
 }
 
 // writeError answers err as the library's OAuth error JSON, logging a server error's cause.

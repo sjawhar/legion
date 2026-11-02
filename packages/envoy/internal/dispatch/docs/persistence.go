@@ -107,7 +107,10 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 // rendered-content classification and the browser edit's in-flight credit: in the update's own
 // transaction, under the document's advisory lock, it writes the credit's authors to the
 // document's pending authors unless a committed version already listed them (UpdateCredit.take),
-// and it lands the credit before it releases that lock (UpdateCredit.landed).
+// and it lands the credit before it releases that lock (UpdateCredit.landed). It stores that one
+// update: the room's own persistence stores the update it was handed with the room's earlier
+// unstored ones through AppendRoomFlush instead, and reaches this only for an update its update
+// observer recorded no class for (StoreUpdateContext).
 func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	return p.appendUpdate(ctx, room, update, contentChanged, credit)
 }
@@ -127,7 +130,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit)
+		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, nil)
 		if err != nil {
 			return err
 		}
@@ -149,13 +152,86 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 	return version, err
 }
 
+// AppendRoomFlush is the room's persistence worker's append of its own update (StoreUpdateContext),
+// the whole flush its transaction runs: under the document's lock, in one transaction, it stores
+// every update of the room instance flush names through `through`, the worker's own update's
+// commit position, that no writer has stored yet, in the room's commit order, the worker's last
+// (flushThrough). The update bytes are not passed: the room's queue holds them, with the class and
+// the credit its update observer recorded for each (documentUpdateClass). An update another writer
+// has stored already appends nothing. Each version it appends advances the instance's cursor
+// inside the lock, as appendUpdate's does, and once the transaction has committed each class is
+// marked stored and its credit held and landed before the lock is released, so the next holder of
+// the lock finds them stored, and the room's shadow is freed once no class it measures is left
+// unstored (dropDrainedShadowLocked). credit is the worker's own update's, which lands inside the
+// lock however the transaction ends; the credits of the other updates land only with their
+// committed appends, and stay with their own updates' appends otherwise. The version returned is
+// the last the flush appended, zero when it appended none.
+func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
+		defer credit.landed()
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin document update: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		if err := flush.service.flushThrough(ctx, tx, flush, through); err != nil {
+			return err
+		}
+		if len(flush.versions) == 0 {
+			return nil
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit document update: %w", err)
+		}
+		if p.afterAppendCommit != nil {
+			for _, version := range flush.versions {
+				p.afterAppendCommit(room, version)
+			}
+		}
+		advanceRoomCursorThrough(flush.cursor, flush.appended(nil))
+		for _, unlanded := range flush.markStored(nil) {
+			unlanded.landed()
+		}
+		state := flush.state
+		state.mu.Lock()
+		state.dropDrainedShadowLocked()
+		flush.service.unlockState(room, state)
+		return nil
+	})
+	if err != nil || len(flush.versions) == 0 {
+		return 0, err
+	}
+	return flush.versions[len(flush.versions)-1], nil
+}
+
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
 // the document's content: settlement versions a document only past a content update.
+//
+// Every caller hands it an update this process encoded moments before - a new document's whole
+// tree (encodeDocumentTree), the transactions of one write's fork (mergeUpdates), a settlement's
+// own repair - so the one refusal decoding such an update into a document of its own ever made is
+// the item cap, which the update's header declares (refuseUpdateItemCap). Reading that header
+// rather than decoding the update took 88 ms and 36 MB off the request of an 8,000-item
+// document's upload, near a quarter of that request's time and a fifth of its allocation, and
+// that allocation is what the garbage collector then charged the writes after it on a two-core
+// pod (sjawhar/legion#2519). Bytes a caller sends, which no document encoded, are decoded as
+// they were (appendUpdate).
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
-		return 0, itemCapError(update, err)
+	if err := refuseUpdateItemCap(update); err != nil {
+		return 0, err
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil, nil)
+}
+
+// AppendRoomUpdateTx appends inside tx an update a room of this process has already applied, with
+// the class and the in-flight credit its update observer recorded, as one append of flush, the
+// run the appending transaction stores of that room instance (flushThrough). The room decoded it
+// when it applied it, so it is not decoded again. flush is what gates the append: the instance's
+// cursor with the versions this flush has appended for it folded in, which is the only way an
+// append of the room's own persistence worker reaches the gate, since no ledger of its
+// transaction names the document (appendingCursor).
+func (p *PgVersioned) AppendRoomUpdateTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, flush)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -200,7 +276,20 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+// lockedHead takes the document's advisory lock in tx (lockDocumentRoom) and reads the durable
+// head under it, in that order and as one step: the head is then the one every append of tx meets,
+// since no other writer of the document appends while tx holds the lock. A transaction that must
+// hold the lock before it reads the document takes both here (readFork). They are two statements:
+// under read committed a statement reads the snapshot it started with, so a head read in the
+// lock's own statement could miss a commit the lock waited for.
+func lockedHead(ctx context.Context, tx pgx.Tx, room string) (int64, error) {
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return 0, err
+	}
+	return currentUpdateCursor(ctx, tx, room)
+}
+
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit, flush *RoomFlush) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -224,7 +313,7 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// is rendered from text the writer never saw. The order is the lock, then the cursor, then
 	// the head: a peer of this very room whose append committed under this lock has already
 	// advanced the cursor (appendUpdate), so two peers of one room never refuse each other.
-	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room), latest); err != nil {
+	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room, flush), latest); err != nil {
 		return 0, err
 	}
 	version := persistence.Version(latest + 1)
@@ -247,8 +336,8 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// An edit credited to authors names its latest edit source, none included when no one
 	// peer made it; an update no one is credited with keeps the row's. The row is taken here, with
 	// the write, so a route that goes on to append an event (an upload, issue creation) holds it
-	// before the events' commit-order lock, as an answer marking this document a copy owed does
-	// (owedCopiesOf); Ledger.Commit's later recordLatestEditSource then waits on nothing.
+	// before its event, as an answer marking this document a copy owed does (owedCopiesOf), and
+	// Ledger.Commit's later recordLatestEditSource waits on nothing.
 	if include && (len(authors) > 0 || lastActor != nil) {
 		if err := markUpdateOwedBy(ctx, tx, room, lastActor, anyPerson(authors)); err != nil {
 			return 0, err
@@ -846,8 +935,11 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // check of each update the service broadcasts (Server.BroadcastUpdate) takes no pending queue at
 // all: it is the check ygo's bundled stores run, since the room has already applied the update
 // (reearth/ygo#268, in the pinned fork).
-// TestTheStoreTakesOneBrowserUpdateItsRoomTook and TestASettlementStampsMoreBlocksThanYgosDefaultQueue
-// are updates the store's check refuses at ygo's default queue.
+// TestTheStoreTakesOneBrowserUpdateItsRoomTook is an update the store decodes itself under this
+// queue (appendUpdate) and a check at ygo's default would refuse;
+// TestASettlementStampsMoreBlocksThanYgosDefaultQueue is one nothing decodes alone any more - the
+// store reads its header (refuseUpdateItemCap) and ygo's check of the broadcast takes no queue -
+// and a check at that default would refuse it, failing the room.
 const maxUpdateItems = 1 << 20
 
 // updateItems is the number of items a V1 update of one client declares in its header: the
@@ -864,6 +956,16 @@ func updateItems(update []byte) (uint64, bool) {
 	return items, err == nil
 }
 
+// itemCapRefusal is the one way this package names an update too large to store: its header
+// declares items, more than the maxUpdateItems one document update may hold. Both refusals of
+// such an update say it with this - the store's own, before anything is written
+// (refuseUpdateItemCap), and ygo's, answered for an update the server encoded (itemCapError) -
+// and TestTheStoreJudgesAnUpdateByItsHeader reads it back from here rather than writing the
+// sentence again (sjawhar/legion#2519).
+func itemCapRefusal(items uint64) error {
+	return fmt.Errorf("%w: its %d items exceed the %d one document update can hold", ErrDocumentTooLarge, items, maxUpdateItems)
+}
+
 // itemCapError is ygo's refusal err of update, an update the server encoded itself, named as the
 // write too large to store it is when update's header declares more than maxUpdateItems items:
 // ygo refuses such an update with the same error it gives a malformed one, and a seed or a
@@ -871,7 +973,27 @@ func updateItems(update []byte) (uint64, bool) {
 // Any other refusal of a server-encoded update is a fault, and is err unchanged.
 func itemCapError(update []byte, err error) error {
 	if items, ok := updateItems(update); ok && items > maxUpdateItems {
-		return fmt.Errorf("%w: its %d items exceed the %d one document update can hold (%v)", ErrDocumentTooLarge, items, maxUpdateItems, err)
+		return fmt.Errorf("%w (%v)", itemCapRefusal(items), err)
 	}
 	return err
+}
+
+// refuseUpdateItemCap is the refusal of update - one this process encoded from a document it
+// built (AppendUpdateTx), or a stored history about to be decoded into a room
+// (servicePersistenceAdapter.LoadDoc) - that holds more items than one document update may
+// (maxUpdateItems), which is what ygo refuses such an update for before it integrates anything of
+// it. The count comes from the update's header (updateItems), which names it exactly for the one
+// client a server-encoded update is written by. An update of several clients declares no single
+// count, and one whose header does not read is no update at all: both are decoded to be judged,
+// and ygo's own refusal of such an update stands as it is - the cap is a count this header never
+// declared, so no decode of one of them ever reached it (itemCapError).
+func refuseUpdateItemCap(update []byte) error {
+	items, named := updateItems(update)
+	if !named {
+		return crdt.ApplyUpdateV1(newDocumentCopy(), update, nil)
+	}
+	if items > maxUpdateItems {
+		return itemCapRefusal(items)
+	}
+	return nil
 }

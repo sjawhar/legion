@@ -150,7 +150,7 @@ func TestMaxConnAgeClosesAnAgedConnectionAfterARejectedUpgrade(t *testing.T) {
 }
 
 // An aged connection must close after a normal response, but the age header must not reach a
-// websocket that takes the connection. The document keep-alive wrapper and /ws/live both upgrade
+// websocket that takes the connection. ygo's document upgrade (/ws/doc) and /ws/live both upgrade
 // this way: the upgrader hijacks before it writes the 101 itself.
 func TestMaxConnAgeDoesNotDisturbAnAgedHijackedWebsocket(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}

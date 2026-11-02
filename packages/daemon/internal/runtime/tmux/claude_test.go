@@ -15,12 +15,14 @@ import (
 var testClaude = ClaudeLaunch{Binary: "/opt/claude/bin/claude", PluginDir: "/opt/legion/claude-envoy", Bun: "/opt/bun/bin/bun"}
 
 // The inner command of a Claude Code role: the bridge around `claude -p` in stream-json both ways
-// (--verbose, which stream-json output requires), every permission granted, only the configured MCP
-// server, both plugin directories, the session, and the one system prompt word every pane gets.
+// (--verbose, which stream-json output requires) re-emitting each user message it takes, every
+// permission granted, only the configured MCP server, both plugin directories, the session, and the
+// one system prompt word every pane gets.
 func TestClaudeInnerCommand(t *testing.T) {
 	parts := runtime.PromptParts{RolePromptPaths: []string{"/roles/implementer.md"}, Addressing: "Legion addressing: x"}
 	got := claudeInnerCommand("/opt/legion/legion", testClaude, "/state/claude/c/mcp.json", "11111111-2222-4333-8444-555555555555", false, parts)
 	want := "/opt/legion/legion claude-bridge -- /opt/claude/bin/claude -p --input-format stream-json --output-format stream-json --verbose" +
+		" --replay-user-messages" +
 		" --permission-mode bypassPermissions --strict-mcp-config --mcp-config /state/claude/c/mcp.json" +
 		" --plugin-dir /opt/legion/claude-envoy --plugin-dir /opt/legion/claude-envoy/legion" +
 		" --session-id 11111111-2222-4333-8444-555555555555 " +
@@ -98,12 +100,16 @@ func TestWriteClaudeMCPConfig(t *testing.T) {
 	}
 }
 
-// A Claude Code pane carries its claim's directory and Claude Code's background work off, beside the
-// pairs every pane carries.
+// A Claude Code pane carries its claim's directory and Claude Code's scheduled prompts off, beside
+// the pairs every pane carries. Nothing on the pane turns its background tasks off: a task that
+// finishes wakes a turn of Claude Code's own, which the bridge reports to the daemon.
 func TestClaudeEnvironment(t *testing.T) {
 	got := strings.Join(claudeEnvironment("/state/claude/c"), " ")
-	if got != "-e CLAUDE_CONFIG_DIR=/state/claude/c -e CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 -e CLAUDE_CODE_DISABLE_CRON=1" {
+	if got != "-e CLAUDE_CONFIG_DIR=/state/claude/c -e CLAUDE_CODE_DISABLE_CRON=1" {
 		t.Errorf("claudeEnvironment = %s", got)
+	}
+	if strings.Contains(got, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") {
+		t.Errorf("claudeEnvironment = %s, want no pane pair turning Claude Code's background tasks off", got)
 	}
 }
 

@@ -184,6 +184,44 @@ func TestEncodeBlockIDMatchesTheSharedTable(t *testing.T) {
 	}
 }
 
+// A block reference is written one way for each kind of document: an issue's primary document as
+// `/spec`, any other document of an issue or a project as `artifact/<slug>` (a project document
+// whose slug is spec too), the id as EncodeBlockID writes it, and a pin after the fragment. A
+// document, an issue or an agent conversation's document has no block reference.
+func TestFormatBlockRefWritesTheCanonicalReference(t *testing.T) {
+	cases := []struct {
+		ref  Ref
+		want string
+	}{
+		{Ref{Kind: "block", IssueKey: "CORE-1", ID: "spec", Block: "x"}, "dispatch://CORE-1/spec#b-x"},
+		{Ref{Kind: "block", IssueKey: "CORE-1", ID: "notes-md", Block: "x"}, "dispatch://CORE-1/artifact/notes-md#b-x"},
+		{Ref{Kind: "block", Project: "CORE", ID: "handbook-md", Block: "x"}, "dispatch://CORE/artifact/handbook-md#b-x"},
+		{Ref{Kind: "block", Project: "CORE", ID: "spec", Block: "x"}, "dispatch://CORE/artifact/spec#b-x"},
+		{Ref{Kind: "block", IssueKey: "CORE-1", ID: "spec", Block: "décision:1"}, "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1"},
+		{Ref{Kind: "block", IssueKey: "CORE-1", ID: "spec", Block: "x", Pin: 2}, "dispatch://CORE-1/spec#b-x@v2"},
+	}
+	for _, tc := range cases {
+		got, ok := FormatBlockRef(tc.ref)
+		if !ok || got != tc.want {
+			t.Errorf("FormatBlockRef(%#v) = %q, %t; want %q", tc.ref, got, ok, tc.want)
+			continue
+		}
+		// What it writes is the one reference text reads back, and canonical.
+		if read, ok := CanonicalBlockRef(got); !ok || read != tc.ref {
+			t.Errorf("CanonicalBlockRef(%q) = %#v, %t; want %#v", got, read, ok, tc.ref)
+		}
+	}
+	for _, ref := range []Ref{
+		{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"},
+		{Kind: "issue", IssueKey: "CORE-1", ID: "CORE-1"},
+		{Kind: "block", Session: "s1", ID: "notes-md", Block: "x"},
+	} {
+		if got, ok := FormatBlockRef(ref); ok {
+			t.Errorf("FormatBlockRef(%#v) = %q; want no block reference", ref, got)
+		}
+	}
+}
+
 // A dashboard page's `#b-` fragment names the block the page lands on, read with any
 // percent-encoding. A pin is written only as a `dispatch://` reference, so a raw `@` in a page's
 // fragment names no block; an item in the query or a version page is what it names today. The

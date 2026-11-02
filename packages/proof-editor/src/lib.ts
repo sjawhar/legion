@@ -22,6 +22,7 @@
  */
 
 import { BLOCK_ID_DOM_ATTR, blockIdOf, blockIdPlugins } from './editor/schema/block-ids';
+import { withoutLeafMarks } from './editor/schema/leaf-marks';
 import { blockSchemaPlugins, type BlockSchema, type HostBlockRenderer } from './block-schema';
 import { createTypedBlockCommands, type TypedBlockCommands } from './typed-block-commands';
 import {
@@ -50,6 +51,7 @@ import { collabCursorPlugin } from './collab-cursor-plugin';
 import type { Awareness } from 'y-protocols/awareness';
 import type * as Y from 'yjs';
 import type { EditorView } from '@milkdown/kit/prose/view';
+import type { Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import type { Ctx, MilkdownPlugin } from '@milkdown/ctx';
 
 import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-marks';
@@ -57,6 +59,7 @@ import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-b
 import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
 import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
+import { libraryRemarkNestedLinksPlugin } from './nested-links';
 import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
 import { brokenAskInputGuards, keepUnselectedAskBlocks, relaxAskContentCheck } from './ask-content';
 import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
@@ -86,7 +89,7 @@ import {
 } from 'proof-sdk-upstream/src/editor/plugins/marks';
 
 import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler } from './dispatch-marks';
-import type { MarkAction, SelectionBarActionKind } from './dispatch-marks';
+import type { MarkAction, RecordMarkPlacement, SelectionBarActionKind } from './dispatch-marks';
 import { commentOnSelection, dispatchActionBarPlugin } from './dispatch-action-bar';
 import { registerPopoverHookInstance } from './dispatch-popover-hook';
 import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
@@ -95,11 +98,17 @@ import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
 import { recordMarkHistoryPlugin } from './record-mark-history';
 import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
-import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
-import type { RetypeOutcome } from './record-mark-retype';
+import {
+  editorChangeDecorationsPlugin,
+  setChangeDecorations as applyChangeDecorations,
+} from './editor-change-decorations';
+import type { ChangeDecorations } from './editor-change-decorations';
+import { removeRecordMark, remarkRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
+import type { RemarkOutcome, RetypeOutcome } from './record-mark-retype';
 
-export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
-export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
+export type { MarkAction, RecordMarkPlacement, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
+export type { RemarkOutcome, RemarkRefusal, RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
+export type { BlockWidget, ChangeDecorations, TextDecoration } from './editor-change-decorations';
 export type {
   BlockAttributeKind,
   BlockAttributeSchema,
@@ -153,6 +162,10 @@ export interface CreateProofEditorOptions {
   blockSchema?: BlockSchema;
   /** Renders a host-owned typed block node when the schema declares `render: "host"`. */
   renderBlock?: HostBlockRenderer;
+  /** The open document's unversioned Dispatch reference (`dispatch://<ISSUE>/spec`, or
+   *  `dispatch://<ISSUE or PROJECT>/artifact/<slug>`), so the typed-block commands refuse a
+   *  `block[]` pointer to one of its own blocks whose type the attribute does not allow. */
+  documentRef?: string;
   /** The host's Mermaid renderer, which draws each mermaid code block's diagram. Without one a
    *  document's mermaid blocks show their source. */
   drawMermaid?: MermaidDrawer;
@@ -181,6 +194,18 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
    *  margin composer's kind switch needs; a refusal names why nothing changed. */
   retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
+  /** Writes a fresh mark of `kind` over `quote` - the words the composer that owns the provisional
+   *  record mark `markId` is anchored to - wherever they are now: under the mark while the
+   *  document still holds it, else where those words read, which `placement` - the one the
+   *  `MarkAction` for that mark carried - narrows by the text the reader had around them. Answers
+   *  it under a new id, as the margin needs when the server refuses a send whose mark the document
+   *  has lost; a refusal names why nothing changed. */
+  remarkMark(
+    markId: string,
+    kind: SelectionBarActionKind,
+    quote: string,
+    placement: RecordMarkPlacement | null
+  ): RemarkOutcome;
   /** Starts a comment on the current selection exactly as the selection bar's Comment button
    *  does, `onMarkAction` included, and answers whether it did: false for an empty selection and
    *  while the document is read-only, where the bar offers no Comment. */
@@ -194,6 +219,15 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   setActiveMarks(markIds: readonly string[]): void;
   /** Highlights the blocks a host has selected without changing the document. */
   setActiveBlocks(blockIds: readonly string[]): void;
+  /** Draws what changed over and beside the document, without changing it: one text entry per
+   *  run, naming its top-level block by index and the run by character offsets into that block's
+   *  text, or the whole block where it names no range; one widget per piece of text the document
+   *  no longer holds, drawn at a character offset inside the block it names, for words that
+   *  block lost, before that block where it names no offset or the block holds no text of its
+   *  own, and at the end of the document where it names the index past the last block.
+   *  Replaces what was drawn before; an empty set draws nothing.
+   *  See ./editor-change-decorations.ts. */
+  setChangeDecorations(decorations: ChangeDecorations): void;
   /** The stable id of the block containing the selection head, if any. */
   blockIdAtSelection(): string | null;
   /** Tear down the editor and any collab bindings. */
@@ -266,19 +300,23 @@ function cssEscapeAttrValue(value: string): string {
  * passes it, so it heals the same way. The wrapper itself never changes once installed: it
  * rebuilds its own closed-over parser from the schema and remark processor the broken one used,
  * keeps the fresh one for the next call, and rethrows the original error, so the one refused
- * parse still fails exactly as it did before and only the shared state is what recovers.
+ * parse still fails exactly as it did before and only the shared state is what recovers. Every
+ * document it returns is read through `withoutLeafMarks` first, so no inline leaf of a paste or
+ * an editor parse carries a mark (./editor/schema/leaf-marks.ts).
  */
 function installSelfHealingParser(ctx: Ctx): void {
   const schema = ctx.get(schemaCtx);
   const remark = ctx.get(remarkCtx);
   let parse = ctx.get(parserCtx);
   ctx.set(parserCtx, (markdown) => {
+    let parsed: ProseMirrorNode;
     try {
-      return parse(markdown);
+      parsed = parse(markdown);
     } catch (error) {
       parse = ParserState.create(schema, remark);
       throw error;
     }
+    return withoutLeafMarks(parsed);
   });
 }
 
@@ -321,6 +359,12 @@ export async function createProofEditor(
     // Register remark plugins for proof marks and dispatchAsk parsing
     .use(remarkProofMarksPlugin)
     .use(remarkDispatchMarksPlugin)
+    // Last of the remark plugins that shape inline content, so the links it splits are every link
+    // the tree holds: a link inside a link label (an autolink, the only nesting CommonMark allows)
+    // is hoisted beside the runs around it (./nested-links.ts). `$remark` puts it in `remarkCtx`,
+    // which is the processor behind both the shared `parserCtx` and the `ParserState`
+    // `setMarkdown` builds, and `stringify` runs no transformer, so the editor's output is as it was.
+    .use(libraryRemarkNestedLinksPlugin)
     // After the mark plugins, so a block-level mark span is a mark node when the fit check reads it.
     .use(opts.blockSchema ? liveTypedBlocksRemarkPlugin(opts.blockSchema) : [])
     // Register contexts
@@ -357,6 +401,7 @@ export async function createProofEditor(
     // The composer's own record-mark writes are never undo steps
     .use(recordMarkHistoryPlugin)
     .use(editorHighlightsPlugin)
+    .use(editorChangeDecorationsPlugin)
     .use(placeholderPlugin)
     .use(keepUnselectedAskBlocks) // no read-back edit drops an unselected block of an off-rule ask (./ask-content.ts)
     .config((ctx) => {
@@ -418,6 +463,7 @@ export async function createProofEditor(
 
   const typedBlockCommands = createTypedBlockCommands({
     blockSchema: opts.blockSchema,
+    documentRef: opts.documentRef,
     getState: () => view.state,
     dispatch: (transaction) => {
       view.dispatch(transaction);
@@ -442,7 +488,9 @@ export async function createProofEditor(
         editor.ctx.get(schemaCtx),
         editor.ctx.get(remarkCtx)().use(remarkSoftBreakAsSpace),
       );
-      const parsed = importParser(markdown);
+      // This parser is its own, so the shared parserCtx's rule is applied here too: no inline
+      // leaf of an imported document carries a mark (./editor/schema/leaf-marks.ts).
+      const parsed = withoutLeafMarks(importParser(markdown));
       const { state } = view;
       view.dispatch(state.tr.replaceWith(0, state.doc.content.size, parsed.content));
     },
@@ -464,6 +512,14 @@ export async function createProofEditor(
     },
     retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome {
       return retypeRecordMark(view, markId, kind, opts.user.name);
+    },
+    remarkMark(
+      markId: string,
+      kind: SelectionBarActionKind,
+      quote: string,
+      placement: RecordMarkPlacement | null
+    ): RemarkOutcome {
+      return remarkRecordMark(view, markId, kind, opts.user.name, quote, placement);
     },
     commentOnSelection(): boolean {
       return commentOnSelection(view);
@@ -487,6 +543,9 @@ export async function createProofEditor(
     },
     setActiveBlocks(blockIds: readonly string[]): void {
       setActiveHighlights(view, 'block', blockIds);
+    },
+    setChangeDecorations(decorations: ChangeDecorations): void {
+      applyChangeDecorations(view, decorations);
     },
     blockIdAtSelection(): string | null {
       const $head = view.state.selection.$head;

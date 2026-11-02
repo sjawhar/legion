@@ -15,6 +15,14 @@ import (
 // finite is false for NaN and the infinities.
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
 
+// envOr is the environment variable name's value, or def when it is unset or empty.
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
 // sleepUntil waits for t; false when ctx ended first.
 func sleepUntil(ctx context.Context, t time.Time) bool {
 	d := time.Until(t)

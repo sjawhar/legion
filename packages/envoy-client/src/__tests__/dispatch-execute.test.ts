@@ -32,6 +32,7 @@ import {
   type DispatchWriteRetry,
 } from "../dispatch-http";
 import { followedAsk } from "../dispatch-subscribe";
+import { renderSessionAnswersList } from "../session-answers";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -2156,6 +2157,99 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("dispatch_answers prints every item of the 72 hours newest first, in full and uncapped", async () => {
+    const requests: string[] = [];
+    const at = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+    const items = Array.from({ length: 10 }, (_, index) => ({
+      kind: "message" as const,
+      relation: "sent_you_a_message" as const,
+      id: `m-${index}`,
+      at: at(index + 1),
+      author: { kind: "user" as const, id: "ana@example.com" },
+      text: `${index} ${"w".repeat(1_000)}`,
+      owner: { issue: { key: "DSP-42", title: "Native workspace" } },
+      ref: `dispatch://DSP-42/message/m-${index}`,
+      href: `/issues/DSP-42#message-m-${index}`,
+    }));
+    const since = at(72);
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response({ session_id: "session-1", since, total: 10, items });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_answers",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual(["/api/v1/agents/session-1/answers"]);
+    expect(result.text).toBe(renderSessionAnswersList(items, { now: Date.now() }));
+    expect(result.text.length).toBeGreaterThan(10_000);
+    expect(result.text.split("\n")[0]).toBe(
+      "10 items people wrote to this session in the last 72 hours, newest first, word for word:"
+    );
+    for (const item of items) expect(result.text).toContain(item.text);
+    expect(result.details).toEqual({ session: "session-1", since, total: 10 });
+  });
+
+  test("dispatch_answers against a Dispatch without the route says its build is older than the answers route", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> =>
+      response(
+        { code: "NOT_FOUND", error: `no route for GET ${new URL(String(url)).pathname}` },
+        404
+      );
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_answers",
+        args: {},
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      "This Dispatch (http://dispatch.test) has no answers route yet: its build is older than the answers route."
+    );
+  });
+
+  test("dispatch_answers against a proxy's 404 page reports that page, never an old Dispatch build", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      new Response("<html><body><h1>404 Not Found</h1><hr>nginx</body></html>", {
+        status: 404,
+        statusText: "Not Found",
+        headers: { "Content-Type": "text/html" },
+      });
+
+    const error: unknown = await executeDispatchTool({
+      tool: "dispatch_answers",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    }).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /answered 404 Not Found with a body that is not Dispatch's error JSON .*which looks like a proxy or gateway page rather than Dispatch's own answer/
+    );
+    expect((error as Error).message).not.toContain("no answers route");
+  });
+
   test("dispatch_claim claims for the calling session and releases with release: true", async () => {
     const calls: Array<{ method: string; pathname: string; body: unknown }> = [];
     const claim = {
@@ -3555,8 +3649,14 @@ describe("executeDispatchTool", () => {
     });
 
     expect(requests).toEqual(["/api/v1/whoami"]);
-    expect(result.details).toEqual({ session: "session-1", owner: "alice", service: null });
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
     expect(result.text).toContain("alice");
+    expect(result.text).not.toContain("which is not this host session");
   });
 
   test("dispatch_whoami reports a null owner under the shared token", async () => {
@@ -3575,7 +3675,12 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
-    expect(result.details).toEqual({ session: "session-1", owner: null, service: null });
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: null,
+      service: null,
+      project: null,
+    });
     expect(result.text).toContain("shared token");
   });
 
@@ -3605,9 +3710,267 @@ describe("executeDispatchTool", () => {
       session: "session-1",
       owner: null,
       service: "system:serviceaccount:legion:legion-worker",
+      project: null,
     });
     expect(result.text).toContain("runs as service legion/legion-worker");
     expect(result.text).not.toContain("shared token");
+  });
+
+  describe("handoffs", () => {
+    const handoffId = "0b7c2c5e-8f6d-4b8a-9a43-5d2e8c1f0a11";
+    const firstId = "6f1d3a2b-4c5e-4f60-8a7b-9c0d1e2f3a4b";
+    const author = { kind: "session", id: "session-1" };
+    // Spacing and key order a re-serialization would lose.
+    const body = '{ "schemaVersion": 1,\n  "b": 2, "a": 1 }\n';
+    const summary = (id: string, version: number) => ({
+      id,
+      issue_key: "DSP-1",
+      phase: "implement",
+      version,
+      author,
+      created_at: `2026-10-26T00:00:0${version}Z`,
+    });
+    const run = (tool: string, args: Record<string, unknown>, fetchImpl: typeof fetch) =>
+      executeDispatchTool({
+        tool,
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      });
+    const serve = (requests: string[], answer: (method: string, pathname: string) => Response) =>
+      (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const method = init?.method ?? "GET";
+        const { pathname } = new URL(String(url));
+        requests.push(`${method} ${pathname}`);
+        if (init?.body !== undefined) requests.push(String(init.body));
+        return answer(method, pathname);
+      }) as typeof fetch;
+
+    test("dispatch_handoff_write sends the body text as written, as this session", async () => {
+      const requests: string[] = [];
+      const result = await run(
+        "dispatch_handoff_write",
+        { issue: "DSP-1", phase: "implement", body },
+        serve(requests, () => response(summary(handoffId, 2), 201))
+      );
+      expect(requests[0]).toBe("POST /api/v1/issues/DSP-1/handoffs/implement");
+      const sent = JSON.parse(requests[1] ?? "{}") as { actor: unknown; body: unknown };
+      expect(sent.body).toBe(body);
+      expect(sent.actor).toMatchObject({ kind: "session", id: "session-1" });
+      expect(result.text).toBe(
+        `Recorded the implement handoff of DSP-1, version 2 (id ${handoffId})`
+      );
+      expect(result.details).toEqual({
+        issue: "DSP-1",
+        phase: "implement",
+        version: 2,
+        handoff: handoffId,
+      });
+    });
+
+    test("dispatch_handoff_write refuses a body that is not one JSON object before any request", async () => {
+      const requests: string[] = [];
+      const noRequest = serve(requests, () => {
+        throw new Error("no request expected");
+      });
+      for (const notAnObject of ["[1, 2]", "not json", '"text"']) {
+        await expect(
+          run(
+            "dispatch_handoff_write",
+            { issue: "DSP-1", phase: "implement", body: notAnObject },
+            noRequest
+          )
+        ).rejects.toThrow("body is not one JSON object");
+      }
+      await expect(
+        run("dispatch_handoff_write", { issue: "DSP-1", phase: "Implement", body }, noRequest)
+      ).rejects.toThrow("phase is not a handoff phase");
+      expect(requests).toEqual([]);
+    });
+
+    test("dispatch_handoff_write passes a refusal's code on", async () => {
+      await expect(
+        run(
+          "dispatch_handoff_write",
+          { issue: "DSP-1", phase: "implement", body },
+          serve([], () => response({ code: "ISSUE_CLOSED", error: "issue DSP-1 is closed" }, 409))
+        )
+      ).rejects.toThrow("ISSUE_CLOSED: issue DSP-1 is closed");
+    });
+
+    test("dispatch_handoff_read prints one line about the newest record, then its body as stored", async () => {
+      const requests: string[] = [];
+      const result = await run(
+        "dispatch_handoff_read",
+        { issue: "DSP-1", phase: "implement" },
+        serve(requests, () => response({ ...summary(handoffId, 2), body }))
+      );
+      expect(requests).toEqual(["GET /api/v1/issues/DSP-1/handoffs/implement/latest"]);
+      expect(result.text).toBe(
+        `DSP-1 implement handoff, version 2 (id ${handoffId}), written by session session-1 at 2026-10-26T00:00:02Z\n${body}`
+      );
+      expect(result.details).toEqual({
+        issue: "DSP-1",
+        phase: "implement",
+        version: 2,
+        handoff: handoffId,
+      });
+    });
+
+    test("dispatch_handoff_read with a version finds that version's id in the list and reads it", async () => {
+      const requests: string[] = [];
+      const result = await run(
+        "dispatch_handoff_read",
+        { issue: "DSP-1", phase: "implement", version: 1 },
+        serve(requests, (_method, pathname) =>
+          pathname === "/api/v1/issues/DSP-1/handoffs"
+            ? response([
+                summary(handoffId, 2),
+                { ...summary(handoffId, 1), id: "plan-id", phase: "plan" },
+                summary(firstId, 1),
+              ])
+            : response({ ...summary(firstId, 1), body })
+        )
+      );
+      expect(requests).toEqual([
+        "GET /api/v1/issues/DSP-1/handoffs",
+        `GET /api/v1/handoffs/${firstId}`,
+      ]);
+      expect(result.text).toBe(
+        `DSP-1 implement handoff, version 1 (id ${firstId}), written by session session-1 at 2026-10-26T00:00:01Z\n${body}`
+      );
+    });
+
+    test("dispatch_handoff_read refuses a version or phase that has no record with HANDOFF_NOT_FOUND", async () => {
+      const requests: string[] = [];
+      const listed = serve(requests, () => response([summary(handoffId, 2), summary(firstId, 1)]));
+      await expect(
+        run("dispatch_handoff_read", { issue: "DSP-1", phase: "implement", version: 3 }, listed)
+      ).rejects.toThrow(
+        "HANDOFF_NOT_FOUND: issue DSP-1 has no implement handoff version 3; its newest implement handoff is version 2"
+      );
+      await expect(
+        run("dispatch_handoff_read", { issue: "DSP-1", phase: "test", version: 1 }, listed)
+      ).rejects.toThrow(
+        "HANDOFF_NOT_FOUND: issue DSP-1 has no test handoff version 1; it has no test handoff at all"
+      );
+      // Only the list was read: no version matched, so no record was asked for by id.
+      expect(requests).toEqual([
+        "GET /api/v1/issues/DSP-1/handoffs",
+        "GET /api/v1/issues/DSP-1/handoffs",
+      ]);
+      await expect(
+        run(
+          "dispatch_handoff_read",
+          { issue: "DSP-1", phase: "plan" },
+          serve([], () =>
+            response({ code: "HANDOFF_NOT_FOUND", error: "issue DSP-1 has no plan handoff" }, 404)
+          )
+        )
+      ).rejects.toThrow("HANDOFF_NOT_FOUND: issue DSP-1 has no plan handoff");
+    });
+  });
+
+  // The three cases the tool's text distinguishes, now that a credential can prove a session of
+  // its own: the server names the host's session, it names another, or it names none at all,
+  // which is a Dispatch older than broker-issued tokens and not an answer of "no session".
+  test("dispatch_whoami reports the session the credential proved when it is this host's", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: "alice",
+        service: null,
+        session: "session-1",
+        project: "INFRA",
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: "INFRA",
+    });
+    expect(result.text).toContain("Session session-1 acts for alice");
+    expect(result.text).toContain("It may write project INFRA and no other.");
+    expect(result.text).not.toContain("which is not this host session");
+  });
+
+  test("dispatch_whoami says plainly when the credential names another session", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: "alice",
+        service: null,
+        session: "ses_from_the_broker",
+        project: null,
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "ses_from_the_broker",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
+    expect(result.text).toContain("Session ses_from_the_broker acts for alice");
+    expect(result.text).toContain(
+      "Your credential names session ses_from_the_broker, which is not this host session (session-1): Dispatch records every write you make as ses_from_the_broker."
+    );
+    expect(result.text).not.toContain("may write project");
+  });
+
+  test("dispatch_whoami reads an omitted session as an older Dispatch, not as none", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({ kind: "agent", owner: "alice", service: null });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
+    expect(result.text).toContain("Session session-1 acts for alice");
+    expect(result.text).not.toContain("which is not this host session");
   });
 
   test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {
@@ -6782,6 +7145,40 @@ describe("executeDispatchTool", () => {
         ["b-1", "b-2"],
         [opening("b-1", "answered"), opening("b-2", "resolved")],
         [blockAsk("b-1", "answered"), blockAsk("b-2", "resolved")]
+      );
+
+      expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
+    });
+
+    // The renderer writes an id the `#` shortcut cannot hold as `id="…"`, its `&` as `&amp;`
+    // (pmdoc.TypedBlockIDAttribute): the opener is found by that spelling.
+    const quotedOpening = (written: string, block: string, state: string) =>
+      `:::ask{id="${written}" urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
+
+    test('refuses over open blocks whose ids are written id="…"', async () => {
+      const { outcome, posts } = await requestOver(
+        ["a b", "R&D"],
+        [quotedOpening("a b", "a b", "open"), quotedOpening("R&amp;D", "R&D", "open")],
+        [blockAsk("a b", "open"), blockAsk("R&D", "open")]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n").slice(1, 3)).toEqual([
+        '- "Question of a b?" (block a b, ask ask-a b)',
+        '- "Question of R&D?" (block R&D, ask ask-R&D)',
+      ]);
+      expect(posts).toEqual([]);
+    });
+
+    test('requests approval once blocks whose ids are written id="…" are answered or resolved', async () => {
+      const { outcome, posts } = await requestOver(
+        ["a b", "R&D"],
+        [quotedOpening("a b", "a b", "answered"), quotedOpening("R&amp;D", "R&D", "resolved")],
+        [blockAsk("a b", "answered"), blockAsk("R&D", "resolved")]
       );
 
       expect((await outcome).text).toStartWith("Approval requested for spec.md");

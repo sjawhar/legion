@@ -115,7 +115,7 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 	met := metrics.New()
 	config := listenerDeliveryHandlerConfig{
 		client:      d.client,
-		forwardRole: d.client.RequestCoreTo,
+		forwardRole: startRoleForward(d.client),
 		registry:    d.registry,
 		sessions:    d.sessions,
 		machineID:   rigMachineID,
@@ -142,6 +142,9 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		// delivery rather than the retry policy (INFRA-141).
 		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
+	// The durable path's pushes to serving-port sessions and the role lane's forwards run off the
+	// handler, as main.go wires them (wireDeliveryWorkers).
+	config = wireTestDeliveryWorkers(t, config)
 	subscription, err := startListenerSubscription(
 		d.client, "listener-dispatch-"+id.New(), jetStreamDeliveryHandler(config))
 	if err != nil {

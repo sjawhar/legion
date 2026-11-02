@@ -108,6 +108,8 @@ func line(issues []Issue, slots []Slot) []Issue {
 // unreleased child or not), or waits on a person with its architect live, and does not linger after
 // its close. A todo child under a live tree runs in it, or waits with its root held under an
 // unreleased child and moves with it into the tree that adopts it; under any other it is an orphan.
+// It reads the slots and nothing else: whether a root that holds none waits for one is its own
+// record's to say (line), so no other issue is read.
 func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
 	if root.Lingers() {
 		return false, nil
@@ -122,12 +124,7 @@ func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, er
 	if slices.ContainsFunc(slots, func(slot Slot) bool { return slot.Issue == root.Key }) {
 		return true, nil
 	}
-	issues, err := store.Issues(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	_, live := LiveRoots(issues, slots)[root.Key]
-	return live, nil
+	return len(line([]Issue{root}, slots)) == 1, nil
 }
 
 // LiveRoots is the set of keys whose trees are live (TreeLive), read from issues and slots already

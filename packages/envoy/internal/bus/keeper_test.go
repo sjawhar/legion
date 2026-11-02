@@ -278,8 +278,8 @@ func TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream(t *testing.T) {
 }
 
 // The keeper's subject list is the deployed one with only this binary's subjects added that it
-// lacks, that overlap none deployed and that capture no role lane: it keeps every deployed subject,
-// a foreign one, a widened one and a narrowed one included.
+// lacks and that overlap none deployed: it keeps every deployed subject, a foreign one, a widened
+// one and a narrowed one included.
 func TestTheKeepersSubjectsAddOnlyItsOwnThatOverlapNothingDeployed(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -290,7 +290,6 @@ func TestTheKeepersSubjectsAddOnlyItsOwnThatOverlapNothingDeployed(t *testing.T)
 		{"a foreign subject", []string{"notifications.agent.>", "notifications.retired.>"}, []string{"notifications.agent.>"}, []string{"notifications.agent.>", "notifications.retired.>"}},
 		{"a narrowed own subject", []string{"notifications.github.>"}, []string{"notifications.github.pr.>"}, []string{"notifications.github.>"}},
 		{"a widened own subject", []string{"notifications.github.pr.>"}, []string{"notifications.github.>"}, []string{"notifications.github.pr.>"}},
-		{"a role lane", []string{"notifications.agent.>"}, []string{contracts.RoleTopicPrefix + ">", ExceptionTopicPrefix + contracts.RoleTopicPrefix + ">"}, []string{"notifications.agent.>"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := keptSubjects(tc.deployed, tc.own); !slices.Equal(got, tc.want) {

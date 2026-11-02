@@ -167,33 +167,24 @@ func TestRolesAndGenerationsOfOnePodEnrollRequestAndReleaseIndependently(t *test
 		}
 	}
 
-	records := map[string]string{}
+	requests := map[string]wireCreateRequestResponse{}
 	for _, s := range []podSession{implementer, reviewer} {
 		created := s.request(t, ts, "DEEL_API_KEY")
 		if created.State != "pending" || created.RecordID == nil || created.Coalesced {
 			t.Fatalf("DEEL_API_KEY as %s = %+v, want a pending record of its own", s.slot, created)
 		}
-		records[s.slot] = *created.RecordID
-		status, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/"+*created.RecordID, nil)
-		read := decode[wireRecord](t, body)
-		if status != http.StatusOK || read.Enrollment == nil || read.Enrollment.Kind != "pod" || read.Enrollment.RuntimeID != podUID ||
-			read.Enrollment.Slot == nil || *read.Enrollment.Slot != s.slot {
-			t.Fatalf("record of %s = %d %s, want pod %s in slot %s", s.slot, status, body, podUID, s.slot)
+		requests[s.slot] = created
+		read := ts.record(t, *created.RecordID)
+		if read.Enrollment == nil || read.Enrollment.Kind != "pod" || read.Enrollment.RuntimeID != podUID || read.Enrollment.Slot != s.slot {
+			t.Fatalf("record of %s = %+v, want pod %s in slot %s", s.slot, read, podUID, s.slot)
 		}
 	}
-	if records["implementer-g1"] == records["reviewer-g1"] {
-		t.Fatalf("both roles' requests share record %s", records["implementer-g1"])
+	if *requests["implementer-g1"].RecordID == *requests["reviewer-g1"].RecordID {
+		t.Fatalf("both roles' requests share record %s", *requests["implementer-g1"].RecordID)
 	}
 	grants := map[string]string{}
-	for slot, recordID := range records {
-		status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", map[string]any{"approver": testApprover})
-		approved := decode[struct {
-			GrantID *string `json:"grant_id"`
-		}](t, body)
-		if status != http.StatusOK || approved.GrantID == nil {
-			t.Fatalf("approve %s's record = %d %s", slot, status, body)
-		}
-		grants[slot] = *approved.GrantID
+	for slot, created := range requests {
+		grants[slot] = ts.approveAs(t, created, testApprover)
 	}
 
 	values := func(s podSession, grantID string) (int, []byte) {

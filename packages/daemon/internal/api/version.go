@@ -357,10 +357,14 @@ package api
 // INFRA-229 at 36, so this branch took 37; main then landed INFRA-80 at 37 with store migration
 // 0051, so this branch took 38 and store migration 0052; main then landed INFRA-225 at 38 with
 // store migrations 0052 and 0053, so this branch takes 39 and store migration 0054, as the
-// collision note says. Other open branches may declare 39 or a migration 0054 too: whichever
-// merges after another takes the next free contract number and renumbers its store migration past
-// main's, every site that names either included, among them the rollback's
-// `delete from schema_version where version = 54` in docs/kubernetes.md.)
+// collision note says. Other open branches may declare 39 too: whichever merges after another
+// takes the next free contract number, every site that names it included. A store migration is
+// not renumbered with it: one added after the numbered series takes the UTC moment it was
+// created as its version, 14 digits YYYYMMDDHHMMSS, which sort above the numbered series, so two
+// branches open at once cannot claim one version and the file keeps the name it was written
+// with. A rollback that deletes the row a migration recorded, as the one in docs/kubernetes.md
+// does with `delete from schema_version where version = 54`, names that version, which for a
+// migration written since is its 14-digit timestamp.)
 //
 // 40: a root whose architect asked a person a question and handed the turn back gives its
 // admission slot up in the new phase `awaiting_person`, and its strict state issue view gains
@@ -407,4 +411,64 @@ package api
 // refuses either pair. This change adds no store migration. (This branch took 36 through 41 in
 // turn; main landed each of those numbers first, the controller start command last at 41, so this
 // branch takes the number above them, as the collision note says.)
-const DaemonAPIVersion = 42
+//
+// 43: api.State gains `consumers`, the lag of the daemon's three durable consumers
+// (api.ConsumerLagView), read from NATS after the state's transaction commits: each consumer's
+// `name`, `waiting` (JetStream's NumPending plus NumAckPending), `oldestAt` and
+// `oldestAgeSeconds` (the stream time of the first message after its ack floor on one of its
+// filter subjects, and that message's age in whole seconds; both null when nothing waits or the
+// message could not be read), `lastHandledAt` (when the daemon last acknowledged one of its
+// messages or terminated one as poison, null before the first; a nak is not handled), `stalled`
+// (messages waiting and none handled for 60 seconds, counted from the consumer's open before the
+// first) and `unavailable` (what NATS did not answer within the read's 2-second bound or refused,
+// absent when every read answered: a failed CONSUMER.INFO leaves `waiting` 0 and `stalled` false,
+// a failed STREAM.MSG.GET only the oldest null). Never null, so a 42 plugin's strict reader
+// refuses the state, and the boot gate and `legion probe-image` refuse the mixed pair. The state's
+// `repositories` gains `withoutWebhookApp` in the same contract: each served repository, as
+// Dispatch maps it, that Dispatch's GitHub App (the one GitHub sends its webhook events through)
+// is not known to be installed on, `{repo, reason}` sorted by repo, the reason naming whether the
+// App is not installed, the check failed, or Dispatch does not answer the check; never null, and
+// the repository is served all the same. (This branch took 41, then 42; 42 is declared by main's
+// stalled-worker reminder, so this change takes the number above it, as the collision note says.)
+//
+// 44: a Claude Code role's start command and pane no longer carry
+// CLAUDE_CODE_DISABLE_BACKGROUND_TASKS; CLAUDE_CONFIG_DIR and CLAUDE_CODE_DISABLE_CRON stay, and
+// the name is no longer the runtime's, so an operator's `runtime.kubernetes.pod.env` and
+// `runtime.tmux.pane_env` may set it as they may set Claude Code's other variables. A role may
+// leave a background task running past the end of a turn: when it finishes, Claude Code starts a
+// turn of its own, which the bridge reports to the daemon as a turn (`internal/claudebridge`), so
+// the result is read in a turn the daemon sees rather than after one the daemon thinks has ended.
+// The worker container's and the pane's environment is one of this contract's surfaces, so
+// dropping a variable from it bumps the number, as adding the three at 42 did, and the image probe
+// holds this daemon and the image that runs its roles together. This change adds no store
+// migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
+// the number above it, as the collision note says.)
+//
+// 45: sjawhar/legion#2354 -- a phase's handoff is a record on its Dispatch issue, which the
+// worker writes with `dispatch handoff-write` under its own session, rather than a committed
+// `.legion/<KEY>/<phase>.json`. `api.HandoffCompleteRequest` gains `handoffId` and
+// `handoffVersion`, the record a file-backed phase's completion (planning, implementing, testing,
+// reviewing) names, and the daemon refuses such a completion without one
+// (HANDOFF_RECORD_REQUIRED); it reads the record back from Dispatch and refuses one Dispatch has
+// not (HANDOFF_RECORD_NOT_FOUND), cannot read (DISPATCH_READ_FAILED), of another issue, phase or
+// version (HANDOFF_RECORD_MISMATCH), or written by another session than the claim's
+// (HANDOFF_SESSION_MISMATCH), and `HANDOFF_NOT_NEW` and the completion's idempotency key name the
+// record id in place of the commit. `commit` stays the implementer's (its pushed tip, and retro's
+// commit) and the merger's; the planner, tester and reviewer send none, and the daemon no longer
+// requires one of them. `api.PhaseView` gains `handoffRecord`, `{id, version}`, absent until the
+// worker's completion of its current file-backed phase names one; store migration 20261101144900_handoff_records keeps it
+// on the phase row. A 44 plugin posts a commit and no record, which this daemon refuses, and its
+// strict reader refuses a state carrying `handoffRecord`, so the boot gate and `legion
+// probe-image` refuse the mixed pair. (This branch took 40 and store migration 0055; main then
+// landed `awaiting_person` at 40 with store migrations 0055 to 0058, and `issue_ancestry` as store
+// migration 0059, so this change took 41 and store migration 0060; main then landed
+// `pull_request_head_move_starts` as store migration 0060 at 40, so this change took store
+// migration 0061; main then landed `pull_request_head_run` as store migration 0061, so this change
+// took store migration 0062; main then landed the controller start command at 41 and the worker
+// stall and Claude session environment at 42, so this change took 43 and kept store migration
+// 0062; main then landed the lost-event pass at 43 with store migrations 0062 to 0064, so this
+// change took 44 and store migration 0065; main then landed background work at 44 with store
+// migrations 0065 to 0067, which closed the numbered series (sjawhar/legion#2411), so this change
+// takes 45 and a store migration named for the UTC moment it was written, as the collision note
+// says.)
+const DaemonAPIVersion = 45

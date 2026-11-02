@@ -309,7 +309,7 @@ func (r *roundTrips) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEnd
 func TestIssueReadCostsTwoRoundTrips(t *testing.T) {
 	database := storetest.Open(t)
 	counter := &roundTrips{}
-	traced := storetest.Traced(t, database, counter)
+	traced := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
 	handler, _, deps := newTestServer(t, testServerOptions{
 		store: traced,
 		// The caller's identity is resolved on the untraced pool, so the count is the read's

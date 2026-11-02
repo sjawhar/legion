@@ -10,7 +10,8 @@
 # `GET /v1/sessions`. Its negative control is the same first case against the base revision's
 # committed `dist/envoy-channel.js`, which registers the folder name and not the chosen one.
 #
-# WHAT IS SIMULATED. Claude Code is not installed in a Legion issue pod and cannot be, so the two
+# WHAT IS SIMULATED. This script does not start Claude Code (a pod can run it from bunx, as
+# scripts/e2e/envoy-session-delivery.sh does), so the two
 # hook payloads are JSON this script writes, shaped as Claude Code's hooks reference documents
 # them (https://code.claude.com/docs/en/hooks: a SessionStart hook receives `session_title`, "the
 # session's custom title, present when one is set, for example with `--name`, `/rename` …", and

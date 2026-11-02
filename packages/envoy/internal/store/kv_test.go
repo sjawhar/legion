@@ -22,6 +22,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -30,11 +31,11 @@ import (
 // --- Unit Tests (no NATS needed — test Match() against pre-populated cache) ---
 
 func TestMatch_FiltersByMachineID(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := cachedRegistry(map[string]Interest{
 		"ses_a": {SessionID: "ses_a", MachineID: "machine-A", Topics: []string{"notifications.>"}},
 		"ses_b": {SessionID: "ses_b", MachineID: "machine-B", Topics: []string{"notifications.>"}},
 		"ses_c": {SessionID: "ses_c", MachineID: "machine-A", Topics: []string{"notifications.>"}},
-	}}
+	})
 
 	got := r.Match("machine-A", "notifications.test")
 	if len(got) != 2 {
@@ -61,13 +62,13 @@ func TestMatch_FiltersByMachineID(t *testing.T) {
 // session must find the ones registered through another machine's listener, by an exact topic or
 // a wildcard alike, and none whose patterns miss the topic.
 func TestMatchAll_ReturnsMatchingSessionsOnEveryMachine(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := cachedRegistry(map[string]Interest{
 		"ses_b_exact": {SessionID: "ses_b_exact", MachineID: "machine-B", Topics: []string{"notifications.team.deploy"}},
 		"ses_a_star":  {SessionID: "ses_a_star", MachineID: "machine-A", Topics: []string{"notifications.team.*"}},
 		"ses_a_other": {SessionID: "ses_a_other", MachineID: "machine-A", Topics: []string{"notifications.team.review"}},
 		"ses_b_chev":  {SessionID: "ses_b_chev", MachineID: "machine-B", Topics: []string{"notifications.slack.>", "notifications.>"}},
 		"ses_b_slack": {SessionID: "ses_b_slack", MachineID: "machine-B", Topics: []string{"notifications.slack.>"}},
-	}}
+	})
 
 	got := r.MatchAll("notifications.team.deploy")
 	ids := make([]string, len(got))
@@ -85,12 +86,12 @@ func TestMatchAll_ReturnsMatchingSessionsOnEveryMachine(t *testing.T) {
 }
 
 func TestMatch_WildcardPatterns(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := cachedRegistry(map[string]Interest{
 		"ses_exact":   {SessionID: "ses_exact", MachineID: "m1", Topics: []string{"notifications.github.sjawhar.legion.pr"}},
 		"ses_star":    {SessionID: "ses_star", MachineID: "m1", Topics: []string{"notifications.github.*.*.pr"}},
 		"ses_chevron": {SessionID: "ses_chevron", MachineID: "m1", Topics: []string{"notifications.github.>"}},
 		"ses_slack":   {SessionID: "ses_slack", MachineID: "m1", Topics: []string{"notifications.slack.>"}},
-	}}
+	})
 
 	got := r.Match("m1", "notifications.github.sjawhar.legion.pr")
 	ids := make([]string, len(got))
@@ -119,7 +120,7 @@ func TestMatch_WildcardPatterns(t *testing.T) {
 }
 
 func TestMatch_SlackThreadIsolation(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := cachedRegistry(map[string]Interest{
 		"ses_thread_a": {SessionID: "ses_thread_a", MachineID: "m1", Topics: []string{
 			"notifications.slack.T123.C456.thread.1111111111_111111.>",
 		}},
@@ -129,7 +130,7 @@ func TestMatch_SlackThreadIsolation(t *testing.T) {
 		"ses_channel": {SessionID: "ses_channel", MachineID: "m1", Topics: []string{
 			"notifications.slack.T123.C456.>",
 		}},
-	}}
+	})
 
 	// Thread A message: only ses_thread_a and ses_channel
 	gotA := r.Match("m1", "notifications.slack.T123.C456.thread.1111111111_111111.message")
@@ -165,7 +166,7 @@ func TestMatch_SlackThreadIsolation(t *testing.T) {
 }
 
 func TestMatch_EmptyCache(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{}}
+	r := cachedRegistry(map[string]Interest{})
 	got := r.Match("m1", "notifications.test")
 	if len(got) != 0 {
 		t.Fatalf("expected 0 results from empty cache, got %d", len(got))
@@ -173,13 +174,13 @@ func TestMatch_EmptyCache(t *testing.T) {
 }
 
 func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := cachedRegistry(map[string]Interest{
 		"ses_multi": {
 			SessionID: "ses_multi",
 			MachineID: "m1",
 			Topics:    []string{"notifications.github.>", "notifications.slack.>"},
 		},
-	}}
+	})
 
 	// Matches first topic
 	got := r.Match("m1", "notifications.github.sjawhar.legion.pr")
@@ -2965,6 +2966,81 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 	}
 	if release, err := registry.ReleaseExpiredRoleClaim(context.Background(), deleted, fmt.Sprintf("ses_%03d", claims), time.Minute); err != nil || release != ExpiredRoleClaimMissing {
 		t.Fatalf("deleted claim = %v, %v; want it missing", release, err)
+	}
+}
+
+// A claim another listener's registry writes reaches this registry's CachedRoleHolder through the
+// role watcher, and so do its release and its replacement, and the cache answers with no read of the
+// bucket, so the role lane resolves a holder without a round trip per message.
+func TestCachedRoleHolderFollowsAnotherRegistrysClaimsWithoutReadingTheBucket(t *testing.T) {
+	uri := testnats.URL(t)
+	reader, writer := testnats.Connect(t, uri), testnats.Connect(t, uri)
+	defer reader.Close()
+	defer writer.Close()
+	readerRegistry, err := Open(reader, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the reading registry: %v", err)
+	}
+	t.Cleanup(readerRegistry.StopWatch)
+	writerRegistry, err := Open(writer, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the writing registry: %v", err)
+	}
+	t.Cleanup(writerRegistry.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := readerRegistry.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("warm the reading registry: %v", err)
+	}
+	gets, err := reader.SubscribeSync(fmt.Sprintf("$JS.API.DIRECT.GET.KV_%s.>", bus.RoleClaimBucket))
+	if err != nil {
+		t.Fatalf("watch direct gets: %v", err)
+	}
+	defer func() { _ = gets.Unsubscribe() }()
+	legacyGets, err := reader.SubscribeSync(fmt.Sprintf("$JS.API.STREAM.MSG.GET.KV_%s", bus.RoleClaimBucket))
+	if err != nil {
+		t.Fatalf("watch stream message gets: %v", err)
+	}
+	defer func() { _ = legacyGets.Unsubscribe() }()
+	reads := func() int {
+		t.Helper()
+		if err := reader.Flush(); err != nil {
+			t.Fatalf("flush the reader: %v", err)
+		}
+		return pending(t, gets) + pending(t, legacyGets)
+	}
+	watched := func(role string) string {
+		readerRegistry.holdersMu.RLock()
+		defer readerRegistry.holdersMu.RUnlock()
+		return readerRegistry.holders[role]
+	}
+	requireHolder := func(role, want string) {
+		t.Helper()
+		waitFor(t, 5*time.Second, func() bool { return watched(role) == want })
+		before := reads()
+		holder, err := readerRegistry.CachedRoleHolder(role)
+		if err != nil || holder != want {
+			t.Fatalf("CachedRoleHolder(%s) = %q, %v; want %q", role, holder, err, want)
+		}
+		if after := reads(); after != before {
+			t.Fatalf("CachedRoleHolder(%s) read the bucket %d times, want none", role, after-before)
+		}
+	}
+
+	if _, err := writerRegistry.SetRole("ses_first", "m1", "reviewer", false); err != nil {
+		t.Fatalf("claim the role: %v", err)
+	}
+	requireHolder("reviewer", "ses_first")
+	if _, err := writerRegistry.SetRole("ses_second", "m1", "reviewer", false); err != nil {
+		t.Fatalf("take the role over: %v", err)
+	}
+	requireHolder("reviewer", "ses_second")
+	if err := writerRegistry.Remove(context.Background(), "ses_second", []string{contracts.RoleTopicPrefix + "reviewer"}); err != nil {
+		t.Fatalf("release the role: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return watched("reviewer") == "" })
+	if holder, err := readerRegistry.CachedRoleHolder("reviewer"); err != nil || holder != "" {
+		t.Fatalf("CachedRoleHolder after the release = %q, %v; want no holder", holder, err)
 	}
 }
 

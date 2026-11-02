@@ -13,7 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { askgateStore, MARKER_MAX_AGE_MS, processStart } from "../askgate-marker";
 import { adviceMemory, resetAdviceMemory } from "../dispatch-execute";
+import { forgetKeyedLayerMemory, keyedLayerMemory, rememberKeyedLayer } from "../dispatch-http";
 import { forgetShownPictures, shownPictures } from "../dispatch-picture-tools";
+import { sessionDirectory } from "../dispatch-session-directory";
 import {
   appendResult,
   loadSessionMemory,
@@ -23,7 +25,6 @@ import {
   recordOutcome,
   resultsEnd,
   saveSessionMemory,
-  sessionDirectory,
   writePicture,
 } from "../dispatch-session-state";
 
@@ -34,19 +35,24 @@ describe("per-session state", () => {
     const env = { DISPATCH_STATE_DIR: root() };
     const dir = sessionDirectory(env, "s1");
     resetAdviceMemory();
+    forgetKeyedLayerMemory();
     adviceMemory().add("triage:LEGION-2");
     shownPictures("s1").add("dispatch://LEGION-2/artifact/a@v1");
+    const seen = new Date(Date.now() - 60_000).toISOString();
+    rememberKeyedLayer({ "https://dispatch.example": seen });
     saveSessionMemory(dir, "s1", new Set(["ask-1"]));
     resetAdviceMemory();
     forgetShownPictures("s1");
+    forgetKeyedLayerMemory();
     const follows = loadSessionMemory(dir, "s1");
     expect(adviceMemory().has("triage:LEGION-2")).toBe(true);
     expect(shownPictures("s1").has("dispatch://LEGION-2/artifact/a@v1")).toBe(true);
     expect(follows.has("ask-1")).toBe(true);
-  });
-
-  test("a session id that could leave the state directory is refused", () => {
-    expect(() => sessionDirectory({ DISPATCH_STATE_DIR: root() }, "../x")).toThrow();
+    // The sighting keeps its own time, so it still ends five minutes after the answer that showed
+    // it, however many calls carry it on.
+    const carried = keyedLayerMemory()["https://dispatch.example"];
+    expect(Math.abs(Date.parse(carried ?? "") - Date.parse(seen))).toBeLessThan(1_000);
+    forgetKeyedLayerMemory();
   });
 
   test("the ledger returns only what was appended after an offset", () => {

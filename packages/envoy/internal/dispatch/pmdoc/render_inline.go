@@ -208,9 +208,11 @@ func autolinkAt(after []byte) bool {
 	return util.FindURLIndex(address) == end || util.FindEmailIndex(address) == end
 }
 
-// rawHTMLParser is goldmark's inline raw HTML parser, which every reader of Parse's reads raw HTML
-// with (inlineParsers).
-var rawHTMLParser = parser.NewRawHTMLParser()
+// rawHTMLParser is the package's inline raw HTML parser (inlineRawHTMLParser), which every reader
+// of Parse's reads raw HTML with (inlineParsers), so the writer's scan and the readers read a
+// comment, a processing instruction, a declaration, a CDATA section and a closing tag by the one
+// parser; an open tag the scan matches against openTagPattern instead.
+var rawHTMLParser = inlineRawHTMLParser{parser.NewRawHTMLParser()}
 
 // openTagPattern is an open tag as CommonMark 0.31 and the browser editor's engine (micromark's
 // html-text) read one, which is goldmark's pattern with CommonMark's unquoted attribute value: one
@@ -220,22 +222,9 @@ var openTagPattern = regexp.MustCompile("^<[A-Za-z][A-Za-z0-9-]*" +
 	`(?:[\r\n \t]+[a-zA-Z_:][a-zA-Z0-9:._-]*(?:[\r\n \t]*=[\r\n \t]*(?:[^"'=<>` + "`" + `\t\n\r ]+|'[^']*'|"[^"]*"))?)*` +
 	`(?:[ \t]|(?:\r\n|\n){0,1})*/?>`)
 
-// The kinds of construct rawHTMLCloser tells apart, each ending at the first of its own closer,
-// and how many of them there are (rawHTMLScan.ends).
-const (
-	htmlComment = iota
-	htmlInstruction
-	htmlDeclaration
-	htmlCDATA
-	htmlCloserKinds
-)
-
-// htmlNoCloser is rawHTMLCloser's answer for a tag or anything else: one the parser reading it
-// ends, not a closer of its own.
-const htmlNoCloser = -1
-
 // htmlEndUnasked and htmlEndNone are what a kind's entry in rawHTMLScan.ends holds beside the end
-// of a construct: before any ask of that kind, and where the last ask found no closer.
+// of a construct: before any ask of that kind, and where the last ask found no closer. The end of
+// a construct is never 0.
 const (
 	htmlEndUnasked = 0
 	htmlEndNone    = -1
@@ -248,8 +237,8 @@ const (
 // reads less as raw HTML than CommonMark 0.31 and the engine do, so it is asked only for a closing
 // tag, a comment, a processing instruction and a CDATA section, which it reads as they do or
 // more; an open tag is matched against CommonMark's (openTagPattern), and a declaration, `<!` and
-// any ASCII letter where goldmark reads one only after an uppercase letter, ends at the first `>`
-// after it (declarationEnd). It reads the run's lines as the readers do, each later line without
+// any ASCII letter where goldmark reads one only after an uppercase letter, is read by the parser
+// the readers read one with. It reads the run's lines as the readers do, each later line without
 // the prefix written after the line feed (as readsBackUnder takes it off), so a `>` of a quote
 // marker closes nothing.
 //
@@ -259,14 +248,16 @@ const (
 // first of its closer (`-->`, `?>`, `>`, `]]>`) after its `<`, which is searched for out to the
 // run's end, so one is asked only where the last of its kind asked does not answer for it: a
 // later `<` of that kind before the end of the construct that one found ends at the same closer,
-// and none after one that found no closer finds one. Each byte is so read for at most one of each
-// kind, and the run's scan is linear.
+// and none after one that found no closer finds one. That record of its own asks (ends) is the
+// one that answers for a run, so the parser is given no context and keeps none for the scan
+// (unclosedRawHTMLOf). Each byte is so read for at most one of each kind, and the run's scan is
+// linear.
 type rawHTMLScan struct {
 	written []byte
 	from    int
 	prefix  string
-	// lines are the run's lines the reader reads, made at the first ask; line is the one the last
-	// `<` asked about is on.
+	// lines are the run's lines the reader reads, made at the first ask, the run's lines being
+	// one block to the parser; line is the one the last `<` asked about is on.
 	lines  text.Segments
 	reader text.BlockReader
 	line   int
@@ -299,14 +290,11 @@ func (s *rawHTMLScan) opensAt(at int) bool {
 			return true
 		}
 	}
-	switch {
-	case kind == htmlDeclaration:
-		s.ends[kind] = s.declarationEnd(at)
-		return s.ends[kind] != htmlEndNone
-	case isASCIILetter(s.written[at+1]):
+	if isASCIILetter(s.written[at+1]) {
 		return s.reader.Match(openTagPattern)
 	}
-	// The raw HTML parser reads neither the parent nor the parser context.
+	// The parser is asked for the lines of this one run, whose asks the scan records itself, so
+	// it is given neither a parent nor a context to record them in.
 	html := rawHTMLParser.Parse(nil, s.reader, nil)
 	if kind != htmlNoCloser {
 		s.ends[kind] = htmlEndNone
@@ -316,21 +304,6 @@ func (s *rawHTMLScan) opensAt(at int) bool {
 		}
 	}
 	return html != nil
-}
-
-// declarationEnd is where the declaration opened at at, on the line the scan is at, ends: after
-// the first `>` on the run's lines from there, htmlEndNone where none follows.
-func (s *rawHTMLScan) declarationEnd(at int) int {
-	for line := s.line; line < s.lines.Len(); line++ {
-		segment := s.lines.At(line)
-		if line == s.line {
-			segment = segment.WithStart(at)
-		}
-		if index := bytes.IndexByte(segment.Value(s.written), '>'); index >= 0 {
-			return segment.Start + index + 1
-		}
-	}
-	return htmlEndNone
 }
 
 // readLines makes the run's lines and a reader over them.
@@ -358,23 +331,6 @@ func blockLine(written []byte, start int, prefix string) (stop, next int) {
 		next += len(prefix)
 	}
 	return stop, next
-}
-
-// rawHTMLCloser is which kind of construct ending at the first of its closer a line opens: a
-// comment, a processing instruction, a declaration (`<!` and an ASCII letter, as CommonMark and
-// the engine read one), a CDATA section, or htmlNoCloser for a tag or nothing.
-func rawHTMLCloser(line []byte) int {
-	switch {
-	case bytes.HasPrefix(line, []byte("<!--")):
-		return htmlComment
-	case bytes.HasPrefix(line, []byte("<?")):
-		return htmlInstruction
-	case len(line) > 2 && line[1] == '!' && isASCIILetter(line[2]):
-		return htmlDeclaration
-	case bytes.HasPrefix(line, []byte("<![CDATA[")):
-		return htmlCDATA
-	}
-	return htmlNoCloser
 }
 
 // escapesOpener reports whether the text `<` at offset in node is the next of the openers the run's

@@ -15,7 +15,7 @@ import { MentionComposer } from "../conversation/MentionComposer";
 import type { SaveCommentEdit } from "../conversation/send-request";
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
-import { marginComposeSendKey } from "./margin-context";
+import { marginComposeSendKey, useMargin } from "./margin-context";
 import { ThreadList } from "./ThreadList";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
@@ -93,6 +93,7 @@ export function MarginComposerSlot({
    *  Comments tab shows. */
   onScreen: boolean;
 }): ReactNode {
+  const { anchorRefusal } = useMargin();
   const sendKey = useMemo(
     () => marginComposeSendKey(composer.anchor.artifact),
     [composer.anchor.artifact]
@@ -110,6 +111,7 @@ export function MarginComposerSlot({
       ) : null}
       <MentionComposer
         anchor={composer.anchor}
+        anchorRefusal={anchorRefusal}
         autoFocus={onScreen}
         closed={isClosed}
         frame="pt-3"

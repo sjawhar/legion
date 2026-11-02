@@ -8,13 +8,13 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 )
 
-// Session routes are keyed by session ID, but opencode session state lives on
-// shared disk, so several live processes can hold the same session at once: the
-// process explicitly driving it (launched with -s <session>), plus any process
-// that merely has it loaded. Every such process heartbeats a claim. Blind
-// last-writer-wins therefore routes deliveries to an arbitrary holder, and a
-// holder that is not driving the session starts its own model loop on delivery —
-// two loops interleaving one transcript.
+// Session routes are keyed by session ID, but a harness can keep session state
+// on shared disk, so several live processes can hold the same session at once:
+// the process explicitly driving it, plus any process that merely has it loaded.
+// Every such process heartbeats a claim. Blind last-writer-wins therefore
+// routes deliveries to an arbitrary holder, and a holder that is not driving
+// the session starts its own model loop on delivery — two loops interleaving
+// one transcript.
 //
 // mergeForClaim decides which claim survives.
 
@@ -127,6 +127,25 @@ func TestMergeForClaim_KeepsIncumbentMetadataWhenChallengerLoses(t *testing.T) {
 	}
 	if got.Dir != "/work/real" || got.Title != "real" {
 		t.Fatalf("expected the incumbent's metadata to survive a rejected claim, got %+v", got)
+	}
+}
+
+// Known limit: a rejected claim is discarded whole, the client instance id with it. mergeForClaim
+// keeps the incumbent entry as it stands, so the stored id stays the incumbent's even though the
+// challenger named a different instance. Nothing merges the two entries field by field, and a
+// losing challenger's id must not be stored: the id answers whose instance holds the route, and
+// the route stayed with the incumbent. The losing process re-registers under its own port once
+// the incumbent's claim goes stale, and stores its id then.
+func TestMergeForClaim_RejectedClaimLeavesTheIncumbentsClientInstanceIDStored(t *testing.T) {
+	cur := SessionEntry{Port: 100, Driving: true, ClientInstanceID: "incumbent-instance", UpdatedAt: claimNow - 1_000}
+	next := SessionEntry{Port: 200, Driving: false, ClientInstanceID: "challenger-instance"}
+
+	got, err := mergeForClaim(cur, nil, next, claimNow)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.ClientInstanceID != "incumbent-instance" {
+		t.Fatalf("expected the incumbent's client instance id to survive a rejected claim, got %+v", got)
 	}
 }
 

@@ -469,6 +469,50 @@ describe("AskGate at the dispatch CLI", () => {
     });
   });
 
+  // pi-envoy records an unmarked write on Dispatch, where a session with no access to this
+  // machine counts the asks that went out, or were refused, unreviewed. The count is the CLI's:
+  // it alone holds the write's own text. The line carries the count and nothing of the write.
+  test("the ledger line of an unmarked write counts the asks it carries, and holds no arguments", async () => {
+    writeRecord();
+    const ask = ["ask", "--issue", "DSP-1", "--question", "Which deployment window?"];
+    expect((await run(ask)).code).toBe(1);
+    expect(ledger()).toMatchObject([
+      {
+        tool: "dispatch_ask",
+        askgate: { mode: "block", why: "this call carries no AskGate marker", asksCarried: 1 },
+      },
+    ]);
+    expect(Object.keys(ledger()[0] ?? {}).sort()).toEqual(["askgate", "at", "error", "tool"]);
+    expect(JSON.stringify(ledger()[0])).not.toContain("deployment window");
+  });
+
+  test("an unmarked write that opens no ask carries a count of none", async () => {
+    writeRecord();
+    expect((await run(MESSAGE)).code).toBe(1);
+    expect(ledger()[0]).toMatchObject({
+      tool: "dispatch_message",
+      askgate: { mode: "block", asksCarried: 0 },
+    });
+  });
+
+  // An upload's asks are in its file, which the dry run's arguments name only by path: the count
+  // reads the bytes the CLI already read for the marker check.
+  test("an unmarked markdown upload counts the ask blocks its own file carries", async () => {
+    writeRecord("ses-1", undefined, "warn");
+    const brief = join(stateDir, "asks.md");
+    writeFileSync(
+      brief,
+      ":::ask{#window}\nWhich deployment window?\n:::\n\n:::ask{#owner}\nWho owns it?\n:::\n"
+    );
+    const upload = ["artifact", "--issue", "DSP-1", "--name", "asks.md", "--path", brief];
+    expect((await run(upload)).code).toBe(0);
+    expect(ledger()[0]).toMatchObject({
+      tool: "dispatch_artifact",
+      askgate: { mode: "warn", asksCarried: 2 },
+    });
+    expect(JSON.stringify(ledger()[0])).not.toContain("deployment window");
+  });
+
   test("in warn mode a write with no marker whose ledger line cannot be written does not post", async () => {
     writeRecord("ses-1", undefined, "warn");
     mkdirSync(join(stateDir, "sessions", "ses-1", "results.jsonl"));

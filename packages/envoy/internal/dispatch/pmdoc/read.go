@@ -22,12 +22,14 @@ func ReadForRendering(frag *crdt.YXmlFragment) (*Node, error) {
 	return readDocument(frag, readLiveText, false)
 }
 
-// ReadUnshared is Read for a document no other goroutine reads or writes while the call runs, and
-// which the caller drops afterwards: the read cache's fold of a history it has just decoded. The
-// tree is the caller's own, as Read's is (ownedValue). It reads each text by walking its items
-// directly (readUnsharedText) rather than through ygo's ToDelta, which takes the document's read
-// lock and builds a delta the walk would only turn into nodes, and it returns the tree validated
-// once, with the Validate and so the errors Read gives, so its holder never validates it again.
+// ReadUnshared is Read for a document no other goroutine reads or writes while the call runs: the
+// read cache's fold of a history it has just decoded, which drops the document afterwards, and a
+// write transaction's read of the fork only the goroutine holding it touches, which keeps the
+// tree it hands back. The tree is the caller's own, as Read's is (ownedValue). It reads each text
+// by walking its items directly (readUnsharedText) rather than through ygo's ToDelta, which takes
+// the document's read lock and builds a delta the walk would only turn into nodes, and it returns
+// the tree validated once, with the Validate and so the errors Read gives, so its holder never
+// validates it again.
 func ReadUnshared(frag *crdt.YXmlFragment) (ValidDocument, error) {
 	doc, err := readDocument(frag, readUnsharedText, true)
 	if err != nil {

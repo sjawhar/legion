@@ -1,5 +1,5 @@
 import { ASK_QUESTION_MAX } from "@legion/contracts/dispatch-tools";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { Artifact } from "../web/src/api/types";
 
 import {
@@ -19,12 +19,33 @@ import {
   requestApproval,
 } from "./api";
 import { documentEditor, needsYouCards, openSpecAndAwaitHeadingIds } from "./editor";
+import { askControls, hasReadingPane, inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
 function drawer(page: Page) {
   return page.getByRole("dialog", { name: "Inbox" });
+}
+
+/**
+ * An approval request's own card, as the Inbox draws one at this width.
+ *
+ * Below `READING_PANE_WIDTH` that is the card in the question's row on the Inbox page. From
+ * there the page shows an approval as the document under review in its reading column
+ * (INFRA-575), which carries no card, and the drawer is the Inbox that still keeps one
+ * (`pane={false}`): it opens over whatever page is showing, so this navigates to one.
+ */
+async function approvalCard(page: Page, askId: string): Promise<Locator> {
+  if (!hasReadingPane(page)) {
+    await page.goto("/");
+    return page.getByTestId(`ask-${askId}`);
+  }
+  await page.goto("/agents");
+  await page.locator("body").focus();
+  await page.keyboard.press("i");
+  await expect(drawer(page)).toBeVisible();
+  return drawer(page).getByTestId(`ask-${askId}`);
 }
 
 const session = {
@@ -43,29 +64,30 @@ test("a spec's approval is a human review pinned to its version: requested by th
   const issue = await createIssue({ project: "GATE", spec: "The plan.", title: "Design gate" });
   const artifactID = issue.primary_artifact_id;
 
-  // The agent asks for approval; the Inbox shows a fixed-option approval ask.
+  // The agent asks for approval; the Inbox shows the request and the two reviews it offers.
   const requested = await requestApproval(artifactID, {}, session);
   expect(requested.version).toBe(1);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    const card = page.getByTestId(`ask-${requested.ask.id}`);
-    await expect(card).toBeVisible();
-    await expect(card.getByRole("radio")).toHaveCount(2);
-    const approve = card.getByRole("radio", { name: /^Approve/ });
+    // From 1280 px an approval's own surface in the Inbox is the reading column (INFRA-575):
+    // the document at the version under review, with Approve and Request changes in the
+    // column's head. That head is where the reader answers it.
+    const head = await askControls(page, requested.ask.id);
+    const approve = head.getByRole("button", { exact: true, name: "Approve" });
     await expect(approve).toBeVisible();
-    const requestChanges = card.getByRole("radio", { name: /^Request changes/ });
+    const requestChanges = head.getByRole("button", { exact: true, name: "Request changes" });
     await expect(requestChanges).toBeVisible();
-    // Request changes needs a reason; the card says so instead of silently disabling Answer.
-    await requestChanges.check();
-    await expect(card.getByLabel("Reason (required)")).toBeFocused();
-    await expect(card.getByRole("button", { name: "Answer" })).toBeDisabled();
-    await expect(card.getByText("Add a reason to send Request changes")).toBeVisible();
-    await approve.check();
-    await expect(card.getByText("Add a reason to send Request changes")).toHaveCount(0);
-    await card.getByRole("button", { name: "Answer" }).click();
-    await expect(card).toHaveCount(0);
+    // Request changes needs a reason, and says so by holding its own button rather than
+    // refusing the review silently.
+    await requestChanges.click();
+    const reason = page.getByRole("dialog", { name: "Request changes" });
+    await expect(reason.getByRole("button", { name: "Request changes" })).toBeDisabled();
+    await reason.getByRole("button", { name: "Cancel" }).click();
+    await expect(reason).toHaveCount(0);
+    await approve.click();
+    await expect(inboxRow(page, requested.ask.id)).toHaveCount(0);
     await expect
       .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
       .toBe("approved");
@@ -149,10 +171,11 @@ test("an approval request stays in one Inbox card while its document version mov
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    const card = page.getByTestId(`ask-${requested.ask.id}`);
-    await expect(
-      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
-    ).toBeVisible();
+    // One request, one item: the row it is, in the band whose turn it is. From 1280 px the
+    // card the Inbox drew for it is the reading column's document (INFRA-575), so the row
+    // carries the question's own words and the column's head carries Approve.
+    const row = inboxRow(page, requested.ask.id);
+    await expect(row).toHaveAttribute("data-inbox-section", "human");
 
     await editArtifact(
       artifactID,
@@ -170,10 +193,8 @@ test("an approval request stays in one Inbox card while its document version mov
     const movedVersion = Math.max(...movedArtifact.versions.map((version) => version.number));
 
     await page.reload();
-    await expect(
-      page.locator('[data-inbox-section="agent"]').getByTestId(`ask-${requested.ask.id}`)
-    ).toBeVisible();
-    await expect(card).toContainText(
+    await expect(row).toHaveAttribute("data-inbox-section", "agent");
+    await expect(row).toContainText(
       `Approve spec.md (version ${movedVersion})? Caps retries at three attempts.`
     );
     await page.goto(`/issues/${issue.key}`);
@@ -186,15 +207,14 @@ test("an approval request stays in one Inbox card while its document version mov
     );
     expect(handedBack.ask.id).toBe(requested.ask.id);
     await page.goto("/");
-    await expect(
-      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
-    ).toBeVisible();
-    await expect(card).toContainText(
+    await expect(row).toHaveAttribute("data-inbox-section", "human");
+    await expect(row).toContainText(
       `Approve spec.md (version ${movedVersion})? Adds the rollback budget.`
     );
-    await card.getByRole("radio", { name: /^Approve/ }).check();
-    await card.getByRole("button", { name: "Answer" }).click();
-    await expect(card).toHaveCount(0);
+    await (await askControls(page, requested.ask.id))
+      .getByRole("button", { exact: true, name: "Approve" })
+      .click();
+    await expect(row).toHaveCount(0);
     await expect
       .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval)
       .toMatchObject({ state: "approved", version: movedVersion, ask_id: requested.ask.id });
@@ -233,9 +253,9 @@ test("a human comment, revision, and hand-back return an approval card to Waitin
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    await expect(
-      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
-    ).toBeVisible();
+    // The band the question sits in is the row's, at every width: from 1280 px an approval's
+    // card in the Inbox is the reading column's document (INFRA-575), not a card in the list.
+    await expect(inboxRow(page, requested.ask.id)).toHaveAttribute("data-inbox-section", "human");
     await page.goto(`/issues/${issue.key}`);
     await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
   } finally {
@@ -269,20 +289,23 @@ test("an unchanged hand-back after a human comment and a progress note returns t
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    await expect(
-      page.locator('[data-inbox-section="agent"]').getByTestId(`ask-${requested.ask.id}`)
-    ).toBeVisible();
+    const row = inboxRow(page, requested.ask.id);
+    await expect(row).toHaveAttribute("data-inbox-section", "agent");
 
-    // The same version, question and summary: the hand-back alone changes whose turn it is, and the
-    // open Inbox moves the card on the ask.handed_back event it records, which rewords nothing.
+    // The same version, question and summary: the hand-back alone changes whose turn it is,
+    // and the open Inbox moves on the ask.handed_back event it records, which rewords nothing
+    // - the question waits on the reader again, live. The row the reading column is showing
+    // is held in the band they saw it in until they look away (INFRA-575, `heldRow`), so its
+    // band is read on their next look at the list.
     const handedBack = await requestApproval(issue.primary_artifact_id, { summary }, session);
     expect(handedBack.ask.id).toBe(requested.ask.id);
-    const card = page
-      .locator('[data-inbox-section="human"]')
-      .getByTestId(`ask-${requested.ask.id}`);
-    await expect(card).toBeVisible();
-    await expect(card).toContainText(`Approve spec.md (version 1)? ${summary}`);
-    await expect(card).not.toContainText("Edited");
+    await expect(page.getByText(/^Blocked on you: 1 item/)).toBeVisible();
+    await page.reload();
+    await expect(row).toHaveAttribute("data-inbox-section", "human");
+    await expect(row).toContainText(`Approve spec.md (version 1)? ${summary}`);
+    // Nothing the Inbox draws of it - the row's own words, and the column beside them - says
+    // the question was reworded.
+    await expect(page.locator("main")).not.toContainText("Edited");
     const askEvents = (await getIssueEvents(issue.key, { limit: 200 }, { login: "alice" }))
       .filter((event) => event.type.startsWith("ask."))
       .map((event) => event.type);
@@ -366,13 +389,19 @@ test("an answer started before a hand-back that rewords nothing is saved, and th
 
   const alice = await asUser(browser, "alice");
   try {
-    // No live socket on this page: the card stays as the human loaded it, mid-answer.
+    // No live socket on this page: the card stays as the human loaded it, mid-answer. An
+    // answer can be half-made only where the Inbox draws the question's own card, which for an
+    // approval from 1280 px is the drawer rather than the page's reading column (INFRA-575):
+    // the column shows the document under review, whose Approve is one press with no draft to
+    // hold. The drawer keeps today's card at every width.
     const answering = await alice.newPage();
     await answering.routeWebSocket(/\/ws\/live$/u, (route) =>
       route.close({ code: 1011, reason: "test network drop" })
     );
-    await answering.goto("/");
-    const shown = answering
+    await answering.goto("/agents");
+    await answering.locator("body").focus();
+    await answering.keyboard.press("i");
+    const shown = drawer(answering)
       .locator('[data-inbox-section="agent"]')
       .getByTestId(`ask-${requested.ask.id}`);
     await expect(shown).toBeVisible();
@@ -380,12 +409,18 @@ test("an answer started before a hand-back that rewords nothing is saved, and th
 
     await requestApproval(issue.primary_artifact_id, { summary }, session);
 
-    // Another page sees the hand-back: the card is the human's turn, and it was never reworded.
+    // Another page sees the hand-back: the question is the human's turn again, and the card the
+    // drawer draws for it was never reworded.
     const watching = await alice.newPage();
     await watching.goto("/");
-    const handedBack = watching
-      .locator('[data-inbox-section="human"]')
-      .getByTestId(`ask-${requested.ask.id}`);
+    await expect(inboxRow(watching, requested.ask.id)).toHaveAttribute(
+      "data-inbox-section",
+      "human"
+    );
+    await watching.goto("/agents");
+    await watching.locator("body").focus();
+    await watching.keyboard.press("i");
+    const handedBack = drawer(watching).getByTestId(`ask-${requested.ask.id}`);
     await expect(handedBack).toBeVisible();
     await expect(handedBack).not.toContainText("Edited");
 
@@ -424,8 +459,17 @@ test("an approval ask's Inbox card shows a question carrying a long summary whol
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await page.goto("/");
-    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    // The question's own card is where the Inbox shows the question itself: the row's card
+    // below 1280 px, and the drawer's from there up, since the Inbox page's reading column
+    // shows an approval as the document under review rather than a card (INFRA-575) and its
+    // short row gives the question one line on purpose. Whole is the card's promise, so the
+    // window is made tall enough to hold the whole card: what is left to flag is a clip, not
+    // a surface scrolling as it is meant to.
+    const viewport = page.viewportSize();
+    if (viewport !== null && hasReadingPane(page)) {
+      await page.setViewportSize({ height: 2600, width: viewport.width });
+    }
+    const card = await approvalCard(page, requested.ask.id);
     await expect(card).toBeVisible();
     const question = card.locator("p", { hasText: ending });
     await expect(question).toHaveText(requested.ask.question);
@@ -455,9 +499,10 @@ test("reading an approved spec and moving the caret through its numbered list le
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    const card = page.getByTestId(`ask-${requested.ask.id}`);
-    await card.getByRole("radio", { name: /^Approve/ }).check();
-    await card.getByRole("button", { name: "Answer" }).click();
+    // The reading column's head is where the Inbox offers the review from 1280 px (INFRA-575).
+    await (await askControls(page, requested.ask.id))
+      .getByRole("button", { exact: true, name: "Approve" })
+      .click();
     await expect
       .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
       .toBe("approved");
@@ -504,9 +549,9 @@ test("an agent's comment on part of an identifier in an approved spec leaves its
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    const card = page.getByTestId(`ask-${requested.ask.id}`);
-    await card.getByRole("radio", { name: /^Approve/ }).check();
-    await card.getByRole("button", { name: "Answer" }).click();
+    await (await askControls(page, requested.ask.id))
+      .getByRole("button", { exact: true, name: "Approve" })
+      .click();
     await expect
       .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
       .toBe("approved");
@@ -555,9 +600,9 @@ test("rejecting a suggestion on part of an identifier in an approved spec leaves
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    const card = page.getByTestId(`ask-${requested.ask.id}`);
-    await card.getByRole("radio", { name: /^Approve/ }).check();
-    await card.getByRole("button", { name: "Answer" }).click();
+    await (await askControls(page, requested.ask.id))
+      .getByRole("button", { exact: true, name: "Approve" })
+      .click();
     await expect
       .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
       .toBe("approved");
@@ -609,10 +654,20 @@ test("an approval request for an unassigned issue's non-primary document remains
     await expect(page.getByText("Nothing needs you")).toBeVisible();
 
     await page.goto("/?assignee=unassigned");
-    const card = page.getByTestId(`ask-${nonPrimary.ask.id}`);
-    await expect(card).toBeVisible();
-    await expect(card).toContainText("Approval requested");
-    await expect(card.getByRole("radio")).toHaveCount(2);
+    await expect(inboxRow(page, nonPrimary.ask.id)).toBeVisible();
+    // Actionable means the Inbox offers the review where this width draws it: the reading
+    // column's head over the document under review from 1280 px (INFRA-575), and the
+    // question's own card, which names itself an approval, below that.
+    const controls = await askControls(page, nonPrimary.ask.id);
+    if (hasReadingPane(page)) {
+      await expect(controls.getByRole("button", { exact: true, name: "Approve" })).toBeVisible();
+      await expect(
+        controls.getByRole("button", { exact: true, name: "Request changes" })
+      ).toBeVisible();
+    } else {
+      await expect(controls).toContainText("Approval requested");
+      await expect(controls.getByRole("radio")).toHaveCount(2);
+    }
     const inboxShot = testInfo.outputPath("approval-non-primary-inbox-1280.png");
     await page.screenshot({ path: inboxShot, fullPage: true });
     await testInfo.attach("non-primary approval under the Unassigned filter", {
@@ -672,13 +727,16 @@ test("an approval ask's Inbox row, drawer link and bare ask route land on the sp
   try {
     const page = await alice.newPage();
 
-    // The Inbox row's title link lands on the spec, approve control in view — not the
-    // Conversation turn `useItemLanding` fell through to before this fix.
+    // The Inbox row's own link for the request lands on the spec, approve control in view — not
+    // the Conversation turn `useItemLanding` fell through to before this fix. From 1280 px the
+    // reading column's head carries the selected question's owner link too (INFRA-575), and it
+    // names the same address; following the row's link is the row's click, not the list's
+    // selection, so the issue it opens stays open.
     await page.goto("/");
-    await page
-      .locator(`[data-inbox-row="${requested.ask.id}"]`)
-      .locator("[data-inbox-owner]")
-      .click();
+    const head = (await askControls(page, requested.ask.id)).locator("[data-inbox-owner]");
+    const owner = inboxRow(page, requested.ask.id).locator("[data-inbox-owner]");
+    await expect(owner).toHaveAttribute("href", (await head.getAttribute("href")) ?? "");
+    await owner.click();
     await expect(page).toHaveURL(specPath);
     await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
@@ -761,13 +819,17 @@ test("an open approval ask's document link reaches the issue's Conversation, and
     }
 
     // A project-level document's approval request links its own document the same way. A
-    // document has no assignee, so the Unassigned filter is where the Inbox lists it.
+    // document has no assignee, so the Unassigned filter is where the Inbox lists it. The link
+    // is the card's named version below 1280 px, and from there the short row's own owner
+    // link, the reading column having drawn the document itself in place of a card
+    // (INFRA-575); both carry the same address.
     await page.goto("/?assignee=unassigned");
-    const inboxCard = page.getByTestId(`ask-${docApproval.ask.id}`);
-    await expect(inboxCard.getByRole("link", { name: "runbook.md, version 1" })).toHaveAttribute(
-      "href",
-      docPath
-    );
+    const inboxLink = hasReadingPane(page)
+      ? inboxRow(page, docApproval.ask.id).locator("[data-inbox-owner]")
+      : page
+          .getByTestId(`ask-${docApproval.ask.id}`)
+          .getByRole("link", { name: "runbook.md, version 1" });
+    await expect(inboxLink).toHaveAttribute("href", docPath);
 
     await page.goto(`/projects/GATE/documents/${doc.artifact.slug}`);
     if (testInfo.project.name === "iphone") {

@@ -1,18 +1,13 @@
 // Package podsafety is what a Legion pod's Oh My Pi starts with beyond the operator's pod, and
 // nothing in it names a model, a provider, or a route, nor holds a repository's settings off. It is
-// four things. The turn-scoping overlay: the two keys supervise.Machine.Quiesce depends on
-// (TurnScopeOverlay, turnscope.yml, which says why), written as the one settings overlay Legion
-// names first in PI_CONFIG_FILES, before the operator's own (runtime.kubernetes.pod): by Oh My Pi's
-// order the operator's overlay outranks it, and both outrank a repository's .omp/config.yml, so a
-// repository's settings reach a pod's agent as they reach any agent session, under the operator's.
-// The baseline variables: the two that decide where a pod's Oh My Pi keeps its sessions
-// (baseline), set on the agent where the pod leaves them unset — when Oh My Pi would otherwise fill
-// them from the working directory's .env — and never on the shim; the Sandbox runtime refuses them,
-// and OMP_SESSION_SQL_DSN_FILE, in the operator's pod (sandbox.CheckPod). Every session of a
-// workflow role is a row in the database the deployment must name (runtime.kubernetes.session_store
-// postgres or cloudsql-iam): the runtime starts every such generation with
-// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. The
-// baseline's `file` is left for the one
+// three things. The baseline variables: the two that decide where a pod's Oh My Pi keeps its
+// sessions (baseline), set on the agent where the pod leaves them unset — when Oh My Pi would
+// otherwise fill them from the working directory's .env — and never on the shim; the Sandbox
+// runtime refuses them, and OMP_SESSION_SQL_DSN_FILE, in the operator's pod (sandbox.CheckPod).
+// Every session of a workflow role is a row in the database the deployment must name
+// (runtime.kubernetes.session_store postgres or cloudsql-iam): the runtime starts every such
+// generation with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps
+// both. The baseline's `file` is left for the one
 // container the runtime tells neither, the image probe's, whose session nothing resumes — neither
 // the probe's pod nor an issue's mounts a disk that outlives it, an issue pod's being the pod's
 // own ephemeral volume (the project controller's pod does mount one its Sandbox owns, and it is
@@ -22,20 +17,24 @@
 // that directory exists. And the scratch directories: each directory the runtime tells a role to
 // write what it writes without being told where — the temporary directory, the cache and data
 // homes, bun's install cache and the two Go caches (EnsureScratch) — made before Oh My Pi
-// starts, since a role told a temporary directory nothing created cannot run. Apply, the
-// overlay and the baseline together, runs only in a pod, for a worker's shim (`legion worker-shim
+// starts, since a role told a temporary directory nothing created cannot run. Apply, the baseline
+// alone, runs only in a pod, for a worker's shim (`legion worker-shim
 // --pod-safety`) and for the image probe (`legion probe-image --pod-safety`), which certifies the
 // baseline a worker's Oh My Pi starts on. The directories are the shim's alone: every role the
 // shim starts is told a state home of its own (sandbox.roleStateHome), which in an issue pod keeps
 // a role's browser broker lock apart from its siblings', and the issue's scratch on the issue's
 // volume, which holds all of those but the two Go caches beside it and which every role of the
 // pod is told the same of, while the probe pod runs one container, on the image's own
-// directories, and is told neither. A pane gets the overlay alone, which runtime/tmux writes and
-// names itself (writeTurnScopeOverlay, panePairs).
+// directories, and is told neither.
+//
+// Legion writes no settings overlay of its own. A role's PI_CONFIG_FILES is the operator's own
+// overlays with the role's own after them, composed by the runtime that starts the role
+// (sandbox.roleOperatorEnv in a pod, tmux.panePairs in a pane), and Apply passes the value the pod
+// carries through untouched: a repository's settings reach a pod's agent as they reach any agent
+// session, under the operator's, and nothing of Legion's outranks either.
 package podsafety
 
 import (
-	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,22 +43,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 )
-
-// TurnScopeOverlay is the one settings overlay every Legion role's Oh My Pi gets, pod or pane
-// (turnscope.yml, which says why): bash.autoBackground and async, both off, and nothing else. Apply
-// writes it for a pod; a runtime with no overlay mechanism of its own (runtime/tmux) writes it
-// directly, named last in a pane's PI_CONFIG_FILES.
-//
-//go:embed turnscope.yml
-var TurnScopeOverlay []byte
-
-// TurnScopeFile is TurnScopeOverlay's file name under the state directory a runtime writes it to:
-// Apply's stateDir in a pod, the daemon's own for a pane.
-const TurnScopeFile = "podsafety-turnscope-overlay.yml"
-
-// settingsOverlays is Oh My Pi's list of settings overlays, PATH-separated: each outranks the
-// repository's .omp/config.yml, and a later one outranks an earlier one.
-const settingsOverlays = "PI_CONFIG_FILES"
 
 // placesSessions is why an operator's pod may not set a variable that decides where Oh My Pi keeps
 // a session: Legion places a pod's sessions where a resume reads them, which under the Kubernetes
@@ -81,47 +64,32 @@ var baseline = []struct{ name, value, reserved string }{
 	{"OMP_SESSION_STORAGE", "file", placesSessions},
 }
 
-// Variable is one variable Apply sets. Reserved, when set, is why an operator's pod may not set it
-// itself: Apply yields to the pod's own value, which for such a variable would give away something
-// the runtime relies on. The one other, PI_CONFIG_FILES, the operator names its own overlays in,
-// and Apply composes.
+// Variable is one variable Apply sets, with Reserved: why an operator's pod may not set it itself,
+// since Apply yields to the pod's own value and such a value would give away something the runtime
+// relies on. Every variable Variables publishes carries one.
 type Variable struct {
 	Name, Reserved string
 }
 
-// Variables are the variables Apply sets: the settings overlays it composes, ahead of the
-// operator's, and each baseline variable.
+// Variables are the variables Apply sets: each baseline variable, with its reason.
 func Variables() []Variable {
-	variables := []Variable{{Name: settingsOverlays}}
+	variables := make([]Variable, 0, len(baseline))
 	for _, v := range baseline {
 		variables = append(variables, Variable{Name: v.name, Reserved: v.reserved})
 	}
 	return variables
 }
 
-// Apply is environ as a pod's Oh My Pi starts with it: TurnScopeOverlay written read-only to
-// <stateDir>/<TurnScopeFile> and named first in PI_CONFIG_FILES, ahead of the overlays environ
-// already names, and each baseline variable set where environ leaves it unset or empty.
-func Apply(environ []string, stateDir string) ([]string, error) {
-	if stateDir == "" {
-		return nil, fmt.Errorf("pod safety: no state directory to write %s to", TurnScopeFile)
-	}
-	file := filepath.Join(stateDir, TurnScopeFile)
-	if err := WriteReadOnly(file, TurnScopeOverlay); err != nil {
-		return nil, fmt.Errorf("pod safety: write %s: %w", file, err)
-	}
-	overlays := file
-	out := make([]string, 0, len(environ)+len(baseline)+1)
+// Apply is environ as a pod's Oh My Pi starts with it: each baseline variable set where environ
+// leaves it unset or empty, and nothing else. PI_CONFIG_FILES rides through as the pod carries it,
+// the operator's overlays and the role's own, already composed by the runtime that starts the
+// role, and no file is written anywhere, since Legion names no settings overlay of its own.
+func Apply(environ []string) []string {
+	out := make([]string, 0, len(environ)+len(baseline))
 	set := map[string]bool{}
 	for _, pair := range environ {
 		name, value, _ := strings.Cut(pair, "=")
-		switch {
-		case name == settingsOverlays:
-			if value != "" {
-				overlays += string(os.PathListSeparator) + value
-			}
-			continue
-		case value != "":
+		if value != "" {
 			set[name] = true
 		}
 		out = append(out, pair)
@@ -131,7 +99,7 @@ func Apply(environ []string, stateDir string) ([]string, error) {
 			out = append(removed(out, v.name), v.name+"="+v.value)
 		}
 	}
-	return append(out, settingsOverlays+"="+overlays), nil
+	return out
 }
 
 // removed is environ without its entries for name.
@@ -258,26 +226,4 @@ func lookup(environ []string) map[string]string {
 		env[name] = value
 	}
 	return env
-}
-
-// WriteReadOnly writes body to file at mode 0444, through a temporary file renamed into place, so
-// a file an earlier start left, read-only, is replaced rather than refusing the write.
-func WriteReadOnly(file string, body []byte) error {
-	temporary, err := os.CreateTemp(filepath.Dir(file), filepath.Base(file)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(temporary.Name())
-	if _, err := temporary.Write(body); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Chmod(0o444); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporary.Name(), file)
 }

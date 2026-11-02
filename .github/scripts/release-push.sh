@@ -295,6 +295,19 @@
 #            be folded, so fold-plan fails with one ::error:: that names every
 #            such entry of every spec, sorted, and tells the author to move or
 #            rename a fragment in one commit with `git mv`, and prints no plan.
+#            A file under the .changes/ of a package no <spec> names is not
+#            refused: the fold runs on main, where a refusal would stop the
+#            fold of every package. One ::warning:: on stderr names every such
+#            path HEAD's tree holds, sorted, and the specs it was given, and
+#            says the fold does not fold them; the plan is printed and the
+#            command exits 0 all the same. The warning says to remove the
+#            file, or to give its package a .changie.yaml and a CHANGELOG.md
+#            and add it to .github/changelog-packages. fold-orphans below is
+#            that check made strict, and ci.yaml's lint job runs it on every
+#            pull request, so such a file is caught before it reaches main;
+#            fold-notes and push-fold make neither check, since
+#            changelog-fold.yaml's build job runs fold-plan first and its
+#            publish job needs that job.
 #            With a tag prefix (a package with releases of its own), a
 #            fragment's label is X.Y.Z of the lowest <tag-prefix>X.Y.Z tag
 #            that contains the commit which first added the entry, following
@@ -317,6 +330,22 @@
 #            same commit, but each fetches every tag, so a release tag pushed
 #            between the jobs can give the publish job's plan a version group
 #            the build job's lacks (push-fold defers it).
+# fold-orphans: fail when HEAD's tree holds a file under the .changes/ of a
+#            package no <spec> names, the strict form of the warning fold-plan
+#            gives: one ::error:: naming every such path, sorted, the specs it
+#            was given and what to do (remove the file, or give its package a
+#            .changie.yaml and a CHANGELOG.md and add it to
+#            .github/changelog-packages), and exit 1; nothing is printed and
+#            the exit is 0 when HEAD holds no such file. It reads HEAD's tree
+#            alone - no history, no tag, no working tree, no CHANGELOG.md - so
+#            a shallow checkout without the tags is enough for it. ci.yaml's
+#            lint job runs it over .github/changelog-packages on every pull
+#            request, inside a required check: a fragment of a package the
+#            fold does not fold is refused there, while the fold on main only
+#            warns about it and folds the rest. Each <spec> is
+#            <package-dir>[=<tag-prefix>], as fold-plan's is, and only the
+#            <package-dir> counts; no spec at all, or one of another shape, is
+#            refused as fold-plan refuses it.
 # fold-notes: the build job's half of a fold: render the plan's fragments with
 #            changie, which is dependency code, into <notes-dir>, which must be
 #            absent or empty and is created. Each (package, label) of the plan
@@ -397,7 +426,7 @@
 #            1.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-notes <notes-dir> <spec>... | release-push.sh push-fold <base-sha> <notes-dir> <spec>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes <notes-dir> <spec>... | release-push.sh push-fold <base-sha> <notes-dir> <spec>... | release-push.sh no-credential}
 
 # The identity of the commits this script makes, `tag`'s version bump,
 # push-fold's fold and push-built's rebuild: GitHub Actions' own bot.
@@ -797,14 +826,38 @@ first_added() {
   printf '%s\n' "$commit"
 }
 
+# A package spec, which fold-plan, fold-orphans, fold-notes and push-fold all
+# take: <package-dir>[=<tag-prefix>]. The package dir goes into paths and
+# pathspecs, the prefix into a tag pattern, and the dir's basename names the
+# notes file of each group. package_dir_re keeps the dir free of pathspec magic
+# (a leading ':') and of glob characters, so it needs no --literal-pathspecs; a
+# fragment's name is anything git holds, so each git call given one reads it
+# literally.
+package_dir_re='^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$'
+
+# check_specs <spec>...: fail unless at least one <spec> is given and each is
+# <package-dir>[=<tag-prefix>]. fold_plan checks this and more of every spec (a
+# repeated basename, a package holding no CHANGELOG.md); fold-orphans, which
+# reads the <package-dir>s and nothing else, checks this alone.
+check_specs() {
+  local spec dir prefix
+  [ $# -gt 0 ] || fail_error "no package spec given; each is <package-dir>[=<tag-prefix>]"
+  for spec in "$@"; do
+    dir=${spec%%=*} prefix=''
+    [[ $spec != *=* ]] || prefix=${spec#*=}
+    if ! [[ $dir =~ $package_dir_re ]] || { [[ $spec == *=* ]] && ! [[ $prefix =~ ^[A-Za-z0-9._-]+$ ]]; }; then
+      fail_error "package spec $(quote_all "$spec") is not <package-dir>[=<tag-prefix>], a relative path of letters, digits, '.', '_' and '-' and a prefix of the same without '/'"
+    fi
+  done
+}
+
 # fold_plan <spec>...: set plan to the fold's plan, the lines fold-plan prints
 # (the header's fold-plan paragraph), each ending in a newline; empty when there
 # is nothing to fold. Sets groups to its distinct <package-dir><TAB><label>
 # pairs, in the plan's order.
 fold_plan() {
-  [ $# -gt 0 ] || fail_error "no package spec given; each is <package-dir>[=<tag-prefix>]"
+  check_specs "$@"
   local spec dir prefix index=0 names=' ' head head_label head_date entry meta path commit candidate tag version label date lines=''
-  local package_dir_re='^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$'
   local unexpected=()
   head=$(git rev-parse HEAD)
   head_label="main@${head:0:12}"
@@ -812,14 +865,6 @@ fold_plan() {
   for spec in "$@"; do
     dir=${spec%%=*} prefix=''
     [[ $spec != *=* ]] || prefix=${spec#*=}
-    # The package dir goes into paths and pathspecs, the prefix into a tag
-    # pattern, and the dir's basename names the notes file of each group.
-    # package_dir_re keeps the dir free of pathspec magic (a leading ':') and
-    # of glob characters, so it needs no --literal-pathspecs; a fragment's name
-    # is anything git holds, so each git call given one reads it literally.
-    if ! [[ $dir =~ $package_dir_re ]] || { [[ $spec == *=* ]] && ! [[ $prefix =~ ^[A-Za-z0-9._-]+$ ]]; }; then
-      fail_error "package spec $(quote_all "$spec") is not <package-dir>[=<tag-prefix>], a relative path of letters, digits, '.', '_' and '-' and a prefix of the same without '/'"
-    fi
     [[ $names != *" ${dir##*/} "* ]] || fail_error "two package specs name a directory ${dir##*/}; the notes files are named by it, so each must differ"
     names+="${dir##*/} "
     git cat-file -e "HEAD:$dir/CHANGELOG.md" 2>/dev/null || fail_error "$dir holds no CHANGELOG.md at HEAD to fold its fragments into"
@@ -866,6 +911,32 @@ set_plan() {
   plan=$1
   [ -z "$plan" ] || plan+=$'\n'
   groups=$(printf '%s' "$plan" | cut -f1,2 | uniq)
+}
+
+# unlisted_files <spec>...: set unlisted to every path HEAD's tree holds under
+# the .changes/ of a package no <spec> names, sorted; an empty array when there
+# is none. fold-plan warns about them and fold-orphans refuses them (the
+# header's paragraph for each). It reads HEAD's tree, as fold_plan does, never
+# the working tree, and the package a path belongs to is read from the path
+# with a bash regex, so the only pathspec is packages/, which holds no magic.
+unlisted_files() {
+  local spec path listed=' '
+  unlisted=()
+  for spec in "$@"; do
+    listed+="${spec%%=*} "
+  done
+  while IFS= read -r -d '' path; do
+    [[ $path =~ ^(packages/[^/]+)/\.changes/ ]] || continue
+    [[ $listed == *" ${BASH_REMATCH[1]} "* ]] || unlisted+=("$path")
+  done < <(git ls-tree -r -z --name-only HEAD -- packages/)
+  [ ${#unlisted[@]} -eq 0 ] || mapfile -d '' -t unlisted < <(printf '%s\0' "${unlisted[@]}" | LC_ALL=C sort -z)
+}
+
+# unlisted_message <spec>...: what fold-plan's ::warning:: and fold-orphans'
+# ::error:: both say about the paths unlisted_files left in unlisted: every one
+# of them, the specs the command was given, and what to do with the file.
+unlisted_message() {
+  printf '%s at HEAD: each is under the .changes/ of a package the fold was not given, here %s, and the fold folds the fragments of the packages it is given alone, so the fold does not fold it and it stays on main unfolded; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to .github/changelog-packages' "$(quote_all "${unlisted[@]}")" "$(quote_all "$@")"
 }
 
 # group_column <dir> <label> <column>: the plan's <column> (3 the date, 4 the
@@ -1439,7 +1510,15 @@ case "$command" in
   fold-plan)
     shift
     fold_plan "$@"
+    unlisted_files "$@"
+    [ ${#unlisted[@]} -eq 0 ] || echo "::warning::release-push.sh $command: $(unlisted_message "$@")" >&2
     printf '%s' "$plan"
+    ;;
+  fold-orphans)
+    shift
+    check_specs "$@"
+    unlisted_files "$@"
+    [ ${#unlisted[@]} -eq 0 ] || fail_error "$(unlisted_message "$@")"
     ;;
   fold-notes)
     [ $# -ge 3 ] || fail_error "usage: release-push.sh fold-notes <notes-dir> <spec>..."

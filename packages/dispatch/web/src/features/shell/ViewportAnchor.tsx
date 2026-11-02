@@ -30,6 +30,11 @@ export interface ViewportAnchorProps {
   label?: string;
   /** Receives the rendered root element, for a host that also queries the rows itself. */
   rootRef?: RefObject<HTMLElement | null>;
+  /** The element the rows scroll in, when they scroll in one rather than the document (the
+   *  Inbox beside its reading pane, where each column scrolls in itself). The anchor then reads
+   *  and moves that element's `scrollTop`, and measures the list against its box. With no ref,
+   *  or one holding null, the window scrolls the rows as it always has. */
+  scroller?: RefObject<HTMLElement | null>;
 }
 
 const probeSteps = 5;
@@ -45,12 +50,20 @@ const probeStepPx = 8;
 // gap, heading, or composer - in which case this probes downward first, then upward, in small
 // steps: a content change lands between two rows more often than exactly on one, and probing
 // downward first means the answer for a point in the gap is consistently "whichever row is
-// below", matching reading order.
-function rowAtCenter(root: HTMLElement, selector: string): HTMLElement | null {
+// below", matching reading order. What is visible is the window's own box, or `scroller`'s when
+// the rows scroll in one: a list scrolled inside an element reaches above and below that
+// element's edges, not the window's, and probing a point the scroller clips lands on whatever
+// covers it instead.
+function rowAtCenter(
+  root: HTMLElement,
+  selector: string,
+  scroller: HTMLElement | null
+): HTMLElement | null {
   const rect = root.getBoundingClientRect();
   const x = rect.left + rect.width / 2;
-  const visibleTop = Math.max(rect.top, 0);
-  const visibleBottom = Math.min(rect.bottom, window.innerHeight);
+  const box = scroller === null ? null : scroller.getBoundingClientRect();
+  const visibleTop = Math.max(rect.top, box === null ? 0 : box.top);
+  const visibleBottom = Math.min(rect.bottom, box === null ? window.innerHeight : box.bottom);
   const y = (visibleTop + visibleBottom) / 2;
   const hit = (offset: number): HTMLElement | null =>
     document.elementFromPoint(x, y + offset)?.closest<HTMLElement>(selector) ?? null;
@@ -82,6 +95,8 @@ function rowWithin(root: HTMLElement, selector: string, node: Element | null): H
  *
  * Rows are the elements matching `[item]`, identified by that attribute's value, and must keep
  * their identity across the commit (a remounted row is a new node and cannot be found again).
+ * The document scrolls them unless the host names a `scroller`, in which case that element's
+ * `scrollTop` is both what is read and what is moved, and the window's scroll is left alone.
  *
  * A class because `getSnapshotBeforeUpdate` has no hook equivalent, and the measurement must be
  * taken in the commit phase, immediately before React mutates the DOM: a render can complete and
@@ -150,13 +165,17 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
   }
 
   /** `interacted()`, else - only once the reader has scrolled - the row nearest the list's
-   *  visible centre (a hit-test probe: layout reads). The row a commit will anchor to. */
+   *  visible centre (a hit-test probe: layout reads). The row a commit will anchor to. The box
+   *  that scrolls is `scroller`'s element while the host gave one and it holds one, else the
+   *  window, and `componentDidUpdate` moves whichever this read. */
   current(): (AnchorRow & { row: HTMLElement }) | null {
     const interacted = this.interacted();
     if (interacted !== null) return interacted;
     const root = this.root;
-    if (root === null || window.scrollY <= 0) return null;
-    const row = rowAtCenter(root, `[${this.props.item}]`);
+    if (root === null) return null;
+    const scroller = this.props.scroller?.current ?? null;
+    if ((scroller === null ? window.scrollY : scroller.scrollTop) <= 0) return null;
+    const row = rowAtCenter(root, `[${this.props.item}]`, scroller);
     return row === null ? null : { id: this.idOf(row), row, via: "center" };
   }
 
@@ -196,7 +215,12 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
     if (group !== undefined && element.getAttribute(group) !== snapshot.group) return;
     const delta = element.getBoundingClientRect().top - snapshot.top;
     if (delta !== 0) {
-      window.scrollBy(0, delta);
+      const scroller = this.props.scroller?.current ?? null;
+      if (scroller === null) {
+        window.scrollBy(0, delta);
+      } else {
+        scroller.scrollTop += delta;
+      }
     }
   }
 

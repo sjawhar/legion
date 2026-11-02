@@ -17,7 +17,7 @@ related_issues:
 
 # A ruling posted after the plan is acceptance: re-read the issue before each push and carry it to every copy
 
-`plan.json` is frozen when the plan is approved. An architect who widens the issue afterwards does
+The plan handoff is frozen when the plan is approved. An architect who widens the issue afterwards does
 it in a comment or an Envoy message, and nothing copies that into the plan's acceptance list, the
 tester's checklist or the throwaway acceptance check. So:
 

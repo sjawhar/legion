@@ -20,9 +20,11 @@ var sessionPlacing = []string{"OMP_SESSION_SQL_DSN", "OMP_SESSION_SQL_DSN_FILE",
 const ClaudeConfigDirVariable = "CLAUDE_CONFIG_DIR"
 
 // ClaudeDisabledFeatures are the variables every Claude Code worker carries set to 1, under either
-// runtime (claudelaunch.Environment), to turn off what would run after a turn's end unseen:
-// background tasks and scheduled prompts.
-var ClaudeDisabledFeatures = []string{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CODE_DISABLE_CRON"}
+// runtime (claudelaunch.Environment), to turn off what would start a turn no task of the daemon's
+// asked for and nothing would read: scheduled prompts. Background tasks are on, and a task that
+// finishes while no turn runs wakes Claude Code into a turn of its own, which the bridge tells the
+// daemon of like any other (internal/claudebridge).
+var ClaudeDisabledFeatures = []string{"CLAUDE_CODE_DISABLE_CRON"}
 
 // launchSecrets are every secret the daemon hands a launch in its spec (daemon.launchSecrets: the
 // Envoy bearer and the pane NATS nkey seed, each when the daemon has one), which a runtime gives

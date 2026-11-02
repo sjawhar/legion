@@ -202,6 +202,14 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	if command.Timeout <= 0 {
 		return Result{}, fmt.Errorf("workspace command has no timeout: %s", strings.Join(command.Argv, " "))
 	}
+	// A child with an empty Dir inherits the working directory of the process that starts it, and
+	// a relative Dir resolves against that same directory: either way exec would chdir somewhere
+	// the caller never chose, and a git or jj that searches upward from there opens a repository
+	// the caller never named. It is one rule, so it is one refusal: every call site in this
+	// package names an absolute directory it owns and knows is there.
+	if !filepath.IsAbs(command.Dir) {
+		return Result{}, fmt.Errorf("workspace command names no absolute working directory of its own (%q): %s", command.Dir, strings.Join(command.Argv, " "))
+	}
 	bounded, cancel := context.WithTimeout(ctx, command.Timeout)
 	defer cancel()
 
@@ -211,7 +219,16 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	args := command.Argv[1:]
 	if command.Argv[0] == "jj" {
-		guarded, err := guardWorkspace(jjWorkspaceRoot(command), command.Clone, true)
+		root := jjWorkspaceRoot(command)
+		if root == "" {
+			// A jj command that names no -R is one of provisioning's two that create a repository,
+			// and jj would read an enclosing one's configuration as well as creating its own, and
+			// write that one when it still holds a legacy .jj/repo/config.toml to migrate.
+			if err := refuseEnclosingWorkspace(command.Dir); err != nil {
+				return Result{}, err
+			}
+		}
+		guarded, err := guardWorkspace(root, command.Clone, true)
 		if err != nil {
 			return Result{}, err
 		}
@@ -230,7 +247,14 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	child := exec.CommandContext(bounded, executable, args...)
 	child.Dir = command.Dir
-	env, err := pinGitConfig(without(merge(merge(runtime.WithoutNATSSeeds(os.Environ()), transportEnvironment), command.Env), "GIT_CONFIG_PARAMETERS"))
+	// Provisioning's children take their git configuration from the caller's intent, never from
+	// the process that happens to start them: the GIT_CONFIG_* block the environment carries goes
+	// before transportEnvironment and the command's own entries are merged in, so pinGitConfig
+	// counts the command's own pairs alone (withoutGitConfigPairs). A Legion pod hands every
+	// process such a block, a role's GitHub credential helper among them, which no clone or fetch
+	// provisioning starts may read.
+	base := withoutGitConfigPairs(runtime.WithoutNATSSeeds(os.Environ()))
+	env, err := pinGitConfig(without(merge(merge(base, transportEnvironment), command.Env), "GIT_CONFIG_PARAMETERS"))
 	if err != nil {
 		return Result{}, err
 	}
@@ -368,6 +392,55 @@ func refuseSymlinkedLayout(root, dir string) error {
 	return nil
 }
 
+// refuseEnclosingWorkspace refuses a jj command that creates a repository of its own — `jj git
+// clone` and `jj git init --colocate`, the only two provisioning runs that name no -R — when dir,
+// or any directory above it, holds a `.jj`.
+//
+// jj has no ceiling option: it searches upward from the directory it runs in for the closest
+// `.jj` and opens that repository, which is how a test in a Legion issue pod came to write the
+// pod's shared clone at /legion/repos/github.com/sjawhar/legion. The walk counts only a `.jj`
+// that is a directory, because that is all jj counts: a regular file named `.jj` is not jj's
+// workspace pointer — that is the file `.jj/repo` inside a `.jj` directory — and jj 0.45.1 run
+// below a directory holding a regular file named `.jj` answers `Error: There is no jj repo in
+// "."`. The entry is read with os.Stat, which follows symlinks as jj does, so a `.jj` symlink
+// pointing at a directory counts; a component that does not exist holds no `.jj`, so it is
+// passed over, as refuseSymlinkedLayout does. The walk costs a handful of os.Stat calls once per
+// clone, which is why nothing here is cached.
+//
+// The walk starts at the directory read physically, not at the path the caller named: a child
+// chdir'd into a path that holds a symlink asks the kernel where it stands, and the kernel
+// answers with the resolved path, so jj walks up from the link's target. A lexical walk with
+// filepath.Dir would pass over every `.jj` above that target and let the command open that
+// repository and read its configuration, writing a config-id there when it still holds a legacy
+// `.jj/repo/config.toml` to migrate — which is exactly the state directory an operator reaches
+// through a symlink, the one refuseSymlinkedLayout deliberately allows, standing on a checkout.
+// The refusal names both paths when they differ, so an operator reading a symlinked state
+// directory sees the path it configured and the path jj stands in as one fact.
+func refuseEnclosingWorkspace(dir string) error {
+	resolved, err := resolvedPath(dir)
+	if err != nil {
+		return fmt.Errorf("refusing to run jj in %s: resolve it as the child would stand in it: %w", dir, err)
+	}
+	named := dir
+	if resolved != dir {
+		named = dir + ", which resolves to " + resolved
+	}
+	for above := resolved; ; {
+		enclosing := filepath.Join(above, ".jj")
+		switch info, err := os.Stat(enclosing); {
+		case err == nil && info.IsDir():
+			return fmt.Errorf("refusing to run jj in %s: %s is a Jujutsu repository, and this jj command creates a repository of its own and reads that one's configuration as well, and when it still holds a legacy .jj/repo/config.toml, migrates it, moving the file into the config home and writing a config-id beside where it was, so the run writes that repository too; the directory the daemon provisions under must sit inside no Jujutsu repository — under `runtime: tmux` it is legion.yaml's state_dir, which a relative value resolves against the configuration file's own directory, so a legion.yaml kept inside a checkout puts the shared clone under that checkout's .jj", named, enclosing)
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("refusing to run jj in %s: read %s: %w", dir, enclosing, err)
+		}
+		parent := filepath.Dir(above)
+		if parent == above {
+			return nil
+		}
+		above = parent
+	}
+}
+
 // sharedRepository is the repository directory jj opens for the workspace whose `.jj` is jjDir,
 // held to the shared clone's own `.jj/repo`: clone's when the command names one (a workspace of
 // it), else the root's own (the command opens the clone itself). The clone's `.jj` and its
@@ -453,11 +526,16 @@ func describeEntry(info fs.FileInfo, err error) string {
 	}
 }
 
-// jjWorkspaceRoot is the workspace a jj command opens: the value of its last -R (or
-// --repository) flag, else the directory it runs in, which every caller in this package names as
-// the workspace root itself.
+// jjWorkspaceRoot is the workspace a jj command acts on: the value of its last -R (or
+// --repository) flag, and nothing else. Command.Dir is purely the working directory the child
+// runs in, so a command that names no -R names no workspace here. Provisioning names a directory
+// for its two rootless commands too — `jj git clone` and `jj git init --colocate`, neither of
+// which takes a -R — and reading that directory as a workspace root would send them through
+// guardWorkspace into refuseSymlinkedLayout, which walks layoutDepth ancestors and would there
+// Lstat the state directory itself, the one directory deliberately left unchecked because an
+// operator may reach it through a symlink.
 func jjWorkspaceRoot(command Command) string {
-	root := command.Dir
+	root := ""
 	for i, arg := range command.Argv {
 		switch {
 		case (arg == "-R" || arg == "--repository") && i+1 < len(command.Argv):
@@ -491,6 +569,19 @@ func merge(base, overrides []string) []string {
 // without is environment with no entry named key.
 func without(environment []string, key string) []string {
 	return slices.DeleteFunc(environment, func(entry string) bool { return environmentKey(entry) == key })
+}
+
+// withoutGitConfigPairs is environment with no GIT_CONFIG_COUNT and none of the
+// GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs it counts. The whole block goes, rather than the
+// count alone, because either half left behind misleads pinGitConfig: an inherited count with no
+// matching keys has git read pairs that are not there and numbers the pins past them, and
+// inherited keys with no count are the pairs the pins are then numbered over. A command that
+// needs a pair names it in Command.Env, which is merged in after this.
+func withoutGitConfigPairs(environment []string) []string {
+	return slices.DeleteFunc(environment, func(entry string) bool {
+		key := environmentKey(entry)
+		return key == "GIT_CONFIG_COUNT" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_")
+	})
 }
 
 // pinGitConfig appends pinnedGitConfig after the GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/
@@ -567,10 +658,11 @@ func RunChecked(ctx context.Context, run Runner, argv []string, env []string, di
 }
 
 // RunCheckedIn is RunChecked for a jj command run in ws's own workspace. It names the workspace
-// with -R, so jj opens ws.Dir itself and never searches its parent directories for a `.jj`, and
-// names ws's shared clone so the runner can hold the workspace's `.jj` and `.jj/repo` to it
-// (Command.Clone, guardWorkspace). Both Location paths must be non-empty: otherwise -R "" is
-// exactly the rootless command an empty guard cannot bind to a workspace.
+// with -R and runs the command in ws.Dir itself, which is what makes that -R safe
+// (runCheckedOnClone states the invariant), and names ws's shared clone so the runner can hold
+// the workspace's `.jj` and `.jj/repo` to it (Command.Clone, guardWorkspace). Both Location paths
+// must be non-empty: otherwise -R "" is exactly the rootless command an empty guard cannot bind
+// to a workspace.
 func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
@@ -621,13 +713,21 @@ func onClone(cloneDir string, args ...string) ([]string, error) {
 	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir), nil
 }
 
-// runCheckedOnClone is RunChecked for an onClone command, including its empty-clone refusal.
+// runCheckedOnClone is RunChecked for an onClone command, including its empty-clone refusal. One
+// cloneDir reaches both the command's -R and Command.Dir, which is how every -R this package
+// builds is kept safe: a jj command that names -R is safe because it runs in that same directory,
+// not because the flag fences jj in. jj 0.45.1 loads the repository its working directory sits in
+// before it applies -R — `jj -R <b> log` run inside a repository a that still held a legacy
+// `.jj/repo/config.toml` migrated it, writing a/.jj/repo/config-id — so a -R whose Dir is some
+// other directory still opens whatever repository that directory sits in. A child of
+// provisioning's takes its working directory from the caller's intent, never from the process
+// that starts it, and the clone is there whenever a command is built against it.
 func runCheckedOnClone(ctx context.Context, run Runner, cloneDir string, args ...string) (Result, error) {
 	argv, err := onClone(cloneDir, args...)
 	if err != nil {
 		return Result{}, err
 	}
-	return RunChecked(ctx, run, argv, nil, "")
+	return RunChecked(ctx, run, argv, nil, cloneDir)
 }
 
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
@@ -654,7 +754,7 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	if err != nil {
 		return err
 	}
-	result, runErr := runCommand(ctx, run, argv, source.env, "")
+	result, runErr := runCommand(ctx, run, argv, source.env, cloneDir)
 	_, err = checkedResult(argv, result, runErr)
 	return err
 }
@@ -685,8 +785,10 @@ func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir str
 		{"credential.useHttpPath", "true"},
 	} {
 		// `git config --get-all` exits 1 for a key the clone never set, which is as stale as an old
-		// helper; a run that failed to start is an error.
-		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", check.key}, nil, "")
+		// helper; a run that failed to start is an error. Each read runs in the clone itself, the
+		// directory --git-dir names the repository of: the daemon runs this over a clone it has
+		// just provisioned or found, so it is there.
+		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", check.key}, nil, cloneDir)
 		if err != nil {
 			return false, fmt.Errorf("read the shared clone's %s: %w", check.key, err)
 		}
@@ -717,7 +819,7 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 		{"git", "--git-dir=" + gitDir, "config", "credential.interactive", "false"},
 		{"git", "--git-dir=" + gitDir, "config", "credential.useHttpPath", "true"},
 	} {
-		if _, err := RunChecked(ctx, run, argv, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, argv, nil, cloneDir); err != nil {
 			return err
 		}
 	}
@@ -729,11 +831,8 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 // through the pane's env.
 func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
-		probe, err := onClone(cloneDir, "config", "list", "--repo", "--include-overridden", key)
-		if err != nil {
-			return err
-		}
-		present, err := RunChecked(ctx, run, probe, nil, "")
+		probe := []string{"config", "list", "--repo", "--include-overridden", key}
+		present, err := runCheckedOnClone(ctx, run, cloneDir, probe...)
 		if err != nil {
 			return err
 		}
@@ -744,14 +843,14 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if err != nil {
 			return err
 		}
-		removed, err := runCommand(ctx, run, unset, nil, "")
+		removed, err := runCommand(ctx, run, unset, nil, cloneDir)
 		if err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(unset, " "), err)
 		}
 		if removed.ExitCode == 0 {
 			continue
 		}
-		rechecked, err := RunChecked(ctx, run, probe, nil, "")
+		rechecked, err := runCheckedOnClone(ctx, run, cloneDir, probe...)
 		if err == nil && strings.TrimSpace(rechecked.Stdout) == "" {
 			continue
 		}

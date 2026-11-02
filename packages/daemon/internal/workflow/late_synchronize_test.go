@@ -58,9 +58,9 @@ func namedSync(before, head, sender string, at time.Time) intake.Fact {
 	return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", Before: before, Sender: sender, HeadSHA: head, UpdatedAt: at}
 }
 
-// sentPush is a push of code by sender, the account the push's webhook names.
+// sentPush is a push by sender, the account the push's webhook names.
 func sentPush(before, after, sender string) intake.Fact {
-	push := pushedFromTo(before, after, "src/widget.go", sender).(intake.Push)
+	push := pushedFromTo(before, after, sender).(intake.Push)
 	push.Sender = sender
 	return push
 }

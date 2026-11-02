@@ -5,8 +5,8 @@ sidebar:
   order: 6
 ---
 
-An agent works in Dispatch through one shell command, `dispatch`. The Envoy plugin for the agent's
-host (Oh My Pi, Claude Code, or OpenCode) puts it on the agent's `PATH` and tells it which session
+An agent works in Dispatch through one shell command, `dispatch`. The Envoy plugin for the
+agent's host (Oh My Pi or Claude Code) puts it on the agent's `PATH` and tells it which session
 it acts for. `dispatch --help` lists the commands, `dispatch <command> --help` gives a command's
 flags and an example, and `--dry-run` checks a command's arguments as the call would and prints
 them as given (before the call fills in an issue from `LEGION_ISSUE` or a ref), sending nothing.
@@ -33,15 +33,14 @@ goes through a `dispatch` command.
    }
    ```
 
-   A session under an Oh My Pi profile other than `default`, a Claude Code `CLAUDE_CONFIG_DIR` or
-   an OpenCode `OPENCODE_CONFIG_DIR` reads the `envoy.json` in that directory and no other. Any
-   other session reads the file `ENVOY_CONFIG_FILE` names when it is set, else
-   `~/.config/legion/envoy.json` (`$XDG_CONFIG_HOME/legion/envoy.json` when that is set). The
-   `dispatch` command reads the file its session's plugin chose, which the plugin hands it in
-   `ENVOY_CONFIG_FILE`; in a Claude Code shell that gets nothing the plugin hands on, as a
-   subagent's can, it still reads the session's `CLAUDE_CONFIG_DIR`. A token written as
-   `!<command>`, such as `!secrets get DISPATCH_TOKEN`, is a command, and what it prints is the
-   token.
+   A session under an Oh My Pi profile other than `default` or a Claude Code `CLAUDE_CONFIG_DIR`
+   reads the `envoy.json` in that directory and no other. Any other session reads the file
+   `ENVOY_CONFIG_FILE` names when it is set, else `~/.config/legion/envoy.json`
+   (`$XDG_CONFIG_HOME/legion/envoy.json` when that is set). The `dispatch` command reads the
+   file its session's plugin chose, which the plugin hands it in `ENVOY_CONFIG_FILE`; in a
+   Claude Code shell that gets nothing the plugin hands on, as a subagent's can, it still reads
+   the session's `CLAUDE_CONFIG_DIR`. A token written as `!<command>`, such as
+   `!secrets get DISPATCH_TOKEN`, is a command, and what it prints is the token.
 
    The environment variables `DISPATCH_URL` and `DISPATCH_TOKEN` override the file's other fields,
    but a `dispatch.enabled: false` in the file keeps Dispatch off. The file's token goes only to
@@ -77,11 +76,12 @@ tells the agent who Dispatch takes it for.
 | --- | --- |
 | Issues | `dispatch issue` creates one; `--blocked-by <key>`, repeated, names up to 20 issues in the same project it waits on. `dispatch issue-update` changes status, title, labels, priority, parent, links, blockers, or components; its `--blocked-by` replaces the list, and `--clear-blocked-by` empties it; `--before <KEY>` and `--after <KEY>` move it on its project's board, above that issue, below it, or between the two. `dispatch claim` claims an issue before work starts. `dispatch issues` lists a project's issues. |
 | Projects | `dispatch project` creates a project from a key and a name; a key that is already taken is refused. `dispatch projects` lists every project's key and name. |
-| Asks | `dispatch ask` opens one. `dispatch edit-ask` rewords an open one. `dispatch resolve-ask` retracts or resolves one. `dispatch follow` follows or leaves an ask's thread. `dispatch open-asks` lists open asks. |
+| Asks | `dispatch ask` opens one. `dispatch edit-ask` rewords an open one. `dispatch resolve-ask` retracts or resolves one. `dispatch follow` follows or leaves an ask's thread. `dispatch open-asks` lists open asks. `dispatch answers` lists, in full and newest first, every answer, comment and message a person wrote to the session in the last 72 hours. |
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
 | Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
 | Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for. |
+| Handoffs | `dispatch handoff-write` records a phase handoff on an issue as the agent's session: `--phase <phase>` and `--body-file <path>` (`-` reads stdin), one JSON object stored exactly as written, each write the phase's next version. `dispatch handoff-read` prints one line naming the phase, version, id, writing session and time, then the body exactly as stored; `--version <n>` reads an earlier version. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now, from every source repository with a line for each, or from one with `--repo <owner/name>`. |
 
 A command with several problems is refused once, with every problem listed, so the next run can
@@ -136,6 +136,15 @@ Each kind of write reaches people differently. Pick by what you need from them.
 
 Never post progress, "starting work", or status on a timer as a message. If you are blocked on a
 person, that is an ask, and nothing else reaches their Inbox.
+
+Every model request of an Oh My Pi session that reaches Dispatch, its `task` subagents' included,
+ends with a list of what people wrote to that session in the last 72 hours: answers to its asks,
+replies on its asks and in its comment threads, comments on its documents and on issues routed to
+it, mentions, and messages to it, each word for word, newest first, under 8,000 characters. A
+Claude Code session gets the same list at its start, resume and compaction and when a subagent
+starts. When the list leaves older items out, its last line says how many; `dispatch answers`
+reads them all. The request waits at most 800 ms for the list and carries the last one read when
+Dispatch does not answer.
 
 The server holds every write to a size, and refuses rather than truncates:
 
@@ -242,11 +251,15 @@ an issue update, a new document version, or opening or rewording an ask. A perso
 reach the issue's route, when that is your session. Each write's result names that topic.
 
 If your connection to Envoy drops, or your session stops and is resumed, what was sent to you
-directly or published on an issue topic you follow in the meantime still arrives once you are
-back, each message once and marked as published while your connection was down, for up to 72
-hours. A person's Send, Aside or BTW that arrives this way is shown as a message only: nothing
-runs and no reply goes back on its own, so answer it with `dispatch message` and its
-`--in-reply-to` if it still matters. Messages to a role you hold are not recovered.
+directly, what was sent to a role you hold, and what was published on an issue topic you follow in
+the meantime still arrives once you are back, each message once and in the order it was
+published, for up to 72 hours. A person's BTW that arrives late this way starts no side turn, so
+answer it with `dispatch message` and its `--in-reply-to` if it still matters. Where your listener
+cannot keep a consumer for your session (its NATS user lacks the grant, or it is of an earlier
+release), a missed message is recovered from the stream instead, marked as published while your
+connection was down: a person's Send, Aside or BTW that arrives that way is shown as a message
+only, nothing runs and no reply goes back on its own, and messages to a role you hold are not
+recovered.
 
 A person can also message you from the Agents page:
 

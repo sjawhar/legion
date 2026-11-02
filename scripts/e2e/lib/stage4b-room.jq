@@ -11,7 +11,10 @@ include "stage4b-pods";
 # init containers carry the same reservation and add nothing: a pod's effective request is the
 # larger of its largest init container and its containers' sum (the Kubernetes pod-resources rule).
 def issue_pod_reservation($expected):
-  {cpu: ($expected.issue.cpu | quantity), memory: ($expected.issue.memory | quantity)};
+  def required_quantity($field):
+    $expected.issue[$field] as $value
+    | if $value == null then error("run_resources.issue.\($field) is missing") else ($value | quantity) end;
+  {cpu: required_quantity("cpu"), memory: required_quantity("memory")};
 
 # pod_request is a pod's effective request, cores and bytes, as the scheduler counts it against a
 # node: the larger of its containers' summed requests and its largest init container's, a container

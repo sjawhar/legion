@@ -26,6 +26,7 @@ import {
 import type { ReplyTarget } from "./composer-model";
 import {
   type CarriedBlockIds,
+  requestFor,
   type SentDraft,
   type SentRequest,
   saveCommentEdit,
@@ -194,7 +195,22 @@ const keptComposerSend = shape.record({
   mutationKey: shape.array(shape.string),
   request: shape.record({
     anchor: shape.optional(
-      shape.record({ artifact: shape.string, mark_id: shape.string, quote: shape.string })
+      shape.record({
+        artifact: shape.string,
+        mark_id: shape.string,
+        // The words the reader had around their selection and how many readings of them their
+        // block held, which the recovery from `ANCHOR_MISSING` needs after a reload as much as
+        // the quote beside it (`ComposerAnchor.placement`).
+        placement: shape.optional(
+          shape.record({
+            blockId: shape.nullable(shape.string),
+            prefix: shape.string,
+            readings: shape.number,
+            suffix: shape.string,
+          })
+        ),
+        quote: shape.string,
+      })
     ),
     ask: keptAsk,
     draft: keptDraft,
@@ -455,6 +471,33 @@ export class HeldSends {
     if (held?.status === "refused") {
       this.#writes.amend(held.id, composerSend, (detail) => ({ ...detail, request }));
     }
+  }
+
+  /** Sends the refused send under `mutationKey` again as a press of its own. Every Retry but a
+   *  mounted composer's is this one body - a session row's, and the margin's own re-send once it
+   *  has written a refused compose's mark again and re-addressed the send to it - so what those
+   *  carry is decided in one place: the request the store holds now, so the retry names the mark
+   *  the margin wrote, and the draft the store holds, which the composer writes what the reader
+   *  wrote over the refusal into. A composer on screen builds its own Retry from the fields the
+   *  reader has in front of them instead (`MentionComposer`'s `sentRequest`), through the same
+   *  `requestFor`. Unedited, that is the refused request itself, picked delivery mode included:
+   *  it goes under its own key where the send ended without Dispatch's verdict, so Dispatch
+   *  makes one message of the two. Edited, it is another message, in the mode this one went in,
+   *  under a key of its own. A refusal Dispatch gave is its verdict on that send's key, so that
+   *  attempt too goes out under a key of its own (`requestFor`): a second body under the
+   *  answered key would be replayed that verdict or refused outright. */
+  retry(mutationKey: MutationKey): void {
+    const held = this.get(mutationKey);
+    if (held?.status !== "refused") return;
+    const { sendKey: _refused, ...addressed } = held.request;
+    this.send(
+      mutationKey,
+      requestFor(held.request, held.refusal, {
+        ...addressed,
+        ask: held.draft.ask,
+        draft: held.draft.draft,
+      })
+    );
   }
 }
 

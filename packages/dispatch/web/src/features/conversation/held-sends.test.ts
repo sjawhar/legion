@@ -24,7 +24,7 @@ import { KEPT_SEND_RESUME_MS } from "../writes/write-storage";
 import { Writes } from "../writes/write-store";
 import { type HeldSend, HeldSends, heldSends, stoppable } from "./held-sends";
 import { PendingSendTurn } from "./PendingSendTurn";
-import { carriedIdsOf, requestFor, type SentRequest, saveCommentEdit } from "./send-request";
+import { carriedIdsOf, type SentRequest, saveCommentEdit } from "./send-request";
 import { useSessionSends } from "./useSessionSends";
 
 const request: SentRequest = {
@@ -127,13 +127,14 @@ function pressedLongAgo(tab: KeptTab, key: string): void {
   );
 }
 
-/** Retries the refused send `store` holds under `mutationKey` with its draft untouched, as a
- *  composer that mounts over it does (`requestFor`). */
+/** Retries the refused send `store` holds under `mutationKey` through the one body every surface
+ *  that offers a Retry goes through (`HeldSends.retry`), so these rows exercise what the session
+ *  row's Retry and the margin's own re-send both carry. */
 function retryHeld(store: HeldSends, mutationKey: MutationKey): void {
-  const held = store.get(mutationKey);
-  if (held?.status !== "refused") throw new Error(`no refused send under ${String(mutationKey)}`);
-  const { sendKey: _pressed, ...addressed } = held.request;
-  store.send(mutationKey, requestFor(held.request, held.refusal, addressed));
+  if (store.get(mutationKey)?.status !== "refused") {
+    throw new Error(`no refused send under ${String(mutationKey)}`);
+  }
+  store.retry(mutationKey);
 }
 
 async function onFakeClock(body: () => Promise<void>): Promise<void> {

@@ -159,14 +159,14 @@ func (s *Service) writeDocumentAskStates(
 		return ask, wanted
 	}
 	var writes *issueAskStateWrites
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, _ func(func(*crdt.Transaction))) error {
-		if current == nil {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current pmdoc.ValidDocument, _ func(func(*crdt.Transaction))) error {
+		if current.Node() == nil {
 			// Settlement reads none of its ask blocks either (settleRoomWithin).
 			slog.Warn("dispatch: leave the ask blocks of a document outside Proof schema as they are", "artifact", artifactID)
 			return nil
 		}
 		var err error
-		writes, err = readIssueAskStateWrites(ctx, tx, artifactID, owner, current, given, markUnindexed)
+		writes, err = readIssueAskStateWrites(ctx, tx, artifactID, owner, current.Node(), given, markUnindexed)
 		if err != nil || writes.empty() {
 			return err
 		}

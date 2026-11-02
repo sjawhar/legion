@@ -36,6 +36,15 @@ concurrency:
   group: release-envoy-infra-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+  # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+  # proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
+  # go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same bytes
+  # straight from the source and checks them against go.sum, so this is a second path, not a weaker
+  # check.
+  GOPROXY: https://proxy.golang.org|direct
+
 jobs:
   # Versions, vets, tests, builds and smoke-tests the plugin and the command, and hands their
   # archives to publish as an artifact. It runs the module's code and every third-party module it
@@ -47,6 +56,7 @@ jobs:
     # with it.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     permissions:
       contents: read
     outputs:
@@ -230,6 +240,7 @@ jobs:
     # says; a skipped build gives `result == 'skipped'`, false.
     if: always() && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
     # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
     # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.

@@ -773,6 +773,96 @@ func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 	}
 }
 
+// TestAConfigurationWarningIsLoggedOnceAcrossServers: two servers on one database, each with a
+// warned-runs map of its own as two processes have, read the same misconfigured runs, and each
+// warning - a run with no production job, a run whose production job lists no step named the
+// configured apply step - is logged once between them, however often either reads. A changed
+// list of production jobs is a new configuration, warned about once more. A database that cannot
+// record a warning still has it logged: a lost warning hides a misconfiguration that counts no
+// deploy, where a repeated one costs a log line.
+func TestAConfigurationWarningIsLoggedOnceAcrossServers(t *testing.T) {
+	first, database, deps := newTestServer(t, testServerOptions{})
+	second := http.NewServeMux()
+	second.HandleFunc("GET /api/v1/delivery/timeline", directServer(deps).getDeliveryTimeline)
+	ctx := t.Context()
+	const applyStep = "Run ./.github/actions/apply"
+	configure := func(names ...string) {
+		t.Helper()
+		if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
+			DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
+			ProductionJobNames: names, ProductionApplyStepName: new(applyStep),
+			PRChecksWorkflowPath: ".github/workflows/pr-checks.yml", PopulationAuthors: []string{"octocat"},
+		}, model.Actor{Kind: "system", ID: "test"}); err != nil {
+			t.Fatalf("configure %v: %v", names, err)
+		}
+	}
+	configure("production / production-apply")
+
+	start := time.Date(2026, 10, 10, 9, 0, 0, 0, time.UTC)
+	success := delivery.DeliveryRunConclusionSuccess
+	const renamed, stepMissing = int64(501), int64(502)
+	for id, job := range map[int64]delivery.DeliveryRunJob{
+		renamed:     {Name: "prod-apply / prod-apply", Conclusion: new(delivery.DeliveryJobConclusionSuccess), CompletedAt: new(start.Add(10 * time.Minute))},
+		stepMissing: {Name: "production / production-apply", Conclusion: new(delivery.DeliveryJobConclusionSuccess), CompletedAt: new(start.Add(10 * time.Minute)), ApplyStep: new(applyStep)},
+	} {
+		run := strconv.FormatInt(id, 10)
+		if err := delivery.UpsertRun(ctx, database.Pool, delivery.DeliveryRun{
+			Repo: "acme/widgets", RunID: id, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha" + run,
+			HeadCommitAt: start.Add(-time.Hour), StartedAt: start, CompletedAt: new(start.Add(15 * time.Minute)), Conclusion: &success,
+			URL: "https://github.com/acme/widgets/actions/runs/" + run, HeadBranch: new("main"), Event: new("workflow_dispatch"),
+		}); err != nil {
+			t.Fatalf("seed run %d: %v", id, err)
+		}
+		job.Repo, job.RunID = "acme/widgets", id
+		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", id, []delivery.DeliveryRunJob{job}, true); err != nil {
+			t.Fatalf("seed run %d's job: %v", id, err)
+		}
+	}
+
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
+
+	const window = "from=2026-10-10T00:00:00Z&to=2026-10-11T00:00:00Z"
+	for _, handler := range []http.Handler{first, second, first, second} {
+		getDeliveryTimeline(t, handler, window)
+	}
+	configure("production / production-apply", "release / release")
+	for _, handler := range []http.Handler{second, first} {
+		getDeliveryTimeline(t, handler, window)
+	}
+	if _, err := database.Pool.Exec(ctx, `drop table if exists delivery_run_warnings`); err != nil {
+		t.Fatalf("drop the warnings table: %v", err)
+	}
+	configure("production / production-apply", "release / release", "deploy / deploy")
+	getDeliveryTimeline(t, second, window)
+
+	warned := map[string]int{}
+	for _, line := range strings.Split(logs.String(), "\n") {
+		kind := ""
+		switch {
+		case strings.Contains(line, "no job matching the configured production_job_names"):
+			kind = "no production job"
+		case strings.Contains(line, "lists no step named the configured production_apply_step_name"):
+			kind = "no apply step"
+		default:
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if id, ok := strings.CutPrefix(field, "run_id="); ok {
+				warned[kind+" "+id]++
+			}
+		}
+	}
+	want := map[string]int{
+		"no production job " + strconv.FormatInt(renamed, 10): 3,
+		"no apply step " + strconv.FormatInt(stepMissing, 10): 3,
+	}
+	if !reflect.DeepEqual(warned, want) {
+		t.Fatalf("warnings by run = %v, want %v: one per configuration across both servers, the last logged with no table to record it in\n%s",
+			warned, want, logs.String())
+	}
+}
+
 // TestGetDeliveryTimelineSurfacesReconcileErrorOnFreshness proves a recorded reconcile failure
 // (delivery_settings.last_error) reaches the API's freshness object by name, not just the
 // database -- a stale-but-healthy pass and a failing one must be distinguishable on the wire.

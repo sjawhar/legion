@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -96,6 +97,31 @@ type DispatchIssue struct {
 	// edit test (a status equal to the one Dispatch showed before) does not hold for it. Never set by
 	// a decoded event.
 	StatusMove bool
+	// LabelSetter is the kind of the Dispatch actor (`user`, `session` or `system`) that added
+	// dispatch.LegionLabel to the issue, by the rule the function LabelSetter states: the actor of
+	// the newest issue.created or issue.updated event in the issue's Dispatch event log whose
+	// labels carry the label while the previous such event's did not. The triggering event's own
+	// actor decides nothing. It is read from the log when the fact is prepared, outside the fact
+	// lock, only for an unrecorded root in `triage` that carries the label: by the prepare stage
+	// (the daemon's workflowRuntime.prepareIssue) and by the boot listing (reconcileListing). It is
+	// "" for every other fact, when the log shows no such transition, and when nothing read it.
+	// Only "user" has admission queue a person's handover (a todo through the outbox); every other
+	// value, "" included, keeps today's `triage` wake of the controller.
+	LabelSetter string
+}
+
+// LabelledTriageRoot says whether the fact shows a root (no Dispatch parent) in triage that
+// carries the label: the one kind of issue whose label's setter the prepare stage and the boot
+// listing read (LabelSetter), and admission then judges, so the two sides test one predicate.
+func (i DispatchIssue) LabelledTriageRoot() bool {
+	return i.Status == "triage" && i.Parent == "" && i.HandedOver
+}
+
+// LabelSetByPerson says whether a person set the label (LabelSetter), by the one rule the daemon
+// has for who is a person (dispatch.Actor.Person): a session's or Dispatch's own label is not,
+// and neither is a setter nothing read.
+func (i DispatchIssue) LabelSetByPerson() bool {
+	return dispatch.Actor{Kind: i.LabelSetter}.Person()
 }
 
 // ObservedIssue is issue as Dispatch's detail shows it now, as an Observed fact at the sequence
@@ -206,9 +232,47 @@ type DispatchArtifact struct {
 	Reason              string
 	Mark                record.EventMark
 	RequestWaitsOnAgent bool
+	// Actor is who Dispatch names as having made the review: the event's own actor, decoded from an
+	// artifact.approved or artifact.changes_requested event wherever one is decoded (the live
+	// consumer, the boot catch-up's DecodeDispatchEvent). It is zero for a version event and for a
+	// fact the gate seed builds from its read of Dispatch's approval, which names nobody. A
+	// person's (Actor.Person()) approval of a parked labelled root's primary document is what has
+	// the workflow queue that root; a review a session or Dispatch itself wrote queues nothing.
+	Actor dispatch.Actor
+	// Issue is Dispatch's view of the issue the review is on, read when the fact is prepared by
+	// the daemon's workflowRuntime.prepareArtifact, for a person's approval that is not a carried
+	// one (CarriedApproval), outside the fact lock; nil for every other fact, a seed's or the boot
+	// catch-up's among them. The workflow reads its parent, label, status and primary document to
+	// decide whether the approval queues the root: a nil view queues nothing and is never an
+	// error, since nothing but that decision reads it.
+	Issue *dispatch.Issue
 }
 
 func (DispatchArtifact) isFact() {}
+
+// CarriedApprovalReasonPrefix opens the reason of a carried approval: the review Dispatch writes
+// in a person's name when their answer to a decision block was the whole change since the version
+// they approved (packages/envoy/internal/dispatch/docs/approval_carry.go, carryReason, whose
+// format is "Carried forward from the approval of version %d: ..."). The daemon cannot import that
+// package, so it holds the prefix before the version number as a literal of its own.
+const CarriedApprovalReasonPrefix = "Carried forward from the approval of version"
+
+// CarriedApproval says whether the review is a carried approval, by its reason's prefix
+// (CarriedApprovalReasonPrefix). A carry is Dispatch's bookkeeping of an earlier approval, not a
+// person's new act, so it queues no parked root. An empty reason (a null `reason` on the event, as
+// an approval given with none carries) is not a carry.
+func (a DispatchArtifact) CarriedApproval() bool {
+	return strings.HasPrefix(a.Reason, CarriedApprovalReasonPrefix)
+}
+
+// PersonApproval says whether the review is an approval a person made themselves: an approval,
+// not a changes request or a version, by an actor Dispatch names a person, and not a carried one
+// (CarriedApproval). It is the one review the daemon reads the issue for when it prepares the
+// fact, and the one that can queue a parked labelled root as the person's handover, so the read
+// side and the deciding side test one predicate.
+func (a DispatchArtifact) PersonApproval() bool {
+	return a.Kind == DispatchArtifactApproved && a.Actor.Person() && !a.CarriedApproval()
+}
 
 // GateAboveDispatch is the gate seed of a generation (Generation) finding the document at a version
 // below the one the seed was queued at (Above): Read is what the seed read of Dispatch, as the fact
@@ -385,6 +449,27 @@ type PullRequestOpened struct {
 
 func (PullRequestOpened) isFact() {}
 
+// OpenedRead is the PullRequestOpened a read of GitHub that found pull open on branch of repo
+// stands for, as its webhook would have carried it - a reopen when recorded is the same pull
+// request - and the event id, under source "github", it is applied under: the project, the
+// repository and number, what the read observed, the head and GitHub's updated_at, and what the
+// workflow decides an opened by beside it, the issue's generation and its pull request record as
+// the read found it (nil for none: its number, state and clock). The id holds no read time and no
+// boot, so the same observation applied twice against the same record is one fact (ApplyFact
+// answers the second Duplicate, and Applied finds it before), whichever reader applies it - the
+// required-checks pass or the implementer's completion - while a pull request that changed since,
+// or a record that changed since (a new generation removes a closed one the opened was declined
+// against), makes a new one.
+func OpenedRead(project, repo, branch string, pull githubrest.PullRequest, generation uint64, recorded *record.PullRequest) (PullRequestOpened, string) {
+	fact := PullRequestOpened{Repo: repo, Number: pull.Number, Branch: branch, HeadSHA: pull.Head.SHA, Body: pull.Body,
+		URL: pull.HTMLURL, UpdatedAt: pull.UpdatedAt, Reopened: recorded != nil && recorded.Number == pull.Number}
+	against := "none"
+	if recorded != nil {
+		against = fmt.Sprintf("%d/%s/%s", recorded.Number, recorded.State, recorded.HeadUpdatedAt.UTC().Format(time.RFC3339Nano))
+	}
+	return fact, fmt.Sprintf("opened-read:%s:%s#%d:%s:%s:%d:%s", project, repo, pull.Number, pull.Head.SHA, pull.UpdatedAt.UTC().Format(time.RFC3339Nano), generation, against)
+}
+
 // PullRequestSynchronized records a new observed head, including the fields the shipped reducer
 // reads to fence stale observations and find its issue. Before is the head GitHub's synchronize
 // says the branch moved from, the move the head arrives by (classify.AdvancePullRequestHead):
@@ -488,10 +573,13 @@ func (r PullRequestReview) Order() record.ReviewOrder {
 // CheckRun is one latest-run identity in a checks settlement.
 type CheckRun = record.AttemptRun
 
-// PullRequestChecks is Envoy's settled checks observation: the latest run of each check, and the
-// checks the settlement names as failed (any failing conclusion) and as cancelled, kept apart since
-// a cancellation is a property of the run - a later push can cancel it - where a failure is of the
-// code. What they come to is the base branch's required set's to say (classify.HeadVerdict).
+// PullRequestChecks is a settled checks observation: the latest run of each check, and the checks
+// the settlement names as failed (any failing conclusion) and as cancelled, kept apart since a
+// cancellation is a property of the run - a later push can cancel it - where a failure is of the
+// code. What they come to is the base branch's required set's to say (classify.HeadVerdict). Envoy's
+// listener publishes one at generation 0 or above; the daemon's two-minute pass applies one it
+// built from GitHub's check runs on a head no settlement stood for at classify.PassGeneration (the
+// daemon's readSettlement), never decoded from an event.
 type PullRequestChecks struct {
 	Repo       string
 	Number     int
@@ -557,6 +645,21 @@ type PullRequestClosed struct {
 
 func (PullRequestClosed) isFact() {}
 
+// PullRequestMissing is the required-checks pass finding, in its listing of Repo's open pull
+// requests, none on Branch, the branch of Issue, whose implementer recorded its handoff at
+// HandoffCommit while Issue is in implementing with no open or merged pull request recorded: never
+// decoded from an event. The issue waits in implementing for a pull request nobody is told is
+// missing, so the workflow tells its architect (workflow's pullRequestMissing), once per handoff
+// commit: the pass applies it under an event id naming the issue and the commit.
+type PullRequestMissing struct {
+	Issue         string
+	Repo          string
+	Branch        string
+	HandoffCommit string
+}
+
+func (PullRequestMissing) isFact() {}
+
 // MergeFailed is the merge queue taking issue's pull request Number out at Head, the head its
 // accepted READY named, because the merge failed (ghautomerge.MergeFailed), as the issue's
 // ready_merge outbox row read it from GitHub: never decoded from an event. Reason names the removal
@@ -570,18 +673,13 @@ type MergeFailed struct {
 
 func (MergeFailed) isFact() {}
 
-// Push records a branch push. Nil ChangedPaths and Truncated preserve an omitted normalized field.
+// Push records a branch push.
 type Push struct {
 	Repo   string
 	Branch string
 	// Before is the head the push replaced, After the head it left.
-	Before       string
-	After        string
-	ChangedPaths *string
-	Truncated    *string
-	// Forced is the listener's "true" or "false" for whether the push rewrote history; absent from
-	// a listener that predates the field.
-	Forced *string
+	Before string
+	After  string
 	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
 	Pusher string
 	// Sender is the login of the account that pushed (the webhook's sender), which a synchronize's
@@ -591,13 +689,14 @@ type Push struct {
 
 func (Push) isFact() {}
 
-// WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope: attempt Attempt of GitHub
-// Actions run RunID of the workflow file Path (GitHub's `workflow_run.path`, the run's top-level
-// `.github/workflows/` file) in Repo finished on HeadBranch, whatever its conclusion.
-// Envoy publishes none for a run of a pull request. The workflow compares it with the project's
-// deploy workflows (config.Project.Deploys) and queues a GitHub read of the run for each open
-// production check it may wake; the envelope is anyone's who holds an Envoy bearer, so nothing in
-// it is trusted beyond choosing what to read.
+// WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope of a run of one of the
+// project's deploy workflows (ConsumerSpec.Deploys; the decoder makes no fact of any other run):
+// attempt Attempt of GitHub Actions run RunID of the workflow file Path (GitHub's
+// `workflow_run.path`, the run's top-level `.github/workflows/` file) in Repo finished on
+// HeadBranch, whatever its conclusion. Envoy publishes none for a run of a pull request. The
+// workflow takes the deploy's step from the project's deploy workflows (config.Project.Deploys) and
+// queues a GitHub read of the run for each open production check it may wake; the envelope is
+// anyone's who holds an Envoy bearer, so nothing in it is trusted beyond choosing what to read.
 type WorkflowRunCompleted struct {
 	Repo       string
 	Path       string
@@ -623,7 +722,16 @@ type HandoffComplete struct {
 	Summary    string
 	Verdict    string
 	Ready      bool
-	Commit     string
+	// Commit is the commit the completion reports: the implementer's pushed tip for an implementing
+	// round, the commit retro stands on, the head the merger's READY names; none for the planner,
+	// the tester or the reviewer.
+	Commit string
+	// HandoffRecord and HandoffVersion name the Dispatch handoff record the completion of a phase
+	// with a handoff ends with (phase.Handoff): the route read it back from Dispatch and held it to
+	// the issue, the phase's word, this version and the claim's session before it applied the fact.
+	// Empty and zero for a phase that writes none.
+	HandoffRecord  string
+	HandoffVersion int
 	// MergeNote is READY's by-hand note, empty for any other completion: the MANUAL_MERGE_REQUIRED
 	// answer the route's READY checks give a pull request whose change touches a path the project's
 	// merge.by_hand names. The workflow keeps it with the merger's packet and tells it at its head.
@@ -969,7 +1077,10 @@ func ChildNotAdoptable(key, tree, reason string) *Refusal {
 // API, or supervision. It records the event before running handlers, skips duplicates before any
 // handler runs, remembers the first refusal while completing every handler, and rolls all writes
 // back when any handler returns an error. An Observed issue fact is settled first, under the lock
-// (settleObserved): the handlers see its view only while the workflow records no such issue.
+// (settleObserved): the handlers see its view only while the workflow records no such issue. A
+// fact a durable consumer delivered (withStreamPosition) records that consumer's stream position
+// in the same transaction (recordStreamPosition), so a consumer found missing is created at the
+// last message it applied (openConsumer).
 //
 // Facts apply one at a time. Handlers read and rewrite whole records, and admission's slots span
 // every tree, so two facts in flight together would each act on what the other is about to change;
@@ -999,6 +1110,11 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 
 	fresh, err := record.NewStore().MarkProcessed(ctx, tx, source, eventID)
 	if err != nil {
+		return Result{}, err
+	}
+	// A duplicate records its position too: it is acknowledged as applied, so its consumer is past
+	// it either way.
+	if err := recordStreamPosition(ctx, tx); err != nil {
 		return Result{}, err
 	}
 	if !fresh {

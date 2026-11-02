@@ -104,6 +104,13 @@ repo_root="$(cd -- "${script_dir}/../../.." && pwd)"
 readonly repo_root
 readonly plugin="${repo_root}/packages/pi-envoy/extensions/envoy.ts"
 
+# The loopback stack local mode brings up, shared with scripts/smoke-registration-stall.sh and
+# scripts/smoke-role-takeover.sh: the ports, the two builds, what each service is run as and when
+# it is up. An exhausted port range is this script's own verdict line, so `fail` reports it.
+local_stack_fail=fail
+# shellcheck source=packages/pi-envoy/scripts/local-stack.sh
+source "${script_dir}/local-stack.sh"
+
 # ---- configuration and prerequisites ---------------------------------------------------------
 remote_envoy_url="${SMOKE_REPLAY_ENVOY_URL:-}"
 remote_nats_url="${SMOKE_REPLAY_NATS_URL:-}"
@@ -168,10 +175,7 @@ elif [[ -n "$token_file" ]]; then
   refuse "SMOKE_REPLAY_ENVOY_TOKEN_FILE applies to remote mode only; the local listener takes no bearer"
 fi
 
-read -r ephemeral_low _ </proc/sys/net/ipv4/ip_local_port_range
-readonly port_floor=10000
-((ephemeral_low > port_floor + 1000)) ||
-  refuse "the kernel's ephemeral range starts at ${ephemeral_low}, leaving no ports below it above ${port_floor}"
+port_range
 
 # ---- scratch, processes and teardown ---------------------------------------------------------
 work="$(mktemp -d "${TMPDIR:-/tmp}/smoke-replay.XXXXXX")"
@@ -261,13 +265,9 @@ isolated_exec() {
 
 # wait_until SECONDS COMMAND...: polls COMMAND every half second; 1 once SECONDS have passed.
 wait_until() {
-  local deadline=$((SECONDS + $1))
+  local seconds=$1
   shift
-  while ((SECONDS < deadline)); do
-    if "$@" >/dev/null 2>&1; then return 0; fi
-    sleep 0.5
-  done
-  "$@" >/dev/null 2>&1
+  poll_until "$seconds" 0.5 "$@"
 }
 
 # running PID: PID is a live process, not a zombie its parent has not reaped.
@@ -295,26 +295,6 @@ await() {
   "$@" >/dev/null 2>&1 || fail "timed out after ${limit}s waiting for ${what}: $(tail -n 5 "$log" | tr '\n' ' ')"
 }
 
-port_open() {
-  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
-}
-
-# pick_port VAR: a loopback port nothing answers on, below the kernel's ephemeral range (which every
-# outbound connection autobinds from) and distinct from this run's earlier picks.
-picked_ports=" "
-pick_port() {
-  local candidate i
-  for ((i = 0; i < 100; i++)); do
-    candidate=$((port_floor + RANDOM % (ephemeral_low - port_floor)))
-    [[ "$picked_ports" != *" ${candidate} "* ]] || continue
-    port_open "$candidate" && continue
-    picked_ports+="${candidate} "
-    printf -v "$1" '%s' "$candidate"
-    return 0
-  done
-  fail "no free loopback port below ${ephemeral_low}"
-}
-
 listener_curl() {
   local -a args=(-sS --connect-timeout "$curl_connect_timeout" --max-time "$curl_max_time")
   [[ -z "$auth_header" ]] || args+=(-H "@${auth_header}")
@@ -337,34 +317,31 @@ proxy_port=""
 
 # start_listener: the listener built from this checkout, on listener_port against the local natsd,
 # once its /healthz answers healthy (local mode; leg 6 stops it and starts it again).
-listener_ready() {
-  curl -fsS --max-time 2 "${envoy_url}/healthz" | jq -e '.status == "healthy"'
-}
 start_listener() {
-  (isolated_exec "" HOME="${work}/listener-home" PORT="$listener_port" ENVOY_LISTEN_HOST=127.0.0.1 \
-    ENVOY_MACHINE_ID="smoke-replay-$$" NATS_URLS="nats://127.0.0.1:${nats_port}" -- "${work}/bin/listener") \
+  set_listener_env "$listener_port" "nats://127.0.0.1:${nats_port}" "smoke-replay-$$"
+  (isolated_exec "" HOME="${work}/listener-home" "${listener_env[@]}" -- "${work}/bin/listener") \
     >>"${work}/logs/listener.log" 2>&1 &
   listener_pid=$!
-  await "$listener_pid" "the listener" "${work}/logs/listener.log" 60 listener_ready
+  await "$listener_pid" "the listener" "${work}/logs/listener.log" 60 \
+    listener_healthy "$envoy_url"
 }
 
 if [[ "$mode" == local ]]; then
   note "building natsd and the listener from ${repo_root}/packages/envoy"
-  (cd -- "${repo_root}/packages/envoy" &&
-    go build -o "${work}/bin/natsd" ./internal/testnats/cmd/natsd &&
-    go build -o "${work}/bin/listener" ./cmd/listener) ||
+  build_natsd "${repo_root}/packages/envoy" "${work}/bin/natsd" &&
+    build_listener "${repo_root}/packages/envoy" "${work}/bin/listener" ||
     fail "go build of natsd or the listener failed (the reason is above)"
 
   pick_port nats_port
   pick_port monitor_port
   pick_port listener_port
-  (isolated_exec "" HOME="${work}/nats-home" -- "${work}/bin/natsd" \
-    -p "$nats_port" -m "$monitor_port" -js -store_dir "${work}/nats-store") \
+  set_natsd_argv "${work}/bin/natsd" "$nats_port" "$monitor_port" "${work}/nats-store"
+  (isolated_exec "" HOME="${work}/nats-home" -- "${natsd_argv[@]}") \
     >"${work}/logs/natsd.log" 2>&1 &
   nats_pid=$!
   nats_monitor="http://127.0.0.1:${monitor_port}"
   nats_ready() {
-    grep -q 'Server is ready' "${work}/logs/natsd.log" &&
+    natsd_serving "${work}/logs/natsd.log" &&
       curl -fsS --max-time 2 "${nats_monitor}/healthz" | jq -e '.status == "ok"'
   }
   await "$nats_pid" natsd "${work}/logs/natsd.log" 30 nats_ready

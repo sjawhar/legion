@@ -106,15 +106,17 @@ def gate_runs(g: Gate) -> list:
     return list(g.runs) + [r for e in g.exact for r in e.runs]
 
 
-# Every ci.yaml step a why cites through at(), checked to exist so a renamed step fails here.
+# Every workflow step a why cites through at(), checked to exist so a renamed step fails here.
+# Each entry is (the workflow file that holds the step, the job, the step).
 CITED: list = []
 
 
-def at(job: str, step: str) -> str:
-    """A citation of a ci.yaml step by its name, its `uses:` (without the @ref) or its whole run:
-    text."""
-    CITED.append((job, step))
-    return f'ci.yaml {job} "{step}"'
+def at(job: str, step: str, workflow: str = WORKFLOW) -> str:
+    """A citation of a step by its name, its `uses:` (without the @ref) or its whole run: text.
+    `workflow` is the file that holds the job. It is ci.yaml, or a workflow ci.yaml calls: a job
+    that calls a reusable workflow keeps its gate here and its steps there."""
+    CITED.append((workflow, job, step))
+    return f'{os.path.basename(workflow)} {job} "{step}"'
 
 
 # ---------------------------------------------------------------- go list
@@ -457,14 +459,21 @@ def reduce_line(line: str) -> tuple:
 
 
 # The only env: names a step, its job or the workflow may set while a go command of the step stays
-# reduced: test configuration the go tool itself never reads. Any other name falls to everything,
+# reduced: names that cannot change what the command compiles. Any other name falls to everything,
 # among them GO* and CGO_*, BASH_ENV and ENV (which bash sources before the script), HOME and
 # XDG_CONFIG_HOME (go reads its env file, GOFLAGS among it, from $XDG_CONFIG_HOME/go/env or else
-# $HOME/.config/go/env) and PATH (which chooses the go binary). Add a name here only when go does
-# not read it.
+# $HOME/.config/go/env) and PATH (which chooses the go binary). Add a name here only when go
+# compiles the same files with it set as without.
+#
+# GOPROXY is the one name go itself reads that is here. It says where a module's bytes come from,
+# never which version: the module files this check already reads decide that, and go.sum holds
+# each module's hash whichever source serves it. This check's own go commands run with
+# GOPROXY=off over an empty module cache (Go.env below), so a workflow's value never reaches
+# them either.
 ENV_ALLOWED = frozenset({
     "BROKER_TEST_DATABASE_URL", "DATABASE_URL", "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT",
     "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE", "ENVOY_SMOKE_IMAGE",
+    "GOPROXY",
     "LEGION_E2E", "LEGION_E2E_ENVOY_STACK", "LEGION_E2E_PG_DSN", "LEGION_TEST_NATS_URL", "LEGION_TEST_PG_DSN",
     "TESTCONTAINERS_RYUK_DISABLED",
 })
@@ -698,10 +707,20 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
         if source not in files:
             problems.append(f"::error file=.github/scripts/ci_job_reads.py::RULES names {source}, which is not "
                             f"in the repository; update or remove the rule")
-    for job_id, ref in CITED:
-        if not any(step_matches(s, ref) for s in (jobs.get(job_id) or {}).get("steps") or []):
+    # A citation names the workflow file that holds the step: ci.yaml, or a workflow one of its
+    # jobs calls. The step must still be there, so a rename or a move fails here.
+    cited_documents = {WORKFLOW: document}
+    for path, job_id, ref in CITED:
+        if path not in cited_documents:
+            cited_documents[path] = (yaml.safe_load((REPO / path).read_text()) or {}) if (REPO / path).is_file() else None
+        cited = cited_documents[path]
+        if cited is None:
             problems.append(f"::error file=.github/scripts/ci_job_reads.py::a why cites step \"{ref}\" of job "
-                            f"{job_id}, which {WORKFLOW} does not have")
+                            f"{job_id} in {path}, which is not in the repository")
+            continue
+        if not any(step_matches(s, ref) for s in ((cited.get("jobs") or {}).get(job_id) or {}).get("steps") or []):
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::a why cites step \"{ref}\" of job "
+                            f"{job_id}, which {path} does not have")
     return unreduced
 
 # The jobs ci-ok.sh holds to success on every run, so its SELECTED_BY maps neither.
@@ -716,8 +735,10 @@ EVENT_LISTS = {
 
 def check_ci_ok(document: dict, problems: list) -> None:
     """ci-ok.sh fails a job its SELECTED_BY says `changes` selected unless the job succeeded, so
-    SELECTED_BY must be exactly {job: the output its if: tests} for every job ci-ok needs but
-    changes and lint, and each EVENT_LISTS list exactly the jobs whose if: holds its term."""
+    SELECTED_BY must be exactly {job: the output its if: tests} for every job ci-ok needs but the
+    ALWAYS_RUN ones, and each EVENT_LISTS list exactly the jobs whose if: holds its term. The
+    jobs come from ci.yaml itself, every job whose if: tests an output of changes, so a job that
+    neither ci-ok's needs nor its SELECTED_BY names fails here too."""
     jobs = document.get("jobs") or {}
     ci_ok = jobs.get("ci-ok")
     if ci_ok is None:
@@ -744,6 +765,21 @@ def check_ci_ok(document: dict, problems: list) -> None:
             return
     needs = ci_ok.get("needs") or []
     needed = [j for j in ([needs] if isinstance(needs, str) else needs) if j not in ALWAYS_RUN]
+    # The jobs ci-ok must hold, read from ci.yaml's own jobs, not from ci-ok's needs. A job that
+    # `changes` gates and that neither needs nor SELECTED_BY names raises nothing in the two
+    # loops below, because both of them start from those two lists. ci-ok is the required check,
+    # so such a job is advisory: it goes red and tells nobody.
+    gated = sorted(job_id for job_id, job in jobs.items()
+                   if job_id not in ALWAYS_RUN and job_id != "ci-ok"
+                   and GATE_REF.search(str((job or {}).get("if", ""))))
+    for job_id in gated:
+        if job_id in needed:
+            continue
+        absent = ["needs"] if job_id in selected_by else ["needs", "SELECTED_BY"]
+        names = " and ".join(absent)
+        problems.append(f"::error file={WORKFLOW}::job {job_id} tests an output of changes in its if:, and ci-ok's "
+                        f"{names} {'do' if len(absent) > 1 else 'does'} not name it, so ci-ok passes while {job_id} "
+                        f"fails. Add {job_id} to ci-ok's {names}.")
     expected, list_expected = {}, {name: set() for name in EVENT_LISTS}
     for job_id in needed:
         condition = str((jobs.get(job_id) or {}).get("if", ""))
@@ -759,6 +795,8 @@ def check_ci_ok(document: dict, problems: list) -> None:
                 list_expected[name].add(job_id)
     for job_id in sorted(set(needed) | set(selected_by)):
         want, have = expected.get(job_id), selected_by.get(job_id)
+        if job_id in gated and job_id not in needed:
+            continue  # the loop above already names it, and says to add it to ci-ok's needs
         if job_id not in needed:
             problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY maps {job_id}, which is not a job ci-ok "
                             f"needs other than {' and '.join(ALWAYS_RUN)}; drop it")
@@ -813,6 +851,36 @@ def check_push_workflows(data, filters: dict, problems: list) -> list:
     return report
 
 
+def declared_reads(data) -> list:
+    """Every read pattern ci_job_reads.py declares, each with where it is: a gate's reads, or a
+    RULES row's (a row's Runs declare go commands, not patterns)."""
+    reads = [(r.glob, f"gate {g.filter} reads") for g in data.GATES for r in g.reads]
+    return reads + [(read.glob, f"the RULES row for {source} reads")
+                    for source, entries in data.RULES.items()
+                    for read in entries if isinstance(read, Read)]
+
+
+def check_dead_patterns(data, filters: dict, expander: Expander, problems: list) -> None:
+    """A pattern that matches no file of the repository names nothing the run can select or
+    cover. The other rules here pass over such a pair: a filter and a declared read that both
+    name a path that does not exist agree with each other, and the gate's read expands to no file
+    to hold the filter to, so a change to the files they mean starts no job, on the pull request
+    and again on main. Judged over repo_files() with the Expander the rest of the check uses, so
+    a pattern is held to exactly the files a dorny/paths-filter run sees. A `!` pattern is exempt:
+    it names what to leave out, and leaving nothing out is no fault."""
+    for name in sorted(filters):
+        for pattern in dict.fromkeys(filters[name]):
+            if pattern.startswith("!") or expander.expand(pattern):
+                continue
+            problems.append(f"::error file={WORKFLOW}::filter {name} has {pattern}, which matches no file in the "
+                            f"repository, so no change ever selects on it; correct the path or drop the pattern")
+    for pattern, where in dict.fromkeys(declared_reads(data)):
+        if expander.expand(pattern):
+            continue
+        problems.append(f"::error file=.github/scripts/ci_job_reads.py::{where} {pattern}, which matches no file in "
+                        f"the repository, so it holds its filter to nothing; correct the path or drop the read")
+
+
 def main() -> int:
     problems: list = []
     document = yaml.safe_load((REPO / WORKFLOW).read_text())
@@ -823,6 +891,7 @@ def main() -> int:
     unreduced = check_table(document, data, filters, set(files), problems)
     check_ci_ok(document, problems)
     expander = Expander(files)
+    check_dead_patterns(data, filters, expander, problems)
     session = Session()
     report = []
     fallback = None  # module_trees_and_go_files(files), once a gate needs it

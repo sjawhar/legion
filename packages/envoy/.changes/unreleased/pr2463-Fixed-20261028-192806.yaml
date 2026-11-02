@@ -1,6 +1,0 @@
-kind: Fixed
-body: |-
-    A link or hover card to a block on an open Dispatch page stops showing the block's text once an edit deletes the block, for a block of a document as for a block of a comment or message, instead of keeping the old text until a reload.
-time: 2026-10-28T19:28:06.000000000Z
-custom:
-    Issue: pr2463

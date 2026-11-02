@@ -64,22 +64,23 @@ test.each(agents)("%s autoloads exactly the skill:// names its body already has"
   );
 });
 
-// deep-worker.md's frontmatter says why.
-test("deep-worker.md is blocking", () => {
-  expect(definition("deep-worker.md").fields.blocking).toBe(true);
+// Legion's pods run Oh My Pi with async jobs and bash auto-background on, and a `blocking` agent
+// would hold its caller in the foreground instead. Each caller's prompt says where it waits for a
+// result, so no agent this package ships declares the field at all, true or false.
+test.each(agents)("%s declares no blocking field", (file) => {
+  expect(definition(file).fields, `${file}'s frontmatter`).not.toHaveProperty("blocking");
 });
 
-// The planner's and the architect's two checks: each caller waits for each answer before it drafts,
-// revises or requests approval (blocking), and each runs on the deployment's model role for its job.
-// They change no file: no edit or write tool. They carry bash to check live state themselves, and
-// Oh My Pi has no per-agent command limit, so each prompt holds the agent to commands that read.
+// The planner's and the architect's two checks: each runs on the deployment's model role for its
+// job. They change no file: no edit or write tool. They carry bash to check live state themselves,
+// and Oh My Pi has no per-agent command limit, so each prompt holds the agent to commands that
+// read.
 test.each([
   ["plan-gap-analyst.md", "@oracle"],
   ["plan-reviewer.md", "@review"],
-])("%s is a blocking check on %s that edits no file and runs only read-only commands", (file, model) => {
+])("%s checks on %s, edits no file and runs only read-only commands", (file, model) => {
   const { fields, body } = definition(file);
   expect(fields.model).toEqual([model]);
-  expect(fields.blocking).toBe(true);
   const allowed: Record<string, true> = {
     read: true,
     glob: true,

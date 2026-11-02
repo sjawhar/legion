@@ -44,6 +44,7 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   ask: (client) => client.ask("DSP-1", { question: "Which?", actor } as never),
   openAsks: (client) => client.openAsks("session-1"),
   openAsksForProject: (client) => client.openAsksForProject("DSP"),
+  sessionAnswers: (client) => client.sessionAnswers("session-1"),
   listAgents: (client) => client.listAgents(),
   whoami: (client) => client.whoami(),
   createProject: (client) => client.createProject({ key: "DSP", name: "Dispatch" } as never),
@@ -90,6 +91,10 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   getComments: (client) => client.getComments("DSP-1"),
   getIssueReferences: (client) => client.getIssueReferences("DSP-1"),
   getReferences: (client) => client.getReferences({ to: "DSP-1" }),
+  writeHandoff: (client) => client.writeHandoff("DSP-1", "implement", { body: "{}", actor }),
+  listHandoffs: (client) => client.listHandoffs("DSP-1"),
+  latestHandoff: (client) => client.latestHandoff("DSP-1", "implement"),
+  handoff: (client) => client.handoff("handoff-1"),
 };
 
 afterEach(forgetKeyedLayerMemory);

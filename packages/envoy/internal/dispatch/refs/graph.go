@@ -14,16 +14,9 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
-
-// Kinds is every edge type graph_edges emits.
-var Kinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
-
-// KnownKind reports whether kind is an edge type graph_edges emits.
-func KnownKind(kind string) bool {
-	return slices.Contains(Kinds, kind)
-}
 
 // excerptRunes bounds the head of an item's text shown beside an edge.
 const excerptRunes = 240
@@ -31,7 +24,8 @@ const excerptRunes = 240
 // Query selects one node's edges. Direction "in" reads edges pointing at the node (Kind, ID
 // are its to_kind, to_id: ref_key for artifacts); "out" reads edges it writes (from_kind,
 // from_id: the uuid for artifacts). Kinds narrows edge types; Since keeps mentions whose
-// source_seq is greater, which excludes every structural edge.
+// source_seq is greater, and Through those whose source_seq is at or below it; either excludes
+// every structural edge.
 //
 // A document's read also lists the edges at its current blocks: on "in", every edge pointing at
 // one of them, and on "out", every link one of them holds; each such edge names that block as
@@ -50,6 +44,11 @@ type Query struct {
 	// inbound `replies_to` edges are its own clarification thread, which its card renders.
 	ExcludeKinds []string
 	Since        *int64
+	// Through bounds a Since read at a safe horizon of the event log (events.Horizon), at or
+	// below which every event is final: event ids are not commit order, so a caller that moved
+	// its since past a returned edge's source_seq would never be shown an edge whose event
+	// drew a lower id and committed later.
+	Through *int64
 	// WholeDocuments, on a document's "in" read, lists the items and documents that cite it or
 	// one of its current blocks, and no block: a citing document is listed by its own edges.
 	WholeDocuments bool
@@ -63,10 +62,10 @@ var AskBacklinkExclusions = []string{"replies_to"}
 // BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
 // list carries beside a row, counted the same way the rows behind it are listed. It counts only
 // edges whose source is a node kind this build reads, so the count is the rows its list shows,
-// and counts a document's, comment's or message's mention once for each of its blocks citing the
-// node, in place of the item's own edge (heldByABlock): a comment citing a node from two
-// paragraphs counts 2. A node with no inbound edge is absent from the result; the caller decides
-// what zero means.
+// and counts a document's, comment's or message's mention once for each of its blocks' links to
+// the node, in place of the item's own edge (heldByABlock): a comment citing a node from two
+// paragraphs counts 2, and a document's block pointing at the node counts once whatever its link's
+// kind. A node with no inbound edge is absent from the result; the caller decides what zero means.
 //
 // It is the sequential half of the one count: QueueBacklinkCounts queues the same statement and
 // reads it with the same scan, for a caller that counts beside its other reads (the issue read's
@@ -159,9 +158,12 @@ type edgeRow struct {
 }
 
 // heldByABlock is true of a document's, comment's or message's mention edge (graph_edges row
-// alias) when a block of that item holds a link of the same kind to the same target: that block's
-// own edge is listed and counted in its place, so each link shows once. An item the block index
-// has not reached holds no block mention, so its own edge stays.
+// alias) when a block of that item holds a link of any kind to the same target, listed or not:
+// that block's own edge is listed and counted in its place, so each link shows once. A typed
+// block's pointer is also written in the document's text, so the document's mention of the target
+// is hidden behind the pointer's edge, and stays hidden while the pointer's target has a type the
+// pointer does not allow (block_ref_listed). An item the block index has not reached holds no
+// block link, so its own edge stays.
 func heldByABlock(alias string) string {
 	holders := []string{blockHolds(alias, "artifact", "block_refs", "artifact_id")}
 	for _, item := range []ItemKind{ItemComment, ItemMessage} {
@@ -172,11 +174,11 @@ func heldByABlock(alias string) string {
 }
 
 // blockHolds is true of a graph_edges row alias written by an item of fromKind when one of the
-// item's blocks holds a link of the row's kind to its target in table, whose column keys the item.
+// item's blocks holds a link of any kind to its target in table, whose column keys the item.
 func blockHolds(alias, fromKind, table, column string) string {
 	return `(` + alias + `.from_kind = '` + fromKind + `' and exists (
 		select 1 from ` + table + ` b where b.to_kind = ` + alias + `.to_kind and b.to_id = ` + alias + `.to_id
-		and b.kind = ` + alias + `.kind and b.` + column + `::text = ` + alias + `.from_id))`
+		and b.` + column + `::text = ` + alias + `.from_id))`
 }
 
 // documentBlockIDs is the node id of every current block of the document whose ref_key is the
@@ -343,7 +345,7 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 			from graph_edges g where g.from_kind = $1 and g.from_id = $2 and not ` + heldByABlock("g") + `
 			union all
 			select b.kind, b.to_kind, b.to_id, b.created_at, b.source_seq, b.from_node
-			from block_refs b where b.artifact_id = $3::uuid`
+			from block_refs b where b.artifact_id = $3::uuid and (b.to_types is null or block_ref_listed(b.to_types, b.to_id))`
 	case query.Direction == "out" && itemBlocks:
 		tables, _ := item.tables()
 		arms = `select g.kind, g.to_kind, g.to_id, g.created_at, g.source_seq, null::text
@@ -372,6 +374,10 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 	if query.Since != nil {
 		args = append(args, *query.Since)
 		sql.WriteString(" and source_seq > $" + strconv.Itoa(len(args)))
+	}
+	if query.Through != nil {
+		args = append(args, *query.Through)
+		sql.WriteString(" and source_seq <= $" + strconv.Itoa(len(args)))
 	}
 	sql.WriteString(" order by created_at desc, kind, other_kind, other_id, at_block")
 	rows, err := q.Query(ctx, sql.String(), args...)
@@ -635,20 +641,27 @@ func anchorVersion(alias string) string {
 // loadAskNodes resolves ask nodes. An ask is made by its author. Its last change is its own edit
 // (edited_at: its wording, a block ask's settlement, an approval request's version move), by the
 // editor the latest ask.edited event names; an answer or a resolution is no change of it. It
-// belongs to the document it is written on: the one its anchor names, at the anchored version; a
-// block ask's document, at the version that first held its block when Dispatch knows it
-// (blockFirstVersion); an approval request's document, at the version it named when it opened
-// (written_version); the document that owns it, at the version current when it was written
-// (written_version). An ask written on no document belongs to its issue.
+// belongs to the document it is written on: the one its anchor names, when the anchor's
+// artifact_id casts to a uuid, at the anchored version; a block ask's document, at the version
+// that first held its block when Dispatch knows it (blockFirstVersion); an approval request's
+// document, at the version it named when it opened (written_version); the document that owns it,
+// at the version current when it was written (written_version). An ask written on no document
+// belongs to its issue.
+//
+// An artifact_id that casts to no uuid names no document, so such an anchor falls through to the
+// branch below - the ask's block document, at that branch's version - exactly as an anchor
+// carrying no artifact_id at all does, and as both search arms link the same ask. The version and
+// the document therefore always come from one branch.
 //
 // The edit lookup repeats events_ask_payload_id's type list (migration 0030), so the planner can
 // prove the partial index serves it.
 func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
+	anchorArtifact := store.CastableUUID(`k.anchor->>'artifact_id'`)
 	rows, err := q.Query(ctx, `
 		select k.id::text, k.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, ''), k.question,
 		       k.author, k.created_at, k.edited_at, edit.edited_by, `+documentColumns("doc")+`,
 		       case
-		         when k.anchor->>'artifact_id' is not null then `+anchorVersion("k")+`
+		         when `+anchorArtifact+` is not null then `+anchorVersion("k")+`
 		         when k.block_artifact_id is not null then case when first.known then first.version end
 		         else k.written_version
 		       end
@@ -656,7 +669,7 @@ func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string
 		left join issues i on i.key = k.issue_key
 		left join artifacts a on a.id = k.artifact_id
 		left join artifacts doc on doc.id = case
-		  when k.anchor->>'artifact_id' is not null then (k.anchor->>'artifact_id')::uuid
+		  when `+anchorArtifact+` is not null then `+anchorArtifact+`
 		  when k.block_artifact_id is not null then k.block_artifact_id
 		  when k.kind = 'approval' then (k.approval->>'artifact_id')::uuid
 		  else k.artifact_id

@@ -681,7 +681,7 @@ func TestSuggestionOutcomeSweepMarksActedOnWhenSourceCitesTarget(t *testing.T) {
 		t.Fatalf("post closing note: status=%d body=%s", closing.Code, closing.Body.String())
 	}
 
-	if err := sweepSuggestionOutcomes(context.Background(), srv.deps.Store.Pool); err != nil {
+	if err := sweepSuggestionOutcomes(t, srv); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if row := readSuggestionOutcome(t, srv, source.Key, target.Key); row.Outcome != "acted_on" {
@@ -713,7 +713,7 @@ func TestSuggestionOutcomeSweepMarksActedOnWhenTargetUpdatedDirectly(t *testing.
 		t.Fatalf("update target issue: status=%d body=%s", updated.Code, updated.Body.String())
 	}
 
-	if err := sweepSuggestionOutcomes(context.Background(), srv.deps.Store.Pool); err != nil {
+	if err := sweepSuggestionOutcomes(t, srv); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if row := readSuggestionOutcome(t, srv, source.Key, target.Key); row.Outcome != "acted_on" {
@@ -745,7 +745,7 @@ func TestSuggestionOutcomeSweepMarksOverriddenWhenSourceContinuesWithoutCitingTa
 		t.Fatalf("continue source issue: status=%d body=%s", continued.Code, continued.Body.String())
 	}
 
-	if err := sweepSuggestionOutcomes(context.Background(), srv.deps.Store.Pool); err != nil {
+	if err := sweepSuggestionOutcomes(t, srv); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if row := readSuggestionOutcome(t, srv, source.Key, target.Key); row.Outcome != "overridden" {
@@ -769,7 +769,7 @@ func TestSuggestionOutcomeSweepLeavesSuggestionIgnoredWithNoFurtherActivity(t *t
 
 	seedWriteSuggestion(t, srv, "issue", source.Key, "", "alice", "issue", target.Key, target.Key)
 
-	if err := sweepSuggestionOutcomes(context.Background(), srv.deps.Store.Pool); err != nil {
+	if err := sweepSuggestionOutcomes(t, srv); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if row := readSuggestionOutcome(t, srv, source.Key, target.Key); row.Outcome != "ignored" {

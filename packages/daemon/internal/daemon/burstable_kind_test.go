@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/stream"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // The Burstable issue pod live proof (scripts/e2e/burstable-kind.sh, whose driver is
@@ -175,6 +176,7 @@ func (firstLaunchStore) IssueSandboxHome(_ context.Context, _, issue string) (st
 }
 
 func (firstLaunchStore) ClaimUnretired(context.Context, claim.Token) (bool, error) { return false, nil }
+func (firstLaunchStore) Claims(context.Context) ([]supervise.Claim, error)         { return nil, nil }
 
 // publicCloneTokens is the provisioning token for a public repository, which GitHub never asks
 // git for.

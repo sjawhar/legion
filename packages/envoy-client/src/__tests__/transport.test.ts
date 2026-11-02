@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { machineID } from "../machine";
-import { createEnvoyClient, EnvoyApiError } from "../transport";
+import {
+  createEnvoyClient,
+  type DeliveryAnswer,
+  EnvoyApiError,
+  newClientInstanceID,
+} from "../transport";
 
 type RecordedFetch = {
   readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -48,6 +53,7 @@ describe("EnvoyClient", () => {
       port: 13381,
       title: "Envoy QA",
       driving: true,
+      clientInstanceID: "0f8c2b1a4d6e7f90",
       plugin: PLUGIN,
     });
 
@@ -57,6 +63,7 @@ describe("EnvoyClient", () => {
       dir: "/work",
       topics: ["notifications.agent.ses_sender"],
       updated_at: undefined,
+      delivery: { mode: "core", reason: "not_answered" },
     });
     expect(recorded.requests).toHaveLength(1);
     expect(recorded.requests[0]?.method).toBe("POST");
@@ -68,7 +75,96 @@ describe("EnvoyClient", () => {
       port: 13381,
       title: "Envoy QA",
       driving: true,
+      client_instance_id: "0f8c2b1a4d6e7f90",
       host: machineID(),
+      plugin: "@sjawhar/pi-envoy",
+      plugin_version: "11.0.0",
+    });
+  });
+
+  test("a subscription without a client instance id carries no client_instance_id", async () => {
+    const recorded = recordFetch([
+      jsonResponse({
+        session_id: "ses_sender",
+        machine_id: "host-a",
+        dir: "/work",
+        topics: ["notifications.agent.ses_sender"],
+      }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.subscribe({
+      sessionID: "ses_sender",
+      directory: "/work",
+      topics: ["notifications.agent.ses_sender"],
+      port: 13381,
+      title: "Envoy QA",
+      driving: true,
+      plugin: PLUGIN,
+    });
+
+    const body = (await recorded.requests[0]?.json()) as Record<string, unknown>;
+    // The key is absent, not undefined, so an older listener sees an unchanged body.
+    expect(Object.hasOwn(body, "client_instance_id")).toBe(false);
+    expect(body).toEqual({
+      session_id: "ses_sender",
+      dir: "/work",
+      topics: ["notifications.agent.ses_sender"],
+      port: 13381,
+      title: "Envoy QA",
+      driving: true,
+      host: machineID(),
+      plugin: "@sjawhar/pi-envoy",
+      plugin_version: "11.0.0",
+    });
+  });
+
+  test("asks for consumer delivery and reads each delivery answer", async () => {
+    const interest = {
+      session_id: "ses_sender",
+      machine_id: "host-a",
+      dir: "/work",
+      topics: ["notifications.agent.ses_sender"],
+    };
+    const consumer: DeliveryAnswer = {
+      mode: "consumer",
+      subject: "notifications.envoy.deliver.ses_sender",
+      stream_id: "stream-1",
+      gap: false,
+    };
+    const recorded = recordFetch([
+      jsonResponse({ ...interest, delivery: consumer }),
+      jsonResponse({ ...interest, delivery: { mode: "core", reason: "no_grant" } }),
+      jsonResponse(interest),
+      jsonResponse({ ...interest, delivery: { mode: "push" } }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+    const register = () =>
+      client.subscribe({
+        sessionID: "ses_sender",
+        directory: "/work",
+        topics: ["notifications.agent.ses_sender"],
+        port: 0,
+        title: "",
+        driving: false,
+        selfSubscribed: true,
+        delivery: { consumer: true, epoch: "epoch-1", resume: { stream_id: "stream-1", seq: 41 } },
+        plugin: PLUGIN,
+      });
+
+    expect((await register()).delivery).toEqual(consumer);
+    expect((await register()).delivery).toEqual({ mode: "core", reason: "no_grant" });
+    // A listener of an earlier release answers no `delivery`: core.
+    expect((await register()).delivery).toEqual({ mode: "core", reason: "not_answered" });
+    // A mode this build does not know does not fail the registration: core.
+    expect((await register()).delivery).toEqual({
+      mode: "core",
+      reason: "unreadable_answer",
+    });
+    // The registration carries the plugin beside the delivery request.
+    expect(await recorded.requests[0]?.json()).toMatchObject({
+      self_subscribed: true,
+      delivery: { consumer: true, epoch: "epoch-1", resume: { stream_id: "stream-1", seq: 41 } },
       plugin: "@sjawhar/pi-envoy",
       plugin_version: "11.0.0",
     });
@@ -364,11 +460,35 @@ describe("EnvoyClient", () => {
     const recorded = recordFetch([new Response(null, { status: 200 })]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
 
-    await client.unregisterSession("ses_closed");
+    await client.unregisterSession({ sessionID: "ses_closed" });
 
     expect(recorded.requests).toHaveLength(1);
     expect(recorded.requests[0]?.method).toBe("DELETE");
+    // No client instance id, no query string: the request an older client sent.
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions/ses_closed");
+  });
+
+  test("a deregistration with a client instance id sends it as an encoded query parameter", async () => {
+    const recorded = recordFetch([
+      Response.json({ deleted: true }, { status: 200 }),
+      Response.json(
+        { deleted: false, reason: "the registration belongs to another client instance" },
+        { status: 200 }
+      ),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.unregisterSession({ sessionID: "ses_closed", clientInstanceID: "0f8c/2b 1a" });
+    // A refusal is a 200 whose body says the entry stayed; no caller acts on it.
+    await client.unregisterSession({ sessionID: "ses_closed", clientInstanceID: "0f8c2b1a" });
+
+    expect(recorded.requests[0]?.method).toBe("DELETE");
+    expect(recorded.requests[0]?.url).toBe(
+      "http://listener/v1/sessions/ses_closed?client_instance_id=0f8c%2F2b%201a"
+    );
+    expect(recorded.requests[1]?.url).toBe(
+      "http://listener/v1/sessions/ses_closed?client_instance_id=0f8c2b1a"
+    );
   });
 
   test("sets a role and returns the listener interest response", async () => {
@@ -719,7 +839,7 @@ describe("EnvoyClient", () => {
       token: "listener-token",
     });
 
-    await client.unregisterSession("ses_closed");
+    await client.unregisterSession({ sessionID: "ses_closed" });
 
     expect(recorded.requests[0]?.headers.get("Authorization")).toBe("Bearer listener-token");
   });
@@ -731,7 +851,7 @@ describe("EnvoyClient", () => {
       const recorded = recordFetch([new Response(null, { status: 200 })]);
       const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
 
-      await client.unregisterSession("ses_closed");
+      await client.unregisterSession({ sessionID: "ses_closed" });
 
       expect(recorded.requests[0]?.headers.has("Authorization")).toBe(false);
     } finally {
@@ -812,5 +932,15 @@ describe("EnvoyClient", () => {
     expect((failure as EnvoyApiError).code).toBe("REPLAY_UNAVAILABLE");
     expect((failure as EnvoyApiError).message).toBe("nats: permissions violation");
     expect(recorded.requests).toHaveLength(1);
+  });
+});
+
+describe("newClientInstanceID", () => {
+  test("mints 128 random bits as 32 lower-case hex characters", () => {
+    expect(newClientInstanceID()).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  test("mints a different id for each client instance", () => {
+    expect(newClientInstanceID()).not.toBe(newClientInstanceID());
   });
 });

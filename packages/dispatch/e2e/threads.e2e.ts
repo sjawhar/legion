@@ -11,6 +11,7 @@ import {
   resolveAsk,
 } from "./api";
 import { conversationFilter, threadCard } from "./editor";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
@@ -469,7 +470,8 @@ test("a session retraction leaves its reason on the card and removes the human's
   const alice = await asUser(browser, "alice");
   const inboxPage = await alice.newPage();
   await inboxPage.goto("/");
-  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
+  await expect(inboxRow(inboxPage, ask.id)).toBeVisible();
+  await expect(inboxPage.getByText(/^Blocked on you: 1 item/)).toBeVisible();
   await inboxPage.screenshot({
     fullPage: true,
     path: testInfo.outputPath("inbox-before-ask-retraction.png"),
@@ -497,7 +499,14 @@ test("a session retraction leaves its reason on the card and removes the human's
     bobSession
   );
 
-  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  // The retraction takes the question out of the human's Inbox, live: the "Blocked on you"
+  // strip counts what the server lists, and it drops with no reload.
+  await expect(inboxPage.getByText(/^Blocked on you:/)).toHaveCount(0);
+  // The row itself: a question the server withdraws leaves the list at once, at every width and
+  // with no reload - a withdrawn question with a live answer form invites an answer the server
+  // refuses, and nothing holds a row the reader has not touched (INFRA-575).
+  await expect(inboxRow(inboxPage, ask.id)).toHaveCount(0);
+  await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
   await inboxPage.screenshot({
     fullPage: true,
     path: testInfo.outputPath("inbox-after-ask-retraction.png"),

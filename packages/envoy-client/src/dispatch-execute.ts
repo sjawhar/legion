@@ -23,6 +23,8 @@ import type {
   Event,
   GraphNode,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   Issue,
   IssueClaim,
   IssueComponents,
@@ -38,6 +40,7 @@ import type {
   OpenAsk,
   OpenAsksResponse,
   Project,
+  SessionAnswersResponse,
   WriteAdvice,
 } from "@legion/contracts";
 import {
@@ -56,6 +59,7 @@ import {
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   serviceSubjectLabel,
+  typedBlockIdAttribute,
   zodSchemaApi,
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
@@ -90,6 +94,7 @@ import {
   issueTopic,
   type Owner,
   type OwnerTopic,
+  ownerTitle,
   type ParsedDispatchRef,
   parseDispatchRef,
 } from "./dispatch-owner";
@@ -122,6 +127,7 @@ import { messageFor } from "./errors";
 import { humanEditHead } from "./human-edit";
 import { decisionBlockLines, relatedCheckLines } from "./related-check";
 import { pageSummaryText, searchAnswer } from "./search-answer";
+import { isNoAnswersRoute, renderSessionAnswersList } from "./session-answers";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
 /**
@@ -317,6 +323,18 @@ function renderAdvice(
     }
   }
 
+  // The gate line is last for the document tools, for the reason the cadence line is last for
+  // the others: behind `| tail -1` it is the only line the agent sees, and it is the one line of
+  // a document write that someone else has to act on. It describes this one write - the version
+  // it stored and the approval that version replaced - rather than a rule about editing a spec,
+  // because the server sends it only on the write that superseded the approval.
+  const superseded = advice.superseded_approval;
+  if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
+    lines.push(
+      `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
+    );
+  }
+
   // The cadence line comes last and opens by saying the write went through: behind `| tail -1`
   // it is the only line an agent sees, and "Stop posting" alone reads as a refusal.
   if (
@@ -329,7 +347,7 @@ function renderAdvice(
   ) {
     const middle =
       writesSinceHuman >= 6
-        ? "Stop posting here until a human replies."
+        ? "Stop posting here until a human replies. Their reply ends this: post then what you held back."
         : "Progress ledger or scratchpad? If so, stop.";
     lines.push(
       `Posted. You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`
@@ -433,6 +451,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_project: true,
   dispatch_projects: true,
   dispatch_open_asks: true,
+  dispatch_answers: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true,
 };
@@ -1587,6 +1606,11 @@ async function resolveOwnerArguments(
   return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
 }
 
+/** A document reference that names no document of its owner. Its message is the hint the Dispatch
+ * tools give; `readDocumentBlocks` tells it apart from every other refusal, as the first upload of
+ * a file. */
+class DocumentNotFoundError extends Error {}
+
 /** The document `artifactReference` names among `artifacts`. A bare reference is an id, a slug,
  * then a filename; a `canonical` one, the document part of a dispatch:// reference, is a slug by
  * definition (the address the dashboard and Dispatch's own routes use), so its slug match is the
@@ -1620,7 +1644,7 @@ function artifactByReference(
   }
   const [artifact] = byName;
   if (artifact === undefined) {
-    throw new Error(documentReferenceProblem(artifactReference, artifacts, owner));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference, artifacts, owner));
   }
   return artifact;
 }
@@ -1668,11 +1692,50 @@ async function resolveArtifact(
     artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
   }
   if (!artifact) {
-    throw new Error(
+    throw new DocumentNotFoundError(
       documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue")
     );
   }
   return { owner, issue, artifact };
+}
+
+/** How a call's documents resolve once its owner is known (`documentTargets`). */
+interface DocumentTargets {
+  /** The call's owner, an issue reference resolved to the issue's key. */
+  readonly owner: Owner | null;
+  /** The owner, refused when the call names none. */
+  documentOwner(): Owner;
+  /** The document `reference` names under `owner`, read as the call's own reference reads it. */
+  resolveDocument(owner: Owner, reference: string | undefined): Promise<ResolvedArtifact>;
+}
+
+/**
+ * The owner a call's resolved arguments name, its issue reference resolved to the key, and how its
+ * document references resolve: the document part of the call's dispatch:// reference is a slug by
+ * definition (`canonical`), and a document argument the reference does not supply is a bare one, an
+ * id, slug or filename. The executor and `readDocumentBlocks` resolve documents through it.
+ */
+async function documentTargets(
+  client: DispatchClient,
+  resolution: OwnerResolution
+): Promise<DocumentTargets> {
+  const refDocument =
+    resolution.ref?.kind === "artifact" ? resolution.ref.id : resolution.ref?.artifact;
+  const owner: Owner | null =
+    resolution.owner?.kind === "issue"
+      ? { kind: "issue", issue: await resolveExistingIssue(client, resolution.owner.issue) }
+      : resolution.owner;
+  return {
+    owner,
+    documentOwner: () => {
+      if (owner === null) throw new Error("issue or project is required");
+      return owner;
+    },
+    resolveDocument: (documentOwner, reference) =>
+      resolveArtifact(client, documentOwner, reference, {
+        canonical: reference !== undefined && reference === refDocument,
+      }),
+  };
 }
 
 /** The id of the document an issue carries under `reference`: its artifact id, slug, or filename,
@@ -1852,9 +1915,9 @@ function routeHeldBySession(issue: RoutedIssue): boolean {
 /**
  * An issue's route as every agent surface reads it: where its messages go and whether that
  * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
- * nobody holds, or to a session that is not running, reaches nobody as of the server's copy of
- * the listener's session list, at most 5 s old,
- * so it says so - and says "right now", because a restarting session is absent for minutes.
+ * nobody holds, or to a session that is not running, reaches nobody as of the listener's session
+ * list Dispatch last stored, at most 5 s old and the same on every server process, so it says
+ * so - and says "right now", because a restarting session is absent for minutes.
  */
 function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
   if (issue.route === null) return "none";
@@ -2288,15 +2351,9 @@ function openAskAge(ageSeconds: number): string {
   return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
 }
 
-function openAskOwner(ask: OpenAsk): string {
-  return "issue" in ask.owner
-    ? `${ask.owner.issue.key}: ${ask.owner.issue.title}`
-    : `${ask.owner.document.project} / ${ask.owner.document.name}`;
-}
-
 function openAskLine(ask: OpenAsk, baseUrl: string): string {
   const priority = ask.priority === null ? "" : `P${ask.priority} · `;
-  return `- ${openAskAge(ask.age_seconds)} · ${priority}${openAskOwner(ask)} · ${ask.question} · ${new URL(ask.ref, baseUrl).toString()}`;
+  return `- ${openAskAge(ask.age_seconds)} · ${priority}${ownerTitle(ask.owner)} · ${ask.question} · ${new URL(ask.ref, baseUrl).toString()}`;
 }
 
 export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: string): string {
@@ -2610,15 +2667,13 @@ async function listDocumentBlocks(
   client: DispatchClient,
   artifact: Artifact
 ): Promise<{ text: string; token: string | undefined }> {
-  const before = await client.docRead(artifact.id);
-  const blocks = await client.artifactBlocks(artifact.id);
-  const after = await client.docRead(artifact.id);
-  if (before.token !== after.token || before.markdown !== after.markdown) {
+  const live = await liveBlocks(client, artifact);
+  if (live === undefined) {
     throw new Error(
       `${artifact.name} changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.`
     );
   }
-  const bytes = new TextEncoder().encode(before.markdown);
+  const { bytes, blocks } = live;
   const decoder = new TextDecoder();
   const lines = [
     `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`,
@@ -2659,7 +2714,122 @@ async function listDocumentBlocks(
     }
     holders.push(block);
   }
-  return { text: lines.join("\n"), token: before.token };
+  return { text: lines.join("\n"), token: live.token };
+}
+
+/** A live document's blocks and the UTF-8 bytes of the markdown their ranges index. */
+interface LiveBlocks {
+  readonly bytes: Uint8Array;
+  readonly token: string | undefined;
+  readonly blocks: ArtifactBlock[];
+}
+
+/**
+ * A live document's blocks, read between two reads of its markdown, since Dispatch reports each
+ * block's range as UTF-8 offsets into `/text`'s markdown; undefined when the token or the text
+ * moved between the two reads, since the offsets would slice text they were not computed over.
+ */
+async function liveBlocks(
+  client: DispatchClient,
+  artifact: Artifact
+): Promise<LiveBlocks | undefined> {
+  const before = await client.docRead(artifact.id);
+  const blocks = await client.artifactBlocks(artifact.id);
+  const after = await client.docRead(artifact.id);
+  if (before.token !== after.token || before.markdown !== after.markdown) return undefined;
+  return { bytes: new TextEncoder().encode(before.markdown), token: before.token, blocks };
+}
+
+/** A document as a Dispatch call names it: `dispatch doc-edit`'s owner and document arguments. */
+export interface DocumentTarget {
+  readonly issue?: string;
+  readonly project?: string;
+  readonly artifact?: string;
+  readonly ref?: string;
+}
+
+/** What a target's owner is resolved against, as a call's arguments are: the checkout and
+ *  environment the command runs in (`LEGION_ISSUE`, and the repository a bare issue number is
+ *  on), and the Dispatch addresses a dashboard-URL `ref` may be on. */
+export type DocumentTargetContext = Pick<
+  DispatchCallCheckInput,
+  "cwd" | "env" | "exec" | "serverUrls"
+>;
+
+/** One block of a document, and its markdown. */
+export interface DocumentBlock {
+  readonly id: string;
+  readonly text: string;
+}
+
+/** A live document's blocks, and the document's own name and slug as Dispatch stores them. */
+export interface DocumentBlocks {
+  /**
+   * The document's name. The reference that found it may be a slug, an id or `spec`, while
+   * Dispatch finds the document an upload replaces by its exact name or its exact slug; a caller
+   * reading for an upload compares the upload's name with both.
+   */
+  readonly name: string;
+  /** The document's slug, the other reference an upload's name finds it by. */
+  readonly slug: string;
+  readonly blocks: DocumentBlock[];
+}
+
+/**
+ * The blocks of the live document `target` names, in document order, each with its markdown: the
+ * byte range Dispatch reports, sliced from the text it was computed over (`liveBlocks`), and the
+ * document's own name and slug. The document is the one `dispatch doc-edit` edits for the same
+ * arguments: its owner from the target, its ref or `LEGION_ISSUE`, and its document by id, slug,
+ * filename, the ref's slug, or `spec` for an issue's primary document. A target naming no document
+ * of its owner answers "not-found", which is what the first upload of a file reads. Everything
+ * else throws: a refused target, a filename two documents answer to, a failed read, and a document
+ * that changed between its two text reads. Every request carries the client's signal, so a stop
+ * ends the read.
+ */
+export async function readDocumentBlocks(
+  client: DispatchClient,
+  target: DocumentTarget,
+  context: DocumentTargetContext
+): Promise<DocumentBlocks | "not-found"> {
+  const tool = "dispatch_doc_edit";
+  const args: ToolArguments = { ...target };
+  const problems: string[] = [];
+  const resolution = await resolveOwnerArguments(
+    tool,
+    args,
+    context.cwd,
+    context.env ?? process.env,
+    context.exec ?? defaultExec,
+    context.serverUrls,
+    problems
+  );
+  problems.push(
+    ...ownerConflictProblems(tool, args, resolution.ref, optionalString(resolution.args, "ref"))
+  );
+  if (problems.length > 0) throw new ToolInputError(tool, problems);
+  const { documentOwner, resolveDocument } = await documentTargets(client, resolution);
+  let resolved: ResolvedArtifact;
+  try {
+    resolved = await resolveDocument(documentOwner(), stringArg(resolution.args, "artifact"));
+  } catch (error) {
+    if (error instanceof DocumentNotFoundError) return "not-found";
+    throw error;
+  }
+  const live = await liveBlocks(client, resolved.artifact);
+  if (live === undefined) {
+    throw new Error(
+      `${resolved.artifact.name} changed while its blocks were read, so their byte ranges could slice the wrong text; nothing was read. Read it again.`
+    );
+  }
+  const decoder = new TextDecoder();
+  return {
+    name: resolved.artifact.name,
+    slug: resolved.artifact.slug,
+    blocks: live.blocks.map((block) => ({
+      id: block.id,
+      text: decoder.decode(live.bytes.subarray(block.from, block.to)),
+    })),
+  };
 }
 
 /**
@@ -2701,11 +2871,13 @@ async function refuseOpenDecisionBlocks(
       : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block): string[] => {
     const ask = asks.get(block.id);
-    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
-    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
-    // whose lines carries a state is open.
+    // The block's opening lines, `:::ask{<id> … state="…"}`, the id as the renderer writes it
+    // (`typedBlockIdAttribute`: `#<id>`, or `id="…"` for an id the shortcut cannot hold). Every
+    // match counts, so a line that quotes the opener (in code, say) can add an open block but
+    // never hide one; a block none of whose lines carries a state is open.
+    const id = typedBlockIdAttribute(block.id);
     const openers = lines.filter(
-      (line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)
+      (line) => line.includes(`ask{${id} `) || line.includes(`ask{${id}}`)
     );
     const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     const named =
@@ -3032,6 +3204,25 @@ export async function executeDispatchTool(
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
   }
+  if (input.tool === "dispatch_answers") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId) throw new Error("host session id is required for dispatch answers");
+    let response: SessionAnswersResponse;
+    try {
+      response = await dispatchClient().sessionAnswers(sessionId);
+    } catch (error) {
+      if (isNoAnswersRoute(error)) {
+        throw new Error(
+          `This Dispatch (${configUrl}) has no answers route yet: its build is older than the answers route.`
+        );
+      }
+      throw error;
+    }
+    return {
+      text: renderSessionAnswersList(response.items, { now: Date.now() }),
+      details: { session: sessionId, since: response.since, total: response.total },
+    };
+  }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
     if (!sessionId) throw new Error("host session id is required for dispatch whoami");
@@ -3040,38 +3231,36 @@ export async function executeDispatchTool(
     const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
     // A Dispatch that predates verified service tokens omits the field entirely.
     const service = identity.kind === "agent" ? (identity.service ?? null) : null;
+    // So does one that predates broker-issued tokens, which are the only credential that proves
+    // a session of its own: read either omission as that older build, not as "no session".
+    const proved = identity.kind === "agent" ? (identity.session ?? null) : null;
+    const project = identity.kind === "agent" ? (identity.project ?? null) : null;
+    // The session Dispatch records the writes as: the one the credential proved, else this host's.
+    const session = proved ?? sessionId;
     const unowned =
       "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
+    const acting =
+      owner !== null
+        ? `Session ${session} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
+        : service !== null
+          ? // The text names the identity the way every other surface does; details
+            // keeps the subject whole, because that is the persisted value.
+            `Session ${session} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
+          : `Session ${session} runs under the shared token: ${unowned}`;
+    const elsewhere =
+      proved !== null && proved !== sessionId
+        ? ` Your credential names session ${proved}, which is not this host session (${sessionId}): Dispatch records every write you make as ${proved}.`
+        : "";
+    const writable = project !== null ? ` It may write project ${project} and no other.` : "";
     return {
-      text:
-        owner !== null
-          ? `Session ${sessionId} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
-          : service !== null
-            ? // The text names the identity the way every other surface does; details
-              // keeps the subject whole, because that is the persisted value.
-              `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
-            : `Session ${sessionId} runs under the shared token: ${unowned}`,
-      details: { session: sessionId, owner, service },
+      text: acting + elsewhere + writable,
+      details: { session, owner, service, project },
     };
   }
   const args = checked.args;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
-  // The document part of the call's dispatch:// reference is a slug by definition; a document
-  // argument the reference does not supply is a bare one.
-  const refDocument =
-    ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
-  const resolveDocument = (documentOwner: Owner, reference: string | undefined) =>
-    resolveArtifact(client, documentOwner, reference, {
-      canonical: reference !== undefined && reference === refDocument,
-    });
-  const owner =
-    ownerArguments.owner?.kind === "issue"
-      ? {
-          kind: "issue" as const,
-          issue: await resolveExistingIssue(client, ownerArguments.owner.issue),
-        }
-      : ownerArguments.owner;
+  const { owner, documentOwner, resolveDocument } = await documentTargets(client, ownerArguments);
   // An external issue reference beside an issue ref is compared here, once Dispatch has resolved
   // it to the key the ref spells (`ownerConflictProblems` compares native keys before any request).
   const issueArgument = optionalString(input.args, "issue");
@@ -3091,10 +3280,6 @@ export async function executeDispatchTool(
   const issue = () => {
     if (owner?.kind !== "issue") throw new Error("issue is required");
     return owner.issue;
-  };
-  const documentOwner = () => {
-    if (owner === null) throw new Error("issue or project is required");
-    return owner;
   };
   // The text a call posts with its pictures, each uploaded first to the owner the address names.
   // An upload is a step before the call's own write, so one that landed without its answer leaves
@@ -4274,6 +4459,74 @@ export async function executeDispatchTool(
       return {
         text: `Following ask ${ask}: its answer and replies reach this session directly.`,
         details: await followedAskDetails(client, read.ask),
+      };
+    }
+    case "dispatch_handoff_write": {
+      // The Legion daemon accepts a handoff only from the session that holds the phase's claim,
+      // so a write names this session and no stand-in.
+      if (!input.sessionId?.trim()) {
+        throw new Error("host session id is required for dispatch handoff-write");
+      }
+      let recorded: HandoffSummary;
+      try {
+        // The body goes as the schema passed it, the text the caller wrote, never re-encoded.
+        recorded = await client.writeHandoff(issue(), stringArg(args, "phase"), {
+          actor,
+          body: stringArg(args, "body"),
+        });
+      } catch (error) {
+        // The description names ISSUE_CLOSED and CAP_EXCEEDED, so the code reaches the caller.
+        throw refusalWithCode(error);
+      }
+      return {
+        text: `Recorded the ${recorded.phase} handoff of ${recorded.issue_key}, version ${recorded.version} (id ${recorded.id})`,
+        details: {
+          issue: recorded.issue_key,
+          phase: recorded.phase,
+          version: recorded.version,
+          handoff: recorded.id,
+        },
+      };
+    }
+    case "dispatch_handoff_read": {
+      const issueKey = issue();
+      const phase = stringArg(args, "phase");
+      const version = optionalNumber(args, "version");
+      let handoff: Handoff;
+      try {
+        if (version === undefined) {
+          handoff = await client.latestHandoff(issueKey, phase);
+        } else {
+          // Dispatch reads a handoff by id or the phase's newest, so a named version is found in
+          // the issue's list (newest first, without bodies) and then read by its id.
+          const listed = await client.listHandoffs(issueKey);
+          const ofPhase = listed.filter((summary) => summary.phase === phase);
+          const match = ofPhase.find((summary) => summary.version === version);
+          if (match === undefined) {
+            const newest = Math.max(0, ...ofPhase.map((summary) => summary.version));
+            throw new Error(
+              `HANDOFF_NOT_FOUND: issue ${issueKey} has no ${phase} handoff version ${version}; ${
+                newest === 0
+                  ? `it has no ${phase} handoff at all`
+                  : `its newest ${phase} handoff is version ${newest}`
+              }`
+            );
+          }
+          handoff = await client.handoff(match.id);
+        }
+      } catch (error) {
+        // HANDOFF_NOT_FOUND is named in the description, so the code reaches the caller.
+        throw refusalWithCode(error);
+      }
+      // One line about the record, then the body exactly as stored.
+      return {
+        text: `${handoff.issue_key} ${handoff.phase} handoff, version ${handoff.version} (id ${handoff.id}), written by ${actorText(handoff.author)} at ${handoff.created_at}\n${handoff.body}`,
+        details: {
+          issue: handoff.issue_key,
+          phase: handoff.phase,
+          version: handoff.version,
+          handoff: handoff.id,
+        },
       };
     }
     // Reads report their owner and follow nothing; no result subscribes the session.

@@ -187,36 +187,61 @@ func newFakeBrokerRig(t *testing.T) *fakeBrokerRig {
 	return rig
 }
 
+// Every read relays the broker's answer untouched: the pending list's rows, a secret request's
+// approve_url among them, and one record's own answer. That link is the broker's, and Dispatch
+// adds nothing to it.
 func TestCredentialRouteForwardsBrokerSuccessBodyAndAuth(t *testing.T) {
-	rig := newFakeBrokerRig(t)
-	rig.bodyByRoute["GET /v1/credential-requests/rec1"] = `{"record_id":"rec1","state":"pending"}`
-	handler := newCredentialTestHandler(t, rig.server.URL)
+	for _, tc := range []struct {
+		name, brokerRoute, dispatchPath, body string
+	}{
+		{
+			"the pending list", "GET /v1/pending", "/api/v1/credential-requests?approver=me",
+			`{"pending":[{"record_id":"rec1","kind":"agent_secret","approve_url":"https://secrets.example.com/approve/rec1"}]}`,
+		},
+		{
+			"one record", "GET /v1/credential-requests/rec1", "/api/v1/credential-requests/rec1",
+			`{"record_id":"rec1","state":"pending","approve_url":"https://secrets.example.com/approve/rec1"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newFakeBrokerRig(t)
+			rig.bodyByRoute[tc.brokerRoute] = tc.body
+			handler := newCredentialTestHandler(t, rig.server.URL)
 
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests/rec1", nil, "alice")
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
-	}
-	if response.Body.String() != `{"record_id":"rec1","state":"pending"}` {
-		t.Fatalf("body = %s, want the broker's body verbatim", response.Body.String())
-	}
-	if rig.lastAuth != "Bearer "+credentialTestAccountToken {
-		t.Fatalf("broker saw Authorization = %q, want Dispatch's own ServiceAccount token", rig.lastAuth)
+			response := dispatchRequest(t, handler, http.MethodGet, tc.dispatchPath, nil, "alice")
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+			}
+			if response.Body.String() != tc.body {
+				t.Fatalf("body = %s, want the broker's body verbatim", response.Body.String())
+			}
+			if rig.lastAuth != "Bearer "+credentialTestAccountToken {
+				t.Fatalf("broker saw Authorization = %q, want Dispatch's own ServiceAccount token", rig.lastAuth)
+			}
+		})
 	}
 }
 
+// A secret request is decided on the broker's page alone, so the broker refuses Dispatch's approve
+// or deny of one; the browser gets that refusal, and the page it names, exactly as the broker sent it.
 func TestCredentialRouteForwardsBrokerErrorStatusAndBodyVerbatim(t *testing.T) {
-	rig := newFakeBrokerRig(t)
-	rig.statusByRoute["POST /v1/credential-requests/rec1/approve"] = http.StatusConflict
-	rig.bodyByRoute["POST /v1/credential-requests/rec1/approve"] = `{"code":"RECORD_TERMINAL","error":"already decided"}`
-	handler := newCredentialTestHandler(t, rig.server.URL)
+	refusal := `{"code":"DECIDE_ON_BROKER_PAGE","error":"decide it at https://secrets.example.com/approve/rec1","approve_url":"https://secrets.example.com/approve/rec1"}`
+	for _, action := range []string{"approve", "deny"} {
+		t.Run(action, func(t *testing.T) {
+			rig := newFakeBrokerRig(t)
+			rig.statusByRoute["POST /v1/credential-requests/rec1/"+action] = http.StatusForbidden
+			rig.bodyByRoute["POST /v1/credential-requests/rec1/"+action] = refusal
+			handler := newCredentialTestHandler(t, rig.server.URL)
 
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/credential-requests/rec1/approve",
-		map[string]any{}, "alice")
-	if response.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409: %s", response.Code, response.Body.String())
-	}
-	if response.Body.String() != `{"code":"RECORD_TERMINAL","error":"already decided"}` {
-		t.Fatalf("body = %s, want the broker's error body verbatim", response.Body.String())
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/credential-requests/rec1/"+action,
+				map[string]any{}, "alice")
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403: %s", response.Code, response.Body.String())
+			}
+			if response.Body.String() != refusal {
+				t.Fatalf("body = %s, want the broker's error body verbatim", response.Body.String())
+			}
+		})
 	}
 }
 

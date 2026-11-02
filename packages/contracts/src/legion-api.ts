@@ -139,10 +139,19 @@ const legionClaimView = z.strictObject({
   pluginContract: z.number().int().nonnegative(),
 });
 
-/** `api.PhaseView` — one phase worker's claim, its committed handoff, and the rounds it has run. */
+/** `api.HandoffRecordView` — the Dispatch handoff record a worker's completion of its current
+ * file-backed phase named: its id, and its version among its phase's records. */
+const legionHandoffRecordView = z.strictObject({
+  id: nonEmptyString,
+  version: z.number().int().positive(),
+});
+
+/** `api.PhaseView` — one phase worker's claim, the handoff of its current phase (the commit its
+ * completion reported, the Dispatch handoff record it named), and the rounds it has run. */
 const legionPhaseView = z.strictObject({
   claim: legionClaimView,
   handoffCommit: nonEmptyString.optional(),
+  handoffRecord: legionHandoffRecordView.optional(),
   rounds: z.number().int().nonnegative(),
 });
 
@@ -421,9 +430,11 @@ const legionCacheView = z.strictObject({
 /** `api.RepositoriesView` — the project's repository mapping as the daemon serves it: the owners
  * its roles' credentials span, each repository it serves (as GitHub names it, `default` the
  * project's default in Dispatch, `cache` its repository cache under the Kubernetes runtime), each
- * mapped repository it leaves out with `reason`, a GitHub App not installed on it, and the `caches`
- * of repositories the mapping no longer names. Every list sorted and never null (contracts 31,
- * 32). */
+ * mapped repository it leaves out with `reason`, a GitHub App not installed on it, each served
+ * repository Dispatch's GitHub App is not known to be installed on (`withoutWebhookApp`, as
+ * Dispatch maps it, with `reason`: not installed, the check failed, or Dispatch does not answer
+ * the check; served all the same, contract 43), and the `caches` of repositories the mapping no
+ * longer names. Every list sorted and never null (contracts 31, 32). */
 const legionRepositories = z.strictObject({
   owners: z.array(nonEmptyString),
   mapped: z.array(
@@ -434,7 +445,26 @@ const legionRepositories = z.strictObject({
     })
   ),
   refused: z.array(z.strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  withoutWebhookApp: z.array(z.strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: z.array(legionCacheView),
+});
+
+/** `api.ConsumerLagView` — one durable consumer's lag, read from NATS after the state's
+ * transaction commits (contract 43): its `name`; `waiting`, the messages it has not handled
+ * (JetStream's pending plus acknowledgement-pending); `oldestAt`, the stream time of the oldest of
+ * them, and `oldestAgeSeconds` its age at the read, both null when nothing waits or that message
+ * could not be read; `lastHandledAt`, when the daemon last acknowledged one of its messages or
+ * terminated one as poison, null before the first; `stalled`, messages waiting and none handled for
+ * 60 seconds; and `unavailable`, what NATS did not answer or refused, absent when every read
+ * answered. */
+const legionConsumerLag = z.strictObject({
+  name: nonEmptyString,
+  waiting: z.number().int().nonnegative(),
+  oldestAt: timestamp.nullable(),
+  oldestAgeSeconds: z.number().int().nullable(),
+  lastHandledAt: timestamp.nullable(),
+  stalled: z.boolean(),
+  unavailable: nonEmptyString.optional(),
 });
 
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
@@ -447,7 +477,8 @@ const legionRepositories = z.strictObject({
  * id, never null (contract 28); `repositories` is the project's repository mapping as the daemon
  * serves it (contract 31); `settings` is the daemon's resolved legion.yaml with no credential,
  * credential source or credential file path, required, and loose like `payload` above so a
- * legion.yaml key added later changes no strictly parsed shape (contract 35). */
+ * legion.yaml key added later changes no strictly parsed shape (contract 35); `consumers` is the lag
+ * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -460,6 +491,7 @@ export const LegionStateResponse = z.strictObject({
   capabilities: z.array(legionCapabilityState),
   repositories: legionRepositories,
   settings: legionSettings,
+  consumers: z.array(legionConsumerLag),
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;
@@ -573,8 +605,9 @@ const legionDeliveryView = z.strictObject({
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
- * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|retry|close`): the claim as its
- * supervisor holds it, but its hashes. */
+ * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|retry|forget-session|close`):
+ * the claim as its supervisor holds it, but its hashes. `forgottenSession` and
+ * `forgottenSessionFile` appear only in a successful `forget-session` response. */
 export const LegionOperatorClaimResponse = z.strictObject({
   token: nonEmptyString,
   tree: nonEmptyString,
@@ -584,6 +617,8 @@ export const LegionOperatorClaimResponse = z.strictObject({
   state: z.enum(LEGION_CLAIM_STATES),
   session: z.string(),
   sessionFile: z.string(),
+  forgottenSession: nonEmptyString.optional(),
+  forgottenSessionFile: nonEmptyString.optional(),
   locator: legionLocator.optional(),
   budgets: z.strictObject({
     launchFailures: z.number().int().nonnegative(),
@@ -654,20 +689,27 @@ export const LegionControllerGrantRequest = z.strictObject({
 
 /** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow: a phase
  * completion, or the implementer's report on a look of its closed issue's production check.
- * `commit` is a phase completion's: the pushed commit carrying the phase's handoff,
- * `.legion/<issue>/<phase>.json`, which the `legion` tool's `handoff_complete` finds in the pane
- * with its jj before posting (as `legion handoff complete` did); a phase that writes no handoff
- * reports the commit the workspace stands on. A check report carries none (the look pushed
- * nothing), so the field is optional here, and the daemon requires it of a phase completion. The
- * daemon reads no handoff file and no branch head. `verdict` is `pass` or `fail` for the tester's
- * completion, `pass`, `pending` or `fail` for a check report (`CHECK_VERDICT_REQUIRED`), and the
- * empty string for every other completion; it stays a string on the wire, as the Go field is. */
+ * A file-backed phase (planning, implementing, testing, reviewing) ends with a handoff record on
+ * the Dispatch issue, which the worker writes with `dispatch handoff-write` under its own session;
+ * its completion names it, `handoffId` and `handoffVersion`, which the daemon reads back from
+ * Dispatch and refuses when it is missing (`HANDOFF_RECORD_REQUIRED`), unknown
+ * (`HANDOFF_RECORD_NOT_FOUND`), unreadable (`DISPATCH_READ_FAILED`), of another issue, phase or
+ * version (`HANDOFF_RECORD_MISMATCH`), or written by another session than the claim's
+ * (`HANDOFF_SESSION_MISMATCH`). `commit` is the implementer's (its pushed tip for an implementing
+ * round, the commit it stands on for retro) and the merger's READY head; the planner, the tester
+ * and the reviewer report none, and a check report carries neither (the look pushed nothing), so
+ * all three are optional here, and the daemon requires each where it applies. `verdict` is `pass`
+ * or `fail` for the tester's completion, `pass`, `pending` or `fail` for a check report
+ * (`CHECK_VERDICT_REQUIRED`), and the empty string for every other completion; it stays a string
+ * on the wire, as the Go field is. */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
   verdict: z.string(),
   ready: z.boolean(),
   commit: nonEmptyString.optional(),
+  handoffId: nonEmptyString.optional(),
+  handoffVersion: z.number().int().positive().optional(),
 });
 
 /** `api.IssueStatusRequest`, the controller's explicit board-status write. */

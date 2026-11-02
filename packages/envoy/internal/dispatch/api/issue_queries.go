@@ -250,8 +250,20 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if routed := slices.ContainsFunc(issues, func(issue model.IssueSummary) bool { return issue.Route != nil }); routed {
-		roster := s.readRouteRoster(r.Context())
-		if routeStatus != "" && routeStatus != model.RouteUnknown && !roster.answered {
+		judged := routeStatus != "" && routeStatus != model.RouteUnknown
+		var roster routeRoster
+		if judged {
+			// A filter for a judged state cannot be cut from an answer it could not read: a failed
+			// read of the stored answer is the database's failure and is answered as one, and only
+			// a listener that did not answer is the listener's.
+			if roster, err = s.readRouteRoster(r.Context()); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		} else {
+			roster = s.routeRosterOrUnknown(r.Context())
+		}
+		if judged && !roster.answered {
 			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable,
 				"the Envoy listener did not answer, so Dispatch cannot tell which routes reach a live session; route_status=unknown lists the routed issues")
 			return
@@ -338,8 +350,9 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 // then, and a second connection taken while it is held is the nesting store.ErrNestedAcquire exists
 // to stop. The pool would not refuse it here: store.Pool.SendBatch checks the request's mark when
 // the batch is sent but sets none while the batch is open, so no callback below reads the database.
-// readRouteRoster is an HTTP read of the listener with a cache of its own, not a database read,
-// and runs after both.
+// The route's reach is read after both (routeRosterOrUnknown), and only for an issue with a route:
+// a statement of its own for the listener's stored answer (storedRouteRoster), and a shared listener
+// fetch only when that answer is stale, so a routed issue's read is one round trip more.
 func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -350,7 +363,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if read.Route != nil {
-		read.IssueRouteReach = s.readRouteRoster(r.Context()).reach(read.Route)
+		read.IssueRouteReach = s.routeRosterOrUnknown(r.Context()).reach(read.Route)
 	}
 	WriteJSON(w, http.StatusOK, read)
 }

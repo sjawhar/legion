@@ -170,10 +170,12 @@ func TestAWatcherRepairedAfterItsConsumerWentLogsOneWarn(t *testing.T) {
 	}
 }
 
-// A repair that fails reports the stop at once rather than waiting out the minute: the bucket is
-// gone, so nothing will repair this watcher. The report is made once, so a self-health rebuild
-// retrying every few seconds adds no second ERROR for the same stop.
-func TestAWatcherWhoseBucketIsGoneLogsTheFailedRepair(t *testing.T) {
+// A repair that fails is no report of its own: it is not the end of the attempt, because the bus
+// arms another repair within seconds (internal/bus/recovery.go, recoverUntilHealthy), so one
+// Rewatch that failed says only that the outage is still running. The wait the stop armed stays
+// armed and makes the one report when its minute passes, and a second failed Rewatch adds no
+// second ERROR.
+func TestAWatcherWhoseBucketIsGoneReportsOnlyWhenItsWaitPasses(t *testing.T) {
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
@@ -189,19 +191,28 @@ func TestAWatcherWhoseBucketIsGoneLogsTheFailedRepair(t *testing.T) {
 	if err := w.Rewatch(conn); err == nil {
 		t.Fatal("a rewatch onto a deleted bucket succeeded")
 	}
-	errs := matching(records(), "ERROR", unrepairedErr)
-	if len(errs) != 1 {
-		t.Fatalf("a failed repair logged %d %q errors, want one: %v", len(errs), unrepairedErr, errs)
+	if errs := matching(records(), "ERROR", unrepairedErr); len(errs) != 0 {
+		t.Fatalf("a failed repair logged %d %q errors, want none: %v", len(errs), unrepairedErr, errs)
 	}
-	if reason, _ := errs[0]["reason"].(string); reason != "repair failed" {
-		t.Fatalf("reason = %q, want %q", reason, "repair failed")
+	if got := arm.waits(); got != 1 {
+		t.Fatalf("the stop armed %d repair waits after a failed repair, want one", got)
 	}
 
 	if err := w.Rewatch(conn); err == nil {
 		t.Fatal("a second rewatch onto a deleted bucket succeeded")
 	}
-	if errs := matching(records(), "ERROR", unrepairedErr); len(errs) != 1 {
-		t.Fatalf("a second failed repair logged %d %q errors in all, want one: %v", len(errs), unrepairedErr, errs)
+	if errs := matching(records(), "ERROR", unrepairedErr); len(errs) != 0 {
+		t.Fatalf("a second failed repair logged %d %q errors, want none: %v", len(errs), unrepairedErr, errs)
+	}
+
+	arm.fireIt(t)
+	errs := matching(records(), "ERROR", unrepairedErr)
+	if len(errs) != 1 {
+		t.Fatalf("the passed wait logged %d %q errors, want one: %v", len(errs), unrepairedErr, errs)
+	}
+	want := "no repair within " + time.Minute.String()
+	if reason, _ := errs[0]["reason"].(string); reason != want {
+		t.Fatalf("reason = %q, want %q", reason, want)
 	}
 }
 

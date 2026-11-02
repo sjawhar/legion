@@ -18,8 +18,8 @@ module: packages/*/.changie.yaml
   second.
 - changie v1.26.0 writes the file with `os.Create` (`cmd/new.go`), which truncates an existing
   file, and exits 0. The earlier entry is lost and nothing reports it.
-- For several entries of one package and kind, either write each fragment by hand under a slug of
-  its own (`<key>-<slug>.yaml`, the form `AGENTS.md` describes), or run `changie new` at least a
+- For several entries of one package and kind, either write each fragment by hand as
+  `pr<number>-<slug>.yaml` (the form `AGENTS.md` describes), or run `changie new` at least a
   second apart.
 - Then count: the package's new fragments under `.changes/unreleased/` must number the entries
   you meant to add.

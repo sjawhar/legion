@@ -245,6 +245,37 @@ func TestCopiedAskSourcesAreTheDocumentOwnersOwn(t *testing.T) {
 	}
 }
 
+// The copies of an ask are found by its block's opener as the rendering writes it
+// (pmdoc.TypedBlockIDAttribute), an id written `id="…"` included: a document of the same owner
+// whose latest version holds the block is a copy, and one holding another block is not.
+func TestTheCopiesOfAnAskAreFoundByItsBlockIDAsWritten(t *testing.T) {
+	service, _ := newTestService(t)
+	ask := func(id string) string {
+		return ":::ask{" + pmdoc.TypedBlockIDAttribute(id) + " urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+	}
+	for _, id := range []string{"plain", "a b", `a"b`, "100%_done"} {
+		t.Run(id, func(t *testing.T) {
+			source := createIssueDocument(t, service.store, 1, "Context\n\n"+ask(id))
+			copied := createIssueDocument(t, service.store, 1, "Copy\n\n"+ask(id))
+			createIssueDocument(t, service.store, 1, "Other\n\n"+ask(id+"-other"))
+			ctx := context.Background()
+			tx, err := service.store.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			issue := "DOC-1"
+			found, err := copiesOf(ctx, tx, documentAsks{artifactID: source, owner: artifactOwner{IssueKey: &issue}, asks: []model.Ask{{BlockID: &id}}})
+			if err != nil {
+				t.Fatalf("copiesOf: %v", err)
+			}
+			if !slices.Equal(found, []string{copied}) {
+				t.Fatalf("copies of the ask under %q = %v, want only %s", id, found, copied)
+			}
+		})
+	}
+}
+
 // openAsksUnder is the documents holding an open ask under blockID, in the test's own database.
 func openAsksUnder(t *testing.T, service *Service, blockID string) []string {
 	t.Helper()
@@ -1115,8 +1146,10 @@ func TestThreeProjectCopiesOfARetractedAskSettlingAtOnceShareOneAsk(t *testing.T
 // pending row, then the source's block, then the ask.answered event), and the copy's settlement,
 // whose block the copy no longer holds, takes no copy lock and so runs beside it. The settlement
 // deletes its own pending row before it appends an event, so it waits for the answer holding no
-// lock the answer needs, and both finish. Deleting the row after its events would hold the events'
-// commit-order lock, which the answer's event waits for, while waiting on the row the answer holds.
+// lock the answer needs, and both finish. Its events lock only the copy's own row, which the
+// answer, appending on its source's owner, never takes, so a settlement that deleted the row after
+// them would wait for the answer too; what fails this test is a lock the two come to share in
+// opposite orders.
 func TestACopySettlingWhileItsSourceIsAnsweredWaitsForTheAnswerAndNeitherFails(t *testing.T) {
 	service, _ := newTestService(t)
 	service.settle = time.Hour

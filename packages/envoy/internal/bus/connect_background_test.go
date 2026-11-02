@@ -50,6 +50,35 @@ func TestAnOwningClientMadeWhileTheServerIsDownCreatesTheStreamOnItsFirstConnect
 	})
 }
 
+// HookedConnectionEvents counts no connection event before an owning client that connects in the
+// background has connected, and at least one as soon as that client's first reconcile has
+// succeeded. The count rises only after a run of the hooks returned (rewatch), and the reconcile
+// is the first hook of such a client (ensureStreamOnce). A test that waits for this count waits
+// for this client's own work. The stream alone proves less: another writer can leave it holding
+// what the test asks of it.
+func TestHookedConnectionEventsCountsTheFirstReconcileOfABackgroundClient(t *testing.T) {
+	srv, uri := stoppedNATS(t)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithConnectInBackground())
+	if err != nil {
+		t.Fatalf("connect owning the stream while the server is down: %v", err)
+	}
+	t.Cleanup(client.Close)
+	if client.Connected() {
+		t.Fatal("a client whose server is down reports itself connected")
+	}
+	if events := client.HookedConnectionEvents(); events != 0 {
+		t.Fatalf("HookedConnectionEvents() before the first connection = %d, want 0", events)
+	}
+
+	srv.Start(t)
+	waitFor(t, 15*time.Second, "the client's hooks to cover a connection event", func() bool {
+		return client.HookedConnectionEvents() >= 1
+	})
+	if _, err := client.JS().StreamInfo(bus.Stream); err != nil {
+		t.Fatalf("read %s once the hooks had covered a connection event: %v", bus.Stream, err)
+	}
+}
+
 // A JetStream and a core subscription made before the client's first connection deliver once it
 // has connected. The JetStream bind cannot reach the server before then, so it fails and its
 // registration stays for the first connection to bind; the core subscription is sent by nats.go
