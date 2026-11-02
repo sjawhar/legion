@@ -47,8 +47,7 @@ A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on r
 
 ## Close what you opened
 
-- An ask you opened is yours until answered or resolved. `dispatch resolve-ask` it that turn once anything makes it needless: another answer, a later write, work dropped.
-- Retract an ask a new one replaces.
+- Resolve your open ask (`dispatch resolve-ask`) the turn it turns needless: another answer, a later write, dropped work, a replacement. If a person said keep it open, say why in its thread; they close it.
 
 ## Structure over stream
 
