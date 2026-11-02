@@ -1,0 +1,4 @@
+kind: Fixed
+body: 'A document reference that names none of an issue''s or a project''s documents, on an owner with more than eight, is refused with a hint that lists the documents whose slug or filename is closest to the reference first (letter case ignored), then the newest, says how many documents the owner holds, and names `GET /api/v1/issues/<KEY>/artifacts` (or `GET /api/v1/projects/<KEY>/artifacts?unlinked=true`) as the route that lists them all. Before, it listed the eight oldest and said nothing of the rest.'
+custom:
+    Issue: pr2672
