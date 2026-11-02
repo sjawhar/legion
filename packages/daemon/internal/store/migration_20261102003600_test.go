@@ -48,6 +48,9 @@ func TestEveryQueuedStatusRowCarriesItsKindAfter20261102003600(t *testing.T) {
 			payload: `{"status":"retro","observedStatus":"done"}`},
 		{name: "an unmarked park a session wrote over, observed at backlog", issue: "LEGION-213", want: record.ReassertStatusRow,
 			payload: `{"status":"in_progress","observedStatus":"backlog"}`},
+		{name: "a person's handover of a parked root, which the re-assert arm would also match", issue: "LEGION-215",
+			want:    record.PersonHandoverStatusRow,
+			payload: `{"status":"todo","observedStatus":"backlog","personHandover":true}`},
 		{name: "an unmarked close, as a merge queued one", issue: "LEGION-214", want: record.CloseStatusRow,
 			payload: `{"status":"done","observedStatus":"in_progress","reason":"merged"}`},
 	}

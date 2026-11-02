@@ -21,9 +21,9 @@
 -- as ordinary would leave each with the very rule it must not have:
 --
 --   * its re-assert of its own status over one a session wrote queued no `reassert` mark, and is
---     told by what it observes — done, backlog or icebox, the statuses only a session's own move
---     out of the workflow puts an issue at, which the ordinary rule would read as an issue that
---     has left and drop the row that exists to undo that move;
+--     told by what it observes — triage, done, backlog or icebox, the statuses only a session's
+--     own move out of the workflow puts an issue at, which the ordinary rule would read as an
+--     issue that has left and drop the row that exists to undo that move;
 --   * its own close, the done a merge or an architect's close_root writes, is told by the status
 --     it writes, and the ordinary rule would drop it for the same reason, leaving the issue open
 --     in Dispatch for good while the tree lingers.
@@ -31,13 +31,18 @@
 -- A close given its kind here carries no `closeGeneration`, since the release that queued it
 -- fenced the write on nothing: its rule reads a zero generation as that release's own unfenced
 -- write.
+--
+-- The marked arms come first, and that order is what keeps a marked row from being read by a
+-- statuses arm: a person's handover is queued observing triage, backlog or icebox, the very
+-- statuses the re-assert arm names, so a `personHandover` row read by that arm would be judged
+-- by the re-assert's rule and never dropped when the person took the label off again.
 update outbox
 set payload = (payload - 'personHandover' - 'reassert' - 'handOver') || jsonb_build_object('kind',
   case
     when payload->>'personHandover' = 'true' then 'person-handover'
     when payload->>'reassert' = 'true' then 'reassert'
     when payload->>'handOver' = 'true' then 'hand-over'
-    when payload->>'observedStatus' in ('done', 'backlog', 'icebox') then 'reassert'
+    when payload->>'observedStatus' in ('triage', 'done', 'backlog', 'icebox') then 'reassert'
     when payload->>'status' in ('done', 'backlog', 'icebox') then 'close'
     else 'ordinary'
   end)

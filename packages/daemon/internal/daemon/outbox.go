@@ -743,24 +743,34 @@ func (handOverRule) refused(ctx context.Context, r *outbox, row record.OutboxRow
 // workflow.
 type closeRule struct{}
 
-// firstAttempt settles nothing of its own: the close's fences are the ones every kind shares,
-// which its caller has taken, and the write that follows is the close itself.
-func (closeRule) firstAttempt(context.Context, *outbox, record.OutboxRow, record.StatusWrite, dispatch.Issue) (bool, error) {
-	return true, nil
+// firstAttempt asks the one question a close has of its own (closeStands): whether the close this
+// row carries is still the record's. A row's first attempt is not its first chance to be stale —
+// an attempt that ended in a backoff, a Dispatch that answered 5xx, or a daemon that restarted
+// before the write leaves the row to a fresh attempt hours later — and a person's reopen in that
+// time would otherwise be closed again by the write this row has been holding.
+func (closeRule) firstAttempt(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, _ dispatch.Issue) (bool, error) {
+	return closeStands(ctx, r, row, payload)
 }
 
-// stillWanted keeps the close owed for as long as the record holds it. The caller has already
-// required Dispatch to show the status the row observed, so nobody has moved the issue since;
-// what is left to ask is whether the close this row carries is still the record's, which it is
-// while the record stands at the generation the row names. A person's reopen re-admits the issue
-// in a generation of its own, and that close is no longer owed: Dispatch holds what the person
-// put there. The ordinary rule cannot be asked here — it drops a row whose issue has left the
-// workflow, which is every close, so one refusal would leave the issue open in Dispatch for good
-// while the tree lingered behind a close nobody ever wrote. That is the reason this kind exists.
+// stillWanted asks the same question after Dispatch refused the write. The caller has already
+// required Dispatch to show the status the row observed, so nobody has moved the issue since, and
+// what is left is whether the close is still owed. The ordinary rule cannot be asked here — it
+// drops a row whose issue has left the workflow, which is every close, so one refusal would leave
+// the issue open in Dispatch for good while the tree lingered behind a close nobody ever wrote.
+// That is the reason this kind exists.
 func (closeRule) stillWanted(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite, _ dispatch.Issue) (bool, error) {
+	return closeStands(ctx, r, row, payload)
+}
+
+// closeStands says whether the close row still carries the record's own close: the record stands
+// at the generation the row names. A person's reopen re-admits the issue in a generation of its
+// own, and that close is no longer owed, whichever attempt of the row reaches this question —
+// Dispatch holds what the person put there. A row with no generation is one migration
+// 20261102003600 gave its kind, queued by a release that fenced the write on nothing: it writes
+// as that release wrote it. An issue the daemon keeps no record of is closed as the row says, as
+// every other rule judges such an issue by the row and the read alone.
+func closeStands(ctx context.Context, r *outbox, row record.OutboxRow, payload record.StatusWrite) (bool, error) {
 	if payload.CloseGeneration == 0 {
-		// A row migration 20261102003600 gave its kind, queued by a release that fenced the
-		// write on nothing: it writes as that release wrote it.
 		return true, nil
 	}
 	var issue *record.Issue
@@ -769,7 +779,7 @@ func (closeRule) stillWanted(ctx context.Context, r *outbox, row record.OutboxRo
 		issue, err = r.records.Issue(ctx, tx, row.Issue)
 		return err
 	}); err != nil {
-		return false, fmt.Errorf("read workflow issue %s after its close changed under it: %w", row.Issue, err)
+		return false, fmt.Errorf("read workflow issue %s to judge the close queued for it: %w", row.Issue, err)
 	}
 	if issue != nil && issue.Generation != payload.CloseGeneration {
 		r.log.Info("outbox close finished without writing: the issue was taken back into the workflow in a generation of its own",

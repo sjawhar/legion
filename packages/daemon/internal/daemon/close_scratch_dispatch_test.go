@@ -84,16 +84,7 @@ func TestAReopenedIssueKeepsTheStatusThePersonGaveItAndTheCloseWritesNothing(t *
 	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Linger: time.Hour}, quietLogger())
 	mergeClosesTheIssue(t, pool, records, engine, issue)
 
-	// The reopen, as a re-admission leaves it: the issue is back in the workflow in a generation
-	// of its own, which is what tells this row's close from the one the record now holds.
-	reopened := recordOf(t, pool, records, issue)
-	reopened.Generation, reopened.Phase, reopened.Status = reopened.Generation+1, phase.Implementing, "in_progress"
-	reopened.LingerUntil = nil
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.PutIssue(context.Background(), tx, reopened)
-	}); err != nil {
-		t.Fatalf("reopen the issue: %v", err)
-	}
+	reopenTheIssue(t, pool, records, issue)
 
 	client := &interleaving{Client: dispatch.New(baseURL, token), act: func() {
 		dispatchCall(t, baseURL, http.MethodPost, "/api/v1/issues/"+issue+"/messages", map[string]any{"body": "reopening this"}, nil)
@@ -109,6 +100,89 @@ func TestAReopenedIssueKeepsTheStatusThePersonGaveItAndTheCloseWritesNothing(t *
 	}
 	if rows := statusRowsOf(t, pool, issue); rows != 0 {
 		t.Fatalf("status rows after the reopen = %d, want the close's finished having written nothing", rows)
+	}
+}
+
+// failingStatus is the daemon's Dispatch client with the status write refused by the server's own
+// failure — a 5xx, which no fence of the row's answers — so the row's attempt ends having written
+// nothing and waits for a fresh one.
+type failingStatus struct {
+	dispatch.Client
+	failed bool
+}
+
+func (d *failingStatus) SetStatusAt(context.Context, dispatch.Issue, string) (dispatch.Issue, error) {
+	d.failed = true
+	return dispatch.Issue{}, &dispatch.Error{Status: http.StatusBadGateway, Code: "BAD_GATEWAY"}
+}
+
+// A row's first attempt is not its first chance to be stale. An attempt that ended in a backoff —
+// Dispatch answering 5xx, the daemon restarting before the write — leaves the close to a fresh
+// attempt, which begins at the first attempt's own path and never reaches the retry's rule. A
+// person who reopens the issue in between has taken it back into the workflow, so that fresh
+// attempt must write nothing: the close it carries is of the run before the reopen, and writing
+// it would close the issue the person just took back.
+func TestACloseWhoseAttemptFailedWritesNothingOverAReopen(t *testing.T) {
+	baseURL, token := startScratchDispatch(t)
+	issue := createScratchDispatchIssue(t, baseURL)
+	setDispatchStatus(t, baseURL, issue, "in_progress")
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Linger: time.Hour}, quietLogger())
+	mergeClosesTheIssue(t, pool, records, engine, issue)
+
+	// The attempt that failed: Dispatch answered 5xx, so the row wrote nothing and waits. The run
+	// itself answers no error — a row whose attempt failed is recorded and backed off, which is
+	// what keeps one issue's failure from ending the pass — so what the attempt did is read from
+	// the row it left and from the client it reached.
+	failing := &failingStatus{Client: dispatch.New(baseURL, token)}
+	first := &outbox{dispatchProject: "LEGION", pool: pool, records: records, dispatch: failing,
+		handlers: []intake.Handler{engine}, now: time.Now, log: quietLogger()}
+	if err := first.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the first attempt: %v", err)
+	}
+	if !failing.failed {
+		t.Fatal("the first attempt never reached Dispatch's status write")
+	}
+	if rows := statusRowsOf(t, pool, issue); rows != 1 {
+		t.Fatalf("status rows after the failed attempt = %d, want the close still waiting for a fresh attempt", rows)
+	}
+	if got := dispatchStatusOf(t, baseURL, token, issue); got != "in_progress" {
+		t.Fatalf("Dispatch shows %s at %q after the failed attempt, want in_progress: nothing was written", issue, got)
+	}
+
+	// The person's reopen, as a re-admission leaves it, and the row's backoff let go: the daemon
+	// that takes the row next is a fresh process, so this is the row's first attempt again.
+	reopenTheIssue(t, pool, records, issue)
+	if _, err := pool.Exec(context.Background(), "update outbox set next_at = now() where issue = $1", issue); err != nil {
+		t.Fatalf("let the row's backoff go: %v", err)
+	}
+
+	restarted := &outbox{dispatchProject: "LEGION", pool: pool, records: records, dispatch: dispatch.New(baseURL, token),
+		handlers: []intake.Handler{engine}, now: time.Now, log: quietLogger()}
+	if err := restarted.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the close after the restart: %v", err)
+	}
+
+	if got := dispatchStatusOf(t, baseURL, token, issue); got != "in_progress" {
+		t.Fatalf("Dispatch shows %s at %q, want the in_progress the reopen left: a fresh attempt of a close is fenced as its retry is", issue, got)
+	}
+	if rows := statusRowsOf(t, pool, issue); rows != 0 {
+		t.Fatalf("status rows after the fresh attempt = %d, want the close's finished having written nothing", rows)
+	}
+}
+
+// reopenTheIssue is a person's reopen as a re-admission leaves it: the issue back in the workflow
+// in a generation of its own, which is what tells a close of the run before it from the record's.
+func reopenTheIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, issue string) {
+	t.Helper()
+	reopened := recordOf(t, pool, records, issue)
+	reopened.Generation, reopened.Phase, reopened.Status = reopened.Generation+1, phase.Implementing, "in_progress"
+	reopened.LingerUntil = nil
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.PutIssue(context.Background(), tx, reopened)
+	}); err != nil {
+		t.Fatalf("reopen the issue: %v", err)
 	}
 }
 

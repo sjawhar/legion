@@ -897,6 +897,9 @@ func TestAMigratedStatusRowRunsUnderItsOwnRule(t *testing.T) {
 		{name: "an unmarked re-assert, as the release before this one queued one", issue: "LEGION-212",
 			want: record.ReassertStatusRow, wanted: true,
 			payload: `{"status":"retro","observedStatus":"done"}`},
+		{name: "a person's handover of a parked root, which the re-assert arm would also match", issue: "LEGION-215",
+			want: record.PersonHandoverStatusRow, wanted: true,
+			payload: `{"status":"todo","observedStatus":"backlog","personHandover":true}`},
 		{name: "an unmarked close, as a merge queued one", issue: "LEGION-214", want: record.CloseStatusRow, wanted: true,
 			payload: `{"status":"done","observedStatus":"in_progress","reason":"merged"}`},
 	}
