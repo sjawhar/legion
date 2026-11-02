@@ -299,9 +299,11 @@ func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullReq
 // implementClient is a client for the REST API of the repository GitHub holds repository under
 // now (repositories.serving), on the implement App's installation token for that repository's
 // owner: a repository a record names from before a transfer is read on the installation that
-// holds it today and addressed by the name GitHub serves, which a REST call, unlike a git
-// operation, is not redirected to. A served repository, which the mapping names as GitHub does,
-// is its own serving repository, so every read of one is the read it always was.
+// holds it today, which is the half the old name cannot supply, and addressed by the name GitHub
+// serves, which it need not be — GitHub answers the old name with a 301 to the repository's id —
+// but which keeps a write off a redirect and names the right repository in a log line. A served
+// repository, which the mapping names as GitHub does, is its own serving repository, so every
+// read of one is the read it always was.
 func (w *workflowRuntime) implementClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, error) {
 	repository = w.repositories.serving(repository)
 	lease, err := w.tokens.Token(ctx, appauth.Implement, repository.Owner())

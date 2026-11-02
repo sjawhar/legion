@@ -116,7 +116,7 @@ type outbox struct {
 	// the deployment's repository equivalence alone (`repository_renames`): which repository
 	// GitHub holds a recorded one under now, for the token and the address of every GitHub call
 	// it makes (serving), and whether two names are one repository, for a deploy run's head
-	// repository against the name a check's record keeps (sameRepository). Nil in a test that
+	// repository against the name a check's record keeps (repositories.same). Nil in a test that
 	// configures neither, where a recorded repository is served under its own name and two names
 	// are one when they match without case.
 	repositories *repositories

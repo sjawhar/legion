@@ -318,9 +318,10 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 	// This read is GitHub's own, so it is minted for and addressed at the repository GitHub holds
 	// the recorded one under now (serving): the record keeps the name it was written under for its
 	// whole life, while after a transfer the installation that covers the repository is the owner
-	// it moved to's, and GitHub's redirect of a repository's old location covers `git clone`,
-	// `git fetch` and `git push`, not a REST read addressed at the old name. The fact applied
-	// below goes on naming issue.GitHubRepo, the name the record is held under.
+	// it moved to's, and that token is what the old name cannot supply. GitHub does answer the old
+	// address, with a 301 to the repository's id, so the served name here is for the log line and
+	// for keeping a write off a redirect, never the reason the call works. The fact applied below
+	// goes on naming issue.GitHubRepo, the name the record is held under.
 	repository := s.serving(recordedRepo)
 	lease, err := s.tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
