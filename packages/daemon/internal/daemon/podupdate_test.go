@@ -271,6 +271,40 @@ func (r *podUpdateRig) awaitRound(role claim.Role, round string) supervise.Claim
 	})
 }
 
+// awaitSwept waits for role's claim to satisfy want, sweeping between the polls, and is how
+// every wait for something only a sweep brings about is written: in this rig no sweep happens
+// unless a test calls for one, so a condition the sweep alone decides never arrives while a
+// wait merely polls for it. One tick is not enough on its own, as it is not for the replacement
+// (awaitReplacement): the sweep reads the claims live and through the deciding mask
+// (roundGroup), so a claim whose machine is still settling a decision at that read counts as not
+// having answered, and what the round would have decided is left to the next sweep. Nothing is
+// given up by the sweeps this makes: the rig's clock is held, so no re-task bound and no notice
+// bound is crossed by sweeping again.
+//
+// The first poll sweeps nothing. A decision the last sweep made is posted to each claim's
+// machine and handled there (supervisor.post), so it is in flight rather than undecided, and a
+// sweep that read it half landed would decide the round a second time: it would replace the pod
+// again, or ask every worker of the round again over the claims the end has already reached
+// (openPodUpdate posts to every blocking claim). A wait for what a sweep has already decided is
+// awaitClaim's, as is one for what a posted event or a direct call brings about.
+func (r *podUpdateRig) awaitSwept(role claim.Role, what string, want func(supervise.Claim) bool) supervise.Claim {
+	r.t.Helper()
+	// landing is the first poll, which leaves a decision the last sweep posted the time to land.
+	landing := true
+	testwait.Eventually(r.t, fmt.Sprintf("%s: %s", role, what), func() bool {
+		if want(r.claimOf(role)) {
+			return true
+		}
+		if landing {
+			landing = false
+			return false
+		}
+		r.tick()
+		return want(r.claimOf(role))
+	})
+	return r.claimOf(role)
+}
+
 // signal is the worker answering ready_for_update, as api's claims/ready-for-update posts it.
 func (r *podUpdateRig) signal(role claim.Role, head string) {
 	r.t.Helper()
@@ -690,7 +724,7 @@ func TestPodUpdateAsksAgainAfterTheRetaskBound(t *testing.T) {
 	rig.clock.advance(2 * time.Minute)
 	rig.tick()
 
-	again := rig.awaitClaim(claim.RoleImplementer, "the worker to be asked again", func(c supervise.Claim) bool {
+	again := rig.awaitSwept(claim.RoleImplementer, "the worker to be asked again", func(c supervise.Claim) bool {
 		return c.UpdateTaskedAt != nil && c.UpdateTaskedAt.After(*first)
 	})
 	if again.Pending == nil || again.Pending.ID == asked.Pending.ID {
@@ -1170,7 +1204,14 @@ func TestPodUpdateTellsItsWorkerNothingHoweverTheRoundEnds(t *testing.T) {
 			rig := newPodUpdateRig(t, tc.roles...)
 			rig.drifts(podUpdateDrift)
 			rig.tick()
-			rig.awaitRound(claim.RoleImplementer, podUpdateRound)
+			// Every worker of the pod is in the round before the end under test is driven. The
+			// sweep reads the round from the claims the store holds, and a claim whose round is
+			// still being written is no member of it: the pod read gone under such a claim has
+			// lost nobody, so the sweep opens a round over the pod that replaced this one
+			// instead of ending the round over the pod that went.
+			for _, role := range tc.roles {
+				rig.awaitRound(role.role, podUpdateRound)
+			}
 			rig.signal(claim.RoleImplementer, "a1b2c3d")
 			// The turn the implementer answered from ends, which retires the round's own ask:
 			// from here it holds nothing at all.
@@ -1185,7 +1226,7 @@ func TestPodUpdateTellsItsWorkerNothingHoweverTheRoundEnds(t *testing.T) {
 
 			tc.end(rig)
 
-			rig.awaitClaim(claim.RoleImplementer, "its round to end", func(c supervise.Claim) bool { return c.UpdateRound == "" })
+			rig.awaitSwept(claim.RoleImplementer, "its round to end", func(c supervise.Claim) bool { return c.UpdateRound == "" })
 			rig.settle(claim.RoleImplementer)
 			if calls := rig.replacements(); len(calls) != tc.replacements {
 				t.Fatalf("ReplacePod called %d times, want %d: this is not the end under test", len(calls), tc.replacements)
@@ -1383,7 +1424,7 @@ func TestPodUpdatePluginRoundEndDoesNotRelaunchAnOperatorSuspendedClaim(t *testi
 
 	rig.tick()
 
-	ended := rig.awaitClaim(claim.RoleImplementer, "its plugin round to end", func(c supervise.Claim) bool {
+	ended := rig.awaitSwept(claim.RoleImplementer, "its plugin round to end", func(c supervise.Claim) bool {
 		return c.UpdateRound == ""
 	})
 	if ended.State != supervise.StateSuspended || ended.SuspendedBy != supervise.SuspendedByOperator {
@@ -1437,7 +1478,7 @@ func TestPodUpdateRevivesASuspendedClaimBelowTheUpdateContract(t *testing.T) {
 
 	rig.tick()
 
-	revived := rig.awaitClaim(claim.RoleTester, "the suspended claim to be revived for the round", func(c supervise.Claim) bool {
+	revived := rig.awaitSwept(claim.RoleTester, "the suspended claim to be revived for the round", func(c supervise.Claim) bool {
 		return c.State == supervise.StateLaunching
 	})
 	if revived.UpdateRound != podUpdateRound || revived.UpdateTaskedAt == nil {
