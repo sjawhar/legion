@@ -693,6 +693,10 @@ Each LISTEN that stands sweeps every resident room, and each room instance that 
 Rows a catch-up applies are another process's content change:
 they credit no local peer, their ask blocks get no local author, and they re-arm only a settlement already armed here (`rearmSettle`), so editors on two processes get one version per burst.
 
+A browser's keystroke is its own append (`PersistCoalesceWindow = -1`), and storing it costs six round trips, every one of them under the document's advisory lock the room's persistence worker holds on its own connection (`withRoomLock`): the lock, the transaction, the gate read, the one batch of writes the append owes (`appendWrites`), the commit, and the unlock.
+The transaction-level lock is not among them: that session already holds the document's lock on that very connection, so the flush carries what it holds (`RoomFlush.holdsRoomLock`) and its appends take none of their own, which took a warm keystroke's store from seven round trips to six, counted on a real process.
+Every writer that holds no session lock still takes `pg_advisory_xact_lock` at each append, a live write's flush of the room's unstored updates included (`Ledger.flushThrough`, `lockDocumentRoom`), since nothing else serialises it against the room's own persistence (`TestAWarmBrowserKeystrokeFlushesInSixRoundTrips`, `TestALiveWritesFlushedAppendTakesTheRoomsTransactionLock`).
+
 The cursor (`roomCursor`) is the version the instance holds every stored update through, plus the versions above it that the instance holds with a gap below them, which fold in as the gap fills.
 The append gate (`appendGateStatement`, one read under the document's lock) has two rules.
 A browser's raw delta (`appendBrowser`) is accepted from a room behind an intact history and lands at the head.

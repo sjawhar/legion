@@ -409,7 +409,8 @@ func (l *Ledger) Discard() {
 	// the ledger outlives the request by a long way: a pooled pgx connection keeps the context of
 	// the queries it last served (liveWrite.releaseFork says why that matters), and this ledger
 	// is a value of that context. Kept, a whole parsed tree of every document the transaction
-	// wrote whole stayed resident beside the document's room.
+	// wrote whole stayed resident beside the document's room
+	// (TestAnUploadsReadBackTreeGoesWhenItsRequestEnds).
 	l.readBacks = nil
 	l.endRebuilds()
 }

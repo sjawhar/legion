@@ -103,21 +103,34 @@ func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) b
 // transaction's commit holds locked while it commits and marks them (commitConsuming). through is
 // the position through which the transaction has stored every unstored durable class. service is
 // the service the flushed room belongs to, which the store calls back into to run the flush
-// (AppendRoomFlush).
+// (AppendRoomFlush). roomLocked is whether the connection the flush's transaction runs on already
+// holds the room's advisory lock (holdsRoomLock).
 //
 // It crosses VersionedStore, which a test store outside this package wraps, so it is exported
 // with its fields unexported: such a store can only pass it on, as it can an UpdateCredit.
 type RoomFlush struct {
-	service  *Service
-	room     string
-	cursor   *roomCursor
-	state    *roomState
-	through  uint64
-	classes  []*queuedClass
-	versions []persistence.Version
-	changed  []bool
-	credits  []*UpdateCredit
-	repairs  []persistence.Version
+	service    *Service
+	room       string
+	cursor     *roomCursor
+	state      *roomState
+	through    uint64
+	roomLocked bool
+	classes    []*queuedClass
+	versions   []persistence.Version
+	changed    []bool
+	credits    []*UpdateCredit
+	repairs    []persistence.Version
+}
+
+// holdsRoomLock reports whether the flush's appends run on a connection that already holds the
+// room's advisory lock, so each of them can skip the transaction-level acquisition
+// (appendUpdateTxClass): the room's own persistence worker takes the session-level lock on its
+// connection before it opens the transaction and keeps it past the commit (AppendRoomFlush,
+// withRoomLock), and a second acquisition inside that transaction would cost a round trip per
+// append and grant what the session already has. A flush of a transaction a writer joined
+// (Ledger.flushThrough) holds no such lock, and a nil flush is no flush at all: both take it.
+func (f *RoomFlush) holdsRoomLock() bool {
+	return f != nil && f.roomLocked
 }
 
 // appended is the run of versions one transaction appended for the instance, ascending: the room

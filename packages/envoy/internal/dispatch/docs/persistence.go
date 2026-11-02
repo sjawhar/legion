@@ -197,6 +197,9 @@ func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *R
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
+		// The session lock withRoomLock holds is on this very connection, so no append of the
+		// flush spends a round trip taking the transaction-level one (holdsRoomLock).
+		flush.roomLocked = true
 		if err := flush.service.flushThrough(ctx, tx, flush, through); err != nil {
 			return err
 		}
@@ -255,8 +258,12 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 // append of the room's own persistence worker reaches the gate, since no ledger of its
 // transaction names the document (appendingCursor). observed is when the room took the update,
 // which the gate judges against its issue's close as it does a single append's (BrowserAppend).
+// The flush also carries whether its transaction's connection already holds the room's advisory
+// lock (RoomFlush.holdsRoomLock): the room's own persistence worker's does, so its appends take
+// no lock of their own, and a joined transaction's flush appends take one each, as every writer
+// that holds no session lock must.
 func (p *PgVersioned) AppendRoomUpdateTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, update []byte, contentChanged bool, credit *UpdateCredit, observed time.Time) (persistence.Version, error) {
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, &BrowserAppend{observed: observed}, flush, false)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, &BrowserAppend{observed: observed}, flush, flush.holdsRoomLock())
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -318,8 +325,9 @@ func lockedHead(ctx context.Context, tx pgx.Tx, room string) (int64, error) {
 // (BrowserAppend); flush is the run of a room instance's updates the transaction is storing, when
 // this append is one of them (RoomFlush); and roomLocked is whether the caller already holds
 // room's advisory lock on this transaction's connection: appendUpdate takes it before the
-// transaction begins and keeps it past the commit (withRoomLock), so a second acquisition inside
-// the transaction would cost a round trip and grant what the session already has.
+// transaction begins and keeps it past the commit (withRoomLock), as AppendRoomFlush does for a
+// whole flush's appends (RoomFlush.holdsRoomLock), so a second acquisition inside the transaction
+// would cost a round trip and grant what the session already has.
 func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend, flush *RoomFlush, roomLocked bool) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
