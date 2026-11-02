@@ -211,6 +211,10 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 	const (
 		interval = time.Second
 		sweeps   = 4
+		// hangGuard only stops a hang: it is long enough for a starved machine to reach its
+		// sweeps however slowly it runs them, and the comparison of the sequence it waited for,
+		// not the bound itself, is what reports a loop that stopped sweeping.
+		hangGuard = sweeps * 10 * interval
 	)
 	for _, tc := range []struct {
 		name string
@@ -250,9 +254,9 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 					want = append(want, fmt.Sprint("wait ", tc.wait))
 				}
 			}
-			// The deadline only ends a loop that stopped sweeping: twelve intervals, against the
-			// three and a bit the sweeps' waits add up to.
-			for deadline := time.Now().Add(sweeps * 3 * interval); len(events.list()) < len(want) && time.Now().Before(deadline); {
+			// The hang guard only ends a loop that stopped sweeping, against the three and a bit
+			// the sweeps' waits add up to.
+			for deadline := time.Now().Add(hangGuard); len(events.list()) < len(want) && time.Now().Before(deadline); {
 				time.Sleep(10 * time.Millisecond)
 			}
 			cancel()
@@ -261,7 +265,7 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 			got := events.list()
 			names := sweepEventNames(got)
 			if len(names) < len(want) || !slices.Equal(names[:len(want)], want) {
-				t.Fatalf("the running sweep did %q, want %q first", names, want)
+				t.Fatalf("the running sweep did %q, want %q first, within the %v it was given", names, want, hangGuard)
 			}
 			var ended time.Time
 			for _, event := range got[:len(want)] {
