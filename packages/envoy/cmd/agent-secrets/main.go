@@ -1099,29 +1099,24 @@ func reportPending(stderr io.Writer, requestID string, approver *string, brokerP
 // on the secrets broker, which the broker's answer carries as approve_url. It is the one place a
 // line of this command names the broker's own host, and it names it because a person must open
 // that page: the host is the one AGENT_SECRETS_URL already names, and no other line says where an
-// answer came from (source_test.go's TestNoSessionLineNamesAHostOrAStoreID). A broker from before
-// that page carries none, and the sentence then names the approver alone, with no page: the
-// request waits on the same person, who opens the broker themselves. The broker names an approver
-// for every pending request; one from before it did names none, and the sentence says so rather
-// than guessing.
+// answer came from (source_test.go's TestNoSessionLineNamesAHostOrAStoreID). The approver alone
+// chooses the wording, so one switch writes all three sentences and the page is the suffix that
+// switch appends: a broker from before that page carries none, the suffix is empty, and the same
+// sentence names the approver alone, with no page - the request waits on the same person, who
+// opens the broker themselves. The broker names an approver for every pending request; one from
+// before it did names none, and the sentence says so rather than guessing.
 func waitingOn(approver *string, brokerPage string) string {
+	where := ""
 	if brokerPage != "" {
-		switch {
-		case approver == nil:
-			return "waiting for approval on the secrets broker: " + brokerPage + "; the broker does not say whose"
-		case *approver == record.AnyoneApprover:
-			return "waiting for anyone signed in to the secrets broker to approve it: " + brokerPage
-		default:
-			return "waiting for " + *approver + " to approve it on the secrets broker: " + brokerPage
-		}
+		where = ": " + brokerPage
 	}
 	switch {
 	case approver == nil:
-		return "waiting for approval on the secrets broker; the broker does not say whose"
+		return "waiting for approval on the secrets broker" + where + "; the broker does not say whose"
 	case *approver == record.AnyoneApprover:
-		return "waiting for anyone signed in to the secrets broker to approve it"
+		return "waiting for anyone signed in to the secrets broker to approve it" + where
 	default:
-		return "waiting for " + *approver + " to approve it on the secrets broker"
+		return "waiting for " + *approver + " to approve it on the secrets broker" + where
 	}
 }
 
