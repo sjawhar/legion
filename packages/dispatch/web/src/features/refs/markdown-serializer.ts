@@ -1,7 +1,8 @@
 import type { HeadlessProofEditor } from "@legion/proof-editor/headless";
 import { DOMSerializer, type Schema } from "prosemirror-model";
 
-import type { MarkdownEngine } from "./markdown-engine";
+import type { BlockSchema } from "../../api/types";
+import type { MarkdownEngine, RenderSpecWithAttrs } from "./markdown-engine";
 import { buildDispatchReference, buildReferencePath, pictureReference } from "./routes";
 
 /**
@@ -9,7 +10,10 @@ import { buildDispatchReference, buildReferencePath, pictureReference } from "./
  * `import()` as the headless editor it serializes for (`markdown-engine.ts`, `loadEngine`): a
  * `DOMSerializer` cannot be built before that editor's schema exists, so parsing `prosemirror-
  * model` on the first route - a quarter of a megabyte, for a page that may render no Markdown at
- * all before the reader asks for some - buys nothing.
+ * all before the reader asks for some - buys nothing. The serializer's own `renderSpec`, which
+ * the sliced painter opens a node with (`MarkdownBody`, `paintBlockInSlices`), travels on the
+ * engine for the same reason: it is a static of that class, so a page that named it to call it
+ * after the engine existed would parse the library before its first paint anyway.
  */
 
 /**
@@ -55,8 +59,11 @@ function pictureSerializer(schema: Schema): DOMSerializer {
   );
 }
 
-export function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
+export function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema): MarkdownEngine {
   return {
+    blockSchema,
+    schema: proof.schema,
+    renderSpec: DOMSerializer.renderSpec as RenderSpecWithAttrs,
     serializer: pictureSerializer(proof.schema),
     parse(markdown, softBreaks = "space") {
       try {

@@ -18,19 +18,23 @@ import (
 )
 
 // operatorRouteFixture is the Go live harnesses' operator pod (deploy/kubernetes/operator-route/
-// pod.yml) with its token audience filled in, as an operator and each live harness run fill in
-// their gateway's: config.ReadPodFile refuses the placeholder itself.
+// pod.yml) with its token audience and its ServiceAccount filled in, as an operator and each live
+// harness run fill in their gateway's and their own: config.ReadPodFile refuses either placeholder
+// itself. The account is the string config's own operatorRouteAccount holds, written out here
+// because a test constant of that package is not reachable from this one.
 func operatorRouteFixture(t *testing.T) Pod {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	filled := filepath.Join(t.TempDir(), "pod.yml")
-	if err := os.WriteFile(filled, bytes.ReplaceAll(raw, []byte("${MODEL_TOKEN_AUDIENCE}"), []byte("operator-audience")), 0o600); err != nil {
+	filled := bytes.ReplaceAll(raw, []byte("${MODEL_TOKEN_AUDIENCE}"), []byte("operator-audience"))
+	filled = bytes.ReplaceAll(filled, []byte("${POD_SERVICE_ACCOUNT}"), []byte("operator-account"))
+	path := filepath.Join(t.TempDir(), "pod.yml")
+	if err := os.WriteFile(path, filled, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixture, err := config.ReadPodFile(filled)
+	fixture, err := config.ReadPodFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A document update is decoded once rather than twice on the two paths that carried the same bytes through two decoders: a write that appends an update this server encoded from the document it had just built no longer decodes it again to check it, and a room''s load no longer decodes the stored history that ygo decodes into the room a moment later. Both still refuse an update holding more items than one update may carry, from the count the update''s header declares. An upload of an 8,000-item list spends about 88 ms and 36 MB less in its own request, and the settlement it queues about 65 ms and 36 MB less out of it, which is time and garbage the writes beside it were paying for on a two-core machine. What a write stores is unchanged.'
+time: 2026-10-31T02:40:00.000000000Z
+custom:
+    Issue: INFRA-625

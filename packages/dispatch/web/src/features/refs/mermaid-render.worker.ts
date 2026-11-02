@@ -12,18 +12,22 @@
  */
 import { renderMermaidMarkup } from "@legion/proof-editor/mermaid-render";
 
+import type { WorkerReply } from "./worker-queue";
+
 /** A source the page asks this worker to draw; `id` names the answer. */
 export interface MermaidRequest {
   id: number;
   source: string;
 }
 
-/** What the worker posts: that it is ready, or the answer to one request. An `error` of `null`
- *  is a refusal whose thrown value was no `Error`. */
-export type MermaidReply =
-  | { ready: true }
-  | { id: number; markup: string }
-  | { id: number; error: string | null };
+/** What this worker has to say about one source: the SVG markup, still unsanitized, or the
+ *  message of the renderer's refusal. An `error` of `null` is a refusal whose thrown value was
+ *  no `Error`. */
+export type DrawnSource = { markup: string } | { error: string | null };
+
+/** What the worker posts: that it is ready, or the answer to one request, under the id the
+ *  request carried (`WorkerReply`). */
+export type MermaidReply = WorkerReply<DrawnSource>;
 
 /** Draws one request's source. Exported for the unit tests, whose stand-in `Worker` answers
  *  through it on the test's own thread. */
