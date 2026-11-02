@@ -92,7 +92,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Session delivery**: `internal/session/session.go`
 
-  what a delivery to a resolved session comes to (`Deliverer.Resolve`): the session's own consumer relays the message, or the session takes it off its own NATS subscription
+  what a delivery to a resolved session comes to (`session.Resolve`): the session's own consumer relays the message, or the session takes it off its own NATS subscription
 
 - **Session consumers**: `internal/bus/session_consumers.go`, `cmd/listener/session_delivery.go`, `cmd/listener/session_relay.go`
 
@@ -101,10 +101,10 @@ Each item below names a task and where its code is, then notes on it.
   the relay of each consumer the listener owns, as core frames on the session's deliver subject (`sessionRelays`).
   "Session consumers" below
 
-- **Role lane**: `internal/bus/role_lane.go`, `cmd/listener/role_lane.go`, `internal/bus/nats.go` (`StartRequestCoreTo`, `StartRequestStoredTo`)
+- **Role lane**: `internal/bus/role_lane.go`, `cmd/listener/role_lane.go`, `internal/bus/nats.go` (`StartRequestCoreTo`)
 
   the role lane's own connection under high finite pending limits (`bus.RoleLanePendingMsgs`, `bus.RoleLanePendingBytes`), in the queue group `envoy-roles` (`bus.RoleLaneQueue`) or the machine's;
-  the forwards it runs off its handler (`roleForwarder`); a forward that counts only once the stream stored it
+  the forwards it runs off its handler (`roleForwarder`); a forward whose `PendingForward.Wait` returns nil only once both replies arrived, the holder's empty receipt and the stream's acknowledgement that it stored the forward
 
 - **Durable path**: `cmd/listener/delivery.go` (`jetStreamDeliveryHandler`, `durableNeedsDelivery`), `internal/store/subject_index.go`
 
@@ -3404,7 +3404,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   a registration that would store the row it holds (no new topic, and the same machine and directory) writes it only once it is that old, and until then answers with the stored row, `updated_at` included (`store.Registry.UpsertWithin`);
   the session entry is still written on every registration, since its bucket's `MaxAge` is the liveness clock.
   A session's owner is the listener its stored subscription names, the one `Match` delivers on, else, with no subscription stored, the listener it registered through (the entry's `machine_id`);
-  a session neither names is every listener's (`session.Deliverer.DeliverWithResultForEntry`).
+  a session neither names is every listener's (`session.HandleAgentMessage`).
   A non-owner leaves inbox messages to the owner silently (`HandleAgentResult.OwnedElsewhere`:
   no delivery, no exception, no NAK, one DEBUG line):
   every listener on the bus reads each inbox message from its own durable, so a second listener would deliver the same message again, while the owner always has the message.

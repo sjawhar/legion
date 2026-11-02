@@ -51,8 +51,8 @@ type SessionEntry struct {
 	// listener it registered through holds its session consumer (bus.SessionConsumers): the
 	// session's stored messages reach it from that consumer, relayed by the listener that owns it,
 	// so the durable path acknowledges them with nothing to deliver and no exception
-	// (Deliverer.DeliverWithResultForEntry). Empty for a session on the core path: a plugin that did
-	// not ask, an older listener, or a hub that refused the consumer.
+	// (Resolve). Empty for a session on the core path: a plugin that did not ask, an older
+	// listener, or a hub that refused the consumer.
 	Delivery string `json:"delivery,omitempty"`
 	// Epoch is the session's delivery epoch while Delivery is DeliveryConsumer: a random string per
 	// plugin NATS connection, so a new one tells the relay the session reconnected and its consumer
@@ -478,11 +478,16 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 // connection ahead of any write this listener sends on it later, so it cannot undo one, and
 // against another listener's write it is last-writer-wins, as every Put already is.
 func (r *SessionRegistry) PutWithin(ctx context.Context, sessionID string, entry SessionEntry) error {
-	// Several live processes can hold the same session (shared on-disk state), and
-	// blind last-writer-wins routed deliveries to whichever heartbeated last —
-	// including processes not driving the session. mergeForClaim arbitrates.
-	cur, curErr := r.Get(sessionID)
-	entry, err := mergeForClaim(cur, curErr, entry, time.Now().UnixMilli())
+	// Several live processes can hold the same session (shared on-disk state), and the route
+	// names whichever heartbeated last — including a process not driving the session.
+	// mergeForClaim arbitrated between them until dispatch://INFRA-889, by rules written on the
+	// serving ports the two claims named; no registration carries a port any more, so it is
+	// last-writer-wins now. What it still does is refuse the write when the read of the
+	// incumbent failed for anything but a missing key: a write built on a read that never
+	// answered would discard whatever the stored entry holds. The incumbent is read for that
+	// error alone, which is why its entry is dropped here.
+	_, curErr := r.Get(sessionID)
+	entry, err := mergeForClaim(curErr, entry, time.Now().UnixMilli())
 	if err != nil {
 		return err
 	}

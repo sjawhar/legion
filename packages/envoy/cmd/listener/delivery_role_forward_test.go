@@ -75,7 +75,7 @@ func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testi
 					forwardErr = harness.client.RequestCoreTo(subject, item, msgID, timeout)
 					return forwardErr
 				})
-				cfg = wireTestDeliveryWorkers(t, cfg)
+				cfg = wireTestRoleForwarder(t, cfg)
 				item.Topic = contracts.RoleTopicPrefix + role
 				item.Payload = `{"type":"worker-queued"}`
 				item.IssuedAt = contracts.NowMillis()

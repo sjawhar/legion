@@ -24,30 +24,31 @@ func newTestEnvelope(source, topic, summary string) contracts.Envelope {
 	}
 }
 
-func newKVDeliverer(t *testing.T) (*session.SessionRegistry, session.Deliverer) {
+func newSessionRegistry(t *testing.T) *session.SessionRegistry {
 	t.Helper()
 	client := session.SetupNATS(t)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
-	return sessions, session.Deliverer{}
+	return sessions
 }
 
-// deliverThroughEntry delivers the way the listener does: the caller resolves the target's record
-// (resolvedEntry) and hands it to the Deliverer, which reads no registry of its own.
-func deliverThroughEntry(t *testing.T, deliverer session.Deliverer, sessions *session.SessionRegistry, item contracts.Envelope, interest store.Interest) error {
+// deliverThroughEntry resolves the way the listener's core path does: the caller reads the
+// target's record (resolvedEntry) and hands it to session.Resolve, which reads no registry of its
+// own, under the core path's stream sequence of 0.
+func deliverThroughEntry(t *testing.T, sessions *session.SessionRegistry, item contracts.Envelope, interest store.Interest) error {
 	t.Helper()
-	_, err := deliverer.DeliverWithResultForEntry(item, interest, resolvedEntry(t, sessions, interest.SessionID))
+	_, err := session.Resolve(item, interest, resolvedEntry(t, sessions, interest.SessionID), item.Topic, 0)
 	return err
 }
 
 func TestDeliver_NoRegistryEntry(t *testing.T) {
-	sessions, deliverer := newKVDeliverer(t)
+	sessions := newSessionRegistry(t)
 	interest := store.Interest{SessionID: "ses_ghost", Dir: "/test", MachineID: "m"}
 	item := newTestEnvelope("agent", "notifications.agent.ses_ghost", "test message")
 
-	err := deliverThroughEntry(t, deliverer, sessions, item, interest)
+	err := deliverThroughEntry(t, sessions, item, interest)
 	if err == nil {
 		t.Fatal("expected error for missing session, got nil")
 	}
@@ -57,7 +58,7 @@ func TestDeliver_NoRegistryEntry(t *testing.T) {
 // succeeds with nothing for the caller to do.
 func TestDeliver_SucceedsForASelfSubscribedSession(t *testing.T) {
 	// Given
-	sessions, deliverer := newKVDeliverer(t)
+	sessions := newSessionRegistry(t)
 	var entry session.SessionEntry
 	if err := json.Unmarshal([]byte(`{"self_subscribed":true}`), &entry); err != nil {
 		t.Fatalf("decode self-subscribed session entry: %v", err)
@@ -67,7 +68,7 @@ func TestDeliver_SucceedsForASelfSubscribedSession(t *testing.T) {
 	}
 
 	// When
-	err := deliverThroughEntry(t, deliverer, sessions,
+	err := deliverThroughEntry(t, sessions,
 		newTestEnvelope("agent", "notifications.agent.ses_omp", "test message"),
 		store.Interest{SessionID: "ses_omp"},
 	)
@@ -82,7 +83,7 @@ func TestDeliver_SucceedsForASelfSubscribedSession(t *testing.T) {
 // so no other path delivers it.
 func TestDeliver_SkipsStoredTopics_whenSessionIsOnConsumerDelivery(t *testing.T) {
 	// Given
-	sessions, deliverer := newKVDeliverer(t)
+	sessions := newSessionRegistry(t)
 	var entry session.SessionEntry
 	if err := json.Unmarshal([]byte(`{"delivery":"consumer","epoch":"e1"}`), &entry); err != nil {
 		t.Fatalf("decode consumer-delivery session entry: %v", err)
@@ -92,10 +93,12 @@ func TestDeliver_SkipsStoredTopics_whenSessionIsOnConsumerDelivery(t *testing.T)
 	}
 
 	// When
-	stored, storedErr := deliverer.DeliverWithResultForEntry(
+	stored, storedErr := session.Resolve(
 		newTestEnvelope("agent", "notifications.agent.ses_consumer", "stored message"),
 		store.Interest{SessionID: "ses_consumer"},
 		resolvedEntry(t, sessions, "ses_consumer"),
+		"notifications.agent.ses_consumer",
+		0,
 	)
 
 	// Then

@@ -144,9 +144,9 @@ const (
 type sessionRelays struct {
 	delivery *sessionDelivery
 	registry *store.Registry
-	// rules carries the session cache this relay reads its entries from (rules.sessions); it is
-	// the value the durable path's fan-out judges a followed topic by (judgeFollowedTopic).
-	rules     followedTopicRules
+	// sessions is the session cache this relay reads its entries from; it is the same registry
+	// the durable path's fan-out judges a followed topic against (judgeFollowedTopic).
+	sessions  *session.SessionRegistry
 	machineID string
 	logger    *logging.Logger
 	// replyPrefix is the listener's reply inbox and a dot: a frame's reply subject is
@@ -273,7 +273,7 @@ func startSessionRelays(delivery *sessionDelivery, cfg listenerDeliveryHandlerCo
 	m := &sessionRelays{
 		delivery:    delivery,
 		registry:    cfg.registry,
-		rules:       cfg.followedTopicRules(),
+		sessions:    cfg.sessions,
 		machineID:   cfg.machineID,
 		logger:      cfg.logger,
 		replyPrefix: inbox + ".",
@@ -380,7 +380,7 @@ func (m *sessionRelays) loop() {
 			return
 		case <-prune.C:
 			// Each lapse it finds is a change, which onChange hears.
-			m.rules.sessions.PruneLapsed()
+			m.sessions.PruneLapsed()
 			continue
 		case <-m.wake:
 		}
@@ -399,7 +399,7 @@ func (m *sessionRelays) loop() {
 				m.stopAll()
 				continue
 			}
-			entries, err := m.rules.sessions.List()
+			entries, err := m.sessions.List()
 			if err != nil {
 				m.logger.Warn("session relays could not list the session cache", slog.String("error", err.Error()))
 			}
@@ -461,7 +461,7 @@ func (m *sessionRelays) wanted(sessionID string) bool {
 	if !m.owned.Load() {
 		return false
 	}
-	entry, err := m.rules.sessions.Get(sessionID)
+	entry, err := m.sessions.Get(sessionID)
 	if err != nil || entry.Delivery != session.DeliveryConsumer {
 		return false
 	}

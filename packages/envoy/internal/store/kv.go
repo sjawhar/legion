@@ -696,16 +696,15 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
 		return Interest{}, getErr
 	}
-	sessionID := item.SessionID
 	requested := item
 	if getErr == nil {
 		item = cur
 	}
-	item.MachineID = first(requested.MachineID, curValue(cur.MachineID))
-	item.Dir = first(requested.Dir, curValue(cur.Dir))
+	item.MachineID = first(requested.MachineID, cur.MachineID)
+	item.Dir = first(requested.Dir, cur.Dir)
 	item.UpdatedAt = now
 	item = Merge(item, topics)
-	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
+	item.Topics = dropPrivateStreamTopics(requested.SessionID, item.Topics)
 	sort.Strings(item.Topics)
 	return item, nil
 }
@@ -1259,10 +1258,6 @@ func first(value string, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func curValue(value string) string {
-	return value
 }
 
 const (

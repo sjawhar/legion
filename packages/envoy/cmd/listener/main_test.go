@@ -2916,7 +2916,7 @@ func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotS
 		forwardedTo = append(forwardedTo, subject)
 		return nil
 	})
-	cfg = wireTestDeliveryWorkers(t, cfg)
+	cfg = wireTestRoleForwarder(t, cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "unseen-holder-delivery")
 	item.Payload = `{"type":"worker-queued"}`
 	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
@@ -2956,7 +2956,7 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 		forwards.Add(1)
 		return errors.New("nats: connection closed")
 	})
-	cfg = wireTestDeliveryWorkers(t, cfg)
+	cfg = wireTestRoleForwarder(t, cfg)
 	handler := coreNATSDeliveryHandler(cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-publish-error")
 	item.Payload = `{"type":"worker-queued"}`
@@ -3012,7 +3012,7 @@ func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *t
 		forwards.Add(1)
 		return nil
 	})
-	cfg = wireTestDeliveryWorkers(t, cfg)
+	cfg = wireTestRoleForwarder(t, cfg)
 	handler := coreNATSDeliveryHandler(cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "refuse-unadvertised-mode")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
@@ -3067,7 +3067,7 @@ func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedeli
 		forwards.Add(1)
 		return nil
 	})
-	cfg = wireTestDeliveryWorkers(t, cfg)
+	cfg = wireTestRoleForwarder(t, cfg)
 	handler := coreNATSDeliveryHandler(cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "dedupe-before-guard")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
@@ -3151,7 +3151,7 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 			}
 			cfg := harness.config
 			cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error { return tc.forwardErr })
-			cfg = wireTestDeliveryWorkers(t, cfg)
+			cfg = wireTestRoleForwarder(t, cfg)
 			handler := coreNATSDeliveryHandler(cfg)
 			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-error-kind-"+role)
 			item.Payload = `{"type":"worker-queued"}`
@@ -3585,7 +3585,6 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client) listenerDeli
 	attemptCache := dedupe.New(5 * time.Minute)
 	t.Cleanup(dedupeCache.Stop)
 	t.Cleanup(attemptCache.Stop)
-	deliverer := session.Deliverer{}
 	met := metrics.New()
 	logs := &cmdtest.LockedBuffer{}
 	t.Cleanup(func() {
@@ -3599,7 +3598,6 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client) listenerDeli
 		registry:          registry,
 		sessions:          sessions,
 		machineID:         "test-machine",
-		deliverer:         &deliverer,
 		dedupeCache:       dedupeCache,
 		attemptCache:      attemptCache,
 		logger:            logging.NewWithWriter("test", logs),
@@ -3613,9 +3611,9 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client) listenerDeli
 	}
 	// The role lane's forwards run on the role forwarder, as main.go wires them: it is the one
 	// path those messages take. It is wired last, from the configuration above, so a test that
-	// overrides a seam of the harness's config wires its copy again (wireTestDeliveryWorkers),
+	// overrides a seam of the harness's config wires its copy again (wireTestRoleForwarder),
 	// since the forwarder keeps the configuration it was built from.
-	deliveryConfig = wireTestDeliveryWorkers(t, deliveryConfig)
+	deliveryConfig = wireTestRoleForwarder(t, deliveryConfig)
 	return listenerDeliveryHarness{
 		client:      client,
 		registry:    registry,
@@ -3646,12 +3644,12 @@ func durableTestHandler(t *testing.T, cfg listenerDeliveryHandlerConfig) natsgo.
 	}
 }
 
-// wireTestDeliveryWorkers wires cfg's role forwarder as main.go wires it (wireDeliveryWorkers). A
+// wireTestRoleForwarder wires cfg's role forwarder as main.go wires it (wireRoleForwarder). A
 // test that overrides a seam of a config - the harness's, or one of its own - wires the copy it
 // overrode, so its forwards go through that seam.
-func wireTestDeliveryWorkers(t *testing.T, cfg listenerDeliveryHandlerConfig) listenerDeliveryHandlerConfig {
+func wireTestRoleForwarder(t *testing.T, cfg listenerDeliveryHandlerConfig) listenerDeliveryHandlerConfig {
 	t.Helper()
-	return wireDeliveryWorkers(cfg)
+	return wireRoleForwarder(cfg)
 }
 
 // settled waits until every forward the forwarder holds has been reported, within 20 s: a test
@@ -3667,7 +3665,7 @@ func (f *roleForwarder) settled(t *testing.T) {
 
 // registerTarget records sessionID as a session of this machine that takes its messages off its
 // own NATS subscription, following topic. A delivery to it resolves and is counted skipped: the
-// listener hands it to nobody (session.Deliverer.Resolve).
+// listener hands it to nobody (session.Resolve).
 func (h listenerDeliveryHarness) registerTarget(t *testing.T, sessionID, topic string) {
 	t.Helper()
 	if _, err := h.registry.Upsert(store.Interest{

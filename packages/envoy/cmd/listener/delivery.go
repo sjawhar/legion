@@ -52,14 +52,13 @@ type listenerDeliveryHandlerConfig struct {
 	// reached the holder.
 	forwardRole func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (wait func() error, err error)
 	// roleForwards runs the role lane's forwards off its handler (roleForwarder); every delivery
-	// path hands its forwards to it, so it is always set: wireDeliveryWorkers builds it from the
+	// path hands its forwards to it, so it is always set: wireRoleForwarder builds it from the
 	// configuration it reports through, once that configuration is otherwise built, and main.go
 	// and every test alike wire it there.
 	roleForwards      *roleForwarder
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
 	machineID         string
-	deliverer         *session.Deliverer
 	dedupeCache       *dedupe.Cache
 	attemptCache      *dedupe.Cache
 	logger            *logging.Logger
@@ -85,12 +84,12 @@ type listenerDeliveryHandlerConfig struct {
 	deferredUnplaceable *unplaceableDeferrals
 }
 
-// wireDeliveryWorkers builds the role forwarder every delivery path hands its forwards to and
+// wireRoleForwarder builds the role forwarder every delivery path hands its forwards to and
 // returns cfg carrying it. The forwarder keeps the configuration it is built from by value, so a
 // caller wires it last, once every seam of cfg is set: a seam set after this is one the forwarder
 // does not have. It has no loop to stop; the role lane's drain waits for the forwards it holds
 // (roleLane.drain).
-func wireDeliveryWorkers(cfg listenerDeliveryHandlerConfig) listenerDeliveryHandlerConfig {
+func wireRoleForwarder(cfg listenerDeliveryHandlerConfig) listenerDeliveryHandlerConfig {
 	cfg.roleForwards = newRoleForwarder(cfg)
 	return cfg
 }
@@ -726,9 +725,9 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	// consumer already holds it, and the core path's message is in no consumer.
 	var result session.HandleAgentResult
 	if message.mode == durableDelivery {
-		result = session.ResolveStoredAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer, message.storedSeq())
+		result = session.ResolveStoredAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, message.storedSeq())
 	} else {
-		result = session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer)
+		result = session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr)
 	}
 	if result.Relayed {
 		// The session's own consumer holds this message and the relay of that consumer delivers it
@@ -771,7 +770,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		deliveryLog := "listener agent delivered"
 		if result.Skipped {
 			// The session holds its own NATS subscription and the message reaches it there
-			// (session.Deliverer.Resolve): this listener handed it to nobody.
+			// (session.Resolve): this listener handed it to nobody.
 			deliveryStatus = "skipped"
 			deliveryLog = "listener agent session takes the message off its own subscription"
 		}
@@ -829,12 +828,23 @@ const (
 )
 
 // judgeFollowedTopic is the durable path fan-out's (fanoutDelivery) judgement of a message on a
-// topic sessionID follows: judgeFollowedTopicWithoutAttempt, the verdict the session's own state
-// earns the message, and then the attempt cache, which the fan-out alone reads as a refusal. A
-// copy the session already took is refused by the dedupe cache, and one already on its way to it
-// by the attempt cache; both are keyed on the envelope's dedupe key, so one upstream event
-// published on several of a session's topics (contracts/normalize.go) reaches it once. An echo of
-// the session's own message, and a delivery mode its entry does not advertise, are refused too.
+// topic sessionID follows: the verdict the session's own state earns the message -- a copy it
+// already took, an echo of its own message, a delivery mode it does not advertise or one that
+// cannot be read, or the message it is given -- and then the attempt cache, which the fan-out
+// alone reads as a refusal. A copy the session already took is refused by the dedupe cache, and
+// one already on its way to it by the attempt cache; both are keyed on the envelope's dedupe key,
+// so one upstream event published on several of a session's topics (contracts/normalize.go)
+// reaches it once.
+//
+// The refusals are ranked, each outranking the ones below it. The dedupe cache's outranks every
+// other: the session has the message already, so nothing else about this copy is worth weighing,
+// and it is the one verdict an attempt record does not override. The attempt record comes next,
+// which is why it is read after the verdict the session's own state earns and replaces it: a copy
+// read while a delivery of the same event, or an exception for it, is in flight is one
+// attempt-dedupe skip rather than a second delivery or a second exception. An echo of the
+// session's own message outranks the two mode refusals, being refused whether or not an entry was
+// read at all. A mode that cannot be read unambiguously outranks a mode the entry does not
+// advertise, since a mode nobody can name cannot be matched against any entry.
 //
 // mode is the delivery mode the envelope targets, "" when it targets none, and modeErr the failure
 // of reading it (envelopeDeliveryMode): both are read once per message rather than once per
@@ -845,45 +855,30 @@ const (
 // the fan-out decides from it whether the session's own consumer relays this message, which it
 // must know for a refusal as much as for a delivery (fanoutDelivery). It returns the error behind
 // a mode refusal too, for the caller to report.
-//
-// An attempt record outranks every verdict but the dedupe one, so a copy read while a delivery of
-// the same event, or an exception for it, is in flight is one attempt-dedupe skip rather than a
-// second delivery or a second exception.
 func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contracts.Envelope, mode string, modeErr error) (followedTopicVerdict, *session.SessionEntry, error) {
-	verdict, target, err := judgeFollowedTopicWithoutAttempt(rules, sessionID, item, mode, modeErr)
-	if verdict != followedTopicDeduped && rules.attemptCache.Seen(item.DedupeKey, sessionID) {
-		return followedTopicAttempted, target, nil
-	}
-	return verdict, target, err
-}
-
-// judgeFollowedTopicWithoutAttempt is judgeFollowedTopic as if no attempt record of the message
-// existed: the verdict the message earns from the session itself -- a copy it already took, an
-// echo of its own message, a delivery mode it does not advertise or one that cannot be read, or
-// the message it is given.
-func judgeFollowedTopicWithoutAttempt(rules followedTopicRules, sessionID string, item contracts.Envelope, mode string, modeErr error) (followedTopicVerdict, *session.SessionEntry, error) {
 	var target *session.SessionEntry
 	if entry, err := rules.sessions.Get(sessionID); err == nil {
 		target = &entry
 	}
-	if rules.dedupeCache.Seen(item.DedupeKey, sessionID) {
-		return followedTopicDeduped, target, nil
+	verdict := takeFollowedTopic
+	var err error
+	switch {
+	case rules.dedupeCache.Seen(item.DedupeKey, sessionID):
+		verdict = followedTopicDeduped
+	case item.SourceSession != "" && item.SourceSession == sessionID:
+		verdict = followedTopicEcho
+	case modeErr != nil:
+		verdict, err = followedTopicModeUnreadable, modeErr
+	// No entry is no refusal: the delivery path decides what to do with a session it cannot
+	// read, and a mode nobody advertises cannot be judged against an entry there is none of, so
+	// the mode test below is reached only for a session whose entry was read.
+	case target != nil && mode != "" && !hasCapability(target.Capabilities, mode):
+		verdict, err = followedTopicModeNotAdvertised, errors.New("the session does not advertise delivery mode "+mode)
 	}
-	if item.SourceSession != "" && item.SourceSession == sessionID {
-		return followedTopicEcho, target, nil
+	if verdict != followedTopicDeduped && rules.attemptCache.Seen(item.DedupeKey, sessionID) {
+		return followedTopicAttempted, target, nil
 	}
-	if modeErr != nil {
-		return followedTopicModeUnreadable, target, modeErr
-	}
-	if target == nil {
-		// No entry is no refusal: the delivery path decides what to do with a session it cannot
-		// read, and a mode nobody advertises cannot be judged against an entry there is none of.
-		return takeFollowedTopic, nil, nil
-	}
-	if mode != "" && !hasCapability(target.Capabilities, mode) {
-		return followedTopicModeNotAdvertised, target, errors.New("the session does not advertise delivery mode " + mode)
-	}
-	return takeFollowedTopic, target, nil
+	return verdict, target, err
 }
 
 // fanoutRefusalOutcome is how the fan-out reports a refusal judgeFollowedTopic returned, each
@@ -970,7 +965,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		// One resolution per recipient decides every outcome below: it reads the entry the
 		// judgement above returned for every verdict, its refusals among them, and makes no call
 		// of its own.
-		delivery, err := cfg.deliverer.Resolve(item, interest, target, item.Topic, message.storedSeq())
+		delivery, err := session.Resolve(item, interest, target, item.Topic, message.storedSeq())
 		relayed := err == nil && delivery.Relayed
 		// Refusals are decided before the take case, since the session whose own consumer relays
 		// the message is one this path still reports a refusal of: that relay judges nothing it
@@ -993,13 +988,6 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			})
 			continue
 		}
-		if err == nil {
-			// The attempt is recorded before the outcome is applied, so another copy of the same
-			// event read while this one is in flight is a dedupe skip rather than a second
-			// delivery. A resolution that failed records none: it names a delivery that was
-			// never made.
-			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
-		}
 		if err != nil {
 			retryable := shouldNAKFanoutDelivery(target != nil, err)
 			if !retryable {
@@ -1012,15 +1000,20 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				log: func(logger *logging.Logger) {
 					logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 				},
-				// A resolution that failed recorded no attempt above, so there is none to clear
-				// for the session whose entry is still to come; the field stands for the retry
-				// this outcome asks for.
+				// A resolution that failed records no attempt -- only the success arm below
+				// does -- so there is none to clear for the session whose entry is still to
+				// come; the field stands for the retry this outcome asks for.
 				clearAttempt: retryable,
 				retry:        retryable,
 			}) {
 				failed = true
 			}
 		} else {
+			// The attempt is recorded before the outcome is applied, so another copy of the same
+			// event read while this one is in flight is a dedupe skip rather than a second
+			// delivery. A resolution that failed records none: it names a delivery that was
+			// never made.
+			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
 			deliveryStatus := "delivered"
 			if delivery.Skipped {
 				deliveryStatus = "skipped"

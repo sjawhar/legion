@@ -69,36 +69,34 @@ type HandleAgentResult struct {
 // can decide ACK vs NAK.
 //
 // entry is that resolved session record, nil when none was resolved; both paths deliver through
-// it (DeliverWithResultForEntry) rather than resolving it a second time, so the record the caller
-// read - the store's own word for it, not just this listener's cache - is the one delivery acts on.
+// it (Resolve) rather than resolving it a second time, so the record the caller read - the
+// store's own word for it, not just this listener's cache - is the one delivery acts on.
+//
+// It is the core path's delivery, whose message is not the durable's copy of a stored one, so it
+// resolves under a stream sequence of 0: a session on consumer delivery is left its consumer's
+// copy whatever that copy's sequence is.
 func HandleAgentMessage(
 	item contracts.Envelope,
 	sessionID string,
 	machineID string,
 	interest *store.Interest,
 	entry *SessionEntry,
-	deliverer *Deliverer,
 ) HandleAgentResult {
-	return handleAgentMessage(item, sessionID, machineID, interest, entry, deliverer.DeliverWithResultForEntry)
+	return handleAgentMessage(item, sessionID, machineID, interest, entry, 0)
 }
 
 // ResolveStoredAgentMessage is HandleAgentMessage for the durable path's copy of a stored message
 // of stream sequence storedSeq. The sequence decides whether a session on consumer delivery is
-// already held this message by its own consumer, which relays it (Deliverer.Resolve).
+// already held this message by its own consumer, which relays it (Resolve).
 func ResolveStoredAgentMessage(
 	item contracts.Envelope,
 	sessionID string,
 	machineID string,
 	interest *store.Interest,
 	entry *SessionEntry,
-	deliverer *Deliverer,
 	storedSeq uint64,
 ) HandleAgentResult {
-	return handleAgentMessage(item, sessionID, machineID, interest, entry, func(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
-		// An agent message is stored on the subject it names as its topic, the session's own
-		// agent subject.
-		return deliverer.Resolve(item, interest, entry, item.Topic, storedSeq)
-	})
+	return handleAgentMessage(item, sessionID, machineID, interest, entry, storedSeq)
 }
 
 func handleAgentMessage(
@@ -107,11 +105,14 @@ func handleAgentMessage(
 	machineID string,
 	interest *store.Interest,
 	entry *SessionEntry,
-	deliver func(contracts.Envelope, store.Interest, *SessionEntry) (DeliveryResult, error),
+	// storedSeq is the stream sequence the delivery resolves under, 0 for the core path. An agent
+	// message is stored on the subject it names as its topic, the session's own agent subject, so
+	// both paths below resolve against item.Topic.
+	storedSeq uint64,
 ) HandleAgentResult {
 	// Interest path: the stored subscription names this listener, which owns the session.
 	if interest != nil && interest.MachineID == machineID {
-		delivery, err := deliver(item, *interest, entry)
+		delivery, err := Resolve(item, *interest, entry, item.Topic, storedSeq)
 		if err != nil {
 			return HandleAgentResult{ShouldNAK: true, Err: err, Reason: reasonFor(err)}
 		}
@@ -129,7 +130,7 @@ func handleAgentMessage(
 	// No stored subscription names an owner, so this listener answers for the session: there is
 	// nobody else the message can be left to. The entry is the one the caller resolved, delivered
 	// through directly rather than read a second time.
-	delivery, err := deliver(item, store.Interest{SessionID: sessionID}, entry)
+	delivery, err := Resolve(item, store.Interest{SessionID: sessionID}, entry, item.Topic, storedSeq)
 	if err != nil {
 		// Session not found or delivery failed without interest — don't NAK,
 		// another listener may own this session.

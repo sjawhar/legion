@@ -28,9 +28,9 @@ const (
 	// Service, and only then takes its SIGTERM.
 	clusteredHubListenerPreStopSeconds = tailnetPreStopDrainSeconds + tailnetPreStopWaitSeconds
 	// clusteredHubListenerShutdownSeconds is the longest the session listener takes to stop on its
-	// SIGTERM: the HTTP server's 10 s, the live lane's 3 s drain and the NATS connection's 13 s
-	// drain, run one after another (packages/envoy/cmd/listener/main.go:978,1011,1021, its sum
-	// stated at :1018-1020).
+	// SIGTERM: the HTTP server's 10 s, the role lane's 3 s drain and the NATS connection's 13 s
+	// drain, run one after another (packages/envoy/cmd/listener/main.go:1225,1263,1270, its sum
+	// stated at :1267-1269).
 	clusteredHubListenerShutdownSeconds = 10 + 3 + 13
 
 	// clusteredHubTailnetUID is the one uid every container of a tailnet host pod runs as

@@ -21,7 +21,6 @@ import (
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
-	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/testpg"
 )
@@ -120,8 +119,7 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		sessions:    d.sessions,
 		machineID:   rigMachineID,
 		// The delivery config resolves the entry from its own sessions field and hands it to
-		// DeliverWithResultForEntry, so the deliverer holds no registry of its own (INFRA-141).
-		deliverer:         &session.Deliverer{},
+		// session.Resolve, which holds no registry of its own (INFRA-141).
 		dedupeCache:       dedupeCache,
 		attemptCache:      attemptCache,
 		logger:            listenerRigLogger(t, "delivery listener"),
@@ -137,8 +135,8 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		// delivery rather than the retry policy (INFRA-141).
 		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
-	// The role lane's forwards run off the handler, as main.go wires them (wireDeliveryWorkers).
-	config = wireTestDeliveryWorkers(t, config)
+	// The role lane's forwards run off the handler, as main.go wires them (wireRoleForwarder).
+	config = wireTestRoleForwarder(t, config)
 	delivery := connectSessionDelivery([]string{testnats.URL(t)}, config.logger)
 	t.Cleanup(delivery.close)
 	if delivery.consumers == nil {

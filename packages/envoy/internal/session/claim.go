@@ -28,9 +28,9 @@ const ClaimStaleAfter = 5 * time.Minute
 // claim went stale. Both turned on the two claims naming different serving ports, and a
 // registration may no longer carry a port at all (cmd/listener/api.go's subscribeHandler refuses
 // one), so every claim now names port 0, neither rule could fire again, and the entry follows the
-// latest heartbeat. The incumbent is still read, for curErr: what it holds no longer enters the
-// decision.
-func mergeForClaim(cur SessionEntry, curErr error, next SessionEntry, now int64) (SessionEntry, error) {
+// latest heartbeat. The incumbent is still read by the caller, for curErr alone: what it holds no
+// longer enters the decision, so it is no longer passed here.
+func mergeForClaim(curErr error, next SessionEntry, now int64) (SessionEntry, error) {
 	if curErr != nil && !errors.Is(curErr, nats.ErrKeyNotFound) {
 		return SessionEntry{}, curErr
 	}

@@ -21,13 +21,12 @@ import (
 // testEnv holds a complete test environment: NATS, the listener's delivery logic, and the count
 // of deliveries made to each session.
 type testEnv struct {
-	t         *testing.T
-	ctx       context.Context
-	client    *bus.Client
-	registry  *store.Registry
-	sessions  *session.SessionRegistry
-	deliverer session.Deliverer
-	dedupe    *dedupe.Cache
+	t        *testing.T
+	ctx      context.Context
+	client   *bus.Client
+	registry *store.Registry
+	sessions *session.SessionRegistry
+	dedupe   *dedupe.Cache
 
 	// mu guards delivered, one count per session the consumer below delivered to, and recorders,
 	// the envelopes a test asked to be given as they are delivered.
@@ -213,7 +212,7 @@ func (env *testEnv) startConsumer(machineID string) {
 			if entryErr == nil {
 				entryPtr = &entry
 			}
-			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, entryPtr, &env.deliverer)
+			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, entryPtr)
 			if result.Delivered {
 				env.dedupe.Record(item.DedupeKey, sessionID)
 				env.recordDelivery(sessionID, item)
@@ -241,13 +240,13 @@ func (env *testEnv) startConsumer(machineID string) {
 				continue
 			}
 			// The listener resolves the subscriber's record and delivers through it
-			// (fanoutDelivery, cmd/listener/delivery.go); the Deliverer reads no registry.
+			// (fanoutDelivery, cmd/listener/delivery.go); session.Resolve reads no registry.
 			targetEntry, targetErr := env.sessions.Get(interest.SessionID)
 			var target *session.SessionEntry
 			if targetErr == nil {
 				target = &targetEntry
 			}
-			if _, err := env.deliverer.DeliverWithResultForEntry(item, interest, target); err != nil {
+			if _, err := session.Resolve(item, interest, target, item.Topic, 0); err != nil {
 				failed = true
 			} else {
 				env.dedupe.Record(item.DedupeKey, interest.SessionID)

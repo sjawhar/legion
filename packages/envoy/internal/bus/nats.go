@@ -1700,8 +1700,8 @@ var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 // sent to subject: the key, a colon, the subject. A publish and a window's
 // JetStream send stamp an envelope that earns a MsgId with it
 // (publishJetStream, window.sendJetStream), so each topic one upstream event
-// is published on keeps its own copy, and a forward passes it to startForward
-// (for RequestCoreTo and StartRequestCoreTo alike) as the forward's
+// is published on keeps its own copy, and a forward passes it to
+// StartRequestCoreTo, which RequestCoreTo publishes through, as the forward's
 // Nats-Msg-Id. A stream that captures subject stores a forward
 // sent again to the same subject once, within its duplicate window, and one
 // sent to another subject again, as a message of its own there.
@@ -1752,19 +1752,6 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, msgID st
 // connection that never came back within timeout); every returned forward must be waited for, which
 // releases its reply subscription.
 func (c *Client) StartRequestCoreTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (*PendingForward, error) {
-	return c.startForward(subject, item, msgID, timeout)
-}
-
-// PendingForward is a forward StartRequestCoreTo published, whose replies Wait reads.
-type PendingForward struct {
-	receipt  *nats.Subscription
-	deadline time.Time
-	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the replies
-	// may still overrule; nil when it confirmed the publish.
-	unconfirmed error
-}
-
-func (c *Client) startForward(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (*PendingForward, error) {
 	if err := checkSubject(subject); err != nil {
 		return nil, err
 	}
@@ -1794,6 +1781,15 @@ func (c *Client) startForward(subject string, item contracts.Envelope, msgID str
 		return nil, err
 	}
 	return &PendingForward{receipt: receipt, deadline: deadline, unconfirmed: err}, nil
+}
+
+// PendingForward is a forward StartRequestCoreTo published, whose replies Wait reads.
+type PendingForward struct {
+	receipt  *nats.Subscription
+	deadline time.Time
+	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the replies
+	// may still overrule; nil when it confirmed the publish.
+	unconfirmed error
 }
 
 // Wait reads the forward's replies until its outcome is known or its window ends, and releases its

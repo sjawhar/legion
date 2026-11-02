@@ -104,7 +104,7 @@ func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
 		forwardedSubjects = append(forwardedSubjects, subject)
 		return nil
 	})
-	config = wireTestDeliveryWorkers(t, config)
+	config = wireTestRoleForwarder(t, config)
 
 	item := listenerTestEnvelope(roleSubject, "core-role-supersession-race")
 	roleTopicDelivery(config, deliveryMessage{mode: coreDelivery}, item)

@@ -21,7 +21,7 @@ const claimNow = int64(1_700_000_000_000)
 func TestMergeForClaim_NewSessionAccepted(t *testing.T) {
 	next := SessionEntry{Dir: "/work/first", Driving: false}
 
-	got, err := mergeForClaim(SessionEntry{}, natsgo.ErrKeyNotFound, next, claimNow)
+	got, err := mergeForClaim(natsgo.ErrKeyNotFound, next, claimNow)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -36,17 +36,16 @@ func TestMergeForClaim_NewSessionAccepted(t *testing.T) {
 func TestMergeForClaim_TransientGetErrorRefusesWrite(t *testing.T) {
 	boom := errors.New("kv unavailable")
 
-	_, err := mergeForClaim(SessionEntry{}, boom, SessionEntry{Dir: "/work/first"}, claimNow)
+	_, err := mergeForClaim(boom, SessionEntry{Dir: "/work/first"}, claimNow)
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected the transient KV error to be returned, got %v", err)
 	}
 }
 
 func TestMergeForClaim_SameProcessRefreshes(t *testing.T) {
-	cur := SessionEntry{Dir: "/work/first", Driving: true, UpdatedAt: claimNow - 120_000}
 	next := SessionEntry{Dir: "/work/first", Driving: true}
 
-	got, err := mergeForClaim(cur, nil, next, claimNow)
+	got, err := mergeForClaim(nil, next, claimNow)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,31 +54,23 @@ func TestMergeForClaim_SameProcessRefreshes(t *testing.T) {
 	}
 }
 
-// The latest claim takes the route whatever the incumbent said. Both rows were decided by the
-// two claims' serving ports until dispatch://INFRA-889: a driving claim displaced a non-driving
-// incumbent, and a newer driving claim displaced a live driving one (a genuine re-home, the
-// session restarted in a new process with -s). No claim carries a port now, so neither rule can
-// fire and both rows are the one rule that is left.
+// The latest claim takes the route whatever the incumbent said. Two rows stood here until
+// dispatch://INFRA-889, both decided by the two claims' serving ports: a driving claim displaced
+// a non-driving incumbent, and a newer driving claim displaced a live driving one (a genuine
+// re-home, the session restarted in a new process with -s). No claim carries a port now, so
+// neither rule can fire, the incumbent no longer reaches mergeForClaim at all, and the two rows
+// were one call with one argument apiece. What the incumbent held is covered where it is still
+// read, through the registry: TestSessionRegistry_PutWritesTheLatestClaimThrough writes a live
+// non-driving row and then the driving claim that displaces it.
 func TestMergeForClaim_TheLatestClaimTakesTheRoute(t *testing.T) {
-	for _, tc := range []struct {
-		name            string
-		incumbentDrives bool
-	}{
-		{name: "the incumbent is not driving"},
-		{name: "the incumbent is driving", incumbentDrives: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cur := SessionEntry{Dir: "/work/incumbent", Driving: tc.incumbentDrives, UpdatedAt: claimNow - 1_000}
-			next := SessionEntry{Dir: "/work/newcomer", Driving: true}
+	next := SessionEntry{Dir: "/work/newcomer", Driving: true}
 
-			got, err := mergeForClaim(cur, nil, next, claimNow)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got.Dir != "/work/newcomer" {
-				t.Fatalf("expected the latest claim to take the route, got %+v", got)
-			}
-		})
+	got, err := mergeForClaim(nil, next, claimNow)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Dir != "/work/newcomer" {
+		t.Fatalf("expected the latest claim to take the route, got %+v", got)
 	}
 }
 

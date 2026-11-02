@@ -1030,7 +1030,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 			forwards.Add(1)
 			return nil
 		})
-		cfg = wireTestDeliveryWorkers(t, cfg)
+		cfg = wireTestRoleForwarder(t, cfg)
 		item := listenerTestEnvelope(contracts.RoleTopicPrefix+"unread", "unread-holder-delivery")
 		probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
 		if err != nil {

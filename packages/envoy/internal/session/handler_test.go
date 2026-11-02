@@ -22,11 +22,11 @@ func resolvedEntry(t *testing.T, sessions *session.SessionRegistry, sessionID st
 // TestHandleAgentMessage_UnknownSession tests that when no registry has the session,
 // the handler signals no delivery (ACK, don't NAK).
 func TestHandleAgentMessage_UnknownSession(t *testing.T) {
-	_, deliverer := newKVDeliverer(t)
+	newSessionRegistry(t)
 
 	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_unknown", "test"),
-		"ses_unknown", "test-machine", nil, nil, &deliverer,
+		"ses_unknown", "test-machine", nil, nil,
 	)
 
 	if result.Delivered {
@@ -45,7 +45,7 @@ func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 // the handler reports it owned elsewhere and does not NAK, since the listener its topics are
 // fanned out on delivers the message from its own durable.
 func TestHandleAgentMessage_StoredInterestOnAnotherMachine(t *testing.T) {
-	sessions, deliverer := newKVDeliverer(t)
+	sessions := newSessionRegistry(t)
 	if err := sessions.Put("ses_target", session.SessionEntry{Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestHandleAgentMessage_StoredInterestOnAnotherMachine(t *testing.T) {
 
 	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
-		"ses_target", "test-machine", interest, resolvedEntry(t, sessions, "ses_target"), &deliverer,
+		"ses_target", "test-machine", interest, resolvedEntry(t, sessions, "ses_target"),
 	)
 
 	if !result.OwnedElsewhere || result.Delivered || result.ShouldNAK || result.Err != nil {

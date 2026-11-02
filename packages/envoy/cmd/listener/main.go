@@ -936,8 +936,6 @@ func main() {
 		endListenerKVWatchers(ctx, caches)
 	})
 
-	deliver := session.Deliverer{}
-
 	dedupeCache := dedupe.New(10 * time.Minute)
 
 	// attemptCache tracks (dedupe_key, session_id) pairs BEFORE a delivery is reported, so a
@@ -965,7 +963,6 @@ func main() {
 		registry:          registry,
 		sessions:          sessions,
 		machineID:         cfg.MachineID,
-		deliverer:         &deliver,
 		dedupeCache:       dedupeCache,
 		attemptCache:      attemptCache,
 		logger:            logger,
@@ -985,8 +982,8 @@ func main() {
 	// The role lane's forwards run off its handler (roleForwarder): the handler resolves each
 	// role message's holder and hands the forward over, and the forwards to one holder are
 	// published in order while each waits for its outcome on its own. It is wired here, last, so
-	// every seam of the configuration it copies is set (wireDeliveryWorkers).
-	deliveryConfig = wireDeliveryWorkers(deliveryConfig)
+	// every seam of the configuration it copies is set (wireRoleForwarder).
+	deliveryConfig = wireRoleForwarder(deliveryConfig)
 	roleForwards := deliveryConfig.roleForwards
 
 	// The role lane is a core-NATS queue subscription on a connection of its own with finite pending
