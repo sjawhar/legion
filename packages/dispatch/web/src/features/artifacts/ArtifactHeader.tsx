@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import type { Artifact, Version } from "../../api/types";
+import type { AnchorBox, Artifact, Version } from "../../api/types";
 import {
   borderDefault,
   card,
@@ -31,6 +31,7 @@ import {
   documentRoute,
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { FileCommentBox, type FileCommentOwner, PictureBoxes } from "./FileComments";
 
 export function artifactVersionUrl(artifactID: string, version: number): string {
   return `/api/v1/artifacts/${encodeURIComponent(artifactID)}/versions/${version}`;
@@ -221,16 +222,34 @@ export function ArtifactHeader({
   );
 }
 
+/**
+ * An uploaded file that is not a document: a picture drawn whole, its version's size, time and
+ * download. With `comments` - an issue's file or a project's, never a picture of an agent's
+ * conversation - the page also takes comments on it: the **Comment** box under the file, and on a
+ * picture its box threads drawn over it and a drag that draws the next one (`FileComments.tsx`).
+ */
 export function ArtifactBlobView({
   artifact,
+  comments,
   version,
 }: {
   artifact: Artifact;
+  comments?: { readonly isClosed: boolean; readonly owner: FileCommentOwner };
   version: number | undefined;
 }): ReactNode {
   const latest = versionsNewestFirst(artifact.versions)[0];
   const selected =
     version === undefined ? latest : artifact.versions.find((item) => item.number === version);
+  const shownVersion = selected?.number;
+  // The box a comment being written is about, drawn on the version shown: another version or file
+  // takes it away, since its fractions name part of this picture.
+  const [draft, setDraft] = useState<AnchorBox>();
+  const [drawing, setDrawing] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the box belongs to this file and version
+  useEffect(() => {
+    setDraft(undefined);
+    setDrawing(false);
+  }, [artifact.id, shownVersion]);
 
   if (selected === undefined) {
     return version === undefined ? (
@@ -245,13 +264,28 @@ export function ArtifactBlobView({
   const download = artifactVersionUrl(artifact.id, selected.number);
   return (
     <section aria-label={`${artifact.name} version ${selected.number}`} className="space-y-3">
-      {artifact.kind === "image" ? (
+      {artifact.kind !== "image" ? null : comments === undefined ? (
         <img
           alt={`${artifact.name} version ${selected.number}`}
           className={`h-auto w-full rounded-lg border ${borderDefault}`}
           src={download}
         />
-      ) : null}
+      ) : (
+        <PictureBoxes
+          alt={`${artifact.name} version ${selected.number}`}
+          artifact={artifact}
+          canDraw={!comments.isClosed}
+          draft={draft}
+          drawing={drawing}
+          onDraw={(box) => {
+            setDraft(box);
+            setDrawing(false);
+          }}
+          owner={comments.owner}
+          src={download}
+          version={selected.number}
+        />
+      )}
       <dl className="grid grid-cols-2 gap-3 text-sm">
         <div>
           <dt className={textMutedOnCanvas}>Version</dt>
@@ -274,6 +308,18 @@ export function ArtifactBlobView({
       >
         Download version {selected.number}
       </a>
+      {comments === undefined ? null : (
+        <FileCommentBox
+          artifact={artifact}
+          draft={draft}
+          drawing={drawing}
+          isClosed={comments.isClosed}
+          onClearDraft={() => setDraft(undefined)}
+          onDrawingChange={setDrawing}
+          owner={comments.owner}
+          version={selected.number}
+        />
+      )}
     </section>
   );
 }

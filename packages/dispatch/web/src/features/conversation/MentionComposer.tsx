@@ -77,6 +77,7 @@ import type {
   ComposerAnchor,
   ComposerKind,
   ComposerOwner,
+  FileComposerAnchor,
   ReplyTarget,
 } from "./composer-model";
 import { MODE_LABELS, plainDelivery } from "./delivery";
@@ -418,6 +419,9 @@ function refusalMessage(
 interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
+  /** A comment on an uploaded file, or on a box drawn over a picture, in place of `anchor`: the
+   *  file page's Comment box passes it, and the send carries it as the comment's anchor. */
+  readonly fileAnchor?: FileComposerAnchor;
   /** What the host says in place of the server's words when it refused this send for a mark the
    *  document no longer holds (`ANCHOR_MISSING`) and could not write that mark again: the margin's
    *  message, kept with the mark it answers, since the composer stays mounted when a newer compose
@@ -474,6 +478,7 @@ export function MentionComposer({
   agents: suppliedAgents,
   anchor,
   anchorRefusal,
+  fileAnchor,
   autoFocus = false,
   closed = false,
   docked = false,
@@ -934,6 +939,7 @@ export function MentionComposer({
     sentReplacement = replacement
   ): Omit<SentRequest, "sendKey"> => ({
     anchor,
+    ...(fileAnchor === undefined ? {} : { fileAnchor }),
     ask: { multiple, options: submittedAskOptions(askOptions), urgency },
     draft: { body: sentBody, mentions, replacement: sentReplacement },
     edit:

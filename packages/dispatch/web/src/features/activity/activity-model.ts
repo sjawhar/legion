@@ -106,6 +106,10 @@ function describe(event: Event, previousStatus: string | undefined): string | Ag
         return `replied to “${event.payload.ask_question ?? "an ask"}”`;
       }
       if (event.payload.reply_to !== null) return "replied to a comment";
+      if (event.payload.anchor?.kind === "file") {
+        const { box, version } = event.payload.anchor;
+        return `commented on ${event.payload.artifact_name} (${box === undefined ? "the whole file" : "part of the picture"}, version ${version})`;
+      }
       return `commented on ${event.payload.artifact_name}: “${event.payload.anchor?.quote ?? ""}”`;
     case "comment.answered":
       return "answered a comment";

@@ -699,6 +699,24 @@ export const errorCodeBlockText = "text-slate-900 dark:text-rose-300";
  * also gets a background/border change elsewhere), so no contrast check applies. */
 export const highlightRing = "ring-2 ring-sky-400";
 
+/** A box drawn over part of a picture (`features/artifacts/PictureBoxes.tsx`). The picture under
+ * it can be any colour in either scheme, so a box is fixed in both: an amber edge inside a thin
+ * dark outline that keeps it visible on a light or a dark picture, sky when its thread is chosen,
+ * dashed while it is a draft not yet sent. Decorative edges: the number tag carries the text. */
+export const pictureBox = "border-2 border-amber-400 outline outline-1 outline-slate-950";
+export const pictureBoxActive =
+  "border-2 border-sky-400 bg-sky-400/20 outline outline-2 outline-slate-950";
+export const pictureBoxDraft =
+  "border-2 border-dashed border-amber-400 bg-amber-400/20 outline outline-1 outline-slate-950";
+/** A box's number, on a tag at its top-left corner, fixed both schemes like the box. */
+export const PICTURE_BOX_TAG_BG = pair(P.AMBER_400, P.AMBER_400);
+export const PICTURE_BOX_TAG_ACTIVE_BG = pair(P.SKY_400, P.SKY_400);
+export const PICTURE_BOX_TAG_TEXT = pair(P.SLATE_950, P.SLATE_950);
+registerText("picture box number", PICTURE_BOX_TAG_TEXT, PICTURE_BOX_TAG_BG);
+registerText("chosen picture box number", PICTURE_BOX_TAG_TEXT, PICTURE_BOX_TAG_ACTIVE_BG);
+export const pictureBoxTag = "bg-amber-400 text-slate-950";
+export const pictureBoxTagActive = "bg-sky-400 text-slate-950";
+
 /** A composer reference chip's border: fixed both schemes (its `sky-800`/`sky-300` text is
  * `badgeMed.text`'s own values, reused directly; its hover border is `controlHoverBorder`). */
 export const referencePillBorder = "border-sky-300";

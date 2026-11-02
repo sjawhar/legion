@@ -487,6 +487,9 @@ the `legion_managed_status` query is `legionManagedStatus` (`internal/dispatch/a
 A chain deeper than the cap answers "not managed" there and the line prints.
 
 Quote-anchored asks and comments retain their inline mark and quote cache, plus the stable `block_id` of the lowest block containing the complete quote.
+A comment on an uploaded file that is not a document has a file anchor instead (`model.AnchorKindFile`, `kind: "file"` in the stored jsonb): the file, the version the comment is about (the request's `version`, else the file's latest), and on a picture an optional `box`, four fractions of its width and height from its top-left corner (`left`, `top`, `width`, `height`), each inside the picture and covering some of it (`api/anchors.go`, `resolveFileAnchor`, `anchorBox`).
+Its `mark_id` is the comment's own id, its `quote` empty and its `block_id` null; no document holds a mark for it, so it is never projected, refreshed, orphaned or backfilled (`Anchor.OnText` guards every document-service call, and `BackfillAnchorBlocks` selects only text anchors).
+A file anchor on a Markdown document, an ask or a suggestion is refused `400 INVALID_ANCHOR`, and a box on a file that is not a picture `400 NOT_PICTURE`.
 A quote that spans top-level siblings stays unpinned.
 `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range, SHA-256 token over its complete Proof state (including inline marks), and `{comments, asks}` reference counts, and a table block's `table.rows`:
 each row's id and index and each cell's id, row, column, the opening words of the header drawn above it and its own, every one placed by the walk that places blocks for the block route (`pmdoc.BlockPathsAndTableRows`;
@@ -4018,7 +4021,8 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   a person's comment reply (`reply_to` set), and its edit, reaches every session that wrote a comment in its thread - the root and every reply, walked to `maxCommentThreadDepth` for legacy nested rows - and every session the thread's document credits;
   a message reply's direct parent author; for a resolve or reopen, the resolved comment's root author only, so the reopen a reply makes in the same transaction tells no new session twice;
   and for a new comment on a document (no `reply_to`, no `ask_id`) and its edit, every session the document credits - the one that created it (`artifacts.created_by`) and every one a version lists (`artifact_versions.authors`), read in one query (`loadDocumentSessionAuthors`) - so a person's comment on a passage, on a whole document or as a suggestion reaches the agent that wrote the document.
-  That document is the anchor's (`anchor.artifact_id`) for a comment on a passage of an issue's document, and the event's own for a project document;
+  An uploaded file that is not a document, a picture among them, credits its uploaders the same way (`documentCreditsSQL` reads every artifact's kind), so a person's comment on the whole file, or on a box drawn over part of a picture, reaches the agent that uploaded it.
+  That document is the anchor's (`anchor.artifact_id`) for a comment on a passage of an issue's document or on an issue's file, and the event's own for a project document;
   for a reply, it is the thread root's, since a reply carries no anchor.
   A comment on an issue's conversation names no document.
   A batch reads the thread sessions and the thread's document authors of all its replies in one query (`outbox/recipients.go`, `loadCommentRecipients`), keyed by the comment each reply is under.

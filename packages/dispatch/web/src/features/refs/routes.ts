@@ -722,16 +722,18 @@ export function itemRoute(
 
 /** The path that opens `artifact` with `item` in view: the document's own route naming the item,
  *  the shape every in-app thread link already uses. A typed ask block is named by its block
- *  fragment, which is how a decision block is focused, rather than by the ask's id. */
+ *  fragment, which is how a decision block is focused, rather than by the ask's id. `version`
+ *  opens a version of the artifact, as a thread on part of an older picture needs. */
 export function documentItemPath(
   artifact: Pick<Artifact, "issue_key" | "kind" | "primary" | "project" | "slug">,
-  item: { blockID?: string; id: string; kind: "ask" | "comment" }
+  item: { blockID?: string; id: string; kind: "ask" | "comment" },
+  version?: number
 ): string {
-  const path = buildReferencePath(documentRoute(artifact));
+  const path = buildReferencePath(documentRoute(artifact, version));
   if (item.blockID !== undefined) {
     return `${path}${blockFragment(item.blockID)}`;
   }
-  return `${path}?${item.kind}=${encodeURIComponent(item.id)}`;
+  return `${path}${path.includes("?") ? "&" : "?"}${item.kind}=${encodeURIComponent(item.id)}`;
 }
 
 /** A reference's compact plain-text form: what its link shows until the target's title

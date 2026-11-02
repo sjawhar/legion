@@ -273,6 +273,41 @@ test("a reply to a thread is kept and resumed whole", async () => {
   }
 });
 
+// A comment on a file kept across a reload goes out again to the same version and box.
+test("a comment on part of a picture is kept and resumed with its version and box", async () => {
+  const tab = keptTab();
+  const box = { height: 0.25, left: 0.62, top: 0.1, width: 0.3 };
+  const onPicture: SentRequest = {
+    ...request,
+    draft: { body: "This bar looks low.", mentions: [], replacement: "" },
+    fileAnchor: { artifact: "chart-id", box, version: 2 },
+    owner: { issueKey: "CORE-1", kind: "issue" },
+    sendKey: "send-picture",
+  };
+  const fileKey: MutationKey = ["file-composer", "chart-id"];
+  const createComment = spyOn(api, "createComment").mockReturnValue(
+    Promise.withResolvers<Comment>().promise
+  );
+  try {
+    heldOf(tab).held.send(fileKey, onPicture);
+    const { held: after, writes } = heldOf(tab);
+    writes.resume("alice");
+    await settle();
+    expect(after.get(fileKey)?.request.fileAnchor).toEqual({
+      artifact: "chart-id",
+      box,
+      version: 2,
+    });
+    expect(createComment.mock.calls.at(-1)?.[1]).toEqual({
+      anchor: { artifact: "chart-id", box, version: 2 },
+      body: "This bar looks low.",
+    });
+  } finally {
+    createComment.mockRestore();
+    tab.close();
+  }
+});
+
 // A comment edit's first save carries the ids the editor followed through it, at the
 // revision the blocks route answered. The page reloads before Dispatch answers and comes back
 // later than a send is made again on its own, so the send shows refused and its Retry goes under

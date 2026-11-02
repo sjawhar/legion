@@ -1,4 +1,4 @@
-import type { Actor, DeliveryCapability } from "../../api/types";
+import type { Actor, AnchorBox, DeliveryCapability } from "../../api/types";
 import type { RecordMarkPlacement } from "../doc/editor";
 
 /** The composer's data model: where a draft goes, what kind it is, and what it carries. The
@@ -24,6 +24,15 @@ export interface ComposerAnchor {
    *  the quote alone. */
   readonly placement?: RecordMarkPlacement;
   readonly quote: string;
+}
+
+/** A comment's anchor on an uploaded file that is not a document: the file, the version shown when
+ *  the reader wrote it, and on a picture the box they drew. Unlike a passage's anchor it names no
+ *  mark, so nothing has to be written again if a send is refused. */
+export interface FileComposerAnchor {
+  readonly artifact: string;
+  readonly box?: AnchorBox;
+  readonly version: number;
 }
 
 /** Why a compose's mark could not be written again after the server refused its send for a mark

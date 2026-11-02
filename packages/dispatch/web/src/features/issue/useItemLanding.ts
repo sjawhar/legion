@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { ApiError } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
+import { isFileAnchor } from "../artifacts/picture-box";
 import { askQuery, commentQuery, messageQuery } from "../refs/reference-target";
 import { buildIssuePath, documentItemPath, type IssueRoute } from "../refs/routes";
 
@@ -107,11 +108,17 @@ export function useItemLanding(
     return { kind: "pending" };
   }
   const artifact = issue.artifacts.find((candidate) => candidate.id === artifactID);
-  if (artifact === undefined || artifact.kind !== "doc") {
+  // A comment on an uploaded file lands on the file, at the version its box was drawn on when the
+  // file has had another since; any other item names a document or nothing.
+  const anchor = route.kind === "comment" ? comment.data?.comment.anchor : undefined;
+  const onFile = isFileAnchor(anchor) && artifact !== undefined && artifact.kind !== "doc";
+  if (artifact === undefined || (artifact.kind !== "doc" && !onFile)) {
     return { kind: "turn" };
   }
+  const latest = Math.max(0, ...artifact.versions.map((version) => version.number));
+  const version = onFile && anchor.version !== latest ? anchor.version : undefined;
   return {
     kind: "redirect",
-    to: documentItemPath(artifact, { blockID, id: route.id, kind: route.kind }),
+    to: documentItemPath(artifact, { blockID, id: route.id, kind: route.kind }, version),
   };
 }

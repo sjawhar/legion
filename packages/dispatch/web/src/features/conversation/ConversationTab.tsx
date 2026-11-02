@@ -6,6 +6,7 @@ import { api, issueStateRequest, type WriteBounds } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
 import type {
   Agent,
+  Anchor,
   Artifact,
   Comment,
   Message,
@@ -35,6 +36,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { deliveryAttempts } from "../agents/attempts";
+import { isFileAnchor } from "../artifacts/picture-box";
 import { AskCard } from "../inbox/AskCard";
 import { writePin } from "../issue/pin-write";
 import { conversationItemId, isPinnedConversation, stateForIssue } from "../issue/pins";
@@ -648,9 +650,13 @@ function CommentTurn({
       {item.root.anchor === null || anchorArtifact === undefined ? null : (
         <Link
           className={`ml-3 text-sm ${linkText}`}
-          to={documentItemPath(anchorArtifact, { id: item.root.id, kind: "comment" })}
+          to={documentItemPath(
+            anchorArtifact,
+            { id: item.root.id, kind: "comment" },
+            fileThreadVersion(item.root.anchor, anchorArtifact)
+          )}
         >
-          View in document
+          {isFileAnchor(item.root.anchor) ? `View on ${anchorArtifact.name}` : "View in document"}
         </Link>
       )}
       <div className="flex justify-end gap-1">
@@ -680,6 +686,14 @@ function CommentTurn({
       </div>
     </li>
   );
+}
+
+/** The version a thread on an uploaded file opens at: the one its box was drawn on, when the file
+ *  has had another since; the file's current version otherwise, and for every other thread. */
+function fileThreadVersion(anchor: Anchor, artifact: Artifact): number | undefined {
+  if (!isFileAnchor(anchor)) return undefined;
+  const latest = Math.max(0, ...artifact.versions.map((version) => version.number));
+  return anchor.version === latest ? undefined : anchor.version;
 }
 
 function TargetedMessageTurn({

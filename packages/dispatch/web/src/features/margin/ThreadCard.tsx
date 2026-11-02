@@ -29,6 +29,8 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { useFileBoxNumber } from "../artifacts/file-comments-query";
+import { fileThreadLabel, isFileAnchor } from "../artifacts/picture-box";
 import { useHeldSendsUnder } from "../conversation/held-sends";
 import { MentionComposer } from "../conversation/MentionComposer";
 import { passageItem, ReplyQuote } from "../conversation/ReplyQuote";
@@ -139,6 +141,33 @@ export interface ThreadCardProps {
   onEditingChange(id: string | undefined): void;
 }
 
+/** What a thread is about, above its first comment: the passage it quotes, or, for a thread on an
+ *  uploaded file, which box of the picture on which version, or the whole file. The box number is
+ *  the one drawn over the picture (`useFileBoxNumber`), so a card and its box name each other. */
+function AnchorLine({
+  comment,
+  owner,
+}: {
+  comment: Pick<ThreadComment, "anchor" | "id">;
+  owner: MarginOwner;
+}): ReactNode {
+  const anchor = comment.anchor;
+  const boxNumber = useFileBoxNumber(owner, comment);
+  if (anchor === null) return null;
+  if (isFileAnchor(anchor)) {
+    return (
+      <span className={`mb-2 block text-xs font-medium ${quoteBodyText}`} data-testid="file-anchor">
+        {fileThreadLabel(anchor, boxNumber)}
+      </span>
+    );
+  }
+  return (
+    <blockquote className={`mb-2 border-l-2 pl-2 ${quoteAccentBorder} ${quoteBodyText}`}>
+      {anchor.quote}
+    </blockquote>
+  );
+}
+
 function CommentBody({
   artifactSlug,
   comment,
@@ -187,11 +216,7 @@ function CommentBody({
   }
   return (
     <>
-      {anchor === null ? null : (
-        <blockquote className={`mb-2 border-l-2 pl-2 ${quoteAccentBorder} ${quoteBodyText}`}>
-          {anchor.quote}
-        </blockquote>
-      )}
+      <AnchorLine comment={comment} owner={owner} />
       {orphanNotice}
       {suggestion === null ? <MarkdownBody markdown={comment.body} /> : null}
       {suggestion !== null && anchor !== null ? (
@@ -507,13 +532,7 @@ export function ThreadCard({
                 </>
               ) : (
                 <>
-                  {root.anchor === null ? null : (
-                    <blockquote
-                      className={`mb-2 border-l-2 pl-2 ${quoteAccentBorder} ${quoteBodyText}`}
-                    >
-                      {root.anchor.quote}
-                    </blockquote>
-                  )}
+                  <AnchorLine comment={root} owner={owner} />
                   <MarkdownPreview lines={2} links="live" markdown={root.body} />
                   {isBareReferenceBody(root.body) ? <Unfurl body={root.body} /> : null}
                 </>

@@ -1,6 +1,6 @@
 ---
 title: Documents
-description: Specs and other documents, versions, margin comments, suggestions, decision blocks, approvals, block links, and search.
+description: Specs and other documents, versions, margin comments, comments on files and pictures, suggestions, decision blocks, approvals, block links, and search.
 sidebar:
   order: 3
 ---
@@ -78,6 +78,30 @@ A suggestion shows the text it would remove and the text it would add. A person 
 
 Anyone can propose a suggestion, with **Suggest** or through an agent's tools. Only a person can
 accept or reject one.
+
+## Comments on files and pictures
+
+An uploaded file that is not a Markdown document, such as a picture, a PDF or a CSV file, has a
+**Comment** box under it on its page. A comment there starts a thread about the whole file, on the
+version the page shows. The thread sits in the margin beside the file, as a document's threads do,
+and on the issue's Conversation tab, with replies, @-mentions, **Resolve** and its own link. Its
+card says what it is about: **Whole file · version 2**.
+
+On a picture, drag over part of it to comment on that part. The box you drew stays on the picture
+while you write; **Clear box** takes it away, and the comment is then about the whole picture again.
+On a phone, choose **Draw a box** first, so that dragging draws instead of scrolling the page. A
+box is kept as fractions of the picture's width and height, so it covers the same part of the
+picture at any size the page draws it.
+
+Each box is drawn over the picture with a number, and its card reads **Box 1 · version 2**.
+Choosing a box opens its thread in the margin, and choosing a card lights its box. A box belongs
+to the version it was drawn on. When the file has a newer version, the box is not drawn over the
+new picture, but its thread is still listed with the version it belongs to, and choosing it opens
+that version with the box drawn.
+
+A picture is a PNG, JPEG, GIF or WebP upload. Any other file, an SVG among them, takes comments on
+the whole file. A picture sent in a conversation on the Agents page belongs to that conversation,
+not to an issue or a project, and has no **Comment** box.
 
 ## Decision blocks
 

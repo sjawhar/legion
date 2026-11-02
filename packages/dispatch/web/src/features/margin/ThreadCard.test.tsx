@@ -687,3 +687,57 @@ test("a collapsed thread shows no reply and marks nothing", async () => {
     card.cleanup();
   }
 });
+
+// A thread on an uploaded file names the box it is about and the version the box is on, by the
+// number drawn over the picture, in place of a passage's quote; a thread on the whole file says so.
+test("a thread on a file names its box and version, or the whole file, in place of a quote", async () => {
+  const fileAnchor = {
+    artifact_id: "chart-id",
+    block_id: null,
+    kind: "file" as const,
+    mark_id: "box-2",
+    orphaned: false,
+    quote: "",
+    version: 1,
+  };
+  const first = comment("box-1", "First box", "2026-09-10T00:00:00Z", {
+    anchor: {
+      ...fileAnchor,
+      box: { height: 0.1, left: 0.1, top: 0.1, width: 0.1 },
+      mark_id: "box-1",
+    },
+  });
+  const second = comment("box-2", "Second box", "2026-09-10T00:01:00Z", {
+    anchor: { ...fileAnchor, box: { height: 0.2, left: 0.5, top: 0.5, width: 0.2 } },
+  });
+  const whole = comment("whole", "The whole chart", "2026-09-10T00:02:00Z", {
+    anchor: { ...fileAnchor, mark_id: "whole", version: 3 },
+  });
+  const listComments = spyOn(api, "listComments").mockResolvedValue([first, second, whole]);
+  try {
+    const boxView = renderCard(
+      thread({
+        anchor: second.anchor,
+        key: second.id,
+        replies: [],
+        root: { comment: second, kind: "comment" },
+      })
+    );
+    expect(await screen.findByText("Box 2 · version 1")).toBeDefined();
+    expect(screen.queryByText("selected text")).toBeNull();
+    boxView.unmount();
+
+    const wholeView = renderCard(
+      thread({
+        anchor: whole.anchor,
+        key: whole.id,
+        replies: [],
+        root: { comment: whole, kind: "comment" },
+      })
+    );
+    expect(screen.getByText("Whole file · version 3")).toBeDefined();
+    wholeView.unmount();
+  } finally {
+    listComments.mockRestore();
+  }
+});

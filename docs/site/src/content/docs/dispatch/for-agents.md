@@ -77,7 +77,7 @@ tells the agent who Dispatch takes it for.
 | Issues | `dispatch issue` creates one; `--blocked-by <key>`, repeated, names up to 20 issues in the same project it waits on. `dispatch issue-update` changes status, title, labels, priority, parent, links, blockers, or components; its `--blocked-by` replaces the list, and `--clear-blocked-by` empties it; `--before <KEY>` and `--after <KEY>` move it on its project's board, above that issue, below it, or between the two. `dispatch claim` claims an issue before work starts. `dispatch issues` lists a project's issues. |
 | Projects | `dispatch project` creates a project from a key and a name; a key that is already taken is refused. `dispatch projects` lists every project's key and name. |
 | Asks | `dispatch ask` opens one. `dispatch edit-ask` rewords an open one. `dispatch resolve-ask` retracts or resolves one. `dispatch follow` follows or leaves an ask's thread. `dispatch open-asks` lists open asks. `dispatch answers` lists, in full and newest first, every answer, comment and message a person wrote to the session in the last 72 hours. |
-| Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
+| Comments | `dispatch comment` comments on a document, on an uploaded file or a box on a picture, or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
 | Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
 | Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for. |
@@ -130,6 +130,7 @@ Each kind of write reaches people differently. Pick by what you need from them.
 | --- | --- | --- |
 | A decision only a person can make | An ask (`dispatch ask`, or a decision block in the spec) | The assignee's Inbox, under **Waiting on you** |
 | To point at a passage in a document | A comment with a quote (`dispatch comment`) | The document's margin and the issue's Conversation |
+| To point at an uploaded file, or part of a picture | A comment naming the file with no quote, and `--box` for part of a picture (`dispatch comment`) | The margin beside the file and the issue's Conversation |
 | To change specific text | A suggestion (`dispatch suggest`) | The margin, where a person accepts or rejects it |
 | To tell people a deliverable landed, or answer a person's message | A message (`dispatch message`) | The issue's Conversation |
 
@@ -173,6 +174,26 @@ shows the picture, which is how an agent gets one back after compaction.
 Write every ask for a person reading on a phone who has not read the code. Put the problem, what
 constrains the answer, and your recommendation in the question, and what each option costs in its
 description.
+
+## Comments on files and pictures
+
+A comment can be about an uploaded file that is not a Markdown document, such as a picture, a PDF
+or a CSV file. Name the file with `--artifact` and give no `--quote`; the comment is about the
+whole file, at its latest version, or at the version `--version` names. On a picture, `--box` names
+the part the comment is about as four fractions of the picture's width and height, measured from
+its top-left corner: left, top, width and height.
+
+```bash
+dispatch comment --issue CORE-12 --artifact chart.png --box 0.62,0.1,0.3,0.25 --body 'This bar looks low.'
+dispatch comment --issue CORE-12 --artifact results.csv --body 'Run 2 is missing.'
+```
+
+The box above starts 62% of the way across and 10% of the way down, and is 30% of the picture
+wide and 25% tall. A box must lie inside the picture, and a file that is not a picture takes no
+box. `dispatch doc-read` of a file lists every thread on it after the file, open ones first, each
+with its version and its box in the same four fractions, so you can read which part of the picture
+a person means. A box belongs to the version it was drawn on: when the file has a newer version,
+read the version the thread names.
 
 ## Documents
 
@@ -223,7 +244,9 @@ matters, resolve it with `dispatch resolve-ask`, giving the reason.
 You follow every ask you open or reply to. Its answer, edits, resolution, and replies reach you
 directly. A person's reply in a comment thread you wrote in reaches you directly. A person's
 comment on a document you wrote reaches you directly too: a new comment on a passage, on the whole
-document, or as a suggestion, and a reply in a thread on the document. A new comment on your ask
+document, or as a suggestion, and a reply in a thread on the document. So does a person's comment on
+a file you uploaded, on the whole file or on a box drawn over part of a picture, and a reply in a
+thread on it. A new comment on your ask
 or document that mentions you arrives once, as the mention, when the mention reached you; when the
 mention's send fails, the comment still reaches you directly.
 
