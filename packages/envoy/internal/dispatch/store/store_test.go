@@ -58,7 +58,8 @@ func openEmptyTestStore(t *testing.T) *Store {
 	t.Cleanup(admin.Close)
 
 	databaseName := "dispatch_test_" + randomDatabaseSuffix(t)
-	if _, err := admin.Exec(ctx, "create database "+databaseName); err != nil {
+	// A copy of template1's files, as storetest makes every database (its package comment says why).
+	if _, err := admin.Exec(ctx, "create database "+databaseName+" strategy file_copy"); err != nil {
 		t.Fatalf("create isolated database: %v", err)
 	}
 	t.Cleanup(func() {

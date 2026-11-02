@@ -68,7 +68,9 @@ func databaseOn(t testing.TB, raw string) string {
 	}
 	name := "testpg_" + hex.EncodeToString(suffix[:])
 	admin := databaseURL(*server, "postgres")
-	adminExec(t, admin, "create database "+name)
+	// A copy of template1's files: created the default way, through the write-ahead log, an empty
+	// database costs 4.4 MB of log (docs/testing.md, "A database a Go test creates").
+	adminExec(t, admin, "create database "+name+" strategy file_copy")
 	// `with (force)` ends any connection the test left open, so one leaked pool cannot keep a
 	// database on a shared server for the rest of the run.
 	t.Cleanup(func() { adminExec(t, admin, "drop database "+name+" with (force)") })
