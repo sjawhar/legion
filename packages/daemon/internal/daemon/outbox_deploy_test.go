@@ -290,7 +290,7 @@ func TestACheckCompareOfADeployRunWakesTheCheckForEachApplyAfterTheMerge(t *test
 			facts := &outboxFactHandler{}
 			var logged bytes.Buffer
 			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, tokens: outboxTokens{}, githubAPI: github.url, project: "legion",
-				renames: tc.renames, handlers: []intake.Handler{facts}, log: slog.New(slog.NewJSONHandler(&logged, nil)), now: time.Now}
+				repositories: newRepositories("LEGION", tc.renames), handlers: []intake.Handler{facts}, log: slog.New(slog.NewJSONHandler(&logged, nil)), now: time.Now}
 			named := check.OpenedAt
 			if tc.replaced {
 				named = named.Add(-24 * time.Hour)

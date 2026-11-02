@@ -310,11 +310,18 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 		}
 		s.log.Warn("api: read the open pull request on a completing implementer's branch; the completion is applied unread, and the required-checks pass records the pull request it finds", attributes...)
 	}
-	repository, err := ghrepo.Parse("the GitHub repository of "+issue.Key, issue.GitHubRepo)
+	recordedRepo, err := ghrepo.Parse("the GitHub repository of "+issue.Key, issue.GitHubRepo)
 	if err != nil {
 		logUnread(err)
 		return true
 	}
+	// This read is GitHub's own, so it is minted for and addressed at the repository GitHub holds
+	// the recorded one under now (serving): the record keeps the name it was written under for its
+	// whole life, while after a transfer the installation that covers the repository is the owner
+	// it moved to's, and GitHub's redirect of a repository's old location covers `git clone`,
+	// `git fetch` and `git push`, not a REST read addressed at the old name. The fact applied
+	// below goes on naming issue.GitHubRepo, the name the record is held under.
+	repository := s.serving(recordedRepo)
 	lease, err := s.tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
 		logUnread(fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err))

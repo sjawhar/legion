@@ -594,7 +594,7 @@ func (leaseTokens) ReadToken(_ context.Context, _ appauth.AppRole, owner string)
 func TestARefreshNeverGivesAReadOnlyPaneAWriteToken(t *testing.T) {
 	ctx := context.Background()
 	var logs strings.Builder
-	credential := appauth.GitHubCredential(leaseTokens{}, func() []string { return []string{"sjawhar", "acme"} }, ghrepo.Renames{}, nil)
+	credential := appauth.GitHubCredential(leaseTokens{}, func() []string { return []string{"sjawhar", "acme"} }, ghrepo.Renames{})
 	f := newFakeServerRuntime(t, credential, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	spec := f.spec(t, claim.RoleImplementer)
 	spec.Repository, spec.DefaultBranch = ghrepo.Repository{}, ""

@@ -127,6 +127,56 @@ func (r *repositories) Owners() []string {
 	return slices.Compact(owners)
 }
 
+// serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
+// other name of its configured pair when the project serves repositories of that name's owner
+// and none of the recorded name's, and recorded itself otherwise. It is the one rule every
+// GitHub call the daemon makes for a recorded tree reads — the owner its App token is minted for
+// and, where the call is a REST write or a GraphQL query, the repository it addresses — since a
+// record keeps the name it was written under for its whole life while GitHub, after a transfer,
+// holds the repository under the other name, on the other owner's installation.
+//
+// A nil mapping — a test that builds an outbox or a workflow without one — serves every recorded
+// repository under its own name, as a deployment that configures no rename does.
+func (r *repositories) serving(recorded ghrepo.Repository) ghrepo.Repository {
+	if r == nil {
+		return recorded
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.renames.Serving(recorded, r.ownsRepositoryOf)
+}
+
+// same is whether a and b name one repository: the same name, compared without case as GitHub
+// compares names, or the two names of a configured rename (ghrepo.Renames.Same). A nil mapping
+// compares without case alone.
+func (r *repositories) same(a, b string) bool {
+	if r == nil {
+		return strings.EqualFold(a, b)
+	}
+	return r.renames.Same(a, b)
+}
+
+// ownerAliases is the mapping's answer for ghrepo.Renames.OwnerAliases: each owner a configured
+// rename moved a repository away from, by the owner it moved to, and the pairs between two
+// owners of the project, which are no alias (logRenameOwnerConflicts).
+func (r *repositories) ownerAliases() (map[string]string, []ghrepo.Rename) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.renames.OwnerAliases(r.ownsRepositoryOf)
+}
+
+// ownsRepositoryOf is whether the mapping serves a repository of owner, compared without case as
+// GitHub compares owners (Owners lowercases its answer for the same reason). Its caller holds the
+// read lock, which is taken once per call however many owners a pair asks about.
+func (r *repositories) ownsRepositoryOf(owner string) bool {
+	for _, mapped := range r.accepted {
+		if strings.EqualFold(mapped.Repo.Owner(), owner) {
+			return true
+		}
+	}
+	return false
+}
+
 // Accepted is every served repository, as GitHub names it, sorted by name: what GitHub intake
 // hears, beside the repositories the project's records name.
 func (r *repositories) Accepted() []ghrepo.Repository {
@@ -551,6 +601,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	w.repositories.set(accepted, refused)
 	w.repositories.setWithoutWebhookApp(servedGaps(gaps, refused))
 	w.logUnservedRenames(accepted)
+	w.logRenameOwnerConflicts()
 	return nil
 }
 
@@ -566,6 +617,22 @@ func (w *workflowRuntime) logUnservedRenames(accepted []mappedRepository) {
 		}
 		w.log.Warn("workflow: a configured repository rename names a repository this project does not serve, so the pair is read wherever a name is compared but nothing is served under it",
 			"from", pair.From.String(), "to", pair.To.String(), "project", w.dispatchProject)
+	}
+}
+
+// logRenameOwnerConflicts says, once per mapping load, that a configured rename moved a
+// repository between two owners this project serves repositories of (ghrepo.Renames.OwnerAliases'
+// conflicts), naming the pair. Such a pair is no alias of either owner: each keeps its own gh
+// directory and its own token, since each one's repositories are the project's, and every GitHub
+// call for a repository recorded under the name it moved from goes on being minted for and
+// addressed at that name. It is said here because the owners that decide it are the mapping's,
+// which this load has just set: appauth.GitHubCredential and serving read the same rule and say
+// nothing, so no refresh of a credential repeats it.
+func (w *workflowRuntime) logRenameOwnerConflicts() {
+	_, conflicts := w.repositories.ownerAliases()
+	for _, pair := range conflicts {
+		w.log.Warn("workflow: a configured repository rename moved a repository between two owners of this project, so each owner keeps its own gh directory and its own token",
+			"from", pair.From.String(), "to", pair.To.String(), "owner", pair.From.Owner(), "project", w.dispatchProject)
 	}
 }
 

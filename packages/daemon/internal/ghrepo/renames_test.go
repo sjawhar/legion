@@ -1,6 +1,7 @@
 package ghrepo
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -174,5 +175,109 @@ func TestLookupsAreTheNameThenItsPartner(t *testing.T) {
 		if got := renames.Lookups(tc.name); !slices.Equal(got, tc.want) {
 			t.Errorf("Lookups(%q) = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// ownedBy is the owner predicate OwnerAliases and Serving take, over the owners a project serves
+// repositories of, compared without case as GitHub compares owners.
+func ownedBy(owners ...string) func(string) bool {
+	return func(owner string) bool {
+		return slices.ContainsFunc(owners, func(o string) bool { return strings.EqualFold(o, owner) })
+	}
+}
+
+// The zero value — a deployment that configures no rename — is no alias of any owner, and the
+// repository GitHub serves a recorded one under is that recorded one. Neither answer asks the
+// owner predicate anything, since there is no pair to ask about.
+func TestZeroRenamesAliasNoOwnerAndServeTheRecordedRepository(t *testing.T) {
+	var renames Renames
+	asked := func(string) bool {
+		t.Error("the zero Renames asked whether an owner is the project's")
+		return true
+	}
+	aliases, conflicts := renames.OwnerAliases(asked)
+	if len(aliases) != 0 || len(conflicts) != 0 {
+		t.Errorf("zero Renames.OwnerAliases = %v, %v, want neither an alias nor a conflict", aliases, conflicts)
+	}
+	for _, recorded := range []string{"sjawhar/legion", "cybermonklabs/legion", "acme/widgets"} {
+		if got := renames.Serving(MustParse(recorded), asked); got.String() != recorded {
+			t.Errorf("zero Renames.Serving(%s) = %s, want %s unchanged", recorded, got, recorded)
+		}
+	}
+}
+
+// A configured rename whose `to` owner the project owns and whose `from` owner it does not is one
+// alias: the owner the repository moved from is served by the owner it moved to, and a repository
+// recorded under the name it moved from is held by GitHub under the one it moved to. Every other
+// shape is no alias — a rename inside one owner, one whose `to` owner the project does not own,
+// and one between two owners of the project, which is a conflict and leaves each owner its own —
+// and in each of those the recorded repository is the one GitHub serves. The repository a pair
+// moved to is served under its own name, whichever side a name is asked from, and a repository of
+// an alias owner that no pair names is its own too.
+func TestOwnerAliasesAndServingOverAConfiguredRename(t *testing.T) {
+	transfer := MustRename("sjawhar/legion", "CyberMonkLabs/legion")
+	for _, tc := range []struct {
+		name      string
+		pairs     []Rename
+		owners    []string
+		aliases   map[string]string
+		conflicts []Rename
+		serving   map[string]string
+	}{
+		{
+			name:  "the owner it moved to is the project's and the one it moved from is not",
+			pairs: []Rename{transfer}, owners: []string{"CyberMonkLabs", "acme"},
+			aliases: map[string]string{"sjawhar": "cybermonklabs"},
+			serving: map[string]string{
+				"sjawhar/legion":       "CyberMonkLabs/legion",
+				"SJAWHAR/Legion":       "CyberMonkLabs/legion",
+				"CyberMonkLabs/legion": "CyberMonkLabs/legion",
+				"cybermonklabs/legion": "cybermonklabs/legion",
+				"sjawhar/legion-smoke": "sjawhar/legion-smoke",
+				"acme/widgets":         "acme/widgets",
+			},
+		},
+		{
+			name:  "the owner it moved to is not the project's",
+			pairs: []Rename{transfer}, owners: []string{"sjawhar", "acme"},
+			serving: map[string]string{"sjawhar/legion": "sjawhar/legion", "CyberMonkLabs/legion": "CyberMonkLabs/legion"},
+		},
+		{
+			name:  "both owners are the project's",
+			pairs: []Rename{transfer}, owners: []string{"sjawhar", "cybermonklabs"},
+			conflicts: []Rename{transfer},
+			serving:   map[string]string{"sjawhar/legion": "sjawhar/legion", "CyberMonkLabs/legion": "CyberMonkLabs/legion"},
+		},
+		{
+			name:  "a rename inside one owner",
+			pairs: []Rename{MustRename("acme/widgets", "ACME/gadgets")}, owners: []string{"acme"},
+			serving: map[string]string{"acme/widgets": "acme/widgets", "ACME/gadgets": "ACME/gadgets"},
+		},
+		{
+			name:  "one owner moved two repositories, one of them to an owner outside the project",
+			pairs: []Rename{transfer, MustRename("sjawhar/tools", "outside/tools")}, owners: []string{"cybermonklabs"},
+			aliases: map[string]string{"sjawhar": "cybermonklabs"},
+			serving: map[string]string{"sjawhar/legion": "CyberMonkLabs/legion", "sjawhar/tools": "sjawhar/tools"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			renames, err := NewRenames(tc.pairs)
+			if err != nil {
+				t.Fatalf("NewRenames: %v", err)
+			}
+			owned := ownedBy(tc.owners...)
+			aliases, conflicts := renames.OwnerAliases(owned)
+			if !maps.Equal(aliases, tc.aliases) {
+				t.Errorf("OwnerAliases over %q = %v, want %v", tc.owners, aliases, tc.aliases)
+			}
+			if !slices.Equal(conflicts, tc.conflicts) {
+				t.Errorf("OwnerAliases' conflicts over %q = %v, want %v", tc.owners, conflicts, tc.conflicts)
+			}
+			for recorded, want := range tc.serving {
+				if got := renames.Serving(MustParse(recorded), owned); got.String() != want {
+					t.Errorf("Serving(%s) over %q = %s, want %s", recorded, tc.owners, got, want)
+				}
+			}
+		})
 	}
 }

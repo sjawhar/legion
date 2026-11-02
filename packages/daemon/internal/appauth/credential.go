@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"maps"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
@@ -44,13 +42,9 @@ var ErrOwnerOutsideProject = errors.New("is not an owner of the project's reposi
 // repository as GitHub holds it now; the directory's name authorises nothing, the token in it
 // does. Such an alias owner is a default the controller may ask for too. Where the owner the
 // repository moved from is itself an owner of the project, its own entry wins — its repositories
-// are the project's and its token is its own — and the conflict is logged once, naming the pair.
-func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Renames, log *slog.Logger) runtime.GitHubCredential {
-	if log == nil {
-		log = slog.Default()
-	}
-	var conflictMu sync.Mutex
-	conflicted := map[ghrepo.Rename]bool{}
+// are the project's and its token is its own — which is a conflict the mapping's load warns of,
+// once per load, where the owners that decide it are read (daemon's logRenameOwnerConflicts).
+func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Renames) runtime.GitHubCredential {
 	return func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
 		appRole := AppRoleFor(role)
 		owner = strings.ToLower(owner)
@@ -60,26 +54,11 @@ func GitHubCredential(tokens Tokens, owners func() []string, renames ghrepo.Rena
 			all[strings.ToLower(o)] = true
 		}
 		// aliases is each owner a configured rename moved a repository away from, by the owner it
-		// moved to: the pair the bundle holds one entry for. A rename whose `to` the project does
-		// not own is no alias — nothing of it is served — and neither is one inside one owner.
-		aliases := map[string]string{}
-		for _, pair := range renames.Pairs() {
-			from, to := strings.ToLower(pair.From.Owner()), strings.ToLower(pair.To.Owner())
-			switch {
-			case from == to || !all[to]:
-				continue
-			case all[from]:
-				conflictMu.Lock()
-				if !conflicted[pair] {
-					conflicted[pair] = true
-					log.Warn("appauth: a configured repository rename moved a repository between two owners of this project, so each owner keeps its own gh directory and its own token",
-						"from", pair.From.String(), "to", pair.To.String(), "owner", from)
-				}
-				conflictMu.Unlock()
-				continue
-			}
-			aliases[from] = to
-		}
+		// moved to: the pair the bundle holds one entry for, and the daemon's one rule for whose
+		// installation holds a renamed repository now (ghrepo.Renames.OwnerAliases, which the
+		// mint sites of every GitHub call read too). Its conflicts are left to the mapping's load,
+		// so this is a pure function of its inputs and may be built per call.
+		aliases, _ := renames.OwnerAliases(func(name string) bool { return all[name] })
 		if role == claim.RoleController {
 			writer = ""
 			if _, alias := aliases[owner]; owner != "" && !all[owner] && !alias {

@@ -216,7 +216,7 @@ func (namedTokens) ReadToken(_ context.Context, role appauth.AppRole, owner stri
 // and sjawhar's directory, which the pod's GH_CONFIG_DIR names.
 func renamedCredentialBundle(t *testing.T, renames ghrepo.Renames) (root, defaultDir string) {
 	t.Helper()
-	credential := appauth.GitHubCredential(namedTokens{}, func() []string { return []string{"cybermonklabs"} }, renames, nil)
+	credential := appauth.GitHubCredential(namedTokens{}, func() []string { return []string{"cybermonklabs"} }, renames)
 	bundle, err := credential(context.Background(), legionclaim.RoleImplementer, "sjawhar")
 	if err != nil {
 		t.Fatalf("build the bundle: %v", err)

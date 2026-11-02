@@ -261,17 +261,22 @@ func readyMergeWaiting(payload record.ReadyMerge, waited time.Duration, cause er
 }
 
 // graphQL is a GitHub GraphQL client carrying the implement App's token, the App that writes the
-// issue branch and submits or disarms its pull request's merge, minted for the owner of the
-// repository issue's record names, and that repository.
+// issue branch and submits or disarms its pull request's merge, and the repository GitHub holds
+// the one issue's record names under now (serving), which the token is minted for the owner of.
+// A GraphQL query naming a repository GitHub has transferred away from that name is answered by
+// nothing — GitHub's redirect of a transferred repository covers `git clone`, `git fetch` and
+// `git push`, not an API call — so the submission and the disarm its callers make with the
+// repository returned here address the name GitHub serves, and their log lines name it.
 func (r *outbox) graphQL(ctx context.Context, issue string) (githubrest.Client, ghrepo.Repository, error) {
 	recorded, err := r.issue(ctx, issue)
 	if err != nil {
 		return githubrest.Client{}, ghrepo.Repository{}, err
 	}
-	repo, err := recorded.Repository()
+	named, err := recorded.Repository()
 	if err != nil {
 		return githubrest.Client{}, ghrepo.Repository{}, err
 	}
+	repo := r.repositories.serving(named)
 	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
 	if err != nil {
 		return githubrest.Client{}, ghrepo.Repository{}, fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)

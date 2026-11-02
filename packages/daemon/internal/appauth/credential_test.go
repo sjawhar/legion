@@ -1,10 +1,8 @@
 package appauth
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -60,7 +58,7 @@ func bundleTokens(t *testing.T, bundle ghconfig.Bundle) map[string]string {
 // fails the bundle, naming the owner; a project with no owner at all has no bundle.
 func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 	owners := func() []string { return []string{"sjawhar", "Acme"} }
-	credential := GitHubCredential(ownerTokens{}, owners, ghrepo.Renames{}, nil)
+	credential := GitHubCredential(ownerTokens{}, owners, ghrepo.Renames{})
 	for _, tc := range []struct {
 		name    string
 		role    claim.Role
@@ -102,17 +100,17 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 		})
 	}
 
-	refused := GitHubCredential(ownerTokens{refuse: "sjawhar"}, owners, ghrepo.Renames{}, nil)
+	refused := GitHubCredential(ownerTokens{refuse: "sjawhar"}, owners, ghrepo.Renames{})
 	if _, err := refused(context.Background(), claim.RoleImplementer, "acme"); err == nil ||
 		!strings.Contains(err.Error(), "sjawhar") || !strings.Contains(err.Error(), string(claim.RoleImplementer)) {
 		t.Errorf("a refused read mint = %v, want an error naming the owner and the role", err)
 	}
-	none := GitHubCredential(ownerTokens{}, func() []string { return nil }, ghrepo.Renames{}, nil)
+	none := GitHubCredential(ownerTokens{}, func() []string { return nil }, ghrepo.Renames{})
 	if _, err := none(context.Background(), claim.RoleController, ""); !errors.Is(err, runtime.ErrNoGitHubOwner) {
 		t.Errorf("a bundle with no owner = %v, want runtime.ErrNoGitHubOwner", err)
 	}
 	var minted []string
-	counting := GitHubCredential(countingTokens{minted: &minted}, owners, ghrepo.Renames{}, nil)
+	counting := GitHubCredential(countingTokens{minted: &minted}, owners, ghrepo.Renames{})
 	if _, err := counting(context.Background(), claim.RoleController, "Outside-Project"); !errors.Is(err, ErrOwnerOutsideProject) ||
 		!strings.Contains(err.Error(), `"outside-project"`) || len(minted) != 0 {
 		t.Errorf("the controller asking for an owner outside the project = %v, minted %q; want ErrOwnerOutsideProject naming it and no mint", err, minted)
@@ -165,7 +163,7 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var minted []string
-			credential := GitHubCredential(countingTokens{minted: &minted}, owners, ghrepo.MustRenames(legionRename), nil)
+			credential := GitHubCredential(countingTokens{minted: &minted}, owners, ghrepo.MustRenames(legionRename))
 			bundle, err := credential(context.Background(), tc.role, tc.owner)
 			if err != nil {
 				t.Fatalf("credential: %v", err)
@@ -198,7 +196,7 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 	t.Run("no pair configured", func(t *testing.T) {
 		var minted []string
 		both := func() []string { return []string{"Cybermonklabs", "sjawhar"} }
-		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.Renames{}, nil)
+		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.Renames{})
 		bundle, err := credential(context.Background(), claim.RoleImplementer, "cybermonklabs")
 		if err != nil {
 			t.Fatalf("credential: %v", err)
@@ -213,13 +211,13 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 	})
 
 	// Where the owner the repository moved from is itself an owner of the project, its own entry
-	// wins — its repositories are the project's and its token is its own — and the conflict is
-	// logged once, naming the pair, however many bundles the credential builds.
+	// wins — its repositories are the project's and its token is its own. The conflict is warned
+	// of where the owners that decide it are read, once per mapping load (the daemon's
+	// logRenameOwnerConflicts), so nothing is logged here.
 	t.Run("the owner it moved from is an owner of the project", func(t *testing.T) {
 		var minted []string
-		var logged bytes.Buffer
 		both := func() []string { return []string{"Cybermonklabs", "sjawhar"} }
-		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.MustRenames(legionRename), slog.New(slog.NewTextHandler(&logged, nil)))
+		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.MustRenames(legionRename))
 		bundle, err := credential(context.Background(), claim.RoleImplementer, "cybermonklabs")
 		if err != nil {
 			t.Fatalf("credential: %v", err)
@@ -233,12 +231,6 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 		}
 		if _, err := credential(context.Background(), claim.RoleReviewer, "sjawhar"); err != nil {
 			t.Fatalf("credential: %v", err)
-		}
-		if got := strings.Count(logged.String(), "moved a repository between two owners of this project"); got != 1 {
-			t.Errorf("the conflict is logged %d times, want once:\n%s", got, logged.String())
-		}
-		if !strings.Contains(logged.String(), "from=sjawhar/legion to=cybermonklabs/legion owner=sjawhar") {
-			t.Errorf("the conflict line does not name the pair:\n%s", logged.String())
 		}
 	})
 }

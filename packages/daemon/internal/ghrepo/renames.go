@@ -111,6 +111,65 @@ func (r Renames) Lookups(name string) []string {
 	return []string{name}
 }
 
+// OwnerAliases is each owner a configured rename moved a repository away from, by the owner it
+// moved to — the pairs whose `to` owner `owned` answers true for and whose `from` owner it does
+// not — and the pairs whose two owners are both owned, which are no alias.
+//
+// It is the one rule for whose installation holds a renamed repository now. A GitHub App is
+// installed on an owner, so once a transfer moves a repository to another owner, the installation
+// that covers it is that owner's: a token minted for the owner a record names would be minted on
+// an installation the repository has left. A rename inside one owner moves nothing between
+// installations and is therefore no alias. A pair whose `to` owner the project does not own is
+// served by nothing here, and a pair whose two owners are both the project's is a conflict rather
+// than an alias — each of those owners keeps its own token, since its own repositories are the
+// project's — which the caller reports as it sees fit.
+//
+// `owned` is asked of each pair's two owners, lowercased, and answers whatever the caller counts
+// as the project's owners, compared without case as GitHub compares owners. A deployment that
+// configures no rename asks it nothing and answers nil for both.
+func (r Renames) OwnerAliases(owned func(owner string) bool) (aliases map[string]string, conflicts []Rename) {
+	for _, pair := range r.pairs {
+		from, to := strings.ToLower(pair.From.Owner()), strings.ToLower(pair.To.Owner())
+		switch {
+		case from == to || !owned(to):
+			continue
+		case owned(from):
+			conflicts = append(conflicts, pair)
+		default:
+			if aliases == nil {
+				aliases = make(map[string]string, len(r.pairs))
+			}
+			aliases[from] = to
+		}
+	}
+	return aliases, conflicts
+}
+
+// Serving is the repository GitHub holds `recorded` under now: the other name of its configured
+// pair when that name's owner is an alias target of OwnerAliases, and `recorded` itself otherwise.
+//
+// A record keeps the repository it was written under for its whole life, so every GitHub call the
+// daemon makes for a tree opened before a transfer starts from a name GitHub no longer serves and
+// an owner whose installation no longer covers it. This is the one place that name is mapped to
+// the one GitHub holds, for the token's owner and for the address together, so a REST write or a
+// GraphQL query reaches the repository rather than silently addressing nobody.
+//
+// A name no pair holds, a pair whose owners OwnerAliases makes no alias of (one inside a single
+// owner, one whose `to` owner the project does not own, one between two owners of the project),
+// and the repository a pair moved to, which is already the served name, each answer `recorded`
+// unchanged; a deployment that configures no rename answers it without asking `owned` at all.
+func (r Renames) Serving(recorded Repository, owned func(owner string) bool) Repository {
+	partner, found := r.Partner(recorded.String())
+	if !found {
+		return recorded
+	}
+	aliases, _ := r.OwnerAliases(owned)
+	if to, alias := aliases[strings.ToLower(recorded.Owner())]; alias && strings.EqualFold(to, partner.Owner()) {
+		return partner
+	}
+	return recorded
+}
+
 // Pairs are the configured pairs, in configured order, as a copy no caller can use to change the
 // equivalence.
 func (r Renames) Pairs() []Rename { return slices.Clone(r.pairs) }

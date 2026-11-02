@@ -278,6 +278,8 @@ func mergeability(p githubrest.PullRequest) record.Mergeability {
 // requires, the mergeability, and the head and its clock followHead compares with the record, in
 // the single read they share. It also returns the githubrest.Client its own token mint built, so
 // the pass's further reads of the same pull request reuse it rather than minting a second token.
+// The facts it leads to go on naming pr.Repo, the repository the record is held under, whichever
+// name GitHub is read by (implementClient).
 func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullRequest) (githubrest.Client, githubrest.PullRequest, error) {
 	repository, err := ghrepo.Parse("the pull request's repository", pr.Repo)
 	if err != nil {
@@ -294,8 +296,14 @@ func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullReq
 	return github, pull, nil
 }
 
-// implementClient is a client for repository's REST API on the implement App's installation token.
+// implementClient is a client for the REST API of the repository GitHub holds repository under
+// now (repositories.serving), on the implement App's installation token for that repository's
+// owner: a repository a record names from before a transfer is read on the installation that
+// holds it today and addressed by the name GitHub serves, which a REST call, unlike a git
+// operation, is not redirected to. A served repository, which the mapping names as GitHub does,
+// is its own serving repository, so every read of one is the read it always was.
 func (w *workflowRuntime) implementClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, error) {
+	repository = w.repositories.serving(repository)
 	lease, err := w.tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
 		return githubrest.Client{}, fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err)

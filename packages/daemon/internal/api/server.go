@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,7 +26,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -187,13 +188,11 @@ type server struct {
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
 	githubOwners func() []string
-	// credential is the one closure the controller's credential route serves its bundle from
-	// (appauth.GitHubCredential over tokens, githubOwners and Options.RepositoryRenames), built
-	// once here because it carries the dedupe of the warning a rename between two owners of the
-	// project logs: a controller refreshes its credential every minute, and a closure built per
-	// request would log that warning on every one of them. Nil when no token source is
-	// configured, which the route refuses before it calls this.
-	credential runtime.GitHubCredential
+	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
+	// that says which owner's installation holds a repository recorded under the name a transfer
+	// moved it away from, which the controller's gh bundle reads (appauth.GitHubCredential) and
+	// serving reads for this server's own GitHub calls. The zero value configures none.
+	renames    ghrepo.Renames
 	githubAPI  string
 	mergeRules func(project string) config.MergeRules
 	grants     *credential.Grants
@@ -243,6 +242,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		pluginRelaunchable: opts.PluginRelaunchable,
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
+		renames:            opts.RepositoryRenames,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
@@ -281,9 +281,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 	if s.decisions == nil {
 		s.decisions = NewRouteDecisions()
-	}
-	if s.tokens != nil {
-		s.credential = appauth.GitHubCredential(s.tokens, s.githubOwners, opts.RepositoryRenames, s.log)
 	}
 
 	mux := http.NewServeMux()
@@ -331,6 +328,25 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
+}
+
+// serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
+// other name of its configured pair when the project's owners make that name's owner the one
+// whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
+// one rule, read here over the owners this server already holds (Options.GitHubOwners) rather
+// than written a second time.
+func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
+	return s.renames.Serving(recorded, s.ownsOwner)
+}
+
+// ownsOwner is whether owner is an owner of the project's repositories, compared without case as
+// GitHub compares owners. A server built with no owners — a test's, a daemon with no GitHub Apps
+// — owns none.
+func (s *server) ownsOwner(owner string) bool {
+	if s.githubOwners == nil {
+		return false
+	}
+	return slices.ContainsFunc(s.githubOwners(), func(o string) bool { return strings.EqualFold(o, owner) })
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,
