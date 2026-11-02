@@ -409,6 +409,9 @@ test("a change committed while the page loads is shown without a reload @phone",
   }
 });
 
+// SLOW(>=2s): the claim is an absence, and the only honest reading of it is a second of real
+// quiet after the feed starts on the opened socket; the page's clock cannot stand in for it, as
+// the comment on that wait below says.
 test("a first live socket opening without a change makes no API request @phone", async ({
   browser,
 }) => {

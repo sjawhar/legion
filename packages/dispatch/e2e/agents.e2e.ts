@@ -1215,6 +1215,9 @@ test("with half the recipients unable to take the mode, the compact composer kee
 });
 
 test.describe("the composer's notices share one slot, highest first, within budget on compact screens", () => {
+  // SLOW(>=2s): 120 agent rows and 120 recipient chips laid out for real at each of three compact
+  // sizes, with the message refilled until it stops growing at each; the layout under measurement
+  // is what the row proves.
   test("the limit alone: 120 recipients", async ({ browser }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
     const alice = await asUser(browser, "alice");

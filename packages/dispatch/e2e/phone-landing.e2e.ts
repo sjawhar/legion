@@ -236,6 +236,9 @@ test("on a phone, the Conversation opens with its newest message in view whichev
 // resumes the event feed, which Dispatch replays in full (`replay_complete` on `events_start`), so
 // the page refreshes nothing for that gap (`api/event-feed.ts`). The row depends on the focus
 // path: if a focus stops refetching a read in error, this row stops seeing a refetch.
+// SLOW(>=2s): the error state the reader actually meets is the one the app reaches only after
+// its own two retries of the failed read, 500 ms apart (`queryRetryDelay`), and the row's claim
+// is about what the refetch does to that state, so both waits are its subject.
 test("on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list @phone", async ({
   browser,
 }) => {

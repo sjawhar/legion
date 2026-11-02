@@ -15,6 +15,10 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): this file sorts first of the Firefox ones, so this row pays Firefox's launch and
+// the engine's first parse of the SPA bundle before its editor can mount - measured here, the
+// row that runs first takes 5.7 s and the one after it 2.8 s, whichever of the two it is. Its
+// own work is one document load, one selection and five keystrokes.
 test("typing over the whole last line of a code block replaces that line", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({

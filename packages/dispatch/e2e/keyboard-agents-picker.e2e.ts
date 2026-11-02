@@ -388,6 +388,9 @@ test.describe("agents page", () => {
 
   // A message on its way is addressed, so Reply holds until the server answers, as the picker
   // does. A refusal hands back the draft that was sent, and Retry sends exactly that again.
+  // SLOW(>=2s): the Agents page is mounted over the keyboard seed, a message is typed key by key
+  // and sent, and both the send and the Retry after the refusal are read off the wire - two whole
+  // round trips, which is what "exactly what was refused" is read from.
   test("Reply holds while a send is out, and a refusal's Retry posts exactly what was refused", async ({
     browser,
   }) => {
@@ -591,6 +594,9 @@ test.describe("agents page", () => {
 
   // Cancel reply is the same address mutation in reverse. The send retains its direct reply
   // target until its refusal arrives, even when the click shares Send's task.
+  // SLOW(>=2s): the Agents page is mounted over the keyboard seed with a message already
+  // delivered to the agent, and the send and its refusal are each read off the wire; the press
+  // the row is about only exists while that send is out.
   test("a same-task Cancel reply keeps the direct reply it sent", async ({ browser }) => {
     await seedAgents();
     await createAgentMessage(plannerSession.session_id, {

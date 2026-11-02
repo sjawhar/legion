@@ -420,6 +420,9 @@ test("the header says why a session shows less: an Oh My Pi that does not report
 // the thread shows as theirs; Send waits for the session's answer, and the header moves only when
 // the session reports the switch. A pick is a steer whatever the composer's mode, since a BTW is a
 // side question the session answers rather than input it runs.
+// SLOW(>=2s): two whole switch round trips through the fake listener - the pick, the session's
+// stored answer and the frame that reports the new model, then the same again from a BTW
+// composer - are what the row proves; neither can be cut without dropping half the claim.
 test("a model picked in the header is the viewer's own Send of /model, holds Send until the session answers, and goes as a steer whatever Send as says @phone", async ({
   browser,
 }, testInfo) => {

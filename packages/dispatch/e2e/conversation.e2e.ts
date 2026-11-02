@@ -382,6 +382,9 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
   }
 });
 
+// SLOW(>=2s): the answer has to reach a Conversation that is already open, so the row pays the
+// page's own load for the failed receipt and then waits out the live feed's delivery of the
+// reply that overturns it; the three seeds already go out together.
 test("an agent's answer on a failed attempt is accepted and shown as the answer", async ({
   browser,
 }) => {
@@ -896,6 +899,9 @@ test("an ask answered after a later comment thread sorts above it", async ({ bro
 
 // The defect this tab exists to fix: a conversation older than any window of the event log was
 // unreachable without paging back through it. The three per-issue reads have no window at all.
+// SLOW(>=2s): burying the ask past the event log's 200-event window is the row's own subject, and
+// the server appends one event at a time per issue, so the 205 writes are 205 round trips
+// (measured: issuing them at once costs more, not less).
 test("a closed ask older than 200 events is listed under Closed with no paging", async ({
   browser,
 }) => {

@@ -145,14 +145,24 @@ interface Seed {
   plainAskId: string;
 }
 
+/** The block index lands about 150 ms after the write that asks for it (measured), which falls
+ *  inside Playwright's own 100/250/500 ladder: that ladder would not look again until a
+ *  quarter-second after the row was already there, and every row of this file pays the seed. */
+const INDEX_PROBE = { intervals: [50, 50, 100, 200, 500] };
+
 /** The Inbox row `match` names, once the server has indexed the block or opened the question. */
 async function indexedRow(match: (row: InboxRow) => boolean): Promise<InboxRow> {
-  await expect.poll(async () => (await getInbox()).some(match)).toBe(true);
-  const row = (await getInbox()).find(match);
-  if (row === undefined) {
+  let found: InboxRow | undefined;
+  await expect
+    .poll(async () => {
+      found = (await getInbox()).find(match);
+      return found !== undefined;
+    }, INDEX_PROBE)
+    .toBe(true);
+  if (found === undefined) {
     throw new Error("the seeded question left the Inbox before it was read");
   }
-  return row;
+  return found;
 }
 
 /**
@@ -164,115 +174,127 @@ async function indexedRow(match: (row: InboxRow) => boolean): Promise<InboxRow> 
 async function seedInbox(): Promise<Seed> {
   await createProject({ key: "PANE", name: "Pane rollout" });
 
-  const decisionIssue = await createIssue({
-    project: "PANE",
-    spec: decisionSpec,
-    title: "Rollout order",
-  });
-  await patchIssue(decisionIssue.key, { priority: 0 });
-  const decision = await indexedRow((row) => row.block_id === DECISION_BLOCK);
-
-  const approvalIssue = await createIssue({
-    project: "PANE",
-    spec: `# ${APPROVAL_HEADING}\n\n${PLACEHOLDER}\n`,
-    title: "Ledger rollout",
-  });
-  await patchIssue(approvalIssue.key, { priority: 1 });
-  const approvalArtifactId = approvalIssue.primary_artifact_id;
-  await editArtifact(
-    approvalArtifactId,
-    { ops: [{ after: "end", markdown: baselineBody, op: "insert" }], summary: "The rollout body" },
-    session
-  );
-  await editArtifact(
-    approvalArtifactId,
-    { ops: [{ find: PLACEHOLDER, op: "delete" }], summary: "Drop the placeholder" },
-    session
-  );
-  const atThree = await requestApproval(
-    approvalArtifactId,
-    { summary: "The ledger-first rollout." },
-    session
-  );
-  expect(atThree.version).toBe(3);
-  await answerAsk(
-    atThree.ask.id,
-    { expected_edited_at: null, selected: ["Approve"] },
-    { login: "alice" }
-  );
-  await editArtifact(
-    approvalArtifactId,
-    {
-      ops: [
-        { find: RETIRED_BLOCK, op: "delete" as const },
-        ...changedParagraphs.map(({ after, before }) => ({
-          find: before,
-          op: "replace" as const,
-          with: after,
-        })),
-      ],
-      summary: "The mirror-first rollout",
-    },
-    session
-  );
-  const atFour = await requestApproval(
-    approvalArtifactId,
-    { summary: "The mirror-first rollout." },
-    session
-  );
-  expect(atFour.version).toBe(4);
-
-  // The three questions left are each their own issue or document, and the Inbox orders them by a
-  // priority set here rather than by the order they were made, so they go out together. Only the
-  // two that share priority 3 stay in order, since that tie is broken by which was made first.
-  const [firstApproval, { anchored, plain }, documentDecision] = await Promise.all([
-    (async () => {
-      const issue = await createIssue({
-        project: "PANE",
-        spec: "# Lease handover\n\nThe lease moves with the ledger, never with the mirror.\n",
-        title: "Lease handover",
-      });
-      await patchIssue(issue.key, { priority: 2 });
-      return requestApproval(
-        issue.primary_artifact_id,
-        { summary: "The first handover draft." },
-        session
-      );
-    })(),
-    (async () => {
-      const anchoredIssue = await createIssue({
-        project: "PANE",
-        spec: "The mirror replays the ledger on a cold start.\n",
-        title: "Cold start",
-      });
-      await patchIssue(anchoredIssue.key, { priority: 3 });
-      const anchored = await createAsk(
-        anchoredIssue.key,
-        { anchor: { artifact: "spec", quote: ANCHOR_QUOTE }, question: ANCHORED_QUESTION },
-        session
-      );
-      const plainIssue = await createIssue({ project: "PANE", title: "Retry budget" });
-      await patchIssue(plainIssue.key, { priority: 3 });
-      const plain = await createAsk(
-        plainIssue.key,
-        { options: [{ label: "Yes" }, { label: "No" }], question: PLAIN_QUESTION },
-        session
-      );
-      return { anchored, plain };
-    })(),
-    (async () => {
-      await createProjectDocument("PANE", { content: documentContent, name: "mirror-runbook.md" });
-      return indexedRow((row) => row.block_id === DOCUMENT_BLOCK);
-    })(),
-  ]);
+  // Every question is its own issue or document, and the Inbox orders them by the priorities set
+  // here rather than by the order they were made, so each chain goes out beside the others
+  // instead of after them. Only the two that share priority 3 stay in order, and they are made in
+  // one chain of their own, since that tie is broken by which was made first.
+  const [decision, approval, firstApproval, { anchored, plain }, documentDecision] =
+    await Promise.all([
+      (async () => {
+        const issue = await createIssue({
+          project: "PANE",
+          spec: decisionSpec,
+          title: "Rollout order",
+        });
+        await patchIssue(issue.key, { priority: 0 });
+        const row = await indexedRow((indexed) => indexed.block_id === DECISION_BLOCK);
+        return { issueKey: issue.key, row };
+      })(),
+      (async () => {
+        const issue = await createIssue({
+          project: "PANE",
+          spec: `# ${APPROVAL_HEADING}\n\n${PLACEHOLDER}\n`,
+          title: "Ledger rollout",
+        });
+        await patchIssue(issue.key, { priority: 1 });
+        const artifactId = issue.primary_artifact_id;
+        await editArtifact(
+          artifactId,
+          {
+            ops: [{ after: "end", markdown: baselineBody, op: "insert" }],
+            summary: "The rollout body",
+          },
+          session
+        );
+        await editArtifact(
+          artifactId,
+          { ops: [{ find: PLACEHOLDER, op: "delete" }], summary: "Drop the placeholder" },
+          session
+        );
+        const atThree = await requestApproval(
+          artifactId,
+          { summary: "The ledger-first rollout." },
+          session
+        );
+        expect(atThree.version).toBe(3);
+        await answerAsk(
+          atThree.ask.id,
+          { expected_edited_at: null, selected: ["Approve"] },
+          { login: "alice" }
+        );
+        await editArtifact(
+          artifactId,
+          {
+            ops: [
+              { find: RETIRED_BLOCK, op: "delete" as const },
+              ...changedParagraphs.map(({ after, before }) => ({
+                find: before,
+                op: "replace" as const,
+                with: after,
+              })),
+            ],
+            summary: "The mirror-first rollout",
+          },
+          session
+        );
+        const atFour = await requestApproval(
+          artifactId,
+          { summary: "The mirror-first rollout." },
+          session
+        );
+        expect(atFour.version).toBe(4);
+        return { artifactId, askId: atFour.ask.id };
+      })(),
+      (async () => {
+        const issue = await createIssue({
+          project: "PANE",
+          spec: "# Lease handover\n\nThe lease moves with the ledger, never with the mirror.\n",
+          title: "Lease handover",
+        });
+        await patchIssue(issue.key, { priority: 2 });
+        return requestApproval(
+          issue.primary_artifact_id,
+          { summary: "The first handover draft." },
+          session
+        );
+      })(),
+      (async () => {
+        const anchoredIssue = await createIssue({
+          project: "PANE",
+          spec: "The mirror replays the ledger on a cold start.\n",
+          title: "Cold start",
+        });
+        await patchIssue(anchoredIssue.key, { priority: 3 });
+        const anchored = await createAsk(
+          anchoredIssue.key,
+          { anchor: { artifact: "spec", quote: ANCHOR_QUOTE }, question: ANCHORED_QUESTION },
+          session
+        );
+        const plainIssue = await createIssue({ project: "PANE", title: "Retry budget" });
+        await patchIssue(plainIssue.key, { priority: 3 });
+        const plain = await createAsk(
+          plainIssue.key,
+          { options: [{ label: "Yes" }, { label: "No" }], question: PLAIN_QUESTION },
+          session
+        );
+        return { anchored, plain };
+      })(),
+      (async () => {
+        await createProjectDocument("PANE", {
+          content: documentContent,
+          name: "mirror-runbook.md",
+        });
+        return indexedRow((indexed) => indexed.block_id === DOCUMENT_BLOCK);
+      })(),
+    ]);
   expect(firstApproval.version).toBe(1);
 
   return {
     anchoredAskId: anchored.id,
-    approvalArtifactId,
-    approvalAskId: atFour.ask.id,
-    decisionAskId: decision.id,
-    decisionIssueKey: decisionIssue.key,
+    approvalArtifactId: approval.artifactId,
+    approvalAskId: approval.askId,
+    decisionAskId: decision.row.id,
+    decisionIssueKey: decision.issueKey,
     documentAskId: documentDecision.id,
     firstApprovalAskId: firstApproval.ask.id,
     plainAskId: plain.id,

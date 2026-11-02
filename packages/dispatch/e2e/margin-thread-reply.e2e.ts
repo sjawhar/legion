@@ -178,6 +178,9 @@ test("the reader's own Resolve while a margin reply is out keeps the reply's dra
 // The Pinned tab takes the Comments tab's place, its threads' cards with it; the reply is the
 // margin's, so the thread finds it again. On a phone the thread fills the screen and Back waits for
 // the reply, so the Pinned tab is reachable only once Back lets go at the send's deadline.
+// SLOW(>=2s): on a phone the thread is opened twice - once to send from, once to read the draft
+// and refusal back after the Pinned tab unmounted its card - with the held send, its refusal and
+// two tab switches between them; the second open is the claim, so neither can go.
 test("the Pinned tab while a margin thread's reply is out keeps the reply's draft and refusal @phone", async ({
   browser,
 }, testInfo) => {

@@ -14,6 +14,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): five full-page screenshots are what this row leaves behind, one for each surface it
+// walks - the project list, its board, the Inbox, the issue's margin and the Agents page - and
+// laying out and shooting a whole page is the cost of each.
 test("project filters stay collapsed until needed and margin asks use the compact composer @phone", async ({
   browser,
 }, testInfo) => {
