@@ -167,11 +167,15 @@ export default defineConfig({
           // WebKit is the one iOS Safari uses for every subscription its row opens. The keyed write
           // path (`keyed-writes`, `keyed-send`) runs here and in Firefox too: each engine has its own
           // way of failing a request, aborting one, keeping a tab's storage across a reload and
-          // asking before it unloads, and a write must land once through all of them.
+          // asking before it unloads, and a write must land once through all of them. The `view`
+          // block's rows (`view-block`, `view-sandbox`, `view-grants`) run here as well: a frame's
+          // sandbox, its opaque origin, what a page in it may reach, the `postMessage` pair and the
+          // frame's height are each engine's own, and WebKit is the engine iOS Safari gives them.
+          // Its byte budget (`view-budget`) is Chromium's alone; that file says why.
           {
             name: "webkit",
             testMatch:
-              /(collab-cursor|deep-links|heavy-bodies|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits)\.e2e\.ts/,
+              /(collab-cursor|deep-links|heavy-bodies|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|view-block|view-sandbox|view-grants)\.e2e\.ts/,
             use: { ...devices["Desktop Safari"] },
           },
           // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
@@ -182,8 +186,10 @@ export default defineConfig({
           {
             name: "webkit-iphone",
             testMatch:
-              /(agent-view|agent-view-settings|phone-conversation|delivery-live|live-socket)\.e2e\.ts/,
-            grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model|a tab holds one live socket for every live view/,
+              /(agent-view|agent-view-settings|phone-conversation|delivery-live|live-socket|view-block|view-sandbox|view-grants)\.e2e\.ts/,
+            // A file matched here with no title in this grep runs zero tests and looks green, so
+            // every `view` row's title holds the words `a view block`.
+            grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model|a tab holds one live socket for every live view|a view block/,
             use: { ...devices["iPhone 13"] },
           },
           // Firefox's native editing mishandles text typed over what follows a block's last line break,
@@ -193,12 +199,13 @@ export default defineConfig({
           // link), a body's Mermaid diagram draws through the engine's SVG parser, shadow DOM and
           // the ELK layout running in it, and a long body's formatting arrives from a Web Worker whose
           // chunk, deadline and late paint the engine schedules its own way. Those specs, the whole
-          // deep-links spec, the one-socket invariant (`live-socket`, which holds in every engine) and
-          // the keyed write path run in Firefox too.
+          // deep-links spec, the one-socket invariant (`live-socket`, which holds in every engine),
+          // the keyed write path and the `view` block's rows (`view-block`, `view-sandbox`,
+          // `view-grants`, for the reasons given under `webkit` above) run in Firefox too.
           {
             name: "firefox",
             testMatch:
-              /(code-line-replace|deep-links|heavy-bodies|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
+              /(code-line-replace|deep-links|heavy-bodies|heavy-streamed-turn|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-link-click|view-block|view-sandbox|view-grants)\.e2e\.ts/,
             use: { ...devices["Desktop Firefox"] },
           },
 
