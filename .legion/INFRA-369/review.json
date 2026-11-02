@@ -2,20 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-369",
-  "completed": "2026-10-31T11:01:47Z",
-  "round": "confirmation after a forward merge, not a new round",
-  "decision": "approved",
-  "lastReview": "APPROVE at 9aa2f24b292afe49590cdefc352dfd88b7674c00 (review 5721824480)",
-  "newHead": "the head this commit makes, above 448a2f18148b29fb7944a6508044dbefc040e7f3",
-  "fingerprint": {
-    "before": "38855df249627b628013d7bbbeccc2fe1b86a8245bd9380c7a2229d348dc337a at 9aa2f24b292afe49590cdefc352dfd88b7674c00",
-    "after": "38855df249627b628013d7bbbeccc2fe1b86a8245bd9380c7a2229d348dc337a at 448a2f18148b29fb7944a6508044dbefc040e7f3",
-    "verdict": "unchanged",
-    "how": "Computed by the reviewer with the procedure in skill://legion-worker/references/conflicts-and-rewrites.md (fork_point against main@origin, --git --context 0, fileset '~(.legion | docs/solutions)', @@ and index lines dropped), with pipefail."
-  },
-  "aboveApproval": "35f2ec24 docs(solutions) and 6b6ba4b5 the removal of .legion/INFRA-369/ (retro), 20835c4d the forward merge of main 1a9095e6 (sjawhar/legion#2598, the claims-test fix), and handoffs. The fingerprint excludes docs/solutions and .legion, and the merge changed no line of the pull request's own diff.",
+  "previousHandoff": "ad40fe2ccedeaa4933ba16a82a11a928b38df5e0",
+  "completed": "2026-11-02T00:11:29Z",
+  "round": "a new round after three forward merges, T7, the skills word trim and the live-room test; fingerprint 38855df2 at ad40fe2c -> 113d3fb4 at 983c9e49",
+  "headReviewed": "the head this handoff push makes, above 983c9e49d76814c12db7d575e34162d95c2d8dda (code 8105eb4fe5ddfbb4e25da8c3fa5a37ee1b7de30f)",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": []
+  "important": 1,
+  "minor": 3,
+  "checked": [
+    "refs/graph.go merge: every kind of #2394 and of this branch once in each registry; askPartPairs passes nil pointers to blockPairs, right for asks (refs/ask_blocks.go:155).",
+    "20261101183525_graph_edges_ask_parts_and_block_pointers: every arm of 144855 and of 143211, the replies_to split and the block_ref_listed filter kept; applied in both orders with psql by the deep review, same pg_get_viewdef in both; census 0; beforeAskBlocks = 161 right.",
+    "No open pull request and not main holds 20261101143211, 20261101143212 or 20261101183525; no open PR restates graph_edges (#2589's 20261101182419 names it in a comment only).",
+    "T7: Go article by kind (pmdoc/schema.go:373-378), contracts ITEM_BLOCK for both ask shapes with the same sentence, shared rows beside #2394's, editor refusal through the shared table.",
+    "docs/approval_carry.go keeps main's now() answer time and this branch's serverURL; the four guides keep main's text and every ask-part fact.",
+    "skills/dispatch/SKILL.md: the three cut words change no instruction; 1997 words."
+  ],
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/block_pointers_test.go:199", "description": "artifactMarkdown reads the room without checking the status, so a failed read decodes as \"\" and the per-row 'room unchanged after a refused write' check (:268) passes on two failed reads. The package already has documentMarkdown (ask_block_edit_settlement_test.go:94), which checks it: use it at :228, :268 and :281 and delete the copy."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/block_pointers_test.go:183", "description": "setBlockAttributes repeats setLiveBlockAttributes (approval_carry_test.go:591): one helper that returns the error, which setLiveBlockAttributes calls."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json:224", "description": "The shared table has issue unpinned, issue pinned and project-document unpinned ask parts, not a pinned project-document ask part; add that row to DISPATCH_BLOCK_POINTER_VALUES and regenerate the JSON."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/store/ask_blocks_migrations_test.go:17", "description": "Prose: 'A numbered migration that merges above this one moves it' cannot happen now that the numbered series is closed at 161; the case is a timestamped migration earlier than 20261101143211 merging later."}
+  ],
+  "notDefects": [
+    "The table's target flag in the live-room test (code quality): two assertion paths for two refusal kinds is readable, and folding them would weaken the sentence check from HasSuffix to Contains."
+  ],
+  "ci": "Required checks are ci-ok and pr-title. At code head 8105eb4f CI run 41361623017 was running (6 success, 6 in progress, 14 queued, no failure) at 00:11Z; PR Title 41361676824 success. A request for changes does not wait on CI."
 }
