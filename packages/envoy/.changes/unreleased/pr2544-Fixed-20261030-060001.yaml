@@ -5,9 +5,10 @@ body: |-
     browser's update is walked without being decoded before anything applies it, and one carrying bytes
     ygo's own decoder would refuse, or content the Proof editor never sends - a subdocument, a move,
     binary content, an embed, a root other than the document's fragment, its margin and the rebuilt
-    history's retired clients, or a write to that retired list - is answered with that error and never
-    applied, leaving the browser connected. An update the walk takes is refused `4413 DOC_TOO_LARGE`,
-    which closes that one browser and stores and relays nothing of the update, when it would take the
+    history's retired clients, or a write to that retired list - is never applied, and closes that one
+    browser `4413 DOC_UPDATE_REFUSED`, so the dashboard drops only the refused edit. An update the
+    walk takes is refused `4413 DOC_TOO_LARGE`, which closes that one browser and stores and relays
+    nothing of the update, when it would take the
     document past the 1 MiB byte bound every server write obeys (past which it may still carry 8 KiB of
     new content, for the editor's own derived writes and for typing, until the document has crept 64 KiB
     over the bound, after which only an update carrying nothing new is taken), past the 1,048,576
@@ -35,7 +36,7 @@ body: |-
     holds less what it has released. The heaviest work the server allows peaked at 3,669 MiB of the
     pod's 4,096 measured that way; the 4,302 and 4,424 MiB once recorded for it were a gVisor
     sandbox's VmRSS, which counts the pages the runtime had released. Each room is charged at both
-    the copies it holds from its load - the greater of its elements at 470 bytes each, its structs at
+    the copies it holds from its load - the greater of its elements at 500 bytes each, its structs at
     170 and its rendered bytes at 12, all measured on resident rooms - beside the part a count of the
     rendering cannot see, which each browser's update and each of the server's own writes adds to. A
     browser's socket is admitted against that budget before the document loads, with its stored
@@ -72,12 +73,12 @@ body: |-
     settlement's repair of a returning answer - each ask whether the document their write would leave
     still decodes, and leave one they would carry past the cap as it was.
 
-    The ygo pin moves to `sjawhar/ygo v1.51.3-sami.7`, which carries every member of `v1.51.3-sami.6`
-    unchanged and a per-apply scan budget: a document can ask its owner, under its lock and with the
-    apply's origin, how many items each remote apply's conflict scans may pass, the drain of the pending
-    queue drawing on the same allowance; a document with a budget applies every remote update whole or
-    not at all, and a failed apply reports what its scans passed. That budget is what the room's scan
-    ceiling and scan total are built on, in place of the fixed per-update bound the server had.
+    The room's scan ceiling and scan total, in place of the fixed per-update bound the server had,
+    are built on the per-apply scan budget of the ygo fork Dispatch already pins,
+    `sjawhar/ygo v1.54.1-sami.3`: a document can ask its owner, under its lock and with the apply's
+    origin, how many items each remote apply's conflict scans may pass, the drain of the pending queue
+    drawing on the same allowance; a document with a budget applies every remote update whole or not
+    at all, and a failed apply reports what its scans passed.
 time: 2026-10-30T06:00:01.000000000Z
 custom:
     Issue: pr2544
