@@ -8672,6 +8672,8 @@ describe("executeDispatchTool", () => {
     "rows.jsonl_",
     "rows.jsonl ",
     "отчёт.данные",
+    "rows.jsonl.1",
+    "tool.1",
   ])("refuses inline content named %j before it sends anything, naming --path", async (name) => {
     const requests: string[] = [];
     await expect(
@@ -8701,6 +8703,8 @@ describe("executeDispatchTool", () => {
     "Design notes",
     "plan v1.2",
     "notes v2. draft",
+    "Release v2.0",
+    "Dr. Smith's notes",
   ])("sends inline content named %j as a Markdown document", async (name) => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
