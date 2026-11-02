@@ -1074,6 +1074,52 @@ test("a view block whose data passes 16 MiB sends no data and says so @phone", a
   }
 });
 
+test("a view block counts the version it sends against 16 MiB, not the newest @phone", async ({
+  browser,
+}) => {
+  const fixture = await seedView();
+  // Version 1 is over the limit on its own; version 2 is a few bytes. A reference that pins
+  // `@v1` is sent version 1, so version 1's bytes are the block's data.
+  await uploadIssueFile(fixture.issue, {
+    content: "x".repeat(17 * 1024 * 1024),
+    name: "huge.json",
+    type: "application/json",
+  });
+  await uploadIssueFile(fixture.issue, {
+    content: attempts(3),
+    name: "huge.json",
+    type: "application/json",
+  });
+  const hugeRef = `dispatch://${fixture.issue}/artifact/huge-json`;
+  await createArtifactGrant(fixture.pageId, hugeRef);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openDocument(
+      page,
+      viewDirective({
+        caption: "Attempts and one huge old version.",
+        data: `${fixture.dataRef} ${hugeRef}@v1`,
+        page: fixture.pageRef,
+      })
+    );
+    const block = viewBlock(page, "Attempts and one huge old version.");
+    await expect(
+      block.getByText(
+        "data — the data files together are larger than 16 MiB, so Dispatch sends no data"
+      ),
+      "R6: the block weighs the version it sends, so a pinned 17 MiB version is over the limit"
+    ).toBeVisible();
+    await expect(
+      viewFrame(block).locator("#waiting"),
+      "R6: and the page is given no data at all"
+    ).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a view block whose read of a data file fails names its status @phone", async ({
   browser,
 }) => {
