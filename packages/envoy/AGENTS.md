@@ -4940,7 +4940,7 @@ a denial releases nothing, so the record's approver may still deny either), re-v
 a non-pending record, and one past its expiry that the sweeper has not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes nothing)
 — but a record past its expiry, whether the sweeper has recorded it expired or not, answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never that it was decided.
 An `agent_secret` record is pending while its request is:
-`GET /v1/pending` (`PendingForApprover`, which lists `anyone` records for every approver) lists it only then, and `GET /v1/credential-requests/{id}` (`ReadRecord`) reads it as pending only then;
+`GET /v1/pending` (`PendingForApprover`, which lists `anyone` records for every approver) lists it only then, and `ReadRecord`, which the broker's own approval page and `POST /v1/machine-logins/lookup` read a record through, reads it as pending only then;
 a decided record's terminal event names the decision, and a request cancelled with no cancelled event on its record, the shape an ended enrollment's requests had before `endEnrollment` wrote one, reads as `cancelled` from its request row.
 A machine login is pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver `anyone`) for every approver.
 `Values` releases a live grant's values, each read from the secret its request froze (its source: the ARN, or the Secret Manager resource name).

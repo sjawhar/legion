@@ -833,9 +833,9 @@ is an `<a>` to the broker's own page, the `approve_url` the broker names on the 
 `brokerPage.ts` takes only as an absolute `http:` or `https:` URL (anything else, a
 `javascript:` URL among them, reads as absent, since the body is the broker's word relayed
 verbatim; the check itself is `lib/external-href.ts`, shared with the issue header's external
-links); from a broker too old to name one the row keeps the `<Link>` it had before that page
-existed, to `/credentials/<record>`, the only place such a request can be decided, since that
-broker serves no page of its own. Below that link each row shows the session the
+links); from a broker that names no page the row is the same summary with no link at all, a plain
+`<div>` rather than an anchor (`PendingRowLine`), since Dispatch decides no secret request of its
+own any more. Below that line each row shows the session the
 broker's `session` field names (LEGION-587: `{request, enrollment}`, either null): each id as an
 `AgentName` - its name, its running state and its live link - followed by the full id in text,
 because the id is an unsigned claim (`session.ts`) and `session:<8>…` alone would let another id
@@ -848,27 +848,26 @@ alone, or both agreeing, shows one unlabeled line. A request-only id (the common
 case, which has no enrollment `session_id` of its own) shows one line with no preamble
 (`session.ts`'s `credentialSessionLines`). Both ids set and differing shows both lines: the
 enrollment's under "The session that enrolled:", since that is the one the broker verified, and
-the request's bare (`CredentialSessionLines.tsx`, shared with the record page below); never
-"Requested by". `pending.ts`'s
+the request's bare (`CredentialSessionLines.tsx`, shared with the machine page's facts below);
+never "Requested by". `pending.ts`'s
 `useCredentialRequests` is
 the one reading of that list - `listed` (empty under `null`), `loading` or `failed` - and
 the section, the Inbox's empty state, its `Blocked on you` banner and both `Needs you N` badges
 all read it, so a request one of them counts is one the section lists.
 
-`CredentialRecordPage.tsx` (`/credentials/:recordId`) sends the browser to the broker's own page
-whenever the record's answer names one: `brokerPage.ts` reads `approve_url` off the record, and
-an effect (never a render, which would repeat the side effect) calls `window.location.replace`,
-so the back button returns where the person came from; until the browser leaves, and for good if
-it never does, the page is one line and a link to the request's page there. What follows is what
-a record the broker names no page for still renders, and what the machine page always renders.
-That record page and its read routes go in step 3 of this rollout.
-`CredentialRecordPage.tsx` and `MachineLoginPage.tsx`
-(`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
-a pod enrollment's worker slot when it has one, session (the same resolution the Inbox row's
-own line uses), lifetime, requested/expiry timestamps, policy
+`MachineLoginPage.tsx` (`/credentials/machine`) is the one page Dispatch renders a credential
+record on. `app.tsx` routes `/credentials/*` to the Inbox, and React Router ranks that static
+machine path above the splat, so every other `/credentials/...` path - an old link to a single
+record among them - opens the Inbox. A secret request is decided on the broker's own page,
+which the Inbox row links; Dispatch serves no page of its own for one.
+The machine page looks a pending machine login up by the 8-character code the operator typed
+(`POST /api/v1/credential-requests/machine-lookup`), and renders `CredentialRecordFacts.tsx`
+(kind, identifiers, enrollment, a pod enrollment's worker slot when it has one, session (the same
+resolution the Inbox row's own line uses), lifetime, requested/expiry timestamps, policy
 version, approver - the broker's `anyone`, which a shared secret's request and a service's machine
-login name, reads "Anyone signed in to Dispatch" - then the agent's reason) and
-`CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown whenever the record is `pending`).
+login name, reads "Anyone signed in to Dispatch" - then the agent's reason) above
+`CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown while the looked-up login carries no
+decision; a service's login gets Deny alone, since no person approves one any more).
 The broker's `enrollment.slot` (`implementer-g3`, null without one) is what tells the requests of
 two roles in one pod apart, since they share the pod's kind and runtime id. A record waiting on
 `anyone` is in every signed-in person's pending list, since the broker lists it for every approver,
@@ -876,29 +875,28 @@ and any of them decides it the same way; a person's own machine login is decided
 alone.
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
-a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
-you." verbatim, or, for a service's login (the record's `service` set, the Legion daemon's),
-"Approving lets `<service> on <host>` start worker pods as `<service>`, not as you: no secret of
-yours reaches its pods unless you approve the request for it."; an approval made on the machine
-page reads "Approved. `<host>` can start agent sessions as you." or "Approved. `<service> on
-<host>` can start worker pods as `<service>`."; the record page renders no buttons at all for a
-machine record, pointing instead at the machine page, whose code-entry lookup is the only way to
-decide it. A decision is one plain
-POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
-send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
-decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
+a pending machine record adds the sentence "Approving lets `<host>` start agent sessions as
+you." verbatim, or, for a service's login (the record's `service` set, the Legion daemon's), the
+sentence that it is a login from before services logged in with their own Kubernetes token and no
+one can approve it any more: deny it, or let it expire. The decision shown in the buttons' place -
+one made here, or the one a looked-up login already carried - reads "Approved. `<host>` can start
+agent sessions as you." or "Approved. `<service> on <host>` can start worker pods as
+`<service>`."; any other decision reads its own word capitalised, as in "Denied. `<host>` is not
+logged in."
+A decision is one plain
+POST: approve and deny both send `{code}`, the code the viewer typed for that lookup (the broker
+requires it on either decision). The page never says who decides: Dispatch's server names the
+signed-in viewer (below),
 and the broker refuses anyone a machine login's rule does not admit (anyone signed in for a
 service's login; otherwise its approver) with `403 NOT_APPROVER`, surfaced verbatim. A secret
 request's decision never reaches that rule through Dispatch: the broker answers
-`403 DECIDE_ON_BROKER_PAGE` to every caller on either decide route, which is why the record page
-sends the browser to the broker's own page.
-Terminal-state records (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their
-recorded decision and no buttons, on the record page and on the machine page alike, whether the
-machine page looked the login up already decided or decided it itself; every broker error
+`403 DECIDE_ON_BROKER_PAGE` to every caller on either decide route, which is why the Inbox row
+links the broker's page and Dispatch renders no Approve or Deny for a secret request at all.
+A login looked up already decided (`approved`, `denied`, `expired`, `cancelled`, `revoked`)
+renders that recorded decision and no buttons, as one decided here does; every broker error
 surfaces verbatim through `ApiError`'s message, never reworded.
 
-`RevocableList.tsx` is the revocable table both lists below render through, as
-`CredentialDecisionButtons.tsx` is the decision pair both record pages share: each section hands it
+`RevocableList.tsx` is the revocable table both lists below render through: each section hands it
 its query (narrowed to the rows with `select`), its columns, its revoke call, an optional
 `window.confirm` question and what to invalidate on success. It owns the loading, failed and empty
 states and the one revoke in flight: every Revoke button is disabled while a revoke is pending, a
@@ -949,9 +947,8 @@ browser's body; any other field the browser sends, an `approver` among them, is 
 as the approver. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
 so another site cannot send a decision from a signed-in human's browser.
-`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the nine `human`-auth proxy
-rows every page above calls:
-`GET /api/v1/credential-requests`, `GET /api/v1/credential-requests/{id}`,
+`packages/envoy/internal/dispatch/api/credential_requests.go` mounts
+the eight `human`-auth proxy rows every page above calls: `GET /api/v1/credential-requests`,
 `POST /api/v1/credential-requests/{id}/approve|deny`,
 `POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`,
 `POST /api/v1/credential-grants/{id}/revoke`, `GET /api/v1/machine-logins` and
