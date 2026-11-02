@@ -586,23 +586,12 @@ func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
 
 // setLiveBlockAttributes writes attributes onto the typed block blockID of the document through
 // the server's own live attribute write, as the answer route writes an answer into its block:
-// inside a transaction joined with Docs.Join, committed through its ledger, as the agent's
-// session.
+// setBlockAttributes' write (block_pointers_test.go), as the agent's session, failing the test
+// where that write is refused.
 func setLiveBlockAttributes(t *testing.T, database *store.Store, documents docs.API, artifactID, blockID string, attributes map[string]any) {
 	t.Helper()
-	ctx := context.Background()
-	tx, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin the attribute write: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	documentCtx, ledger := documents.Join(ctx, tx)
-	defer ledger.Discard()
-	if err := documents.SetBlockAttributes(documentCtx, artifactID, blockID, attributes, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+	if err := setBlockAttributes(database, documents, artifactID, blockID, attributes, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
 		t.Fatalf("set block %q attributes %v: %v", blockID, attributes, err)
-	}
-	if err := ledger.Commit(ctx); err != nil {
-		t.Fatalf("commit the attribute write: %v", err)
 	}
 }
 
