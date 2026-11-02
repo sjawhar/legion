@@ -26,7 +26,7 @@ func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 
 	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_unknown", "test"),
-		"ses_unknown", "test-machine", nil, nil,
+		"ses_unknown", "test-machine", nil, nil, 0,
 	)
 
 	if result.Delivered {
@@ -34,9 +34,6 @@ func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 	}
 	if result.ShouldNAK {
 		t.Fatal("unknown session should ACK (skip), not NAK (retry forever)")
-	}
-	if result.Reason != session.ReasonNoSessionRecord {
-		t.Fatalf("expected ReasonNoSessionRecord for a session with no record, got %v", result.Reason)
 	}
 }
 
@@ -58,7 +55,7 @@ func TestHandleAgentMessage_StoredInterestOnAnotherMachine(t *testing.T) {
 
 	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
-		"ses_target", "test-machine", interest, resolvedEntry(t, sessions, "ses_target"),
+		"ses_target", "test-machine", interest, resolvedEntry(t, sessions, "ses_target"), 0,
 	)
 
 	if !result.OwnedElsewhere || result.Delivered || result.ShouldNAK || result.Err != nil {

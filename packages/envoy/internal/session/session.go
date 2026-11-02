@@ -6,7 +6,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/store"
 )
 
 // ErrNoSessionRecord is returned when a delivery found nothing of the session it names to deliver
@@ -41,7 +40,7 @@ func (e SessionEntry) ConsumerRelaysStored(topic string, storedSeq uint64) bool 
 	return e.ConsumerHoldsStored(storedSeq) && bus.StreamCaptures(topic)
 }
 
-// Resolve decides what a delivery of item to interest's session at entry comes to: the session's
+// Resolve decides what a delivery of item to sessionID's session at entry comes to: the session's
 // own consumer relays the message, the session takes it off its own NATS subscription, or the
 // entry records no way of receiving at all. A result with Skipped set needs nothing of this
 // delivery, because the session receives the message another way, and an error is the delivery's
@@ -52,20 +51,17 @@ func (e SessionEntry) ConsumerRelaysStored(topic string, storedSeq uint64) bool 
 // entry it decides on and hands it over, so the record the decision acts on is the one that
 // caller read, and nothing of the listener it runs in enters the decision.
 //
-// storedSubject and storedSeq name the durable path's copy of a stored message: the subject it is
-// stored on, which is item's own topic for everything but the stored copy of a role forward (that
-// is stored on the holder's agent subject while its envelope keeps the role topic), and its stream
-// sequence, 0 for any other delivery. Together they decide whether a session on consumer delivery
-// is already held this message by its own consumer (SessionEntry.ConsumerRelaysStored); an empty
-// storedSubject names a copy no consumer holds, for a caller that is the only delivery of it left.
-// A core path's message is not the durable's copy of a stored one, so its caller passes item's own
-// topic and a sequence of 0, which leaves a session on consumer delivery its consumer's copy
-// whatever that copy's sequence is.
-func Resolve(item contracts.Envelope, interest store.Interest, entry *SessionEntry, storedSubject string, storedSeq uint64) (DeliveryResult, error) {
+// storedSeq is the stream sequence of the durable path's copy of a stored message, 0 for any
+// other delivery. A message is stored on the subject its envelope names as its topic, so that
+// topic and the sequence together decide whether a session on consumer delivery is already held
+// this message by its own consumer (SessionEntry.ConsumerRelaysStored). A core path's message is
+// not the durable's copy of a stored one, so its caller passes a sequence of 0, which leaves a
+// session on consumer delivery its consumer's copy whatever that copy's sequence is.
+func Resolve(item contracts.Envelope, sessionID string, entry *SessionEntry, storedSeq uint64) (DeliveryResult, error) {
 	if entry == nil {
-		return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoSessionRecord, interest.SessionID)
+		return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoSessionRecord, sessionID)
 	}
-	if entry.ConsumerRelaysStored(storedSubject, storedSeq) {
+	if entry.ConsumerRelaysStored(item.Topic, storedSeq) {
 		// The session's consumer holds this stored message, and the listener that owns the session
 		// relays it from there: no other path delivers it, and none records anything about it. A
 		// topic the stream does not store is in no consumer, and so is a durable message stored
@@ -82,5 +78,5 @@ func Resolve(item contracts.Envelope, interest store.Interest, entry *SessionEnt
 	}
 	// The entry records neither way of receiving: nothing reaches this session until it registers
 	// again (ErrNoSessionRecord).
-	return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoSessionRecord, interest.SessionID)
+	return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoSessionRecord, sessionID)
 }

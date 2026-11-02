@@ -318,7 +318,7 @@ func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
 		if got := counterValue(t, body, nakedCounter); got != 1 {
 			t.Fatalf("%s = %d, want 1 - a deferred delivery is NAKed back to the stream, not acknowledged:\n%s", nakedCounter, got, body)
 		}
-		for _, status := range []string{"delivered", "skipped", "unplaceable_no_record", "unplaceable_no_push_target"} {
+		for _, status := range []string{"delivered", "skipped", "unplaceable_no_record"} {
 			if got := counterValue(t, body, deliveredSeries(status)); got != -1 {
 				t.Fatalf("%s = %d while the message is still in the stream, want no series at all - a deferral disposes of nothing:\n%s", deliveredSeries(status), got, body)
 			}
@@ -425,18 +425,16 @@ func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
 	})
 }
 
-// The give-up counter separates its causes, because an operator acts on them differently: a
-// session with no record at all may be one whose registration never landed or one that ended, and
-// a record that names nothing to push to is a session that registered before its server bound its
-// serve port. Neither is a skip: before this change both were counted delivery_status="skipped"
-// and logged "listener agent session not found anywhere", which is indistinguishable from the
-// self-subscribed session that really did receive the message over its own subscription. A push
-// that fails is no cause here at all: the durable hands every push to a serving-port session to
-// that session's worker, which pushes it until the port accepts it.
+// Two shapes of record are given up under the one cause, and the counter and the operator's line
+// must both name it: a session with no record at all may be one whose registration never landed
+// or one that ended, and a record that names no way the session receives a message is one that
+// registered through a plugin that asks for neither way. Neither is a skip, and neither is
+// logged "listener agent session not found anywhere", which is indistinguishable from the
+// self-subscribed session that really did receive the message over its own subscription.
 //
-// That third outcome is asserted here too, against the same handler: a session with no port that
-// is self-subscribed is delivered - skipped only in the push this listener did not have to make -
-// and must never be counted unplaceable.
+// The boundary is asserted here too, against the same handler: a self-subscribed session is a
+// delivered outcome - it reads the message off its own subscription - and must never be counted
+// unplaceable.
 //
 // Every cause runs at a real window over a real durable, because the separation is claimed of the
 // whole path and not of its last attempt: at a zero window every delivery is given up on its first

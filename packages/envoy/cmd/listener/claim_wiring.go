@@ -12,21 +12,14 @@ type subscribeBody struct {
 	SessionID string   `json:"session_id"`
 	Dir       string   `json:"dir"`
 	Topics    []string `json:"topics"`
-	// Port named the session's own HTTP serving port, which the listener pushed messages to.
-	// It is still parsed so a registration carrying one above 0 can be refused by name
-	// (subscribeHandler): the listener delivers to no port, and storing such a registration
-	// would leave its session waiting for pushes nothing sends. A session receives from its own
-	// consumer, or on its own NATS subscription.
-	Port         int      `json:"port"`
-	Title        string   `json:"title"`
-	Capabilities []string `json:"capabilities"`
-	// Driving reports that this process is the one actually driving the session,
-	// rather than a process that merely has it loaded from shared on-disk state.
-	// Nothing reads it: the claim rule that weighed it is gone with the serving port that rule
-	// compared (session.mergeForClaim). It is stored with the session entry as the registering
-	// process's own report of itself.
-	Driving        bool `json:"driving"`
-	SelfSubscribed bool `json:"self_subscribed"`
+	// Port is the session's own HTTP serving port, parsed so that a registration carrying one
+	// above 0 can be refused by name (subscribeHandler): this listener delivers nothing to a
+	// port, and storing such a registration would leave its session waiting for messages
+	// nothing sends. A session receives from its own consumer, or on its own NATS subscription.
+	Port           int      `json:"port"`
+	Title          string   `json:"title"`
+	Capabilities   []string `json:"capabilities"`
+	SelfSubscribed bool     `json:"self_subscribed"`
 	// Host is envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel
 	// hostname): where the session process actually runs, as opposed to machineID below,
 	// which is always the registering listener's own machine (unrelated to the caller). No
@@ -85,7 +78,6 @@ func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery se
 		Dir:              body.Dir,
 		Title:            body.Title,
 		Capabilities:     append([]string{}, body.Capabilities...),
-		Driving:          body.Driving,
 		SelfSubscribed:   body.SelfSubscribed,
 		Host:             body.Host,
 		Plugin:           strings.TrimSpace(body.Plugin),

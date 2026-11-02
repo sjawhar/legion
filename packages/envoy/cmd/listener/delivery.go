@@ -710,10 +710,10 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	// read that did not answer, which is no evidence of absence at all - the bucket was never
 	// consulted, so nothing about this session was learned, and an attempt that learned nothing
 	// can never be the ground for giving a message up. Neither needs to be told from the other
-	// below: both leave this delivery with no entry to deliver through, and an entry-less attempt
-	// reaches the retry decision only as ReasonNoSessionRecord, which already holds the retry
-	// open (session.HandleAgentMessage: the registry path reports that reason, and the interest
-	// path NAKs with an error, which never reaches that branch).
+	// below: both leave this delivery with no entry to deliver through, and an attempt with no
+	// entry is held and retried for the whole window before it is given up
+	// (unplaceableAgentDelivery), while the interest path's own failures NAK with an error
+	// instead and never reach that branch.
 	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, roles.Registered)
 	var entryPtr *session.SessionEntry
 	if entryErr == nil {
@@ -722,13 +722,8 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
 	// The durable path's message carries the stream sequence that says whether the session's
-	// consumer already holds it, and the core path's message is in no consumer.
-	var result session.HandleAgentResult
-	if message.mode == durableDelivery {
-		result = session.ResolveStoredAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, message.storedSeq())
-	} else {
-		result = session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr)
-	}
+	// consumer already holds it, and the core path's message is in no consumer (storedSeq 0).
+	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, message.storedSeq())
 	if result.Relayed {
 		// The session's own consumer holds this message and the relay of that consumer delivers it
 		// (session.SessionEntry.ConsumerRelaysStored), as on the fan-out path below. The attempt
@@ -784,7 +779,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			recordDedupe: true,
 		})
 	} else if result.Err == nil {
-		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata, result)
+		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata)
 		return
 	}
 	if result.ShouldNAK {
@@ -965,7 +960,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		// One resolution per recipient decides every outcome below: it reads the entry the
 		// judgement above returned for every verdict, its refusals among them, and makes no call
 		// of its own.
-		delivery, err := session.Resolve(item, interest, target, item.Topic, message.storedSeq())
+		delivery, err := session.Resolve(item, interest.SessionID, target, message.storedSeq())
 		relayed := err == nil && delivery.Relayed
 		// Refusals are decided before the take case, since the session whose own consumer relays
 		// the message is one this path still reports a refusal of: that relay judges nothing it

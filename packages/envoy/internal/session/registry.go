@@ -22,20 +22,13 @@ type SessionEntry struct {
 	// session. The field is kept because every released client parses it in the listener's
 	// answers, and because an entry an older listener stored can still carry a port until it
 	// lapses (the session bucket's TTL, 5 minutes by default).
-	Port         int      `json:"port"`
-	MachineID    string   `json:"machine_id"`
-	Dir          string   `json:"dir"`
-	Title        string   `json:"title"`
-	Capabilities []string `json:"capabilities"`
-	UpdatedAt    int64    `json:"updated_at"`
-	// Driving reports whether the claiming process is the one actually driving
-	// this session (its explicit -s target or a session it owns), as opposed to a
-	// process that merely has the session loaded from shared on-disk state. Nothing in the
-	// listener reads it: the rule that weighed it against an incumbent claim turned on the two
-	// claims naming different serving ports, which no registration carries any more
-	// (mergeForClaim). It is still stored, as the registering process's own report of itself.
-	Driving        bool `json:"driving,omitempty"`
-	SelfSubscribed bool `json:"self_subscribed,omitempty"`
+	Port           int      `json:"port"`
+	MachineID      string   `json:"machine_id"`
+	Dir            string   `json:"dir"`
+	Title          string   `json:"title"`
+	Capabilities   []string `json:"capabilities"`
+	UpdatedAt      int64    `json:"updated_at"`
+	SelfSubscribed bool     `json:"self_subscribed,omitempty"`
 	// Host is the machine the client-reported `machineID()` (envoy-client's
 	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, as
 	// opposed to MachineID, which is the registering listener's own ENVOY_MACHINE_ID, whether
@@ -91,7 +84,7 @@ const DeliveryConsumer = "consumer"
 // durable message below that start is in no consumer — one NAKed, or deferred, before the
 // consumer was created, and redelivered after it — and the durable path delivers it as it would
 // for a session with no consumer at all. storedSeq 0 names a message that is not the durable's
-// copy of a stored one (a core or live frame), whose stored copy the consumer holds whatever its
+// copy of a stored one (a core frame), whose stored copy the consumer holds whatever its
 // sequence.
 func (e SessionEntry) ConsumerHoldsStored(storedSeq uint64) bool {
 	return e.Delivery == DeliveryConsumer && (storedSeq == 0 || storedSeq >= e.ConsumerStart)
@@ -478,19 +471,11 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 // connection ahead of any write this listener sends on it later, so it cannot undo one, and
 // against another listener's write it is last-writer-wins, as every Put already is.
 func (r *SessionRegistry) PutWithin(ctx context.Context, sessionID string, entry SessionEntry) error {
-	// Several live processes can hold the same session (shared on-disk state), and the route
-	// names whichever heartbeated last — including a process not driving the session.
-	// mergeForClaim arbitrated between them until dispatch://INFRA-889, by rules written on the
-	// serving ports the two claims named; no registration carries a port any more, so it is
-	// last-writer-wins now. What it still does is refuse the write when the read of the
-	// incumbent failed for anything but a missing key: a write built on a read that never
-	// answered would discard whatever the stored entry holds. The incumbent is read for that
-	// error alone, which is why its entry is dropped here.
-	_, curErr := r.Get(sessionID)
-	entry, err := mergeForClaim(curErr, entry, time.Now().UnixMilli())
-	if err != nil {
-		return err
-	}
+	// Several live processes can hold the same session (shared on-disk state) - a harness can
+	// keep a session's state on shared disk - and each heartbeats a claim of its own. The route
+	// follows whichever wrote last, and this write stamps the entry with the moment it was made,
+	// so a reader weighing the route's freshness (ClaimStaleAfter) reads the latest heartbeat.
+	entry.UpdatedAt = time.Now().UnixMilli()
 	buf, err := json.Marshal(entry)
 	if err != nil {
 		return err

@@ -39,7 +39,7 @@ func newSessionRegistry(t *testing.T) *session.SessionRegistry {
 // own, under the core path's stream sequence of 0.
 func deliverThroughEntry(t *testing.T, sessions *session.SessionRegistry, item contracts.Envelope, interest store.Interest) error {
 	t.Helper()
-	_, err := session.Resolve(item, interest, resolvedEntry(t, sessions, interest.SessionID), item.Topic, 0)
+	_, err := session.Resolve(item, interest.SessionID, resolvedEntry(t, sessions, interest.SessionID), 0)
 	return err
 }
 
@@ -95,9 +95,8 @@ func TestDeliver_SkipsStoredTopics_whenSessionIsOnConsumerDelivery(t *testing.T)
 	// When
 	stored, storedErr := session.Resolve(
 		newTestEnvelope("agent", "notifications.agent.ses_consumer", "stored message"),
-		store.Interest{SessionID: "ses_consumer"},
+		"ses_consumer",
 		resolvedEntry(t, sessions, "ses_consumer"),
-		"notifications.agent.ses_consumer",
 		0,
 	)
 

@@ -12,7 +12,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
-	"github.com/sjawhar/envoy/internal/session"
 )
 
 // unplaceableRetryDelay is the delay an agent delivery this listener could not place asks for
@@ -161,7 +160,7 @@ func (d *unplaceableDeferrals) sweepLocked(now time.Time) {
 // unplaceableAgentDelivery answers an agent delivery that nothing placed and nothing failed hard
 // enough to NAK (agentSubjectDelivery's undelivered, error-free result). It either defers the
 // message for redelivery or gives it up with its record, and finalizes the message either way.
-func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, metadata *nats.MsgMetadata, result session.HandleAgentResult) {
+func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, metadata *nats.MsgMetadata) {
 	// Nothing placed this message and nothing failed hard enough to NAK: this listener found no
 	// session record it could deliver through - no entry at all, or an entry that records no way
 	// the session receives a message (session.ErrNoSessionRecord). Either can be true of a
@@ -170,13 +169,6 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// and redelivered for as long as cfg.unplaceableRetryWindow, and only then given up, with a
 	// record and a counter of its own rather than the ACKed skip that lost it.
 	//
-	// The reason is the same for the operator and for the counter label whatever the result
-	// carries: session.ReasonNone reaches here in no deployed listener, since HandleAgentMessage
-	// answers undelivered, error-free and ReasonNone only for a session another listener owns,
-	// which it reports as OwnedElsewhere, and agentSubjectDelivery acknowledges that result
-	// before it calls here.
-	const reason = "no_session_record"
-	const giveUpStatus = "unplaceable_no_record"
 	// The window is counted from this message's first delivery, not from the time the
 	// stream stored it: a backlog replayed into a listener whose caches are still cold -
 	// after a restart, during a rolling deploy - is minutes old when it is first delivered,
@@ -191,17 +183,8 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	if cfg.unplaceableRetryWindow > 0 {
 		windowDeferrals = uint64(cfg.unplaceableRetryWindow / unplaceableRetryDelay)
 	}
-	// What does not hold the retry open is session.ReasonNone, the defensive arm above: an
-	// undelivered result that carries it is another listener's session to place, however often
-	// this one sees the message. Every outcome a deployed listener reaches here with carries
-	// ReasonNoSessionRecord (internal/session/handler.go, reasonFor), and the interest path's
-	// failures return ShouldNAK with an Err set and are answered by agentSubjectDelivery. A read
-	// that did not answer is no evidence of absence and must not end the retries, and it does
-	// not: it leaves no entry, and an attempt with no entry reports ReasonNoSessionRecord here,
-	// so the reason alone already holds the window open for it.
-	placementMayChange := result.Reason != session.ReasonNone
 	deferred := false
-	if metadata != nil && placementMayChange && metadata.NumDelivered <= windowDeferrals &&
+	if metadata != nil && metadata.NumDelivered <= windowDeferrals &&
 		metadata.NumDelivered < unplaceableMaxDeliveries {
 		// The slot is this message's own, keyed on its stream sequence, so only this
 		// message's next delivery gives it back, or its expiry (unplaceableDeferralExpiry) when
@@ -223,7 +206,7 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 			sessionID: sessionID,
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelInfo, "listener agent delivery deferred", sessionID, item.Topic, item.EventID, "deferred",
-					slog.String("reason", reason),
+					slog.String("reason", "no_session_record"),
 					slog.Uint64("attempt", metadata.NumDelivered),
 					slog.Uint64("window_deferrals", windowDeferrals),
 				)
@@ -264,9 +247,9 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// with no give-up record at all.
 	applyDeliveryOutcome(cfg, item, deliveryOutcome{
 		sessionID:    sessionID,
-		metricStatus: giveUpStatus,
+		metricStatus: "unplaceable_no_record",
 		log: func(logger *logging.Logger) {
-			logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, giveUpStatus, slog.String("reason", reason))
+			logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, "unplaceable_no_record", slog.String("reason", "no_session_record"))
 		},
 		exceptionReason: "no_holder",
 		origin:          exceptionOrigin(message),

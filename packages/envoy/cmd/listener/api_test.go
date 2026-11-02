@@ -842,6 +842,38 @@ func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
 	}
 }
 
+// A role claim refreshes the claimant's session entry, and the entry it writes names no serving
+// port. An entry an earlier listener stored with one would otherwise be renewed by every claim
+// its client makes, while each of that client's registrations is refused (subscribeHandler); and
+// while such an entry lives, Resolve passes the session over as self-subscribed and Dispatch's
+// outbox counts the stream's ack as its delivery, so its messages are reported delivered when
+// nobody delivered them.
+func TestARoleClaimWritesTheServingPortOutOfTheClaimantsEntry(t *testing.T) {
+	const sessionID = "ses_ported_claimant"
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put(sessionID, session.SessionEntry{Port: 8080, MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("store the entry an earlier listener wrote: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	roleSetHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test")).ServeHTTP(recorder,
+		httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"`+sessionID+`","role":"ported-claimant"}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("%s claims ported-claimant: status %d %s", sessionID, recorder.Code, recorder.Body.String())
+	}
+
+	entry, err := sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the claimant's entry back: %v", err)
+	}
+	if entry.Port != 0 {
+		t.Fatalf("the refreshed entry names port %d, want none: this listener delivers nothing to a port, and a renewed entry that names one is a session reported as receiving messages nobody hands it", entry.Port)
+	}
+	if !entry.SelfSubscribed || entry.MachineID != "test-machine" {
+		t.Fatalf("the refreshed entry %+v, want it still self-subscribed on test-machine", entry)
+	}
+}
+
 // A listener's session cache trails the session bucket, so a holder another listener registered and
 // gave a role a moment ago can be in the bucket and not yet in this listener's cache. A lookup there
 // answers that holder. Releasing the claim as lapsed on the cache's word deletes the claim the other

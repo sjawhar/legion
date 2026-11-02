@@ -5,29 +5,6 @@ import (
 	"testing"
 )
 
-// The subscribe payload carries whether the claiming process is driving the
-// session; it must reach the session registry so competing claims can be
-// arbitrated (see session.mergeForClaim). Dropping it silently reinstates
-// last-writer-wins routing.
-func TestSessionEntryFromSubscribe_CarriesDrivingFlag(t *testing.T) {
-	got := sessionEntryFromSubscribe(subscribeBody{
-		SessionID: "ses_x",
-		Dir:       "/work",
-		Title:     "ipi eval",
-		Driving:   true,
-	}, "devbox-sami", sessionDeliveryOutcome{})
-
-	if !got.Driving {
-		t.Fatalf("expected Driving to be carried into the session entry, got %+v", got)
-	}
-	if got.Dir != "/work" || got.Title != "ipi eval" || got.MachineID != "devbox-sami" {
-		t.Fatalf("unexpected entry mapping: %+v", got)
-	}
-	if got.Port != 0 {
-		t.Fatalf("the entry records port %d, want none: a registration naming one is refused before it reaches here (subscribeHandler)", got.Port)
-	}
-}
-
 // envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel hostname) names where
 // the session process actually runs. No delivery reads it, and it must still reach the session
 // entry as Host, kept separate from MachineID (always the registering listener's own machine,
@@ -115,14 +92,6 @@ func TestSessionEntryFromSubscribe_DefaultsTheClientInstanceIDEmpty(t *testing.T
 
 	if got.ClientInstanceID != "" {
 		t.Fatalf("expected no client instance id for a payload without the field, got %+v", got)
-	}
-}
-
-func TestSessionEntryFromSubscribe_DefaultsToNonDriving(t *testing.T) {
-	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_y"}, "devbox-sami", sessionDeliveryOutcome{})
-
-	if got.Driving {
-		t.Fatalf("expected a payload without the flag to claim non-driving, got %+v", got)
 	}
 }
 

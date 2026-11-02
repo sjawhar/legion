@@ -169,7 +169,7 @@ func (h *listenerHarness) handleAgent(msg *natsgo.Msg, item contracts.Envelope) 
 		entryPtr = &entry
 	}
 	h.attemptCache.Record(item.DedupeKey, sessionID)
-	result := session.HandleAgentMessage(item, sessionID, h.machineID, interestPtr, entryPtr)
+	result := session.HandleAgentMessage(item, sessionID, h.machineID, interestPtr, entryPtr, 0)
 	if result.Delivered {
 		h.dedupeCache.Record(item.DedupeKey, sessionID)
 		h.env.recordDelivery(sessionID, item)
@@ -206,7 +206,7 @@ func (h *listenerHarness) handleFanout(msg *natsgo.Msg, item contracts.Envelope)
 		if targetErr == nil {
 			target = &targetEntry
 		}
-		if _, err := session.Resolve(item, interest, target, item.Topic, 0); err != nil {
+		if _, err := session.Resolve(item, interest.SessionID, target, 0); err != nil {
 			if fanoutShouldNAK(h.env.sessions, interest.SessionID, err) {
 				failed = true
 			}

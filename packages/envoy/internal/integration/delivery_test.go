@@ -212,7 +212,7 @@ func (env *testEnv) startConsumer(machineID string) {
 			if entryErr == nil {
 				entryPtr = &entry
 			}
-			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, entryPtr)
+			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, entryPtr, 0)
 			if result.Delivered {
 				env.dedupe.Record(item.DedupeKey, sessionID)
 				env.recordDelivery(sessionID, item)
@@ -246,7 +246,7 @@ func (env *testEnv) startConsumer(machineID string) {
 			if targetErr == nil {
 				target = &targetEntry
 			}
-			if _, err := session.Resolve(item, interest, target, item.Topic, 0); err != nil {
+			if _, err := session.Resolve(item, interest.SessionID, target, 0); err != nil {
 				failed = true
 			} else {
 				env.dedupe.Record(item.DedupeKey, interest.SessionID)
