@@ -53,7 +53,9 @@ it, PostgreSQL 15 and later copy the source database through the write-ahead log
 4.4 MB of log for an empty database made from `template1`, and 6.4 MB for a clone of Dispatch's
 migrated template, which made one run of the `api` and `docs` packages write 16 GiB of log. A file
 copy writes a few hundred bytes. `storetest`'s own test fails when a clone writes more than a
-hundredth of its template's size.
+hundredth of its template's size, and each module's `internal/testpg` test
+`TestEveryCreatedDatabaseIsAFileCopy` fails on any line of the module's Go files that opens a
+database's creation in a string without `strategy file_copy` on the same line.
 
 A test changes no server setting (`fsync`, `full_page_writes`, `max_wal_size`): the server
 `DISPATCH_TEST_DATABASE_URL` names can hold other databases, such as the local Dispatch's on
