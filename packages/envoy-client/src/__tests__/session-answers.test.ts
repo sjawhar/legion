@@ -24,6 +24,7 @@ import {
   type SessionAnswersRead,
   sessionAnswersFailureLine,
   sessionAnswersSettled,
+  sessionAnswersWords,
 } from "../session-answers";
 
 const NOW = Date.parse("2026-10-27T12:00:00.000Z");
@@ -246,6 +247,46 @@ describe("renderSessionAnswers", () => {
   });
 });
 
+describe("sessionAnswersWords", () => {
+  const words = (items: readonly SessionAnswer[]) => sessionAnswersWords(items, NOW);
+  const isNew = (before: readonly SessionAnswer[], after: readonly SessionAnswer[]) => {
+    const shown = new Set(words(before));
+    return words(after).some((word) => !shown.has(word));
+  };
+
+  test("a new item, a changed answer or an edited comment is new", () => {
+    expect(isNew([comment, direct], [answer, comment, direct])).toBe(true);
+    const edited = {
+      ...comment,
+      edited_at: "2026-10-27T11:30:00Z",
+      text: "Step 3 needs the production URL.",
+    };
+    expect(isNew([comment, direct], [edited, direct])).toBe(true);
+    const replaced = {
+      ...answer,
+      at: "2026-10-27T11:40:00Z",
+      selected: ["JSON"],
+      replaced: true as const,
+    };
+    expect(isNew([answer], [replaced])).toBe(true);
+  });
+
+  test("the same items, fewer items, or a changed title or question is nothing new", () => {
+    expect(isNew([answer, comment, direct], [answer, comment, direct])).toBe(false);
+    expect(isNew([answer, comment, direct], [answer, direct])).toBe(false);
+    const retitled = {
+      ...answer,
+      owner: { issue: { key: "CORE-7", title: "A new title" } },
+      ask: { id: "ask-1", question: "Which format, now?" },
+    };
+    expect(isNew([answer], [retitled])).toBe(false);
+  });
+
+  test("an item past 72 hours has no words", () => {
+    expect(words([message("old", hoursAgo(73), "old"), direct])).toHaveLength(1);
+  });
+});
+
 describe("renderSessionAnswersList", () => {
   test("prints every item of the 72 hours with no cap", () => {
     const items = Array.from({ length: 12 }, (_, index) =>
@@ -451,6 +492,7 @@ describe("readSessionAnswers", () => {
       text: renderSessionAnswers(recent, { now: NOW }),
       source: "fresh",
       readAt: new Date(NOW).toISOString(),
+      words: sessionAnswersWords(recent, NOW),
     });
     expect(calls.map((call) => call.url.pathname + call.url.search)).toEqual([
       `/api/v1/agents/${session}/answers?max_chars=8000`,
@@ -513,6 +555,7 @@ describe("readSessionAnswers", () => {
         text: undefined,
         source: "fresh",
         readAt: new Date(NOW).toISOString(),
+        words: [],
       });
       fail = true;
       expectFailureLine(await readSessionAnswers({ ...options, deadlineMs }), reason);
@@ -539,6 +582,7 @@ describe("readSessionAnswers", () => {
         text: renderSessionAnswers(recent, { now: later, cached: { readAt, reason: failed } }),
         source: "cache",
         readAt,
+        words: expect.any(Array),
         reason: failed,
       });
       expect(read.text?.split("\n")[0]).toBe(SESSION_ANSWERS_MARKER);
@@ -723,6 +767,7 @@ describe("readSessionAnswers", () => {
       text: renderSessionAnswers([direct], { now: NOW }),
       source: "fresh",
       readAt: new Date(NOW).toISOString(),
+      words: sessionAnswersWords([direct], NOW),
     });
     expect(calls.map((call) => call.url.host)).toEqual([hostOf(a), hostOf(b)]);
     pendingA.resolve(listed(recent));
@@ -908,6 +953,7 @@ describe("readSessionAnswers", () => {
       }),
       source: "cache",
       readAt,
+      words: expect.any(Array),
       reason: NO_ANSWERS_ROUTE_REASON,
     };
     // The read that meets the 404, with the notice; then a request inside the back-off, which
@@ -973,6 +1019,7 @@ describe("readSessionAnswers", () => {
       text: renderSessionAnswers(recent, { now: NOW, cached: { readAt, reason: notRun } }),
       source: "cache",
       readAt,
+      words: expect.any(Array),
       reason: notRun,
     };
     const failure: SessionAnswersRead = {

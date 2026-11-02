@@ -111,6 +111,27 @@ function withinWindow(items: readonly SessionAnswer[], now: number): SessionAnsw
   return items.filter((item) => Date.parse(item.at) >= start);
 }
 
+/**
+ * What the people wrote in each item inside the 72 hours before `now`, one string per item: its
+ * kind, id, author and times, the options chosen and the words. A host compares two reads' sets to
+ * tell a new item, or an answer or comment a person changed, from a list that only lost items to
+ * the window or changed what the session or Dispatch says around them (an issue's title, an ask's
+ * question, a cached list's header).
+ */
+export function sessionAnswersWords(items: readonly SessionAnswer[], now: number): string[] {
+  return withinWindow(items, now).map((item) =>
+    JSON.stringify([
+      item.kind,
+      item.id,
+      item.author.id,
+      item.at,
+      item.edited_at ?? null,
+      item.selected ?? null,
+      item.text,
+    ])
+  );
+}
+
 /** `SESSION_ANSWERS_MAX_CHARS` as the left-out line prints it. */
 const MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
 
@@ -336,6 +357,8 @@ export interface SessionAnswersRead {
   readonly source: "fresh" | "cache" | "failure" | "unavailable" | "off";
   /** When the list shown was read (`fresh` and `cache`). */
   readonly readAt?: string;
+  /** `sessionAnswersWords` of the list shown (`fresh` and `cache`): what the people wrote in it. */
+  readonly words?: readonly string[];
   /** Why the read gave no list (`cache`, `failure`, `unavailable`), or the notice that turns
    *  Dispatch off. */
   readonly reason?: string;
@@ -425,7 +448,13 @@ export async function readSessionAnswers(
       // from looking like no person wrote.
       return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
     }
-    return { text, source: "cache", readAt: cache.read_at, reason };
+    return {
+      text,
+      source: "cache",
+      readAt: cache.read_at,
+      words: sessionAnswersWords(cache.items, now()),
+      reason,
+    };
   };
   if (!dispatch.enabled) {
     const url = options.dispatchUrl;
@@ -527,6 +556,7 @@ export async function readSessionAnswers(
     }),
     source: "fresh",
     readAt: outcome.cache.read_at,
+    words: sessionAnswersWords(outcome.cache.items, now()),
   };
 }
 

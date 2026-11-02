@@ -191,7 +191,7 @@ import {
   taskWasAbandoned,
 } from "../src/registration-state";
 import { ServerClock } from "../src/server-clock";
-import { withSessionAnswers } from "../src/session-answers-context";
+import { type CarriedAnswers, withSessionAnswers } from "../src/session-answers-context";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
 import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
@@ -3276,7 +3276,9 @@ export default function envoyExtension(pi: PiApi): void {
   // cannot place carries no list rather than another session's. A Dispatch with no answers route
   // carries nothing to the model; the read's `notice`, which it gives once per session and
   // Dispatch URL, goes to the log instead.
-  const sessionAnswersText = async (context: SessionContext): Promise<string | undefined> => {
+  const sessionAnswersText = async (
+    context: SessionContext
+  ): Promise<CarriedAnswers | undefined> => {
     const session = await replyAddress(context, context.sessionManager.getSessionId());
     if (session === "") return undefined;
     try {
@@ -3289,13 +3291,14 @@ export default function envoyExtension(pi: PiApi): void {
         env: process.env,
       });
       if (read.notice !== undefined) logger.warn(`envoy: ${read.notice}`);
-      return read.text;
+      // The failure line shows nothing a person wrote.
+      return read.text === undefined ? undefined : { text: read.text, words: read.words ?? [] };
     } catch (error) {
       // Oh My Pi drops all a `context` handler returns when it throws, the dispatch-first skill
       // with it, so a read that throws instead of answering with its failure line still costs
       // only the list: the request says the list could not be read, and why.
       logger.warn(`envoy: people's answers could not be read: ${messageFor(error)}`);
-      return sessionAnswersFailureLine(messageFor(error));
+      return { text: sessionAnswersFailureLine(messageFor(error)), words: [] };
     }
   };
 
@@ -3304,8 +3307,8 @@ export default function envoyExtension(pi: PiApi): void {
     // (`../src/card-age`), so a reader whose inbox ran behind does not take a late card's stamp
     // for the present time. Every session that reaches Dispatch, Legion panes and `task` subagents
     // included, also carries the dispatch-first skill on every request at the head, where its
-    // bytes never change, and on every request of its main loop what people wrote to it at the
-    // tail, where a change in the list re-reads no cached prefix. The host runs this handler on
+    // bytes never change, and on every request of its main loop what people wrote to it: after the
+    // last message when it shows something new, then where it went (`withSessionAnswers`). The host runs this handler on
     // its side turns, its handoff prompt and a remote compaction's conversions too;
     // `withSessionAnswers` leaves the list off those. Oh My Pi hands this handler no abort signal:
     // it races the handler against the run's own and drops what an aborted handler returns, and
@@ -3324,6 +3327,7 @@ export default function envoyExtension(pi: PiApi): void {
       const messages = await withSessionAnswers(withSkill ?? aged ?? event.messages, {
         branch: () => context.sessionManager.getBranch?.() ?? [],
         session: context.sessionManager,
+        id: context.sessionManager.getSessionId(),
         // Read off the live `AgentSession` (18.12.2), whose getters the declared host surface
         // leaves out: `get isCompacting() { return this.#C.isCompacting; }` and
         // `get compactionSpeculation() { return this.#C.speculationState; }`, the compaction
