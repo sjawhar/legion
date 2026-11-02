@@ -267,14 +267,18 @@ shows the same three things:
 - **Its name**: the session's current title while it is running, else the title it had when it
   wrote, else a short form of its id, such as `session:01a0e090…`. A session working for a person
   adds `(for <login>)`.
-- **Whether it is running**: a filled dot when it is running, a hollow ring when it is not, and a
-  dashed ring while Dispatch cannot tell (the list of running sessions has not loaded, or failed to
-  load). The mark reads Envoy's three session states, not the agent's process: a session is `live`
-  (it registered within the live window, 5 minutes by default), `unresponsive` (it last registered
-  longer ago than that but inside the gone horizon, 1 hour by default) or `gone` (past the horizon,
-  or Envoy holds no record of it). Only `gone` is a hollow ring. An **unresponsive** session is not
-  dead: it is shown as running, it keeps its claims, and a message you send it waits for it and
-  arrives when it answers again.
+- **Whether it is running**: a filled dot when it is running, a ring in amber when it is
+  unresponsive, a hollow ring when it is not running, and a dashed ring while Dispatch cannot tell
+  (the list of running sessions has not loaded, or failed to load). The mark reads Envoy's three
+  session states, not the agent's process: a session is `live` (it registered within the live
+  window, 5 minutes by default), `unresponsive` (it last registered longer ago than that but
+  inside the gone horizon, 1 hour by default) or `gone` (past the horizon, or Envoy holds no
+  record of it). Point at a mark to read its state in words, and, for a running or unresponsive
+  session, when it was last seen. An **unresponsive** session is not dead: it has a mark of its
+  own rather than the hollow ring, it keeps its claims, and a message you send it waits for it and
+  arrives when it answers again. On this page and in the header of its live view, such a session
+  also says **Unresponsive** in words beside its name, with the heartbeat it was last seen at,
+  because that is the state a reader has to decide about.
 - **A link to its live view**: choose the name. Where the name is itself a button, such as an
   agent's row on this page or the asker on an Inbox card, which shows the session's ID and title
   to copy, the link is the **↗** beside it.

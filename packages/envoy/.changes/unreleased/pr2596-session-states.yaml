@@ -7,8 +7,12 @@ body: |-
     An unresponsive session is not a dead one: nothing a lookup, a publish, a role-lane delivery or
     a reaper pass does releases its role claim, a send to it is accepted and stored with
     `recipient_state: unresponsive`, topic fan-out skips it with a status of its own rather than a
-    failure, and its interests are kept. Only the role-claim reaper releases a claim, and only once
-    the holder is `gone`. Every list, lookup and refusal carries `state` and `last_seen`, a role
+    failure, and its interests are kept. The listener's role routes, its role lane and Dispatch's
+    outbox resolve a holder through one package (`internal/roles`) that writes nothing to the role
+    bucket, so a role-routed event whose holder is unresponsive stays pending for that session to
+    answer rather than being published with nothing sent. Only the role-claim reaper releases a
+    claim, and only once the holder is `gone`. Every list, lookup and refusal carries `state` and
+    `last_seen`, a role
     lookup answers `holder_state` and `claim_released`, a publish answers `holder_state` for the
     role it reached and lists under `unresponsive` each topic recipient whose copy was stored
     without waiting for a receipt, and `GET /v1/sessions` and

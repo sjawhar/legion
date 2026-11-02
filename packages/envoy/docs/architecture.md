@@ -49,10 +49,11 @@ Agent messages  --/       |
 All `/v1/*` endpoints answer 503 `service starting` until NATS is connected and the interest and session caches are warm; they do not wait for the durable consumer. The two list reads, `GET /v1/sessions` and `GET /v1/interests/`, answer that time with the refilling 503 the routes themselves give (below).
 A listener's caches follow their buckets through watchers (`internal/kvwatch`): the interest and
 session buckets, and the CI bucket on a listener that mounts the GitHub webhook route. A start
-reads each bucket in full. A rewatch, after a NATS reconnect or a self-health rebuild, resumes
-after the last revision its cache applied, so it delivers only what was written since; it reads in
-full again when it cannot resume (a recreated bucket, or a scan that did not complete), and when
-its resuming watcher cannot be created, which it logs at WARN. JetStream
+reads each bucket in full, and so does a rewatch after a NATS reconnect or a self-health rebuild
+(`kvwatch.Watcher.Rewatch`), which resumes from no revision: the copy keeps every row while the
+new read runs, each delivered record replaces its row as it arrives, and only a completed read
+removes the rows it did not find, so an incomplete read removes nothing and the listener reads
+again itself. A rewatch that cannot be created is logged at WARN. JetStream
 delivers no event when the session bucket's `MaxAge` expires a key, so the session cache gives
 each entry a deadline one `MaxAge` after its write, and a timer removes the entry at that
 deadline. That deadline bounds the cache, not a session's life: state is computed from the
@@ -97,8 +98,9 @@ every role answer carries that session's `state` and `last_seen`. A role answer 
 state as `holder_state` and says, with `claim_released`, whether that answer released the claim;
 it is always `false`, because no answer releases one.
 
-No lookup, publish, role-lane delivery attempt or daemon probe releases a role claim, whatever the
-holder's state. Only the role claim reaper does, and only once the holder's own record reads
+No lookup, publish, role-lane delivery attempt, Dispatch outbox forward or daemon probe releases a
+role claim, whatever the holder's state. Only the role claim reaper does, and only once the
+holder's own record reads
 `gone`. It runs on the session reaper's period, `ENVOY_SESSION_REAP_INTERVAL` (a Go duration,
 default 1m), since what it waits for is what the session reaper decides. A Legion role whose agent
 process exits is `gone` at once rather than at the end of the live window, so its successor's soft
@@ -333,10 +335,14 @@ when it is back; a serving-port holder counts the stream's acknowledgement alone
 or the owning listener's durable, pushes the stored copy to its port.
 
 Dispatch's outbox forwards its own role-routed events to the holder itself: it resolves the
-holder with the resolution the listener's lane uses (`roles.ResolveHolder`) and sends the
-envelope, its role topic kept, to the holder's agent subject, so Dispatch's events no longer
-cross `notifications.role.*`. A role with no claim counts as reached with nothing sent, and a
-forward that fails stays pending in the outbox and is retried; the outbox raises no exception.
+holder through the one resolution the listener's routes and its lane use (`roles.ResolveHolder`,
+`internal/roles`) and sends the envelope, its role topic kept, to the holder's agent subject, so
+Dispatch's events no longer cross `notifications.role.*`. That resolution writes nothing to the
+role bucket here either: a role with no claim, and one whose holder is `gone`, counts as reached
+with nothing sent, and the `gone` holder's claim is left where it is for the role claim reaper;
+an `unresponsive` holder's event stays pending and is retried, so it waits for that session to
+answer rather than being published with nothing sent, as a read or a forward that failed does.
+The outbox raises no exception.
 The listener's role lane gives its forward a `Nats-Msg-Id` (`bus.ForwardMsgID`): the forward's
 dedupe key and the agent subject when the original envelope's dedupe key, before the forward's
 `envoy.role.forward.` prefix is added, names its event, and the envelope's `event_id` and the

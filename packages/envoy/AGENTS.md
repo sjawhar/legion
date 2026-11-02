@@ -2549,7 +2549,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 
 - Role messages use core NATS, not JetStream, and none is kept for a later claimant.
   `POST /v1/messages/publish` delivers a role topic itself (`sendToRole`, `cmd/listener/confirmed.go`) and does not publish it on the role lane.
-  Its first resolution of the holder reads the claim as `GET /v1/roles/<role>` does (`resolveRoleHolder`, whose one rule is that the holder's own record reads `session.Live`), within `sendRequestBudget` (3.5 s) of the request's arrival, and gives that route's answers:
+  Its first resolution of the holder reads the claim as `GET /v1/roles/<role>` does (`roles.ResolveHolder`, `internal/roles`, whose one rule is that the holder's own record reads `session.Live`), within `sendRequestBudget` (3.5 s) of the request's arrival, and gives that route's answers:
   404 `unclaimed` or `holder_lapsed`, the bus-unavailable 503 with `Retry-After: 1` for a read that did not answer, the 500 for a claim record no read can decode.
   Every later attempt resolves the holder again by that same rule, so a holder that relaunched under a new session between attempts gets the next one, and makes a receipt-backed request to that holder's agent subject (`bus.Client.RequestCoreTo`) with a receipt window of two seconds or what is left of the send;
   after a miss it waits 100 ms (`publishRetryPause`) and tries again, until a receipt arrives or 4 s from the request's arrival have passed (`publishDeliveryWindow`, which bounds every read, forward and pause of the send, and keeps the answer inside envoy-client's 5 s attempt and the Legion daemon's 10 s client).
@@ -2611,16 +2611,19 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Nothing is taken from a holder on the cache's word:
   before the role reaper ends a claim, or a soft claim supersedes its holder, a holder the cache misses — or holds in a record that caller's own state test refuses — is read from the bucket itself (`liveSessionEntry`, `session.SessionRegistry.Refresh`; `cmd/listener/role_holder.go`).
 
-- The listener's three role paths — `GET /v1/roles/<role>`, a role send through the publish route and a role delivery on the lane — resolve the holder through `resolveRoleHolder` and `resolveRoleHolderFrom` (`cmd/listener/role_holder.go`), the role delivery reading its claim from the registry's watched copy of the role bucket (`store.Registry.CachedRoleHolder`, the resolution's `firstHolder`).
+- The listener's three role paths — `GET /v1/roles/<role>`, a role send through the publish route and a role delivery on the lane — resolve the holder through `roles.ResolveHolder` and `roles.ResolveHolderFrom` (`internal/roles`), the role delivery reading its claim from the registry's watched copy of the role bucket (`store.Registry.CachedRoleHolder`, the resolution's `firstHolder`).
   One resolution is one claim read, and it writes nothing to the role bucket:
   a holder that stopped answering keeps its claim, so there is no release for a second read to see past and the resolution never retries.
-  Dispatch's outbox resolves its own role sends through `roles.ResolveHolder` (`internal/roles`), a resolution of its own, which reads every claim from the bucket and does release the claim of a holder that bucket no longer holds.
+  Dispatch's outbox resolves its own role sends through that same `internal/roles` (`resolveRoleHolders`, `internal/dispatch/outbox/role.go`), reading each claim from the role bucket itself, and takes nothing from a holder either.
+  A `gone` holder's role destination counts as reached with nothing sent, its claim left where it is;
+  an `unresponsive` holder's event stays pending and is retried, rather than being published with nothing sent.
+  So the listener and the outbox share one resolution, no path releases a claim on a lookup, and the role claim reaper is the one writer that takes one away.
   A holder no session can register as (a key `bus.KeyValue` refuses, one outside nats.go's key alphabet such as `ses:bad` among them) counts as gone.
   A read that does not answer within `roleHolderReadTimeout` (2 s, inside the 10 s HTTP write timeout) takes nothing from a holder either:
   a lookup and a soft claim answer 503, a role delivery reports `delivery_failed`, and the reaper keeps the claim and logs a WARN.
-  The reapers and the role lane answer no caller, so they hold no request context and bound that read by `roleHolderReadTimeout` alone (`sessionMayBeLive`, and `resolveRoleHolderFrom` under `context.Background()`).
+  The reapers and the role lane answer no caller, so they hold no request context and bound that read by `roleHolderReadTimeout` alone (`sessionMayBeLive`, and `roles.ResolveHolderFrom` under `context.Background()`).
   The two routes that resolve a holder, `GET /v1/roles/<role>` and a role send through the publish route (its first resolution within `sendRequestBudget`, its later attempts within `publishDeliveryWindow`;
-  all through `resolveRoleHolder`), and a soft claim (`POST /v1/roles/set`) also hold the whole resolution to the request's own context:
+  all through `roles.ResolveHolder`), and a soft claim (`POST /v1/roles/set`) also hold the whole resolution to the request's own context:
   the claim read and the holder's session read each stop when it ends (`store.Registry`'s `RoleClaim` bounds its own bucket call by the context, through `bus.Bounded` in `internal/bus/kv.go`, since nats.go's KV calls take none;
   `liveSessionEntry` bounds the session read), so a role store that does not answer is reported inside the caller's attempt, as the bus-unavailable 503 with `Retry-After: 1` (a role send's later attempt that runs out of the window is its 504).
   That read is a direct get, so the listener's NATS user needs publish on `$JS.API.DIRECT.GET.KV_envoy_sessions.>`.
@@ -2982,7 +2985,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   Until then it returns `store.ErrRoleViewNotReady`, a read that did not answer:
   the two session routes answer the bus-unavailable 503 with `Retry-After: 1`, never a holder listed without its role, and a send leaves `sender.roles` out rather than refusing.
   A read kvwatch's own idle wait ended is read again 5 s later (`rereadDelay`), so a timed-out warm-up cannot leave the view refusing for good.
-  Within one read epoch every update is fenced by revision (`setRoleHolder`), the registry's own claim writes included, so none undoes a later one, and a read of a recreated bucket starts a new epoch rather than emptying the view under the old one.
+  Within one read epoch every update is fenced by revision (`setOwnRoleHolder` and `forgetRoleHolder`, `internal/store/roles.go`, the two writers of that view), the registry's own claim writes included, so none undoes a later one, and a read of a recreated bucket starts a new epoch rather than emptying the view under the old one.
 
 - Each listener collects the interest bucket's delete markers, because nothing else does:
   every delete path leaves one (the reaper for each dead session, an unsubscribe-all, the admin delete), the bucket has no `MaxAge` and keeps one message per subject, and each marker is replayed by every restart's cache warm-up before that listener serves, so uncollected markers grow every restart's time with no deliveries (LEGION-374).
@@ -3412,7 +3415,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   falls back to `machine_id` for a session whose plugin predates the field) and `last_seen`.
   A 404 has `reason: "unclaimed"` when no role claim exists;
   for a holder whose own record does not read live it has `reason: "holder_lapsed"` with that holder's id, its `holder_state` (`unresponsive` or `gone`), `claim_released: false`, since the lookup takes nothing from a holder in either state, and the last registration the listener still keeps (`session.LastSeenMemory`, 2 hours).
-  The holder is resolved as a role send's first resolution through the publish route resolves it (`resolveRoleHolder`, live only), within 3.5 s (`sendRequestBudget`) of the request's own context, and writes nothing to the role bucket.
+  The holder is resolved as a role send's first resolution through the publish route resolves it (`roles.ResolveHolder`, live only), within 3.5 s (`sendRequestBudget`) of the request's own context, and writes nothing to the role bucket.
   A role store call that did not answer within its cap or that budget (the claim read or the holder's session read) is, as on the publish route, `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`, naming the call that did not answer (`writeBusUnavailable`;
   a key NATS refuses keeps the 413 or 400 `writeNATSError` gives);
   and a claim record no read can decode is, as on the publish route, `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no `Retry-After`.

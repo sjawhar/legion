@@ -45,7 +45,7 @@ A session's state comes from the registry's record of it, never from its presenc
 - `live`: it registered within the live window (`ENVOY_SESSION_LIVE_WINDOW`, 5m by default).
 - `unresponsive`: it last registered longer ago than the live window but inside the gone horizon (`ENVOY_SESSION_GONE_HORIZON`, 1h by default). **It is not dead.** Start no replacement for it, take no role claim and no issue claim from it, and never report it as gone. A message you send it is stored and reaches it when it answers again.
 - `gone`: it last registered before the gone horizon, or the registry holds no record of it.
-- Take an issue claim from a session only when it reads `gone`, or has read `unresponsive` for more than 20 minutes. A role claim is released only by the reaper, once the holder is `gone`: no lookup, publish or delivery failure releases one.
+- Take an issue claim from a session only when it reads `gone`, or its `last_seen` is more than 20 minutes old. A role claim is released only by the role-claim reaper, once the holder is `gone`: no lookup, publish or delivery failure releases one, in the listener or in Dispatch's outbox, which share that one resolution.
 - A send refused because the target is not live names the target's `state` and `last_seen`. Read those two fields before you decide anything about that session: a refusal on an `unresponsive` target means "it has not answered yet", not "it ended".
 
 ## Subscribe to a topic

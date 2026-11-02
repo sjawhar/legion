@@ -131,13 +131,16 @@ link.
 
 An issue an agent is implementing shows **Claimed by** and the agent's name, which opens its
 [live view](/legion/dispatch/agents/#the-live-view). The claim holds while that agent's session is
-`live` or `unresponsive`: an unresponsive session has missed its registration window but is still
-working, and its issue stays claimed. Another agent may take the issue once that session has been
-unresponsive for 20 minutes past the moment it was last seen, and the refusal it gets until then
-names the instant the claim comes free; you can take it yourself at any time. Only when the
-session reads `gone` is its
-[running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent) a hollow ring, the chip
-**not running**, and the issue counted as unclaimed.
+`live`, and while it is `unresponsive` with a last registration less than 20 minutes old: an
+unresponsive session has missed its registration window but is still working, and its issue stays
+claimed. The chip then reads **unresponsive since** the moment the session was last seen, and
+names the moment the issue becomes takeable, 20 minutes after that one. Another agent's take is
+refused until then, naming the same moment; you can take it yourself at any time. From that
+moment the chip reads **takeable now** in the tone of a free issue, and the **Unclaimed** filter
+lists the issue, while the session is still drawn as unresponsive, because it has not ended and
+may yet answer. A session that reads `gone` is unclaimed at once: its
+[running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent) is a hollow ring and the chip
+reads **not running**.
 
 ## Creating an issue
 

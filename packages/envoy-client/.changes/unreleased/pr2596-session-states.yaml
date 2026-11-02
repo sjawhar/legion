@@ -7,8 +7,13 @@ body: |-
     `claim_released` a refused send and a lapsed role's 404 answer, and its message says which
     state the session is in and when it was last seen, so a role lookup or a publish refused by
     an unresponsive holder no longer reads as that holder's death. A listener that names no
-    state is read as `live`, so an older listener still works. The tool descriptions say what
-    the three states mean and what to do about them, in place of "List all live sessions" and
-    "stays registered for up to 5 minutes": an unresponsive session is not dead, so start no
-    replacement for it and take no claim from it until it is `gone`, or until 20 minutes have
-    passed since its last registration.
+    state is read as `live`, so an older listener still works. An `envoy_publish` answer names
+    every session its message was only stored for, under `unresponsive`, and for a role publish
+    the holder and the state the listener resolved that holder in (`holder_state`), so the agent
+    that published hears that a peer has not taken the message yet. The tool descriptions say
+    what the three states mean and what to do about them, in place of "List all live sessions"
+    and "stays registered for up to 5 minutes": an unresponsive session is not dead, so start no
+    replacement for it and take no claim from it until it is `gone`, or until
+    `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` has passed since its `last_seen`, the sum the Dispatch
+    server itself refuses a take by, counted into the sentence rather than written as a number
+    nothing enforces.

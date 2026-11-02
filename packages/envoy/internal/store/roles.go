@@ -557,8 +557,8 @@ func (r *Registry) RoleClaim(ctx context.Context, role string) (RoleClaim, error
 
 // RoleHolder returns the authoritative session ID for role, read with no deadline of its own. Only
 // tests call it, to read what a claim left behind; every route and the role lane read RoleClaim
-// within a deadline (resolveRoleHolder, cmd/listener/role_holder.go). An unclaimed role returns an
-// empty holder without an error.
+// within a deadline, through the one resolution (roles.ResolveHolder and roles.ResolveHolderFrom,
+// internal/roles). An unclaimed role returns an empty holder without an error.
 func (r *Registry) RoleHolder(role string) (string, error) {
 	claim, err := r.RoleClaim(context.Background(), role)
 	if err != nil {

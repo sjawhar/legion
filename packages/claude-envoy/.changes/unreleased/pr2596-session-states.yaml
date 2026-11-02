@@ -5,4 +5,8 @@ body: |-
     already in flight before it deletes the session, rather than queueing behind a write that is
     stuck, and adopting a handoff deletes the session id it leaves. The shutdown wait is a quarter
     of a second in all, since the process is killed five seconds after it is asked to stop and a
-    delete never sent would leave the row behind for an hour.
+    delete never sent would leave the row behind for an hour. An `envoy_publish` answer names
+    every session its message was only stored for, under `unresponsive`, and for a role publish
+    the holder and the state the listener resolved that holder in (`holder_state`), with the rule
+    for an unresponsive peer beside them: it has not taken the message yet, and nothing is to be
+    taken from it.
