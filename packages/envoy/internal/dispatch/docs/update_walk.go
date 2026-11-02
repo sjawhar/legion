@@ -38,7 +38,9 @@ import (
 //   - errUpdateUndecodable, what ygo's V1 apply refuses (applyV1Txn, crdt/update.go:537-590): a
 //     header of more clients than half the frame's bytes or than maxUpdateItems (:559); more
 //     than maxUpdateItems structs in total, counted after each client's header as decodeAndPark
-//     (:609-617) and decodeStructsV1 (crdt/merge.go:30-46) count them; a delete set of more than
+//     (:609-617) and decodeStructsV1 (crdt/merge.go:30-46) count them, which is also what keeps
+//     that running count inside uint64: the walk stops at the first header past the cap, and a
+//     header declares at most the 2^53 a varint carries; a delete set of more than
 //     maxUpdateItems clients, or of more than maxUpdateItems ranges for one client (:1295,
 //     :1307); a varint past 53 bits or a length past the end of the frame, wherever it is; a
 //     string, a root name or a map key that is not UTF-8; JSON that encoding/json would not

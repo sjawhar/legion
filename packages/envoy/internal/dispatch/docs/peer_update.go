@@ -95,7 +95,10 @@ import (
 // still multiply what its room holds. What an update inserts is what can add an element, so an
 // update that inserts nothing is the one update that cannot grow the rendering; but a delete that
 // cuts the middle of an item splits it, which adds structs, so even deletes are bounded, by the
-// reserve. That refusal is not the document's own bound and is not folded into it: 4413 is
+// reserve. A struct born deleted - a GC run, a deleted item - renders nothing either and inserts
+// nothing here (peerWeighing.weighStruct), and a flood of them is bounded by that same reserve,
+// which its structs are charged against. That refusal is not the document's own bound and is not
+// folded into it: 4413 is
 // permanent and the editor drops the refused edit, where 4503 is transient and the editor keeps
 // it, to send once the pressure passes.
 //
@@ -345,9 +348,10 @@ const peerWriteQueueBytes = 60 << 20
 //
 // While the room's last measured rendering plus the update's own bytes stay under
 // pmdoc.MaxDocumentBytes, the bytes admit the update. At or over it, the update is admitted only
-// when what it carries that the room does not already hold - the walk's clocks beyond the room's
-// state vector (peerWeighing) - is under maxPeerInsertAtTheBound, or, past the creep cap, only when
-// it carries nothing new at all. Then the room's totals admit it only while what it would add keeps
+// when what it carries that the room does not already hold and can render - the walk's clocks
+// beyond the room's state vector, born deleted ones apart (peerWeighing.weighStruct) - is under
+// maxPeerInsertAtTheBound, or, past the creep cap, only when
+// it inserts nothing at all. Then the room's totals admit it only while what it would add keeps
 // its struct total within maxUpdateItems, its unrendered bytes, when it adds any, within
 // maxUnrenderedBytes, and its frame total, when it inserts anything, within heaviestHandoffBound
 // (structTotal.admits). Each refusal of the five is the document's own, DocumentTooLargeCloseCode.
@@ -378,7 +382,8 @@ const peerWriteQueueBytes = 60 << 20
 // leaves the document's bytes at, since an insert of fewer bytes than it deletes can still add
 // elements. An update does not say what it deletes without the document to measure it against, so
 // an edit that replaces text with less of it is refused too, as the creep cap refuses it. One that
-// only deletes is admitted while what it adds to the charges keeps them within the budget's limit
+// only deletes, or carries nothing but structs born deleted, is admitted while what it adds to
+// the charges keeps them within the budget's limit
 // and the pressure reserve beyond it (pressureReserveBytes), and refused the same way past it. The
 // signal is one atomic load, so the peer's read loop takes neither the budget's lock nor a room's
 // state lock for it while the budget is not full.
@@ -604,9 +609,10 @@ func refusedWith(refusal *websocket.PeerClose, cause error) error {
 
 // refusedUnderPressure is whether the room budget's pressure, while the budget is full and nothing
 // can be closed (roomBudget.full), refuses weighed, an update the document's own bounds admit:
-// one that carries anything the room does not already hold, and one that only deletes once its
+// one that inserts content the room does not already hold (peerWeighing.inserted), and one that
+// inserts none - a delete, a frame of structs born deleted - once its
 // structure would take the charges and reservations past the limit and the service's pressure
-// reserve beyond it (MemoryBounds.PressureReserve). A delete it admits is charged to charge, the
+// reserve beyond it (MemoryBounds.PressureReserve). An update it admits is charged to charge, the
 // room's, in the same look at the budget
 // (roomBudget.growWithin), so the hook does not charge it again after its apply.
 func (s *Service) refusedUnderPressure(weighed *peerWeighing, charge *roomCharge) bool {
@@ -640,11 +646,13 @@ func (s *Service) roomWeighingOf(live *crdt.Doc) *roomWeighing {
 // estimates what ygo's apply of the update allocates (applyHeap).
 type peerWeighing struct {
 	held crdt.StateVector
-	// inserted is how much content the update carries that the room does not already hold,
-	// counted in the units a Yjs item's content is measured in: a character of text, an element,
-	// an attribute an element gains. It is zero for an update that only deletes, and zero for a
+	// inserted is how much content the update carries that the room does not already hold and
+	// that the room can render, counted in the units a Yjs item's content is measured in: a
+	// character of text, an element, an attribute an element gains. It is zero for an update that
+	// only deletes, zero for one that only carries clocks born deleted, and zero for a
 	// whole-state message of a document the room already holds, which every browser sends on its
-	// first sync and which measured literally would be the whole document.
+	// first sync and which measured literally would be the whole document. No frame can wrap it
+	// (weighStruct).
 	inserted int64
 	// structs is the structs reaching past the room's state, each of which integration adds to the
 	// room's store; deletes is the update's delete ranges, and splits the items at their two ends
@@ -744,7 +752,22 @@ func (w *peerWeighing) weighStruct(walked updateStruct, cost applyCost) {
 	if end <= known && (walked.length != 0 || walked.clock < known) {
 		return
 	}
-	w.inserted += int64(end - max(walked.clock, known))
+	// Clocks born deleted - a GC run's and a deleted item's (bornDeleted) - are not counted here:
+	// nothing the room renders ever comes of them, and a rendering that can grow is what both
+	// readers of this count weigh (the at-the-bound rule in weighPeerUpdate, and
+	// refusedUnderPressure). Their length is also a varint where every other kind's is its
+	// content's own bytes, so one struct of about fifteen bytes declares 2^53 clocks: counted,
+	// 1,024 such groups took this sum past 2^63 and wrapped it negative, which read as an update
+	// inserting nothing, and both rules then admitted a paste each of them refuses on its own.
+	// What those structs do add - a struct, the splits its integration can cause, its frame bytes
+	// - the struct total, the frame total and the structure part charge in full (added,
+	// frameBytes, structureHeap). Every clock still counted costs the frame at least one byte, so
+	// the sum is under the frame's length and far under the saturation point; that point is here
+	// so that a content kind measuring its length in anything but its bytes cannot wrap it
+	// either.
+	if !bornDeleted(walked) {
+		w.inserted = min(maxEditorClock, w.inserted+int64(min(end-max(walked.clock, known), maxEditorClock)))
+	}
 	w.structs++
 	w.integrated += cost.integrate
 	w.content += unrenderedContentHeap(walked)
