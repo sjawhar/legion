@@ -2,66 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-558",
-  "previousHandoff": "6b6509ed7490bb8aa77d01c50f11db2fddd23905",
-  "round": 11,
-  "completed": "2026-11-01T06:03:00Z",
-  "codeHead": "920859be8",
-  "scope": "Three merges of main since round 10's code head b7709821: 4b63e8d5 (#2541), b3a11acc (#2522) and 920859be (#2549). The fingerprint changed (b5c7591c -> 7aaeb15d), so this was a full round, covering the architect's five checks plus the real-binary and browser runs against the new previous release.",
+  "previousHandoff": "4b9195bd88b3773ab9ddc4b23c001a11c349ff77",
+  "round": 12,
+  "codeHead": "0e545db07",
+  "scope": "d839fb94 (the slow-page test rework) and two merges of main (02eb6569 at d8c67afc, 0e545db0 at 05d65789). The fingerprint changed (7aaeb15d -> 9c6dda81), so this was a full round, covering the architect's seven checks and its addition on the hold and the connection count.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the route, write-class, migration guard, census, revoke and token tests at 920859be, and the two-build harness and browser cross-build spec against legion-envoy-v25.1.0."
+    "how": "I re-ran the slow-page, broker recovery, migration, upload-lock, pointer, revoke and token tests and the two-build harness against legion-envoy-v27.2.1 at 0e545db0. They pass locally, but CI at the same head fails the slow-page test (failure 1)."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "(1) The merges add nothing beyond the branch's diff and main's changes.",
-      "surface": "git show --remerge-diff of 4b63e8d5, b3a11acc and 920859be",
-      "command": "git show --remerge-diff --stat <each merge>; per-file comparison of the revoke-path changes since b7709821 with main's daf71f53..c656fc4f",
-      "observed": "4b63e8d5: routes_table.go takes main's routeRow and keeps this PR's newer-content row; README, AGENTS, fragments and comments change only migration numbers; three migrations are renamed. b3a11acc: pmdoc update.go and splice.go take main's single validation, with the creation gate in the writer tail; mutation.go applyMargin takes main's ValidDocument read and keeps the outside-schema tolerance. 920859be: web files only. docs/websocket.go carries exactly #2541's lines; the admission and revoke code is unchanged.",
-      "headSha": "920859be8",
-      "negativeControl": "The fingerprint at b7709821 differs from 920859be (b5c7591c vs 7aaeb15d), which is why this was a full round."
+      "criterion": "(7) ci-ok at the code head; (1) the slow-page revoke test is reliable.",
+      "evidence": "CI run 41361396521 at 0e545db0: envoy-go (job 125014853163) and envoy-go-race-docs (job 125014853168) both FAIL TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole at schema_admission_test.go:572: 'the revoked page, reading two seconds after the revoke ended with read tcp ...: i/o timeout, want a close with 4412 or the 1006 ...' (35.29s and 50.99s). The server-side check at line 560 passed, so ServeHTTP returned within 2.5 s of the revoke; the page then read for its whole 30 s drain deadline and got neither a close nor EOF. ygo's cancel path closes the connection (closeConn, then ws.Close on return; provider/websocket/server.go around line 2145), so that is not the receive-window pace the test assumes. Not reproduced locally in 100 runs: 30 plain with -cpu=1,2, 10 -race, 10 with every CPU saturated, 30 plain and 20 beside whole-package load. Read the failure with: gh api repos/sjawhar/legion/actions/jobs/125014853163/logs --allow-escape-sequences | grep -a -A2 'FAIL: TestARevokedSlowPage'. This is not one of the flakes the architect allowed (TestEditNoticeRestart, overlapping-marks.e2e.ts:311, runner disk). The failing test is itself the red test."
     },
     {
-      "criterion": "(2) Every route from both sides is in routes_table.go, and this PR's test hook has its write class.",
-      "surface": "routes_table.go at the branch (78d58843), main (f93dd689) and the merge; package api tests on the pod's test Postgres",
-      "command": "Set comparison of route rows and writeClasses keys; go test -run 'TestRouteIndex|TestWriteRouteIndex|TestRoutesTable|TestEveryMutatingRouteIsClassed|TestAProjectScoped|TestADeploymentWriteIsRefused' ./internal/dispatch/api/",
-      "observed": "No route row of either side is lost, and the merge has no row that neither side has. writeClasses is the union of both sides plus POST /api/v1/artifacts/{id}/_test/newer-content: scopeProject. All 8 tests PASS.",
-      "headSha": "920859be8",
-      "negativeControl": "In a scratch copy without the newer-content write class, TestEveryMutatingRouteIsClassed FAILs: '1 mutating row(s) the project check cannot decide'."
+      "criterion": "Spec: fix every comment and document that describes behaviour this child changes.",
+      "evidence": "packages/envoy/AGENTS.md:1696 says GET /api/v1/references?kind= answers any other name '400 INVALID_KIND', and packages/envoy/cmd/dispatch/README.md:2435 lists INVALID_KIND for that route. At 0e545db0, parseReferencesQuery (api/references.go:338-344) lists an unknown kind in unknown_kinds and answers 200; TestReferencesReadBacklinksAcrossProjectsWithProvenance asserts that for kind=future and passes. The AGENTS line arrived from main's #2394 in merge 0e545db0; the README line was stale on the branch already (d839fb94:2159). Documentation only, so no test applies."
     },
     {
-      "criterion": "(3) The creation gate sits in pmdoc's single writer tail.",
-      "surface": "pmdoc/update.go at 920859be; docs.ApplyOps through a probe test, at head and in a scratch copy whose UpdateDocument skips writeDocument",
-      "command": "Grep of updateChildren and refuseUncreatable callers; probe TestZZProbeAnEditBatchCreatesNoUncreatableElement (future block staged as not creatable)",
-      "observed": "Update, UpdateHolding and UpdateDocument all end in writeDocument (refuseUncreatable, then updateChildren); writeDocument is the only non-recursive caller of updateChildren. At head and in the broken copy, the edit batch's insert is refused at parse ('reads typed block \"future\" but cannot write it yet'), and a replace writes escaped inline text only. UpdateDocument's gate is a second guard; losing it shows no consumer-visible defect, so this is not a finding.",
-      "headSha": "920859be8",
-      "negativeControl": "An insert holding the future block is refused, at head and in the broken copy."
-    },
-    {
-      "criterion": "(4) The migrations renumbered to 0151-0153 have the same SQL apart from the numbers, no old reference remains, and the migration guard tests pass.",
-      "surface": "Migration files at 78d58843 and 920859be; package store tests on the pod's test Postgres",
-      "command": "diff of each .up.sql and .census.sql with the numbers masked; git grep for 015[0-3] and the migration file names; go test -run 'TestMigrate|TestEveryShippedCensus|TestTheCensusPairCheck|TestCensusOnAMigratedDatabaseHasNothingPending' ./internal/dispatch/store/",
-      "observed": "All six files are identical apart from the numbers. Every 0150 reference names main's dpop_proofs, and every reference to the three migrations names 0151-0153. TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny, the census pair checks and every TestMigrate test PASS; ok 105.439s.",
-      "headSha": "920859be8",
-      "negativeControl": "Before the merge, main's 0150_dpop_proofs and the branch's 0150_duty_holds would share version 0150, which TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny refuses."
-    },
-    {
-      "criterion": "(5) The revoke and token tests pass under -race.",
-      "surface": "Package docs on the pod's test Postgres",
-      "command": "CGO_ENABLED=1 go test -race -count=1 -run 'TestARevoke|TestARevoked|TestAdmissionRecheck|TestATokenIsAnswered|TestSchemaAdmission' ./internal/dispatch/docs/",
-      "observed": "10 tests PASS; ok 50.552s.",
-      "headSha": "920859be8",
-      "negativeControl": "Round 9: without the revoke's cancel, the slow-page test FAILs (i/o timeout); the revoke code is unchanged since then."
-    },
-    {
-      "criterion": "Acceptance 1 / item 6: two builds on one database and one bus, both ways, against the previous release.",
-      "surface": "Real envoy-dispatch processes (legion-envoy-v25.1.0, f93dd689, and this head) on the pod's test Postgres and a nats-server; Chromium through the two-process proxy",
-      "command": "DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-251 go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch; DISPATCH_E2E_BINARY_B=<prev>/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=<prev>/web bun run e2e:multiprocess -- cross-build.multiprocess, then with both processes on this tree",
-      "observed": "CLI PASS (33.7s), documents PASS (102.7s, 57 of 57 refs rows each way), messages PASS (128.9s), ok 265.432s. Browser: 2 passed and 1 skipped (B=v25.1.0); 3 passed (both on this tree). Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6554194520",
-      "headSha": "920859be8",
-      "negativeControl": "The newer-content spec is skipped against v25.1.0, which lacks the hook, and passes on this tree."
+      "criterion": "(5) The PR body says the upload-lock test is main's and why it changed.",
+      "evidence": "gh pr view 2461 --json body at 5fe091ad: no mention of TestAnUploadHoldsNoIssueLockWhileTheStoreWrites, settle, time.Hour or the upload lock. Only merge 02eb6569's commit message and the forward-merge comment mention it."
     }
   ],
-  "ci": "At 920859be, CI run 41277396655 was queued, changes included; pr-title was pending (run 41277449496) at 2026-11-01T06:00:50Z. There is no ci-ok or pr-title verdict yet."
+  "failed": 3,
+  "passed": [
+    "(1) ygo closeFrameTimeout = 1s (v1.54.1-sami.3 server.go:57). Without admission.cancel the slow-page test FAILs 3/3 ('still open on the server 2.503408535s after the revoke, past 2.5s'). At head it passes 30 plain (-cpu=1,2), 10 -race, 10 with every CPU saturated, 30 more plain and 20 beside whole-package load. Twice a package reported FAIL with every test passing, both times while another test process used the same test Postgres; run alone, each was ok.",
+    "(2) TestRecoverRevokesThePriorEnrollmentBeforeReenrolling passes 20/20 at 0e545db0 and 20/20 at main 05d65789.",
+    "(3) Route rows 154 = main's 153 + _test/newer-content; writeClasses 73 = 72 + scopeProject; all 140 handlers resolve. #2394's link kinds read the compiled manifest, and the pointer tests pass. What the hold on #2391's intake changed: the bind poll is replaced by the hold's attempt and take-over; subscribeDurable and StopDelivering move onto heldDurable; receive gives a message back past the hold's deadline; jobKey keeps the job intake one at a time. With one build, only a drifted durable's correction moves from periodic reconciliation to take-over.",
+    "(3a) TestTwoBuildsPassMessagesBothWays passes against v27.2.1, with a hand-over each way at 16 of 25. Control (the implementer confirmed the hold only acts between hold-aware processes): with a hold row per process, TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy and TestAProcessStoppedWhileWaitingForAdmissionReleasesItsDurables FAIL. The four delivery hold tests and a probe of a holder cut off from Postgres alone still pass, since a holder that loses its own hold drains and the durable unbinds; the shared hold only changes when the standby takes over (16 s vs 2 ms).",
+    "(3b) ConnectionsPerProcess 94 = main's 90 + 4 lease connections, two per delivery intake: the hold's renewal goroutine and the intake's own hold statements (SetToken inside the take-over). dispatchConnectionsPerPod = 94 and the infra/gcp connections test passes; the README, store and docs-site figures agree.",
+    "(4) The three migrations are renamed to 20261101030536-38 with SQL identical to 0151-0153 apart from comments; migrationid is byte-identical to main; TestMigrationSetTakesNumbersThenTimestamps, both migrate guards and the census checks pass.",
+    "(5) settle: time.Hour is a files_test.go-only change. With the store write moved inside the issue lock it FAILs 3/3 (SQLSTATE 55P03); at head it passes 40/40.",
+    "(6) Two-build vs legion-envoy-v27.2.1 (0642a37a): CLI PASS 28.3s, documents PASS 82.8s (137 corpus documents each way; 57/57 refs rows each way), messages PASS 110.4s. Browser: 2 passed and 1 skipped (B = v27.2.1); 3 passed (both on this tree). Revoke and token tests under -race: 10 PASS.",
+    "(7) pr-title: run 41361473202 succeeded at 0e545db0."
+  ],
+  "evidence": "https://github.com/sjawhar/legion/pull/2461#issuecomment-6566324951"
 }
