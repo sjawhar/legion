@@ -1,5 +1,5 @@
 ---
-title: "A plan decision that binds a later phase goes in the committed handoff, and a review's \"everything else holds\" is not a ruling"
+title: "A plan decision that binds a later phase goes in the plan handoff, and a review's \"everything else holds\" is not a ruling"
 category: legion
 tags:
   - handoffs
@@ -19,18 +19,20 @@ related_issues:
   - "sjawhar/legion#2152"
 ---
 
-# A decision that binds a later phase goes in the committed handoff, and "everything else holds" is not a ruling
+# A decision that binds a later phase goes in the plan handoff, and "everything else holds" is not a ruling
 
 Extends docs/solutions/legion/a-decision-taken-between-rounds-dies-with-the-pane-and-an-endorsement-is-a-claim-INFRA-62.md.
 That document says a between-rounds decision must reach a durable artefact and that an
 endorsement is a claim. Two deltas, each of which cost a round here.
 
-- **Planner: a decision that binds another phase is its own enumerated field of `plan.json`, not a
-  sentence inside an answer to a gap finding, and not only a letter in the Dispatch plan
-  document.** `plan.json` is what a later role reads first and what a recreated pane reads at all.
-  Keep the reasoning in the document; put the binding rule in the file.
-- **Phase worker: open the plan document `plan.json` names before your first commit.** The `plan`
-  field is a summary string, never the plan; a decision you never saw still binds you.
+- **Planner: a decision that binds another phase is its own enumerated field of the plan handoff,
+  not a sentence inside an answer to a gap finding, and not only a letter in the Dispatch plan
+  document.** The plan handoff is what a later role reads first and what a recreated pane reads at
+  all. Keep the reasoning in the document; put the binding rule in the handoff. Before
+  sjawhar/legion#2354 that handoff was the committed `plan.json`. It is a record on the Dispatch
+  issue now, read with `dispatch handoff-read --issue <KEY> --phase plan --version <n>`.
+- **Phase worker: open the plan document the plan handoff names before your first commit.** The
+  `plan` field is a summary string, never the plan; a decision you never saw still binds you.
 - **Reviewer: enumerate what you checked and name what is still open. Never write a blanket
   "everything else holds" over a clause you are still checking** — a later role, and the merger,
   read that sentence as a ruling on the whole diff.
@@ -62,7 +64,9 @@ ruling arrived in time to join the round, so the fix cost nothing; it carries no
 and GitHub shows one thread, one resolved. A merger reading threads alone would see a clean
 one-finding round.
 
-**One more fact about reading a Legion branch's history:** `plan`, `test` and `review` commits are
-all authored by `legion-reviewer[bot]`, only `implement` commits by `legion-implementer[bot]`. The
-tester's Go test above is authored by the review App. Do not reconstruct who did what from commit
-authorship; the discriminator is the `Omp-Session:` trailer.
+**One more fact about reading a Legion branch's history:** before sjawhar/legion#2354 a branch
+also carried `plan`, `test` and `review` handoff commits, all authored by `legion-reviewer[bot]`,
+and only `implement` commits by `legion-implementer[bot]`. The tester's Go test above is authored
+by the review App. A handoff is a Dispatch record now, so a branch carries code commits alone, and
+a tester's or reviewer's code commit still comes from the review App. Do not reconstruct who did
+what from commit authorship; the discriminator is the `Omp-Session:` trailer.

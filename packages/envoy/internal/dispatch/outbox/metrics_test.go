@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -72,13 +74,19 @@ func TestPublishedCountsTheEventsTheBatchMarksPublished(t *testing.T) {
 	already := insertEvent(t, database, 4, `{"body":"four"}`, 0, true)
 
 	before := Published()
-	if err := recordBatch(context.Background(), Deps{Store: database}, []outcome{
+	// No hold row names this holder, so only the published rows are written at all: a back-off
+	// is scheduled by the holder alone (recordBatch).
+	holds, err := recordBatch(context.Background(), Deps{Store: database}, []outcome{
 		{id: first, state: published},
 		{id: second, state: published},
-		{id: failed, state: backedOff, attempts: 1, retryAt: time.Now().Add(time.Minute)},
+		{id: failed, state: backedOff, attempts: 1, failure: "nats refused it", delay: new(time.Minute)},
 		{id: already, state: published},
-	}); err != nil {
+	}, uuid.New())
+	if err != nil {
 		t.Fatal(err)
+	}
+	if holds {
+		t.Fatal("recordBatch reported the publisher hold held, with no hold row naming this holder")
 	}
 	if got := Published() - before; got != 2 {
 		t.Fatalf("Published rose by %d, want 2: the two events this batch marked published", got)

@@ -72,7 +72,7 @@ const (
 
 // writeClasses is the class of every mutating route, by "<method> <pattern>". It stands beside
 // the table rather than in each row because Go leaves no field out of a positional composite
-// literal: a sixth value on the row would have to be written on all 146 rows, every GET row
+// literal: a sixth value on the row would have to be written on all 151 rows, every GET row
 // included, and a GET row needs no class. mountedRoutes stamps it onto the row, so
 // apiRoute.Scope is what every reader of a route sees, and undecidableWrites holds the two in
 // exact correspondence — a mutating row this table does not name, and a name that is no
@@ -92,6 +92,7 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/issues/{key}/messages":                   scopeProject,
 	"POST /api/v1/issues/{key}/asks":                       scopeProject,
 	"POST /api/v1/issues/{key}/comments":                   scopeProject,
+	"POST /api/v1/issues/{key}/handoffs/{phase}":           scopeProject,
 
 	"POST /api/v1/projects/{key}/artifacts":                                scopeProject,
 	"POST /api/v1/projects/{key}/artifacts/{slug}/versions":                scopeProject,
@@ -256,6 +257,14 @@ func issueUpload(row routeRow) apiRoute {
 	return apiRoute{routeRow: row, BodyLimit: maxUploadRequestBytes, RefusesClosedIssue: true}
 }
 
+// handoffWrite is the handoff record write, the one JSON row whose body limit is its own: a
+// handoff body travels as a JSON string, whose escaping can make each byte of the object up to
+// six on the wire, so the row reads handoffRequestLimit rather than maxJSONRequestBytes, and
+// bodyTooLarge answers a body past it with errHandoffTooLarge.
+func handoffWrite(row routeRow) apiRoute {
+	return apiRoute{routeRow: row, BodyLimit: handoffRequestLimit}
+}
+
 // replays is route with the keyedReplay that answers a repeat of its write once that write has
 // committed a recovery point (bindRequestKeyRecovery): the writes that also deliver to sessions,
 // whose deliveries a repeat finishes.
@@ -378,6 +387,10 @@ func (s *server) routes() []apiRoute {
 		replays(served(routeRow{http.MethodPost, "/api/v1/issues/{key}/messages", authAny, "Post an issue message; target and delivery address a session or role. A reply names the message it answers in in_reply_to, and one block of it in in_reply_to_block.", s.createMessage}), replayRecovered(s, s.replayIssueMessage)),
 		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/messages", authAny, "List an issue's message threads: every root message, oldest first, each with its deliveries and its replies.", s.listIssueMessages}),
 		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/messages/{id}", authAny, "Read one message with its deliveries and replies.", s.getMessage}),
+		handoffWrite(routeRow{http.MethodPost, "/api/v1/issues/{key}/handoffs/{phase}", authBearer, fmt.Sprintf("Record a session's handoff for one phase of an issue {actor, body}: the session names itself in actor (400 ACTOR_KIND otherwise; a cookie caller is 403 HANDOFF_FORBIDDEN), phase is a lowercase slug (%s, 400 HANDOFF_INPUT otherwise), and body is one JSON object as a string (400 HANDOFF_INPUT otherwise) of at most %d bytes (413 CAP_EXCEEDED), stored exactly as sent. The record is the phase's next version, from 1; a closed issue is 409 ISSUE_CLOSED. Answers 201 {id, issue_key, phase, version, author, created_at} and appends handoff.recorded {handoff_id, phase, version}, which never carries the body.", contracts.HandoffPhasePattern, contracts.DispatchHandoffBodyMax), s.createHandoff}),
+		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/handoffs", authAny, "List an issue's handoffs, newest first, each {id, issue_key, phase, version, author, created_at} without its body; a closed issue's read too.", s.listHandoffs}),
+		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/handoffs/{phase}/latest", authAny, "The newest handoff of one phase of an issue with its body, the exact text written; 404 HANDOFF_NOT_FOUND when the phase has none. A closed issue's read too.", s.getLatestHandoff}),
+		served(routeRow{http.MethodGet, "/api/v1/handoffs/{id}", authAny, "One handoff by id with its body, the exact text written; 404 HANDOFF_NOT_FOUND when there is none, 400 HANDOFF_ID_INPUT for an id that is not a uuid.", s.getHandoff}),
 		served(routeRow{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first. An issue thread follows the issue's rule. On a direct (issue-less) thread a bearer names its session in ?session= and reads only one whose root targets that session or that it replied in (403 THREAD_FORBIDDEN), a guard against reading another session's conversation by mistake, not an authorization boundary. Direct-conversation text also reaches every authenticated caller through that caller's events view on GET /ws/live; nothing in Dispatch restricts it by session.", s.getMessageThread}),
 		served(routeRow{http.MethodGet, "/api/v1/messages/{id}/blocks", authAny, "A message's current blocks in body order: {item, indexed, blocks: [{id, type, text, ref, from, to}]}, item the message's graph node, from and to UTF-16 code units into its stored body, ref absent for a direct message's block (it has no address). Read under GET /api/v1/messages/{id}'s rule: a bearer reading a direct message names its session in ?session= (400 SESSION_REQUIRED, 403 THREAD_FORBIDDEN). While the message is owed a block index, indexed is false and blocks empty; the read writes nothing.", s.getMessageBlocks}),
 		served(routeRow{http.MethodPost, "/api/v1/messages/{id}/deliveries", authAny, "Retry delivering a targeted message.", s.createDelivery}),

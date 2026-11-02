@@ -187,21 +187,27 @@ func expectsContinue(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Expect")), "100-continue")
 }
 
-// errUploadTooLarge is an upload route's answer to a body past its limit (apiRoute.bodyLimit), and
-// errJSONTooLarge every other route's (decodeJSON).
+// errUploadTooLarge is an upload route's answer to a body past its limit, errHandoffTooLarge the
+// handoff write's, and errJSONTooLarge every other route's (apiRoute.bodyLimit, bodyTooLarge,
+// decodeJSON).
 var (
 	errUploadTooLarge = errorf(http.StatusRequestEntityTooLarge, "CAP_EXCEEDED", "artifact blob exceeds 25 MB")
 	errJSONTooLarge   = errorf(http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds %d bytes", maxJSONRequestBytes)
 )
 
 // bodyTooLarge is the route's answer to a body past its limit: the one its handler gives on
-// reading past it, read from the limit the route's own row carries (apiRoute.BodyLimit, upload),
-// so a route the table makes an upload is answered as an upload without naming it anywhere else.
+// reading past it, read from the limit the route's own row carries (apiRoute.BodyLimit, upload,
+// handoffWrite), so a route the table makes an upload, or gives a limit of its own, is answered
+// as that row says without naming it anywhere else.
 func bodyTooLarge(route apiRoute) *apiError {
-	if route.BodyLimit == maxUploadRequestBytes {
+	switch route.BodyLimit {
+	case maxUploadRequestBytes:
 		return errUploadTooLarge
+	case handoffRequestLimit:
+		return errHandoffTooLarge
+	default:
+		return errJSONTooLarge
 	}
-	return errJSONTooLarge
 }
 
 // drainBeforeAnswer serves a route whose requests carry a body - every route but a GET - so that

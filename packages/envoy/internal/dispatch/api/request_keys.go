@@ -84,8 +84,8 @@ const (
 	keyedAnswerKept = 1 << 20
 	// keyedBodyMax is the largest body an upload route reads: an upload's file and a megabyte of
 	// fields (uploadArtifactFor), which is what the table gives those routes
-	// (apiRoute.BodyLimit, upload). Every other route reads a JSON body of at most
-	// maxJSONRequestBytes (apiRoute.bodyLimit).
+	// (apiRoute.BodyLimit, upload). The handoff write reads handoffRequestLimit (handoffWrite),
+	// and every other route a JSON body of at most maxJSONRequestBytes (apiRoute.bodyLimit).
 	keyedBodyMax = maxUploadRequestBytes
 	// keyedBookkeeping bounds the layer's work around the handler - the claim before it, and each
 	// statement recording its answer after it - which runs on past a client that went away, since

@@ -138,10 +138,13 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 //     pools idle, and its writes would fail on a closed pool once GitHub answered, with its message
 //     acknowledged all the same.
 //  5. It waits until every request has answered and no connection of writePools is in use.
-//  6. deregister takes this process out of the registry of live server processes, within what is
-//     left of ctx: only once HTTP has drained, so a draining process counts as live until its last
-//     request is answered, and before the pools close.
-//  7. It closes the database pools; main then writes the buffered log lines last.
+//  6. It waits for the events outbox to stop, so its last batch is recorded and its publisher
+//     hold released through the pools before they close (waitForOutbox); a process with no
+//     outbox waits for nothing.
+//  7. deregister takes this process out of the registry of live server processes, within what is
+//     left of ctx: only once HTTP has drained and the outbox has stopped, so a draining process
+//     counts as live until its last request is answered, and before the pools close.
+//  8. It closes the database pools; main then writes the buffered log lines last.
 //
 // While the database answers, only the deadline bounds the wait of stage 5, so a write in flight
 // commits and is answered if it finishes before it. A database that has stopped answering
@@ -151,7 +154,7 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // deadline of their own, so a write still in flight at the deadline is cut off with the process,
 // as the runtime's kill would cut it moments later.
 func shutdown(ctx context.Context, server *http.Server, documentService *docs.Service, pool *store.Pool,
-	waitBackground, waitIntakes func(), deregister func(context.Context)) {
+	waitBackground, waitIntakes func(), deregister func(context.Context), outboxStopped <-chan struct{}) {
 	deadline, _ := ctx.Deadline()
 	drained := make(chan struct{})
 	go func() {
@@ -195,8 +198,25 @@ func shutdown(ctx context.Context, server *http.Server, documentService *docs.Se
 		return
 	}
 	if waitUntilIdle(ctx, drained, pool) {
+		waitForOutbox(ctx, outboxStopped)
 		deregister(ctx)
 		pool.Close()
+	}
+}
+
+// waitForOutbox waits until the events outbox has stopped, or until ctx's deadline passes: its
+// Run returns once it has recorded its batch in flight and released the publisher hold, each a
+// statement through the pool the close below releases. outboxStopped closes when that Run returns;
+// a nil one is a process with no outbox, and nothing to wait for. Like every other stage it spends
+// what is left of the shutdown's one deadline rather than a budget of its own.
+func waitForOutbox(ctx context.Context, outboxStopped <-chan struct{}) {
+	if outboxStopped == nil {
+		return
+	}
+	select {
+	case <-outboxStopped:
+	case <-ctx.Done():
+		slog.Warn("dispatch: close the pools with the events outbox still stopping")
 	}
 }
 

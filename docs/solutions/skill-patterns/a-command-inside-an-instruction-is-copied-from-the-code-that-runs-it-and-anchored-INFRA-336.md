@@ -42,18 +42,21 @@ record a default in its place.
 ## Evidence
 
 INFRA-336 added `previousHandoff` to every Legion handoff and told the worker to read it with
+(both the field and this revset are gone since sjawhar/legion#2354, which made each handoff a
+versioned record on its Dispatch issue; what the rules above are about is any command prose hands
+an agent)
 
 ```
 jj -R "$LEGION_WORKSPACE" log --no-graph -r 'latest((::@- ~ ::trunk()) & files(".legion/<issue>/<phase>.json"))' -T commit_id
 ```
 
-The function this mirrors, `findHandoffCommit` in `packages/pi-shared/src/handoff-commit.ts`,
-builds its fileset as `root:` plus the path. The prompt dropped the prefix. Measured in an issue
+The function it mirrored, `findHandoffCommit` in the then `packages/pi-shared/src/handoff-commit.ts`,
+built its fileset as `root:` plus the path. The prompt dropped the prefix. Measured in an issue
 workspace: from the workspace root the command printed the commit; run unchanged from
 `packages/pi-legion` it printed nothing and exited 0; from `/tmp` it failed outright with a
 fileset parse error. The instruction then told the worker to write `""` for the empty case, so the
 subdirectory run — the plausible one — recorded a default that reads like "there is no previous
-handoff", which is precisely the duplicate-bytes state the field exists to prevent.
+handoff", which was precisely the duplicate-bytes state the field existed to prevent.
 
 The fix was the one qualifier, `files(root:"…")`, which answers the same commit from all three
 directories. A review round of the same pull request fixed the second half: the sentence's "an
