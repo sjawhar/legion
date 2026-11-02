@@ -657,7 +657,6 @@ func (r *ciRedNoTakeoverLive) publishPush(from, to string) {
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
 		"kind": "push", "repo": liveRepo, "ref": "refs/heads/legion/" + r.key, "before": from, "after": to,
-		"changed_paths": "src/widget.go", "changed_paths_truncated": "false", "forced": "false",
 		"pusher": "legion-implement[bot]", "commit_count": "1", "head_subject": "fix the red",
 	})
 	if err != nil {

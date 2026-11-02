@@ -8,7 +8,7 @@ tags:
   - backward-compatibility
   - discriminated-union
 date: 2026-04-05
-status: "superseded by LEGION-631 — `legion handoff write|read` and their write-time validation are gone, and nothing holds a handoff to a shape any more; a worker writes `.legion/<KEY>/<phase>.json` itself (`schemaVersion`, `phase`, `issue` and `completed` included, the fields its role prompt spells), commits and pushes it, and the `legion` tool's `handoff_complete` finds the pushed commit carrying it and reports that to the daemon, which reads no handoff file. No handoff carries a `completed` field since dispatch://INFRA-336: a handoff's time is the committer date of the commit that carries it."
+status: "superseded by sjawhar/legion#2354 — a handoff is a versioned record on the Dispatch issue, written with `dispatch handoff-write` and read with `dispatch handoff-read`. No worker writes, commits or pushes a `.legion/<KEY>/<phase>.json` file, there is no `.legion/` directory, and the `BaseHandoff` Zod union, its `schemaVersion` and the `legion handoff write|read` commands this note is about are all gone (`legion handoff write|read` had already gone in LEGION-631). No handoff carries a `completed` field since dispatch://INFRA-336: a handoff's time is the record's own."
 module: daemon
 related_issues:
   - "#239"

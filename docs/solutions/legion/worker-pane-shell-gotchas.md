@@ -13,7 +13,7 @@ tags:
   - jq
   - jaq
 date: 2026-09-12
-status: superseded by LEGION-631 — the grant file, `LEGION_GRANT`, the grant-redeeming `legion gh --`, `legion credential`, `legion push` (with its `pushTTL`), `legion handoff write|read|complete` and an agent's `legion state` are all gone; a pane's `gh` is the `legion gh` wrapper, which runs the real gh as the role's App from the gh directory of the owner the command names, its clones' git credential helper is `legion git-credential`, a push is plain `jj git push --bookmark legion/<KEY>`, a handoff is a file the worker writes, commits and pushes whose carrying commit the `legion` tool's `handoff_complete` finds in the pane and reports (the daemon reads no handoff file), and an issue record is read with its `read_record`, while the jj, jq/jaq, bun-test and Envoy sections stand
+status: superseded by LEGION-631 and sjawhar/legion#2354 — the grant file, `LEGION_GRANT`, the grant-redeeming `legion gh --`, `legion credential`, `legion push` (with its `pushTTL`), `legion handoff write|read|complete` and an agent's `legion state` are all gone; a pane's `gh` is the `legion gh` wrapper, which runs the real gh as the role's App from the gh directory of the owner the command names, its clones' git credential helper is `legion git-credential`, a push is plain `jj git push --bookmark legion/<KEY>`, a handoff is a versioned record on the Dispatch issue written with `dispatch handoff-write` and read with `dispatch handoff-read` — no `.legion/` file, no handoff commit and no handoff push — and an issue record is read with the `legion` tool's `read_record`, while the jj, jq/jaq, bun-test and Envoy sections stand
 module: legion
 related_issues:
   - "LEGION-9"
@@ -267,7 +267,8 @@ or drop them", and the deletion head `239aaa28` was `9f55687a` + those two + the
 merger's and reviewer's tree check: `jj diff --from 9f55687a --to 239aaa28 --summary` lists only `D
 .legion/implement.json` and `D .legion/plan.json`, because `test.json` and `review.json` were added *and* removed
 above the compared head and net out — the same diff with `'~.legion'` appended is empty, which is the fact the
-"approved head plus the deletion alone" rule wants.
+"approved head plus the deletion alone" rule wants. Since sjawhar/legion#2354 a handoff is a record on the Dispatch
+issue: no role commits or pushes one, there is no `.legion/` deletion push, and the rule this measured is gone.
 
 ## 4. The box's global git credential helper can make a test daemon clone time out
 
@@ -279,11 +280,13 @@ the supported path; do not use a global-configuration fallback for current test 
 Diagnose the helper independently with `timeout 8 git credential fill <<<$'protocol=https\nhost=github.com'`:
 a hang, rather than a prompt, is the signature.
 
-## 6. `handoff_write` rejects the ledger's own fields
+## 6. `handoff_write` rejected the ledger's own fields (history)
 
-Re-writing a phase handoff from the existing `.legion/<phase>.json` (e.g. adding a `round2` key) fails with
-`Handoff data field schemaVersion is not allowed`: the ledger adds `schemaVersion`, `phase`, and `completed` itself.
-Drop those three keys and pass the rest as the `legion` tool's `handoff_write` `data`.
+Before sjawhar/legion#2354, re-writing a phase handoff from the existing `.legion/<phase>.json` (e.g. adding a
+`round2` key) failed with `Handoff data field schemaVersion is not allowed`: the ledger added `schemaVersion`,
+`phase`, and `completed` itself, and the fix was to drop those three keys and pass the rest as the `legion` tool's
+`handoff_write` `data`. A handoff is a versioned record on the Dispatch issue now, written with `dispatch
+handoff-write` from a body file outside the workspace, and there is no ledger file to re-write.
 
 ## 7. Your role topic has no Envoy holder
 
@@ -293,7 +296,7 @@ can return `no holder` for both your own role and the tree's architect. Two cons
 - The `legion` tool's `handoff_complete` returns `[handoff] Warning: phase recorded; no architect was live to receive
   the summary` and succeeds. The completion **is** recorded: the daemon cleared the active phase for routing, PATCHed
   the issue's Dispatch status (`legion state` showed `LEGION-18` at `testing` right after), and parked the summary for
-  the architect's catch-up (`phases[<KEY>].completed`, the API's 202 path). Do not write a second handoff file. Do call
+  the architect's catch-up (`phases[<KEY>].completed`, the API's 202 path). Do not record the handoff again. Do call
   `handoff_complete` again once the architect holds its role again — a repeat completion by the same worker is the
   designed recovery (200, published, record cleared); a repeat while the role is still unheld just 202s again. What
   the architect can and cannot do about it is in
@@ -320,9 +323,11 @@ subprocess.run(["jj", "-R", ws, "split", "-m", "…", "<path>"], cwd=ws, env=env
 With that `env`, file edits and `jj split` commits behave exactly as from the pane: `JJ_CONFIG` is present, so every
 commit still carries the `Omp-Session:` trailer and the role's bot author (verified on #953's four text commits, all
 made this way). What the kernel cannot do is redeem a grant — `legion gh` and `jj git push` need the grant the bash
-hook writes to `$LEGION_GRANT_FILE` before each command — so queue those until the bridge returns. The `legion` tool's
-handoff actions do not run through the bash tool, so `handoff_write` still works; `handoff_complete` mints a grant from
-the daemon, so when the cause is section 9's daemon outage it waits too.
+hook writes to `$LEGION_GRANT_FILE` before each command — so queue those until the bridge returns. Before
+sjawhar/legion#2354 the `legion` tool's handoff actions did not run through the bash tool, so `handoff_write` still
+worked; a handoff is recorded with the `dispatch handoff-write` command now, so it waits for the bridge like any
+other command. `handoff_complete` mints a grant from the daemon, so when the cause is section 9's daemon outage it
+waits too.
 
 ## 9. While the daemon's API is down, every bash tool call fails before your command runs
 
@@ -340,12 +345,14 @@ What still works, and what to do:
   not help: a supervised service starts as a `bash` call (with `name`), and an `async` job is a
   `bash` call too, so the hook mints a grant from the daemon for each and it fails like any other
   bash call until the daemon is back. Do not spin in a foreground loop.
-- **The `legion` tool's `handoff_write` needs no daemon** (it writes `.legion/<phase>.json` under the workspace and
-  mints nothing), and neither does a local `jj` commit. During the outage commit the handoff through an `eval`
-  subprocess carrying the pane's exact environment, read from `/proc/<omp-pid>/environ` of this session's own `omp`
-  process (section 8's recipe), plus the `JJ_CONFIG` overlay the extension adds at session start
-  (`<LEGION_STATE_DIR>/omp-attribution-<session-id>.toml`, which is what puts the `Omp-Session:` trailer on the
-  commit). Confirm the trailer matches an earlier commit of yours before relying on it.
+- **Before sjawhar/legion#2354 the `legion` tool's `handoff_write` needed no daemon** (it wrote `.legion/<phase>.json`
+  under the workspace and minted nothing), and neither does a local `jj` commit. During the outage the handoff was
+  committed through an `eval` subprocess carrying the pane's exact environment, read from `/proc/<omp-pid>/environ`
+  of this session's own `omp` process (section 8's recipe), plus the `JJ_CONFIG` overlay the extension adds at
+  session start (`<LEGION_STATE_DIR>/omp-attribution-<session-id>.toml`, which is what puts the `Omp-Session:`
+  trailer on the commit); confirming the trailer against an earlier commit of yours before relying on it. A handoff
+  is a Dispatch record now, written with `dispatch handoff-write`, so it waits for the bash tool with everything
+  else; the environment recipe still stands for any local commit you have to make during an outage.
 - **Anything that redeems a grant must wait**: pushing, `legion gh`, the tool's `handoff_complete`. Grants minted
   before the restart are gone with the old process's memory.
 - **Never restart, signal, or write to the daemon yourself.** It runs under a supervisor from
@@ -383,7 +390,7 @@ still names your role and your session; it answers 409 when the record has moved
 phase, or the daemon respawned or re-assigned around you — even though your role claim itself is intact. LEGION-37
 tracks why a worker revived for a follow-up round ends up on the wrong side of that check.
 
-What to do: do not retry, and do not write a second handoff file (nothing about the branch is wrong). Report the
+What to do: do not retry, and do not record the handoff again (nothing about the branch is wrong). Report the
 completion to the architect yourself with `envoy_publish` to `notifications.role.legion-<project>-<KEY>-architect`,
 carrying exactly what the summary would have said — the head, what changed, the test counts, the CI run ids — and
 name the 409 in it so the architect knows the daemon holds no record of the completion. The architect can act on the

@@ -105,9 +105,11 @@ gate is a silent respawn loop, which is worse than any refusal.
 The gate turns a silent loop into a loud refusal, which means the shared dogfood daemon will
 refuse to restart on this code until the plugin release built from the merged commit is
 installed into its profile. That is correct behaviour, and it must be stated where the person
-restarting the daemon will see it: the PR body's deployment section, not only in `.legion/`
-handoffs (which are deleted before merge). The tester's negative control against the installed
-1.11.1 confirmed the same refusal on the head that merged.
+restarting the daemon will see it: the PR body's deployment section. Before sjawhar/legion#2354 a
+handoff lived in `.legion/` and was deleted before the merge; a handoff is a record on the
+Dispatch issue now, which the person restarting the daemon is still not reading.
+The tester's negative control against the installed 1.11.1 confirmed the same refusal on the head
+that merged.
 
 ## Test discipline that came out of review
 

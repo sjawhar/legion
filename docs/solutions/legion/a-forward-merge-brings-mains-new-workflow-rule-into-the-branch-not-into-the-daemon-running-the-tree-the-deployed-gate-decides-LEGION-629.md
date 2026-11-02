@@ -40,16 +40,17 @@ related_issues:
   system prompt that the rule change rewrote: `jj diff -r <the rule's commit> --git
   packages/daemon/internal/prompts/go/<role>.md` shows the old and new sentence; whichever your
   prompt carries is the daemon you have.
-- Two releases' gates can be mutually exclusive, and the live one decides. Under the pre-#1857
-  daemon the merger's tip check (`jj diff --from <approved> --to <tip> --summary` with
-  `'~docs/solutions'` appended must print nothing) treats any other change above the approved head,
-  a `.legion/<issue>/` removal included, as voiding the approval, and the merger sends the head back
-  to review; under #1857's daemon `handoff complete --ready` refuses a head that still carries
-  `.legion/<issue>/`, the merger tells the architect, and the architect moves the issue back to
-  retro (`request_backward_move`) for the removal. A retro that follows the deployed text under the
-  old daemon costs at worst that designed backward move if the daemon is upgraded before READY; a
-  retro that follows the branch's newer text under the old daemon produces a head the deployed
-  merger reports as voiding the approval.
+- Two releases' gates can be mutually exclusive, and the live one decides. In 2026-10, under the
+  pre-#1857 daemon, the merger's tip check (`jj diff --from <approved> --to <tip> --summary` with
+  `'~docs/solutions'` appended must print nothing) treated any other change above the approved
+  head, a `.legion/<issue>/` removal included, as voiding the approval, and the merger sent the
+  head back to review; under #1857's daemon `handoff complete --ready` refused a head that still
+  carried `.legion/<issue>/`, the merger told the architect, and the architect moved the issue
+  back to retro (`request_backward_move`) for the removal. A retro that followed the deployed text
+  under the old daemon cost at worst that designed backward move if the daemon was upgraded before
+  READY; one that followed the branch's newer text under the old daemon produced a head the
+  deployed merger reported as voiding the approval. Both gates are gone with the handoff commit
+  (sjawhar/legion#2354); the rule that the deployed gate decides is not.
 - A handoff that cites the branch's AGENTS.md for a workflow rule the daemon enforces is the tell.
   Cite the daemon's text (the system prompt's sentence, the installed skill's path and line) for a
   rule about what the daemon will do; cite the branch's text only for what the code under review

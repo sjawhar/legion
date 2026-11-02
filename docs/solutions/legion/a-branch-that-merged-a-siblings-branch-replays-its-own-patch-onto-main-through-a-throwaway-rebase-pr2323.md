@@ -39,8 +39,9 @@ main, let jj do the three-way merge for every file at once, against the right ba
    `jj restore --from <throwaway>` before abandoning the throwaway. The merge commit keeps both
    parents, so the push is a fast-forward.
 4. Confirm the merge's diff against main lists only your files
-   (`jj diff --stat --from '"main"@origin' --to @`): the sibling's files and its `.legion/`
-   directory drop out on their own.
+   (`jj diff --stat --from '"main"@origin' --to @`): the sibling's files drop out on their own.
+   Before sjawhar/legion#2354 the sibling's `.legion/` directory dropped out the same way; no
+   branch carries one now.
 
 ## Evidence
 

@@ -138,11 +138,13 @@ the process stays alive until the driver kills it.
 **3c. The worker image builds and probes the pin.** The `Worker Image` run on the PR is the check
 that actually installs the release inside the image. Read its `Build and push` log for
 `mise github:sjawhar/oh-my-pi@<tag> ✓ installed`, `omp/18.1.18`, and `probe-image: OK
-(/opt/omp/bin/omp)`. A later handoff-only commit re-runs the workflow fully `CACHED` — the first run
-is the evidence. (Superseded 2026-10-27, INFRA-520, the CI router: the pull request's image build is
-now the `worker-image` job of ci.yaml, which calls `worker-image.yaml`. A handoff-only push carries
-`skip-checks: true` and starts no run; a push without it cancels the first run if that run is
-unfinished, and a pull request's build writes no cache, since only builds on main write the
+(/opt/omp/bin/omp)`. Before sjawhar/legion#2354 a later handoff-only commit re-ran the workflow
+fully `CACHED` — the first run is the evidence. (Superseded 2026-10-27, INFRA-520, the CI router:
+the pull request's image build is now the `worker-image` job of ci.yaml, which calls
+`worker-image.yaml`. A handoff-only push carried `skip-checks: true` and started no run; a handoff
+is a Dispatch record since sjawhar/legion#2354 and no push is handoff-only, so every push of a
+round cancels the first run if that run is unfinished, and a pull request's build writes no
+cache, since only builds on main write the
 Actions cache scope `worker-image`, so its run rebuilds every layer main's
 cache lacks.) Why the check attaches to every PR head is
 `docs/solutions/github/pull-request-trigger-paths-follow-the-pr-head.md`; the image's probe ordering

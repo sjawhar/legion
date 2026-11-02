@@ -23,12 +23,14 @@ related_issues:
   term dropped by whoever resolves the merge then turns a test red in the merge-queue build. A
   comment on the other pull request is read by a person and checked by nobody, so it names that
   file rather than standing alone.
-- **Write the other branch's instruction where it survives your retro.** The plan handoff is
-  deleted from the head before READY, so an instruction that lives only in
-  `.legion/<issue>/plan.json` is gone the moment the merge lands. Put it in the learning document,
-  in the pull request body's `Not proven / risk`, or in a comment in the code it concerns.
+- **Write the other branch's instruction where its reader will meet it.** Before
+  sjawhar/legion#2354 the plan handoff was deleted from the head before READY, so an instruction
+  that lived only in `.legion/<issue>/plan.json` was gone the moment the merge landed. A handoff is
+  a versioned record on the Dispatch issue now and outlives the merge, but nobody working the other
+  branch reads your issue's handoff. Put the instruction in the learning document, in the pull
+  request body's `Not proven / risk`, or in a comment in the code it concerns.
 - **Say in the body which branch you took**, so the second merger knows which half of the plan is
-  live without reading a deleted file.
+  live without reading another issue's record.
 
 ## Evidence
 
@@ -52,5 +54,6 @@ annotation, normalized `""` → `default` on both sides: a Sandbox stored before
 existed carries none, and the round then falls back to comparing the image alone, which is exactly
 the fleet a ServiceAccount migration has to move. The controller's pod is not round-covered, so
 the term must also stay in `relaunch`'s own decision, outside the plugin-install guard. That was
-written in `.legion/INFRA-934/plan.json`, which retro removes before READY, which is why it is
+written in the plan handoff of dispatch://INFRA-934 — then the committed
+`.legion/INFRA-934/plan.json`, which retro removed before READY — which is why it is
 restated here.

@@ -21,7 +21,7 @@ related_issues:
   - "LEGION-23"
   - "sjawhar/legion#966"
 symptoms:
-  - "`pr-blocked` fires on every `.legion/*.json` handoff push to a red PR"
+  - "`pr-blocked` fired on every `.legion/*.json` handoff push to a red PR (before sjawhar/legion#2354)"
   - "a spec says 'the daemon reads the push webhook's file lists' but the daemon never sees a push payload with file lists"
   - "two GitHub webhooks describe one commit and the daemon's answer depends on which arrives first"
 ---
@@ -32,7 +32,8 @@ LEGION-33 (PR sjawhar/legion#993) made a fix attempt mean "a new head on a red P
 changed something outside `.legion/`". That rule was one sentence. Landing it needed a change in
 the Go listener, three new state fields, a two-webhook convergence pattern, and a deliberate
 degradation mode. Since sjawhar/legion#2354 a handoff is a record on the Dispatch issue, so every
-pushed head is a code head and the path rule is gone. Each of the four patterns below is still
+pushed head is a code head and the path rule is gone; dispatch://INFRA-609 then stopped the
+listener sending the three fields that rule was built on. Each of the four patterns below is still
 reusable the next time a rule needs a fact the daemon does not yet receive.
 
 ## 1. Check the normalizer before the spec names a webhook field
@@ -62,16 +63,22 @@ order, newline-joined, capped at 100 paths and 32,768 runes of text) and `change
 daemon's `classifyPush` owned `HANDOFF_PATH_PREFIX` and the every-path rule. Envoy's own guidance
 ("It does not own Legion workflow policy") is the reason, and the payoff was concrete: the
 `.legion/` rule changed in TypeScript, unit-tested in-process, with no change to Go and no
-redeploy of the listener. sjawhar/legion#2354 then deleted that classifier with the mechanism it
-read, and the listener kept `changed_paths`. A forwarded fact outlives the policy that asked for
-it.
+redeploy of the listener.
+
+Both halves are gone now. sjawhar/legion#2354 deleted the classifier with the mechanism it read,
+and dispatch://INFRA-609 then deleted the fields the listener sent for it: a push envelope is
+`kind, repo, ref, after, before, pusher, sender, head_subject, commit_count, compare_url`, with no
+`changed_paths`, no `changed_paths_truncated` and no `forced`. A forwarded fact outlives the
+policy that asked for it — and the removal runs the other way round, the last reader first and the
+listener after it, which is this note's own rule applied to itself.
 
 Two wire facts bit during implementation and belong in any consumer of a new normalized field:
 
-- `payloadJSON` drops empty-string values. A push listing no commits therefore has **no**
-  `changed_paths` key on the wire, exactly like a push from a listener that predates the field.
-  The always-present boolean (`changed_paths_truncated`) is the "new listener" marker; the paths
-  key's absence alone is ambiguous. `classifyPush` reads the boolean first for this reason.
+- `payloadJSON` drops empty-string values. A push listing no commits therefore had **no**
+  `changed_paths` key on the wire, exactly like a push from a listener that predated the field.
+  The always-present boolean (`changed_paths_truncated`) was the "new listener" marker; the paths
+  key's absence alone was ambiguous, which is why `classifyPush` read the boolean first. Any
+  optional string field a normalizer adds needs the same always-present companion.
 - A boolean transmitted as a string has three values, not two. `"true"`, `"false"`, and anything
   else each need a branch and a test — the `"maybe"` row in `reducers.test.ts` was a review
   finding, and deleting the `!== "false"` branch made exactly that row fail.
@@ -85,7 +92,8 @@ pattern that made it order-independent is three optional `PrState` fields:
 - `pendingPush?: { sha, handoffOnly }` — the push arrived first. One slot, keyed by sha, latest
   push wins. `resetPrHead` **consumes** (deletes) it when a head with that exact sha arrives —
   from the synchronize webhook or from resync's GitHub read alike — so a stale slot can only ever
-  describe the commit it names.
+  describe the commit it names. The `handoffOnly` flag went with the handoff commit in
+  sjawhar/legion#2354.
 - `headCounted?: true` — the synchronize arrived first and was counted. A later push that the
   daemon did not count for that head took the attempt back. Literal `true`/absent, never `false`:
   one representation of "not counted". A handoff-only push was such a push then. Since
@@ -103,14 +111,16 @@ next head".
 
 ## 4. Under deploy skew, unknown degrades to yesterday's behaviour — loudly
 
-The listener and the daemon are upgraded by hand and separately. Until both run the new code:
-daemon-only sees every push as "changed_paths absent"; listener-only has the daemon ignoring
-the new fields. The design that made that safe: every shape the daemon cannot classify (no
-`changed_paths_truncated`, `"true"`, an unrecognised value, no commits listed) **counts exactly
-as before the change** and emits one `{ kind: "log", message }` effect naming the PR and the
+The listener and the daemon are upgraded by hand and separately. Until both ran the new code:
+daemon-only saw every push as "`changed_paths` absent"; listener-only had the daemon ignoring
+the new fields. The design that made that safe: every shape the daemon could not classify (no
+`changed_paths_truncated`, `"true"`, an unrecognised value, no commits listed) **counted exactly
+as before the change** and emitted one `{ kind: "log", message }` effect naming the PR and the
 reason. A missing signal degrades to the prior behaviour, never to silence (`pr-blocked` could not
 quietly stop firing) and never to the new behaviour (a handoff push could not be un-counted on a
-guess).
+guess). The removal obeyed the same skew: the daemon stopped reading the fields first
+(sjawhar/legion#2354) and the listener stopped sending them after (dispatch://INFRA-609), so no
+deployment ever read an absent field as a verdict.
 
 The `log` effect itself was the cheapest way to get a reducer — pure, no logger — to say why:
 `events.ts`'s exhaustive `dispatch` switch executes it as `console.warn("[legion] …")`, it cannot

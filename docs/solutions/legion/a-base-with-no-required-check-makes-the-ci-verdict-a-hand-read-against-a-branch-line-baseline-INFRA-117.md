@@ -36,11 +36,13 @@ pull request targets that requires no check.
   head on that base is the baseline to use. `gh api repos/<o>/<r>/actions/jobs/<job id> --jq
   '[.steps[] | select(.conclusion=="failure") | .name]'` on both heads is the comparison; anything
   else is fixed in this pull request.
-- **A handoff-only head has no checks at all.** A push carrying only `.legion/` ends its message
-  with `skip-checks: true`, so GitHub starts no run for it and the pull request's head shows zero
-  check runs. The verdict that counts is the code head's, and the claim that joins them is
-  `jj diff --from <code head> --to <handoff head> --git '~.legion'` being empty. Say both SHAs
-  wherever the CI line is quoted, or the next role reads "no checks" as "not run".
+- **A handoff-only head had no checks at all.** Before sjawhar/legion#2354 a push carrying only
+  `.legion/` ended its message with `skip-checks: true`, so GitHub started no run for it and the
+  pull request's head showed zero check runs. The verdict that counted was the code head's, and
+  the claim that joined them was `jj diff --from <code head> --to <handoff head> --git '~.legion'`
+  being empty, said with both SHAs wherever the CI line was quoted. A handoff is a versioned
+  record on the Dispatch issue now, so no round pushes a handoff head and every head a round
+  pushes starts its own runs.
 
 **Superseded 2026-10-23 (dispatch://INFRA-83):** two clauses are gone. The first is the one that
 has you say both SHAs wherever the CI line is quoted, because that line is: the pull request body
@@ -49,9 +51,10 @@ result for a later step to trust — the tester and the reviewer each read CI on
 they are judging and record none of it (the reviewer's own four GitHub reads are in
 `skills/legion-worker/references/merge-gate.md`). The hand-read this learning is about is now what
 each role does for itself instead of reading it off a body line: at the head it is judging it reads
-every job with its conclusion and run id, and when that head is a handoff-only one with zero check
-runs it reads the code head's runs and proves the join itself with
-`jj diff --from <code head> --to <handoff head> --git '~.legion'` being empty. The second is the
+every job with its conclusion and run id. Before sjawhar/legion#2354, when that head was a
+handoff-only one with zero check runs, the role read the code head's runs and proved the join
+itself with `jj diff --from <code head> --to <handoff head> --git '~.legion'` being empty, which
+no round needs now. The second is the
 first bullet's "READY is accepted with a note that the base requires no check": READY reads no
 check of the head at all now, `rules/branches` included, and answers no note at all on such a base
 — the completion's `note` carries the already-merged sentence and the by-hand
@@ -59,8 +62,9 @@ check of the head at all now, `rules/branches` included, and answers no note at 
 judges no head red on that base, so a red job never sends the issue back, and GitHub merges under
 its own rules, so nothing on GitHub is in the way either. The rest of the finding stands: the empty
 `rules/branches/<base>` read and what it means for the daemon's verdict, naming the whole job list
-in the plan, classifying a red job-by-job and step-by-step against a baseline head on the same
-branch line, and a handoff-only head having no checks at all.
+in the plan, and classifying a red job-by-job and step-by-step against a baseline head on the same
+branch line. The handoff-only head with no checks at all is history: sjawhar/legion#2354 made a
+handoff a Dispatch record, and no round pushes one.
 
 ## Evidence
 

@@ -38,7 +38,8 @@ related_issues:
   and brings the body's `Size` and `Chain` lines up to date for its commit.
 - A first retro's note that states a current number, a head or a "no release has shipped" claim can
   become a review finding in the next round, fixable only by the implementer in an implementing
-  round (retro never edits `.legion/`, and a round-4 sweep had to edit two retro notes). Write such
+  round (a round-4 sweep here had to edit two retro notes; before sjawhar/legion#2354 retro also
+  never edited `.legion/`). Write such
   facts as history with their moment, or as pointers
   (docs/solutions/legion/a-contract-numbers-prose-is-declaration-history-or-current-write-current-as-a-pointer-and-sweep-docs-solutions-too-LEGION-578.md).
 

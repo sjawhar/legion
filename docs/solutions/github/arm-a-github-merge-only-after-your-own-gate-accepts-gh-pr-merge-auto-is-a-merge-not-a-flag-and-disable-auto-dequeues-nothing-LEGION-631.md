@@ -22,7 +22,8 @@ related_issues:
   the merge itself. Run it only after every gate of your own has accepted — in Legion, the moment the
   daemon accepts the merger's `handoff_complete` with `ready: true`, in the same turn, never before
   and never from a later role — because each refusal that gate can still give (the design gate, a
-  head carrying `.legion/<issue>/`, a conflict, a check not green) names a condition an armed request
+  conflict, a check not green; and, before sjawhar/legion#2354, a head carrying
+  `.legion/<issue>/`) names a condition an armed request
   would merge through. A child issue's merger cannot even read its root's design gate (`designGate`
   is on the root's record alone), so "check the gate yourself, then arm" is not available to it.
 - `--match-head-commit` is checked when the request is made, not when the merge lands: an armed

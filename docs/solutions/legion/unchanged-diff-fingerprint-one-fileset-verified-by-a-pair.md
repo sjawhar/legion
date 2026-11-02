@@ -155,9 +155,10 @@ match.
 1. Before merging: `jj git fetch`, then hash the current tip with the one-fileset command and
    keep the number.
 2. `jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"`
-   — a forward merge from the bookmark, not `@` (a handoff split leaves `@` empty and
-   undescribed, and `jj git push` refuses a commit with no description); the tester's and
-   reviewer's handoff commits stay exactly where they are.
+   — a forward merge from the bookmark, not `@`, which may be an empty, undescribed child that
+   `jj git push` refuses. Before sjawhar/legion#2354 the empty `@` was what a handoff split left
+   behind, and merging from the bookmark also left the tester's and reviewer's handoff commits
+   exactly where they were; a handoff is a Dispatch record now and no commit carries one.
 3. Resolve the conflict directly in that one merge commit (edit the markers; there is nothing to
    squash, since the merge is the only new commit). Never `jj op restore` in a shared workspace.
 4. `jj new`, run the package's tests, lint, and typecheck at the resolved tip, re-run every
@@ -178,6 +179,7 @@ match.
   — a generated-output directory that must be excluded from the fileset, and the CI-forced
   rebase that is not a conflict but is still necessary.
 - `handoff-file-conflicts-during-rebases.md` — the bottom-up edit-and-squash procedure for
-  `.legion/` files.
+  `.legion/` files. That note is superseded by sjawhar/legion#2354: a handoff is a Dispatch
+  record and a rebase meets no handoff file.
 - `../github/conflicting-pr-gets-no-pull-request-ci.md` — why a `CONFLICTING` PR gets no CI
   and no wake announces it.
