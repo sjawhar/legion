@@ -1,0 +1,7 @@
+kind: Fixed
+body: |-
+  A root architect can close a tree whose root waits on a person. `close_root` refused every phase
+  but `admitted`, so a root in `awaiting_person` whose person answered "close this" could be ended
+  only by a person's own status write; it now accepts both phases, posting the reason, writing
+  `done` and lingering the tree. A root past its first phase, one already lingering and one leaving
+  the workflow are refused as before.

@@ -571,7 +571,7 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 	if err != nil || pending {
 		return intake.Result{}, err
 	}
-	if err := e.enqueue(ctx, tx, fact.Key, record.StatusWrite{Status: "todo", ObservedStatus: fact.Issue.Status, PersonHandover: true}); err != nil {
+	if err := e.enqueue(ctx, tx, fact.Key, record.PersonHandoverStatusWrite("todo", fact.Issue.Status)); err != nil {
 		return intake.Result{}, err
 	}
 	e.logOnCommit(ctx, "admission: queued a person's handover", "issue", fact.Key, "source", "approval")

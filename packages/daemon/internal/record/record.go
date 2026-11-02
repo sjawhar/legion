@@ -1128,8 +1128,8 @@ type Store interface {
 	// identical one.
 	ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind) (bool, error)
 
-	// PersonHandoverPending says whether outbox still holds a dispatch_status row of issue that is
-	// a person's handover (StatusWrite.PersonHandover): a finished row is deleted, so any such row
+	// PersonHandoverPending says whether outbox still holds a dispatch_status row of issue whose
+	// kind is PersonHandoverStatusRow: a finished row is deleted, so any such row
 	// is one still to run or retrying. Admission and the workflow queue no second such row, and no
 	// triage wake, for the issue while one is pending; the issue's other status rows, a hand-over
 	// row among them, are not counted.

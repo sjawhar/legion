@@ -296,8 +296,7 @@ func (e *Engine) handOver(ctx context.Context, tx pgx.Tx, root, child record.Iss
 	}
 	e.logOnCommit(ctx, "workflow: a finished root hands its unfinished child to Legion", "issue", child.Key, "tree", root.Key,
 		"phase", child.Phase, "status", child.Status)
-	return e.enqueue(ctx, tx, child.Key, record.StatusWrite{Status: "todo", ObservedStatus: child.Status, HandOver: true,
-		HandOverTree: root.Tree, HandOverLinger: root.Generation})
+	return e.enqueue(ctx, tx, child.Key, record.HandOverStatusWrite("todo", child.Status, root.Tree, root.Generation))
 }
 
 // lingerExpired closes the tree whose root's linger elapsed at the generation the fact names: a

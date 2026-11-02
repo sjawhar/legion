@@ -1160,9 +1160,9 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 	s.applyFact(w, r, requestFactID("signoff"), intake.SignOff{Issue: req.Issue}, SignOffResponse{})
 }
 
-// closeRoot ends the architect's tree while its root is admitted and no phase has started
-// (workflow's closeRoot): the root's own architect only, with a reason short enough to post as a
-// message.
+// closeRoot ends the architect's tree while its root has started no phase — admitted, or waiting
+// on a person (workflow's closeRoot): the root's own architect only, with a reason short enough
+// to post as a message.
 func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 	var req RootCloseRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}, field{"reason", req.Reason}) {

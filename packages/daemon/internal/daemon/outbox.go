@@ -297,7 +297,7 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 		refusal, _ := dispatch.PermanentRefusal(cause)
 		r.log.Error("outbox status write refused by Dispatch and dropped; the issue's later writes go on",
 			"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", cause)
-		if value.HandOver {
+		if value.Kind == record.HandOverStatusRow {
 			follow = func(tx pgx.Tx) error {
 				return r.records.DeleteHandoverAt(scoped, tx, row.Issue, value.HandOverTree, value.HandOverLinger)
 			}
@@ -465,17 +465,17 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("read Dispatch issue %s before status write: %w", row.Issue, err)
 	}
 	if issue.Status != payload.ObservedStatus && issue.Status != payload.Status {
-		if payload.HandOver {
+		if payload.Kind == record.HandOverStatusRow {
 			if err := r.dropHandover(ctx, row.Issue, payload); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if payload.PersonHandover && !r.personHandoverStands(row, issue) {
+	if payload.Kind == record.PersonHandoverStatusRow && !r.personHandoverStands(row, issue) {
 		return nil
 	}
-	if payload.HandOver {
+	if payload.Kind == record.HandOverStatusRow {
 		if holds, err := r.handOverHolds(ctx, row, payload); err != nil || !holds {
 			return err
 		}
@@ -568,63 +568,45 @@ func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload 
 		row.Issue, payload.Status, statusWriteReads)
 }
 
-// statusRowKind is what a status row is for, which is what decides the rule its retry is judged
-// by. Every row is exactly one of these, read from the payload's own marks (statusKindOf), and
-// stillWanted has a case for each: a kind added without one reaches the default and the row fails
-// rather than being judged by somebody else's rule, which TestEveryStatusRowKindHasAStillWantedRule
-// holds to the list.
-type statusRowKind int
-
-const (
-	// ordinaryStatusRow is the workflow moving an issue along inside the workflow: the phase
-	// statuses, and the done a merge writes.
-	ordinaryStatusRow statusRowKind = iota
-	// personHandoverRow is a person's handover, queued at triage, backlog or icebox to bring an
-	// issue into the workflow (StatusWrite.PersonHandover).
-	personHandoverRow
-	// reassertRow is the daemon setting its own status back over one a session wrote
-	// (workflow's sessionStatusWrite), so it too is queued at a status the issue is not meant to
-	// be at, done, backlog or icebox among them.
-	reassertRow
-)
-
-func statusKindOf(payload record.StatusWrite) statusRowKind {
-	switch {
-	case payload.PersonHandover:
-		return personHandoverRow
-	case payload.Reassert:
-		return reassertRow
-	default:
-		return ordinaryStatusRow
-	}
-}
-
 // stillWanted says whether a row whose write Dispatch refused may write again, asking the rule its
-// own kind carries. The caller has already taken the two answers every kind shares — the status is
-// the row's own, so someone else did this work, or it is neither the row's nor the one it observed,
-// so somebody moved the issue since — and what is left is the question each kind answers
-// differently.
+// own kind carries (record.StatusRowKind, the kind the payload stores). The caller has already
+// taken the two answers every kind shares — the status is the row's own, so someone else did this
+// work, or it is neither the row's nor the one it observed, so somebody moved the issue since —
+// and what is left is the question each kind answers differently.
 //
-// Two of the three are queued at a status that reads as out of the workflow, and for them the
-// ordinary rule reads backwards: a handover brings an issue into the workflow, and a re-assert
-// undoes a session's own move out of it. Asking record.OutOfWorkflow of either would finish it
-// without writing and log that its issue had left a workflow it never entered, or had left one
-// this very row exists to put it back in.
+// Three of the four are queued at a status that reads as out of the workflow, and for them the
+// ordinary rule reads backwards: a handover of either sort brings an issue into the workflow, and
+// a re-assert undoes a session's own move out of it. Asking record.OutOfWorkflow of any of them
+// would finish it without writing and log that its issue had left a workflow it never entered, or
+// had left one this very row exists to put it back in.
+//
+// There is a case per kind and no fallback: a kind added to record.StatusRowKinds without a rule
+// here fails its row, naming itself, rather than being judged by whichever rule a default would
+// lend it, which is review round 6's defect and what
+// TestEveryStatusRowKindHasAStillWantedRule holds this switch to.
 func (r *outbox) stillWanted(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) (bool, error) {
-	switch kind := statusKindOf(payload); kind {
-	case ordinaryStatusRow:
+	switch payload.Kind {
+	case record.OrdinaryStatusRow:
 		return r.statusStillWanted(ctx, row, payload, read)
-	case personHandoverRow:
+	case record.PersonHandoverStatusRow:
 		return r.personHandoverStands(row, read), nil
-	case reassertRow:
+	case record.ReassertStatusRow:
 		// The read shows the status the session wrote, which the caller has just required, so the
 		// session's move still stands and the daemon's own status is still owed. Nothing else is
 		// asked: the record cannot be consulted for it, since the status this row restores is the
 		// one the record kept (workflow's keepStatus), and the issue's being out of the workflow
 		// in Dispatch's eyes is the very thing being undone.
 		return true, nil
+	case record.HandOverStatusRow:
+		// A hand-over's write is made by the hand-over branch of status, which returns there, so
+		// no hand-over reaches this rule today. Its rule is nonetheless its own: the fence the
+		// branch already passed, read again (handOverHolds) — the issue still that tree's and the
+		// root still lingering at the generation the row names — since what a refusal costs is
+		// the time for a reopen to take the child back, and the ordinary rule would read the todo
+		// this row writes as an issue out of the workflow.
+		return r.handOverHolds(ctx, row, payload)
 	default:
-		return false, fmt.Errorf("outbox row %d: status row kind %d has no still-wanted rule", row.ID, kind)
+		return false, fmt.Errorf("outbox row %d: status row kind %q has no still-wanted rule", row.ID, payload.Kind)
 	}
 }
 

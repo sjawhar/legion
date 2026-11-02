@@ -40,7 +40,7 @@ import (
 )
 
 func TestOutboxDropsSupersededStatusWrite(t *testing.T) {
-	row, err := record.NewOutboxRow("LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())
+	row, err := record.NewOutboxRow("LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), time.Now())
 	if err != nil {
 		t.Fatalf("new outbox row: %v", err)
 	}
@@ -56,13 +56,14 @@ func TestOutboxDropsSupersededStatusWrite(t *testing.T) {
 	}
 }
 
-// A person's handover row (StatusWrite.PersonHandover) answers a person's legion label on a triage
-// root, or a person's approval of a parked labelled root's spec. Its delivery writes todo only
-// while the issue still shows the status the row answered and still carries the label: a person
-// who parked the root since is let stand silently, as any superseded status write is, and one who
-// took the label off withdrew the handover, which is dropped with one log line (R4 of
-// dispatch://LEGION-755 and the plan's D2). A hand-over row of the workflow (HandOver) is not held
-// to the label: TestAHandOverWritesTheStatusAndTheLabelTogether's unlabelled cases PATCH it on.
+// A person's handover row (record.PersonHandoverStatusRow) answers a person's legion label on a
+// triage root, or a person's approval of a parked labelled root's spec. Its delivery writes todo
+// only while the issue still shows the status the row answered and still carries the label: a
+// person who parked the root since is let stand silently, as any superseded status write is, and
+// one who took the label off withdrew the handover, which is dropped with one log line (R4 of
+// dispatch://LEGION-755 and the plan's D2). A hand-over row of the workflow
+// (record.HandOverStatusRow) is not held to the label:
+// TestAHandOverWritesTheStatusAndTheLabelTogether's unlabelled cases PATCH it on.
 func TestOutboxWritesAPersonsHandoverOnlyWhileItsLabelAndStatusStand(t *testing.T) {
 	const dropped = "outbox: a person's handover is not written; the label is gone"
 	for _, tc := range []struct {
@@ -76,7 +77,7 @@ func TestOutboxWritesAPersonsHandoverOnlyWhileItsLabelAndStatusStand(t *testing.
 		{name: "label and status stand", shown: dispatch.Issue{Key: "LEGION-208", Status: "triage", Labels: []string{"legion"}, HandedOver: true}, statuses: []string{"todo"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true}, time.Now())
+			row := mustOutboxRow(t, "LEGION-208", record.PersonHandoverStatusWrite("todo", "triage"), time.Now())
 			client := &outboxDispatch{issue: tc.shown}
 			var logs bytes.Buffer
 			runner := &outbox{log: slog.New(slog.NewJSONHandler(&logs, nil)), dispatch: client}
@@ -180,7 +181,7 @@ func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProje
 func (d *outboxDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())
+	row := mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), time.Now())
 	client := &outboxDispatch{issue: dispatch.Issue{Key: row.Issue, Status: "todo"}}
 
 	if err := (&outbox{dispatch: client}).execute(context.Background(), row); err != nil {
@@ -212,7 +213,7 @@ func TestAHandOverWritesTheStatusAndTheLabelTogether(t *testing.T) {
 	member := record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	orphaned := member
 	orphaned.Tree = child
-	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 3}, time.Now())
+	row := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 3), time.Now())
 	for _, tc := range []struct {
 		name                string
 		root, child         record.Issue
@@ -288,7 +289,7 @@ func TestAReopenBetweenTheHandOverCheckAndItsPatchKeepsTheChild(t *testing.T) {
 		return err
 	}
 	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "in_progress"}, handOverHook: reopen}
-	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+	row := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 1), time.Now())
 	if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), row); err != nil {
 		t.Fatalf("write the hand-over: %v", err)
 	}
@@ -351,7 +352,7 @@ func TestAnAlreadyTodoAndLabelledChildConsumesItsHandover(t *testing.T) {
 	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "todo", HandedOver: true, Labels: []string{"legion"}}}
-	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+	row := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 1), time.Now())
 	if err := (&outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission}, log: quietLogger()}).execute(context.Background(), row); err != nil {
 		t.Fatalf("consume already-todo hand-over: %v", err)
 	}
@@ -407,7 +408,7 @@ func TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent(t *testing.T) {
 			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
 			admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 			client := &outboxDispatch{issue: tc.shown}
-			row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+			row := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 1), time.Now())
 			if err := (&outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission}, log: quietLogger()}).execute(context.Background(), row); err != nil {
 				t.Fatalf("write the hand-over: %v", err)
 			}
@@ -471,7 +472,7 @@ func TestAPersonMoveBetweenTheHandOverReadAndPatchStands(t *testing.T) {
 						return put
 					}
 				}
-				row, err := record.NewOutboxRow(child, record.StatusWrite{ObservedStatus: "testing", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, now)
+				row, err := record.NewOutboxRow(child, record.HandOverStatusWrite("todo", "testing", root, 1), now)
 				if err != nil {
 					return err
 				}
@@ -555,7 +556,7 @@ func TestAStaleHandOverRowLeavesANewerLingersFence(t *testing.T) {
 				t.Fatalf("seed the newer linger's fence: %v", err)
 			}
 			client := &outboxDispatch{issue: tc.shown}
-			stale := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+			stale := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 1), time.Now())
 			if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), stale); err != nil {
 				t.Fatalf("execute the stale hand-over row: %v", err)
 			}
@@ -608,7 +609,7 @@ func TestAPermanentlyRefusedHandOverDropsItsFence(t *testing.T) {
 	if home, err := st.IssueSandboxHome(ctx, "legion", child); err != nil || home != child {
 		t.Fatalf("the child's Sandbox home while its hand-over is pending = %q, %v; want %s", home, err, child)
 	}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 3}, time.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 3), time.Now()))
 	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "in_progress"}, handOverHook: func() error {
 		return &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "issue not found"}
 	}}
@@ -638,7 +639,7 @@ func TestAPermanentlyRefusedHandOverDropsItsFence(t *testing.T) {
 // The message is the row's own, under its marker, so a retry after a failed status write finds it
 // and posts none.
 func TestADoneWriteWithAReasonPostsItFirstAndOnce(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: "Closed by its architect before its first phase: no change"}, time.Now())
+	row := mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("done", "in_progress", "Closed by its architect before its first phase: no change"), time.Now())
 	row.ID = 56
 	client := &outboxDispatch{issue: dispatch.Issue{Key: row.Issue, Status: "in_progress"}, postErr: errors.New("Dispatch refused the message")}
 	runner := &outbox{dispatch: client}

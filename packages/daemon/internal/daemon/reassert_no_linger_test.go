@@ -57,8 +57,7 @@ func TestAReassertLeavesItsRecordedIssueInTheWorkflow(t *testing.T) {
 			client := &refusedOnceDispatch{outboxDispatch: outboxDispatch{issue: shown}, reread: reread}
 			runner := &outbox{pool: pool, records: records, dispatch: client,
 				handlers: []intake.Handler{engine, admission}, log: quietLogger()}
-			row := mustOutboxRow(t, tc.key, record.StatusWrite{
-				Status: "in_progress", ObservedStatus: tc.wrote, Reassert: true}, time.Now())
+			row := mustOutboxRow(t, tc.key, record.ReassertStatusWrite("in_progress", tc.wrote), time.Now())
 
 			if err := runner.execute(ctx, row); err != nil {
 				t.Fatalf("execute the re-assert: %v", err)
@@ -111,7 +110,7 @@ func TestTheCloseEventTakesTheIssueOutAfterItsWriteWasRefused(t *testing.T) {
 	client := &refusedOnceDispatch{outboxDispatch: outboxDispatch{issue: shown}, reread: reread}
 	runner := &outbox{pool: pool, records: records, dispatch: client,
 		handlers: []intake.Handler{engine, admission}, log: quietLogger()}
-	row := mustOutboxRow(t, key, record.StatusWrite{Status: "testing", ObservedStatus: "in_progress"}, time.Now())
+	row := mustOutboxRow(t, key, record.OrdinaryStatusWrite("testing", "in_progress", ""), time.Now())
 
 	if err := runner.execute(ctx, row); err != nil {
 		t.Fatalf("execute the status write: %v", err)

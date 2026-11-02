@@ -99,43 +99,94 @@ type HeldRow struct {
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
 type OutboxPayload interface{ OutboxKind() OutboxKind }
 
+// StatusRowKind is what a status row is for, and the one thing that decides the rule the outbox
+// judges its retry by (the daemon's stillWanted). It is stored in the payload rather than worked
+// out from the row's other fields: derived from a set of marks, a kind nobody gave a rule read as
+// the ordinary one and was judged by the ordinary rule in silence, which is review round 6's
+// defect. Every kind is named once, in StatusRowKinds, which the daemon's rule switch and the
+// tests of both packages read, so a kind added to that list and nowhere else fails its row and
+// reddens the package rather than borrowing another kind's rule.
+type StatusRowKind string
+
+const (
+	// OrdinaryStatusRow is the workflow moving an issue along inside the workflow: the phase
+	// statuses, and the done a merge or an architect's close writes.
+	OrdinaryStatusRow StatusRowKind = "ordinary"
+	// PersonHandoverStatusRow is a person's handover: a person's legion label on an unrecorded
+	// root in triage, or a person's approval of a parked labelled root's primary document. It is
+	// queued at the triage, backlog or icebox that act found, to bring the issue into the
+	// workflow. The pending-row rule (Store.PersonHandoverPending) reads the kind to tell such a
+	// row from the workflow's other status rows, which suppress nothing: while one is pending for
+	// an issue, no second one is queued for it. The outbox's status executor also drops such a row
+	// at delivery when the re-read issue no longer carries the label: a person who took it off
+	// withdrew the handover. A HandOverStatusRow, also a todo, is not one.
+	PersonHandoverStatusRow StatusRowKind = "person-handover"
+	// ReassertStatusRow is the daemon setting its own status back over one a session wrote
+	// (workflow's sessionStatusWrite): the session's close or park stands in Dispatch and the
+	// record kept the daemon's status, so this row is queued observing a status the issue is not
+	// meant to be at — done, backlog or icebox — exactly as a person's handover is. Asking the
+	// ordinary rule of it, whether the issue is still in the workflow, would drop the row for
+	// being at the status it exists to undo.
+	ReassertStatusRow StatusRowKind = "reassert"
+	// HandOverStatusRow hands a child of a closed tree to Legion: the write also puts
+	// dispatch.LegionLabel on the issue, in the same Dispatch write, and the runner makes it while
+	// the label is missing even where Dispatch already shows Status.
+	HandOverStatusRow StatusRowKind = "hand-over"
+)
+
+// StatusRowKinds is every kind of status row, listed once. The daemon's rule switch, the
+// migration that gave the stored rows their kind and the tests of both packages read this list,
+// so a kind is added in one place and every reader of it is held to the same four.
+var StatusRowKinds = []StatusRowKind{OrdinaryStatusRow, PersonHandoverStatusRow, ReassertStatusRow, HandOverStatusRow}
+
 // StatusWrite is a Dispatch status the daemon writes. ObservedStatus is the status Dispatch shows
 // until the write runs: the runner writes Status only while Dispatch still shows ObservedStatus, so a
-// move someone else made since the write was queued stands.
+// move someone else made since the write was queued stands. Kind is what the write is for, set by
+// the constructor its queueing site goes through — OrdinaryStatusWrite, PersonHandoverStatusWrite,
+// ReassertStatusWrite or HandOverStatusWrite — which are the only places one is built, so no row
+// reaches the outbox without a kind (validateOutboxPayload refuses one that does).
 type StatusWrite struct {
-	Status         string `json:"status"`
-	ObservedStatus string `json:"observedStatus"`
+	Kind           StatusRowKind `json:"kind"`
+	Status         string        `json:"status"`
+	ObservedStatus string        `json:"observedStatus"`
 	// Reason is a done write's reason: the runner posts it as a message on the issue before it
 	// writes the status, since Dispatch refuses a message on a closed issue. Empty for a write
 	// with no reason to record.
 	Reason string `json:"reason,omitempty"`
-	// HandOver also puts dispatch.LegionLabel on the issue, in the same Dispatch write: the write
-	// hands the issue to Legion, and the runner writes it while the label is missing even where
-	// Dispatch already shows Status. HandOverTree and HandOverLinger fence it: the runner writes it
+	// HandOverTree and HandOverLinger fence a hand-over (HandOverStatusRow): the runner writes it
 	// only while the issue is still that tree's and the tree's root still lingers at that
 	// generation (Issue.LingersAt), so a root re-admitted since keeps the issue as its child.
-	HandOver       bool   `json:"handOver,omitempty"`
 	HandOverTree   string `json:"handOverTree,omitempty"`
 	HandOverLinger uint64 `json:"handOverLinger,omitempty"`
-	// PersonHandover marks a todo write the daemon queues for a person's handover: a person's
-	// legion label on an unrecorded root in triage, or a person's approval of a parked labelled
-	// root's primary document. The pending-row rule (Store.PersonHandoverPending) reads it to tell
-	// such a row from the workflow's other status rows, which suppress nothing: while one is
-	// pending for an issue, no second one is queued for it. The outbox's status executor also drops
-	// a marked row at delivery when the re-read issue no longer carries the label: a person who took
-	// it off withdrew the handover. A hand-over row (HandOver), also a todo, is not one.
-	PersonHandover bool `json:"personHandover,omitempty"`
-	// Reassert marks the row the daemon queues to set its own status back over one a session
-	// wrote (workflow's sessionStatusWrite): the session's close or park stands in Dispatch and
-	// the record kept the daemon's status, so this row is queued observing a status the issue is
-	// not meant to be at — done, backlog or icebox — exactly as a person's handover is. The
-	// outbox's retry reads the mark to know which rule judges the row (its statusRowKind): asking
-	// the ordinary one, whether the issue is still in the workflow, would drop the row for being
-	// at the status it exists to undo.
-	Reassert bool `json:"reassert,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }
+
+// OrdinaryStatusWrite is the workflow's own move of an issue inside the workflow, to status from
+// the observed status Dispatch shows until the write runs. reason is a done write's, posted as a
+// message before the status lands (StatusWrite.Reason); every other write has none.
+func OrdinaryStatusWrite(status, observed, reason string) StatusWrite {
+	return StatusWrite{Kind: OrdinaryStatusRow, Status: status, ObservedStatus: observed, Reason: reason}
+}
+
+// PersonHandoverStatusWrite is the write a person's handover queues, observed at the status that
+// person's act found (PersonHandoverStatusRow).
+func PersonHandoverStatusWrite(status, observed string) StatusWrite {
+	return StatusWrite{Kind: PersonHandoverStatusRow, Status: status, ObservedStatus: observed}
+}
+
+// ReassertStatusWrite is the daemon's own status set back over the one a session wrote, which the
+// row observes (ReassertStatusRow).
+func ReassertStatusWrite(status, observed string) StatusWrite {
+	return StatusWrite{Kind: ReassertStatusRow, Status: status, ObservedStatus: observed}
+}
+
+// HandOverStatusWrite hands a child of tree to Legion at status, fenced on that tree and on the
+// root generation whose linger queued the write (HandOverStatusRow).
+func HandOverStatusWrite(status, observed, tree string, linger uint64) StatusWrite {
+	return StatusWrite{Kind: HandOverStatusRow, Status: status, ObservedStatus: observed,
+		HandOverTree: tree, HandOverLinger: linger}
+}
 
 // MessagePost is a Dispatch message body. The runner posts it as Posted: the body, then its outbox
 // marker.
@@ -719,6 +770,14 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 func validateOutboxPayload(payload OutboxPayload) error {
 	switch value := payload.(type) {
 	case StatusWrite:
+		// A row whose kind is not one of the four can never be queued, and one stored by an
+		// older release is given its kind by migration 20261102003600 before this release reads
+		// it: so a kind the outbox has no rule for is a kind somebody added to StatusRowKinds
+		// and nowhere else, which fails here rather than reaching the outbox to be judged by
+		// another kind's rule.
+		if !slices.Contains(StatusRowKinds, value.Kind) {
+			return fmt.Errorf("outbox status write has unknown kind %q", value.Kind)
+		}
 		if value.Status == "" {
 			return fmt.Errorf("outbox status write has empty status")
 		}

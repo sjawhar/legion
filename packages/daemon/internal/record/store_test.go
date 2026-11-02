@@ -1135,7 +1135,7 @@ func TestHeldRowsListsLifecycleRowsBehindTheirIssuesRunningOne(t *testing.T) {
 		// (a) LEGION-208: a workspace removal and a status write due behind a running suspend.
 		runningSuspend = enqueue(tx, "LEGION-208", suspend, now)
 		removal = enqueue(tx, "LEGION-208", WorkspaceRemove{Linger: 1}, now)
-		enqueue(tx, "LEGION-208", StatusWrite{Status: "done"}, now)
+		enqueue(tx, "LEGION-208", OrdinaryStatusWrite("done", "in_progress", ""), now)
 		// (b) LEGION-209: a start due behind its branch row, which is running; due a minute before 208's.
 		runningBranch = enqueue(tx, "LEGION-209", IssueBranch{Generation: 1}, now)
 		fencedStart = enqueue(tx, "LEGION-209", start, now.Add(-time.Minute))
@@ -1331,8 +1331,8 @@ func TestDueRowsListsOnlyTheRowsALaneMayRunNow(t *testing.T) {
 		must(t, records.Enqueue(ctx, tx, row))
 	}
 	inTx(t, st, func(tx pgx.Tx) {
-		enqueue(tx, "LEGION-208", StatusWrite{Status: "testing"})
-		enqueue(tx, "LEGION-208", StatusWrite{Status: "retro"})
+		enqueue(tx, "LEGION-208", OrdinaryStatusWrite("testing", "in_progress", ""))
+		enqueue(tx, "LEGION-208", OrdinaryStatusWrite("retro", "testing", ""))
 		enqueue(tx, "LEGION-208", IssueBranch{Generation: 1})
 		enqueue(tx, "LEGION-208", SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1})
 		enqueue(tx, "LEGION-209", Notice{Kind: "phase-finished", Role: claim.RoleTester, Summary: "Tests passed"})
@@ -1394,7 +1394,7 @@ func TestADueLifecycleRowWaitsWhileItsIssuesLifecycleRowRuns(t *testing.T) {
 	inTx(t, st, func(tx pgx.Tx) {
 		enqueue(tx, "LEGION-208", SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1})
 		removalID = enqueue(tx, "LEGION-208", WorkspaceRemove{Linger: 1})
-		enqueue(tx, "LEGION-208", StatusWrite{Status: "done"})
+		enqueue(tx, "LEGION-208", OrdinaryStatusWrite("done", "in_progress", ""))
 		enqueue(tx, "LEGION-209", LingerClose{Generation: 1})
 		all := []string{"supervise:LEGION-208:suspend", "workspace_remove:LEGION-208", "dispatch_status:LEGION-208:done", "linger_close:LEGION-209"}
 		if got := due(tx, "", nil); !reflect.DeepEqual(got, all) {
@@ -1545,7 +1545,7 @@ func TestABoardRowClaimedWhileItsIssuesLifecycleClaimIsUncommittedIsLeasedAtOnce
 	inTx(t, st, func(tx pgx.Tx) {
 		for _, payload := range []OutboxPayload{
 			SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1},
-			StatusWrite{Status: "done"},
+			OrdinaryStatusWrite("done", "in_progress", ""),
 		} {
 			row, err := NewOutboxRow("LEGION-208", payload, now)
 			must(t, err)

@@ -1173,8 +1173,8 @@ func (s *Postgres) ControllerNoticePending(ctx context.Context, tx pgx.Tx, proje
 
 func (s *Postgres) PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error) {
 	var pending bool
-	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2 and payload->>'personHandover' = 'true')",
-		string(OutboxKindDispatchStatus), issue).Scan(&pending); err != nil {
+	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2 and payload->>'kind' = $3)",
+		string(OutboxKindDispatchStatus), issue, string(PersonHandoverStatusRow)).Scan(&pending); err != nil {
 		return false, fmt.Errorf("read whether %s has a person's handover pending: %w", issue, err)
 	}
 	return pending, nil

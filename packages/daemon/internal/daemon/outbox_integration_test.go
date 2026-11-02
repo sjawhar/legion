@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -39,7 +40,7 @@ func TestOutboxLeaseLetsOnlyOneRunnerExecuteDueRow(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, entered: entered, release: release}
@@ -68,7 +69,7 @@ func TestOutboxRetryBacksOffFailedEffect(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, fail: errors.New("Dispatch down")}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: func() time.Time { return now }}
 
@@ -98,9 +99,9 @@ func TestOutboxRestartDrainsDueThenExpiredLeaseRows(t *testing.T) {
 	now := clock.Now()
 	// Three issues: one issue's status rows run one at a time by design, so each row is on a lane
 	// of its own and none waits for another.
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-209", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-210", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now.Add(time.Hour)))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-209", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-210", record.OrdinaryStatusWrite("in_progress", "todo", ""), now.Add(time.Hour)))
 	if _, err := pool.Exec(context.Background(), "update outbox set lease_token = 'a-runner-that-died', lease_until = $2 where issue = $1",
 		"LEGION-209", now.Add(-time.Second)); err != nil {
 		t.Fatalf("leave a lapsed lease on LEGION-209's row: %v", err)
@@ -143,7 +144,7 @@ func TestOutboxStaleLeaseFinishLeavesNewLeaseRowUntouched(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
 
 	first := claimDueOutboxRow(t, pool, records, now)
 	second := claimDueOutboxRow(t, pool, records, first.LeaseUntil.Add(time.Nanosecond))
@@ -327,8 +328,8 @@ func TestOutboxWritesOneIssuesStatusesInOrderWhenTheOlderFailsFirst(t *testing.T
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "testing", Status: "needs_review"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("testing", "in_progress", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("needs_review", "testing", ""), now))
 	board := &boardDispatch{status: "in_progress", failures: 1}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: board, now: func() time.Time { return now }}
 
@@ -356,8 +357,8 @@ func TestAPermanentlyRefusedStatusWriteDoesNotHoldBackTheIssuesLaterWrites(t *te
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "testing", Status: "needs_review"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("testing", "in_progress", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("needs_review", "testing", ""), now))
 	board := &refusingDispatch{status: "in_progress", refuse: map[string]*dispatch.Error{
 		"testing": {Status: 422, Code: "INVALID_STATUS", Message: "testing is not a status of this issue"},
 	}}
@@ -405,7 +406,7 @@ func TestACredentialOrUncodedRefusalIsRiddenOutRatherThanDroppingTheWrite(t *tes
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			now := time.Now().UTC()
-			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("testing", "in_progress", ""), now))
 			board := &refusingDispatch{status: "in_progress", refuse: map[string]*dispatch.Error{"testing": tc.refusal}}
 			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: board, now: func() time.Time { return now }, log: quietLogger()}
 
@@ -573,7 +574,7 @@ func TestAPersonsHandoverIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing.T
 			var logs bytes.Buffer
 			runner := &outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission},
 				log: slog.New(slog.NewJSONHandler(&logs, nil))}
-			row := mustOutboxRow(t, tc.key, record.StatusWrite{Status: "todo", ObservedStatus: tc.observed, PersonHandover: true}, time.Now())
+			row := mustOutboxRow(t, tc.key, record.PersonHandoverStatusWrite("todo", tc.observed), time.Now())
 
 			if err := runner.execute(context.Background(), row); err != nil {
 				t.Fatalf("execute the person's handover: %v", err)
@@ -623,6 +624,15 @@ func TestTheDaemonsReassertIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing
 		{name: "a session parked its own issue to icebox", key: "LEGION-763", wrote: "icebox"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// The issue as the daemon is running it: recorded, in the workflow, at the status the
+			// record kept (workflow's keepStatus), which is the status this row restores. Without
+			// it the linger assertion below would hold whatever the code did, since an unrecorded
+			// issue has no tree to linger.
+			putOutboxIssue(t, pool, records, record.Issue{
+				Key: tc.key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+				Project: "LEGION", Tree: tc.key, Title: tc.key, Phase: phase.Implementing,
+				Generation: 1, Status: "in_progress",
+			})
 			shown := dispatch.Issue{Key: tc.key, Status: tc.wrote, Title: tc.key, Rank: "A", Labels: []string{dispatch.LegionLabel},
 				HandedOver: true, ResolvedRepo: "acme/widgets", LastSeq: 4}
 			reread := shown
@@ -630,7 +640,7 @@ func TestTheDaemonsReassertIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing
 			client := &refusedOnceDispatch{outboxDispatch: outboxDispatch{issue: shown}, reread: reread}
 			runner := &outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission},
 				log: quietLogger()}
-			row := mustOutboxRow(t, tc.key, record.StatusWrite{Status: "in_progress", ObservedStatus: tc.wrote, Reassert: true}, time.Now())
+			row := mustOutboxRow(t, tc.key, record.ReassertStatusWrite("in_progress", tc.wrote), time.Now())
 
 			if err := runner.execute(context.Background(), row); err != nil {
 				t.Fatalf("execute the re-assert: %v", err)
@@ -645,9 +655,10 @@ func TestTheDaemonsReassertIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing
 			if client.at != reread.LastSeq {
 				t.Fatalf("the retry wrote at sequence %d, want the re-read's %d", client.at, reread.LastSeq)
 			}
-			// Nothing of the read reached the engine, so the session's close ended no tree: an
-			// issue the engine had taken out of the workflow would be recorded, and a linger
-			// would have queued its rows.
+			// Nothing of the read reached the engine, so the session's close ended no tree: the
+			// engine taking this issue out of the workflow would linger its tree, whose rows
+			// would be queued here. The record itself is asked in
+			// TestAReassertLeavesItsRecordedIssueInTheWorkflow.
 			if rows := outboxRowsOf(t, pool, tc.key); rows != 0 {
 				t.Fatalf("%d rows left for %s, want none: a linger would have queued its own", rows, tc.key)
 			}
@@ -657,28 +668,145 @@ func TestTheDaemonsReassertIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing
 
 // Every kind of status row has a rule its retry is judged by, and stillWanted has a case for
 // each. A kind added without one reaches the default and fails its row rather than being judged
-// by another kind's rule, which is the mistake this case exists to make loud: each kind is asked
-// for real, against a record and a read that stand, and none may answer with that refusal.
+// by another kind's rule, which is the mistake this case exists to make loud. The kinds are read
+// from record.StatusRowKinds rather than written out here, so a kind added to that list and left
+// out of the switch is asked here too; and each is asked for real, against a record and a read
+// that stand, so none may answer with that refusal.
 func TestEveryStatusRowKindHasAStillWantedRule(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	runner := &outbox{pool: pool, records: records, log: quietLogger()}
-	for _, tc := range []struct {
-		kind    statusRowKind
-		payload record.StatusWrite
-	}{
-		{ordinaryStatusRow, record.StatusWrite{Status: "testing", ObservedStatus: "in_progress"}},
-		{personHandoverRow, record.StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true}},
-		{reassertRow, record.StatusWrite{Status: "in_progress", ObservedStatus: "done", Reassert: true}},
-	} {
-		if got := statusKindOf(tc.payload); got != tc.kind {
-			t.Fatalf("statusKindOf(%+v) = %d, want %d", tc.payload, got, tc.kind)
+	// A row of each kind as its own constructor builds it. A kind this table does not name is
+	// asked all the same, carrying its kind and a status pair: what is under test is whether its
+	// rule answers, and a kind with no rule reaches the default whatever else it carries.
+	payloads := map[record.StatusRowKind]record.StatusWrite{
+		record.OrdinaryStatusRow:       record.OrdinaryStatusWrite("testing", "in_progress", ""),
+		record.PersonHandoverStatusRow: record.PersonHandoverStatusWrite("todo", "triage"),
+		record.ReassertStatusRow:       record.ReassertStatusWrite("in_progress", "done"),
+		record.HandOverStatusRow:       record.HandOverStatusWrite("todo", "in_progress", "LEGION-207", 1),
+	}
+	for _, kind := range record.StatusRowKinds {
+		payload, named := payloads[kind]
+		if !named {
+			payload = record.StatusWrite{Kind: kind, Status: "testing", ObservedStatus: "in_progress"}
 		}
-		read := dispatch.Issue{Key: "LEGION-208", Status: tc.payload.ObservedStatus, HandedOver: true}
-		if _, err := runner.stillWanted(context.Background(), record.OutboxRow{Issue: "LEGION-208"}, tc.payload, read); err != nil {
-			t.Fatalf("the rule of status row kind %d answered %v, want it to answer at all", tc.kind, err)
+		if payload.Kind != kind {
+			t.Fatalf("the row built for status row kind %q carries kind %q", kind, payload.Kind)
+		}
+		read := dispatch.Issue{Key: "LEGION-208", Status: payload.ObservedStatus, HandedOver: true}
+		if _, err := runner.stillWanted(context.Background(), record.OutboxRow{Issue: "LEGION-208"}, payload, read); err != nil {
+			t.Fatalf("the rule of status row kind %q answered %v, want it to answer at all", kind, err)
 		}
 	}
+}
+
+// A status row whose kind nothing has a rule for never runs quietly. The kind is refused where
+// the row is built (record's validateOutboxPayload), and one already in the outbox — hand-written,
+// or left by a release whose rows migration 20261102003600 did not reach — fails its run naming
+// the kind it carries, where a row of no mark was once read as ordinary and judged by the
+// ordinary rule. Both kinds go through execute, the path every row of the outbox takes.
+func TestAStatusRowOfAnUnknownKindFailsNamingItsKind(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, want string
+	}{
+		{name: "a row carrying no kind", kind: "", want: `unknown kind ""`},
+		{name: "a row of a kind nobody gave a rule", kind: "escalation", want: `unknown kind "escalation"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := record.NewOutboxRow("LEGION-208", record.StatusWrite{Kind: record.StatusRowKind(tc.kind),
+				Status: "testing", ObservedStatus: "in_progress"}, time.Now()); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("queueing %s = %v, want it refused naming the kind (%s)", tc.name, err, tc.want)
+			}
+			client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"}}
+			runner := &outbox{dispatch: client, log: quietLogger()}
+			stored := record.OutboxRow{ID: 7, Kind: record.OutboxKindDispatchStatus, Issue: "LEGION-208",
+				Payload: []byte(fmt.Sprintf(`{"kind":%q,"status":"testing","observedStatus":"in_progress"}`, tc.kind))}
+
+			err := runner.execute(context.Background(), stored)
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("running %s = %v, want it failed naming the kind (%s)", tc.name, err, tc.want)
+			}
+			if len(client.statuses) != 0 {
+				t.Fatalf("status writes = %v, want none: a row whose kind has no rule reaches Dispatch with nothing", client.statuses)
+			}
+		})
+	}
+}
+
+// A dispatch_status row the release before this one queued carries the three old marks and no
+// kind. Migration 20261102003600 gives it the kind its marks named, and this is what the outbox
+// then makes of such a row: it decodes, it carries the kind the marks named, and it is judged by
+// the rule of that kind rather than by the ordinary one, which for three of the four would read
+// backwards. The rows are queued in the old shape and the migration's own statement is applied to
+// them, since this package's pool is migrated to the head before a test can write a row of the
+// old shape; the migration's place in the order, at the schema before it, is held by the store's
+// TestEveryQueuedStatusRowCarriesItsKindAfter20261102003600.
+func TestAMigratedStatusRowRunsUnderItsOwnRule(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	runner := &outbox{pool: pool, records: records, log: quietLogger()}
+	ctx := context.Background()
+	rows := []struct {
+		name, issue, payload string
+		want                 record.StatusRowKind
+	}{
+		{name: "a person's handover", issue: "LEGION-208", want: record.PersonHandoverStatusRow,
+			payload: `{"status":"todo","observedStatus":"triage","personHandover":true}`},
+		{name: "a re-assert", issue: "LEGION-209", want: record.ReassertStatusRow,
+			payload: `{"status":"in_progress","observedStatus":"done","reassert":true}`},
+		{name: "a hand-over", issue: "LEGION-210", want: record.HandOverStatusRow,
+			payload: `{"status":"todo","observedStatus":"in_progress","handOver":true,"handOverTree":"LEGION-200","handOverLinger":3}`},
+		{name: "an unmarked write", issue: "LEGION-211", want: record.OrdinaryStatusRow,
+			payload: `{"status":"testing","observedStatus":"in_progress"}`},
+	}
+	for _, row := range rows {
+		if _, err := pool.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
+			values ('dispatch_status', $1, $2, 0, now(), '')`, row.issue, row.payload); err != nil {
+			t.Fatalf("queue %s in the old shape: %v", row.name, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, migrationSQL(t, 20261102003600)); err != nil {
+		t.Fatalf("apply the kind migration: %v", err)
+	}
+
+	for _, row := range rows {
+		var payload []byte
+		if err := pool.QueryRow(ctx, "select payload from outbox where issue = $1", row.issue).Scan(&payload); err != nil {
+			t.Fatalf("read %s after the migration: %v", row.name, err)
+		}
+		stored := record.OutboxRow{Kind: record.OutboxKindDispatchStatus, Issue: row.issue, Payload: payload}
+		decoded, err := record.DecodeOutboxPayload(stored)
+		if err != nil {
+			t.Fatalf("%s does not decode after the migration (%s): %v", row.name, payload, err)
+		}
+		write := decoded.(record.StatusWrite)
+		if write.Kind != row.want {
+			t.Fatalf("%s carries kind %q after the migration, want %q", row.name, write.Kind, row.want)
+		}
+		read := dispatch.Issue{Key: row.issue, Status: write.ObservedStatus, HandedOver: true}
+		if _, err := runner.stillWanted(ctx, stored, write, read); err != nil {
+			t.Fatalf("the rule judging %s answered %v, want the rule of its own kind to answer", row.name, err)
+		}
+	}
+}
+
+// migrationSQL is the statement of the embedded migration version, which a test applies to rows
+// it queued in the shape an older release left: this package's pool is migrated to the head
+// before a test can write one.
+func migrationSQL(t *testing.T, version int) string {
+	t.Helper()
+	all, err := migrations.All()
+	if err != nil {
+		t.Fatalf("read the embedded migrations: %v", err)
+	}
+	for _, migration := range all {
+		if migration.Version == version {
+			return migration.SQL
+		}
+	}
+	t.Fatalf("no embedded migration of version %d", version)
+	return ""
 }
 
 // refusedOnceDispatch refuses the first fenced status write with ISSUE_CHANGED, as Dispatch
@@ -727,7 +855,7 @@ func TestOutboxRunSurvivesAFailedClaimAndAFailedFinish(t *testing.T) {
 
 	// This outbox has no workflow writing through projectRecords, so the test wakes the lane the
 	// way the committed write would.
-	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, clock.Now())
+	row := mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), clock.Now())
 	enqueueOutbox(t, pool, records, row)
 	runner.wake(row.Issue, row.Kind)
 	testwait.Eventually(t, "the claim failed", func() bool { return records.failedClaims() == 1 })

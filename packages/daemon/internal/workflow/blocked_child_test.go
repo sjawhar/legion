@@ -315,7 +315,7 @@ func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
 	// the outbox's drop guard and intake.Handover read it.
 	var writes int
 	if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'dispatch_status' and issue = 'LEGION-209'
-		and payload->>'status' = 'todo' and payload->>'observedStatus' = 'todo' and payload->>'handOver' = 'true'
+		and payload->>'status' = 'todo' and payload->>'observedStatus' = 'todo' and payload->>'kind' = 'hand-over'
 		and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '4'`).Scan(&writes); err != nil || writes != 1 {
 		t.Fatalf("the blocked child's hand-over writes = %d, %v; want one fenced on LEGION-208's linger 4", writes, err)
 	}

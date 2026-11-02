@@ -154,7 +154,7 @@ func (e *Engine) status(ctx context.Context, tx pgx.Tx, issue record.Issue, stat
 	if status == "" || issue.Status == status {
 		return nil
 	}
-	return e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: status, ObservedStatus: issue.Status})
+	return e.enqueue(ctx, tx, issue.Key, record.OrdinaryStatusWrite(status, issue.Status, ""))
 }
 
 // notice tells the architect that owns the issue; a notice of no kind (noticeFor's, for a move

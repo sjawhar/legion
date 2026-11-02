@@ -732,7 +732,7 @@ func handOvers(t *testing.T, pool *pgxpool.Pool) []string {
 	var got []string
 	for _, effect := range effects(t, pool) {
 		write, ok := effect.payload.(record.StatusWrite)
-		if !ok || !write.HandOver {
+		if !ok || write.Kind != record.HandOverStatusRow {
 			continue
 		}
 		if write.Status != "todo" || write.HandOverTree != finishedRoot || write.HandOverLinger != lingerOfRoot {

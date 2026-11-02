@@ -33,7 +33,7 @@ func TestTheBootWritesTheStatusOfAPhaseAnIssueAlreadyStoodIn(t *testing.T) {
 
 	applyMirrored(t, pool, testEngine(config.DesignGateRootIssues, nil), "boot", intake.DaemonBooted{})
 
-	want := []record.StatusWrite{{Status: "in_progress", ObservedStatus: "todo"}}
+	want := []record.StatusWrite{record.OrdinaryStatusWrite("in_progress", "todo", "")}
 	if got := statusWrites(t, pool, "LEGION-209"); len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("the status writes the boot queued for the planning child = %+v, want %+v", got, want)
 	}

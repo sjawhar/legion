@@ -417,7 +417,7 @@ func (a *Admission) queuePersonHandover(ctx context.Context, tx pgx.Tx, key, obs
 	if err != nil || pending {
 		return err
 	}
-	if err := a.enqueue(ctx, tx, key, record.StatusWrite{Status: "todo", ObservedStatus: observedStatus, PersonHandover: true}, a.now()); err != nil {
+	if err := a.enqueue(ctx, tx, key, record.PersonHandoverStatusWrite("todo", observedStatus), a.now()); err != nil {
 		return err
 	}
 	intake.OnCommit(ctx, func() { a.log.Info("admission: queued a person's handover", "issue", key, "source", source) })
@@ -1218,7 +1218,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			return admitted, returned, fmt.Errorf("put admission slot for %s: %w", candidate.Key, err)
 		}
 		if writeInProgress {
-			if err := a.enqueue(ctx, tx, candidate.Key, record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}, now); err != nil {
+			if err := a.enqueue(ctx, tx, candidate.Key, record.OrdinaryStatusWrite("in_progress", "todo", ""), now); err != nil {
 				return admitted, returned, err
 			}
 		}

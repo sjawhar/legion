@@ -476,7 +476,7 @@ func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 	}
 	assertOutboxCount(t, pool, "workspace_remove", 2)
 	var handedOver int
-	if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'dispatch_status' and payload->>'handOver' = 'true'`).Scan(&handedOver); err != nil || handedOver != 0 {
+	if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'dispatch_status' and payload->>'kind' = 'hand-over'`).Scan(&handedOver); err != nil || handedOver != 0 {
 		t.Fatalf("hand-over writes = %d, %v; want none: the close waited until no child was running", handedOver, err)
 	}
 	assertOutboxCount(t, pool, "dispatch_status", 2)

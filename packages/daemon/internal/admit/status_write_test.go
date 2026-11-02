@@ -90,7 +90,7 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 			var reasserted int
 			var told []record.Notice
 			for _, effect := range effects(t, pool) {
-				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-1" && write == (record.StatusWrite{Status: "retro", ObservedStatus: tc.status, Reassert: true}) {
+				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-1" && write == record.ReassertStatusWrite("retro", tc.status) {
 					reasserted++
 				}
 				if notice, ok := effect.payload.(record.Notice); ok && notice.Kind == "status-reasserted" {
@@ -217,7 +217,8 @@ func TestAnOutsideSessionsWriteWhereNoTreeRunsIsAPersonsMove(t *testing.T) {
 // after two outside writes were set back parks the tree, and neither set-back lands over it.
 func TestOnlyAChangeFromTheStatusDispatchLastShowedIsAStatusWrite(t *testing.T) {
 	type step struct{ actor, status, title string }
-	inFlight := &record.StatusWrite{Status: "testing", ObservedStatus: "in_progress"}
+	inFlightWrite := record.OrdinaryStatusWrite("testing", "in_progress", "")
+	inFlight := &inFlightWrite
 	for _, tc := range []struct {
 		name string
 		// queued is a status write the daemon already queued, so the record holds its status;
@@ -235,13 +236,13 @@ func TestOnlyAChangeFromTheStatusDispatchLastShowedIsAStatusWrite(t *testing.T) 
 			steps: []step{{"ses-outsider", "in_progress", "renamed"}}},
 		{name: "an outside session's rename before its backlog is set back",
 			steps: []step{{"ses-outsider", "backlog", "LEGION-1"}, {"ses-outsider", "backlog", "renamed"}},
-			rows:  []record.StatusWrite{{Status: "in_progress", ObservedStatus: "backlog", Reassert: true}}, notices: 1},
+			rows:  []record.StatusWrite{record.ReassertStatusWrite("in_progress", "backlog")}, notices: 1},
 		{name: "a person's rename before an outside backlog is set back",
 			steps: []step{{"ses-outsider", "backlog", "LEGION-1"}, {"", "backlog", "renamed"}},
-			rows:  []record.StatusWrite{{Status: "in_progress", ObservedStatus: "backlog", Reassert: true}}, notices: 1},
+			rows:  []record.StatusWrite{record.ReassertStatusWrite("in_progress", "backlog")}, notices: 1},
 		{name: "an outside session's backlog while the daemon's testing is on its way", queued: inFlight,
 			steps: []step{{"ses-outsider", "backlog", "renamed"}},
-			rows:  []record.StatusWrite{*inFlight, {Status: "testing", ObservedStatus: "backlog", Reassert: true}}, notices: 1},
+			rows:  []record.StatusWrite{*inFlight, record.ReassertStatusWrite("testing", "backlog")}, notices: 1},
 		{name: "a person parks the tree after two outside writes were set back",
 			steps: []step{{"ses-outsider", "backlog", "LEGION-1"}, {"ses-outsider", "icebox", "LEGION-1"}, {"", "backlog", "renamed"}},
 			ends:  true, notices: 2},
@@ -398,7 +399,7 @@ func TestAParkAndATodoWhileThePromotionsWriteIsOnItsWayRunTheTreeAgain(t *testin
 			writes = append(writes, payload)
 		}
 	}
-	if want := []record.StatusWrite{{Status: "in_progress", ObservedStatus: "todo"}}; !reflect.DeepEqual(writes, want) {
+	if want := []record.StatusWrite{record.OrdinaryStatusWrite("in_progress", "todo", "")}; !reflect.DeepEqual(writes, want) {
 		t.Fatalf("queued status writes %+v, want only the new generation's promotion %+v", writes, want)
 	}
 }

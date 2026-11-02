@@ -67,7 +67,7 @@ func TestAHandOverReachesScratchDispatchAsOneEventCarryingTheTodoAndTheLabel(t *
 	}
 
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue, record.StatusWrite{Status: "todo", ObservedStatus: "in_progress", HandOver: true, HandOverTree: root, HandOverLinger: 2}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue, record.HandOverStatusWrite("todo", "in_progress", root, 2), now))
 	runner := &outbox{dispatchProject: "LEGION", pool: pool, records: records, dispatch: daemonDispatch, now: func() time.Time { return now }, log: quietLogger()}
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("run the hand-over: %v", err)

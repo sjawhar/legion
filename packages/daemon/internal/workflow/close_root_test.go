@@ -49,11 +49,11 @@ func TestAnArchitectClosesItsAdmittedRootBeforeItsFirstPhase(t *testing.T) {
 		t.Fatalf("root status=%s phase=%s linger=%v; want done, parked in done, lingering", status, rootPhase, until)
 	}
 	var write record.StatusWrite
-	if err := pool.QueryRow(context.Background(), "select payload->>'status', payload->>'observedStatus', payload->>'reason' from outbox where kind = 'dispatch_status'").
-		Scan(&write.Status, &write.ObservedStatus, &write.Reason); err != nil {
+	if err := pool.QueryRow(context.Background(), "select payload->>'kind', payload->>'status', payload->>'observedStatus', payload->>'reason' from outbox where kind = 'dispatch_status'").
+		Scan(&write.Kind, &write.Status, &write.ObservedStatus, &write.Reason); err != nil {
 		t.Fatalf("read the status write: %v", err)
 	}
-	if write != (record.StatusWrite{Status: "done", ObservedStatus: "in_progress", Reason: "Closed by its architect before its first phase: the human decided no change is needed"}) {
+	if write != record.OrdinaryStatusWrite("done", "in_progress", "Closed by its architect before its first phase: the human decided no change is needed") {
 		t.Fatalf("status write %+v; want done over in_progress with the architect's reason", write)
 	}
 	assertOutboxCount(t, pool, "linger_close", 1)
@@ -82,8 +82,46 @@ func TestAnArchitectClosesItsAdmittedRootBeforeItsFirstPhase(t *testing.T) {
 	}
 }
 
-// close_root ends a tree only while its root is admitted and no phase has started, and only a root:
-// past that the tree ends through its workflow or a human, and a child leaves with park_child.
+// A root waiting on a person has started no phase either — it reaches awaiting_person only from
+// admitted — so the answer "close this" ends its tree the same way: the reason posted, done
+// written over the status the record kept, and the tree lingering. Before, close_root refused it
+// as a tree past its first phase, and the only way out was a person's own status write
+// (dispatch://INFRA-545).
+func TestAnArchitectClosesItsRootThatWaitsOnAPerson(t *testing.T) {
+	pool := migratedPool(t)
+	since := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.AwaitingPerson, Generation: 1, Status: "in_progress",
+		Rank: "U", Awaiting: &record.Awaiting{Ask: "ask-1", Since: record.EventMark{Seq: 3, At: since}}})
+
+	result, err := intake.ApplyFact(context.Background(), pool, "api", "close",
+		intake.CloseRoot{Issue: "LEGION-1", Reason: "the person answered: close this"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{})
+	if err != nil || result.Refusal != nil {
+		t.Fatalf("close = %+v, %v; want it accepted for a root waiting on a person", result.Refusal, err)
+	}
+
+	var status string
+	var rootPhase phase.Phase
+	var until *time.Time
+	if err := pool.QueryRow(context.Background(), "select status, phase, linger_until from issues where key = 'LEGION-1'").Scan(&status, &rootPhase, &until); err != nil {
+		t.Fatalf("read the root: %v", err)
+	}
+	if status != "done" || rootPhase != phase.Done || until == nil {
+		t.Fatalf("root status=%s phase=%s linger=%v; want done, parked in done, lingering", status, rootPhase, until)
+	}
+	var write record.StatusWrite
+	if err := pool.QueryRow(context.Background(), "select payload->>'kind', payload->>'status', payload->>'observedStatus', payload->>'reason' from outbox where kind = 'dispatch_status'").
+		Scan(&write.Kind, &write.Status, &write.ObservedStatus, &write.Reason); err != nil {
+		t.Fatalf("read the status write: %v", err)
+	}
+	if write != record.OrdinaryStatusWrite("done", "in_progress", "Closed by its architect before its first phase: the person answered: close this") {
+		t.Fatalf("status write %+v; want done over in_progress with the architect's reason", write)
+	}
+	assertOutboxCount(t, pool, "linger_close", 1)
+}
+
+// close_root ends a tree only while its root has started no phase, and only a root: past that the
+// tree ends through its workflow or a human, and a child leaves with park_child.
 func TestCloseRootIsRefusedOnceATreeHasStartedOrForAChild(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

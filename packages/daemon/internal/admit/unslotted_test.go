@@ -193,7 +193,7 @@ func TestReleasingAnUnslottedRootDropsTheStatusWritesQueuedBeforeIt(t *testing.T
 	seedSlotted(t, pool, "LEGION-RUN", "A")
 	seedWaiting(t, pool, "LEGION-CLEANUP", "B")
 	inTx(t, pool, func(tx pgx.Tx) {
-		row, err := record.NewOutboxRow("LEGION-CLEANUP", record.StatusWrite{Status: "todo", ObservedStatus: "backlog"}, fixedNow)
+		row, err := record.NewOutboxRow("LEGION-CLEANUP", record.OrdinaryStatusWrite("todo", "backlog", ""), fixedNow)
 		if err != nil {
 			t.Fatalf("build the queued status write: %v", err)
 		}

@@ -537,7 +537,7 @@ func TestAStartBlockedOnTheRuntimeHoldsOnlyItsOwnIssuesLifecycleLane(t *testing.
 
 	status := func(t *testing.T) record.OutboxRow {
 		t.Helper()
-		return mustOutboxRow(t, "LEGION-209", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, tree.clock.Now())
+		return mustOutboxRow(t, "LEGION-209", record.OrdinaryStatusWrite("in_progress", "todo", ""), tree.clock.Now())
 	}
 	tree.commit(t, "other-status", status(t))
 	testwait.Eventually(t, "the other issue's status landed", func() bool {
@@ -575,7 +575,7 @@ func TestACommitOnABlockedLifecycleLanesIssueReturnsAtOnceAndItsBoardRowRuns(t *
 	tree.holdArchitectStart(t)
 
 	began := time.Now()
-	tree.commit(t, "own-status", mustOutboxRow(t, tree.root.Key, record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, tree.clock.Now()))
+	tree.commit(t, "own-status", mustOutboxRow(t, tree.root.Key, record.OrdinaryStatusWrite("in_progress", "todo", ""), tree.clock.Now()))
 	if took := time.Since(began); took > 2*time.Second {
 		t.Fatalf("the fact took %s to commit with the issue's lifecycle lane blocked, want it back within 2s", took)
 	}
@@ -596,8 +596,8 @@ func TestTheLaneWritesOneIssuesStatusesInOrderWhenTheOlderFailsFirst(t *testing.
 	records := record.NewStore()
 	clock := microClock()
 	now := clock.Now()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "testing", Status: "needs_review"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("testing", "in_progress", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("needs_review", "testing", ""), now))
 	board := &laneBoard{status: "in_progress", failures: 1}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: board, log: quietLogger()}
 	runLanes(t, runner, clock)
@@ -724,7 +724,7 @@ func TestALaneRenewsItsRunningRowsLeaseAndNoSweepClaimsItAgain(t *testing.T) {
 	var released sync.Once
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, entered: entered, release: release}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, log: quietLogger()}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, clock.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), clock.Now()))
 	runLanes(t, runner, clock, func() { released.Do(func() { close(release) }) })
 	<-entered
 
@@ -775,7 +775,7 @@ func TestTheSweepAfterALeasesLapseStartsItsLaneAgainWithoutARestart(t *testing.T
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, log: quietLogger()}
 	runLanes(t, runner, clock)
 
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, clock.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), clock.Now()))
 	if _, err := pool.Exec(context.Background(), "update outbox set lease_token = 'a-runner-that-died', lease_until = $1", clock.Now().Add(outboxLease/2)); err != nil {
 		t.Fatalf("leave a lease nobody holds on the row: %v", err)
 	}
@@ -805,7 +805,7 @@ func TestRunReturnsOnlyAfterItsLanesAndSettlesTheRowAStopInterrupted(t *testing.
 	var released sync.Once
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, entered: entered, release: release, fail: errors.New("dispatch: context canceled")}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: clock.Now, clock: clock, log: quietLogger()}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, clock.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), clock.Now()))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
