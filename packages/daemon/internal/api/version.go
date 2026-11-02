@@ -445,7 +445,35 @@ package api
 // migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
 // the number above it, as the collision note says.)
 //
-// 45: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
+// 45: sjawhar/legion#2354 -- a phase's handoff is a record on its Dispatch issue, which the
+// worker writes with `dispatch handoff-write` under its own session, rather than a committed
+// `.legion/<KEY>/<phase>.json`. `api.HandoffCompleteRequest` gains `handoffId` and
+// `handoffVersion`, the record a file-backed phase's completion (planning, implementing, testing,
+// reviewing) names, and the daemon refuses such a completion without one
+// (HANDOFF_RECORD_REQUIRED); it reads the record back from Dispatch and refuses one Dispatch has
+// not (HANDOFF_RECORD_NOT_FOUND), cannot read (DISPATCH_READ_FAILED), of another issue, phase or
+// version (HANDOFF_RECORD_MISMATCH), or written by another session than the claim's
+// (HANDOFF_SESSION_MISMATCH), and `HANDOFF_NOT_NEW` and the completion's idempotency key name the
+// record id in place of the commit. `commit` stays the implementer's (its pushed tip, and retro's
+// commit) and the merger's; the planner, tester and reviewer send none, and the daemon no longer
+// requires one of them. `api.PhaseView` gains `handoffRecord`, `{id, version}`, absent until the
+// worker's completion of its current file-backed phase names one; store migration 20261101144900_handoff_records keeps it
+// on the phase row. A 44 plugin posts a commit and no record, which this daemon refuses, and its
+// strict reader refuses a state carrying `handoffRecord`, so the boot gate and `legion
+// probe-image` refuse the mixed pair. (This branch took 40 and store migration 0055; main then
+// landed `awaiting_person` at 40 with store migrations 0055 to 0058, and `issue_ancestry` as store
+// migration 0059, so this change took 41 and store migration 0060; main then landed
+// `pull_request_head_move_starts` as store migration 0060 at 40, so this change took store
+// migration 0061; main then landed `pull_request_head_run` as store migration 0061, so this change
+// took store migration 0062; main then landed the controller start command at 41 and the worker
+// stall and Claude session environment at 42, so this change took 43 and kept store migration
+// 0062; main then landed the lost-event pass at 43 with store migrations 0062 to 0064, so this
+// change took 44 and store migration 0065; main then landed background work at 44 with store
+// migrations 0065 to 0067, which closed the numbered series (sjawhar/legion#2411), so this change
+// takes 45 and a store migration named for the UTC moment it was written, as the collision note
+// says.)
+//
+// 47: dispatch://INFRA-714 -- the daemon is an event-driven state machine, and its strictly parsed
 // shapes change with it. The phase enum loses `awaiting_merge` (both places it is spelled: the
 // issue's phase and a backward move's target), since the merger merges in `merging` and the daemon
 // closes the issue when it reads that merge. `api.PullRequestView` loses `checksVerdict` and
@@ -463,11 +491,12 @@ package api
 // `pass`, `lastTurnStart` or `lastTurnEnd`, and a plugin from this contract refuses an older
 // daemon's `checksVerdict` and `fixAttempts`; the boot gate and `legion probe-image` refuse the
 // mixed pair. (This branch took 42, then 43 when main landed the consumer-lag state at 43;
-// main landed the background-task contract at 44, so this branch takes the number above it, as
+// main landed the background-task contract at 44 and the Dispatch handoff records at 45, and
+// INFRA-484's sjawhar/legion#2538 takes 46, so this branch takes the number above both, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 //
-// 46: dispatch://INFRA-714 -- every turn a session ends is reported to the daemon by the producer
+// Also at 47: dispatch://INFRA-714 -- every turn a session ends is reported to the daemon by the producer
 // that ended it, over `POST /legion/v1/claims/turn-outcome`: `{claimToken, sessionId, secret,
 // generation, sequence, outcome, message}`, authenticated by the registration's secret as the
 // ready and the exit are, answering `{refusedRun, failed}`. `sequence` is the producer's own count
@@ -484,4 +513,4 @@ package api
 // whoever retries it. That retry also reaches a phase worker an operator stopped, which is
 // retired: the route starts the worker's phase again — restoring a held one, as the architect's
 // retry_or_escalate does — so the session it starts, new or kept, is given that phase's task.
-const DaemonAPIVersion = 46
+const DaemonAPIVersion = 47

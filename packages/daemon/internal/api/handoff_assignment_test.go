@@ -45,7 +45,8 @@ func TestAStaleAssignmentsCompletionDoesNotTakeTheNextTestingPhases(t *testing.T
 
 	// The implementer's round ends and the issue enters testing: the tester's first assignment.
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: "handoff-1"}))
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: "handoff-1",
+		HandoffID: implementer.writeHandoff("implement", 1), HandoffVersion: 1}))
 	assertIssuePhase(t, h, phase.Testing)
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	firstTesting := takeStart(t, h, tester.token, "LEGION-208", claim.RoleTester)
@@ -69,7 +70,8 @@ func TestAStaleAssignmentsCompletionDoesNotTakeTheNextTestingPhases(t *testing.T
 	// The implementer's second pass ends and the issue is in testing again: the tester's second
 	// assignment, which its first task's turn knows nothing of.
 	takeStart(t, h, implementer.token, "LEGION-208", claim.RoleImplementer)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "merged the base forward", Commit: "handoff-2"}))
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "merged the base forward", Commit: "handoff-2",
+		HandoffID: implementer.writeHandoff("implement", 2), HandoffVersion: 2}))
 	assertIssuePhase(t, h, phase.Testing)
 	_, secondStart := queuedStart(t, h, "LEGION-208", claim.RoleTester)
 	if secondStart.Assignment == "" || secondStart.Assignment == firstTesting {
@@ -80,10 +82,11 @@ func TestAStaleAssignmentsCompletionDoesNotTakeTheNextTestingPhases(t *testing.T
 	}
 
 	// The old turn reports its completion. Refused, with nothing recorded, and the call made again
-	// at the same commit is refused the same way rather than answered ALREADY_RECORDED.
+	// naming the same record is refused the same way rather than answered ALREADY_RECORDED.
+	firstRecord := tester.writeHandoff("test", 1)
 	complete := func() string {
 		t.Helper()
-		recorder := h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: "test-1"})
+		recorder := h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", HandoffID: firstRecord, HandoffVersion: 1})
 		return refused(t, recorder, http.StatusConflict, "HANDOFF_STALE_ASSIGNMENT")
 	}
 	before := recordedCompletions(t, h, claim.RoleTester)
@@ -94,7 +97,7 @@ func TestAStaleAssignmentsCompletionDoesNotTakeTheNextTestingPhases(t *testing.T
 	// What the refusal tells the worker to do: the second testing assignment is for the head the
 	// implementer's fix pushed, so this turn's verdict on the head before it is no answer for it.
 	// The worker does that task's work and writes a handoff of its own, and the refusal never
-	// sends this completion's commit again.
+	// sends this completion's record again.
 	if !strings.Contains(message, "a handoff of its own") {
 		t.Fatalf("the refusal is %q, want it to tell the worker to complete the new task with a handoff of its own", message)
 	}
@@ -119,7 +122,8 @@ func TestAStaleAssignmentsCompletionDoesNotTakeTheNextTestingPhases(t *testing.T
 	if second != secondStart.Assignment {
 		t.Fatalf("the tester took assignment %q, want the start's %q", second, secondStart.Assignment)
 	}
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass on the fix", Verdict: "pass", Commit: "test-2"}))
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass on the fix", Verdict: "pass",
+		HandoffID: tester.writeHandoff("test", 2), HandoffVersion: 2}))
 	assertIssuePhase(t, h, phase.Reviewing)
 	testers := 0
 	for _, fact := range facts.recorded() {
@@ -161,7 +165,8 @@ func TestACompletionIsHeldToItsAssignmentOnlyWhenBothSidesNameOne(t *testing.T) 
 			if tc.serving != "" {
 				takeTask(t, h, tester.token, "outbox:77", "test it again", tc.serving, 1)
 			}
-			recorder := h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: headSHA})
+			recorder := h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass",
+				HandoffID: tester.writeHandoff("test", 1), HandoffVersion: 1})
 			if tc.refused {
 				refused(t, recorder, http.StatusConflict, "HANDOFF_STALE_ASSIGNMENT")
 				if got := facts.recorded(); len(got) != 0 {
@@ -199,7 +204,8 @@ func TestAHeldPhasesRetryKeepsTheAssignmentItsWorkerStillServes(t *testing.T) {
 
 	// The implementer's round ends and the tester takes the task of the testing phase's assignment.
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: "handoff-1"}))
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: "handoff-1",
+		HandoffID: implementer.writeHandoff("implement", 1), HandoffVersion: 1}))
 	assertIssuePhase(t, h, phase.Testing)
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	testing := takeStart(t, h, tester.token, "LEGION-208", claim.RoleTester)
@@ -223,7 +229,8 @@ func TestAHeldPhasesRetryKeepsTheAssignmentItsWorkerStillServes(t *testing.T) {
 
 	// The relaunched worker finishes the task it held, and its completion is applied: the issue
 	// moves on to reviewing, and the workflow saw exactly that one tester completion.
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: "test-1"}))
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass",
+		HandoffID: tester.writeHandoff("test", 1), HandoffVersion: 1}))
 	assertIssuePhase(t, h, phase.Reviewing)
 	testers := 0
 	for _, fact := range facts.recorded() {
@@ -243,6 +250,7 @@ func TestAHeldPhasesRetryKeepsTheAssignmentItsWorkerStillServes(t *testing.T) {
 func newAssignmentHarness(t *testing.T) (*harness, *workflow.Engine, *factRecorder) {
 	t.Helper()
 	h := newHarness(t)
+	h.handoffs = &statusRecorder{}
 	github := newHandoffGitHub(t)
 	facts := &factRecorder{}
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3},
@@ -250,7 +258,7 @@ func newAssignmentHarness(t *testing.T) (*harness, *workflow.Engine, *factRecord
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
-		Handlers: []intake.Handler{engine, facts}, Dispatch: &statusRecorder{},
+		Handlers: []intake.Handler{engine, facts}, Dispatch: h.handoffs,
 		Tokens: handoffTokens{}, GitHubAPI: github.url,
 	}).Handler
 	return h, engine, facts

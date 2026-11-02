@@ -24,10 +24,9 @@ import (
 const issueRead = 30 * time.Second
 
 // readIssuePullRequest reads one issue's pull request from GitHub and applies what it shows, as the
-// webhook would have: the head GitHub holds it at (followHead, and the handoff-only push that
-// reached it), whether that head can be merged into its base and GitHub's own merge state
-// (applyMergeability), a deciding review the daemon has not recorded (readReviews), and the push
-// that carries an approval set aside below the head (readApprovalCarry), in that order. An issue
+// webhook would have: the head GitHub holds it at (followHead, and the pushes that reached it),
+// whether that head can be merged into its base and GitHub's own merge state (applyMergeability),
+// and a deciding review the daemon has not recorded (readReviews), in that order. An issue
 // whose record holds no open pull request is looked up by its branch instead (openPullRequestOn),
 // and the opened its webhook would have carried is applied first, so the reads that follow judge
 // the pull request that leaves.
@@ -75,7 +74,6 @@ func (w *workflowRuntime) readIssuePullRequest(ctx context.Context, issue string
 	if w.readReviews(ctx, prCtx, github, pr) {
 		return nil
 	}
-	w.readApprovalCarry(ctx, prCtx, github, pr)
 	return nil
 }
 

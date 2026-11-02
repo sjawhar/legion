@@ -28,7 +28,7 @@ func TestThePerIssueReadFollowsAStaleRecordedHead(t *testing.T) {
 	read := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	pool := isolatedOutboxPool(t)
 	seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
-	w := readRuntime(pool, pullRequestStandIn(t, "pushed", read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
+	w := readRuntime(pool, pullRequestStandIn(t, "pushed", read, &atomic.Int32{}).URL, quietLogger())
 	if err := w.readIssuePullRequest(context.Background(), "CAPTURE-1"); err != nil {
 		t.Fatalf("read the issue's pull request: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestThePerIssueReadFindsThePullRequestOfTheIssuesBranch(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	seedUnrecorded(t, pool, "handoff")
 	var listed atomic.Int32
-	w := readRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, quietLogger())
+	w := readRuntime(pool, pullRequestStandIn(t, "handoff", opened, &listed).URL, quietLogger())
 	if err := w.readIssuePullRequest(context.Background(), "CAPTURE-1"); err != nil {
 		t.Fatalf("read the issue's pull request: %v", err)
 	}

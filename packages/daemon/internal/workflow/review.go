@@ -27,10 +27,10 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
-	// that stands for the head can be of the code head it replaced, arriving after it. A
-	// settlement is for the commit it names, never the head by default. While a head run is open
-	// the settlement is recorded in it whether it stands or not (classify.ApplyCheckSettlement).
+	// The listener settles every commit of the pull request, its head or not, and a settlement
+	// stands only for the commit it names: it is for the head only when it names the head. While a
+	// head run is open the settlement is recorded in it whether it stands or not
+	// (classify.ApplyCheckSettlement).
 	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
 	told := settledChecks(*pr)
 	settled, applied := classify.ApplyCheckSettlement(*pr, candidate)
@@ -52,40 +52,6 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.tellChecks(ctx, tx, pr, told)
-}
-
-// carryApproval queues GitHub's compare of the head the reviewer approved with the pull request's
-// head (record.ApprovalCarry, the outbox's approvalCarry) when the push just recorded leaves that
-// approval set aside below the head (classify.ApprovalSetAside): the reviewer approved another
-// head than the current one, no recorded push carries the approval up to it, and no push that may
-// change code is on its way. A push carries an approval across only when
-// its own file list shows it changed nothing outside the issue's handoffs, so an approval is set
-// aside by a push whose list was truncated or forced, or that came from a listener that says
-// nothing about paths; GitHub's compare of the two heads is what settles it, and R1 reads "the
-// file list comes from GitHub's compare, read once per push event"
-// (dispatch://INFRA-714/spec).
-//
-// The compare is a durable row rather than a call made here: the compare is a GitHub read, which
-// the fact's transaction must not wait on, and one rate-limited answer must not silently drop an
-// approval - the row retries on the outbox's backoff and under its rate-limit budget until GitHub
-// answers. The row names the head it was queued at and does nothing once the record has moved past
-// it, so each push's row answers for its own head.
-func (e *Engine) carryApproval(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
-	if pr == nil || pr.State != record.PullRequestOpen {
-		return nil
-	}
-	reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-	if err != nil {
-		return err
-	}
-	if reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head == "" {
-		return nil
-	}
-	if reviewer.Decision.Head == pr.HeadSHA || !classify.ApprovalSetAside(*pr, reviewer.Decision.Head) {
-		return nil
-	}
-	return e.enqueue(ctx, tx, issue.Key, record.ApprovalCarry{Repo: pr.Repo, Number: pr.Number,
-		Approved: reviewer.Decision.Head, Head: pr.HeadSHA})
 }
 
 // mergeability records what GitHub's last read found for whether the pull request's head can be
@@ -164,16 +130,12 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // the reading worker's (dispatch://INFRA-714/spec R1). The line is the whole of what the daemon
 // knows of that head's CI, so two settlements that leave it the same say nothing new (tellChecks).
 //
-// Each name's conclusion is the newest run of it across the code head and every handoff-only head
-// above it, which is what the record holds (classify.SettlementFor): a handoff push changes
-// nothing GitHub checks, so those heads hold one tree and a run on any of them is a run on the
-// same code. That is the whole of it for a check that runs per pull request - a title check, or
-// anything on a pull_request edited trigger - which runs on whatever head is current and so never
-// on the code head again: its run on the head above is the newer one, and carrying the code
-// head's older failure past it would report a check that has since passed as red. A check still
-// running on every one of those heads is in no settlement of any of them - the listener settles a
-// commit only once every check it has seen there is terminal - so this line names it not at all:
-// a pending check is no verdict, and never a failure.
+// Each name's conclusion is the newest run of it among the settlements of the head the fence
+// stands at, which is what the record holds (classify.SettlementFor): a settlement stands only
+// for the head it names, so a check re-run there and passed is no longer red however its earlier
+// run ended. A check still running on that head is in no settlement of it - the listener settles
+// a commit only once every check it has seen there is terminal - so this line names it not at
+// all: a pending check is no verdict, and never a failure.
 //
 // A check run's name is whoever wrote the workflow's text, and this line is read into an agent's
 // prompt, so each name is quoted as a Go string (strconv.Quote): the quotes bound it, and a quote
@@ -432,9 +394,9 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 			return intake.Result{}, err
 		}
 	}
-	// The decision belongs to the review round, not to the pull request's head: the reviewer's own
-	// handoff push is a new head, and the round must still know, when the reviewer completes, what
-	// the review decided, on which head, and what it said for the next round's implementer. The
+	// The decision belongs to the review round, not to the pull request's head: the round must still
+	// know, when the reviewer completes, what the review decided, on which head, and what it said for
+	// the next round's implementer. The
 	// round is open while the issue is in reviewing, and while it is held from reviewing, since the
 	// retry puts it back there with the reviewer's work kept. A review outside the round decides
 	// nothing and counts no round. An approval is judged against the head it names when the
@@ -466,8 +428,8 @@ const (
 type roundOutcome int
 
 const (
-	// roundOpen is a round still owed its reviewer's completion or its decision, or waiting on a
-	// head a push that may change code is bringing; or an issue not in reviewing, since one held
+	// roundOpen is a round still owed its reviewer's completion or its decision, or waiting on the
+	// head a push is bringing; or an issue not in reviewing, since one held
 	// from reviewing ends only once the retry restores it.
 	roundOpen roundOutcome = iota
 	// roundApproved ends the round: its reviewer completed, and its approval approves the head's code
@@ -569,12 +531,11 @@ func stuckMergeStateReason(pr record.PullRequest) string {
 // head still has a check running: a check the base requires holds the head `blocked` while it
 // runs, which says nothing about the round. What tells the two apart is the head's own check
 // runs (classify.ChecksConcludedOnHead): the round reports a head only once GitHub has reported
-// a check run on that head itself and every one of them has concluded. A settlement carried
-// back from the code head through handoff-only pushes never satisfies it, and must not: the
-// handoff push that left this head carries no skip-checks trailer unless its author wrote one,
-// so GitHub runs CI here too and answers `blocked` while it does. Read off the carried settlement,
-// the round would be reported stuck at once and the head marked told before the checks that
-// would clear it had finished.
+// a check run on that head itself and every one of them has concluded. A settlement of an
+// earlier head never satisfies it, and must not: the push that left this head starts CI of its
+// own, and GitHub answers `blocked` while it runs. Read off an earlier head's settlement, the
+// round would be reported stuck at once and the head marked told before the checks that would
+// clear it had finished.
 // An approval GitHub answers with a state it would not merge from, on a head whose own checks
 // have all concluded, is stuck (stuckMergeState): the architect and the reviewer are told, once
 // for each head and state (record.ReviewDecision.ToldStuckHead), since the checks that would
@@ -585,13 +546,13 @@ func stuckMergeStateReason(pr record.PullRequest) string {
 // that nothing on its way would end is stuck, its reason naming the
 // head, since the decision it needs is of the head: no review decided it (stuckUndecided), or its
 // approval is of other code than the head's (stuckApprovedOtherCode). An approval of the head a
-// push that may change code is still on its way from (classify.CodeOnItsWay) keeps the round open:
-// the push's new head decides whether the approval stands.
+// push is still on its way from (classify.CodeOnItsWay) keeps the round open until the push's new
+// head arrives.
 func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) round {
 	if issue.Phase != phase.Reviewing {
 		return round{}
 	}
-	completed := row.HandoffCommit != ""
+	completed := row.Completed()
 	decided := ""
 	if row.Decision != nil {
 		decided = row.Decision.State

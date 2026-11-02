@@ -20,8 +20,8 @@ import (
 // AttemptRun is the latest check-run id the daemon observed for one check name (ID), with the
 // head GitHub reported that run on (Head) and what the run came to (Conclusion). Those two are
 // facts of the run rather than of the settlement that carried it, and they are kept with the id
-// because the fence is merged per check name over the code head and the handoff-only heads above
-// it (classify's mergeAttemptSets): each name keeps its highest run id, so the head and the
+// because the fence is merged per check name over the settlements of the head it stands at
+// (classify's mergeAttemptSets): each name keeps its highest run id, so the head and the
 // conclusion must be the ones of that run and never a mixture of two runs'. What they answer is
 // which names are red (classify.ApplySettlement derives Failing and Cancelled from them) and
 // whether GitHub has reported a check run on the pull request's current head itself
@@ -52,31 +52,17 @@ const (
 	RunCancelled RunConclusion = "cancelled"
 )
 
-// ClassifiedPush is one branch push as its changed paths classify it: a fact about two commits,
-// the head it replaced (Before) and the head it left (SHA), true whenever it is learned.
+// ClassifiedPush is one branch push as the daemon records it: a fact about two commits, the head it
+// replaced (Before) and the head it left (SHA), true whenever it is learned, and whose push it was.
 type ClassifiedPush struct {
 	SHA string `json:"sha"`
 	// Before is the head the push replaced, empty when the push did not say.
 	Before string `json:"before,omitempty"`
-	// HandoffOnly is a push every one of whose changed paths is the issue's own handoff, under
-	// .legion/<issue>/ (classify.HandoffPath); a .legion/-only push names such a push throughout.
-	HandoffOnly bool   `json:"handoffOnly"`
-	Unknown     string `json:"unknown,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
 	ByReviewApp bool `json:"byReviewApp,omitempty"`
-	// Forced is a push that rewrote history, or did not say whether it did. Its changed paths list
-	// the commits it added since the merge base, not what it did to the head it replaced, so it
-	// never carries an approval across.
-	Forced bool `json:"forced,omitempty"`
 	// Sender is the login of the account that pushed (the webhook's sender), empty from a listener
 	// that predates the field. A synchronize names its move's push by it (classify.pushOf).
 	Sender string `json:"sender,omitempty"`
-}
-
-// MayChangeCode is whether the push may have changed anything outside the issue's own
-// .legion/<issue>/ in the head it replaced.
-func (p ClassifiedPush) MayChangeCode() bool {
-	return !p.HandoffOnly || p.Forced
 }
 
 // Issue is one durable workflow record. Status is the issue's lifecycle status as the daemon holds
@@ -358,9 +344,12 @@ func (m EventMark) ID() int64 {
 
 // PhaseRow is the durable part of a role's work on an issue; live claim facts are joined for state.
 type PhaseRow struct {
-	Issue         string
-	Role          claim.Role
-	Claim         claim.Token
+	Issue string
+	Role  claim.Role
+	Claim claim.Token
+	// HandoffCommit is the commit the role's completion of its current phase reported: the
+	// implementer's pushed tip for an implementing round, and the commit retro and merging stand
+	// on. The planner, the tester and the reviewer report none; they name a handoff record instead.
 	HandoffCommit string
 	// Pass counts the moves the issue has made back into an earlier phase, each of which opens one
 	// more run of the implementing, testing and reviewing stretch. It tells one pass through a
@@ -368,6 +357,12 @@ type PhaseRow struct {
 	// handoffPosition), and so it is never reset while the record of the work stands: a completion
 	// at a commit an earlier pass already reported has to be a fact of its own.
 	Pass int
+	// HandoffRecord and HandoffVersion are the Dispatch handoff record the role's completion of its
+	// current phase named, for a phase with a handoff (phase.Handoff), and that record's version
+	// among its phase's records: the next worker reads that version with `dispatch handoff-read
+	// --version <n>`, as its task's Handoff line says. Empty and zero for a phase that writes none.
+	HandoffRecord  string
+	HandoffVersion int
 	// Rounds counts the review rounds review_round_cap bounds: a round ends with a review that
 	// requested changes, and nothing else moves this count.
 	Rounds  int
@@ -375,9 +370,10 @@ type PhaseRow struct {
 	// Summary is what the role reported with its completion, which the architect is told when the
 	// phase ends.
 	Summary string
-	// LastHandoff is the carrying commit the role last reported for a file-backed phase. Unlike
-	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
-	// to carry no handoff written since.
+	// LastHandoff is the handoff record the role last named for a file-backed phase (a commit, on a
+	// row a daemon before the records last wrote, which no record id equals). Unlike HandoffRecord
+	// it survives the next phase's start, so a completion naming it again is known to carry no
+	// handoff written since.
 	LastHandoff string
 	// Decision is the review round's decision, on the reviewer's row: the newest review the
 	// reviewer's own review-App session (told from any other review-App session's by its Legion
@@ -387,7 +383,7 @@ type PhaseRow struct {
 	Decision *ReviewDecision
 	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
 	// then. The reviewer's orders the reviews its round receives against the completion (workflow's
-	// reviewersAnswer and answerSkew), and is read only for a round whose HandoffCommit is set. It can
+	// reviewersAnswer and answerSkew), and is read only for a completed round (Completed). It can
 	// be stale: a daemon older than migration 0026 writes a completion without it, and
 	// ClearGeneration resets the row without it. Behind a completion an old daemon wrote, a stale time
 	// at worst makes a review read as the reviewer's answer: one extra review-stuck notice.
@@ -403,6 +399,13 @@ type PhaseRow struct {
 	// row no start has stamped: a daemon upgraded in place, where both sides are empty and every
 	// completion is accepted, and a row ClearGeneration reset.
 	Assignment string
+}
+
+// Completed says whether the role completed its current phase: its completion reported a commit
+// or named a handoff record, both of which clearing the handoff at the next phase's start
+// (workflow's clearHandoff) and a new generation (ClearGeneration) empty.
+func (p PhaseRow) Completed() bool {
+	return p.HandoffCommit != "" || p.HandoffRecord != ""
 }
 
 // ReviewDecision is what one review decided: its state (changes_requested or approved), its body,
@@ -471,32 +474,29 @@ type PullRequest struct {
 	// redelivery and changes nothing (classify.LateLifecycle).
 	HeadUpdatedAt time.Time
 	// CheckedHead is the head whose CI settlement Failing, Cancelled, CheckRuns, Generation and
-	// Snapshot record, empty while none is recorded: the current head, or a head the current one
-	// replaced through pushes that changed only .legion/ (a handoff push starts no CI of its own,
-	// so the code head's settlement is the head's), or an earlier head whose settlement no longer
-	// counts. A settlement moves no issue (dispatch://INFRA-714/spec R1): what it names is told to
-	// the roles that work the issue and judged by them (workflow's checks).
+	// Snapshot record, empty while none is recorded: the current head, or an earlier head whose
+	// settlement no longer counts, since a settlement stands only for the head it names. A
+	// settlement moves no issue (dispatch://INFRA-714/spec R1): what it names is told to the roles
+	// that work the issue and judged by them (workflow's checks).
 	CheckedHead string
 	// CheckRuns is the latest run observed of each check name, and Failing and Cancelled the
-	// checks that come to failed and to cancelled. All three hold every head that shares the
-	// checked head's tree, not the checked head alone: a settlement of a head the current one
-	// replaced with handoffs merges into them per check name, so each name reads the newest run
-	// of it over those heads (classify.SettlementFor). That run's own conclusion is what puts its
-	// name in Failing, in Cancelled, or in neither (classify.ApplySettlement), so a name whose
-	// newest run passed is in none of them however an older run of it concluded. A name the
-	// settlements report no run for at all - a check GitHub never started - keeps the conclusion
-	// the lists were given (classify.EffectiveOutcome), and a check with no concluded run
-	// anywhere is in none of them.
+	// checks that come to failed and to cancelled. All three stand for the checked head alone,
+	// since a settlement of another head starts the fence afresh (classify.SettlementFor). A run's
+	// own conclusion is what puts its name in Failing, in Cancelled, or in neither
+	// (classify.ApplySettlement), so a name whose newest run passed is in none of them however an
+	// older run of it concluded. A name the settlements report no run for at all - a check GitHub
+	// never started - keeps the conclusion the lists were given (classify.EffectiveOutcome), and a
+	// check with no concluded run anywhere is in none of them.
 	Failing    []string
 	Cancelled  []string
 	CheckRuns  []AttemptRun
 	Generation int64
 	Snapshot   string
-	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
-	// and said which head it replaced, which carry an approval across, each pair of heads once; and
-	// every other push whose heads have not arrived yet, in the order they were delivered, two
-	// pushes of the same two heads kept apart. A push that may change code is spent once its head
-	// arrives.
+	// Pushes are the branch's pushes the daemon still reads: every push whose own move, its two
+	// heads, the record has not made (Moves) - a push still on its way from the head, a link of a
+	// chain still to complete, or one that returns the branch to a commit it held before
+	// (classify.unspentPushes) - in the order they were delivered, two pushes of the same two heads
+	// kept apart.
 	Pushes []ClassifiedPush
 	// Moves are the moves the record has made, newest last and at most the last 32, each pair of
 	// heads once: each head's arrival from the head before it, and each push on the chain of pushes
@@ -540,7 +540,7 @@ type PullRequest struct {
 }
 
 // HeadRun is a pull request's head run (PullRequest.Run): Anchor, the judgement before the run's
-// first step; Pushes, the anchor's code pushes and every code push recorded since, in delivery
+// first step; Pushes, the anchor's pushes and every push recorded since, in delivery
 // order, less those the record's bound let go; Names, the moves synchronizes that moved no head
 // named while the run was open (classify.NameMove), less those an arrival spent; and Steps, in the
 // order they were applied. Replaying the steps from the anchor with every push and every named
@@ -590,10 +590,9 @@ type Judgement struct {
 // Move is a move from the head Before to the head SHA, which a push with the same two heads makes.
 // Pushed is whether that push is recorded: the move was made by it, it arrived after the move and
 // the move spent it, or a chain of several recorded pushes made the move, for which GitHub sends no
-// push of its own. A move made by a push that carries an approval across is not pushed, since such
-// a push is never spent. Repeats are the code pushes of the same two heads that arrived once the
-// move was pushed, oldest first and at most 16: each is the push delivered again or the branch
-// moving between the two heads again, which only a head's next arrival by that move tells apart.
+// push of its own. Repeats are the pushes of the same two heads that arrived once the move was
+// pushed, oldest first and at most 16: each is the push delivered again or the branch moving
+// between the two heads again, which only a head's next arrival by that move tells apart.
 // An arrival takes one of them for its push only through the head its synchronize says it moved
 // from: its sender's when the synchronize names its sender, the oldest otherwise
 // (classify.arrivalPushes). A move recorded before these fields existed reads as not

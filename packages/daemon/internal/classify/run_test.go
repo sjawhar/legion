@@ -127,22 +127,20 @@ func interleavings(facts []runFact, pushes []record.ClassifiedPush) [][]runFact 
 // a pull request's pushes interleave with its other facts: every order of the pushes at every
 // position gives what the pushes arriving first give, and closes the head run. The shapes move a
 // red h2 past h3 to h4 - the order a second head arriving before the first head's pushes broke
-// before the head run - by the review App's red tests, handoffs, the implementer's code and forced
-// pushes, with settlements of h3 and h4 red and green and a reopen between them. The record goes
-// through the store's round trip between facts, as the daemon reads it back.
+// before the head run - by the review App's red tests and the implementer's code, with settlements
+// of h3 and h4 red and green and a reopen between them. The record goes through the store's round
+// trip between facts, as the daemon reads it back.
 func TestEveryOrderOfThePushesGivesTheJudgementOfThePushesFirst(t *testing.T) {
 	shapes := []struct {
 		name   string
 		pushes []record.ClassifiedPush
 	}{
-		{"red tests, then a handoff", []record.ClassifiedPush{{SHA: "h3", Before: "h2", ByReviewApp: true}, {SHA: "h4", Before: "h3", HandoffOnly: true}}},
-		{"two handoffs", []record.ClassifiedPush{{SHA: "h3", Before: "h2", HandoffOnly: true}, {SHA: "h4", Before: "h3", HandoffOnly: true}}},
-		{"a handoff, then code", []record.ClassifiedPush{{SHA: "h3", Before: "h2", HandoffOnly: true}, {SHA: "h4", Before: "h3"}}},
-		{"code, then a handoff", []record.ClassifiedPush{{SHA: "h3", Before: "h2"}, {SHA: "h4", Before: "h3", HandoffOnly: true}}},
+		{"red tests, then red tests", []record.ClassifiedPush{{SHA: "h3", Before: "h2", ByReviewApp: true}, {SHA: "h4", Before: "h3", ByReviewApp: true}}},
+		{"code, then red tests", []record.ClassifiedPush{{SHA: "h3", Before: "h2"}, {SHA: "h4", Before: "h3", ByReviewApp: true}}},
 		{"code, then code", []record.ClassifiedPush{{SHA: "h3", Before: "h2"}, {SHA: "h4", Before: "h3"}}},
 		{"red tests, then code", []record.ClassifiedPush{{SHA: "h3", Before: "h2", ByReviewApp: true}, {SHA: "h4", Before: "h3"}}},
-		{"a forced handoff, then a handoff", []record.ClassifiedPush{{SHA: "h3", Before: "h2", HandoffOnly: true, Forced: true}, {SHA: "h4", Before: "h3", HandoffOnly: true}}},
-		{"red tests past an unrecorded h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2", ByReviewApp: true}, {SHA: "h4", Before: "h3", HandoffOnly: true}}},
+		{"red tests past an unrecorded h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2", ByReviewApp: true}, {SHA: "h4", Before: "h3", ByReviewApp: true}}},
+		{"code, then red tests past an unrecorded h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2"}, {SHA: "h4", Before: "h3", ByReviewApp: true}}},
 	}
 	sequences := []struct {
 		name  string
@@ -225,9 +223,8 @@ func sha(i int) string { return fmt.Sprintf("%040x", i) }
 // the run's front folds into its anchor as each push arrives, so the stored run stays as long as
 // the pushes lag, here three heads. A push lost for good keeps the run open at its head; the run is
 // cut to its newest maxRunSteps steps and stays that size, however many heads follow. Every second
-// push is handoff-only, which the record keeps for good (it carries an approval across) and the
-// run does not copy; each settlement holds ten check runs and is delivered twice, and the second
-// delivery takes no step. Heads are 40-character SHAs.
+// push is the review App's; each settlement holds ten check runs and is delivered twice, and the
+// second delivery takes no step. Heads are 40-character SHAs.
 // Whether its push comes before or after its head, each head records its move once, so the record
 // remembers the last maxMoves distinct moves.
 func TestAHeadRunStaysBounded(t *testing.T) {
@@ -253,7 +250,7 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 			largestRun, largestMoves, largestRow := 0, 0, 0
 			for i := 1; i <= 200; i++ {
 				if tc.pushFirst {
-					pr = ApplyPush(pr, record.ClassifiedPush{SHA: sha(i), Before: sha(i - 1), HandoffOnly: i%2 == 0})
+					pr = ApplyPush(pr, record.ClassifiedPush{SHA: sha(i), Before: sha(i - 1), ByReviewApp: i%2 == 0})
 				}
 				pr = AdvancePullRequestHead(pr, Arrival{}, sha(i))
 				settlement := SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i), Generation: int64(i + 1),
@@ -267,7 +264,7 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 					t.Fatalf("after %d heads the redelivered settlement took a step: %d steps, want %d", i, len(pr.Run.Steps), steps)
 				}
 				if late := i - 3; !tc.pushFirst && late >= 1 && late != tc.lost {
-					pr = ApplyPush(pr, record.ClassifiedPush{SHA: sha(late), Before: sha(late - 1), HandoffOnly: late%2 == 0})
+					pr = ApplyPush(pr, record.ClassifiedPush{SHA: sha(late), Before: sha(late - 1), ByReviewApp: late%2 == 0})
 				}
 				if pr.Run != nil {
 					largestRun = max(largestRun, encoded(pr.Run))
@@ -305,7 +302,7 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 func TestARunOneLostPushOpenedClosesAtItsBound(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
-	first, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}
+	first, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1"}
 	for _, tc := range []struct {
 		name  string
 		facts []runFact
@@ -390,7 +387,7 @@ func TestOneHeadRecordsItsMoveOnce(t *testing.T) {
 func TestAMoveMadeAgainTakesItsPushWhicheverArrivesFirst(t *testing.T) {
 	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
-	first, back, again := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}, record.ClassifiedPush{SHA: "h1", Before: "h0"}
+	first, back, again := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1"}, record.ClassifiedPush{SHA: "h1", Before: "h0"}
 	s1, s2, s3 := settles("h1", 2, "ci"), settles("h0", 3, "ci"), settles("h1", 4, "ci")
 	deliverAll := func(facts ...runFact) record.PullRequest {
 		pr := red

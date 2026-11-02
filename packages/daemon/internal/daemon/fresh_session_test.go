@@ -359,12 +359,12 @@ func TestAFreshSessionRetryTheWorkflowRefusesLeavesTheSession(t *testing.T) {
 // wantsAbandonment is the check both retries make of the fresh session's first prompt: it names
 // the session that was abandoned and why — the provider's own words for a refused one, the
 // context size among them where the provider gave one — and the two things that outlived that
-// session, the issue's branch and the handoffs committed on it.
+// session, the issue's branch and the handoff records its phases wrote on the Dispatch issue.
 func wantsAbandonment(t *testing.T, prompt, why string) {
 	t.Helper()
 	for _, want := range []string{
 		oldSession, "abandoned", why,
-		"legion/" + "LEGION-208", ".legion/LEGION-208/", "plan.json", "implement.json", "test.json", "review.json",
+		"legion/" + "LEGION-208", "dispatch handoff-read --issue LEGION-208 --phase", "(plan, implement, test, review)",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the fresh session's first prompt does not name %q:\n%s", want, prompt)

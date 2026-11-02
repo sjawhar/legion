@@ -67,10 +67,6 @@ const (
 	// the row runs on its issue's lifecycle lane, one row at a time, so a call GitHub never
 	// answers would hold every later lifecycle row of the issue behind it.
 	checkCompareTimeout = 30 * time.Second
-	// approvalCarryTimeout bounds one approval_carry row's compare and its token's mint, as
-	// checkCompareTimeout bounds a check compare's: both run on the issue's lifecycle lane, one
-	// row at a time.
-	approvalCarryTimeout = 30 * time.Second
 )
 
 // outbox runs each effect that the workflow transaction committed, one lane per issue and kind of
@@ -113,7 +109,7 @@ type outbox struct {
 	// launches run issues side by side, so several issues' provisions are in flight together.
 	provisions provisionLocks
 	// githubAPI is the GitHub REST root a row's GitHub call is made under — an issue_branch row's
-	// create, a check_compare's and an approval_carry's compare: the workflow's
+	// create and a check_compare's compare: the workflow's
 	// (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
 	// limits is every GitHub rate limit a row met, by the budget it exhausted, held until its
@@ -360,9 +356,8 @@ type rateLimit struct {
 // calls (an issue branch's create, a production check's compare) the REST core's, and every call
 // GitHub's secondary limit. A kind it does not name calls no GitHub API.
 var githubBudgets = map[record.OutboxKind][]githubrest.Budget{
-	record.OutboxKindIssueBranch:   {githubrest.BudgetCore, githubrest.BudgetSecondary},
-	record.OutboxKindCheckCompare:  {githubrest.BudgetCore, githubrest.BudgetSecondary},
-	record.OutboxKindApprovalCarry: {githubrest.BudgetCore, githubrest.BudgetSecondary},
+	record.OutboxKindIssueBranch:  {githubrest.BudgetCore, githubrest.BudgetSecondary},
+	record.OutboxKindCheckCompare: {githubrest.BudgetCore, githubrest.BudgetSecondary},
 }
 
 // standingLimit is the limit in limits, among the budgets a row of kind spends, that still stands
@@ -443,8 +438,6 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.checkLook(ctx, row, value)
 	case record.CheckBound:
 		return r.checkBound(ctx, row)
-	case record.ApprovalCarry:
-		return r.approvalCarry(ctx, row, value)
 	case record.PhaseEnded:
 		return r.phaseEnded(ctx, row, value)
 	default:
@@ -1737,70 +1730,6 @@ func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
 		intake.CheckBound{Issue: row.Issue}, r.handlers...); err != nil {
 		return fmt.Errorf("apply the bound of %s's production check: %w", row.Issue, err)
 	}
-	return nil
-}
-
-// approvalCarry is the compare that carries a reviewer's approval across a handoff-only push
-// (record.ApprovalCarry), read from GitHub as the implement App. The push that left the approval
-// set aside below the pull request's head queued the row (workflow's carryApproval), because the
-// push webhook's own file list did not show the push to be handoff-only: it was truncated, forced,
-// or carried by a listener that says nothing about paths. The compare, and the apply of the push
-// it shows, are the daemon's one carry (daemon's carryApproval), the same the per-issue read
-// makes and under the same event id, so whichever of the two gets there first carries the
-// approval and the other applies nothing.
-//
-// The row acts only while the record still stands where the push left it: its pull request open,
-// the one the row names, at the head the row names, with the approval still set aside
-// (classify.ApprovalSetAside). A head that moved since has a row of its own from its own push,
-// which compares the heads that stand then; this one finishes without acting. A comparison GitHub
-// answers that does not carry the approval finishes the row: the compare of two fixed commits
-// never changes its answer, so there is nothing to ask again. Any other failure is the row's to
-// retry on its backoff, a rate limit as every GitHub row's (noteLimit, deferral).
-func (r *outbox) approvalCarry(ctx context.Context, row record.OutboxRow, payload record.ApprovalCarry) error {
-	ctx, cancel := context.WithTimeout(ctx, approvalCarryTimeout)
-	defer cancel()
-	var pr *record.PullRequest
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		var err error
-		pr, err = r.records.PullRequest(ctx, tx, row.Issue)
-		return err
-	}); err != nil {
-		return fmt.Errorf("read the pull request record of %s to carry its approval: %w", row.Issue, err)
-	}
-	if pr == nil || pr.State != record.PullRequestOpen || pr.Number != payload.Number || pr.HeadSHA != payload.Head {
-		r.log.Info("outbox approval carry finished without acting: the record no longer stands at the head the row names",
-			"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head)
-		return nil
-	}
-	if !classify.ApprovalSetAside(*pr, payload.Approved) {
-		r.log.Info("outbox approval carry finished without acting: the approval is no longer set aside below the head",
-			"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head)
-		return nil
-	}
-	if r.tokens == nil {
-		return errors.New("approval carry executor has no GitHub App token manager")
-	}
-	repository, err := ghrepo.Parse("the pull request's repository", payload.Repo)
-	if err != nil {
-		return fmt.Errorf("carry the approval on %s: %w", row.Issue, err)
-	}
-	github, err := implementClient(ctx, r.tokens, r.githubAPI, repository)
-	if err != nil {
-		return fmt.Errorf("mint implement App token: %w", err)
-	}
-	push, aside, carried, err := carryApproval(ctx, r.pool, r.dispatchProject, github, *pr, payload.Approved, r.handlers)
-	switch {
-	case err != nil && carried:
-		return fmt.Errorf("apply the handoff-only push GitHub's compare shows above %s's approved head: %w", row.Issue, err)
-	case err != nil:
-		return fmt.Errorf("compare the approved head %s of %s with its head %s: %w", payload.Approved, row.Issue, payload.Head, err)
-	case aside != "":
-		r.log.Info("outbox approval carry finished without acting: the reviewer's approval stays set aside below the head; only an APPROVE of the head or a REQUEST_CHANGES ends the round",
-			"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head, "reason", aside)
-		return nil
-	}
-	r.log.Warn("outbox approval carry: only the issue's handoffs changed above the approved head, and no recorded push says so; the push GitHub's compare shows is applied",
-		"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head, "paths", *push.ChangedPaths)
 	return nil
 }
 

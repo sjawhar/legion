@@ -32,7 +32,6 @@ const (
 	OutboxKindCheckCompare     OutboxKind = "check_compare"
 	OutboxKindCheckLook        OutboxKind = "check_look"
 	OutboxKindCheckBound       OutboxKind = "check_bound"
-	OutboxKindApprovalCarry    OutboxKind = "approval_carry"
 	OutboxKindRoleMessage      OutboxKind = "role_message"
 	OutboxKindPhaseEnded       OutboxKind = "phase_ended"
 )
@@ -43,9 +42,7 @@ const (
 // leaves (a start after the branch it waits for, a workspace removal after the suspend that
 // stopped the roles). It also carries the production check's rows
 // (check_compare, check_look, check_bound), which start and end the implementer's looks in order
-// with the starts and suspends they queue; and the approval carry (approval_carry), whose fact can
-// move the issue out of reviewing, so it runs before the start that move queues. The board lane
-// runs the issue's Dispatch writes and
+// with the starts and suspends they queue. The board lane runs the issue's Dispatch writes and
 // notice publishes beside them, so a status write or a notice never waits behind a start pulling
 // an image, and a slow publish never holds a stop back. The role-message lane runs the one kind the
 // daemon addresses to a role of the issue that is not its architect (phase_ended), on a lane of its
@@ -63,7 +60,7 @@ const (
 // laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
-	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindApprovalCarry},
+	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
 	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindRoleMessage},
 	LaneRoleMessage: {OutboxKindPhaseEnded},
 }
@@ -561,23 +558,6 @@ type CheckBound struct{}
 
 func (CheckBound) OutboxKind() OutboxKind { return OutboxKindCheckBound }
 
-// ApprovalCarry is GitHub's compare of the head a reviewer approved with the head the pull
-// request stands at, queued by the push that left the approval set aside below that head
-// (workflow's carryApproval). The executor compares Approved with Head as the implement App and,
-// when every path that changed between them is under the issue's own .legion/<issue>/, applies the
-// intake.Push that says so, which carries the approval up to Head (daemon's approvalCarry). Number
-// is the pull request the two heads belong to, and Repo its repository as the record spells it.
-// Head fences the row: the record's head has moved past the one the row names by the time it runs,
-// so another push's row compares the heads that stand then, and this one compares nothing.
-type ApprovalCarry struct {
-	Repo     string `json:"repo"`
-	Number   int    `json:"number"`
-	Approved string `json:"approved"`
-	Head     string `json:"head"`
-}
-
-func (ApprovalCarry) OutboxKind() OutboxKind { return OutboxKindApprovalCarry }
-
 // PhaseEnded tells the role whose phase a transition the daemon raised on its own ended that its
 // phase is over, on that role's own Envoy topic. It is the one message the daemon addresses to a
 // role that is not an architect of its own accord: when the daemon moves an issue out of a phase
@@ -734,12 +714,6 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
-	case OutboxKindApprovalCarry:
-		value := ApprovalCarry{}
-		if err := decoder.Decode(&value); err != nil {
-			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
-		}
-		payload = value
 	case OutboxKindPhaseEnded:
 		value := PhaseEnded{}
 		if err := decoder.Decode(&value); err != nil {
@@ -832,16 +806,6 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.Body == "" {
 			return fmt.Errorf("role message requires body")
-		}
-	case ApprovalCarry:
-		if value.Repo == "" || value.Number <= 0 {
-			return fmt.Errorf("an approval carry requires its repository and pull request number")
-		}
-		if value.Approved == "" || value.Head == "" {
-			return fmt.Errorf("an approval carry requires the approved head and the head it is carried to")
-		}
-		if value.Approved == value.Head {
-			return fmt.Errorf("an approval carry compares %s with itself; an approval of the head needs no carry", value.Head)
 		}
 	case CheckCompare:
 		if value.Look <= 0 {

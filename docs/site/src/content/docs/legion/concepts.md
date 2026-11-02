@@ -184,22 +184,25 @@ nothing in Legion approves a spec on a person's behalf, and the approval Dispatc
 deployment that does not want the gate sets `gates.design: off`, and the tree starts as soon as the
 architect has written its spec.
 
-## Handoffs on the issue branch
+## Handoffs on the Dispatch issue
 
-Each phase ends by writing a **handoff**, a small JSON file committed to the issue's branch under
-its own `.legion/<issue>/` directory: `architect.json`, `plan.json`, `implement.json`, `test.json`,
-and `review.json`. The next phase reads the ones before it. A handoff is the copy that survives:
-when a worker comes back after a restart, or a memory disagrees with a file, the committed handoff
-wins. The merger writes none.
+Each phase ends by writing a **handoff**, a small JSON record on its Dispatch issue, kept under the
+phase's word: `plan`, `implement`, `test` and `review`. The worker writes it with
+`dispatch handoff-write` under its own session, and every write adds a version; the next phase's
+task names the version the daemon accepted, which it reads with
+`dispatch handoff-read --version <n>`. A handoff is the copy that survives: when a worker
+comes back after a restart, or a memory disagrees with a record, the record wins. The issue's
+Conversation in Dispatch lists every version, and opens each to its fields. The merger writes
+none, and nor does the architect.
 
-Each tree writes only under its own directory, so trees running at the same time never touch the
-same file. Handoffs belong to the issue branch, not the default branch: nothing on the default
-branch reads one, so retro's last commit removes the tree's `.legion/<issue>/` from the head that
-merges, and the merger reads the head for that directory itself and sends one that still carries
-it back to retro rather than merging it. The merge
-therefore brings no handoff onto the default branch, and no later branch starts with one. The
-removal sits above the reviewer's approved head beside retro's notes, so it costs no test or review
-round; the handoffs stay on the issue branch below it, where a worker still reads them.
+A worker's completion names its record, and the daemon reads that record back from Dispatch before
+it moves the issue: it refuses a record another session wrote, one of another issue, phase or
+version, and the record the role named for its previous phase. No handoff is a commit, so the
+issue branch carries only work, every push gets its own CI, and the merge brings no handoff onto
+the default branch. Only retro's notes under `docs/solutions/` sit above the reviewer's approved
+head, and they cost no test or review round: nothing in Legion compares the head that merges with
+the one the approval named, so a repository that wants a later push reviewed says so in its own
+rulesets, and GitHub holds the merge to them.
 
 ## Review signalling
 
@@ -214,17 +217,13 @@ Legion uses GitHub's own review mechanisms rather than labels:
   the daemon already applied, by webhook or by read, decides nothing again. A review submitted while
   no round is open (the work is being implemented or tested) decides no later round when the daemon
   reads it before the next round opens. One it first hears of after that round opened can still
-  decide it, as a webhook delivered late can. An approval of a head below the pull request's head
-  still counts when everything above it changed only the issue's own `.legion/<issue>/`: the
-  daemon learns that from each push's webhook, and the same read also asks GitHub to
-  compare the approved head with the head while the approval does not count, so a push webhook
-  lost or late, or an approved head the record never held, sets nothing aside. Any other change
-  above the approved head, another issue's `.legion/` included, or a head not built on it, sets the
-  approval aside, and only an approval of the head itself or a request for changes ends the round.
-  An approval does not end it on its own: the round ends once the record reaches the approved head
-  and GitHub reports that head one the issue may advance on. A head GitHub holds blocked, on a
-  check or a review the repository requires, leaves the issue in `reviewing` until that merge
-  state comes clean.
+  decide it, as a webhook delivered late can. An approval counts for the head it names and no
+  other, since any push may change code, and a push on its way from that head leaves the approval
+  undecided until the new head arrives; anything else sets it aside, and only an approval of the
+  head itself or a request for changes ends the round. An approval does not end it on its own:
+  the round ends once the record reaches the approved head and GitHub reports that head one the
+  issue may advance on. A head GitHub holds blocked, on a check or a review the repository
+  requires, leaves the issue in `reviewing` until that merge state comes clean.
 - **CI** on the pull request's head is information, not a verdict. When GitHub's checks settle, the
   daemon names every check GitHub reported, with the conclusion GitHub gave it, and judges none of
   them: it sends one message each to the tree's architect, the worker of the issue's current phase
@@ -279,8 +278,8 @@ that lands under the merger is refused instead of merged unseen.
 The merge carries a message the merger writes itself,
 `--subject '<pull request title> (#<n>)' --body ''`. GitHub's own default
 (`squash_merge_commit_message` of `COMMIT_MESSAGES`) joins every commit message of the branch into
-the squash commit, which would put the tree's Dispatch keys, its `Omp-Session:` trailers and every
-`skip-checks: true` line on your default branch. `enqueuePullRequest` can carry no message, so on a
+the squash commit, which would put the tree's Dispatch keys and its `Omp-Session:` trailers on your
+default branch. `enqueuePullRequest` can carry no message, so on a
 merge-queue base whose repository setting still joins them the merger enqueues nothing and tells
 the architect: only a person can change that setting, to `PR_BODY` or `BLANK`.
 
@@ -288,8 +287,7 @@ The merger never turns auto-merge on, and the daemon submits no merge and change
 of any pull request. The repository's own required reviews and checks decide when it lands; Legion
 reads none of them at the merge, bypasses none, and waits for a review only a person can give.
 Nothing holds the head that merges to the head the reviewer approved: a repository that wants its
-newest push reviewed says so in its own rulesets. A head that still carries `.legion/<issue>/` is
-one retro did not finish, and the merger sends it back to retro rather than merging it.
+newest push reviewed says so in its own rulesets.
 
 When a merge fails, the decision is the merger's, on GitHub's own answer: wait for what GitHub
 waits for, merge again at the head it re-reads, send the issue back with `request_backward_move`

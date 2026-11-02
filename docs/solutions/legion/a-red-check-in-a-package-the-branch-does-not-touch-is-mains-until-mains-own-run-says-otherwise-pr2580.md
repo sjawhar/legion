@@ -71,11 +71,13 @@ ends the list only when the next non-blank line is neither a bullet nor an inden
 so `documentedClaims` at the head behaves the opposite way to the sentence above and is no
 citation for it. The branch was held until then, and the round that cleared
 the red changed no code at all: one merge commit, `2599248d44b3`, no conflict, fingerprint
-`756fb89b…` unchanged at both heads, pushed once with the round's handoff so the push carried a
-code commit and GitHub started a run for it.
+`756fb89b…` unchanged at both heads, pushed once with the round's handoff, which that release
+still committed, so the push carried a code commit and GitHub started a run for it.
 
 Two things the episode measured that a reader should not re-derive. Tightening the document back
 was not available: the repository's own layout checker refuses the tightened list, so the parser
-was the only side that could move. And a handoff-only push would not have cleared the red either:
-it carries `skip-checks: true` and starts no run, so it makes no merge ref — the round's push had
-to carry the merge and the handoff together.
+was the only side that could move. And the handoff-only push that release had would not have
+cleared the red either: it carried `skip-checks: true` and started no run, so it made no merge
+ref — the round's push had to carry the merge. Since sjawhar/legion#2354 a handoff is a versioned
+record on its Dispatch issue, so there is no handoff-only push and no trailer: every push a round
+makes is a code push and starts a run.

@@ -70,7 +70,13 @@ func TestSessionAnswersReadsWhatThePublisherRecorded(t *testing.T) {
 		"id": commentID, "body": "Reviewers, please look.",
 	}})
 
-	scan(ctx, Deps{Store: database, Publisher: &recordingPublisher{}})
+	// One batch publishes every event of this owner (scanBatch, batchSize 100), sent through a
+	// window the publisher hold fences (holding, unfenced), and the issue's role route resolves to
+	// heldRoles' holder, which recordingPublisher's Request answers.
+	deps := withHeldRoles(Deps{Store: database, Publisher: &recordingPublisher{}})
+	if _, err := scanBatch(ctx, deps, unfenced{}, holding(t, deps).instance); err != nil {
+		t.Fatalf("scan batch: %v", err)
+	}
 	destinations := func(event model.Event) []string {
 		t.Helper()
 		var topics []string

@@ -626,14 +626,19 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if phase.FileBacked(reported) {
-		// The commit a completion carries is the pushed commit carrying the phase's handoff, which
-		// the `legion` tool's handoff_complete found in the pane: the one the role reported for its
-		// previous phase means this phase wrote none.
-		if fact.Commit == row.LastHandoff {
-			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s reported commit %s for its previous phase of %s; write and commit this phase's handoff before completing", fact.Role, fact.Commit, issue.Key)), nil
+	if word, _, ok := phase.Handoff(reported); ok {
+		// A phase with a handoff ends with a Dispatch handoff record, which the route read back
+		// and held to this issue, the phase's word, the reported version and the claim's session:
+		// the record the role named for its previous phase means this phase wrote none.
+		if fact.HandoffRecord == "" {
+			return refused("HANDOFF_RECORD_REQUIRED", fmt.Sprintf("the %s's completion of phase %s of %s names no handoff record: write it with `dispatch handoff-write --issue %s --phase %s --body-file <file>`, then complete again; this completion changed nothing",
+				fact.Role, reported, issue.Key, issue.Key, word)), nil
 		}
-		row.LastHandoff = fact.Commit
+		if fact.HandoffRecord == row.LastHandoff {
+			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s named handoff record %s for its previous phase of %s; write this phase's handoff with `dispatch handoff-write --issue %s --phase %s --body-file <file>` before completing",
+				fact.Role, fact.HandoffRecord, issue.Key, issue.Key, word)), nil
+		}
+		row.LastHandoff = fact.HandoffRecord
 	}
 	// The round as the completion found it is what a notice is deduped against (settleRound): a
 	// round already stuck at this head before the completion was told then, and the completion
@@ -641,6 +646,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	// decision, or with an approval of other code - was not stuck before it, and is told.
 	found := e.reviewRound(*issue, row, pr)
 	row.Claim, row.HandoffCommit, row.Verdict, row.Summary, row.CompletedAt = fact.Claim, fact.Commit, fact.Verdict, fact.Summary, e.now()
+	row.HandoffRecord, row.HandoffVersion = fact.HandoffRecord, fact.HandoffVersion
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}

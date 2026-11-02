@@ -60,22 +60,26 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // it lacks the agent-secrets volumes a role that enrolls now is started against; or a container of
 // it runs an image other than the one this runtime launches every container with (imageDrift) —
 // unless the launch is installing a stale-plugin pair into this pod (spec.Plugins set,
-// LEGION-164): then drift alone is not a reason to replace it, since the install, not a fresh pod on the
-// configured image, is what brings this launch's agent onto the current plugin, and a pod replaced
-// for some other reason in the same sweep still is. The first role relaunched after any of these
-// replaces it, and its siblings resume into the new pod. Replacing a live pod — its Sandbox
-// Running, the pod its own, not ended, its init containers passed — ends the process of every role
-// still running in it, wherever its turn stood, so the Suspended patch that replaces it names it
-// on the Sandbox in the same write (suspendDisplacing): evaluate then reports each of those roles
-// ended by the daemon's replacement (Displaced), which the supervisor resumes uncharged
-// (LEGION-729). A pod already ended, or never the Sandbox's, is named nothing. Before each start
-// the Sandbox records the addresses the generation is handed (recordAddresses). A new pod is
-// provisioned by its kind (podKind.provision), under nothing but the pod's own launch turn: an
-// issue pod has its workspace's provisioning token minted, the controller's pod needs nothing. A
-// workflow claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so
-// the tree's cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox
-// this creates. Every Kubernetes request of the launch is sent again while the API server answers
-// it overloaded, up to the launch's own deadline for it (launching, resend), so a server under load
+// LEGION-164): then image drift alone is not a reason to replace it, since the install, not a
+// fresh pod on the configured image, is what brings this launch's agent onto the current plugin,
+// and a pod replaced for some other reason in the same sweep still is. That exemption is the
+// image's alone: a pod running as a ServiceAccount other than the configured one (accountDrift)
+// is replaced whatever the launch is installing, since the account is fixed for the pod's life
+// and no install can move it, so the only way its agents stop holding the old identity is a pod
+// created under the new account. The first role relaunched after any of these replaces it, and
+// its siblings resume into the new pod. Replacing a live pod — its Sandbox Running, the pod its
+// own, not ended, its init containers passed — ends the process of every role still running in
+// it, wherever its turn stood, so the Suspended patch that replaces it names it on the Sandbox in
+// the same write (suspendDisplacing): evaluate then reports each of those roles ended by the
+// daemon's replacement (Displaced), which the supervisor resumes uncharged (LEGION-729). A pod
+// already ended, or never the Sandbox's, is named nothing. Before each start the Sandbox records
+// the addresses the generation is handed (recordAddresses). A new pod is provisioned by its kind
+// (podKind.provision), under nothing but the pod's own launch turn: an issue pod has its
+// workspace's provisioning token minted, the controller's pod needs nothing. A workflow claim
+// passed its tree's lifecycle check before the call (supervise's checkLaunch), so the tree's
+// cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this
+// creates. Every Kubernetes request of the launch is sent again while the API server answers it
+// overloaded, up to the launch's own deadline for it (launching, resend), so a server under load
 // slows the launch rather than failing it.
 // The try is bounded on the runtime's own account from the moment it holds the pod's launch turn
 // (launchBound, LaunchBound): a try that never answers ends at the bound with an error naming it,
@@ -122,10 +126,11 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
 	live := s.mode() != modeSuspended && ownedBy(pod, s.UID) && !terminal(pod) && initExit == nil
-	_, drifted := imageDrift(pod, r.image)
+	_, imageDrifted := imageDrift(pod, r.image)
+	_, accountDrifted := accountDrift(pod, r.pod.ServiceAccount)
 	installing := l.spec.Plugins != nil
 	migrate := supersededDisk(s, l)
-	replace := !live || (drifted && !installing) || migrate ||
+	replace := !live || (imageDrifted && !installing) || accountDrifted || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)

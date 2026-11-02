@@ -2,13 +2,16 @@ package workflow
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -278,4 +281,80 @@ func TestALateSettlementWithLowerRunsChangesNothing(t *testing.T) {
 			assertPhase(t, pool, phase.Testing)
 		})
 	}
+}
+
+// latePullRequest reads LEGION-208's pull request back.
+func latePullRequest(t *testing.T, pool *pgxpool.Pool) record.PullRequest {
+	t.Helper()
+	var got *record.PullRequest
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		var err error
+		got, err = record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
+		return err
+	})
+	if got == nil {
+		t.Fatal("LEGION-208 has no pull request")
+	}
+	return *got
+}
+
+// latePush is the push of legion/LEGION-208 from before to after by pusher, as the push webhook
+// carries it and as the daemon's read rebuilds it from the branch's activity (the daemon's
+// lostPushes).
+func latePush(before, after, pusher string) intake.Push {
+	return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: before, After: after, Pusher: pusher}
+}
+
+// latePushDecidesNothing applies push as a late webhook under an event id of its own and fails t
+// when it changed the issues, their phase rows, the production checks, the outbox, or the pull
+// request's judgement, pushes or head run. The record's moves may change: a push of a move the
+// record made is kept as that move's push or as a repeat of it (classify.ApplyPush), which only a
+// head's next arrival by that move reads.
+func latePushDecidesNothing(t *testing.T, pool *pgxpool.Pool, apply func(string, intake.Fact), id string, push intake.Push) {
+	t.Helper()
+	others := []string{"issues", "phases", "production_checks", "outbox"}
+	before, prBefore := tablesText(t, pool, others...), latePullRequest(t, pool)
+	apply(id, push)
+	after, prAfter := tablesText(t, pool, others...), latePullRequest(t, pool)
+	if after != before {
+		t.Fatalf("the late push %s..%s changed the records:\nbefore %s\nafter  %s", push.Before, push.After, before, after)
+	}
+	if classify.JudgementChanged(prBefore, prAfter) || !slices.Equal(prAfter.Pushes, prBefore.Pushes) || (prAfter.Run == nil) != (prBefore.Run == nil) {
+		t.Fatalf("the late push %s..%s changed the pull request: judgement or pushes %+v, run open %t; was %+v, run open %t",
+			push.Before, push.After, prAfter.Pushes, prAfter.Run != nil, prBefore.Pushes, prBefore.Run != nil)
+	}
+}
+
+// The review App pushes the tester's red tests twice onto the implementer's red code, and the
+// daemon's read rebuilds both pushes from the branch's activity and applies the head it read, so
+// the head is judged by its chain of pushes. The push webhooks arriving late decide nothing - the
+// push the chain began from, whose move the record made before the read, and a copy of each push
+// the read rebuilt: the judgement, the pushes waiting for a link, the phase and the outbox stand,
+// and the record keeps each as its move's push or a repeat of it.
+func TestALatePushAfterTheReadRebuiltItsChainDecidesNothing(t *testing.T) {
+	const implementer = "legion-implementer[bot]"
+	pr := redRecord(record.PullRequestOpen, "code", lateApplied.Add(-2*time.Hour))
+	pr.Moves = []record.Move{{Before: "base", SHA: "code"}}
+	pool := migratedPool(t)
+	seedLateIssue(t, pool, phase.Testing, "testing", pr)
+	apply := githubFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+	tests := latePush("code", "red-tests", testReviewApp)
+	more := latePush("red-tests", "more-red-tests", testReviewApp)
+	apply("push-read:code...red-tests", tests)
+	apply("push-read:red-tests...more-red-tests", more)
+	apply("head-read:more-red-tests", readHead("more-red-tests", lateApplied))
+	if got := latePullRequest(t, pool); got.HeadSHA != "more-red-tests" || got.Run != nil {
+		t.Fatalf("after the read the record is at %q, run %+v; want more-red-tests judged by its pushes, with no head run open", got.HeadSHA, got.Run)
+	}
+	for _, late := range []struct {
+		id   string
+		push intake.Push
+	}{
+		{"the push the chain began from", latePush("base", "code", implementer)},
+		{"the red tests' webhook", tests},
+		{"the second push of red tests' webhook", more},
+	} {
+		latePushDecidesNothing(t, pool, apply, late.id, late.push)
+	}
+	assertPhase(t, pool, phase.Testing)
 }
