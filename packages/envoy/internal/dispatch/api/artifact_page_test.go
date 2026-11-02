@@ -3,12 +3,16 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 )
 
 // The Go half of dispatch://INFRA-682's A4: what a caller of
@@ -228,5 +232,44 @@ func TestArtifactPageRefusesAPageOverTheLimit(t *testing.T) {
 	served := pageRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+atLimit.Artifact.ID+"/versions/1/page", "iframe")
 	if served.Code != http.StatusOK || served.Body.Len() != limit {
 		t.Fatalf("a page of exactly 5 MiB: status=%d, %d body bytes, want 200 with %d", served.Code, served.Body.Len(), limit)
+	}
+}
+
+// The HEAD a view block sends before each frame is answered from the row, whether the bytes sit
+// in the row or in a file store. A page file is the one a store is most likely to hold, since it
+// carries a whole drawing library, and reading that object back for a body net/http discards is
+// a megabyte off the bucket per frame the reader scrolls to.
+func TestAHeadOfAStoreBackedPageAnswersItsLengthWithoutReadingTheObject(t *testing.T) {
+	memory := filestest.NewMemory()
+	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
+	issue := pageTestIssue(t, handler)
+	body := []byte("<!doctype html><title>chart</title>" + strings.Repeat("<!-- draw -->", 2048))
+	page := uploadPageTestFile(t, handler, issue, "chart.html", "text/html", body)
+	if versionRow(t, database, page.Artifact.ID, 1) != nil {
+		t.Fatal("the row kept its bytes, so this test would not reach the store path")
+	}
+	target := "/api/v1/artifacts/" + page.Artifact.ID + "/versions/1/page"
+
+	memory.SetFailure(errors.New("the store must not be read to answer a HEAD"))
+	head := pageRequest(t, handler, http.MethodHead, target, "iframe")
+	if head.Code != http.StatusOK {
+		t.Fatalf("HEAD of a store-backed page: status=%d body=%s, want 200 answered from the row", head.Code, head.Body.String())
+	}
+	if got := head.Header().Get("Content-Length"); got != strconv.Itoa(len(body)) {
+		t.Errorf("HEAD Content-Length = %q, want %d", got, len(body))
+	}
+	if got := head.Header().Get("Content-Security-Policy"); got != wantPagePolicy {
+		t.Errorf("HEAD Content-Security-Policy = %q, want the page policy", got)
+	}
+	if got := head.Header().Get("Content-Disposition"); got != "inline" {
+		t.Errorf("HEAD Content-Disposition = %q, want inline", got)
+	}
+
+	// The control: with the bucket reachable the same address still serves the page, so what the
+	// HEAD avoided is a read it did not need rather than one the route has lost.
+	memory.SetFailure(nil)
+	served := pageRequest(t, handler, http.MethodGet, target, "iframe")
+	if served.Code != http.StatusOK || served.Body.Len() != len(body) {
+		t.Fatalf("GET after the HEAD: status=%d, %d body bytes, want 200 with %d", served.Code, served.Body.Len(), len(body))
 	}
 }

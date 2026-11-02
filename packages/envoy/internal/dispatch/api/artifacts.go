@@ -861,19 +861,24 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Go's ServeMux serves HEAD from this GET pattern, and net/http drops the body, so a HEAD is
-	// answered from the length alone: octet_length reads it from the stored value's header, so
-	// the version a view block weighs against its 16 MiB - tens of megabytes of it - is neither
-	// detoasted nor sent for a body nothing reads. The answer carries the download headers the
-	// GET carries, Content-Length included. A row holding no bytes answers null and falls
-	// through to the read below, which keeps the file store's own refusals.
+	// answered from the row alone and never from the bytes: the version a view block weighs
+	// against its 16 MiB - tens of megabytes of it - is neither detoasted nor fetched from the
+	// file store for a body nothing reads. octet_length reads the length from the stored value's
+	// header where the row holds the bytes; where a store holds them the row still records the
+	// file's length in size, and that is the same number, so the answer is the same either way
+	// and the bucket is not touched. Only a row that records neither falls through to the read
+	// below, which keeps the file store's own refusals.
 	if r.Method == http.MethodHead {
 		var contentType, sha *string
-		var length *int64
+		var length, recorded *int64
 		if err := s.deps.Store.Pool.QueryRow(r.Context(), `
-			select mime, sha256, octet_length(content) from artifact_versions where artifact_id = $1 and number = $2
-		`, artifact.ID, number).Scan(&contentType, &sha, &length); err != nil {
+			select mime, sha256, octet_length(content), size from artifact_versions where artifact_id = $1 and number = $2
+		`, artifact.ID, number).Scan(&contentType, &sha, &length, &recorded); err != nil {
 			s.writeHandlerError(w, err)
 			return
+		}
+		if length == nil {
+			length = recorded
 		}
 		if length != nil {
 			downloadHeaders(w, contentType, sha)(*length)
@@ -937,10 +942,12 @@ func (s *server) getArtifactVersionPage(w http.ResponseWriter, r *http.Request) 
 		writeError(w, "PAGE_TOO_LARGE", http.StatusRequestEntityTooLarge, fmt.Sprintf("a page is at most %d bytes", maxPageBytes))
 		return
 	}
-	// A HEAD is answered from the length alone: octet_length reads it from the stored value's
-	// header, so the page the block asks after before each frame - over a megabyte of it - is
-	// neither detoasted nor sent for a body net/http drops. A row holding no bytes answers null
-	// and falls through to the read below, which keeps the file store's own refusals.
+	// A HEAD is answered from the row alone and never from the bytes: the page the block asks
+	// after before each frame - over a megabyte of it - is neither detoasted nor fetched from
+	// the file store for a body net/http drops. octet_length reads the length from the stored
+	// value's header where the row holds the bytes; where a store holds them the row's size,
+	// already read above for the 5 MiB cap, records the same number. Only a row that records
+	// neither falls through to the read below, which keeps the file store's own refusals.
 	if r.Method == http.MethodHead {
 		var length *int64
 		if err := s.deps.Store.Pool.QueryRow(r.Context(), `
@@ -948,6 +955,9 @@ func (s *server) getArtifactVersionPage(w http.ResponseWriter, r *http.Request) 
 		`, artifact.ID, number).Scan(&length); err != nil {
 			s.writeHandlerError(w, err)
 			return
+		}
+		if length == nil {
+			length = size
 		}
 		if length != nil {
 			pageHeaders(w, r, sha)(*length)
