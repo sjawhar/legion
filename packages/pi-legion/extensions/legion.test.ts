@@ -2587,6 +2587,108 @@ describe("Legion OMP extension", () => {
     expect(dispatchHosts).toEqual(["profile.dispatch.example"]);
   });
 
+  // The reader behind the production check of a deployment's idle release: the pane's own claim
+  // and its secret, which the registration gave this process and no file holds, reach the
+  // daemon's route, and the agent gets the window counted.
+  test("read_release_records posts the pane's claim credential to the daemon and answers the window's numbers", async () => {
+    const records = {
+      releases: [
+        {
+          id: 1,
+          issue: "REPO-43",
+          generation: 2,
+          roles: ["implementer"],
+          at: "2026-11-01T12:00:00Z",
+          bundleBytes: 4096,
+        },
+        {
+          id: 2,
+          issue: "REPO-44",
+          generation: 1,
+          roles: ["tester"],
+          at: "2026-11-01T13:00:00Z",
+          bundleBytes: 0,
+        },
+      ],
+      resumes: [
+        {
+          id: 1,
+          release: 1,
+          issue: "REPO-43",
+          role: "implementer",
+          kind: "task",
+          at: "2026-11-01T14:00:00Z",
+          podReadyAt: "2026-11-01T14:01:00Z",
+          firstTurnAt: "2026-11-01T14:02:00Z",
+          stuck: false,
+        },
+        {
+          id: 2,
+          release: 2,
+          issue: "REPO-44",
+          role: "tester",
+          kind: "message",
+          at: "2026-11-01T13:05:00Z",
+          podReadyAt: "2026-11-01T13:06:00Z",
+          stuck: true,
+        },
+      ],
+      holds: [
+        {
+          id: 1,
+          issue: "REPO-45",
+          reason: "background_work",
+          detail: "async-job",
+          firstAt: "2026-11-01T12:50:00Z",
+          at: "2026-11-01T13:00:00Z",
+          passes: 11,
+        },
+      ],
+    };
+    const pane = await bootPane({
+      role: "implementer",
+      sessionId: "ses_release_records",
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/claims/release-records" ? Response.json(records) : undefined,
+    });
+    const legion = pane.tools.find((tool) => tool.name === "legion");
+    if (legion === undefined) throw new Error("the legion tool was not registered");
+    const before = pane.requests.length;
+
+    const answer = await legion.execute(
+      "release-records",
+      { op: "read_release_records", since: "2026-11-01T00:00:00Z" },
+      undefined,
+      undefined,
+      pane.context
+    );
+
+    expect(answer).toMatchObject({
+      details: {
+        since: "2026-11-01T00:00:00Z",
+        counts: {
+          releases: 2,
+          resumes: 2,
+          resumesByKind: { task: 1, message: 1 },
+          holds: 1,
+          holdsByReason: { background_work: 1 },
+        },
+        wokenWithinTenMinutes: { releases: 1, share: 0.5 },
+        wakeToFirstTurnSeconds: { measured: 1, withoutFirstTurn: 1, median: 120, max: 120 },
+      },
+    });
+    expect(daemonRequests(pane.requests.slice(before))).toEqual([
+      {
+        path: "/legion/v1/claims/release-records",
+        body: {
+          claimToken: pane.claimToken,
+          secret: pane.registration.secret,
+          since: "2026-11-01T00:00:00Z",
+        },
+      },
+    ]);
+  });
+
   test("subscribes no claim to an issue's notice topic", async () => {
     await bootPane({ role: "architect", sessionId: "ses_notice_architect" });
     await bootPane({ role: "implementer", sessionId: "ses_notice_worker" });

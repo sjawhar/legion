@@ -277,6 +277,14 @@ reviewing until you finish.
     controller topic. Either names this issue, the pull request, the merge commit, what you drove
     and what failed. Name the message or the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the
     `Production:` line and in the summary.
+- **Numbers the daemon holds are read with the `legion` tool.** Where the verdict rests on what a
+  deployment's idle release has done, `read_release_records` answers a window of the daemon's own
+  records: its one argument `since` is the RFC 3339 instant the window starts at, and the answer
+  is that window's releases, resumes and holds, oldest first, with the counts of releases, of
+  resumes by wake kind and of holds by reason, the pod-hours released, the share of releases a
+  wake followed within ten minutes, and the median, 90th percentile and maximum seconds from a
+  wake to the woken role's first turn. It reads them with this session's own claim, so there is
+  no credential to fetch and none on disk.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look. Where no wake is
   queued yet, the daemon suspends your claim with its session kept, and the issue's Sandbox goes
   with its pod and disk; where a wake arrived while the look was open, the next look starts at once

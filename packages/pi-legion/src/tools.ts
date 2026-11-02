@@ -53,9 +53,15 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
     "park_child",
     "rerun_child",
     "read_record",
+    "read_release_records",
     "handoff_complete",
   ],
-  "phase-worker": ["request_backward_move", "read_record", "handoff_complete"],
+  "phase-worker": [
+    "request_backward_move",
+    "read_record",
+    "read_release_records",
+    "handoff_complete",
+  ],
   controller: ["read_state", "set_status"],
 };
 
@@ -85,6 +91,7 @@ function toolSchema(pi: PiApi): unknown {
   return z.object({
     op: z.enum([...OPERATIONS.architect, ...OPERATIONS.controller]),
     issue: phase.issue,
+    since: phase.since,
     artifactId: z
       .string()
       .describe(
@@ -164,12 +171,15 @@ export function createLegionTool(deps: {
   return {
     name: "legion",
     label: "legion",
-    // No sentence on read_record; after handoff_complete's contract the shared sentence on
-    // request_backward_move (an architect's names the issue it returns from accepting), then the
-    // architect's sign_off and the controller's operations: the exact text tools.test.ts pins, so a
-    // change to the shared template cannot reach an Oh My Pi agent unnoticed.
+    // No sentence on read_record, whose name says what it reads; the shared sentence on
+    // read_release_records before handoff_complete's contract, since the records it answers are
+    // not read from its name; after that contract the shared sentence on request_backward_move
+    // (an architect's names the issue it returns from accepting), then the architect's sign_off
+    // and the controller's operations: the exact text tools.test.ts pins, so a change to the
+    // shared template cannot reach an Oh My Pi agent unnoticed.
     description: legionToolDescription({
       envoyPublish: "envoy_publish",
+      before: PHASE_OP_SENTENCES.readReleaseRecords,
       after:
         PHASE_OP_SENTENCES.requestBackwardMove +
         "sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +

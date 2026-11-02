@@ -158,6 +158,79 @@ test("activity posts the claim wire's report and accepts only the empty 204", as
   await expect(talkative.activity(report)).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
+test("the release records are read by a POST carrying the claim's token and secret, and strictly", async () => {
+  const records = {
+    releases: [
+      {
+        id: 1,
+        issue: "LEGION-208",
+        generation: 2,
+        roles: ["implementer", "tester"],
+        at: "2026-11-01T12:10:00Z",
+        bundleBytes: 2048,
+      },
+    ],
+    resumes: [
+      {
+        id: 1,
+        release: 1,
+        issue: "LEGION-208",
+        role: "implementer",
+        kind: "task",
+        at: "2026-11-01T12:40:00Z",
+        podReadyAt: "2026-11-01T12:41:00Z",
+        firstTurnAt: "2026-11-01T12:42:00Z",
+        stuck: false,
+      },
+    ],
+    holds: [
+      {
+        id: 1,
+        issue: "LEGION-209",
+        reason: "background_work",
+        detail: "async-job",
+        firstAt: "2026-11-01T12:50:00Z",
+        at: "2026-11-01T13:00:00Z",
+        passes: 11,
+      },
+    ],
+  };
+  const { fetch, requests } = daemon(() => Response.json(records));
+  const client = createLegionDaemonClient("http://daemon.test", fetch);
+  // The pod holds its claim and no operator token, so the claim's own token and secret
+  // authenticate the read, and the secret rides in the body rather than a query string.
+  const window = {
+    claimToken: "legion-legion-legion-208-implementer",
+    secret: "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+    since: "2026-11-01T12:00:00Z",
+  };
+
+  await expect(client.releaseRecords(window)).resolves.toEqual(records as never);
+  expect(requests).toEqual([
+    {
+      method: "POST",
+      url: "http://daemon.test/legion/v1/claims/release-records",
+      body: window,
+    },
+  ]);
+
+  // A window with nothing in it is three empty lists; a list the daemon left out is no answer.
+  const empty = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon(() => Response.json({ releases: [], resumes: [], holds: [] })).fetch
+  );
+  await expect(empty.releaseRecords(window)).resolves.toEqual({
+    releases: [],
+    resumes: [],
+    holds: [],
+  });
+  const partial = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon(() => Response.json({ releases: [], resumes: [] })).fetch
+  );
+  await expect(partial.releaseRecords(window)).rejects.toBeInstanceOf(LegionDaemonContractError);
+});
+
 test("a ready carrying the capability report is the daemon's golden ReadyRequest, field for field", async () => {
   // ready.json is what the daemon's golden test wrote of a `claim.ReadyRequest` with a report, so
   // sending it as the client's input and recording the body it posts pins both sides to it.

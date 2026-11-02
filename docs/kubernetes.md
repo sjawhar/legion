@@ -3945,7 +3945,10 @@ Whatever the setting says, the daemon releases nothing while the Envoy listener 
 
 `legion state` shows a released claim apart from a suspended or a failed one, reading which it is from the operator claim routes with the bearer `operator_token_file` names, since the state body itself carries no suspender; without that bearer every stranded claim reads as the plain suspension it is, which `legion claims list --json` tells apart.
 The stranded-claim report counts a released claim only when its wake is more than 10 minutes old with no resume.
-The daemon keeps a record of each release, each resume and each pod held past the idle period, and a claim reads the deployment's records on `POST /legion/v1/claims/release-records`, naming its claim token and that claim's secret in the body: the secret is the credential, and a query string would put it in every proxy and access log between the pod and the daemon.
+The daemon keeps a record of each release, each resume and each pod held past the idle period.
+A role of an issue pod reads the deployment's records with the `legion` tool's `read_release_records`, whose one argument `since` is the RFC 3339 instant its window starts at.
+The plugin posts them on `POST /legion/v1/claims/release-records` with the claim token and secret its registration left in the session's own process, so no role handles that credential and nothing writes it to disk; the route takes it in the body because a query string would put the secret in every proxy and access log between the pod and the daemon.
+The op answers every release, resume and hold of the window, oldest first, and over them the counts a report is written from: releases, resumes by wake kind, holds by reason, the pod-hours released, the share of releases a wake followed within ten minutes, and the median, 90th percentile and maximum seconds from a wake to the woken role's first turn.
 
 #### Rolling back idle release
 

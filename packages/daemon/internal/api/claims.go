@@ -341,6 +341,10 @@ type ReleaseRecordsResponse struct {
 // claim's secret is the credential: in a query string it would reach every proxy and access log
 // between the pod and the daemon, so it rides in the body as its siblings' does.
 //
+// The caller is the plugin, not a role: the `legion` tool's read_release_records posts the claim
+// token and secret its registration left in the session's process
+// (packages/pi-shared/src/legion-phase-ops.ts), so no role handles that credential.
+//
 // It refuses a blank field by its name with 400, a claim this daemon does not hold and a wrong
 // secret with claim.InvalidSecret, and a stale plugin with the stale-contract 409, as its
 // siblings do. `since` is required and must be an RFC 3339 instant: a window nobody named is not

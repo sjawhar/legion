@@ -68,26 +68,20 @@ func TestIdleReleaseAndWake(t *testing.T) {
 	})
 
 	// This reads what the pass above drove: the five wakes happen once, and this counts what each
-	// woken role was given for them.
+	// woken role was given for them. The pass above waited for every one of these tasks, so a
+	// count of none here is a task that never came rather than one still on its way.
 	t.Run("EachWokenRoleGetsItsTaskOnceNamingTheWake", func(t *testing.T) {
-		for _, tc := range []struct{ name, want string }{
-			{idleRigDelivery, idleRigDeliveredTask},
-			{idleRigChecks, "The wake is a CI settlement on your pull request's head: " + idleRigHead(rig.issue(idleRigChecks).key)[:12] + " passed every check"},
-			{idleRigRoleWake, "The wake is a message somebody published to your role topic (" + string(rig.token(rig.issue(idleRigRoleWake))) + ")"},
-			{idleRigAgentWake, "The wake is a message somebody sent to your session (" + rig.session(rig.issue(idleRigAgentWake)) + ")"},
-			{idleRigBackstop, "The wake is the release's backstop running out"},
-		} {
-			issue := rig.issue(tc.name)
-			prompts := rig.newPrompts(issue)
+		for _, wake := range idleRigWakes(rig) {
+			prompts := rig.newPrompts(wake.issue)
 			if len(prompts) != 1 {
-				t.Errorf("%s's woken role was given %d tasks, want exactly one: %v", tc.name, len(prompts), idleRigTexts(prompts))
+				t.Errorf("%s's woken role was given %d tasks, want exactly one: %v", wake.issue.name, len(prompts), idleRigTexts(prompts))
 				continue
 			}
-			if !strings.Contains(prompts[0].Text, tc.want) {
-				t.Errorf("%s's woken role was given %q, want a task naming the wake with %q", tc.name, prompts[0].Text, tc.want)
+			if !strings.Contains(prompts[0].Text, wake.task) {
+				t.Errorf("%s's woken role was given %q, want a task naming the wake with %q", wake.issue.name, prompts[0].Text, wake.task)
 			}
-			if tc.name != idleRigDelivery && !strings.Contains(prompts[0].Text, idleRigWakePreamble) {
-				t.Errorf("%s's task does not say its pod was released and brought back: %q", tc.name, prompts[0].Text)
+			if wake.issue.name != idleRigDelivery && !strings.Contains(prompts[0].Text, idleRigWakePreamble) {
+				t.Errorf("%s's task does not say its pod was released and brought back: %q", wake.issue.name, prompts[0].Text)
 			}
 		}
 	})
@@ -263,7 +257,32 @@ var idleRigWakePreamble = workflow.WakeTask("", "")[:len("Your issue's pod had b
 // item 1's wake: the delivery is its own account of why the pod came back.
 const idleRigDeliveredTask = "the daemon had this task for you while your pod was gone"
 
-// idleRigWakeAll drives the five wakes of R3, once each, and waits for each pod to come back.
+// idleRigWake is one of the five wakes of R3: the issue whose pod it brings back, and the words
+// the task it gives its woken role names that wake with.
+type idleRigWake struct {
+	issue idleRigIssue
+	task  string
+}
+
+// idleRigWakes is the five wakes with the task each gives, written once: the pass that drives
+// them waits for each of these tasks and the subtest that counts them reads the same words, so
+// neither can assert on a wording the other does not wait for. The role token and the session id
+// are the released process's, and a relaunched process registers the same of both (the session
+// is derived from the pod and the role, idleRigRoleProcess.register), so this reads the same
+// before a wake and after it.
+func idleRigWakes(rig *idleWakeRig) []idleRigWake {
+	checks, role, agent := rig.issue(idleRigChecks), rig.issue(idleRigRoleWake), rig.issue(idleRigAgentWake)
+	return []idleRigWake{
+		{rig.issue(idleRigDelivery), idleRigDeliveredTask},
+		{checks, "The wake is a CI settlement on your pull request's head: " + idleRigHead(checks.key)[:12] + " passed every check"},
+		{role, "The wake is a message somebody published to your role topic (" + string(rig.token(role)) + ")"},
+		{agent, "The wake is a message somebody sent to your session (" + rig.session(agent) + ")"},
+		{rig.issue(idleRigBackstop), "The wake is the release's backstop running out"},
+	}
+}
+
+// idleRigWakeAll drives the five wakes of R3, once each, and waits for each pod to come back and
+// for the task its wake gives it.
 func idleRigWakeAll(t *testing.T, rig *idleWakeRig) {
 	t.Helper()
 	// 1. A delivery the daemon has for a role of the pod. It reaches the released claim through
@@ -301,6 +320,13 @@ func idleRigWakeAll(t *testing.T, rig *idleWakeRig) {
 	rig.dueBackstop(backstop)
 	for _, issue := range []idleRigIssue{delivery, checks, role, agent, backstop} {
 		rig.awaitResumed(issue, 2)
+	}
+	// The claim's resume and the task are two steps of one outbox `start` row, in that order: the
+	// row resumes the claim, waits out the relaunch, and only then delivers the row's task
+	// (outbox's start executor). A wake's task therefore reaches its woken role strictly after
+	// the resume above, so every wake waits for its own task as well.
+	for _, wake := range idleRigWakes(rig) {
+		rig.awaitTask(wake.issue, wake.task)
 	}
 	for _, issue := range []idleRigIssue{delivery, checks, role, agent, backstop} {
 		// A second pod was made for the wake. Whether one stands now is not asserted: a woken pod
