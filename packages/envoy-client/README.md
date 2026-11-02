@@ -201,11 +201,21 @@ uses the stack runs only with `LEGION_E2E_ENVOY_STACK=1`.
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
 accept optional `inReplyTo`, `supersedes`, `urgency`, `expectsReply`, and `expiresAt` metadata.
-Successful direct sends return both the envelope and listener-selected recipient; publishes return
-the envelope and an optional role holder. Network failures and 5xx responses retry once after
-250 ms. Listener error responses preserve their `error` and optional `expected` fields. The
-listener's bearer is the `token` the client is given (`envoySettings`); without one it sends no
-`Authorization` header.
+Successful direct sends return both the envelope and listener-selected recipient, and
+`duplicate` when the listener already held a send under that target and idempotency key;
+publishes return the envelope and an optional role holder. Network failures, timeouts (5 s an
+attempt, the answer's body included) and 5xx responses retry once after 250 ms, under the same
+idempotency key; a 4xx whose body does not arrive is still a refusal. A send any attempt of which
+got no answer, an unreadable 2xx or a 5xx throws `EnvoySendUnconfirmedError`, even when a later
+attempt was refused: the message may or may not have arrived. The error names its
+`idempotencyKey` and says in `resendSafe` whether the listener's dedupe key for it
+(`agent.<target>.<key>`) is one a repeat is recognised by (`MINTED_DEDUPE_KEY_PATTERN`); when it
+is, a resend under that key inside the 72-hour duplicate window is dropped as a repeat if the
+first copy arrived (`DELIVERY_DUPLICATE_WINDOW_MS` names the rare cases a recipient that restarted
+still sees it twice). A send
+refused with a 4xx on every attempt stays an `EnvoyApiError`. Listener error responses preserve their
+`error` and optional `expected` fields. The listener's bearer is the `token` the client is given
+(`envoySettings`); without one it sends no `Authorization` header.
 
 `subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
 `plugin_version` on every registration, and exposes listener warnings, including a topic that has
