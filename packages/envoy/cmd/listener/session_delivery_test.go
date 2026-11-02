@@ -440,6 +440,93 @@ func TestSessionConsumerCarriesTheGapAndTheUnsubscribeAcrossARefusedWrite(t *tes
 	}
 }
 
+// The gap a registration answers is the gap any pass of it found, kept in the registration's own
+// flag rather than read from the pass before it (registerSession): a pass that can be given no
+// consumer answers none at all, and a pass that finds the consumer already made is told no gap,
+// so a gap read from the previous pass's answer alone is lost the moment those two follow the
+// create. The three passes here are that sequence. Pass one creates the consumer at a start
+// below the stream's first sequence and is told the gap, and the unsubscribe in its window
+// refuses its write. Pass two is a serving-port body the grant has gone from, so it is given no
+// consumer and answers none, which a serving-port body is registered with
+// (sessionDelivery.register), and the second unsubscribe refuses its write too. Pass three finds
+// the consumer pass one created, is told no gap of its own, and answers. Without the flag that
+// answer says gap false, and the session never learns, from this registration, that messages it
+// would have been delivered are gone.
+func TestSessionConsumerKeepsTheGapAcrossAPassThatIsGivenNoConsumer(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID  = "ses_gap_three_passes"
+		kept       = "notifications.dispatch.issue.THREE-1.>"
+		firstDrop  = "notifications.dispatch.issue.THREE-2.>"
+		secondDrop = "notifications.dispatch.issue.THREE-3.>"
+	)
+	// A row with a topic for each pass to lose, and no consumer yet: the first pass creates it.
+	if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"},
+		[]string{kept, firstDrop, secondDrop}); err != nil {
+		t.Fatalf("seed the session's interest row: %v", err)
+	}
+	// Two messages gone from the stream's head, as aged-out ones are, so a resume point below
+	// its first sequence is a gap.
+	gone := []uint64{rig.store(t, kept), rig.store(t, kept)}
+	rig.store(t, kept)
+	for _, seq := range gone {
+		if err := rig.harness.client.JS().DeleteMsg(bus.Stream, seq); err != nil {
+			t.Fatalf("delete the stored message at %d: %v", seq, err)
+		}
+	}
+	registration := `{"session_id":"` + sessionID + `","port":8099,"host":"127.0.0.1","topics":["` + kept + `"],
+		"delivery":{"consumer":true,"epoch":"e","resume":{"stream_id":"` + rig.streamID(t) + `","seq":` + jsonUint(gone[0]) + `}}}`
+
+	// Each pass's hook runs between that pass's plan and its write. The first two unsubscribe a
+	// topic their plan merged, which refuses their writes; the second also takes the grant away,
+	// so that pass can be given no consumer, and the third gives it back, so the pass that
+	// answers holds one.
+	passes := 0
+	rig.deps.consumers.beforeRegister = func() {
+		passes++
+		rig.deps.consumers.grantMu.Lock()
+		if passes == 2 {
+			rig.deps.consumers.noGrantUntil = rig.deps.consumers.now().Add(time.Minute)
+		} else {
+			rig.deps.consumers.noGrantUntil = time.Time{}
+		}
+		rig.deps.consumers.grantMu.Unlock()
+		dropped := ""
+		switch passes {
+		case 1:
+			dropped = firstDrop
+		case 2:
+			dropped = secondDrop
+		default:
+			return
+		}
+		if err := rig.harness.registry.Remove(context.Background(), sessionID, []string{dropped}); err != nil {
+			t.Errorf("unsubscribe from %s: %v", dropped, err)
+		}
+	}
+	answer := rig.subscribe(t, registration)
+	rig.deps.consumers.beforeRegister = nil
+
+	if passes != 3 {
+		t.Fatalf("the registration made %d passes, want the three the gap has to cross", passes)
+	}
+	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
+		t.Fatalf("answer %s, want delivery mode consumer: the pass that answered was given the consumer", answer.raw)
+	}
+	if answer.Delivery.Gap == nil || !*answer.Delivery.Gap {
+		t.Fatalf("answer %s, want gap true: the pass that created the consumer found one, and neither the pass given no consumer nor the pass that found that consumer may drop it", answer.raw)
+	}
+	// The row the registration stored is the one both unsubscribes left, so the two re-plans
+	// were the writes they refused.
+	stored, err := rig.harness.registry.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the stored interest row: %v", err)
+	}
+	if slices.Contains(stored.Topics, firstDrop) || slices.Contains(stored.Topics, secondDrop) {
+		t.Fatalf("stored topics %v; the unsubscribes removed %s and %s", stored.Topics, firstDrop, secondDrop)
+	}
+}
+
 // A registration whose row is rewritten under every plan it makes is answered the
 // bus-unavailable 503 and writes nothing: the plugin's next heartbeat registers again, rather
 // than this one spinning against a writer that keeps winning. The three plans are written out

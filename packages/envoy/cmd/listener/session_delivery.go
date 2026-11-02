@@ -105,31 +105,6 @@ func (o sessionDeliveryOutcome) relayed() bool {
 	return o.answer != nil && o.answer.Mode == deliveryModeConsumer
 }
 
-// carrying is what this pass of a registration answers once the gap an earlier pass of the same
-// registration found is kept (registerSession re-plans and registers again when another writer
-// stores the session's row in between).
-//
-// Only the pass that creates the consumer is told its start fell below the stream's first
-// sequence (bus.SessionConsumers.Ensure); a later pass finds that consumer and reports none. So
-// within one registration the flag has to survive the re-plan, or a session whose row another
-// writer stored while it registered would be answered gap false and never learn, from this
-// registration, that messages it would have been delivered are gone.
-//
-// Nothing else is carried. A pass that can give no consumer answers none, and its answer stands:
-// a serving-port body is answered rather than refused (register), and keeping an earlier pass's
-// consumer there would write the entry as consumer delivery while the filter that consumer holds
-// is an earlier plan's, which the row this registration stored disagrees with.
-func (o sessionDeliveryOutcome) carrying(earlier sessionDeliveryOutcome) sessionDeliveryOutcome {
-	if o.answer == nil || earlier.answer == nil || earlier.answer.Gap == nil || !*earlier.answer.Gap {
-		return o
-	}
-	gap := true
-	answer := *o.answer
-	answer.Gap = &gap
-	o.answer = &answer
-	return o
-}
-
 // sessionRelay is what the relay of session consumers hears from registrations.
 type sessionRelay interface {
 	// registered reports a registration of sessionID that recorded consumer delivery on its entry.
@@ -157,8 +132,9 @@ type sessionDelivery struct {
 	// beforeRegister runs at the top of each register call, before the consumer's filter is set;
 	// nil unless a test sets it. The window between a registration's plan and its filter is where
 	// another writer's row lands and makes the plan's compare-and-swap fail, and only a test that
-	// can write in that window can drive the re-plan and the second filter the route then makes
-	// (subscribeHandler's loop).
+	// can write in that window can drive the re-plan, and the filter the pass after it sets, of
+	// registerSession's loop. It runs for every pass of one registration, so a test that counts
+	// its calls drives each pass of that registration on its own.
 	beforeRegister func()
 	// locks keeps the consumer calls made for one session one at a time: a registration's create or
 	// filter update, an unsubscribe's filter update and the relay's restart at the ack floor, which

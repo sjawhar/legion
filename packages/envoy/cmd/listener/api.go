@@ -1498,11 +1498,21 @@ type registeredSession struct {
 // session's row in the seconds the consumer call takes: the write is refused the revision its
 // plan read (store.ErrInterestPlanConflict), or it finds the row already holds everything the
 // plan would add and stores nothing, leaving a row wider than the filter. Either way it plans
-// again from the row that is there, filters on that plan, and writes again, and what the first
-// pass learned of the consumer is carried across (sessionDeliveryOutcome.carrying). Answering
-// 200 with the filter of an earlier plan would leave a topic the registration was answered 200
-// for out of the consumer until the session's next heartbeat, and every message published on it
-// in that window undelivered.
+// again from the row that is there, filters on that plan, and writes again. Answering 200 with
+// the filter of an earlier plan would leave a topic the registration was answered 200 for out
+// of the consumer until the session's next heartbeat, and every message published on it in that
+// window undelivered.
+//
+// Nothing a pass answers carries into the next, save the gap: a pass that can give no consumer
+// answers none, and that answer stands (sessionDelivery.register). The gap is the one thing this
+// loop keeps of its own, in a flag, because only the pass that creates the consumer is told its
+// start fell below the stream's first sequence (bus.SessionConsumers.Ensure): a pass that is
+// given no consumer answers no gap at all, and a pass that finds the consumer already made
+// answers none. The flag starts false, turns on at the first pass whose answer reports a gap and
+// never off again, and the answer this registration returns carries it. It holds within this
+// registration's passes alone: the session's next registration finds the consumer there and is
+// told no gap, so this answer is the only one telling the session that messages it would have
+// been delivered are gone.
 //
 // A registration this listener can give no consumer is refused, which the caller answers by
 // name: a session is delivered to through its own consumer alone, so such a registration must
@@ -1522,6 +1532,9 @@ func (d *listenerDeps) registerSession(
 	logger *logging.Logger,
 ) (registeredSession, *deliveryRefusal, error) {
 	var registered registeredSession
+	// The gap any pass of this registration found, which the answer below carries whichever pass
+	// answers.
+	gap := false
 	for attempt := 1; attempt <= registrationPlanAttempts; attempt++ {
 		plan := store.InterestPlan{}
 		var err error
@@ -1538,7 +1551,10 @@ func (d *listenerDeps) registerSession(
 		if refusal != nil {
 			return registeredSession{}, refusal, nil
 		}
-		registered.delivery = pass.carrying(registered.delivery)
+		if pass.answer != nil && pass.answer.Gap != nil && *pass.answer.Gap {
+			gap = true
+		}
+		registered.delivery = pass
 		row, err := d.registry.UpsertPlanned(ctx, store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
@@ -1548,6 +1564,11 @@ func (d *listenerDeps) registerSession(
 		case err == nil:
 			registered.row = row
 			if slices.Equal(row.Topics, plan.Topics) {
+				if registered.delivery.answer != nil {
+					answer := *registered.delivery.answer
+					answer.Gap = &gap
+					registered.delivery.answer = &answer
+				}
 				return registered, nil, nil
 			}
 			logger.Warn("listener plans the session's interest again: the row it stored is not the one it filtered on",
