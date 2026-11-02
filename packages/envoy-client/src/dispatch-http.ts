@@ -163,11 +163,13 @@ export class DispatchWriteUnsettledError extends Error {
     let why = "an earlier attempt of the write may have reached Dispatch";
     if (last instanceof DispatchGatewayError) {
       answer = last.answer;
+    } else if (last instanceof DispatchServiceError && last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+      // Dispatch's own text tells the caller to ask again under the same key, which the client
+      // already did and a person or agent reading this cannot: the code alone names the answer.
+      answer = last.code;
+      why = "Dispatch was still running an earlier attempt of the write";
     } else if (last instanceof DispatchServiceError) {
       answer = `${last.code}: ${last.message}`;
-      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
-        why = "Dispatch was still running an earlier attempt of the write";
-      }
     } else {
       answer = unanswered ?? last.message;
       why = "an attempt of the write may have reached Dispatch";

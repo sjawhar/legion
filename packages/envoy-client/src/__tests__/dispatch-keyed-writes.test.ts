@@ -647,7 +647,7 @@ describe("DispatchClient's writes", () => {
     expect(running.sent).toHaveLength(20);
     expect(stillRunning).toBeInstanceOf(DispatchWriteUnsettledError);
     expect(stillRunning.message).toBe(
-      "KEY_IN_FLIGHT: an earlier request with this key is still running (the last of 20 " +
+      "KEY_IN_FLIGHT (the last of 20 " +
         "attempts), and Dispatch was still running an earlier attempt of the write, so it may or " +
         "may not have taken effect. Dispatch finishes an attempt it received whatever this " +
         "command does, so read the write back before you send it again: a new command sends it " +
@@ -873,7 +873,7 @@ describe("DispatchClient's writes", () => {
     // Cut at 50 s, then asked at 51 and 53 s; the next ask would start at 56 s.
     expect(sent).toHaveLength(3);
     expect(error.message).toBe(
-      "KEY_IN_FLIGHT: an earlier request with this key is still running (the last of 3 " +
+      "KEY_IN_FLIGHT (the last of 3 " +
         "attempts), and Dispatch was still running an earlier attempt of the write, so it may or " +
         `may not have taken effect${keyedTail}`
     );

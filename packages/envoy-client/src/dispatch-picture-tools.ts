@@ -14,7 +14,7 @@ import type {
   Event,
 } from "@legion/contracts";
 import { overCapMessage, SESSION_ID_PATTERN } from "@legion/contracts";
-import type { DispatchClient } from "./dispatch-http";
+import { type DispatchClient, DispatchWriteUnsettledError } from "./dispatch-http";
 import { parseDispatchRef } from "./dispatch-owner";
 import {
   type DatedText,
@@ -160,8 +160,15 @@ export async function textWithPictures(
         addresses.length === 0
           ? ""
           : `; the pictures before it are uploaded (${addresses.join(", ")})`;
+      // An unsettled upload may still land on Dispatch, so it is not said to have failed; the
+      // write's own message already ends its sentence.
+      const outcome =
+        error instanceof DispatchWriteUnsettledError
+          ? "may or may not have been uploaded"
+          : "was not uploaded";
       throw new Error(
-        `images: ${picture.path} was not uploaded: ${messageFor(error)}. Nothing was posted${earlier}.`
+        `images: ${picture.path} ${outcome}: ${messageFor(error).replace(/\.$/, "")}. Nothing ` +
+          `was posted${earlier}.`
       );
     }
     const address = `dispatch://${owner}/artifact/${uploaded.artifact.slug}@v${uploaded.version.number}`;

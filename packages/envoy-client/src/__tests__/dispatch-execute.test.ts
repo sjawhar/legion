@@ -4742,7 +4742,7 @@ describe("executeDispatchTool", () => {
           throw new TypeError("fetch failed");
         },
         inFlight,
-        "KEY_IN_FLIGHT: an earlier request with this key is still running (the last of 20 " +
+        "KEY_IN_FLIGHT (the last of 20 " +
           "attempts), and Dispatch was still running an earlier attempt of the write, so it may " +
           `or may not have taken effect${keyedTail}${unknownSentence}`,
         20,
