@@ -140,6 +140,16 @@ func TestStatementTimings(t *testing.T) {
 	// database, which is the reading R6's bound is judged on and which the runner fails when
 	// the after median is not below the before. On the before side there is no after text to
 	// run, so main's own is measured alone, as the other four document-arm statements are.
+	//
+	// The pair's subject is subjects.ProbeLexemes, the project's twenty commonest words, not
+	// the three the other statements are measured on. On three words the arm looks a handful
+	// of candidate documents up by id, both texts cost the same to within a percent either
+	// way, and a committed "lower after" there decides nothing: measured four times on the
+	// 13 GB fixture that pair came out red three times and green once. Twenty common words
+	// are the list a question of a paragraph or two hands the picker, and they put the cost in
+	// the document arm, where the two texts' plans differ: four runs there read 20.533 ms to
+	// 19.581 ms, 20.685 to 19.506, 20.648 to 19.484 and 20.626 to 19.774.
+	//
 	// The after text binds the lexemes ORed as $5; main's builds that tsquery in a CTE of its
 	// own and takes four arguments.
 	mainProbeArguments := []any{subjects.Project, lexemes, "", (*string)(nil)}
@@ -147,9 +157,11 @@ func TestStatementTimings(t *testing.T) {
 		runner.Head(t, "relatedProbeSQL"+label, benchtime.Statement{SQL: side.relatedProbeSQL, Args: mainProbeArguments})
 		return
 	}
+	pairLexemes := subjects.ProbeLexemes
+	pairArguments := []any{subjects.Project, pairLexemes, "", (*string)(nil)}
 	runner.Pair(t, "relatedProbeSQL",
-		benchtime.Statement{SQL: mainRelatedProbeSQL, Args: mainProbeArguments},
-		benchtime.Statement{SQL: relatedProbeSQL, Args: append(slices.Clone(mainProbeArguments), relatedProbeTSQuery(lexemes))})
+		benchtime.Statement{SQL: mainRelatedProbeSQL, Args: pairArguments},
+		benchtime.Statement{SQL: relatedProbeSQL, Args: append(slices.Clone(pairArguments), relatedProbeTSQuery(pairLexemes))})
 }
 
 // documentArmStatements are the five statements whose document arm this change moved onto

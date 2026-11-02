@@ -44,23 +44,34 @@ type Subjects struct {
 	RareWord   string
 	MediumWord string
 	CommonWord string
+	// ProbeLexemes are the project's probeLexemeCount commonest words, the subject the
+	// related-terms probe is measured on: a question of a paragraph or two hands its picker a
+	// list that long, and words most of the project's documents hold are what put the cost in
+	// the probe's document arm, where the two texts' plans differ. On three words that arm
+	// looks a handful of candidate documents up by id and both texts cost the same to within a
+	// percent either way, so a pair on that subject decides nothing; on these twenty the after
+	// text is 4 to 6 per cent lower, against a spread between runs under one.
+	ProbeLexemes []string
 }
 
 // rareWordFloor and mediumWordFloor are the item counts the two scarcer words are taken above. A
 // word in one or two items measures an arm that returns almost nothing, and a search's cost is
 // in the rows it ranks; the floors keep each word in the class the measurement is about.
+// probeLexemeCount is how many of the commonest words the probe's own subject holds.
 const (
-	rareWordFloor   = 100
-	mediumWordFloor = 1000
+	rareWordFloor    = 100
+	mediumWordFloor  = 1000
+	probeLexemeCount = 20
 )
 
 // String is the one line a run records its subjects as. The query vector is given by its length
 // alone: it is 1,536 numbers, and what identifies it is the issue it is the embedding of.
 func (s Subjects) String() string {
 	return fmt.Sprintf(
-		"project=%s issue=%s anchored_document=%s sessions=%s model=%s query_vector=%d bytes of %s's embedding words=%s/%s/%s",
+		"project=%s issue=%s anchored_document=%s sessions=%s model=%s query_vector=%d bytes of %s's embedding words=%s/%s/%s probe_lexemes=%d",
 		s.Project, s.Issue, s.AnchoredDocument, strings.Join(s.Sessions, ","),
-		s.EmbeddingModel, len(s.QueryVector), s.Issue, s.RareWord, s.MediumWord, s.CommonWord)
+		s.EmbeddingModel, len(s.QueryVector), s.Issue, s.RareWord, s.MediumWord, s.CommonWord,
+		len(s.ProbeLexemes))
 }
 
 // bindSubjects reads every subject. A subject the database does not hold fails the run with what
@@ -119,6 +130,21 @@ func bindSubjects(t *testing.T, conn *pgx.Conn) Subjects {
 	subjects.CommonWord = word(t, conn, subjects.Project, "the commonest", `
 		select s.lexeme from search_term_stats s
 		where s.project_key = $1 and s.ndoc >= $2 order by s.ndoc desc, s.lexeme limit 1`, 0)
+	probeRows, err := conn.Query(ctx, `
+		select s.lexeme from search_term_stats s
+		where s.project_key = $1 and s.ndoc >= $2 order by s.ndoc desc, s.lexeme limit $3`,
+		subjects.Project, mediumWordFloor, probeLexemeCount)
+	if err != nil {
+		t.Fatalf("read %s's middling words: %v", subjects.Project, err)
+	}
+	subjects.ProbeLexemes, err = pgx.CollectRows(probeRows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read %s's middling words: %v", subjects.Project, err)
+	}
+	if len(subjects.ProbeLexemes) < probeLexemeCount {
+		t.Fatalf("%s holds %d words in at least %d of its items, and the probe's subject is %d: the term statistics of this database are not the seed's",
+			subjects.Project, len(subjects.ProbeLexemes), mediumWordFloor, probeLexemeCount)
+	}
 	return subjects
 }
 
