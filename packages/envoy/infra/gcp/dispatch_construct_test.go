@@ -57,11 +57,17 @@ var (
 	dispatchConstructTailscale = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + tailscaleProviderType + "::tailscale-example"), ID: "tailscale-example-id"}
 )
 
+// dispatchConstructProviders are the three provider references a consumer's program declares,
+// as a function so that no caller can mutate a map another test reads.
+func dispatchConstructProviders() map[tokens.Package]p.ProviderReference {
+	return map[tokens.Package]p.ProviderReference{
+		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom, "tailscale": dispatchConstructTailscale,
+	}
+}
+
 func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bool, dependsOn ...resource.URN) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
-	return constructDispatchWithProviders(t, inputs, dryRun, map[tokens.Package]p.ProviderReference{
-		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom, "tailscale": dispatchConstructTailscale,
-	}, dependsOn...)
+	return constructDispatchWithProviders(t, inputs, dryRun, dispatchConstructProviders(), dependsOn...)
 }
 
 // constructDispatchWithProviders constructs the component through the plugin's own Construct, the
@@ -74,14 +80,12 @@ func constructDispatchWithProviders(t *testing.T, inputs map[string]property.Val
 	return m, response, err
 }
 
-// constructDispatchOnMocks constructs the component through the plugin's own Construct on mocks
-// the caller owns, so a test can set Mocks.Preview, which answers a create with no ID as a
-// preview does.
-func constructDispatchOnMocks(t *testing.T, m *pulumitest.Mocks, inputs map[string]property.Value, dryRun bool) (p.ConstructResponse, error) {
+// constructDispatchOnMocks constructs the component on mocks the caller owns, so a test can set
+// Mocks.Preview, which answers a create with no ID as a preview does. The engine's dry run is
+// that same flag: the two cannot disagree.
+func constructDispatchOnMocks(t *testing.T, m *pulumitest.Mocks, inputs map[string]property.Value) (p.ConstructResponse, error) {
 	t.Helper()
-	return pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, map[tokens.Package]p.ProviderReference{
-		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom, "tailscale": dispatchConstructTailscale,
-	})
+	return pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, m.Preview, dispatchConstructProviders())
 }
 
 // Every Input may come from another resource: tailnetAuthKey typically is the consumer's

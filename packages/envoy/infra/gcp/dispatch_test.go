@@ -169,7 +169,14 @@ func newTailscaleProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) 
 func runDispatchWithProviders(t *testing.T, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) (*pulumitest.Mocks, error) {
 	t.Helper()
 	m := newMocks()
-	err := m.Run(func(ctx *pulumi.Context) error {
+	return m, runDispatchOnMocks(t, m, name, args, providers...)
+}
+
+// runDispatchOnMocks is runDispatchWithProviders on mocks the caller owns, so a test can set
+// Mocks.Preview before the program runs.
+func runDispatchOnMocks(t *testing.T, m *pulumitest.Mocks, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) error {
+	t.Helper()
+	return m.Run(func(ctx *pulumi.Context) error {
 		var declared []pulumi.ProviderResource
 		for _, newProvider := range providers {
 			provider, err := newProvider(ctx)
@@ -185,7 +192,6 @@ func runDispatchWithProviders(t *testing.T, name string, args *gcp.DispatchArgs,
 		_, err := gcp.NewDispatch(ctx, name, args, opts...)
 		return err
 	})
-	return m, err
 }
 
 func TestDispatchSettingsApplyDefaults(t *testing.T) {
@@ -1392,18 +1398,17 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	const roleType, bindingType = "kubernetes:rbac.authorization.k8s.io/v1:Role", "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
 	require.Len(t, registrationsOf(m, roleType), 1, "the component registers one Role")
-	require.Len(t, registrationsOf(m, bindingType), 1, "the component registers one RoleBinding")
+	require.Len(t, registrationsOf(m, roleBindingType), 1, "the component registers one RoleBinding")
 	role := m.Named(t, roleType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, []any{map[string]any{
 		"apiGroups": []any{""}, "resources": []any{"secrets"}, "resourceNames": []any{"example-dispatch-tailnet-tls"},
 		"verbs": []any{"get", "patch"},
 	}}, role["rules"])
-	binding := m.Named(t, bindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
+	binding := m.Named(t, roleBindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "example-dispatch-tailnet-tls"}, binding["roleRef"])
 	require.Equal(t, []any{map[string]any{"kind": "ServiceAccount", "name": "example-dispatch-tailnet", "namespace": "dispatch"}}, binding["subjects"])
-	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, bindingType)...) {
+	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, roleBindingType)...) {
 		for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
 			require.NotContains(t, s, "tailscale-state", "%s %s", r.Type, r.Name)
 		}
@@ -1441,27 +1446,15 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 // serves it through Construct, which is the artifact a consumer installs and the path its
 // pulumi preview takes.
 func TestDispatchFrontDoorBindingWaitsForItsRoleOnPreview(t *testing.T) {
-	const bindingType = "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
 	for _, surface := range []struct {
 		name string
-		run  func(t *testing.T, m *pulumitest.Mocks, preview bool) error
+		run  func(t *testing.T, m *pulumitest.Mocks) error
 	}{
-		{"component", func(t *testing.T, m *pulumitest.Mocks, preview bool) error {
-			return m.Run(func(ctx *pulumi.Context) error {
-				var providers []pulumi.ProviderResource
-				for _, newProvider := range []func(*pulumi.Context) (pulumi.ProviderResource, error){newGCPProvider, newRandomProvider, newTailscaleProvider} {
-					provider, err := newProvider(ctx)
-					if err != nil {
-						return err
-					}
-					providers = append(providers, provider)
-				}
-				_, err := gcp.NewDispatch(ctx, "example-dispatch", dispatchArgs(), pulumi.Providers(providers...))
-				return err
-			})
+		{"component", func(t *testing.T, m *pulumitest.Mocks) error {
+			return runDispatchOnMocks(t, m, "example-dispatch", dispatchArgs(), newGCPProvider, newRandomProvider, newTailscaleProvider)
 		}},
-		{"plugin", func(t *testing.T, m *pulumitest.Mocks, preview bool) error {
-			_, err := constructDispatchOnMocks(t, m, dispatchConstructBaseInputs(), preview)
+		{"plugin", func(t *testing.T, m *pulumitest.Mocks) error {
+			_, err := constructDispatchOnMocks(t, m, dispatchConstructBaseInputs())
 			return err
 		}},
 	} {
@@ -1469,8 +1462,8 @@ func TestDispatchFrontDoorBindingWaitsForItsRoleOnPreview(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/preview=%v", surface.name, preview), func(t *testing.T) {
 				m := newMocks()
 				m.Preview = preview
-				require.NoError(t, surface.run(t, m, preview))
-				ref := m.Named(t, bindingType, "example-dispatch-tailnet-tls").Inputs["roleRef"].ObjectValue()
+				require.NoError(t, surface.run(t, m))
+				ref := m.Named(t, roleBindingType, "example-dispatch-tailnet-tls").Inputs["roleRef"].ObjectValue()
 				require.Equal(t, "Role", ref["kind"].StringValue())
 				name := ref["name"]
 				if preview {
@@ -2762,6 +2755,8 @@ func TestDispatchRefusesEphemeralStorageBeforeRegistering(t *testing.T) {
 const (
 	podDisruptionBudgetType = "kubernetes:policy/v1:PodDisruptionBudget"
 	priorityClassType       = "kubernetes:scheduling.k8s.io/v1:PriorityClass"
+	roleType                = "kubernetes:rbac.authorization.k8s.io/v1:Role"
+	roleBindingType         = "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
 )
 
 // safeToEvict reports whether deployment's pod template carries the cluster autoscaler's
