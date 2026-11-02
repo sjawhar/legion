@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -282,10 +283,13 @@ func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
 // hand-over's row drops its fence with it: the write that would hand the child to Legion never
 // lands, so no admission consumes the fence, and one left behind would keep naming the child's own
 // tree as its Sandbox's home (store.IssueSandboxHome) for good. The child stays where it is until
-// a person labels it, which admits it as an orphan. A READY merge row tells the issue's architect
-// why it ended without a merge (readyMergeEnded): its notice row is written in the finish's own
-// transaction, which owns the commit hook that write registers (projectRecords, intake.OnCommit),
-// so the notice's lane is woken as the finish commits and the notice is published without a sweep.
+// a person labels it, which admits it as an orphan. A message row Dispatch refused tells the
+// issue's architect what was not posted and Dispatch's own refusal (messagePostRefused), since
+// nothing else would: the message is the daemon's only word on the issue for what it carries. A
+// READY merge row tells the issue's architect why it ended without a merge (readyMergeEnded).
+// Each of those notice rows is written in the finish's own transaction, which owns the commit
+// hook that write registers (projectRecords, intake.OnCommit), so the notice's lane is woken as
+// the finish commits and the notice is published without a sweep.
 func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause error) error {
 	payload, err := record.DecodeOutboxPayload(row)
 	if err != nil {
@@ -308,6 +312,15 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 				r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
 					"row", row.ID, "issue", row.Issue, "tree", value.HandOverTree, "linger", value.HandOverLinger)
 			}
+		}
+	case record.MessagePost:
+		notice, err := record.NewOutboxRow(row.Issue, messagePostRefused(row.Issue, value, cause), r.now().UTC())
+		if err != nil {
+			return err
+		}
+		follow = func(tx pgx.Tx) error { return r.records.Enqueue(scoped, tx, notice) }
+		told = func() {
+			r.log.Error("outbox Dispatch message refused and dropped; its architect is told", "row", row.ID, "issue", row.Issue, "error", cause)
 		}
 	case record.ReadyMerge:
 		notice, err := record.NewOutboxRow(row.Issue, readyMergeEnded(cause), r.now().UTC())
@@ -341,6 +354,27 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 		told()
 	}
 	return nil
+}
+
+// messageRefusedPreview is how much of a refused message's first line its notice quotes: enough to
+// know which message it was, short enough that the notice is one readable paragraph whatever the
+// message was.
+const messageRefusedPreview = 200
+
+// messagePostRefused is the architect's notice of a Dispatch message the daemon could not post:
+// Dispatch refused the body the way it would refuse every attempt (dispatch.PermanentRefusal), a
+// block over its own bound among them, so the row is finished and the message is on no issue.
+// Nothing else would tell anyone, since the message is the daemon's only word on the issue for
+// what it carries. The reason names the issue, how long the message is, its first line (a READY
+// packet opens with its own `READY #<n> at <sha>` line) and Dispatch's own refusal.
+func messagePostRefused(issue string, payload record.MessagePost, cause error) record.Notice {
+	first, _, _ := strings.Cut(payload.Body, "\n")
+	if runes := []rune(first); len(runes) > messageRefusedPreview {
+		first = string(runes[:messageRefusedPreview]) + "…"
+	}
+	return record.Notice{Kind: "message-refused", Role: claim.RoleArchitect,
+		Reason: fmt.Sprintf("Dispatch refused the message Legion was posting on %s, so it is on no issue and the daemon will not post it again. The message is %d characters and begins %q. Dispatch answered: %s",
+			issue, utf8.RuneCountInString(payload.Body), first, cause)}
 }
 
 // retry returns row to the outbox, due again after its backoff, or after the wait GitHub asks for
@@ -413,15 +447,17 @@ func retryBackoff(attempts int) time.Duration {
 }
 
 // permanentRefusal is a row's failure no retry repairs, so the row is finished with its follow-up
-// (finishRefused) rather than retried: a Dispatch status write Dispatch refuses the same way every
-// time (dispatch.PermanentRefusal), which would hold every later status of its issue behind it, and
-// a READY merge GitHub refuses where it still stands (ghautomerge.Refused), whose pull request
-// GitHub has shown closed or at another head than the record awaits for longer than
-// ghautomerge.LagBound at now (ghautomerge.Lagging.Stalled), or whose arm or merge-queue entry
-// someone else removed without a merge (ghautomerge.Removed), which a retry must not undo.
+// (finishRefused) rather than retried: a Dispatch status write or message post Dispatch refuses the
+// same way every time (dispatch.PermanentRefusal) — a refused status would hold every later status
+// of its issue behind it, and a refused post, a packet with one block over Dispatch's own bound
+// among them, would retry on its backoff for ever and tell nobody — and a READY merge GitHub
+// refuses where it still stands (ghautomerge.Refused), whose pull request GitHub has shown closed
+// or at another head than the record awaits for longer than ghautomerge.LagBound at now
+// (ghautomerge.Lagging.Stalled), or whose arm or merge-queue entry someone else removed without a
+// merge (ghautomerge.Removed), which a retry must not undo.
 func permanentRefusal(row record.OutboxRow, err error, now time.Time) bool {
 	switch row.Kind {
-	case record.OutboxKindDispatchStatus:
+	case record.OutboxKindDispatchStatus, record.OutboxKindDispatchMessage:
 		_, permanent := dispatch.PermanentRefusal(err)
 		return permanent
 	case record.OutboxKindReadyMerge:

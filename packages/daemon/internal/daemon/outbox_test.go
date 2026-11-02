@@ -682,6 +682,30 @@ func TestOutboxMessagePostsItsMarkerAndReturnsReadFailure(t *testing.T) {
 	}
 }
 
+// A Dispatch message post Dispatch refuses the same way on every attempt — one block of the body
+// over Dispatch's own block bound — is finished refused with its architect's notice, as a refused
+// status write is, rather than retried on a backoff for ever with nobody told. An outage is no
+// refusal and still retries.
+func TestAMessagePostDispatchRefusesIsFinishedAndItsArchitectTold(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-208", record.MessagePost{Body: "READY #42 at head\n\nthe rest of the packet"}, time.Now())
+	now := time.Now().UTC()
+	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
+		Message: "body block 2 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
+	if !permanentRefusal(row, fmt.Errorf("post Dispatch message for LEGION-208: %w", refusal), now) {
+		t.Fatal("a CAP_EXCEEDED post is retried, want it finished refused")
+	}
+	outage := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
+	if permanentRefusal(row, fmt.Errorf("post Dispatch message for LEGION-208: %w", outage), now) {
+		t.Fatal("a 503 post is finished refused, want it retried")
+	}
+	notice := messagePostRefused("LEGION-208", record.MessagePost{Body: "READY #42 at head\n\nthe rest of the packet"}, refusal)
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, "LEGION-208") || !strings.Contains(notice.Reason, "READY #42 at head") ||
+		strings.Contains(notice.Reason, "the rest of the packet") || !strings.Contains(notice.Reason, refusal.Error()) {
+		t.Fatalf("the notice = %+v, want message-refused to the architect naming the issue, the first line alone and Dispatch's refusal", notice)
+	}
+}
+
 // A controller notice row goes to the controller topic of the daemon's own project, the one its
 // controller subscribes to, and to no issue topic, under the row's own key, as the Notice it is.
 func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {

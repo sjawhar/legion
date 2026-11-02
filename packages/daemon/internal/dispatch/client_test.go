@@ -693,6 +693,41 @@ func TestMessageBodiesSincePagesNewestFirstUntilTheOutboxWindow(t *testing.T) {
 	}
 }
 
+// An event carries at most the first part of a long body and says so; the whole of it, the outbox
+// marker at its end included, is read from the message itself. A body the event carries whole is
+// read from the event alone, so the common message costs no second request.
+func TestMessageBodiesSinceReadsACutBodyFromItsMessage(t *testing.T) {
+	since := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
+	whole := strings.Repeat("x", 40000) + "\n\n<!-- legion-outbox:7 -->"
+	reads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		switch r.URL.Path {
+		case "/api/v1/issues/LEGION-5/events":
+			writeJSON(t, w, []map[string]any{
+				{"seq": 9, "type": "message.created", "created_at": "2026-09-23T01:02:00Z",
+					"payload": map[string]any{"id": "f1c0ffee-0000-4000-8000-000000000001", "body": whole[:32000], "body_truncated": true}},
+				{"seq": 8, "type": "message.created", "created_at": "2026-09-23T01:01:00Z",
+					"payload": map[string]any{"id": "f1c0ffee-0000-4000-8000-000000000002", "body": "A short daemon notice."}},
+			})
+		case "/api/v1/issues/LEGION-5/messages/f1c0ffee-0000-4000-8000-000000000001":
+			reads++
+			writeJSON(t, w, map[string]any{"message": map[string]any{"id": "f1c0ffee-0000-4000-8000-000000000001", "body": whole}, "replies": []any{}})
+		default:
+			t.Fatalf("request = %s %s, want the issue's events or its cut message", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	bodies, err := New(server.URL, dispatchToken).MessageBodiesSince(context.Background(), "LEGION-5", since)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if reads != 1 || len(bodies) != 2 || bodies[0] != whole || bodies[1] != "A short daemon notice." {
+		t.Fatalf("message reads=%d bodies=%d, want the cut body read whole from its message and the short one from its event alone", reads, len(bodies))
+	}
+}
+
 // BuildCommit is the build Dispatch's server fleet serves: its /healthz `fleet_commit` when the body
 // carries the field, whatever this process's own `commit`, and none ("") when it is null; a body
 // without the field, from a Dispatch older than the fleet's announcement, is read for its `commit`,

@@ -1,7 +1,6 @@
 package prompts
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
-	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // A broken role sequence drops the shared core, uses a root prompt for a child, or makes the Go
@@ -54,9 +52,9 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			"read CI for everything static", "try to break it", "dispatch handoff-write --issue <issue> --phase test"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
 			"Retro's `docs/solutions/` commits may land above your approved head", "`pullRequest.head` is the commit the pull request stands on"}},
-		// The packet limit the merger is told is the one the handoff route enforces.
+		// The merger is told what Dispatch does to a packet with one long block.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base",
-			"that GitHub's compare lists as removed", "`READY_DISARM_PENDING`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
+			"that GitHub's compare lists as removed", "`READY_DISARM_PENDING`", "Dispatch bounds a body block by block and refuses a block over its own bound",
 			"`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
 			"`GITHUB_READ_FAILED`", "`DESIGN_GATE_CLOSED`", "`NO_PULL_REQUEST`", "`READY_REQUIRED`"}},
 	} {

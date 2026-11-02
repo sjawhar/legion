@@ -1115,9 +1115,9 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 		t.Fatalf("close facts = %#v", got)
 	}
 
-	// A child is not the root, a sub-architect of the tree is not the root's architect though it
-	// names the root, a phase worker is not the architect, and a reason too long for one message
-	// would never post.
+	// A child is not the root, a sub-architect of the tree is not the root's architect, and a
+	// phase worker is not the architect. A long reason is not refused: Dispatch bounds the
+	// message the daemon makes of it block by block, so the route holds it to no length.
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
 		"grantId": architect.grant(t), "issue": "LEGION-209", "reason": "moot",
 	}, nil), http.StatusForbidden, "ROOT_REQUIRED")
@@ -1129,10 +1129,14 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
 		"grantId": worker.grant(t), "issue": "LEGION-208", "reason": "moot",
 	}, nil), http.StatusForbidden, "ARCHITECT_REQUIRED")
-	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
-		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": strings.Repeat("x", record.MessagePostLimit),
-	}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
-	if got := facts.recorded(); len(got) != 1 {
-		t.Fatalf("refused closes applied facts %#v", got[1:])
+	long := strings.Repeat("x", 40000)
+	closedLong := h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": long,
+	}, nil)
+	if closedLong.Code != http.StatusOK {
+		t.Fatalf("close with a 40,000-character reason = %d: %s", closedLong.Code, closedLong.Body)
+	}
+	if got := facts.recorded(); len(got) != 2 || got[1] != (intake.CloseRoot{Issue: "LEGION-208", Reason: long}) {
+		t.Fatalf("close facts = %d, want the long reason applied whole", len(got))
 	}
 }

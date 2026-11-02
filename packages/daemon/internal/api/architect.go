@@ -1156,8 +1156,7 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 }
 
 // closeRoot ends the architect's tree while its root is admitted and no phase has started
-// (workflow's closeRoot): the root's own architect only, with a reason short enough to post as a
-// message.
+// (workflow's closeRoot): the root's own architect only.
 func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 	var req RootCloseRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}, field{"reason", req.Reason}) {
@@ -1168,11 +1167,6 @@ func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fact := intake.CloseRoot{Issue: req.Issue, Reason: req.Reason}
-	if length := dispatch.MessageBodyLength(fact.Message()); length > record.MessagePostLimit {
-		writeFailure(w, http.StatusBadRequest, "CLOSE_REASON_TOO_LONG",
-			fmt.Sprintf("the reason makes a %d-character message, over the %d one message holds; shorten it", length, record.MessagePostLimit))
-		return
-	}
 	grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
 	if !ok || !s.rootArchitectOf(w, r, grant, recorded, closeRootRoute) {
 		return
