@@ -9,13 +9,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/embed/embedtest"
 )
 
-// longText is exactly maxInputChars (32,000) runes, mixing one-, two-, three- and four-byte
+// longText is exactly MaxInputRunes (32,000) runes, mixing one-, two-, three- and four-byte
 // UTF-8 runes, so a client that counted bytes, or cut a text at its own limit, would not deliver
 // it whole.
 func longText() string {
-	text := strings.Repeat("aé漢🙂", maxInputChars/4)
-	if n := len([]rune(text)); n != maxInputChars {
-		panic(fmt.Sprintf("longText has %d runes, want %d", n, maxInputChars))
+	text := strings.Repeat("aé漢🙂", MaxInputRunes/4)
+	if n := len([]rune(text)); n != MaxInputRunes {
+		panic(fmt.Sprintf("longText has %d runes, want %d", n, MaxInputRunes))
 	}
 	return text
 }
@@ -67,7 +67,7 @@ func TestIsThrottledIgnoresAnUnmarkedOrFalseError(t *testing.T) {
 }
 
 // TestEstimateTokensTruncatesAndDividesByFourCharsPerToken proves EstimateTokens matches the
-// same truncation Embed itself applies (maxInputChars, by rune count) and the 4-chars/token
+// same truncation Embed itself applies (MaxInputRunes, by rune count) and the 4-chars/token
 // ratio the original "Bedrock capacity" measurement used - the basis for embedqueue's shared
 // token-rate budget (reserveTokens).
 func TestEstimateTokensTruncatesAndDividesByFourCharsPerToken(t *testing.T) {
@@ -75,16 +75,16 @@ func TestEstimateTokensTruncatesAndDividesByFourCharsPerToken(t *testing.T) {
 	if got, want := EstimateTokens([]string{short}), 10; got != want {
 		t.Errorf("EstimateTokens(%d chars) = %d, want %d", len(short), got, want)
 	}
-	long := strings.Repeat("y", maxInputChars+8000)
-	if got, want := EstimateTokens([]string{long}), maxInputChars/4; got != want {
-		t.Errorf("EstimateTokens(a text over maxInputChars) = %d, want %d (truncated to maxInputChars first)", got, want)
+	long := strings.Repeat("y", MaxInputRunes+8000)
+	if got, want := EstimateTokens([]string{long}), MaxInputRunes/4; got != want {
+		t.Errorf("EstimateTokens(a text over MaxInputRunes) = %d, want %d (truncated to MaxInputRunes first)", got, want)
 	}
 	if got, want := EstimateTokens([]string{short, short}), 20; got != want {
 		t.Errorf("EstimateTokens(two short texts) = %d, want %d (summed across the batch)", got, want)
 	}
 }
 
-// BoundedBytes counts the bytes a text is sent as: every byte up to maxInputChars runes, the cut
+// BoundedBytes counts the bytes a text is sent as: every byte up to MaxInputRunes runes, the cut
 // boundBatch makes, never more and never a rune split.
 func TestBoundedBytesCountsTheBytesOfTheTruncatedText(t *testing.T) {
 	for _, tc := range []struct {
@@ -93,9 +93,9 @@ func TestBoundedBytesCountsTheBytesOfTheTruncatedText(t *testing.T) {
 	}{
 		{"empty", ""},
 		{"short ASCII", "hello"},
-		{"short CJK, more bytes than maxInputChars runes", strings.Repeat("漢", maxInputChars/2)},
-		{"exactly maxInputChars mixed runes", longText()},
-		{"overlong CJK", strings.Repeat("漢", maxInputChars+100)},
+		{"short CJK, more bytes than MaxInputRunes runes", strings.Repeat("漢", MaxInputRunes/2)},
+		{"exactly MaxInputRunes mixed runes", longText()},
+		{"overlong CJK", strings.Repeat("漢", MaxInputRunes+100)},
 		{"overlong mixed", longText() + "🙂é"},
 	} {
 		bounded, err := boundBatch([]string{tc.text}, 1)
@@ -110,7 +110,7 @@ func TestBoundedBytesCountsTheBytesOfTheTruncatedText(t *testing.T) {
 			t.Errorf("%s: BoundedBytes = %d, want %d (the bytes boundBatch sends)", tc.name, got, want)
 		}
 	}
-	if got, want := BoundedBytes(strings.Repeat("漢", maxInputChars+100)), 3*maxInputChars; got != want {
+	if got, want := BoundedBytes(strings.Repeat("漢", MaxInputRunes+100)), 3*MaxInputRunes; got != want {
 		t.Errorf("BoundedBytes(overlong CJK) = %d, want %d", got, want)
 	}
 }

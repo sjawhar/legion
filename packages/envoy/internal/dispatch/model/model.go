@@ -429,6 +429,22 @@ type SearchCoverageCounts struct {
 	OldestLackingSeconds *int64 `json:"oldest_lacking_seconds"`
 }
 
+// DispatchLimits is what GET /api/v1/limits answers: the bounds the server holds a write to, each
+// read from the constant that enforces it. BlockUnits and AskUnits are UTF-16 code units, as is
+// EventBodyUnits, the longest body an event carries whole; ItemBlocks is the most blocks one body
+// may hold and AskOptions the most options one ask may have; RequestBytes, DocumentBytes and
+// HandoffBytes are UTF-8 bytes.
+type DispatchLimits struct {
+	BlockUnits     int   `json:"block_units"`
+	ItemBlocks     int   `json:"item_blocks"`
+	AskOptions     int   `json:"ask_options"`
+	AskUnits       int   `json:"ask_units"`
+	EventBodyUnits int   `json:"event_body_units"`
+	RequestBytes   int64 `json:"request_bytes"`
+	DocumentBytes  int   `json:"document_bytes"`
+	HandoffBytes   int   `json:"handoff_bytes"`
+}
+
 // DuplicateCandidate is a potential duplicate issue proposed before creation.
 type DuplicateCandidate struct {
 	Key         string `json:"key"`

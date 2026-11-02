@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -1146,6 +1147,19 @@ func capExceededError(field string, length, limit int) *apiError {
 func countExceededError(code, field string, count, limit int) *apiError {
 	return errorf(http.StatusBadRequest, code,
 		"%s is %d over the %d-item limit (%d/%d)", field, count-limit, limit, count, limit)
+}
+
+// blockCapExceededError is the refusal of a body with a block over contracts.DispatchBlockUnits:
+// the typed error's own message, which names the block, with the status and code every cap
+// refusal carries.
+func blockCapExceededError(err *itemblocks.CapExceeded) *apiError {
+	return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err.Error())
+}
+
+// blockCountExceededError is the refusal of a body holding more than contracts.DispatchItemBlocks
+// blocks, worded by the typed error itself as blockCapExceededError's is.
+func blockCountExceededError(err *itemblocks.CountExceeded) *apiError {
+	return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err.Error())
 }
 
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {

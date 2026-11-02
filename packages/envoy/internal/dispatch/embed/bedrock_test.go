@@ -172,13 +172,13 @@ func TestBedrockEmbedTruncatesAnOverlongTextByRunesNotBytes(t *testing.T) {
 	defer server.Close()
 	// A multi-byte rune ("é", 2 bytes in UTF-8) repeated past the char cap: truncating by byte
 	// count would split a rune and produce invalid UTF-8; this must not panic or corrupt it.
-	overlong := strings.Repeat("é", maxInputChars+100)
+	overlong := strings.Repeat("é", MaxInputRunes+100)
 	client := testBedrockClient(server)
 	if _, err := client.Embed(context.Background(), []string{overlong}, InputDocument); err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	if count := len([]rune(gotText)); count != maxInputChars {
-		t.Errorf("truncated text has %d runes, want %d", count, maxInputChars)
+	if count := len([]rune(gotText)); count != MaxInputRunes {
+		t.Errorf("truncated text has %d runes, want %d", count, MaxInputRunes)
 	}
 }
 

@@ -340,12 +340,12 @@ func TestAzureEmbedTruncatesAnOverlongTextByRunes(t *testing.T) {
 		_, _ = w.Write(azureAnswer(0))
 	}))
 	defer server.Close()
-	overlong := strings.Repeat("é", maxInputChars+100)
+	overlong := strings.Repeat("é", MaxInputRunes+100)
 	if _, err := testAzureClient(t, server, AzureConfig{}).Embed(context.Background(), []string{overlong}, InputDocument); err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	if n := utf8.RuneCountInString(got); n != maxInputChars || !utf8.ValidString(got) {
-		t.Errorf("server received %d runes (valid UTF-8: %v), want %d", n, utf8.ValidString(got), maxInputChars)
+	if n := utf8.RuneCountInString(got); n != MaxInputRunes || !utf8.ValidString(got) {
+		t.Errorf("server received %d runes (valid UTF-8: %v), want %d", n, utf8.ValidString(got), MaxInputRunes)
 	}
 }
 

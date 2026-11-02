@@ -33,9 +33,10 @@ import {
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
 import {
-  ASK_QUESTION_MAX,
-  DISPATCH_BODY_MAX,
+  DISPATCH_BLOCK_UNITS,
+  DISPATCH_EVENT_BODY_MAX,
   DISPATCH_HANDOFF_BODY_MAX,
+  DISPATCH_ITEM_BLOCKS,
   HANDOFF_PHASE_PATTERN,
   HANDOFF_PHASE_RULE_WORDS,
   PROJECT_KEY_PATTERN,
@@ -181,16 +182,21 @@ const DefaultIssuePageLimit = ${DEFAULT_ISSUE_PAGE_LIMIT}
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = ${ISSUE_TITLE_MAX}
 
-// DispatchBodyMax is the longest comment, comment-edit, message and broadcast body the server
-// accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
-// refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
-const DispatchBodyMax = ${DISPATCH_BODY_MAX}
+// DispatchBlockUnits is the longest one block of a comment, comment edit, message, broadcast or
+// ask part may be, in UTF-16 units. Generated from DISPATCH_BLOCK_UNITS in packages/contracts;
+// the server enforces it, names it in its refusal, and publishes it through GET /api/v1/limits.
+const DispatchBlockUnits = ${DISPATCH_BLOCK_UNITS}
 
-// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
-// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
-// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
-// ask composer cannot drift apart.
-const AskQuestionMax = ${ASK_QUESTION_MAX}
+// DispatchItemBlocks is the most blocks one body may hold. Generated from DISPATCH_ITEM_BLOCKS in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchItemBlocks = ${DISPATCH_ITEM_BLOCKS}
+
+// DispatchEventBodyMax is the longest body an event carries whole, in UTF-16 units, and the bound
+// on an ask's question and its options together. Generated from DISPATCH_EVENT_BODY_MAX in
+// packages/contracts; the server enforces it, names it in its refusal, and publishes it through
+// GET /api/v1/limits.
+const DispatchEventBodyMax = ${DISPATCH_EVENT_BODY_MAX}
 
 // DispatchHandoffBodyMax is the longest phase handoff body, in UTF-8 bytes, that
 // POST /api/v1/issues/{key}/handoffs/{phase} accepts. Generated from DISPATCH_HANDOFF_BODY_MAX in
@@ -543,29 +549,13 @@ ${keep}
 `;
 }
 
-function renderDaemonDispatch() {
-  return `package dispatch
-
-// MessageBodyLimit is the longest body Dispatch accepts on a message, in UTF-16 code units as
-// Dispatch counts them. Generated from DISPATCH_BODY_MAX in packages/contracts;
-// record.MessagePostLimit subtracts the outbox marker the runner appends from it.
-const MessageBodyLimit = ${DISPATCH_BODY_MAX}
-`;
-}
-
 const envelope = (await Bun.file(envelopeFile).json()) as Schema;
 
-// Every generated Go file this script owns. The daemon carries its own copy of the body cap
-// rather than importing the envoy package: its production build imports nothing from
-// github.com/sjawhar/envoy.
+// Every generated Go file this script owns.
 const outputs = [
   {
     path: resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go"),
     rendered: renderContracts(envelope),
-  },
-  {
-    path: resolve(import.meta.dir, "../../daemon/internal/dispatch/generated.go"),
-    rendered: renderDaemonDispatch(),
   },
 ];
 const fmt = Bun.which("gofmt");

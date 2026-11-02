@@ -4,8 +4,6 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
 import {
-  ASK_QUESTION_MAX,
-  DISPATCH_BODY_MAX,
   DISPATCH_HANDOFF_BODY_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
@@ -136,13 +134,13 @@ describe("zodSchemaApi", () => {
   });
 
   test("names how far an over-limit string is over its cap", () => {
-    const result = schemaFor("dispatch_ask").safeParse({
+    const result = schemaFor("dispatch_issue_update").safeParse({
       issue: "DSP-1",
-      question: "x".repeat(ASK_QUESTION_MAX + 50),
+      title: "x".repeat(ISSUE_TITLE_MAX + 50),
     });
     expect(result.success).toBe(false);
     expect(result.error?.issues.map((issue) => issue.message)).toEqual([
-      `is 50 characters over the ${ASK_QUESTION_MAX}-character limit (${ASK_QUESTION_MAX + 50}/${ASK_QUESTION_MAX})`,
+      `is 50 characters over the ${ISSUE_TITLE_MAX}-character limit (${ISSUE_TITLE_MAX + 50}/${ISSUE_TITLE_MAX})`,
     ]);
   });
 
@@ -643,16 +641,17 @@ describe("dispatchToolSpecs", () => {
         JSON.stringify(args)
       ).toEqual([refusal]);
     }
+    // The Dispatch server owns the bound on a body (INFRA-370), so the schema takes a reason the
+    // old client-side cap of 32,000 characters refused.
     expect(
-      schema.safeParse({
-        issue: "DSP-1",
-        status: "done",
-        reason: "x".repeat(DISPATCH_BODY_MAX + 1),
-      }).success
-    ).toBe(false);
+      schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(32001) }).success
+    ).toBe(true);
+  });
+
+  // The server owns the bound on an ask's question too, and names it in its refusal.
+  test("dispatch_ask takes a question longer than the old client-side cap", () => {
     expect(
-      schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(DISPATCH_BODY_MAX) })
-        .success
+      schemaFor("dispatch_ask").safeParse({ issue: "DSP-1", question: "x".repeat(2001) }).success
     ).toBe(true);
   });
 

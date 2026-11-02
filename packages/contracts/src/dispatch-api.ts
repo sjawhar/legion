@@ -1947,6 +1947,22 @@ export interface SearchCoverage {
   readonly kinds: SearchCoverageKinds;
 }
 
+/** `GET /api/v1/limits`: the bounds the Dispatch server holds a write to, each from the constant
+ * that enforces it, which `dispatch limits` prints. `block_units` and `ask_units` are UTF-16 code
+ * units, `event_body_units` the units of a body an event carries whole; `item_blocks` is the most
+ * blocks one body may hold and `ask_options` the most options one ask may have; `request_bytes`,
+ * `document_bytes` and `handoff_bytes` are UTF-8 bytes. Mirrors `model.DispatchLimits`. */
+export interface DispatchLimits {
+  readonly block_units: number;
+  readonly item_blocks: number;
+  readonly ask_options: number;
+  readonly ask_units: number;
+  readonly event_body_units: number;
+  readonly request_bytes: number;
+  readonly document_bytes: number;
+  readonly handoff_bytes: number;
+}
+
 export interface DuplicateCandidate {
   readonly key: string;
   readonly title: string;

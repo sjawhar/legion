@@ -21,20 +21,17 @@ const (
 	// re-embed; this package does not detect a Dispatch already carrying vectors at another width.
 	// Both places are asked for this width, so a vector from either fits the same column.
 	Dimension = 1536
-	// maxInputChars bounds one text's length before it is sent, by either client. The model's
+	// MaxInputRunes bounds one text's length before it is sent, by either client. The model's
 	// context is generous (128k tokens) but an unbounded document would pay to embed far more
 	// than a search result ever shows; this is a generous multiple of the 4,000-character snippet
 	// window search.go already uses, not a tight limit. It bounds one text in runes
-	// (text.HeadRunes), while DISPATCH_BODY_MAX in packages/contracts/src/dispatch-tools.ts caps a
-	// comment, comment-edit and message body in UTF-16 units, which are never fewer than a text's
-	// runes; so a body at that cap reaches the embedder whole only while DISPATCH_BODY_MAX <=
-	// maxInputChars, and .github/scripts/check-body-embed-limit.sh fails the build when it does
-	// not.
-	maxInputChars = 32000
+	// (text.HeadRunes), and the windows a searchable item is embedded in are built so that none
+	// of them passes it.
+	MaxInputRunes = 32000
 )
 
 // EstimateTokens estimates how many tokens texts will cost one call to the model service, at the
-// same truncation this package applies before sending (maxInputChars, by rune count exactly as
+// same truncation this package applies before sending (MaxInputRunes, by rune count exactly as
 // text.HeadRunes truncates) and the same rough characters-per-token ratio the original "Bedrock
 // capacity" measurement used (4 characters/token, a standard order-of-magnitude estimate for
 // English prose - not Cohere's own tokenizer, which only the model service itself has). Good
@@ -47,8 +44,8 @@ func EstimateTokens(texts []string) int {
 	total := 0
 	for _, t := range texts {
 		n := utf8.RuneCountInString(t)
-		if n > maxInputChars {
-			n = maxInputChars
+		if n > MaxInputRunes {
+			n = MaxInputRunes
 		}
 		total += n
 	}
@@ -56,16 +53,16 @@ func EstimateTokens(texts []string) int {
 }
 
 // BoundedBytes is the UTF-8 byte length of t at the truncation this package applies before sending
-// (maxInputChars runes, the cut text.HeadRunes makes), counted without copying t. A Cohere token
+// (MaxInputRunes runes, the cut text.HeadRunes makes), counted without copying t. A Cohere token
 // is at least one byte, so this bounds the tokens t costs from above, which EstimateTokens does
 // not.
 func BoundedBytes(t string) int {
-	if len(t) <= maxInputChars {
+	if len(t) <= MaxInputRunes {
 		return len(t) // no more runes than bytes, so nothing is cut
 	}
 	runes := 0
 	for i := range t {
-		if runes == maxInputChars {
+		if runes == MaxInputRunes {
 			return i
 		}
 		runes++
@@ -74,7 +71,7 @@ func BoundedBytes(t string) int {
 }
 
 // boundBatch checks one Embed call's texts against a place's batch limit and returns them each
-// truncated to maxInputChars runes (text.HeadRunes), the form both clients send. No texts comes
+// truncated to MaxInputRunes runes (text.HeadRunes), the form both clients send. No texts comes
 // back as nil, nil: a caller answers that call with no vectors and no error, before any other
 // check.
 func boundBatch(texts []string, limit int) ([]string, error) {
@@ -86,7 +83,7 @@ func boundBatch(texts []string, limit int) ([]string, error) {
 	}
 	bounded := make([]string, len(texts))
 	for i, t := range texts {
-		bounded[i] = text.HeadRunes(t, maxInputChars)
+		bounded[i] = text.HeadRunes(t, MaxInputRunes)
 	}
 	return bounded, nil
 }

@@ -1314,9 +1314,6 @@ jobs:
       - name: Check every manifest names the one exact zod
         run: .github/scripts/check-zod-version.sh
 
-      - name: Check the comment and message body limit fits what the embedder reads whole
-        run: .github/scripts/check-body-embed-limit.sh
-
       - name: Check the registration heartbeat leaves a margin inside the session record lifetime
         run: .github/scripts/check-heartbeat-margin.sh
 
@@ -1634,9 +1631,6 @@ jobs:
 
       - name: Test the zod version check
         run: .github/scripts/check-zod-version.test.sh
-
-      - name: Test the body embed limit check
-        run: .github/scripts/check-body-embed-limit.test.sh
 
       - name: Test the heartbeat margin check
         run: .github/scripts/check-heartbeat-margin.test.sh
