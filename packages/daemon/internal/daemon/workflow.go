@@ -573,9 +573,18 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 }
 
 // identity is the bot a role's commits are authored by: its App's, from the lease the token
-// source mints for owner, the owner of the repository the role works (the identity is fetched once
-// per App and cached).
-func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
+// source mints for the owner whose installation holds the repository the role works (the identity
+// is fetched once per App and cached).
+//
+// recorded is the repository the issue's record names, and the mint is made for the owner GitHub
+// serves it under now (repositories.serving): the record keeps the name it was written under for
+// its whole life, while after a transfer the installation that covers the repository is the owner
+// it moved to's. Taking the repository rather than an owner is what keeps that mapping here, in
+// the one place both callers reach — a launch's spec (specs.SpawnSpec) and a working copy's
+// adoption (adoptIdentity) — so neither can mint on an owner the repository has left and fail
+// every launch of a tree open at the transfer.
+func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, recorded ghrepo.Repository) (runtime.GitIdentity, error) {
+	owner := w.repositories.serving(recorded).Owner()
 	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), owner)
 	if err != nil {
 		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, owner, err)

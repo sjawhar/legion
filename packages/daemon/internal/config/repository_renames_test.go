@@ -94,6 +94,8 @@ func TestRepositoryRenamesRefusals(t *testing.T) {
 			"repository_renames: rename 1 (c/d -> e/f) chains onto rename 0 (a/b -> c/d) through c/d: a rename pairs two names, never a chain of three"},
 		{"a chain the other way round", "repository_renames: [{from: c/d, to: e/f}, {from: a/b, to: c/d}]\n",
 			"repository_renames: rename 1 (a/b -> c/d) chains onto rename 0 (c/d -> e/f) through c/d: a rename pairs two names, never a chain of three"},
+		{"one owner to two owners", "repository_renames: [{from: a/b, to: c/d}, {from: a/e, to: f/g}]\n",
+			"repository_renames: rename 1 (a/e -> f/g) and rename 0 (a/b -> c/d) move repositories of a to two owners, f and c: an owner's repositories moved to one owner, since the gh directory keyed by a holds one installation's token"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Load(writeConfigFile(t, minimalFile+tc.body), noEnv)

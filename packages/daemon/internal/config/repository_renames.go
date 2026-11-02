@@ -59,9 +59,9 @@ func readRepositoryRenames(value *yaml.Node, key string) ([]ghrepo.Rename, error
 
 // checkRepositoryRenames settles the list `repository_renames` read into the one equivalence every
 // consumer takes (ghrepo.Renames), refusing what that value cannot hold — a repository renamed to
-// itself, one renamed twice, a chain of two pairs — with the key before the pair ghrepo names. A
-// file that configures none settles the zero value, which answers exactly as strings.EqualFold
-// does.
+// itself, one renamed twice, a chain of two pairs, one owner's repositories moved to two owners —
+// with the key before the pair ghrepo names. A file that configures none settles the zero value,
+// which answers exactly as strings.EqualFold does.
 func checkRepositoryRenames(file fileConfig, cfg *Config) error {
 	renames, err := ghrepo.NewRenames(file.RepositoryRenames)
 	if err != nil {

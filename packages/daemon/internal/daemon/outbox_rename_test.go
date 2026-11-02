@@ -15,11 +15,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // transferredLegion is the pair a deployment configures over sjawhar/legion's transfer to
@@ -141,10 +143,13 @@ func (g *renameGitHub) assertAddressed(t *testing.T, repo string) {
 // repository GitHub holds it under now, with the implement App's token minted for that
 // repository's owner: the record keeps sjawhar/legion, the configured pair and the project's
 // served cybermonklabs/legion make cybermonklabs the owner whose installation holds it, and the
-// GraphQL query names cybermonklabs/legion. A GraphQL query is not a git operation, so GitHub's
-// redirect of a transferred repository does not cover it and a query naming the old repository
-// would be answered by nothing, leaving a tree open at the transfer unmerged. With no pair
-// configured the same record is minted for and addressed at sjawhar/legion, as it always was.
+// GraphQL query names cybermonklabs/legion. The token is the half the old name cannot supply:
+// after the transfer the installation holding the repository is cybermonklabs', and sjawhar's
+// token reaches nothing, so a tree open at the transfer would never be merged. GitHub does
+// answer the old address — a REST call to it redirects, and a GraphQL query resolves the
+// repository — so naming the served one is for the log line and for keeping a write off a
+// redirect. With no pair configured the same record is minted for and addressed at
+// sjawhar/legion, as it always was.
 func TestAREADYMergeOfATreeRecordedBeforeItsTransferAddressesTheRepositoryGitHubServes(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -273,6 +278,56 @@ func TestAProductionCheckCompareOfATreeRecordedBeforeItsTransferAddressesTheRepo
 			want := intake.CheckWake{Issue: root.Key, Look: 1, Cause: "daemon boot", Detail: build, OpenedAt: check.OpenedAt}
 			if got := facts.facts(); len(got) != 1 || fmt.Sprint(got[0]) != fmt.Sprint(want) {
 				t.Fatalf("facts applied = %+v, want the check woken by %+v", got, want)
+			}
+		})
+	}
+}
+
+// identityTokens is roleTokens with a bot identity of its own for each owner, so a lease shows
+// the owner it was minted for.
+type identityTokens struct{ roleTokens }
+
+func (t identityTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.roleTokens.Token(ctx, role, owner)
+	lease.Identity = runtime.GitIdentity{Name: "legion-" + string(role) + "[bot] of " + owner, Email: owner + "@users.noreply.github.com"}
+	return lease, err
+}
+
+// The git identity a tree recorded before its repository's transfer commits as is minted on the
+// installation that holds the repository now: the record keeps sjawhar/legion, and under the
+// configured pair with cybermonklabs served the lease is cybermonklabs', which is the half the
+// old owner cannot supply — the installation covering a transferred repository is the new
+// owner's, so without this a launch and a working-copy adoption of such a tree both fail. Both
+// of identity's callers, a launch's spec (specs.SpawnSpec) and a working copy's adoption
+// (adoptIdentity), hand it the recorded repository and leave the owner to it. With no pair
+// configured the same record is minted for sjawhar, as it always was.
+func TestTheGitIdentityOfATreeRecordedBeforeAConfiguredRenameIsMintedForTheOwnerGitHubServes(t *testing.T) {
+	recorded := ghrepo.MustParse("sjawhar/legion")
+	for _, tc := range []struct {
+		name    string
+		renames ghrepo.Renames
+		served  string
+		want    string
+	}{
+		{name: "the pair configured", renames: transferredLegion, served: "cybermonklabs/legion", want: "cybermonklabs"},
+		{name: "no pair configured", served: "sjawhar/legion", want: "sjawhar"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repos := newRepositories("LEGION", tc.renames)
+			repos.set([]mappedRepository{{Repo: ghrepo.MustParse(tc.served), Default: true}}, nil)
+			w := &workflowRuntime{tokens: identityTokens{}, repositories: repos}
+			want := runtime.GitIdentity{Name: "legion-implement[bot] of " + tc.want, Email: tc.want + "@users.noreply.github.com"}
+
+			launch, err := w.identity(context.Background(), claim.RoleImplementer, recorded)
+			if err != nil || launch != want {
+				t.Fatalf("the identity of a launch on %s = %+v, %v; want %+v", recorded, launch, err, want)
+			}
+			adopt := adoptIdentity(w.identity, func(context.Context, string) (ghrepo.Repository, string, error) {
+				return recorded, "main", nil
+			})
+			adopted, err := adopt(context.Background(), claim.RoleImplementer, "LEGION-208")
+			if err != nil || adopted != want {
+				t.Fatalf("the identity of an adoption of %s = %+v, %v; want %+v", recorded, adopted, err, want)
 			}
 		})
 	}

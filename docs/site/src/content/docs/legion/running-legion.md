@@ -378,9 +378,12 @@ What each part is for:
   equivalence is read-side only: no record is rewritten, and a tree keeps the repository name it
   was recorded under for its whole life, so a pair must stay in the file for as long as any record
   names the old repository. The loader refuses a pair whose two names are one repository, a
-  repository renamed twice, and a chain of two pairs (`a/b` to `c/d` with `c/d` to `e/f`), and
-  `legion start --check-config` prints one line per configured pair, so you can read back what the
-  daemon will treat as one repository before the transfer.
+  repository renamed twice, a chain of two pairs (`a/b` to `c/d` with `c/d` to `e/f`), and one
+  owner's repositories moved to two owners (`a/b` to `c/d` with `a/e` to `f/g`), since the gh
+  directory a worker reads is keyed by an owner and holds one installation's token; several
+  repositories of one owner may move to one owner. `legion start --check-config` prints one line
+  per configured pair, so you can read back what the daemon will treat as one repository before
+  the transfer.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes

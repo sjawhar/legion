@@ -546,9 +546,10 @@ func closeStore(st *store.Store, log *slog.Logger) {
 
 // plan is what the daemon resolved from its configuration before touching anything.
 type plan struct {
-	// identity is the role's App bot identity for the owner of the repository it works, from the
-	// workflow's token source; nil without one.
-	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
+	// identity is the role's App bot identity for the owner whose installation holds the
+	// repository it works, from the workflow's token source (workflowRuntime.identity, which maps
+	// the record's repository to the one GitHub serves); nil without one.
+	identity func(ctx context.Context, role claim.Role, repository ghrepo.Repository) (runtime.GitIdentity, error)
 	// repository is the repository an issue works and its default branch
 	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
 	// workflow does not record); nil without a workflow.
@@ -1766,10 +1767,11 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 }
 
 // adoptIdentity is the supervisor's identity for a working copy's adoption (supervise.Deps.Identity)
-// over identity, minted for the owner of the repository the claim's issue works (repository): its
-// record's, or the project's default repository for an issue the workflow does not record. nil
-// without a workflow.
-func adoptIdentity(identity func(context.Context, claim.Role, string) (runtime.GitIdentity, error), repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Role, string) (runtime.GitIdentity, error) {
+// over identity, for the repository the claim's issue works (repository): its record's, or the
+// project's default repository for an issue the workflow does not record. The owner the lease is
+// minted for is identity's own to decide, since a record written before a transfer names an owner
+// whose installation no longer holds the repository. nil without a workflow.
+func adoptIdentity(identity func(context.Context, claim.Role, ghrepo.Repository) (runtime.GitIdentity, error), repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Role, string) (runtime.GitIdentity, error) {
 	if identity == nil || repository == nil {
 		return nil
 	}
@@ -1778,7 +1780,7 @@ func adoptIdentity(identity func(context.Context, claim.Role, string) (runtime.G
 		if err != nil {
 			return runtime.GitIdentity{}, err
 		}
-		return identity(ctx, role, repo.Owner())
+		return identity(ctx, role, repo)
 	}
 }
 

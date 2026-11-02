@@ -59,8 +59,12 @@ projects:
 #                                      # recorded under for its whole life, so keep the pair here
 #                                      # for as long as any record names the old repository.
 #                                      # Refused: a pair whose two names are one repository, a
-#                                      # repository renamed twice, and a chain (acme/a -> acme/b
-#                                      # with acme/b -> acme/c). --check-config prints one line
+#                                      # repository renamed twice, a chain (acme/a -> acme/b
+#                                      # with acme/b -> acme/c), and one owner's repositories
+#                                      # moved to two owners (acme/a -> b/a with acme/c -> d/c),
+#                                      # since a gh directory is keyed by an owner and holds one
+#                                      # installation's token; several repositories of one owner
+#                                      # may move to one owner. --check-config prints one line
 #                                      # per pair, to read the equivalence back before a transfer.
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off

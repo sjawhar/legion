@@ -96,7 +96,8 @@ func TestConfiguredRenamesAreOneRepositoryBothWays(t *testing.T) {
 }
 
 // Each refusal names the pair it cannot hold: a repository renamed to itself, one renamed twice
-// (as a from or as a to), a chain of two pairs either way round, and a pair missing a side.
+// (as a from or as a to), a chain of two pairs either way round, a pair missing a side, and one
+// owner's repositories moved to two owners, which would key one alias twice.
 func TestNewRenamesRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -119,6 +120,10 @@ func TestNewRenamesRefusals(t *testing.T) {
 			"rename 0 names no repository in from: a rename is the repository as it was and the one it moved to"},
 		{"no to", []Rename{MustRename("a/b", "c/d"), {From: MustParse("acme/widgets")}},
 			"rename 1 names no repository in to: a rename is the repository as it was and the one it moved to"},
+		{"one owner to two owners", []Rename{MustRename("a/x", "b/x"), MustRename("A/y", "c/y")},
+			"rename 1 (A/y -> c/y) and rename 0 (a/x -> b/x) move repositories of A to two owners, c and b: an owner's repositories moved to one owner, since the gh directory keyed by A holds one installation's token"},
+		{"one owner to two owners, one of them its own", []Rename{MustRename("a/x", "a/y"), MustRename("a/z", "c/z")},
+			"rename 1 (a/z -> c/z) and rename 0 (a/x -> a/y) move repositories of a to two owners, c and a: an owner's repositories moved to one owner, since the gh directory keyed by a holds one installation's token"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			renames, err := NewRenames(tc.pairs)
@@ -127,6 +132,30 @@ func TestNewRenamesRefusals(t *testing.T) {
 			}
 			if !renames.IsZero() {
 				t.Errorf("a refused NewRenames answered %v, want the zero value", renames.Pairs())
+			}
+		})
+	}
+}
+
+// Two pairs out of one owner to that one owner are the transfer of two repositories, and two
+// owners moving to one owner key one alias each: neither is the shape the refusal above names, so
+// both are held.
+func TestNewRenamesHoldsSeveralPairsSharingAnOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		pairs []Rename
+	}{
+		{"one owner's two repositories to one owner", []Rename{MustRename("sjawhar/legion", "cybermonklabs/legion"), MustRename("SJAWHAR/envoy", "cybermonklabs/envoy")}},
+		{"two owners to one owner", []Rename{MustRename("sjawhar/legion", "cybermonklabs/legion"), MustRename("acme/widgets", "CyberMonkLabs/widgets")}},
+		{"one owner's two repositories renamed inside it", []Rename{MustRename("acme/widgets", "acme/gadgets"), MustRename("acme/old", "ACME/new")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			renames, err := NewRenames(tc.pairs)
+			if err != nil {
+				t.Fatalf("NewRenames(%v) = %v, want both pairs held", tc.pairs, err)
+			}
+			if got := renames.Pairs(); !slices.Equal(got, tc.pairs) {
+				t.Errorf("Pairs() = %v, want %v", got, tc.pairs)
 			}
 		})
 	}
@@ -286,10 +315,10 @@ func TestOwnerAliasesAndServingOverAConfiguredRename(t *testing.T) {
 			serving: map[string]string{"acme/widgets": "acme/widgets", "ACME/gadgets": "ACME/gadgets"},
 		},
 		{
-			name:  "one owner moved two repositories, one of them to an owner outside the project",
-			pairs: []Rename{transfer, MustRename("sjawhar/tools", "outside/tools")}, owners: []string{"cybermonklabs"},
+			name:  "two owners moved a repository, one of them to an owner outside the project",
+			pairs: []Rename{transfer, MustRename("beta/tools", "outside/tools")}, owners: []string{"cybermonklabs"},
 			aliases: map[string]string{"sjawhar": "cybermonklabs"},
-			serving: map[string]string{"sjawhar/legion": "CyberMonkLabs/legion", "sjawhar/tools": "sjawhar/tools"},
+			serving: map[string]string{"sjawhar/legion": "CyberMonkLabs/legion", "beta/tools": "beta/tools"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

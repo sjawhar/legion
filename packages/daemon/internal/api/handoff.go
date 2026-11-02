@@ -411,9 +411,10 @@ func byHandShare(mergeNote string) string {
 }
 
 // readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub, in
-// the repository issue's record names, for a merger's ready: true, and is what they leave
-// (readyAnswer). Every refusal is written before the fact is applied, so nothing is recorded under
-// the completion's key and the corrected retry at the same commit is applied:
+// the repository GitHub holds the issue's recorded one under now (serving), for a merger's
+// ready: true, and is what they leave (readyAnswer). Every refusal is written before the fact is
+// applied, so nothing is recorded under the completion's key and the corrected retry at the same
+// commit is applied:
 //
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
 //     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
@@ -421,8 +422,9 @@ func byHandShare(mergeNote string) string {
 //     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
-// The reads are made as the implement App, minted for the repository's owner, whose token never
-// leaves the daemon; a runtime that boots without Apps publishes no READY (leaseForGrant).
+// The reads are made as the implement App, minted for the owner of the repository GitHub serves,
+// whose token never leaves the daemon; a runtime that boots without Apps publishes no READY
+// (leaseForGrant).
 func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (answer readyAnswer, ok bool) {
 	repository, err := issue.Repository()
 	if err != nil {
@@ -430,6 +432,14 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", fmt.Sprintf("the record of %s names no repository its pull request can be read in", issue.Key))
 		return readyAnswer{}, false
 	}
+	// READY's checks are GitHub's own reads, so they are minted for and addressed at the
+	// repository GitHub holds the recorded one under now: the record keeps the name it was
+	// written under for its whole life, while after a transfer the installation that covers the
+	// repository is the owner it moved to's, and that token is what the old owner cannot supply —
+	// a tree open at the transfer would never publish READY. GitHub does answer the old address,
+	// with a 301 to the repository's id, so the served name here is for the log line and for
+	// keeping a write off a redirect, never the reason the reads work.
+	repository = s.serving(repository)
 	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement, repository.Owner())
 	if !ok {
 		return readyAnswer{}, false

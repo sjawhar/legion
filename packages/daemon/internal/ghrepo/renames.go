@@ -31,9 +31,21 @@ type Renames struct {
 
 // NewRenames is the equivalence pairs configure, or a refusal naming the pair it cannot hold: a
 // pair whose names are one repository, a repository renamed twice (as a pair's from or as its to),
-// and a chain, where one pair's to is another's from. The map holds one pair per repository, a
-// flat equivalence of two names, so `Same` and `Partner` answer the same from either side. No pair
-// may carry the zero Repository, since that names no repository at all.
+// a chain, where one pair's to is another's from, and one owner's repositories moved to two
+// owners. The map holds one pair per repository, a flat equivalence of two names, so `Same` and
+// `Partner` answer the same from either side. No pair may carry the zero Repository, since that
+// names no repository at all.
+//
+// The last refusal is the one rule about owners rather than names, and it is here because this is
+// the only place that holds every pair. `OwnerAliases` is keyed by the owner a pair moved a
+// repository away from, so two pairs leaving one owner for two owners would write that key twice
+// and the last would win, silently: the name `Serving` answers, the token `appauth.GitHubCredential`
+// writes into that owner's gh directory and the owner Sandbox provisioning mints for would then
+// disagree about which installation holds a repository. A gh directory is keyed by an owner and
+// carries one installation's token, so an owner's repositories may move to one owner and no more.
+// Several pairs out of one owner to that one owner are a transfer of several repositories, which
+// is configured as it is, and several owners moving to one owner key one alias each, so only this
+// shape is refused.
 func NewRenames(pairs []Rename) (Renames, error) {
 	for index, pair := range pairs {
 		switch {
@@ -54,6 +66,8 @@ func NewRenames(pairs []Rename) (Renames, error) {
 				return Renames{}, fmt.Errorf("rename %d (%s) chains onto rename %d (%s) through %s: a rename pairs two names, never a chain of three", index, pair.describe(), seen, earlier.describe(), pair.From)
 			case strings.EqualFold(pair.To.String(), earlier.From.String()):
 				return Renames{}, fmt.Errorf("rename %d (%s) chains onto rename %d (%s) through %s: a rename pairs two names, never a chain of three", index, pair.describe(), seen, earlier.describe(), pair.To)
+			case strings.EqualFold(pair.From.Owner(), earlier.From.Owner()) && !strings.EqualFold(pair.To.Owner(), earlier.To.Owner()):
+				return Renames{}, fmt.Errorf("rename %d (%s) and rename %d (%s) move repositories of %s to two owners, %s and %s: an owner's repositories moved to one owner, since the gh directory keyed by %s holds one installation's token", index, pair.describe(), seen, earlier.describe(), pair.From.Owner(), pair.To.Owner(), earlier.To.Owner(), pair.From.Owner())
 			}
 		}
 	}
