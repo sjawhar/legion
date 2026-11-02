@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-627",
+  "previousHandoff": "649b7eae85b38c2285ee8fec53c3b292f383b05b",
+  "round": "5, at code head 7c96a6e4042b (the PR head was 29fca84b, then 649b7eae after the daemon's legion-v19 handoff import, which removed .legion/INFRA-627/ and changed no code). This round reviewed the implementer's one commit, which answers round 4's six minors.",
+  "headReviewed": "649b7eae85b38c2285ee8fec53c3b292f383b05b",
+  "codeHead": "7c96a6e4042b30e61cc53d7b6aad29bc96bb0aec",
+  "proseFix": "9c497c7a, my own commit, prose only. index.go:240-244: the indexKey comment said both whole-bucket triggers end when a back-fill lands, but the olderBuild cursor ends only when a sweep of this build completes and writes its cursor. index.go:306-310: the back-fill's claim test names the clock it reads and why that direction is safe (the architect's request). sweep_test.go:2052: the failure message said 'nothing brings that delivery back'; it is now 'for about 68 minutes', as its siblings at 1785 and 1839 say. gofmt and go vet are clean, and the two affected tests pass.",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "ci": "Required set: ci-ok and pr-title (rulesets). Run 41396685632 at 7c96a6e4 was cancelled by the daemon's import push at 07:21Z. Run 41405832567 at 649b7eae (the same code) was in progress at 08:00Z. The approval is submitted only once this push's own run is green for ci-ok and pr-title, read on GitHub.",
+  "thermonuclear": "Both ran once on 30ceb420..7c96a6e4. Deep review: APPROVE, with one minor (the test message). Code quality: two minors, the indexKey comment and the same test message. Mutation runs by both: the olderBuild guard, the refused live-claim Put, the marker's stale edge on each side of Lookback, the freshness window and the stray margin each fail their test when reverted.",
+  "keyFindings": [
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/index.go:241", "description": "False comment: the cursor trigger does not end when a back-fill lands, only when a sweep of this build completes. Fixed in my prose commit."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/redeliver/sweep_test.go:2052", "description": "False failure message ('nothing brings that delivery back'; the delay is about 68 minutes). Fixed in my prose commit."}
+  ],
+  "threads": "Every thread on the pull request carries my answer: the implementer's round-4 replies were read and the six round-4 threads accepted in round 4; this round opened no thread."
+}
