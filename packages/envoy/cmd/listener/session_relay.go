@@ -1073,7 +1073,7 @@ func (m *sessionRelays) followedTopicVerdict(sessionID string, item contracts.En
 // An attempt record is a push in flight, not a delivery: the path that wrote it pushed the
 // message to the session's port itself, or is a serving-port worker handed that push before the
 // session's entry moved to consumer delivery under it (serve_port_workers.go). Acking the message
-// on that record would rest the session's only copy on a process-local cache that expires and on
+// on that record would rest the session's only copy on a ledger record that expires and on
 // a worker that may yet drop or hand back its push, so the message is held unacked instead, and
 // judged again:
 //   - the worker's 204 records the dedupe key: the session has the message, so it is acked;

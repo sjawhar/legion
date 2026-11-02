@@ -2994,9 +2994,9 @@ func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *te
 	}
 }
 
-// A duplicate of a message whose push is still in flight is skipped by the attempt cache: the
-// durable's handler hands each push to the session's worker and returns, so the duplicate is
-// judged while the first push is held.
+// A duplicate of a message whose push is still in flight is skipped by the ledger's attempt
+// record: the durable's handler hands each push to the session's worker and returns, so the
+// duplicate is judged while the first push is held.
 func TestListenerDeliveryHandler_SkipsDuplicateWhileDeliveryInFlight(t *testing.T) {
 	// Given
 	started := make(chan struct{})
@@ -3634,15 +3634,15 @@ func ledgerVerdict(t *testing.T, cfg listenerDeliveryHandlerConfig, dedupeKey, s
 }
 
 // ledgerAttempted reports whether the ledger says a push of the pair is in flight, on this pod or
-// another of the machine's: what attemptCache.Seen reported before the pods shared one ledger.
+// another of the machine's: what the per-process attempt cache reported before the pods shared one ledger.
 func ledgerAttempted(t *testing.T, cfg listenerDeliveryHandlerConfig, dedupeKey, sessionID string) bool {
 	t.Helper()
 	verdict := ledgerVerdict(t, cfg, dedupeKey, sessionID)
 	return verdict == dedupe.InFlight || verdict == dedupe.Deferred
 }
 
-// ledgerDelivered reports whether the ledger records the pair delivered: what dedupeCache.Seen
-// reported before the pods shared one ledger.
+// ledgerDelivered reports whether the ledger records the pair delivered: what the per-process
+// dedupe cache reported before the pods shared one ledger.
 func ledgerDelivered(t *testing.T, cfg listenerDeliveryHandlerConfig, dedupeKey, sessionID string) bool {
 	t.Helper()
 	return ledgerVerdict(t, cfg, dedupeKey, sessionID) == dedupe.Delivered

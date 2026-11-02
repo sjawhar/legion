@@ -29,7 +29,7 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// The live tests of the host grant: one nkey user holding HostPermissions, on the 2.10 image and on
+// The live tests of the host grant: one nkey user holding HostPermissions, on the plain image and on
 // the hub's, each run with the hub's own server arguments. This branch's listener connects as that
 // user with the environment host:Listener gives it, subscribeAllTopics on, since this is the one
 // grant that allows it, and a session connects as the same user, as every session on a host does.
@@ -287,7 +287,7 @@ func TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers(t *te
 // and takes, renews and releases its machine's delivery lease there as the listener's lease does:
 // each write read back by key, a direct get on the key's subject, at the revision it wrote. It also
 // writes a session's last-seen record. A write to another machine's lease key is refused, on the
-// 2.10 image and on the hub's. Every allowed operation comes first, so the refused publish after
+// plain image and on the hub's. Every allowed operation comes first, so the refused publish after
 // them is the only violation the server logs.
 func TestListenerPermissionsOpenTheListenerStateBucketOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
@@ -415,7 +415,7 @@ func TestListenerHostPermissionsOnRealServers(t *testing.T) {
 
 // A user holding SessionPermissions alone, as sessions that share one user hold it, receives its
 // notifications and publishes a reply, and the server refuses it a subscribe to the reply inboxes
-// and a JetStream API request, on the 2.10 image and on the hub's: request/reply from such a
+// and a JetStream API request, on the plain image and on the hub's: request/reply from such a
 // session is refused by design, and it reads missed notifications only through the listener.
 func TestSessionPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {

@@ -348,6 +348,12 @@ credential is configured.
 The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image. Pin it by digest and
 verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 
+It needs nats-server v2.15.0 or later, and the hubs this repository deploys run v2.15.1. An
+earlier server loses a message it is pushing to the listener's durable consumer as that
+consumer's only subscriber goes, which is what a hand-over from one pod of a machine to the next
+is: it miscounts that push and drops the message at the ack wait, with no redelivery, so a
+session never receives it.
+
 | Setting | What it is |
 | --- | --- |
 | `ENVOY_MACHINE_ID` | Required. Names the machine this listener delivers for; its durable consumer is `listener-<machine id>`. Every listener started with one id is a pod of that machine: one delivers at a time and the others stand by ([Health and readiness](#health-and-readiness)), so two machines must never share an id. |

@@ -3073,7 +3073,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   After a hard stop the new holder settles:
   it subscribes at once and holds what it receives until the durable's `NumAckPending` is no more than what it holds, capped at one ack wait and a second (7 s) after it subscribed, then delivers in stream order, so it delivers about 5 to 6 s after the dead holder's last renewal when nothing was outstanding and about 12 to 13 s after it otherwise;
   a pod that takes a released record carrying `stale_binding` or `unsettled` settles too, and ends that hold at the hand-back delay and a second (3 s) only when the record carries `unsettled` without `ack_wait_owed` and without `stale_binding` - which makes its term a hand-back candidate - and the stopping pod's clean-hand-back mark for the revision it replaced is in the bucket (`handback.<durable>.<revision>`, `bus.ListenerHandBackPrefix`:
-  the stopping pod writes it once its own release wrote that record, its term had no lost node's binding open, its linger read this pod receiving and the server confirmed its drain, and the hold reads it every settle poll rather than at the subscribe, since the mark lands after this pod is receiving), and at 7 s otherwise - no mark, a mark that cannot be read, a stop that fell short of any part of the hand-over, or a record carrying the debt or a stale binding (`ack_wait_owed` is the ack wait the releasing term still owed - every term that must settle owes one until its own settle hold ends, the mark-ended hold included, every release writes the debt as the term stands, and a release the lease's loop outlasts records it for the release that lands after the linger has let go).
+  the stopping pod writes it once its own release wrote that record, its term had no lost node's binding open, its linger read this pod receiving, the server confirmed its drain, and nothing of the term still held a message, a serving-port worker inside a push included (`noMarkWorkerPushing`), and the hold reads it every settle poll rather than at the subscribe, since the mark lands after this pod is receiving), and at 7 s otherwise - no mark, a mark that cannot be read, a stop that fell short of any part of the hand-over, or a record carrying the debt or a stale binding (`ack_wait_owed` is the ack wait the releasing term still owed - every term that must settle owes one until its own settle hold ends, the mark-ended hold included, every release writes the debt as the term stands, and a release the lease's loop outlasts records it for the release that lands after the linger has let go).
   A message waiting out a NAK delay (a retry) stays outstanding and holds the hold to its cap, then arrives after it.
   During a roll from a build before INFRA-557, the new lease holder (taking an absent record, or a released one with neither flag) finds the old task's `nats.Bind` binding on the durable and waits for it to end (`/healthz` 200 `degraded` with `role` `standby` and `receive` `waiting for another subscriber's push binding to end`), subscribing within a second of its end;
   past 135 s it logs `lease holder cannot deliver from the durable` at ERROR, again every five minutes, and never exits for it.
@@ -3164,9 +3164,12 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
 
 - On the durable path a push to a serving-port session this listener owns is not made by the handler:
   it goes to the session's serving-port worker (`servePortWorkers`, `cmd/listener/serve_port_workers.go`), which keeps the message in progress and pushes it again, 1 s doubling to 30 s, until the port answers 204, so the session's later messages keep their stream order behind it, and hands it back to the durable only when the session is no longer a serving port this listener owns.
-  It keeps the messages it holds in progress every `servePortProgressInterval` (2 s), well inside the durable's 6 s `consumerAckWait`, so a message waiting for its port is never delivered again while it waits, and a holder that dies leaves its messages to that same short ack wait, after which the standby that takes the delivery lease over is given them.
+  A worker's pushes belong to the receive term that handed them over, and end with it (`servePortWorkers.endTerm`):
+  a graceful stop takes them back and NAKs them in its hand-back batch, so the successor is given them after the hand-back delay rather than one ack wait later, and a lost lease drops them, so a pod whose lease is gone pushes nothing more and the server gives those messages to the pod holding the lease now at their ack wait.
+  A pod that cannot take them back -- a worker still inside a push when the take-back's wait runs out -- writes no clean-hand-back mark for that stop (`noMarkWorkerPushing`), so its successor holds the full 7 s settle cap rather than the 3 s a clean hand-back buys.
+  A worker keeps the messages it holds in progress every `servePortProgressInterval` (2 s), well inside the durable's 6 s `consumerAckWait`, so a message waiting for its port is never delivered again while it waits, and a holder that dies leaves its messages to that same short ack wait, after which the standby that takes the delivery lease over is given them.
   So a refused push is never a delivery failure the durable path reports:
-  it is the worker's to repeat, and only a session that is gone or no longer this listener's serving port sends the message back, where the unplaced causes above apply.
+  it is the worker's to repeat, and only a session that is gone or no longer this listener's serving port, or the end of the term that handed the push over, sends the message back, where the unplaced causes above apply.
   A deferral (`finalizeAfter`) and every other settle of a durable message go through its `durableSettle`, which NAKs after the longest delay any of its parties asked for.
 
 - CI settlements are published by the listeners that receive GitHub webhooks, which in production is the Fargate listener behind the webhook load balancer (its deployment sets `ENVOY_WEBHOOKS=github,slack`).
@@ -3246,7 +3249,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   The durable no longer needs the role forward mark for this;
   the mark stays for the sessions' dedupe and for `/v1/replay`'s readers, which pass a role forward over.
   A session's replay of its own agent subject shows an ad-hoc topic's stored copy it was not shown live, once.
-  A listener of an earlier release reads only the mark, so during a rollout it sends a stored ad-hoc copy to `fanoutDelivery`, which pushes it to its serve-port sessions subscribed to the topic once per key (its dedupe cache).
+  A listener of an earlier release reads only the mark, so during a rollout it sends a stored ad-hoc copy to `fanoutDelivery`, which pushes it to its serve-port sessions subscribed to the topic once per key (the delivery ledger).
 
 - A `bus.ConnectOwningStream` caller reconciles `ENVOY_NOTIFICATIONS`'s subjects by adding its own to the deployed list:
   the listener at start, and Dispatch's server, which connects in the background, on its first connection.
@@ -3374,7 +3377,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   An ad-hoc topic (`bus.UsesCoreTransport`) is published over core NATS, for the serve-port sessions the live topics lane delivers to and any subscriber the registry does not know, then forwarded the same way, `event_id` and `dedupe_key` unchanged, to the agent subject of each `self_subscribed` session registered on it on any machine (`store.Registry.MatchAll`), the `source_session` excepted, all at once (`sendToTopic`).
   Both are answered once each recipient confirmed, or once 4 s from the request's arrival have passed (`publishDeliveryWindow`), and neither publishes a delivery exception: the sender has the answer.
   Only a receipt that arrived through the route counts as a confirmation:
-  the route keeps its own record of each session that confirmed a dedupe key (`listenerDeps.confirmed`, 10 minutes), which a later send of the key reads, apart from the delivery handlers' dedupe cache, where the live topics lane's fanout and the durable's inbox delivery record a self-subscribed session whose push they skipped without hearing from it.
+  the route keeps its own record of each session that confirmed a dedupe key (`listenerDeps.confirmed`, 10 minutes), which a later send of the key reads.
+  The delivery ledger holds no record of such a session: a path that pushes a self-subscribed session nothing writes none for it, since the live topics lane's fanout and the durable's inbox delivery ask the ledger only for a recipient this listener prompts or refuses (`fanoutDelivery`).
 
 - A topic that does not begin with `notifications.` is refused `400 {"error":"topic must begin with notifications.","expected":["topic"]}` and nothing is published, which closes the raw-subject route a bearer could otherwise use to write the listener's own key-value buckets
   — the role-claim records among them — and reach `$JS.API.*`.
@@ -3686,12 +3690,14 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   A grant without the list costs one log line and one info per session.
   Calls made at once share their reads of the stream's state (identity, first and last sequence):
   each waits for a read that began after it was made, so a gap is still reported exactly when a start lies below the stream's first sequence.
-  A pull sends its own pull requests (`$JS.API.CONSUMER.MSG.NEXT`, 1,024 messages, 30 s expiry, 15 s idle heartbeat) and costs no consumer info:
+
+- **A relay's pull:** a pull sends its own pull requests (`$JS.API.CONSUMER.MSG.NEXT`, 1,024 messages, 30 s expiry, 15 s idle heartbeat) and costs no consumer info:
   its first `Next` reports a missing consumer (`ErrSessionConsumerNotFound`), and a pull that hears nothing for 30 s ends (`ErrSessionPullStalled`) and the relay restarts.
-  A reconnect ends every pull at once (`ErrSessionPullReconnected`, the client's reconnect hook):
-  the server drops a pull request with the connection it was sent on, so the relay restarts at the ack floor rather than waiting the 30 s of silence out.
+  A connection event of the session-consumer client ends every pull of it at once (`ErrSessionPullReconnected`, the channel `bus.Client.ConnectionChanged` hands each pull):
+  the server drops a pull request with the connection it was sent on, so a reconnect, a close and a replacement connection all end the pull and the relay restarts at the ack floor rather than waiting the 30 s of silence out, while a disconnect alone is waited past to the reconnect that follows it, as is an event that left the request's connection current and unreconnected (`bus.SessionPull.lostRequest`).
   That restart waits out no retry backoff either, however far a run's earlier failures had doubled it (`relayReconnected`, `cmd/listener/session_relay.go`), and it puts that wait back to `relayRetryFirst`:
   a pull request lost with its connection says nothing about the session or its consumer, and a run is never replaced while the session's epoch stands, so a reconnect would otherwise cost a long-lived run's session up to `relayRetryMax`, 30 s, every time.
+  A pull's `Stop` on a live connection waits, at most 2 s, for the server to confirm its unsubscribe (`bus.SessionPull.Stop`): a reconnect in place resends the old inbox's subscription, and a message stored while the unsubscribe was still on its way would otherwise go to the dropped request and wait out the consumer's 60 s ack wait, since the restart keeps a consumer with nothing awaiting an ack.
 
 - **Relay over NATS:** the owner pulls the consumer and publishes each message, in stream order, as a core frame on `notifications.envoy.deliver.<session id>` (`bus.DeliverSubject`;
   the stream does not store it, and the live topics lane skips it).
@@ -3703,7 +3709,7 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   `done` once it wrote, skipped or refused the frame (`Ack`, which also counts as `received`); `nak` when it cannot take it (`NakWithDelay` of 1 s).
   Up to `MaxAckPending` frames are in flight.
   The relay judges none of them:
-  every frame it pulls is published whatever the caches hold, and a refusal of a message on a followed topic is the fan-out's to report for such a session (the "No consumer" bullet below), where a serving-port session's relay makes and reports that refusal itself.
+  every frame it pulls is published whatever the delivery ledger holds, and a refusal of a message on a followed topic is the fan-out's to report for such a session (the "No consumer" bullet below), where a serving-port session's relay makes and reports that refusal itself.
   When the oldest unanswered frame gets no reply within 3 s (`relayReceiptWait`), the relay pauses:
   it sends nothing more and leaves the frames in flight to their ack wait.
   It resumes on its own, with no registration:
@@ -3720,16 +3726,16 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   That exception is the one report of such a refusal where the fan-out leaves it to this relay (the bullet below), and no report at all where the fan-out reported it itself: the fan-out records a refusal only together with the exception that reports it, so a refused message that has an attempt record is acked unreported rather than reported a second time.
   An attempt record is therefore a hold only where the relay would otherwise push the message (below), whatever the session's entry said when the fan-out judged it -- a serving port on consumer delivery, a portless one, none at all, or the core-path entry a heartbeat tick whose consumer call failed transiently writes.
   So one upstream event published on several of a session's topics under one dedupe key (`contracts/normalize.go`) reaches its port once.
-  Because the relay reads those two caches, and judges without the attempt record first, a record it finds never costs the session a message.
+  Because the relay reads both of the ledger's records for the pair, and judges without the attempt record first, a record it finds never costs the session a message.
   Two rules hold that.
   A path that does not push to the session records nothing for it (the bullet below).
   And an attempt record of a message the relay would otherwise push is a push in flight, not a delivery, so the relay holds such a message rather than acking it (`holdWhilePushedElsewhere`):
   it leaves the copy unacked in the consumer, keeps it in progress, and judges it again every second (`relayHeldRecheck`).
-  It acks the message only on the dedupe key that push's 204 writes, and pushes it itself once the attempt record is gone -- the serving-port worker clears it when it drops its push or hands it back, the fan-out writes none at all when its own resolution of that recipient fails (`session.ErrNoSessionRecord`, a session whose entry is gone, among those failures) and clears the one it recorded when a push it made itself then fails, and `attemptCacheTTL` expires it 5 minutes after it was written -- so a hold lasts at most that TTL plus one recheck, and delivery rests on the consumer's ack state, never on a cache that expires.
+  It acks the message only on the dedupe key that push's 204 writes, and pushes it itself once the attempt record is gone -- the serving-port worker clears it when it drops its push or hands it back, the fan-out writes none at all when its own resolution of that recipient fails (`session.ErrNoSessionRecord`, a session whose entry is gone, among those failures) and clears the one it recorded when a push it made itself then fails, and the ledger stops holding the pair under an unsettled attempt once it is older than the takeover age (the 30 s prompt limit and `ledgerTakeoverMargin`) and under a kept one at `dedupe.AttemptedAge`, 5 minutes from the write -- so a hold lasts at most that age plus one recheck, and delivery rests on the consumer's ack state, never on a record that expires.
   That is the case of a serving-port session whose entry flips from core delivery back to consumer delivery under a push already handed to its worker -- a registration answered `core` on a transient consumer call failure, then one that finds the consumer again -- where the worker's next try reads the flipped entry, drops its push and clears the attempt, and the relay then pushes the message itself.
   A held message delays only the session's own later messages, which wait behind it in stream order as they wait behind a head message the port keeps refusing.
   The worst case, relay and worker pushing at once, is a duplicate the session drops by its dedupe key, never a lost message.
-  A dedupe record over the attempt is a push that did reach the port, so the relay acks its copy, and a portless session refuses nothing (its frames are published whatever the caches hold), so the worker leaves that message to the relay.
+  A dedupe record over the attempt is a push that did reach the port, so the relay acks its copy, and a portless session refuses nothing (its frames are published whatever the ledger holds), so the worker leaves that message to the relay.
 
 - **No consumer:** a listener whose consumer call the server refuses for want of a grant (`bus.ErrConsumerNotGranted`) answers `core` with `no_grant`, logs one WARN for the episode, and answers `no_grant` without a server call for 10 minutes (`noGrantBackoff`);
   any other failed call answers `consumer_error`.
@@ -4237,7 +4243,7 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   The route then confirms it with each registered self-subscribed session:
   it forwards the same envelope, `event_id` and `dedupe_key` unchanged, with a receipt to the agent subject of every session whose registered interests match the topic on any machine (`store.Registry.MatchAll`), whose session entry is live and `self_subscribed`, other than the `source_session`, retrying each as a role message is retried, and answers once each confirmed, or 504 naming each that did not (the Listener API's `/v1/messages/publish` row).
   Only a receipt that arrived through the route counts:
-  with the live topics lane on, the lane receives the route's own publish and records each self-subscribed session on its machine whose push it skipped in the delivery handlers' dedupe cache, so the route reads a record of its own (`listenerDeps.confirmed`) instead.
+  with the live topics lane on, the lane receives the route's own publish and skips the push of each self-subscribed session on its machine without hearing from it, writing no ledger record for it (`fanoutDelivery` asks the ledger only for a recipient it prompts or refuses), so the route reads a record of its own (`listenerDeps.confirmed`) instead.
   A topic whose own publish did not reach NATS, the window ending first or the publish failing at once for any reason but a refusal, is answered 504 `publish_failed` and forwarded to no one, so a topic with no recipient is answered 200 only once it was published.
   A session that stopped without unregistering stays registered until its registration lapses (5 minutes) and is named in every `not_confirmed` 504 in that time;
   it is not a failed delivery to the others.

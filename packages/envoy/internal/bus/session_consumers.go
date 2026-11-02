@@ -87,11 +87,6 @@ type SessionConsumers struct {
 	// pullExpires and pullHeartbeat are sessionPullExpires and sessionPullHeartbeat, shortened by
 	// a test of a pull's later requests.
 	pullExpires, pullHeartbeat time.Duration
-	// pullsMu guards pulls.
-	pullsMu sync.Mutex
-	// pulls holds every pull in progress (Pull), until Stop takes it out: a reconnect ends each of
-	// them (pullsLost), because the server drops their pull requests with the connection.
-	pulls map[*SessionPull]struct{}
 	// pendingMu guards pending and createFault.
 	pendingMu sync.Mutex
 	// pending holds, by consumer name, the start of each consumer a restart (RestartAtFloor) read
@@ -113,44 +108,16 @@ type SessionConsumers struct {
 // ConnectSessionConsumers opens SessionConsumers on a Client of its own, named
 // "envoy-session-consumers" unless options name it: it connects as Connect does, as the NATS user,
 // through the proxy and under the remote-NATS rule the environment names, reconnects forever, and
-// dials a replacement for a connection nats.go gave up on. A pull (Pull) in progress when the
-// connection reconnects, in place or replaced, ends with ErrSessionPullReconnected, and its
-// caller pulls again (pullsLost).
+// dials a replacement for a connection nats.go gave up on. A pull (Pull) in progress at a
+// connection event of that client -- a disconnect, a reconnect in place, a close, or a connection
+// dialled to replace a closed one -- ends with ErrSessionPullReconnected, and its caller pulls
+// again (SessionPull.take).
 func ConnectSessionConsumers(urls []string, options ...ConnectOption) (*SessionConsumers, error) {
 	client, err := Connect(urls, append([]ConnectOption{WithName("envoy-session-consumers")}, options...)...)
 	if err != nil {
 		return nil, err
 	}
-	consumers := &SessionConsumers{client: client, ackWait: SessionConsumerAckWait, pullExpires: sessionPullExpires, pullHeartbeat: sessionPullHeartbeat, pulls: map[*SessionPull]struct{}{}}
-	client.AddReconnectHook(consumers.pullsLost)
-	return consumers, nil
-}
-
-// trackPull records a pull in progress; untrackPull drops one Stop ended.
-func (s *SessionConsumers) trackPull(p *SessionPull) {
-	s.pullsMu.Lock()
-	defer s.pullsMu.Unlock()
-	s.pulls[p] = struct{}{}
-}
-
-func (s *SessionConsumers) untrackPull(p *SessionPull) {
-	s.pullsMu.Lock()
-	defer s.pullsMu.Unlock()
-	delete(s.pulls, p)
-}
-
-// pullsLost ends every pull in progress once the connection reconnected, in place or replaced:
-// the server dropped their pull requests with the connection they were sent on and delivers
-// nothing for them, so each pull's caller restarts its consumer at the ack floor and pulls again
-// (SessionPull.reconnected). It is the client's reconnect hook, and never fails: there is nothing
-// here to retry.
-func (s *SessionConsumers) pullsLost(*nats.Conn) error {
-	s.pullsMu.Lock()
-	defer s.pullsMu.Unlock()
-	for p := range s.pulls {
-		p.reconnected()
-	}
-	return nil
+	return &SessionConsumers{client: client, ackWait: SessionConsumerAckWait, pullExpires: sessionPullExpires, pullHeartbeat: sessionPullHeartbeat}, nil
 }
 
 // Close closes the connection; a pull in progress ends.
@@ -166,9 +133,9 @@ func (s *SessionConsumers) SetCreateFault(fault func(consumer string) error) {
 }
 
 // ForceReconnect has nats.go reconnect the connection in place, as it does when the server drops
-// it: every pull in progress ends (pullsLost, ErrSessionPullReconnected) and its caller pulls
-// again. It is a seam for tests, which measure what a relay does with a lost pull; nothing else
-// calls it.
+// it: every pull in progress ends (ErrSessionPullReconnected, SessionPull.take) and its caller
+// pulls again. It is a seam for tests, which measure what a relay does with a lost pull; nothing
+// else calls it.
 func (s *SessionConsumers) ForceReconnect() error { return s.client.Conn.ForceReconnect() }
 
 // Drain drains the connection, letting acks already sent reach the server, within timeout.

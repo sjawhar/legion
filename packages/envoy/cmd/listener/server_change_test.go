@@ -197,9 +197,9 @@ type serverChangeRun struct {
 // It runs twice. With the live topics lane off, the senders publish through the sender's listener
 // S, so every message crosses the hub. With the lane on in both listeners (liveLaneEnv), the
 // senders publish through H, so the publish route runs on the machine whose live lane receives
-// each ad-hoc publish and records the stand-in in its delivery handlers' dedupe cache as a push it
-// skipped; a route that counted that record as the stand-in's receipt would answer 200 for an
-// ad-hoc message sent while the stand-in is held off, and fail assertion 1.
+// each ad-hoc publish and skips the stand-in's push without hearing from it; a route that counted
+// a delivery-ledger record of that skip as the stand-in's receipt would answer 200 for an ad-hoc
+// message sent while the stand-in is held off, and fail assertion 1.
 func TestServerChange(t *testing.T) {
 	runs := []serverChangeRun{
 		{name: "live lane off, senders through S"},

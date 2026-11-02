@@ -2918,11 +2918,11 @@ the host, holds the whole grant above, host sessions included, since sessions ru
 that already reads the host's seed. This repository's listener and a session, connected as one
 user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
-2.10 and 2.15.1 servers, the listener's `/v1/replay` read of a send stored while its session had
-no subscription open and the session user's refusal of that JetStream read included, as are a
-session consumer the listener's user creates, pulls, acks, restarts and deletes, both of its role
-lane queue groups, and the session user's refusal of a consumer create; `AGENTS.md` in this
-directory says how.
+2.15.1 servers, the plain image and the hub's alpine one (`internal/testnats.Images`), the
+listener's `/v1/replay` read of a send stored while its session had no subscription open and the
+session user's refusal of that JetStream read included, as are a session consumer the listener's
+user creates, pulls, acks, restarts and deletes, both of its role lane queue groups, and the
+session user's refusal of a consumer create; `AGENTS.md` in this directory says how.
 
 `ListenerHostPermissions(machineID)` is the grant of a listener's own NATS user, one no session
 shares: `ListenerPermissions(machineID)`, the session consumers' calls included, then the plain
@@ -2979,7 +2979,7 @@ that durable on any filter, so it can read any retained notification; and, since
 push consumer's deliver subject against a grant, a consumer it creates can deliver any payload onto
 a session's frames. Its `_INBOX.>` subscription, the base grant's, receives every reply any
 client on the server gets, other listeners' durable push deliveries included. The real
-`envoy-dispatch` runs under that grant against nats-server 2.10 and 2.15.1 in
+`envoy-dispatch` runs under that grant against those same nats-server 2.15.1 servers in
 `core/dispatch_permissions_live_test.go`, which also checks Dispatch's own user is refused a
 publish to a session's frames.
 

@@ -95,7 +95,7 @@ func requireViolation(t *testing.T, conn *natsgo.Conn, errs <-chan error, want s
 	}
 }
 
-// The rendered block, as a server's whole configuration, on both the 2.10 image and the hub's.
+// The rendered block, as a server's whole configuration, on both the plain image and the hub's.
 func TestRenderedAuthorizationOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
