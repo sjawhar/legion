@@ -1,3 +1,4 @@
+import { envoyCredential } from "@legion/envoy-client/envoy-settings"
 import { messageFor } from "@legion/envoy-client/errors"
 import { sessionConfigFile, sessionEnvoySettings } from "@legion/envoy-client/session-settings"
 import { sendEnvoyMessage } from "../src/envoy-client"
@@ -13,7 +14,12 @@ try {
     nats: false,
   })
   if (!envoy.enabled) throw new Error(`Envoy is off: ${envoy.error ?? envoy.notice}`)
-  await sendEnvoyMessage({ baseUrl: envoy.url, token: envoy.token, targetSession, message })
+  await sendEnvoyMessage({
+    baseUrl: envoy.url,
+    token: envoyCredential(envoy),
+    targetSession,
+    message,
+  })
   process.stdout.write(`Sent Envoy message to ${targetSession}.\n`)
 } catch (error) {
   process.stderr.write(`Claude Envoy send failed: ${messageFor(error)}\n`)

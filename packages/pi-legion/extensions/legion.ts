@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
+import { activeDispatchSettings, dispatchCredential } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state";
+import { envoyCredential } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import {
   sessionConfigFile,
@@ -174,7 +175,8 @@ export default function legionExtension(pi: PiApi): void {
         });
         architectPublisher = {
           publish: envoy.enabled
-            ? createEnvoyClient({ baseUrl: envoy.url, token: envoy.token, fetch }).publish
+            ? createEnvoyClient({ baseUrl: envoy.url, token: envoyCredential(envoy), fetch })
+                .publish
             : undefined,
         };
       }
@@ -439,7 +441,7 @@ export default function legionExtension(pi: PiApi): void {
           }
           try {
             return await resolveIssueDocumentId(
-              new DispatchClient(config.url, config.token, fetch),
+              new DispatchClient(config.url, dispatchCredential(config), fetch),
               issue,
               reference
             );

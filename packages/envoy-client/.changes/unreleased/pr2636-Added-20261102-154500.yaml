@@ -1,0 +1,16 @@
+kind: Added
+body: |
+  A session whose Dispatch or Envoy listener names no bearer at all now presents the access
+  token the secrets broker mints for this machine's own identity: a pod's projected
+  service-account token, or a Compute Engine machine's Google identity token, traded at
+  `AGENT_SECRETS_URL` through `@legion/broker-client` when `AGENT_SECRETS_MACHINE_IDENTITY`
+  names one. That token is bound to a key this process makes, so every request carries
+  `Authorization: DPoP <token>` and a proof of that key naming the request and hashing the
+  token (RFC 9449); `src/bearer.ts` holds a bearer and that credential as one
+  `RequestCredential`, and `dispatchCredential` and `envoyCredential` answer what a caller
+  presents. `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `ENVOY_TOKEN`, `ENVOY_TOKEN_FILE` and an
+  envoy.json's own token are resolved first and unchanged, so a session that has one behaves
+  exactly as it did.
+time: 2026-11-02T15:45:00.000000000Z
+custom:
+  Issue: pr2636

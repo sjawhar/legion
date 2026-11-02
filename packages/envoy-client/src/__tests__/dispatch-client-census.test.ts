@@ -96,11 +96,13 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
 afterEach(forgetKeyedLayerMemory);
 
 test("every DispatchClient method reaches Dispatch through its one request function, every write keyed", async () => {
-  expect(
-    Object.getOwnPropertyNames(DispatchClient.prototype)
-      .filter((name) => name !== "constructor")
-      .sort()
-  ).toEqual(Object.keys(CALLS).sort());
+  // Every method, which is every own property of the prototype that is one: `token` is an
+  // accessor (the secret the client presents, which a broker credential renews), not a call.
+  const methods = Object.getOwnPropertyNames(DispatchClient.prototype).filter((name) => {
+    const property = Object.getOwnPropertyDescriptor(DispatchClient.prototype, name);
+    return name !== "constructor" && typeof property?.value === "function";
+  });
+  expect(methods.sort()).toEqual(Object.keys(CALLS).sort());
   const global = spyOn(globalThis, "fetch");
   const keys: string[] = [];
   try {

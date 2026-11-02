@@ -3,7 +3,7 @@
 // (`extensions/askgate/askgate.ts`). The configuration is resolved at each call, so a Dispatch that
 // moved — a new `dispatch.serverUrl` in the session's envoy.json, or a checkout's own
 // `.envoy/envoy.json` under the directory a gated command runs in — takes effect without a reload.
-import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
+import { activeDispatchSettings, dispatchCredential } from "@legion/envoy-client/dispatch-config";
 import { dispatchServerUrls } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import {
@@ -34,7 +34,7 @@ export function sessionDispatchClient(
   return config === null
     ? undefined
     : {
-        client: new DispatchClient(config.url, config.token, fetch, signal),
+        client: new DispatchClient(config.url, dispatchCredential(config), fetch, signal),
         serverUrls: dispatchServerUrls(config),
       };
 }

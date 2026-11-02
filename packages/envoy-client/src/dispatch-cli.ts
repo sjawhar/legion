@@ -32,6 +32,7 @@ import {
   writePicture,
 } from "./dispatch-session-state";
 import { followedAsk, followNoticeText } from "./dispatch-subscribe";
+import { envoyCredential } from "./envoy-settings";
 import { messageFor } from "./errors";
 import {
   handedConfigFile,
@@ -428,7 +429,7 @@ export async function runDispatchCli(
       const listener = createEnvoyClient({
         baseUrl: envoy.url,
         fetch: io.fetchImpl ?? fetch,
-        token: envoy.token,
+        token: envoyCredential(envoy),
         timeoutMs: SUBSCRIPTIONS_TIMEOUT_MS,
         retry: false,
       });

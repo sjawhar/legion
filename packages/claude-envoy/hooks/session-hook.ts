@@ -68,6 +68,7 @@
 
 import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { dispatchCredential } from "@legion/envoy-client/dispatch-config"
 import { formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute"
 import {
   dispatchFirstSkillFile,
@@ -201,7 +202,7 @@ async function openAsks(raw: unknown): Promise<void> {
     try {
       const snapshot = await new DispatchClient(
         dispatch.url,
-        dispatch.token,
+        dispatchCredential(dispatch),
         fetch,
         AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS),
       ).openAsks(input.session_id)

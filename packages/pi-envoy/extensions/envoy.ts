@@ -68,7 +68,7 @@ import {
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
 import { askgateSetting, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
-import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
+import { envoyCredential, MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsConnectionOptions } from "@legion/envoy-client/nats-connection";
@@ -646,7 +646,7 @@ export default function envoyExtension(pi: PiApi): void {
         client: createEnvoyClient({
           baseUrl: envoy.url,
           fetch: serverClock.observing(fetch),
-          token: envoy.token,
+          token: envoyCredential(envoy),
         }),
       }
     : undefined;

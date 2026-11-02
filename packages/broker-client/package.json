@@ -1,0 +1,51 @@
+{
+  "name": "@legion/broker-client",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./dpop": {
+      "types": "./src/dpop.ts",
+      "bun": "./src/dpop.ts"
+    },
+    "./environment": {
+      "types": "./src/environment.ts",
+      "bun": "./src/environment.ts"
+    },
+    "./metadata-identity": {
+      "types": "./src/metadata-identity.ts",
+      "bun": "./src/metadata-identity.ts"
+    },
+    "./projected-token": {
+      "types": "./src/projected-token.ts",
+      "bun": "./src/projected-token.ts"
+    },
+    "./source": {
+      "types": "./src/source.ts",
+      "bun": "./src/source.ts"
+    },
+    "./token-client": {
+      "types": "./src/token-client.ts",
+      "bun": "./src/token-client.ts"
+    },
+    "./wire": {
+      "types": "./src/wire.ts",
+      "bun": "./src/wire.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome check src/"
+  },
+  "dependencies": {
+    "jose": "6.2.9",
+    "openid-client": "6.8.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

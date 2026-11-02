@@ -68,6 +68,7 @@ import {
 } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
+import { bearerCredential, type RequestCredential } from "./bearer";
 
 export type { DispatchServiceErrorShape } from "@legion/contracts";
 
@@ -668,21 +669,41 @@ function excerpt(text: string, token: string): string {
  * JSON HTTP client for Dispatch's native-tool API. Every request goes through `#send`, where each
  * write (POST or PATCH) carries an `Idempotency-Key` of its own and asks again under it as
  * `writeRetry` paces it.
+ *
+ * `credential` is a bearer, as it has always been, or a `RequestCredential` — what this machine
+ * trades its own identity for at the secrets broker, presented under the `DPoP` scheme with a
+ * fresh proof of this process's key on every request (`dispatchCredential`, src/bearer.ts).
  */
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
+  readonly #credential: RequestCredential;
 
   constructor(
     baseUrl: string,
-    readonly token: string,
+    credential: string | RequestCredential,
     readonly fetchImpl: typeof fetch = fetch,
     signal?: AbortSignal,
     readonly writeRetry: DispatchWriteRetry = DISPATCH_WRITE_RETRY
   ) {
+    if (credential === "") {
+      // The one credential that can only be a mistake: a caller reading a resolution's `token`
+      // where the credential is the broker's would send `Bearer ` and be refused by Dispatch with
+      // nothing to say why.
+      throw new Error(
+        "DispatchClient needs a credential: this Dispatch's is the secrets broker's access token, which `dispatchCredential` answers"
+      );
+    }
+    this.#credential = typeof credential === "string" ? bearerCredential(credential) : credential;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+  }
+
+  /** The secret this client presents, which an excerpt of someone else's answer redacts; "" while
+   *  a broker credential has yet to trade for one. */
+  get token(): string {
+    return this.#credential.secret();
   }
 
   /**
@@ -1467,7 +1488,7 @@ export class DispatchClient {
   ): Promise<Response> {
     const headers: Record<string, string> = {
       Accept: accept,
-      Authorization: `Bearer ${this.token}`,
+      ...(await this.#credential.headers(method, url)),
     };
     if (body !== undefined) headers["Content-Type"] = body.type;
     if (method !== "POST" && method !== "PATCH") {
@@ -1488,7 +1509,11 @@ export class DispatchClient {
       let answer: WriteAnswer | undefined;
       let thrown: unknown;
       try {
-        answer = await writeAnswer(await this.#attempt(url, method, headers, body, silenceMs), key);
+        // Each attempt presents the credential afresh: a key-bound scheme signs one proof per
+        // request, and a resource server that keeps a replay store refuses a proof it has
+        // already seen.
+        const sent = { ...headers, ...(await this.#credential.headers(method, url)) };
+        answer = await writeAnswer(await this.#attempt(url, method, sent, body, silenceMs), key);
         if (answer.echoed) KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
         if (!answer.again) return answer.response;
         reached ||= answer.reached;
@@ -1627,9 +1652,10 @@ export class DispatchClient {
    */
   async #probeKeyedLayer(): Promise<boolean> {
     try {
-      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+      const probe = `${this.#baseUrl}/healthz`;
+      const response = await this.fetchImpl(probe, {
         method: "GET",
-        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        headers: { Accept: "application/json", ...(await this.#credential.headers("GET", probe)) },
         signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)]),
       });
       if (!isJson(response)) return false;

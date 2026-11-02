@@ -51,6 +51,7 @@ packages/claude-envoy
 packages/envoy-client
 packages/contracts
 packages/pi-shared
+packages/broker-client
 
 # The build's outputs themselves, not inputs.
 :(exclude)packages/claude-envoy/dist

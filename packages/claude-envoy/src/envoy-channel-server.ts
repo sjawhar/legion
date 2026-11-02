@@ -24,6 +24,7 @@ import {
 import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
 import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
+import { envoyCredential } from "@legion/envoy-client/envoy-settings"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsConnectionOptions } from "@legion/envoy-client/nats-connection"
@@ -1769,7 +1770,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const client = createEnvoyClient({
     baseUrl: envoy.url,
     fetch: globalThis.fetch,
-    token: envoy.token,
+    token: envoyCredential(envoy),
   })
   // INFRA-404: this process, as the listener knows it. Minted once here and sent on every
   // registration and every deregistration, so the listener can tell the entry this process made

@@ -1,5 +1,6 @@
 import { type Envelope, EnvelopeSchema } from "@legion/contracts";
 import { z } from "zod";
+import { bearerCredential, type RequestCredential } from "./bearer";
 import { normalizeEnvoyUrl } from "./envoy-settings";
 import { machineID } from "./machine";
 
@@ -133,9 +134,13 @@ export type EnvoyClientConfig = {
   /** Whether a request a network error or a 5xx failed is sent once more, after 250 ms. Default
    * true; false for a best-effort read that must not hold its caller past one timeout. */
   readonly retry?: boolean;
-  /** The listener's bearer (`envoySettings`), sent on every call; none sends no `Authorization`
-   * header, for a loopback listener that asks for none. */
-  readonly token?: string | undefined;
+  /**
+   * What every call presents (`envoyCredential`): the listener's bearer, as it always was; or a
+   * `RequestCredential`, which is this machine's identity traded at the secrets broker and
+   * presented under the `DPoP` scheme with a proof of this process's key on each request; or none
+   * at all, which sends no `Authorization` header, for a loopback listener that asks for none.
+   */
+  readonly token?: string | RequestCredential | undefined;
 };
 
 export type Interest = z.infer<typeof InterestWireSchema>;
@@ -439,8 +444,16 @@ type RequestOptions = { readonly timeoutMs?: number; readonly retry?: boolean };
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const apiToken = config.token;
 
+  // A bearer is the credential it has always been, and an empty one is no credential, as it was
+  // before: a loopback listener that asks for none gets no `Authorization` header. A
+  // `RequestCredential` signs a proof of its own for each request, so each attempt asks it again.
+  const credential: RequestCredential | undefined =
+    typeof config.token === "string"
+      ? config.token === ""
+        ? undefined
+        : bearerCredential(config.token)
+      : config.token;
   const request = async (
     path: string,
     init: RequestInit,
@@ -453,7 +466,12 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       let response: Response;
       try {
         const headers = new Headers(init.headers);
-        if (apiToken) headers.set("Authorization", `Bearer ${apiToken}`);
+        // Awaited only when the credential answers with a promise. A bearer answers at once, and
+        // an awaited microtask here would let whatever the caller does next — the plugin's NATS
+        // drain at shutdown — start before this request leaves.
+        const ready = credential?.headers(init.method ?? "GET", url);
+        const presented = ready instanceof Promise ? await ready : ready;
+        for (const [name, value] of Object.entries(presented ?? {})) headers.set(name, value);
         response = await config.fetch(url, {
           ...init,
           headers,

@@ -65,7 +65,7 @@ import { z } from "zod";
 import { actorText } from "./actor-text";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine, commandName } from "./dispatch-command";
-import type { ActiveDispatchConfig } from "./dispatch-config";
+import { type ActiveDispatchConfig, dispatchCredential } from "./dispatch-config";
 import {
   type DispatchHost,
   type DispatchOrigin,
@@ -3149,7 +3149,8 @@ export async function checkDispatchCall(input: DispatchCallCheckInput): Promise<
 export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
 ): Promise<DispatchToolResult> {
-  const { url: configUrl, token: configToken } = input.config;
+  const { url: configUrl } = input.config;
+  const credential = dispatchCredential(input.config);
   // Every link the command prints is to Dispatch's dashboard as people open it: the public URL when
   // the session has one (a pod reaches Dispatch at an in-cluster address nobody else can open), and
   // the API's URL otherwise.
@@ -3186,7 +3187,7 @@ export async function executeDispatchTool(
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
   const dispatchClient = (): DispatchClient =>
-    new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
+    new DispatchClient(configUrl, credential, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");

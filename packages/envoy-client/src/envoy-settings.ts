@@ -1,4 +1,5 @@
-import { bearerSource, fileBearer } from "./bearer";
+import { bearerSource, fileBearer, type RequestCredential } from "./bearer";
+import { brokerCredential, brokerRouteConfigured } from "./broker-credential";
 import {
   type EnvoyConfig,
   type EnvoyConfigEnvironment,
@@ -103,8 +104,17 @@ export type EnvoyInbound =
 export interface EnabledEnvoySettings {
   readonly enabled: true;
   readonly url: string;
-  /** The listener's bearer; none for a loopback listener that asks for none. */
+  /** The listener's bearer; none for a loopback listener that asks for none, and none where
+   * `brokered` holds the credential instead. */
   readonly token: string | undefined;
+  /**
+   * The credential when it is not a bearer: an access token the secrets broker minted for this
+   * machine's identity, presented under the `DPoP` scheme with a proof of this process's key on
+   * every request. Set only when no bearer is configured and this machine has an identity to
+   * trade, so every deployment that writes `ENVOY_TOKEN` or an `envoy.token` is unaffected.
+   * `envoyCredential` is what a caller presents.
+   */
+  readonly brokered?: RequestCredential | undefined;
   /** Inbound messages, which arrive over NATS. Off with `NO_NATS_SERVER` when nothing names a
    * NATS server, with the refusal when the seed for the named ones could not be read or used (the
    * listener and its bearer stand), and with `NO_NATS_CONNECTION` for a caller that opens none. */
@@ -123,6 +133,16 @@ export interface EnabledEnvoySettings {
    * it named is used as given. It reports the raise to the heartbeat alone: the bounds every
    * resolved interval is held inside are applied in silence and are not reported here. */
   readonly passDeadlineRaisedFrom: number | undefined;
+}
+
+/**
+ * What a listener client presents for `settings`: the broker credential when this machine traded
+ * for one, the bearer when one is configured, and undefined for a listener that asks for none.
+ */
+export function envoyCredential(
+  settings: EnabledEnvoySettings
+): string | RequestCredential | undefined {
+  return settings.brokered ?? settings.token;
 }
 
 /** No Envoy: a `notice` says why, or an `error` names what could not be read or used. */
@@ -236,6 +256,7 @@ export function envoySettings(
   const listener = section.url ?? DEFAULT_ENVOY_URL;
   const url = namedUrl ?? listener;
   let token: string | undefined;
+  let brokered: RequestCredential | undefined;
   try {
     const source = bearerSource(env, "ENVOY", () =>
       section.token === undefined
@@ -248,12 +269,14 @@ export function envoySettings(
             checkout: false,
           }
     );
-    token =
-      source.kind === "none"
-        ? undefined
-        : source.kind === "variable"
-          ? source.token
-          : fileBearer(source, url, "ENVOY", env);
+    if (source.kind === "none") {
+      // No bearer: this machine's own identity, where it has one to trade, is what the listener
+      // checks at the broker's introspection route. A listener that asks for no credential is
+      // unaffected — it reads the request's identity, or none, the same way.
+      brokered = brokerRouteConfigured(env) ? brokerCredential(env) : undefined;
+    } else {
+      token = source.kind === "variable" ? source.token : fileBearer(source, url, "ENVOY", env);
+    }
   } catch (error) {
     return offWithError(messageFor(error));
   }
@@ -287,6 +310,7 @@ export function envoySettings(
     enabled: true,
     url: normalizeEnvoyUrl(url),
     token,
+    ...(brokered === undefined ? {} : { brokered }),
     inbound,
     heartbeatMs,
     passDeadlineMs: Math.min(

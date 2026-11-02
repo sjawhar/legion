@@ -1,0 +1,9 @@
+kind: Fixed
+body: |
+  The Legion plugin's Dispatch client, its listener publisher and the production-Dispatch reader
+  of `scripts/skill-scenarios/` present the credential the Envoy client resolves rather than a
+  bearer string, so they work on a machine whose Dispatch token is the secrets broker's
+  DPoP-bound access token instead of being refused with a bare `401`.
+time: 2026-11-02T15:48:00.000000000Z
+custom:
+  Issue: pr2636
