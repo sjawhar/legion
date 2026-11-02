@@ -2,60 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "previousHandoff": "58b87102d22320dd73bb543be9a3b0caee872fcd",
-  "round": 28,
-  "headSha": "79fd47725984",
-  "handoffHead": "820465bf76c8267a6af05e4652cdb3b01fe7c776",
-  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. The one model call this round made was the pinned Oh My Pi's print-mode turn against my local stub endpoint (proof[3]); no real model answered it.",
-  "rig": "The pod was recreated. I restored nats-server 2.10.29 from its release, and my whole-daemon driver from this branch's own history (702c4ee9 carried it briefly in round 24). I used the pod's PostgreSQL 18.6. The driver is not committed; a copy is at $TMPDIR/tester/zz_tester_parked_live_test.round28.go.",
+  "previousHandoff": "04a8d9a079e71b8bea06a1ba029279f1bd14621a",
+  "round": 29,
+  "headSha": "67e3bbc66d4980a24ac0534f4e5f67a1b8a937e5",
+  "handoffHead": "b3475694f5cef52a4b012ceb0b07d4dfe0e12277",
+  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran and no other model was called.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Each of the implementer's claims holds when I run it myself: the static checks, reasserted_status's exit codes, the setupVersion wizard result, and the four lib test files at 48 of 48. Beyond its proof, I drove tree 5's daemon behaviour on the whole daemon (proof[1]) and the key-file route's base URL end to end through a real agent turn (proof[3]), neither of which the implementer could run without docker."
+    "how": "I re-ran its claims myself: the pty wizard check on the pinned Oh My Pi, the parsed config.yml, the four route-lib test files (48 of 48), bash -n, shellcheck 0.10.0 -x, and the README layout check. I also read each of the four Minors against the review and the script."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "No daemon code moved since round 27 beyond main's merge, and the merge left this change's diff unchanged",
-      "surface": "jj diffs of the branch",
-      "command": "jj diff -r 418b43208e4a --stat; jj diff --from 56b6404b --to 6c8f837c --stat -- packages; this change's diff against its fork point at 6c8f837c and at 79fd4772, file by file",
-      "observed": "418b4320, whose parent is 39549460, the reviewer's round-27 handoff, touches only scripts/e2e/README.md, parked-decision-devbox.sh and the three install-*.sh libs; 56b6404b..6c8f837c changes nothing under packages/. Across the merge, both sides change 86 files. Only four files' context lines differ (AGENTS.md, skills/AGENTS.md, packages/daemon/internal/dispatch/client.go and types.go), and the changed (+/-) lines of every file are identical on both sides.",
-      "headSha": "79fd47725984",
+      "criterion": "The round touches only scripts/e2e; no daemon code",
+      "surface": "jj diff of the branch",
+      "command": "jj diff --from 79fd47725984 --to 67e3bbc66d49 --stat",
+      "observed": "Besides the three .legion/INFRA-251 handoffs, only scripts/e2e/README.md and the libs install-box-login-route.sh, install-key-file-model-route.sh, install-model-gateway.sh and model-endpoint.sh changed: 5 files, +28/-23 in 67e3bbc6. parked-decision-devbox.sh is unchanged. Nothing under packages/ changed.",
+      "headSha": "67e3bbc66d49",
       "negativeControl": "Not applicable."
     },
     {
-      "criterion": "Tree 5: a session outside a root waiting on a person cannot park it; the script's check reads the set-back after the fact and fails if the park were allowed",
-      "surface": "The whole Legion daemon (startDaemonWithin) on the pod's PostgreSQL and nats-server; Dispatch events as envelopes on ENVOY_NOTIFICATIONS; then the script's own reasserted_status function (extracted from parked-decision-devbox.sh) over that run's daemon log",
-      "command": "go test -tags e2e -count=1 -run '^TestTesterSessionParkOfWaitingRootSetBackLive$' -v ./internal/daemon/; bash: evidence=<dir>; dispatch_agent_session=stage3-architect-stand-in; reasserted_status <key>",
-      "observed": "PASS. The root waits on its gate (phase awaiting_person, waitingOn kind gate, artifact-g v1). An issue.updated to backlog by session stage3-architect-stand-in: the daemon wrote the root back to in_progress on the Dispatch stand-in, and the root still waits on its gate, with no slot and its architect not resumed. On that run's daemon log, the script's reasserted_status prints 'in_progress' (exit 0). For another issue, and for another session, it exits 4 and prints nothing. The log line's fields (msg, issue, session, wrote, status) are the ones workflow/engine.go:268 logs. status_by_daemon_after then reads that status written by legion-daemon:<project> after the park's seq on the real Dispatch, a read only the devbox run reaches.",
-      "headSha": "79fd47725984",
-      "negativeControl": "With sessionStatusWrite's `waiting` set to false (the park allowed; reverted with jj restore), the drive FAILS ('timed out waiting for the daemon wrote ...-3's status back'), and the script's reasserted_status over that run's log exits 4. The script's until_true 300 on it would fail the checkpoint."
+      "criterion": "A fresh lib-written profile opens no setup wizard with startup.setupWizard: false, whatever the setup version, and opens it with the setting removed; the setting is spelled as Oh My Pi reads it",
+      "surface": "The pinned Oh My Pi (release v18.13.3-sami.20261029-115123, linux-x64, byte-identical to /opt/omp/bin/omp) in a real pty (python3 pty.fork), on a home from lib/omp-home.sh's make_omp_home and a profile written by lib/install-key-file-model-route.sh; clean environment (HOME, OMP_PROFILE, TERM, PATH); 20 s of screen each",
+      "command": "bash $TMPDIR/tester/wiz/run.sh with | without | v0",
+      "observed": "with: config.yml parses (PyYAML) to startup {'setupWizard': False} and has no setupVersion key; the splash shows and 'Setup step' never appears. v0 (setupVersion: 0 appended, the lowest version): still no 'Setup step', so the switch works whatever version the build counts to. The binary has the setting 'startup.setupWizard' and checks 'setupWizardEnabled === false'. record-casts.sh:166-169 writes the same form, `startup:` with `setupWizard: false` nested under it. The three libs' heredoc hunks are identical.",
+      "headSha": "67e3bbc66d49",
+      "negativeControl": "without (the startup block deleted from the lib's config.yml): 'Setup step 1 of 5' is on the screen."
     },
     {
-      "criterion": "In a pty, the pinned Oh My Pi shows no setup wizard on a profile the libs write, and shows it without setupVersion",
-      "surface": "The pinned Oh My Pi (sjawhar/oh-my-pi release v18.13.3-sami.20261029-115123, linux-x64, byte-identical to /opt/omp/bin/omp) in a real pty (python3's pty.fork), on a fresh home made by lib/omp-home.sh's make_omp_home and a profile written by lib/install-key-file-model-route.sh, under a clean environment (HOME, OMP_PROFILE, TERM, PATH only)",
-      "command": "bash $TMPDIR/tester/wiz/run.sh with; bash run.sh without (the second deletes the setupVersion line from the lib's config.yml); 20 s of screen each",
-      "observed": "With the lib's setupVersion: 2: the splash shows (v18.13.3 and a tip) and 'Setup step' never appears. Without it: 'Setup step 1 of 5' is on the screen.",
-      "headSha": "79fd47725984",
-      "negativeControl": "The run without the line."
+      "criterion": "The four Minors of review 5732651189 are fixed as named",
+      "surface": "The changed files read against the review and the script",
+      "command": "jj diff -r 67e3bbc66d49 --git; grep in scripts/e2e/README.md, lib/model-endpoint.sh and parked-decision-devbox.sh",
+      "observed": "(1) The box-login comment names no pinned build: 'turns the wizard off, whatever setup version the build counts to'. (2) README trees-parked now follows the script: the three parks, then 'Right after those writes' the stand-in's tree 5 backlog (script line 714, after the parks at 709-712), the set-back, then 'Once tree 5 is set back' the questions on trees 1, 2 and 4 (lines 739-741, after the set-back checks at 730-734). (3) A blank line stands at README 2951, before '## dispatch-user-turns.sh' at 2952. (4) model-endpoint.sh's header and README 4560 list parked-decision-devbox.sh, which sources it at line 74. The README's config description says startup.setupWizard: false in place of setupVersion: 2.",
+      "headSha": "67e3bbc66d49",
+      "negativeControl": "Not applicable."
     },
     {
-      "criterion": "The key-file route's agents call the base URL given, not api.anthropic.com",
-      "surface": "The pinned Oh My Pi in print mode on a profile lib/install-key-file-model-route.sh wrote with --base-url http://127.0.0.1:28531, against a local stub that records each request's path, model and the sha256 of the key it carries, and answers 401",
-      "command": "env -i HOME=<home> OMP_PROFILE=tester-wiz PATH=/usr/bin:/bin omp -p 'say hi'",
-      "observed": "models.yml baseUrl is http://127.0.0.1:28531. The stub got 1 request, POST /v1/messages for model claude-opus-4-8, carrying a key whose sha256 prefix 66f1e8620dbe equals that of the key file's content. omp printed the stub's 401 and exited 1. The script now passes --base-url \"${model_base_url:-$anthropic_base_url}\" (default https://api.anthropic.com), and the gateway route refuses LEGION_E2E_MODEL_BASE_URL. model_base_url_refusal accepts https://gateway.internal.example and http://127.0.0.1:9, and refuses https://u:p@x.example, ftp://x.example and 'not a url'.",
-      "headSha": "79fd47725984",
-      "negativeControl": "The refused URLs above."
-    },
-    {
-      "criterion": "Static checks; the other proofs that use the three libs are unaffected beyond the setupVersion line",
+      "criterion": "Static checks, the route-lib tests, and other callers",
       "surface": "The scripts and their callers",
-      "command": "bash -n; shellcheck v0.10.0 -x; the shfmt AST command-word check; grep of every caller; bun test of the four lib test files",
-      "observed": "bash -n ok on the script and the four libs. shellcheck exits 0 on the script, install-key-file-model-route.sh, install-model-gateway.sh and model-endpoint.sh. install-box-login-route.sh has 2 SC2015 infos, the same 2 it had before 418b4320. Command words: 126, unresolved only docker, mise and tmux. Each lib's diff is the setupVersion: 2 line and a 3-line comment, appended last in the config.yml heredoc. The libs' callers are claude-backend-tmux, stage2, stage3, stage3-4b13b, stage4b, dispatch-user-turns, lib/box-login.sh, lib/check-model-route.sh and pi-legion's skill-scenarios rig. Of those, only dispatch-user-turns.sh writes the same config.yml again, and it appends a compaction: block, which does not collide. stage4b writes a different .omp/config.yml of its own. bun test of the four lib test files: 48 pass, 0 fail.",
-      "headSha": "79fd47725984",
+      "command": "bash -n; shellcheck v0.10.0 -x; the shfmt AST command-word check; bun scripts/semantic-line-breaks.ts scripts/e2e/README.md; bun test of the four route-lib test files; grep for setupWizard",
+      "observed": "bash -n passes on the script and the four libs. shellcheck exits 0 on the script, the key-file and gateway libs and model-endpoint.sh; install-box-login-route.sh keeps its 2 earlier SC2015 infos. The script calls 126 command words, and only docker, mise and tmux are not found here. The layout check exits 0 with no output. Route-lib tests: 48 pass, 0 fail. Each lib's change is the comment and the startup block, last in its config.yml heredoc. Of the libs' callers, only dispatch-user-turns.sh writes the same config.yml again, and it appends a `compaction:` block, so no second top-level startup key appears. stage4b writes a separate .omp/config.yml.",
+      "headSha": "67e3bbc66d49",
       "negativeControl": "Not applicable."
     }
   ],
-  "notDriven": "The full parked-decision-devbox.sh run: this pod has no docker, tmux or mise; the merge lane's devbox run proves it, and it needs the review App's key the operator holds.",
-  "ci": "Head 820465bf, read 2026-11-02T05:48Z: changes and pr-title queued; nothing else started. Not waited on. GitHub: MERGEABLE, BLOCKED."
+  "standsFromRound28": "This diff does not touch the daemon, the script, or the key-file lib's base-URL handling, so round 28's tree-5 whole-daemon drive and its negative control, and its base-URL agent-turn check, stand as recorded.",
+  "notDriven": "The full parked-decision-devbox.sh run: this pod has no docker, tmux or mise.",
+  "ci": "No check runs at 67e3bbc6. At the pushed head b3475694, read 2026-11-02T06:13Z: changes and pr-title queued, earlier pr-title runs cancelled; nothing else started. Not waited on. GitHub: MERGEABLE, BLOCKED."
 }
