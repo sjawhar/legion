@@ -247,9 +247,10 @@ func (l sourceLines) lastBefore(line int, past func([]byte) bool) int {
 // typed's content strip from every line they continue: as far past the quotes' content as typed's
 // own opening line starts, its list item's indentation and the block's own among it
 // (typedDirectiveParser.Continue). What is left of such a line for typed's content is its line
-// ending alone, so the browser editor's parser reads it as no line of typed. A line holding a
-// marker and a tab alone is that parser's own case (markerTabEndsLine): it never reads such a line
-// as typed's, whatever the columns the tab spans.
+// ending alone, so the browser editor's parser reads it as no line of typed. A line holding the
+// markers and a tab alone (markerTabEndsLine) is measured otherwise: that quote takes one column of
+// the tab and what is left of it is the line's own, which no block inside the quote strips, so only
+// a line the marker's column leaves nothing of is typed's there, whatever indentation typed carries.
 func (l sourceLines) holdsOnlyBlockIndent(line, depth int, typed *typedDirective) bool {
 	if line < 0 || leadingQuoteMarkers(l.text(line)) != depth {
 		return false
@@ -259,20 +260,24 @@ func (l sourceLines) holdsOnlyBlockIndent(line, depth int, typed *typedDirective
 	if !whitespaceLine(l.text(line)[past-start:]) {
 		return false
 	}
+	columns := l.textColumn(past) - l.quoteContentColumn(start, depth)
 	if depth > 0 && l.markerTabEndsLine(start, depth) {
-		return false
+		return columns == 0
 	}
 	indent := l.textColumn(startOf(typed)) - l.quoteContentColumn(startOf(typed), depth)
-	return l.textColumn(past)-l.quoteContentColumn(start, depth) <= indent
+	return columns <= indent
 }
 
 // markerTabEndsLine reports whether position's line holds count quote markers and a tab alone, the
-// tab right after the innermost marker and the line ending right after the tab. The quote takes one
+// tab right after the innermost marker and the line ending right after it. The quote takes one
 // column of such a tab, and the browser editor's parser leaves what is left of it in the line rather
-// than as indentation a block inside the quote strips from the lines it continues: measured against
-// the headless engine, such a line is a line of a typed block's content at every indentation the
-// block can carry, where a line of spaces at or within that indentation is none, and so is a line
-// whose tab another character follows.
+// than as indentation a block inside the quote strips from the lines it continues. Measured against
+// the headless engine on a typed block no fence closes in a quoted list item, over one to five
+// quotes and every indentation the block can carry: such a line spreads the item wherever the
+// marker's column leaves a column of the tab - at one quote, three and five, whose markers end
+// three, five and nine columns in - and is the block's where it leaves none, at two quotes and
+// four. A line of spaces, and one whose tab another character follows, are measured against the
+// block's indentation as every other line is.
 func (l sourceLines) markerTabEndsLine(position, count int) bool {
 	for ; count > 0; count-- {
 		for position < len(l.source) && (l.source[position] == ' ' || l.source[position] == '\t') {
