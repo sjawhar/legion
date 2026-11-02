@@ -16,7 +16,8 @@ package supervise
 // are here as well: a claim that can answer gets a round, and one that cannot, like a
 // registration, keeps today's immediate relaunch. The last group is the claim the daemon
 // relaunched into another pod while its pod round ran: its part in that round is frozen where
-// the dead pod left it, and the control beside it is a claim still in the round's own pod, which
+// the dead pod left it, the ask a restart left it still holding is dropped with every mark
+// armed for it, and the control beside it is a claim still in the round's own pod, which
 // takes its full part.
 //
 // Each test drives the machine through Handle, as the daemon's sweep and the API do; no action is
@@ -1359,6 +1360,57 @@ func TestPodUpdateAnUnansweredClaimRelaunchedIntoAnotherPodIsAskedNothingMore(t 
 	}
 	if c := h.claim(); c.UpdateSignalledAt != nil || c.UpdateHead != "" {
 		t.Errorf("claim after the refused answer = %+v, want nothing of it recorded", c)
+	}
+}
+
+// The ask of the pod the claim has left goes, and the question a restart armed for it goes with
+// it. A daemon that died between the write of ready in the new pod and the write of that drop —
+// or whose RetireDelivery failed, which leaves exactly the same two rows — comes back holding
+// the dead pod's ask, pending and unconfirmed, and marks it askFirst: the agent may already be
+// in the turn an earlier daemon's prompt started. The sweep drops the ask. Left armed over
+// nothing pending, that question would make the claim's next task the running turn's —
+// confirmed by a turn of another cause, never prompted, and retired unsent by that turn's end —
+// and the worker would never receive the task at all.
+func TestPodUpdateADroppedAskLeavesNoQuestionArmedForTheNextTask(t *testing.T) {
+	const task = "review the pull request"
+	h := updateHarness(t, PodUpdateContract)
+	h.inPod(testRoundPod)
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+
+	// The pod dies and the claim comes up in another one, but the drop's write fails, so the
+	// store holds the claim ready in the new pod with the dead pod's ask still pending.
+	h.rt.ScriptResume(fake.SpawnResult{Locator: podProcess(testOtherPod, 1)})
+	h.observe(runtime.Gone)
+	h.wantState(StateLaunching)
+	h.connect()
+	h.register()
+	h.store.fail("RetireDelivery", errBoom)
+	if err := h.handle(RequestReady{Claim: h.token, Generation: h.generation(), Session: session}); !errors.Is(err, errBoom) {
+		t.Fatalf("ready over a failing retirement returned %v, want the store's error", err)
+	}
+	h.store.fail("RetireDelivery", nil)
+
+	h.restart()
+	if !h.m.askFirst {
+		t.Fatal("the restored claim has nothing to ask its agent; this test needs the question a restart leaves open")
+	}
+	// The daemon's next observation of the live process drops the ask of the round this claim's
+	// process has left.
+	h.observe(runtime.Alive)
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("pending = %+v, want the dead pod's ask dropped in the new pod", p)
+	}
+
+	// A turn of another cause — an Envoy notice, a person's steer — is running, one this daemon
+	// never saw begin, and the workflow hands the claim the task of its next phase.
+	h.conn.SetStreaming(true)
+	h.must(RequestDeliver{Claim: h.token, Task: task})
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+
+	sent := h.wantPrompts(2)[1]
+	if sent.Message != task {
+		t.Errorf("the second prompt carried %q, want the next task %q", sent.Message, task)
 	}
 }
 
