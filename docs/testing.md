@@ -45,6 +45,22 @@ rather than beside the module's other Postgres-backed packages: together they sh
 service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
 (`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).
 
+## A database a Go test creates
+
+A Go test that creates a Postgres database writes `create database … strategy file_copy`, as
+`packages/envoy/internal/dispatch/store/storetest` and both modules' `internal/testpg` do. Without
+it, PostgreSQL 15 and later copy the source database through the write-ahead log, every page of it:
+4.4 MB of log for an empty database made from `template1`, and 6.4 MB for a clone of Dispatch's
+migrated template, which made one run of the `api` and `docs` packages write 16 GiB of log. A file
+copy writes a few hundred bytes. `storetest`'s own test fails when a clone writes more than a
+hundredth of its template's size, and each module's `internal/testpg` test
+`TestEveryCreatedDatabaseIsAFileCopy` fails on any line of the module's Go files that opens a
+database's creation in a string without `strategy file_copy` on the same line.
+
+A test changes no server setting (`fsync`, `full_page_writes`, `max_wal_size`): the server
+`DISPATCH_TEST_DATABASE_URL` names can hold other databases, such as the local Dispatch's on
+`packages/envoy/scripts/dev-postgres.sh`'s container.
+
 ## A test that reads `GET /api/v1/references?since=` reads again
 
 A since read answers only the edges at or below the event log's safe horizon
@@ -54,8 +70,8 @@ the events committed before the read. Past that wait it answers at the horizon i
 the rest to a later read: the route defers, it never loses an edge. The horizon is instance-wide,
 so any transaction holding a transaction id on the Postgres instance holds it back, and in
 `packages/envoy/internal/dispatch/api` the holder is the test process itself: `storetest.Open`'s
-`create database … template …` and `storetest`'s `drop database … with (force)`
-(`packages/envoy/internal/dispatch/store/storetest/storetest.go`).
+`create database … template … strategy file_copy` and `storetest`'s
+`drop database … with (force)` (`packages/envoy/internal/dispatch/store/storetest/storetest.go`).
 
 So a read that answered within `referencesSinceWait` was not held back: what it listed is what it
 owed, and a wrong answer fails the test at once. Only a read held past that wait is read again,
