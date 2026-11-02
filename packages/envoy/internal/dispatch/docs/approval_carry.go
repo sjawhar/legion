@@ -118,23 +118,56 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	if err != nil {
 		return nil, err
 	}
-	if open != nil {
-		answered, err := answerApprovalAsk(ctx, tx, s.events, open, review.Actor, reason)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, answered)
-		askID = &open.ID
-	}
 	artifact, err := reviewedArtifact(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
 	}
-	_, event, err := WriteReview(ctx, tx, s.events, artifact, version.Number, "approved", review.Actor, &reason, askID)
+	// A request that names one document - every request but one opened over a spec and its
+	// issue's Verification document - is answered by this carry, as it always was. One that names
+	// two is answered only once both stand approved at the versions it names, which this review
+	// settles for this document; the request stays open for the other, and the carried review
+	// records the request it was given against either way.
+	if open != nil {
+		askID = &open.ID
+		closes, err := carryClosesRequest(ctx, tx, open, artifactID, version.Number)
+		if err != nil {
+			return nil, err
+		}
+		if closes {
+			answered, err := answerApprovalAsk(ctx, tx, s.events, open, review.Actor, reason)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, answered)
+		}
+	}
+	_, event, err := WriteReview(ctx, tx, s.events, artifact, version.Number, "approved", ReviewKindPerson, review.Actor, &reason, askID)
 	if err != nil {
 		return nil, err
 	}
 	return append(events, event), nil
+}
+
+// carryClosesRequest reports whether carrying an approval of carried at version answers the open
+// request: every other document the request names already stands approved at the version the
+// request names for it.
+func carryClosesRequest(ctx context.Context, tx pgx.Tx, open *model.Ask, carried string, version int) (bool, error) {
+	for _, document := range open.Approval.Documents {
+		if document.ArtifactID == carried {
+			if document.Version != version {
+				return false, nil
+			}
+			continue
+		}
+		approved, err := LatestApprovedReview(ctx, tx, document.ArtifactID)
+		if err != nil {
+			return false, err
+		}
+		if approved == nil || approved.Version != document.Version {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // carriedReview is the review version number of artifactID, whose markdown is markdown and whose

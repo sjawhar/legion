@@ -4349,9 +4349,11 @@ export async function executeDispatchTool(
           : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       await refuseOpenDecisionBlocks(client, input.tool, resolved);
+      const includeVerification = optionalBoolean(args, "include_verification") === true;
       const result = await client.requestApproval(resolved.artifact.id, {
         actor,
         summary: stringArg(args, "summary"),
+        ...(includeVerification ? { include_verification: true } : {}),
       });
       if (result.ask === null) {
         return {
@@ -4374,6 +4376,23 @@ export async function executeDispatchTool(
       return {
         text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
+      };
+    }
+    case "dispatch_plan_approve": {
+      const resolved = await resolveDocument(
+        documentOwner(),
+        optionalString(args, "artifact") ?? "plan.md"
+      );
+      // The schema requires an integer version, so a call that reaches here carries one.
+      const version = optionalNumber(args, "version") ?? 0;
+      const review = await client.planApprove(resolved.artifact.id, { actor, version });
+      return {
+        text: `The plan review approved ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${review.version}; no human is asked to approve a plan. A later plan version makes this approval stale: run the review again and record it the same way.`,
+        details: {
+          issue: resolved.issue?.key,
+          artifact: resolved.artifact.id,
+          version: review.version,
+        },
       };
     }
     case "dispatch_artifact": {

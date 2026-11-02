@@ -19,8 +19,17 @@ const (
 	ApprovalOptionRequestChanges = "Request changes"
 )
 
+// A review's kind: who gave it. ReviewKindPerson is a person's review, given by answering an
+// approval request or from the document header, or carried to a later version in their name;
+// ReviewKindPlanReview is a plan review's approval of a plan version, which no person is asked
+// for (the approval request route refuses a plan document).
+const (
+	ReviewKindPerson     = "person"
+	ReviewKindPlanReview = "plan_review"
+)
+
 // ReviewColumns selects one artifact_reviews row in the order ScanReview reads it.
-const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reason, ask_id::text, created_at, event_seq`
+const ReviewColumns = `id::text, artifact_id::text, version, state, kind, actor, reason, ask_id::text, created_at, event_seq`
 
 // ReviewOrder sorts a document's reviews newest first by the order their events committed: the
 // event sequence each review kept on its document's owner, then, for a review recorded before the
@@ -42,7 +51,7 @@ const ReviewOrder = `event_seq desc nulls last, created_at desc, artifact_review
 func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 	var review model.ArtifactReview
 	var actor []byte
-	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &actor, &review.Reason, &review.AskID, &review.CreatedAt, &review.EventSeq); err != nil {
+	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &review.Kind, &actor, &review.Reason, &review.AskID, &review.CreatedAt, &review.EventSeq); err != nil {
 		return model.ArtifactReview{}, err
 	}
 	if err := json.Unmarshal(actor, &review.Actor); err != nil {
@@ -53,7 +62,8 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 
 // WriteReview records a review of artifact pinned to version and appends its event,
 // artifact.approved or artifact.changes_requested, on the document's owner: its issue when it
-// belongs to one, else the document itself. askID is the approval ask the review answers, nil
+// belongs to one, else the document itself. kind is who gave it (ReviewKindPerson,
+// ReviewKindPlanReview). askID is the approval ask the review answers, nil
 // when it was given from the document header with no request open. The review row keeps the
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
 // events. Every caller already holds the owner's row before it calls this; inside WriteReview the
@@ -65,15 +75,15 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // only at the commit, the first moment the event exists for every release; so WriteReview writes it
 // itself, and the row is right for any read the caller makes before it commits. The trigger then
 // finds the row sequenced and leaves it. The caller owns the transaction and publishes the event.
-func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
+func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state, kind string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {
 		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("encode review actor: %w", err)
 	}
 	review, err := ScanReview(tx.QueryRow(ctx, `
-		insert into artifact_reviews (artifact_id, version, state, actor, reason, ask_id)
-		values ($1, $2, $3, $4, $5, $6)
-		returning `+ReviewColumns, artifact.ID, version, state, actorJSON, reason, askID))
+		insert into artifact_reviews (artifact_id, version, state, kind, actor, reason, ask_id)
+		values ($1, $2, $3, $4, $5, $6, $7)
+		returning `+ReviewColumns, artifact.ID, version, state, kind, actorJSON, reason, askID))
 	if err != nil {
 		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("insert artifact review: %w", err)
 	}
@@ -87,6 +97,7 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 			ArtifactID: artifact.ID,
 			Name:       artifact.Name,
 			Version:    version,
+			Kind:       kind,
 			Actor:      actor,
 			Reason:     reason,
 			AskID:      askID,

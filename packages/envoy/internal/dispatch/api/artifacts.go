@@ -48,8 +48,9 @@ const (
 	maxNewArtifactKeyBytes = 2692
 )
 
-// artifactColumns is the canonical artifact column list scanArtifact reads.
-const artifactColumns = `id::text, issue_key, project_key, session_id, ref_key, slug, name, kind, is_primary, created_by, created_at`
+// artifactColumns is the canonical artifact column list scanArtifact reads. role is read through
+// coalesce because model.Artifact carries it as "" when the document plays no role.
+const artifactColumns = `id::text, issue_key, project_key, session_id, ref_key, slug, name, kind, is_primary, coalesce(role, ''), created_by, created_at`
 
 func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -475,10 +476,10 @@ func (s *server) storeArtifact(
 			return
 		}
 		artifact, err = scanArtifact(tx.QueryRow(r.Context(), `
-			insert into artifacts (issue_key, project_key, session_id, slug, name, kind, is_primary, created_by)
-			values ($1, $2, $3, $4, $5, $6, false, $7)
+			insert into artifacts (issue_key, project_key, session_id, slug, name, kind, is_primary, role, created_by)
+			values ($1, $2, $3, $4, $5, $6, false, $7, $8)
 			returning `+artifactColumns,
-			target.IssueKey, project, session, slug, input.name, kind, actorJSON))
+			target.IssueKey, project, session, slug, input.name, kind, documentRole(target, kind, slug), actorJSON))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -1377,7 +1378,7 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 	var createdBy []byte
 	if err := row.Scan(
 		&artifact.ID, &artifact.IssueKey, &project, &artifact.SessionID, &artifact.RefKey, &artifact.Slug,
-		&artifact.Name, &artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt,
+		&artifact.Name, &artifact.Kind, &artifact.Primary, &artifact.Role, &createdBy, &artifact.CreatedAt,
 	); err != nil {
 		return model.Artifact{}, err
 	}
@@ -1509,6 +1510,26 @@ func artifactSlug(name string) string {
 		return "artifact"
 	}
 	return result
+}
+
+// documentRole is the role a document takes when its row is created: an issue's markdown
+// document slugged verification-md plays "verification" and one slugged plan-md plays "plan";
+// every other new artifact plays none. The slug decides, not the name, because the slug is the
+// unique key the upload already took within the owner (nextArtifactSlug), so a second document
+// whose name gives a slug already in use - verification-md-2 - plays no role rather than
+// colliding with the one that holds it. The role is written once, as is_primary is: a later
+// upload of the same name is that document's next version, under the row this made.
+func documentRole(target artifactTarget, kind, slug string) *string {
+	if target.IssueKey == nil || kind != "doc" {
+		return nil
+	}
+	switch slug {
+	case "verification-md":
+		return new("verification")
+	case "plan-md":
+		return new("plan")
+	}
+	return nil
 }
 
 // newArtifactNameRefusal is the 400 refusing a new artifact's name past maxNewArtifactKeyBytes,

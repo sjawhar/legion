@@ -8,6 +8,7 @@ import type {
   Artifact,
   ArtifactBlock,
   ArtifactReferences,
+  ArtifactReview,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -1054,7 +1055,7 @@ export class DispatchClient {
    */
   async requestApproval(
     artifactID: string,
-    input: { actor: Actor; summary: string }
+    input: { actor: Actor; summary: string; include_verification?: boolean }
   ): Promise<ApprovalRequestResponse & { recorded: boolean }> {
     const answer = await this.#jsonAnswer<ApprovalRequestResponse>(
       "POST",
@@ -1062,6 +1063,18 @@ export class DispatchClient {
       input
     );
     return { ...answer.payload, recorded: answer.status === 201 };
+  }
+
+  /**
+   * Records the plan review's approval of a plan document at `version`. A plan is approved by its
+   * review, never by a person: `requestApproval` on a plan answers 409 `PLAN_APPROVED_BY_REVIEW`,
+   * and this answers 409 `NOT_PLAN_DOCUMENT` on any document whose role is not `plan`.
+   */
+  async planApprove(
+    artifactID: string,
+    input: { actor: Actor; version: number }
+  ): Promise<ArtifactReview> {
+    return this.#json("POST", ["api", "v1", "artifacts", artifactID, "plan-reviews"], input);
   }
 
   async editAsk(id: string, input: EditAskInput): Promise<Ask> {

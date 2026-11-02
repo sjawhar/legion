@@ -261,7 +261,12 @@ type Issue struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 	ClosedAt          *time.Time `json:"closed_at"`
 	PrimaryArtifactID string     `json:"primary_artifact_id"`
-	LastSeq           int        `json:"last_seq"`
+	// VerificationArtifactID and PlanArtifactID are the issue's documents by role
+	// (Artifact.Role): the one created as verification.md and the one created as plan.md, each
+	// "" when the issue holds none. They are resolved on read, as PrimaryArtifactID is.
+	VerificationArtifactID string `json:"verification_artifact_id"`
+	PlanArtifactID         string `json:"plan_artifact_id"`
+	LastSeq                int    `json:"last_seq"`
 }
 
 // Route statuses: whether an issue's route reaches a running session right now.
@@ -635,15 +640,20 @@ type ArchitectureTreeRetired struct {
 // file an agent's conversation owns (SessionID set; IssueKey nil and Project empty, its RefKey
 // `agent/<session id>/<slug>`).
 type Artifact struct {
-	ID        string    `json:"id"`
-	IssueKey  *string   `json:"issue_key"`
-	Project   string    `json:"project"`
-	SessionID *string   `json:"session_id"`
-	RefKey    string    `json:"ref_key"`
-	Slug      string    `json:"slug"`
-	Name      string    `json:"name"`
-	Kind      string    `json:"kind"`
-	Primary   bool      `json:"primary"`
+	ID        string  `json:"id"`
+	IssueKey  *string `json:"issue_key"`
+	Project   string  `json:"project"`
+	SessionID *string `json:"session_id"`
+	RefKey    string  `json:"ref_key"`
+	Slug      string  `json:"slug"`
+	Name      string  `json:"name"`
+	Kind      string  `json:"kind"`
+	Primary   bool    `json:"primary"`
+	// Role is the part an issue's document plays beside its spec: "verification" for the
+	// document created as verification.md, "plan" for the one created as plan.md, "" for every
+	// other document. It is set from the document's slug when the row is created and never
+	// changes, as Primary never changes, and no request field sets it.
+	Role      string    `json:"role,omitempty"`
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 	Versions  []Version `json:"versions"`
@@ -658,15 +668,18 @@ type Artifact struct {
 // for a review recorded before Dispatch kept it; the approval read returns it as
 // ArtifactApproval.Seq, and the review list does not carry it.
 type ArtifactReview struct {
-	ID         string    `json:"id"`
-	ArtifactID string    `json:"artifact_id"`
-	Version    int       `json:"version"`
-	State      string    `json:"state"`
-	Actor      Actor     `json:"actor"`
-	Reason     *string   `json:"reason"`
-	AskID      *string   `json:"ask_id"`
-	CreatedAt  time.Time `json:"created_at"`
-	EventSeq   *int64    `json:"-"`
+	ID         string `json:"id"`
+	ArtifactID string `json:"artifact_id"`
+	Version    int    `json:"version"`
+	State      string `json:"state"`
+	// Kind is who gave the review: "person" for one a person gave or Dispatch carried in their
+	// name, "plan_review" for a plan review's approval of a plan version.
+	Kind      string    `json:"kind"`
+	Actor     Actor     `json:"actor"`
+	Reason    *string   `json:"reason"`
+	AskID     *string   `json:"ask_id"`
+	CreatedAt time.Time `json:"created_at"`
+	EventSeq  *int64    `json:"-"`
 }
 
 // ArtifactApproval is a document's approval state as of its latest version:
@@ -693,6 +706,19 @@ type ArtifactApproval struct {
 	AskID         *string `json:"ask_id,omitempty"`
 	RequestedBy   *Actor  `json:"requested_by,omitempty"`
 	WaitingOn     string  `json:"waiting_on,omitempty"`
+	// Kind is the latest review's Kind, so a reader can say an approval is a plan review's
+	// rather than a person's; empty while no review stands.
+	Kind string `json:"kind,omitempty"`
+	// Documents names every document the open request covers when it covers more than this
+	// one, each at the version the request names, this document included; empty otherwise.
+	Documents []ArtifactApprovalDocument `json:"documents,omitempty"`
+}
+
+// ArtifactApprovalDocument is one document an open approval request covers.
+type ArtifactApprovalDocument struct {
+	ArtifactID string `json:"artifact_id"`
+	Name       string `json:"name"`
+	Version    int    `json:"version"`
 }
 
 // ArtifactReviewEventPayload is the payload of artifact.approved and
@@ -703,6 +729,7 @@ type ArtifactReviewEventPayload struct {
 	ArtifactID string  `json:"artifact_id"`
 	Name       string  `json:"name"`
 	Version    int     `json:"version"`
+	Kind       string  `json:"kind"`
 	Actor      Actor   `json:"actor"`
 	Reason     *string `json:"reason"`
 	AskID      *string `json:"ask_id"`
@@ -899,18 +926,73 @@ type AskBlockArtifact struct {
 	Primary bool   `json:"primary"`
 }
 
-// AskApproval is the document an approval ask names. Version follows the document's latest
-// settled version while the ask remains open. RequestedVersion is the version the agent most
-// recently handed to a human, so a lower value means the agent is revising the moved request.
-// Approved names the document's newest approval as the request was opened, so a request to
-// approve again says which approval it follows; a request on a document nobody has approved
-// carries none. A version move re-encodes the whole approval, so it survives it unchanged.
+// AskApproval is what an approval ask names: Documents, one entry per document the request
+// covers, each at the version it names. A request opened on a spec with its issue's Verification
+// document names two; every other request names one. Each document's Version follows that
+// document's latest settled version while the ask remains open, and its RequestedVersion is the
+// version of it the agent most recently handed to a human, so a lower value means the agent is
+// revising the moved request. Approved names the first document's newest approval as the request
+// was opened, so a request to approve again says which approval it follows; a request on a
+// document nobody has approved carries none. A version move re-encodes the whole approval, so it
+// survives it unchanged.
+//
+// ArtifactID, Name, Version and RequestedVersion repeat Documents[0], the document the request
+// was opened on: the stored JSON stays the one-document shape the release before this one reads,
+// and asks.approval's check constraint, its indexes and every join that resolves an approval
+// ask's document go on finding that first document. Lead keeps them in step; nothing else writes
+// them.
 type AskApproval struct {
-	ArtifactID       string               `json:"artifact_id"`
-	Name             string               `json:"name"`
-	Version          int                  `json:"version"`
-	RequestedVersion int                  `json:"requested_version"`
-	Approved         *AskApprovalApproved `json:"approved,omitempty"`
+	ArtifactID       string                `json:"artifact_id"`
+	Name             string                `json:"name"`
+	Version          int                   `json:"version"`
+	RequestedVersion int                   `json:"requested_version"`
+	Approved         *AskApprovalApproved  `json:"approved,omitempty"`
+	Documents        []AskApprovalDocument `json:"documents"`
+}
+
+// AskApprovalDocument is one document an approval request names.
+type AskApprovalDocument struct {
+	ArtifactID       string `json:"artifact_id"`
+	Name             string `json:"name"`
+	Version          int    `json:"version"`
+	RequestedVersion int    `json:"requested_version"`
+}
+
+// Lead copies Documents[0] into the four fields that repeat it. Every writer of Documents calls
+// it before the approval is encoded.
+func (approval *AskApproval) Lead() {
+	if len(approval.Documents) == 0 {
+		return
+	}
+	lead := approval.Documents[0]
+	approval.ArtifactID = lead.ArtifactID
+	approval.Name = lead.Name
+	approval.Version = lead.Version
+	approval.RequestedVersion = lead.RequestedVersion
+}
+
+// FromLead fills Documents with the one document the four lead fields name, when a decoded
+// approval carries none: the shape the release before the documents list stored.
+func (approval *AskApproval) FromLead() {
+	if len(approval.Documents) > 0 {
+		return
+	}
+	approval.Documents = []AskApprovalDocument{{
+		ArtifactID:       approval.ArtifactID,
+		Name:             approval.Name,
+		Version:          approval.Version,
+		RequestedVersion: approval.RequestedVersion,
+	}}
+}
+
+// Document is the entry naming artifactID, or nil when the request does not name that document.
+func (approval *AskApproval) Document(artifactID string) *AskApprovalDocument {
+	for index := range approval.Documents {
+		if approval.Documents[index].ArtifactID == artifactID {
+			return &approval.Documents[index]
+		}
+	}
+	return nil
 }
 
 // AskApprovalApproved is the approval a request follows: the version a human approved, when

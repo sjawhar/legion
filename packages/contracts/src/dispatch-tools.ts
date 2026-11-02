@@ -1132,6 +1132,8 @@ export const dispatchToolSpecs = [
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
+      "Refused 409 PLAN_APPROVED_BY_REVIEW on an issue's plan, which its plan review approves " +
+      "(dispatch plan-approve), never a person. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -1147,8 +1149,36 @@ export const dispatchToolSpecs = [
         .describe(
           `What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. A Legion architect adds one last sentence with its two spec reviews' results. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`
         ),
+      include_verification: z
+        .boolean()
+        .describe(
+          "Ask for the issue's Verification document in the same request, beside this one: one Inbox card names both at their current versions, and the answer records the human's review on each. 409 NO_VERIFICATION_DOCUMENT when the issue has no verification.md. Without it the request names this document alone and records nothing on the Verification document."
+        )
+        .optional(),
     }),
     validation: documentOwnerValidation(true),
+  },
+  {
+    name: "dispatch_plan_approve",
+    example: { issue: "DSP-1", version: 2 },
+    description:
+      "Record the plan review's approval of an issue's plan at the version it reviewed. A plan is " +
+      "approved by that review, never by a person: dispatch request-approval on a plan is refused " +
+      "409 PLAN_APPROVED_BY_REVIEW, so no plan approval ever reaches a human's Inbox. The approval " +
+      "is pinned to the version named, so a later plan version makes it stale and the review runs " +
+      "again. Refused 409 NOT_PLAN_DOCUMENT on any other document, the issue's spec included, and " +
+      "400 INVALID_REVIEW for a version the plan does not have. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      artifact: z
+        .string()
+        .describe("Plan document artifact id, slug, or filename; the issue's plan.md by default.")
+        .optional(),
+      version: z
+        .number({ int: true, min: 1 })
+        .describe("The plan version the review read and approved."),
+    }),
   },
   {
     name: "dispatch_artifact",

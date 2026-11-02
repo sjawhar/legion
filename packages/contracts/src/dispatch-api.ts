@@ -323,6 +323,11 @@ export interface Issue {
   readonly updated_at: string;
   readonly closed_at: string | null;
   readonly primary_artifact_id: string;
+  /** The issue's Verification document, the one created as `verification.md`, and its Plan, the
+   *  one created as `plan.md` (`Artifact.role`); `""` when the issue holds none. Absent from a
+   *  Dispatch older than document roles. */
+  readonly verification_artifact_id?: string;
+  readonly plan_artifact_id?: string;
   readonly last_seq: number;
 }
 
@@ -591,6 +596,11 @@ export interface Artifact {
   readonly name: string;
   readonly kind: "doc" | "image" | "file";
   readonly primary: boolean;
+  /** The part an issue's document plays beside its spec: `verification` for the document created
+   *  as `verification.md`, `plan` for the one created as `plan.md`. It is set when the document
+   *  is created and never changes; absent for every other document and from a Dispatch older
+   *  than document roles. */
+  readonly role?: DocumentRole;
   readonly created_by: Actor;
   readonly created_at: string;
   readonly versions: Version[];
@@ -599,6 +609,14 @@ export interface Artifact {
 }
 
 export type ArtifactReviewState = "approved" | "changes_requested";
+
+/** The part an issue's document plays beside its spec. */
+export type DocumentRole = "verification" | "plan";
+
+/** Who gave a review: `person` for one a person gave or Dispatch carried in their name,
+ *  `plan_review` for a plan review's approval of a plan version. Absent from a Dispatch older
+ *  than review kinds, which wrote people's reviews alone. */
+export type ArtifactReviewKind = "person" | "plan_review";
 
 /** One human review of a document, pinned to the version it was given on. A review is given one
  *  of three ways: by answering an approval request (`ask_id` names the request), from the
@@ -616,6 +634,7 @@ export interface ArtifactReview {
   readonly actor: Actor;
   readonly reason: string | null;
   readonly ask_id: string | null;
+  readonly kind?: ArtifactReviewKind;
   readonly created_at: string;
 }
 
@@ -643,6 +662,19 @@ export interface ArtifactApproval {
    *  version moved it past the one its agent last handed to the human, or a reply left it with the
    *  agent; `human` otherwise. */
   readonly waiting_on?: AskTurn;
+  /** The latest review's kind, so a reader can say an approval is a plan review's rather than a
+   *  person's; absent while no review stands, and from a Dispatch older than review kinds. */
+  readonly kind?: ArtifactReviewKind;
+  /** Every document the open request covers, each at the version the request names, this one
+   *  included; absent when it covers this document alone. */
+  readonly documents?: ArtifactApprovalDocument[];
+}
+
+/** One document an open approval request covers. */
+export interface ArtifactApprovalDocument {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly version: number;
 }
 
 /** What `POST /api/v1/artifacts/{id}/approval-requests` answers: the document's open request (null
@@ -797,17 +829,33 @@ export interface AskApprovalApproved {
   readonly by: Actor;
 }
 
-/** The document and version an approval ask names. `requested_version` is the version the agent
- *  last handed to the human; a lower value means the agent is revising the moved request.
- *  `approved` names the document's newest approval when the request was opened, so a request to
- *  approve again says which approval it follows; it is absent on a request for a document nobody
- *  has approved. A version move re-encodes the whole approval, so it survives unchanged. */
+/** What an approval ask names: `documents`, one entry per document the request covers, each at
+ *  the version it names. A request opened on a spec with `include_verification` names the spec
+ *  and the issue's Verification document; every other request names one. A document's
+ *  `requested_version` is the version of it the agent last handed to the human; a lower value
+ *  means the agent is revising the moved request. `approved` names the first document's newest
+ *  approval when the request was opened, so a request to approve again says which approval it
+ *  follows; it is absent on a request for a document nobody has approved. A version move
+ *  re-encodes the whole approval, so it survives unchanged.
+ *
+ *  `artifact_id`, `name`, `version` and `requested_version` repeat `documents[0]`, the document
+ *  the request was opened on, so a client that reads one document reads that one. `documents` is
+ *  absent from a Dispatch older than the list. */
 export interface AskApproval {
   readonly artifact_id: string;
   readonly name: string;
   readonly version: number;
   readonly requested_version: number;
   readonly approved?: AskApprovalApproved;
+  readonly documents?: AskApprovalDocument[];
+}
+
+/** One document an approval request names. */
+export interface AskApprovalDocument {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly version: number;
+  readonly requested_version: number;
 }
 
 export interface Ask extends AnchorPosition {
@@ -2274,6 +2322,8 @@ export interface ArtifactReviewEventPayload {
   readonly artifact_id: string;
   readonly name: string;
   readonly version: number;
+  /** Who gave the review; absent from a Dispatch older than review kinds. */
+  readonly kind?: ArtifactReviewKind;
   readonly actor: Actor;
   readonly reason: string | null;
   readonly ask_id: string | null;
