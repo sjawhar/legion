@@ -284,7 +284,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
   await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   const tablist = page.getByRole("tablist", { name: "Issue detail" });
   const tabs = tablist.getByRole("tab");
-  await expect(tabs).toHaveCount(5);
+  await expect(tabs).toHaveCount(7);
   const insideTablist = async (tab: Locator) => {
     const [listBox, box] = await Promise.all([tablist.boundingBox(), tab.boundingBox()]);
     expect(listBox).not.toBeNull();
@@ -295,16 +295,31 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
       (listBox?.x ?? 0) + (listBox?.width ?? 0) + 0.5
     );
   };
-  // Five tabs, one of them counted, no longer fit a 390 px viewport: the tablist scrolls
+  // Seven tabs, one of them counted, no longer fit a 390 px viewport: the tablist scrolls
   // sideways there (as it already did at 360 px). No label is shortened to buy the room, every
   // tab is reachable from the keyboard, each is scrolled fully into view as it takes focus, and
   // each keeps its 44 px touch target.
   const viewport = page.viewportSize();
   await page.setViewportSize({ height: viewport?.height ?? 800, width: 390 });
-  await expect(tabs).toHaveText(["Spec", "Conversation", "Children", "Artifacts2", "Activity"]);
+  await expect(tabs).toHaveText([
+    "Spec",
+    "Verification",
+    "Plan",
+    "Conversation",
+    "Children",
+    "Artifacts2",
+    "Activity",
+  ]);
   expect(await tablist.evaluate((node) => node.scrollWidth > node.clientWidth + 0.5)).toBe(true);
   await page.getByRole("tab", { name: "Spec" }).focus();
-  for (const label of ["Conversation", "Children", "Artifacts (2)", "Activity"] as const) {
+  for (const label of [
+    "Verification",
+    "Plan",
+    "Conversation",
+    "Children",
+    "Artifacts (2)",
+    "Activity",
+  ] as const) {
     await page.keyboard.press("ArrowRight");
     const tab = page.getByRole("tab", { exact: true, name: label });
     await expect(tab).toBeFocused();

@@ -782,10 +782,10 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
   // lists the results it recorded. Nothing else reads a result, so no document, ask or inbox read
   // is refreshed; this switch has a default, so the branch is deliberate and its test pins it.
   if (event.type === "result.recorded") {
-    targets.push({ queryKey: ["results", key] });
+    targets.push({ exact: true, queryKey: ["issue", key, "results"] });
     if (event.payload.issue !== key) {
       targets.push(
-        { queryKey: ["results", event.payload.issue] },
+        { exact: true, queryKey: ["issue", event.payload.issue, "results"] },
         { exact: true, queryKey: ["issue", event.payload.issue] }
       );
     }

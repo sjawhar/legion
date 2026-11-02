@@ -1008,8 +1008,10 @@ test("an architecture event refreshes the source lists and the project's model",
 
 // A recorded result moves two reads and no more: the results of the check's issue, where the
 // event sits, and the results of the issue that recorded it, which lists what it recorded. A
-// result recorded on the check's own issue names one. event-refresh's switches all have a
-// default, so this pins the decision rather than the compiler.
+// result recorded on the check's own issue names one. Each key is the one the Verification tab
+// reads under (`issueResultsQuery`), so a result recorded while that tab is open appears without
+// a reload. event-refresh's switches all have a default, so this pins the decision rather than
+// the compiler.
 test("a recorded result refreshes the results of the check's issue and of the recording issue", () => {
   const own = event("result.recorded", {
     check_block_id: "k1",
@@ -1023,7 +1025,7 @@ test("a recorded result refreshes the results of the check's issue and of the re
     ["issue", "CORE-1"],
     ["events", "CORE-1"],
     ["issues", "project", "CORE"],
-    ["results", "CORE-1"],
+    ["issue", "CORE-1", "results"],
   ]);
   const child = event("result.recorded", {
     check_block_id: "k1",
@@ -1037,8 +1039,8 @@ test("a recorded result refreshes the results of the check's issue and of the re
     ["issue", "CORE-1"],
     ["events", "CORE-1"],
     ["issues", "project", "CORE"],
-    ["results", "CORE-1"],
-    ["results", "CORE-9"],
+    ["issue", "CORE-1", "results"],
+    ["issue", "CORE-9", "results"],
     ["issue", "CORE-9"],
   ]);
 });
