@@ -345,7 +345,7 @@ type Client struct {
 	// connection event after it (ensureStreamOn); nil for a client that owns no stream.
 	streamConfig *nats.StreamConfig
 	// deployedSubjects holds the subjects the deployed stream carried when the client last read them
-	// (usesCoreTransport); nil until the client has read them once.
+	// (UsesCoreTransport); nil until the client has read them once.
 	deployedSubjects atomic.Pointer[[]string]
 	// subjectsRefused is set once the server refused a read of the deployed stream's subjects under
 	// the NATS user's permissions (readDeployedSubjects): the client then reads them no more.
@@ -411,7 +411,7 @@ func Dial(name string, urls []string, environment func(string) (string, bool), o
 // publisher owns (ConnectOwningStream), and leaves the stream itself alone. It reads the subjects
 // of the deployed stream at connect (at its first connection, with WithConnectInBackground),
 // waiting at most firstStreamSubjectsRead for them, and again every streamSubjectsRefresh, so it
-// publishes each topic on the transport the deployed stream calls for (usesCoreTransport).
+// publishes each topic on the transport the deployed stream calls for (UsesCoreTransport).
 //
 // Every client, from Connect or ConnectOwningStream, connects as the NATS user the environment
 // names: NATS_NKEY_SEED_FILE or NATS_NKEY_SEED (nkeyCredential). An unusable seed is an error
