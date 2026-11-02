@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
+
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -17,6 +19,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/session"
+	envoystore "github.com/sjawhar/envoy/internal/store"
 )
 
 // A listener that answers delivers the mention to the session the comment's route or its author
@@ -198,6 +202,32 @@ func publishedFallbackCopies(t *testing.T, deps Deps, issueKey, commentID string
 	return copies
 }
 
+// claimedRole is the role reader runOutboxUntilSettled resolves a role route through: every role
+// is claimed by one live, self-subscribed session, so the outbox forwards a role route to that
+// holder with a Request the publisher records, the envelope's topic still the role's
+// (outbox's roleForward). A route the outbox must not publish the comment to is then visible as
+// that topic; an outbox with no reader at all would leave every role route pending, and a routed
+// event unpublished.
+type claimedRole struct{}
+
+func (claimedRole) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
+	return envoystore.RoleClaim{HolderSessionID: "role-holder"}, nil
+}
+
+func (claimedRole) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
+	return envoystore.ExpiredRoleClaimSuperseded, nil
+}
+
+func (claimedRole) Holder(_ context.Context, _ string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+	entry := session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}
+	if !live(entry) {
+		return session.SessionEntry{}, natsgo.ErrKeyNotFound
+	}
+	return entry, nil
+}
+
+func (claimedRole) TTL() time.Duration { return 5 * time.Minute }
+
 // runOutboxUntilSettled runs the outbox through publisher until every event of issueKey is
 // published and every copy of commentID it held back for a resent mention is settled, for at most
 // 10 s.
@@ -207,7 +237,11 @@ func runOutboxUntilSettled(t *testing.T, deps Deps, publisher outbox.Publisher, 
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		outbox.Run(ctx, outbox.Deps{Store: deps.Store, Publisher: publisher, Broker: events.NewBroker(), Docs: deps.Docs})
+		outbox.New(outbox.Deps{
+			Store: deps.Store, Publisher: publisher, Broker: events.NewBroker(),
+			Listen: deps.Store.Pool.Listener, Docs: deps.Docs,
+			RoleClaims: claimedRole{}, Sessions: claimedRole{},
+		}).Run(ctx)
 	}()
 	defer func() {
 		cancel()
@@ -232,13 +266,25 @@ func runOutboxUntilSettled(t *testing.T, deps Deps, publisher outbox.Publisher, 
 	}
 }
 
-// recordingOutboxPublisher takes every envelope the outbox publishes and records it.
+// recordingOutboxPublisher takes every envelope the outbox publishes and records it, a role
+// route's forward to its holder (outbox's roleForward.send) as any other: the envelope's topic is
+// still the role's, so a copy the outbox sent to a role route shows as that role's topic.
 type recordingOutboxPublisher struct {
 	mu    sync.Mutex
 	items []contracts.Envelope
 }
 
-func (p *recordingOutboxPublisher) Window() bus.Sender { return p }
+func (p *recordingOutboxPublisher) Connected() bool { return true }
+
+func (p *recordingOutboxPublisher) ConnectionChanged() <-chan struct{} { return nil }
+
+func (p *recordingOutboxPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
+
+func (p *recordingOutboxPublisher) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	return p.PublishAsync(item)
+}
+
+func (p *recordingOutboxPublisher) Probe(time.Duration) error { return nil }
 
 func (p *recordingOutboxPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	p.mu.Lock()

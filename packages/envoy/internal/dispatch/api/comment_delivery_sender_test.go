@@ -913,9 +913,10 @@ func runOutboxBeside(t *testing.T, deps Deps, publisher outbox.Publisher) {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		outbox.Run(ctx, outbox.Deps{
-			Store: deps.Store, Publisher: publisher, Broker: events.NewBroker(), Docs: deps.Docs,
-		})
+		outbox.New(outbox.Deps{
+			Store: deps.Store, Publisher: publisher, Broker: events.NewBroker(),
+			Listen: deps.Store.Pool.Listener, Docs: deps.Docs,
+		}).Run(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()

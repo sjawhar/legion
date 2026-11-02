@@ -11,13 +11,14 @@
 -- session an attempt counts under, or the target as written for a route the comment suppressed by
 -- that string alone. settled_at is when the fallback pass decided the row, published whether it
 -- published the copy then; next_attempt_at is when the row is next due: the claim one pass holds
--- on the row while it decides it, so a second process skips it, the backoff after a failed
--- decision or publish, or the wait a pass released it for without counting an attempt - the
--- mention's send is still undecided (mentionPendingDelay), or NATS was unreachable
--- (retryInterval); a pass cut short by its process stopping releases it with no wait at all, so
--- whatever process runs next takes the row at once. attempt_count is how many of the pass's
--- decisions or publishes of the row failed, which paces that backoff (retry.Delay) as an event's
--- attempt_count paces its own. A failure never settles the row.
+-- on the row while it decides it, so a second process skips it (fallbackClaim), the backoff after
+-- a failed decision or publish, or the wait a pass released it for without counting an attempt -
+-- the mention's send is still undecided (mentionPendingDelay), or NATS was unreachable
+-- (retry.BaseDelay); a pass cut short by the publisher hold's deadline or by its process stopping
+-- releases it with no wait at all, so whatever pass runs next takes the row at once.
+-- attempt_count is how many of the pass's decisions or publishes of the row failed, which paces
+-- that backoff (retry.Delay) as an event's attempt_count paces its own. A failure never settles
+-- the row.
 --
 -- The partial index holds the unsettled rows alone, in the order the pass reads them: a pass with
 -- nothing to decide reads an empty index, and a settled row leaves it.

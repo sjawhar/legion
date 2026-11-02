@@ -279,8 +279,8 @@ func (s *server) claimCommentDeliveryAttempt(
 		case bound.State != "pending" || !takeable:
 			// Answered or failed already - a reply consumed it while this sender was on its way,
 			// or the outbox settled it abandoned and published the session's copy instead
-			// (attempt.leftTo in internal/dispatch/outbox) - or held by another live sender, who
-			// owns the outcome.
+			// (destinations.leftTo in internal/dispatch/outbox) - or held by another live sender,
+			// who owns the outcome.
 			claimed.settled = &bound
 		case delivered:
 			// A later attempt of this mention was sent: this one sends nothing and its caller

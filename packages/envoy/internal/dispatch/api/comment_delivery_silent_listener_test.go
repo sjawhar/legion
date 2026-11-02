@@ -73,7 +73,10 @@ func publishedToSession(t *testing.T, deps Deps, issueKey, commentID, sessionID 
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		outbox.Run(ctx, outbox.Deps{Store: deps.Store, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: deps.Docs})
+		outbox.New(outbox.Deps{
+			Store: deps.Store, Publisher: acceptingPublisher{}, Broker: events.NewBroker(),
+			Listen: deps.Store.Pool.Listener, Docs: deps.Docs,
+		}).Run(ctx)
 	}()
 	defer func() {
 		cancel()
@@ -277,7 +280,10 @@ func TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		outbox.Run(ctx, outbox.Deps{Store: deps.Store, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: deps.Docs})
+		outbox.New(outbox.Deps{
+			Store: deps.Store, Publisher: acceptingPublisher{}, Broker: events.NewBroker(),
+			Listen: deps.Store.Pool.Listener, Docs: deps.Docs,
+		}).Run(ctx)
 	}()
 	defer func() {
 		cancel()
