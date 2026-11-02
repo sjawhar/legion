@@ -49,7 +49,7 @@ const (
 // writeQueueCloseLine is what ygo logs for each peer its byte budget closes, with the figures
 // behind it (peer.enqueueLocked, sjawhar/ygo provider/websocket/write_budget.go:6-30). It reaches
 // the server's own log because ygo logs through slog.Default() while Server.Logger is unset
-// (provider/websocket/server.go:168-174), which cmd/dispatch sets at boot (main.go:190).
+// (provider/websocket/server.go:168-174), which cmd/dispatch sets at boot (main).
 var writeQueueCloseLine = regexp.MustCompile(`msg="peer queued bytes over budget; closing peer" room=(\S+) path=("[^"]*"|\S+) queuedBytes=(\d+) budgetBytes=(\d+) frameBytes=(\d+) queueSize=(\d+)`)
 
 // writeQueueClose is one such close: the room, the enqueue path the frame was refused on, what the

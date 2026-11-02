@@ -82,7 +82,7 @@ type MemoryBounds struct {
 	// calibration: the slack for what no bound weighs - the request path, the applies of
 	// browsers' updates under unweighedApplyHeapBytes, one for each browser's read loop at most,
 	// the measurer's parse of a rendering, up to about 130 MiB for a mebibyte of the heaviest
-	// shape (pmdoc/elements.go:31-37), and the collector, which needs headroom under the Go
+	// shape (pmdoc's nodeGuard), and the collector, which needs headroom under the Go
 	// memory limit to free garbage before it reaches it. An apply estimated past ApplyHeap, which
 	// runs alone, may reach into it too, up to ApplyTooHeavy. Nothing reads it; it is named so
 	// the boot line accounts for the whole limit.
@@ -107,7 +107,7 @@ type MemoryBounds struct {
 	// 2 MiB or more, and the scavenger releases in smaller pieces (cmd/dispatch, peakResident,
 	// which reads the charged figure from the server's own memory trace). Dispatch's own pods are
 	// not sandboxed - the GKE Autopilot deployment names no runtimeClassName and no GKE Sandbox
-	// node pool (infra/gcp/dispatch_kube.go:492-501) - so what is charged there is what the limit
+	// node pool (newDispatchKubernetes) - so what is charged there is what the limit
 	// bounds. The 4,302 and 4,424 MiB earlier runs of that drive recorded were VmRSS read on this
 	// sandbox, not memory any pod was charged.
 	HeapSlack int64

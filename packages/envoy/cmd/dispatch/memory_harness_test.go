@@ -634,7 +634,7 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 }
 
 // The tags of the document socket's frames this harness reads and writes: Hocuspocus's framing,
-// which Dispatch's rooms speak (internal/dispatch/docs/service.go:612), puts the room's name before
+// which Dispatch's rooms speak (docs.New sets Server.HocuspocusFraming), puts the room's name before
 // each (sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:66-80).
 const (
 	frameSync       = 0
@@ -653,9 +653,9 @@ func documentFrame(room string, tag uint64, payload []byte) []byte {
 }
 
 // dialDocument connects to the document's room as a person's browser does: signed in, read-write
-// at the server's schema version (schemaReadOnly, internal/dispatch/docs/websocket.go:388-390).
+// at the server's schema version (schemaReadOnly).
 // The server answers the upgrade only once it has admitted the browser and loaded the document
-// (Service.ServeHTTP, websocket.go:274-353), and a burst of browsers to documents at the bound
+// (Service.ServeHTTP), and a burst of browsers to documents at the bound
 // queues behind the counts of their stored versions and the loads, which share the copy-heap
 // bound (storedCountWeight, podCopyHeaps) and two processors, so a browser waits for that answer as
 // long as a browser does rather than the 45 seconds gorilla's default dialer gives up after. An
@@ -735,8 +735,8 @@ func (p *memoryServer) openBrowser(t *testing.T, artifactID string) *browser {
 // (provider/websocket/server.go:2108-2114), then sends a Ping and waits for its Pong: a first frame
 // lifts ygo's handshake deadline (server.go:2122-2145), so a socket held open without an edit is
 // not closed thirty seconds in. A socket the server closes before any of that - the room budget's
-// refusal, which completes the upgrade only to close it (refuseOverRoomBudget,
-// internal/dispatch/docs/websocket.go:245-248) - returns the *gws.CloseError it was closed with.
+// refusal, which completes the upgrade only to close it (refuseOverRoomBudget) - returns the
+// *gws.CloseError it was closed with.
 func (p *memoryServer) tryOpenBrowser(artifactID string) (*browser, error) {
 	connection, err := p.dialDocument(artifactID)
 	if err != nil {
@@ -937,7 +937,7 @@ func (b *browser) leave() {
 }
 
 // proofFragment is the Yjs fragment a document's Proof tree is kept in
-// (internal/dispatch/docs/tree.go:19), which this package cannot read.
+// (docs' fragmentName), which this package cannot read.
 const proofFragment = "prosemirror"
 
 // browserDocument is a browser's copy of a document, which it edits and sends the updates of. It

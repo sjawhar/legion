@@ -295,7 +295,7 @@ func TestTheRoomBudgetsArithmetic(t *testing.T) {
 // type use) and over this repository's markdown files, and this fails once any shape
 // prices higher at a mebibyte than the constant does. What is measured is each one's rendering,
 // since that is what the budget prices: a version is stored as its rendering
-// (pmdoc/parse.go:120-122), and a room's replica publishes its own.
+// (writeVersionTx), and a room's replica publishes its own.
 //
 // MeasureDocument stops counting at twice the element bound, so a mebibyte of a dense shape is
 // counted in pieces, each a document of its own of up to 8 KiB of the shape, rendered and measured

@@ -549,7 +549,7 @@ func (w *roomWeighing) totals() (*roomTotals, *roomScans) {
 // could not read reads sizeUnmeasured elements until its count lands, which the budget does not
 // re-base on (storeCounted). A caller reading across a publication sees one rendering's bytes
 // beside the elements of the rendering before it too, which is within that same staleness.
-// Neither half makes the document bound a ceiling (peer_update.go:56-58).
+// Neither half makes the document bound a ceiling (weighPeerUpdate).
 func (w *roomWeighing) size() (bytes, elements int64, measured bool) {
 	if w == nil {
 		return 0, 0, false
@@ -571,7 +571,7 @@ type roomListing struct {
 
 // sizeUnmeasured is what bytes and elements hold for a room whose document renders no markdown to
 // measure: a document outside the Proof schema, which the socket path refuses to open in the first
-// place (refuseOutsideSchema, websocket.go:235) and which a live document can still fall into
+// place (refuseOutsideSchema) and which a live document can still fall into
 // between two renders. The hook admits an update on such a room; the room's next render settles it.
 const sizeUnmeasured = -1
 

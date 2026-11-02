@@ -654,7 +654,7 @@ func oneClientAtCapState(t *testing.T) []byte {
 // edit of it, naming the old history's items, parked: the walk's refusal is a plain error rather
 // than a *websocket.PeerClose, and ygo closes a peer whose update the hook refused only for a
 // PeerClose (sjawhar/ygo v1.51.3-sami.7, provider/websocket/peer.go:254-260, over the
-// Hocuspocus framing service.go:659 sets). The room closes it with the document's own close and
+// Hocuspocus framing New sets). The room closes it with the document's own close and
 // DOC_REBUILT; it reconnects from a fresh read of the rebuilt document, as the editor's
 // 4413 path does, not with its old state; and a new edit from it is applied and stored.
 func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBeforeReadingAnyOfIt(t *testing.T) {

@@ -406,8 +406,8 @@ func proseAtLeast(bytes int) string {
 // large document in a reconnect loop no person's edit could leave. The frame this measures is the
 // heaviest document the server's own writes can leave - its markdown at pmdoc.MaxDocumentBytes
 // making pmdoc.MaxDocumentElements, its margin at maxMarginBytes and its anchor marks at
-// maxAnchorBytes - whose whole state is far more than its markdown: growth.go:14-18 records
-// thirty-two suggestions of 900 KB that left the markdown as it was. What this does not weigh is
+// maxAnchorBytes - whose whole state is far more than its markdown: growth.go records thirty-two
+// suggestions of 900 KB that left the markdown as it was. What this does not weigh is
 // the items a long edit history tombstones, which no rendering shows and which the decode cap
 // bounds instead (maxUpdateItems: refuseUndecodable, and the peer update hook's roomTotals);
 // TestTheHeaviestWholeStateFrameTheServerStoresFitsTheMessageFloor weighs those.
@@ -603,7 +603,7 @@ func heaviestDocument(t *testing.T) *crdt.Doc {
 // bound with its full margin and anchor marks, through the hook itself (weighPeerUpdate), with
 // updates a browser's copy of the room makes the way the editor makes them (pmdoc.Update of its
 // tree), of the densest markdown this repository measures: empty items of alternating bullet lists,
-// `- \n\n* \n\n`, 2.25 elements a byte (room_budget.go:119-121), each list and item and paragraph
+// `- \n\n* \n\n`, 2.25 elements a byte (bytesOfHeapAByteAtTheDensest), each list and item and paragraph
 // carrying the block id a browser's write mints. Each update is as large as the hook admits at the
 // bound, and the last is taken from a rendering under the creep cap by at most a pair, so the
 // document ends as far past the cap as one admitted update can take it; one more pair is then
@@ -1611,7 +1611,7 @@ func chainedCharacters(n int) []byte {
 // applyAllocation is what ygo's apply of update into a document into makes allocates, the least of
 // three runs, each into a fresh document from into: an upper bound on the heap the apply adds at
 // its peak, since no byte it holds can be one it did not allocate. The document has an update
-// observer, as every room does (ygo's own, and the room's, websocket.go:617), so the apply
+// observer, as every room does (ygo's own, and the room's, onLoadDocument), so the apply
 // encodes the update its transaction made for the observers (sjawhar/ygo v1.54.1-sami.1,
 // crdt/doc.go:591-595) as a room's does. Two collections before each run empty the pool ygo's
 // encoders come from (encoding/pool.go:17-19), whose primary and victim caches each survive one,

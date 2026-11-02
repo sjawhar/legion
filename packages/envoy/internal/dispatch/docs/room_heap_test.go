@@ -219,7 +219,7 @@ const typedRoomHeapMeasurement = "DISPATCH_MEASURE_TYPED_ROOM_HEAP"
 //
 // The room is a mebibyte of prose (residentRoomState), loaded as a room's load leaves it - the live
 // document, and the load's own decode of the stored state as the replica, its update log open and
-// its update observer registered (websocket.go:597-617) - and typed into as a person types:
+// its update observer registered (onLoadDocument) - and typed into as a person types:
 // 2,000 one-character keystrokes in a hundred runs of twenty, each run in the middle of a
 // paragraph of its own across the document, and a paste of 4 KiB after every tenth run, each in a
 // paragraph of its own, every one a browser's update the peer hook weighs and charges
@@ -338,13 +338,13 @@ type typedResidentRoom struct {
 	charge *roomCharge
 }
 
-// loadAndType loads state as a room's load does (onLoadDocument, websocket.go:597-617): the
+// loadAndType loads state as a room's load does (onLoadDocument): the
 // live document decoded from state, the load's own decode of it as the replica, the room's update
 // log opened, the replica kept and its scan total set from that decode, the room charged in a
 // budget of roomBudgetBytes, and an update observer on live that moves the replica through each
 // commit. It then hands each of updates to the peer hook as one browser's, applied as the room
 // applies a peer's update, and returns once the measurer has counted the room's last rendering.
-// The room's update log is left open, as a room's load leaves it (websocket.go:606): it goes with
+// The room's update log is left open, as a room's load leaves it (onLoadDocument): it goes with
 // the replica that drains it, which the room holds, so nothing outside the room holds the log and
 // a room dropped is collected whole, which the heap reading's cross-check rests on.
 func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoom {
@@ -519,7 +519,7 @@ type residentRoom struct {
 
 // heldByResidentRoom is the heap a room loading state holds: what stays allocated once collections
 // have freed everything else its decode, its copy and its render made. It follows the read cache's
-// own measurement of what a structure holds (heldByDocumentRead, read_cache_weight_test.go:48): a
+// own measurement of what a structure holds (heldByDocumentRead): a
 // first build of the same state, discarded, keeps the decoder's one-time setup out of the count;
 // each reading follows two collections, since a sync.Pool's contents survive the first; and the
 // least of three readings is taken, since what anything else allocates meanwhile only adds to a
@@ -576,8 +576,8 @@ func buildResidentRoom(t *testing.T, state []byte, edited bool) *residentRoom {
 // that room's rendering measures (pmdoc.MeasureDocument, which is how an upload of the same
 // markdown is weighed). Each reading decodes that state rather than building the document again,
 // as the read cache's own measurement builds its read from a document decoded from its stored
-// state, which holds strings of its own rather than the markdown's (buildTestDocumentRead,
-// read_cache_weight_test.go:68).
+// state, which holds strings of its own rather than the markdown's
+// (buildTestDocumentRead).
 func residentRoomState(t *testing.T, size int) (state []byte, rendering pmdoc.DocumentSize) {
 	t.Helper()
 	live := residentRoomDocument(t, size)

@@ -164,7 +164,7 @@ type bootConfig struct {
 // setGoMemoryLimit gives the Go runtime a soft memory limit of 90% of the container's, so the
 // collector works harder as the heap nears it rather than letting garbage pile up until the
 // container is killed at its limit (the deployment's appMemory, which sizedResources sets as the
-// container's limit, infra/gcp/dispatch_kube.go:748 and :204: 4Gi where the stack leaves it
+// container's limit for newDispatchKubernetes: 4Gi where the stack leaves it
 // unset, defaultDispatchAppMemory, and 32Gi in production, theorem-labs/agent-infra
 // dispatch/Pulumi.prod.yaml); nothing else tells the runtime that limit
 // exists. The ratio is automemlimit's default, 0.9. provider reads the
@@ -172,7 +172,7 @@ type bootConfig struct {
 // v2 and memory.limit_in_bytes under v1, takes the smallest in the hierarchy and reports `max` as
 // no limit; a test passes its own rather than depending on the runner's control group. Where no
 // limit is readable the runtime keeps having none. GOMEMLIMIT and AUTOMEMLIMIT stay automemlimit's
-// own variables, read inside memlimit.Set and not settings rows (settings.go:11-23): a GOMEMLIMIT,
+// own variables, read inside memlimit.Set and not settings rows (setting): a GOMEMLIMIT,
 // or AUTOMEMLIMIT=off, skips the provider, and any other AUTOMEMLIMIT replaces the ratio. It logs
 // one line naming the limit it read and the limit it set.
 //

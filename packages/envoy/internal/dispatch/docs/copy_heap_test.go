@@ -322,7 +322,7 @@ func densestMarkdownOf(bytes int) string {
 }
 
 // storeVersionMarkdown stores markdown as room's next version, as an upload's insert stores one
-// (api/artifacts.go:296), leaving the document's stored history as it is: what a count of that
+// (api's writeDocumentVersion), leaving the document's stored history as it is: what a count of that
 // version parses is the markdown, whatever the history holds.
 func storeVersionMarkdown(t *testing.T, database *store.Store, room, markdown string) int64 {
 	t.Helper()

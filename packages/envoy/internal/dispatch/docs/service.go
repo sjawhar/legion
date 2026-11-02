@@ -1257,10 +1257,10 @@ func ArtifactVersionEventPayload(
 // A document the stamp would carry past the decode cap is stamped nothing and opens no
 // transaction: it returns errPastDecodeCap before it writes, having asked of the write before
 // rewriteLive's (Service.leavesPastDecodeCap). What the stamp adds is at most one struct for each
-// repair: pmdoc.Update writes a minted id as one attribute set (pmdoc/update.go:164-178), a map
+// repair: pmdoc.Update writes a minted id as one attribute set (pmdoc's updateElement), a map
 // item whose origin is the attribute's last item, whole, so it splits nothing (crdt/yxml.go:
 // 510-525 in sjawhar/ygo v1.51.3-sami.7), and it writes nothing of the rest of the tree, which
-// the stamp read in the same transaction and hands back as it was (pmdoc/update.go:65-70). A
+// the stamp read in the same transaction and hands back as it was (pmdoc's updateChildren). A
 // browser's edit landing after the caller's read can leave more blocks to stamp than it counted;
 // the stamp then writes nothing, so it never adds more than it was answered on, and the next
 // settlement, which that edit schedules, stamps them.

@@ -1030,7 +1030,7 @@ func unmarkFound(txn *crdt.Transaction, fragment *crdt.YXmlFragment, expired []p
 }
 
 // unmarkRunStructs is the most structs unmarking one run of text adds to a document. pmdoc.Unmark
-// formats each run of the text's delta that carries the mark (pmdoc/find.go:1046-1064), and ygo's
+// formats each run of the text's delta that carries the mark, and ygo's
 // Format of one key over a run writes at most two format items - the mark's end where the run
 // begins (insertAttributes, crdt/ytext.go:1070-1081 in sjawhar/ygo v1.51.3-sami.7) and its value
 // restored where the run ends (insertNegatedAttributes, :1087-1107) - and splits at most two
@@ -1040,7 +1040,7 @@ const unmarkRunStructs = 4
 
 // markedRuns is how many runs of text in tree carry one of marks: each text node's mark of a
 // mark's type and id counts once, as pmdoc.Unmark formats each run of a text's delta carrying it,
-// and the reader makes one text node of each run (pmdoc/read.go:96-127).
+// and the reader makes one text node of each run (pmdoc's textNodesOfDelta).
 func markedRuns(tree *pmdoc.Node, marks []pmdoc.MarkRef) int {
 	wanted := make(map[pmdoc.MarkRef]struct{}, len(marks))
 	for _, mark := range marks {

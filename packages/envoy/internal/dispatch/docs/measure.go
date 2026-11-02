@@ -24,7 +24,7 @@ import (
 // typing never does, and which has its rendering counted at once (hurry).
 //
 // There is one for the whole service (Service.measurer), and it runs one count at a time: the
-// parse's own heap, up to about 130 MiB for a mebibyte of the heaviest shape (pmdoc/elements.go:31-37),
+// parse's own heap, up to about 130 MiB for a mebibyte of the heaviest shape (pmdoc's nodeGuard),
 // is paid once for the pod rather than once for each room typed into at the same moment, and the
 // pod's memory is what this count is for. A room has at most one rendering waiting
 // (renderedReplica.uncounted), which its next publication replaces rather than queues behind, so a

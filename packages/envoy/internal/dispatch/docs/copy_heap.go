@@ -63,7 +63,7 @@ const copyHeapName = "copy"
 // densest markdown this repository measures, empty items of alternating bullet lists
 // (bytesOfHeapAByteAtTheDensest), 549,224 bytes in all; 117.4 for 64 KiB of it, 7,692,712 bytes;
 // 48.4 for a mebibyte of it; and 62.0 for a mebibyte of hard breaks, the shape goldmark's node
-// guard stops latest (nodeGuard, pmdoc/elements.go:31-37). A mebibyte of prose held 13.0 a byte,
+// guard stops latest (pmdoc's nodeGuard). A mebibyte of prose held 13.0 a byte,
 // the walk of its 2,957,640-byte state included. The small shapes run denser a byte because the
 // guard stops the parse of a large one: it is the whole parse, not the byte, that the guard
 // bounds, so a count of a whole document never holds more than storedCountHeapAtMost whatever its
@@ -71,7 +71,7 @@ const copyHeapName = "copy"
 const storedCountHeapPerByte = 160
 
 // storedCountHeapAtMost caps what a count's markdown is granted (storedCountWeight), since
-// goldmark stops building nodes at the guard (nodeGuard, pmdoc/elements.go:31-37) and a stored
+// goldmark stops building nodes at the guard (pmdoc's nodeGuard) and a stored
 // version's markdown is at most pmdoc.MaxDocumentBytes: no count of a mebibyte measured held more
 // than 65,025,848 bytes, a mebibyte of hard breaks, where the densest markdown held 50,703,568 and
 // a mebibyte of prose 13,607,960 (TestAStoredVersionsCountHoldsNoMoreThanItsGrant). It is about a

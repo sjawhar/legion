@@ -419,7 +419,7 @@ go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/
 
 The `envoy-infra-go` job runs only when a file its `envoy_infra_go` filter in that workflow names
 changes. That filter includes every package `cmd/dispatch` and `cmd/listener` import, since
-`core/permissions_live_test.go:298-299` builds them; `packages/envoy/AGENTS.md` (Critical
+`TestListenerHostPermissionsOnRealServers` builds them; `packages/envoy/AGENTS.md` (Critical
 conventions) says what keeps it current.
 
 The release workflow's `build` job runs vet and the unit tests again before it builds. The
