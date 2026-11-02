@@ -147,7 +147,13 @@ jobs:
       # `image` output, or from the caller's `image` input when this job skipped. $GITHUB_ENV
       # gives the steps after this one the same `${IMAGE}` they always read.
       - name: Derive the image repository
-        run: echo "IMAGE=$(.github/scripts/repo-paths.sh worker_image)" >> "$GITHUB_ENV"
+        run: |
+          # Assigned first, never `echo "IMAGE=$(…)"`: a command substitution inside echo's
+          # arguments cannot fail the step, since echo exits 0 whatever the substitution did, so
+          # a refusal from the script would write an empty IMAGE and the job would go on until
+          # some later step failed on an empty image name, far from the cause.
+          image=$(.github/scripts/repo-paths.sh worker_image)
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
 
       # The sha- tag alone: release.yaml's worker_image_release adds the legion version tag to this
       # image's digest once publish has released that version, so a version tag still means

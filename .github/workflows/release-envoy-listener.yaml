@@ -115,9 +115,15 @@ jobs:
           persist-credentials: false
       - id: read
         run: |
+          # Each value is assigned first, never written as `echo "key=$(…)"`: a command
+          # substitution inside echo's arguments cannot fail the step, since echo exits 0
+          # whatever the substitution did, so a refusal would publish an empty job output that
+          # docker, image_index, attest and release_publish would all read.
+          envoy=$(jq -c .envoy .github/go-release-targets.json)
+          image=$(.github/scripts/repo-paths.sh envoy_image)
           {
-            echo "envoy=$(jq -c .envoy .github/go-release-targets.json)"
-            echo "envoy_image=$(.github/scripts/repo-paths.sh envoy_image)"
+            echo "envoy=$envoy"
+            echo "envoy_image=$image"
           } >> "$GITHUB_OUTPUT"
       - name: Check this job holds no credential (tripwire)
         run: .github/scripts/release-push.sh no-credential

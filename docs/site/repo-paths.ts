@@ -7,16 +7,14 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-/** Every key the script prints and this site reads, which the parse below is held to. */
-const repoPathKeys = [
-  "worker_image",
-  "envoy_image",
-  "plugin_download_url",
-  "repository_url",
-  "docs_site",
-  "docs_base",
-  "docs_edit_base",
-] as const;
+/**
+ * The keys this site reads, which the parse below is held to: the site's own address and base
+ * (astro.config.mjs) and the two links back to the repository, the edit link and the source link
+ * each generated page carries (astro.config.mjs, generators/legion-skills.ts). The script prints
+ * more — the image paths and the plugin download address the release workflows read — and this
+ * build neither reads nor requires them, so renaming one of those breaks no docs build.
+ */
+const repoPathKeys = ["repository_url", "docs_site", "docs_base", "docs_edit_base"] as const;
 
 type RepoPathKey = (typeof repoPathKeys)[number];
 
