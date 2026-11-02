@@ -2,35 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-484",
-  "completed": "2026-11-01T23:26:21Z",
-  "previousHandoff": "5c2530162668cb395ce0c45ced616506955dff71",
-  "round": 7,
-  "headReviewed": "326572883e5828ec99214f76bbd55e52b6cc8b38",
-  "reviewedCodeHead": "9ed584e160a0",
+  "completed": "2026-11-02T01:55:32Z",
+  "previousHandoff": "8baad29e88f02eb1811c5fcfb66d148130e80cfe",
+  "round": 8,
+  "headReviewed": "727290f21cd402230f9ec95ca9f53b850fe8756f",
+  "reviewedCodeHead": "f43b2b66c68d",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
+  "important": 3,
+  "minor": 3,
   "designLinesMet": [
-    "1 removal complete: roundOver, podUpdateOverTask, tellRoundIsOver and Replaced are gone; drift returning during a turn keeps the round (signalled=true, then replacements=1)",
-    "2 met only on the ErrPodGone read (residual below)",
-    "3 restart: askFirst not set for a task the open round holds; a foreign turn leaves it unconfirmed; it goes out once at the round's end",
-    "4 minors: no notice with an empty waiting list; noPluginInstall Kubernetes-only",
-    "merges: relaunch.go union keeps main's accountDrifted and the branch's roundCovers; migration 20261029195520 sorts after main's 0067 and store/migrations tests pass; contract 45 vs main 44",
-    "rollback with a round open: no wedge beyond a drift-standing round; the round replaces once every worker answers"
+    "1 leftPodRound freezes a claim's part once its process runs in another pod; R2, R2b, R3 re-run through the machines' own relaunch pass; the no-locator boundary holds (every new-pod event is handled after the new locator is recorded); a relaunch into the same pod does not freeze",
+    "2 no live claim on the round's pod: PodDrift asked, only ErrPodGone ends; a transient error kept the round open over 5 sweeps with no false end",
+    "3 ReplacePod writes legion.dev/round-displaced-pod and PodDrift reads only that mark; a launch's own displacement reads gone",
+    "4 prose states the rule, apart from the overclaims named below"
   ],
   "keyFindings": [
-    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:117", "description": "Round-6 gone-pod finding met only when a sweep reads ErrPodGone first; machines relaunch within seconds and persist no locator before Resume, so the sweep usually sees no pod, then the new pod, and decides at :117 after new-pod processes changed the old round (interrupted ask re-sent and answered in the new pod hides lost work; an Envoy turn there takes an answer back and reports false loss). Reproduced by all three subagents."},
-    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:236", "description": "completePodUpdate ends the round with no ReplacePod when no live claim records a locator (operator suspension or relaunch between snapshot and live read); the drifted pod is kept and the round reopens. Reproduced."},
-    {"severity": "minor", "file": "packages/daemon/internal/runtime/sandbox/drift.go:262", "description": "A launch's own replacement writes the same displaced mark as ReplacePod, so PodDrift answers nil for it instead of ErrPodGone; the doc at :225-227 says it reads gone."},
-    {"severity": "minor", "file": "packages/daemon/internal/supervise/table.go:1878", "description": "A confirmed ask outlives the round the gone read ended and is re-sent in the new pod, where ready_for_update is refused; one wasted, misleading turn."}
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:118", "description": "The gone-pod report counts every blocking claim not in the round as lost: a claim an earlier sweep's end already reached (while another is held in Resume), or a role first started in the new pod, is named as having lost work although it answered or never ran in the dead pod. Reproduced (DeepReview8 held-Resume test; RSM8 new-role test); not a regression, but the delta's prose says the report no longer depends on order."},
+    {"severity": "important", "file": "packages/daemon/internal/supervise/delivery.go:179", "description": "The new drop of a left round's ask returns before the askFirst reset; after a restart the next task is confirmed by an unrelated turn and retired unsent. Regression from de49ef1c; reproduced; fix verified in a copy."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:228", "description": "A round whose pod no live claim records still waits for turns in the new pod before asking PodDrift; when the new pod has drifted and a turn runs, the round over the dead pod stays open, answered workers' tasks are held and a late notice can fire. Reproduced."},
+    {"severity": "minor", "file": "packages/daemon/internal/supervise/table.go:2155", "description": "The left-pod refusal names PodRound(new pod) as 'the round of that pod', a round that does not exist; a worker answering it is refused again."},
+    {"severity": "minor", "file": "packages/daemon/internal/supervise/table.go:720", "description": "A suspension's letGo clears the locator, so a frozen claim's late answer from the new-pod process is accepted once suspended (narrow: needs a stop mid-turn)."},
+    {"severity": "minor", "file": "tests", "description": "Round 7 asked to keep R2, R2b and R3 as daemon-level tests on the machines' own relaunch; only supervise-level tests were added."}
   ],
-  "threads": "Replied on the 6 round-6 threads. Accepted: PRRT_kwDORFy7ds6yXyi9, yXyi-, yZU6H, yZU6K, yZU6M. Reopened: PRRT_kwDORFy7ds6yZU6F.",
+  "threads": "Replied on the 3 round-7 threads and accepted all: PRRT_kwDORFy7ds6yZU6F, yfhDn, yfhDq.",
   "proseFixedByReviewer": [
-    "32657288: supervise/table.go PodUpdateEnded.Round doc no longer names leaveRound as something that ends a round before the post lands; it names endCurrentPluginRound."
+    "727290f2: daemon/podupdate.go endRoundOverAGonePod and groupDrift docs no longer give, as their reason, that new-pod turns are counted against the old round; they state that leftPodRound freezes a claim's part."
   ],
-  "proseLeftToImplementer": "podupdate.go:83-89, runtime.go:176-180, drift.go:225-227, docs/kubernetes.md:3909-3911 and podupdate_test.go:754-760 state the gone read comes first; their right wording depends on the fix for the podupdate.go:117 finding.",
-  "thermonuclear": "deep-review CHANGES, code-quality CHANGES at code head 9ed584e160a0",
-  "suites": "RoundStateMachine7 at 9ed584e1 on a scratch database: supervise ok (59), api ok, runtime/sandbox ok, runtime/fake ok, store ok (84, migrations included), cmd/legion Claims ok; internal/daemon 57 passed, 3 cleanup-only failures (cannot drop test database, SQLSTATE 42501).",
-  "ci": "CI run 41356135250 at code head 9ed584e160a0 still queued at 23:26Z; no required check has concluded. A request for changes does not wait for it. This push changes a code-file comment, so it carries no trailer."
+  "proseLeftToImplementer": "docs/kubernetes.md:3909-3912, podupdate.go:84-90, runtime.go:177-181 and podupdate_test.go:758-761 say the report and the end no longer depend on which reading comes first; true only once the podupdate.go:118 and :228 findings are fixed.",
+  "thermonuclear": "deep-review CHANGES, code-quality CHANGES at code head f43b2b66c68d",
+  "suites": "RoundStateMachine8 at f43b2b66 on a scratch database: supervise ok (62), daemon ok (62, 1 skip), runtime/sandbox ok (31), api ok (17).",
+  "ci": "CI run 41367417962 at code head f43b2b66c68d still queued at 01:55Z; no required check has concluded. A request for changes does not wait for it. This push changes a code-file comment, so it carries no trailer."
 }
