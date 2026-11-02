@@ -2,80 +2,81 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-771",
-  "completed": "2026-11-02T00:41:00Z",
-  "round": 8,
-  "headTested": "8d4f9dac5b878fb4b3ad8a13285cc2fa9581a4a5",
-  "codeHeadTested": "7b9c47fbf9ed",
-  "previousHandoff": "8b2034a07f09",
+  "completed": "2026-11-02T03:30:00Z",
+  "round": 9,
+  "headTested": "abf78572f36568adf4a83d77ac1854c4d6bac20b",
+  "codeHeadTested": "f8905ed38cc0",
+  "previousHandoff": "32c0f659bc12",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Review round 3's fix is real and pinned where it counts: the new case TestSessionConsumerFiltersAgainWhenItsWriteLosesTheCompareAndSwap passes at this head and goes red with the route's own loop alone reverted to the previous head's, naming the missing topic (proof entry 1), and round 6's compare-and-swap case still holds (proof entry 2). The deleted serving-port client leaves no caller anywhere and every TypeScript package typechecks clean (proof entry 3). Round 7's checks re-driven once each hold: the file set against main, the stale-topic drop, the presence grant and the load numbers (proof entries 4 and 5). The plugin rigs and the live proof pass on this pod's image (proof entry 6). One thing is unfinished rather than failed, and it is the restart's doing, not the change's: the third of the three listener runs was still going when the merge lane's 00:39Z restart notice arrived, so this handoff records two green runs and one cut (proof entry 7)."
+    "how": "Review round 4's fix holds where I could drive it, and I drove each half rather than reading it: the gap survives the re-plan and the answer says so, red when the carry is dropped (proof entry 1); the private sentence now reaches notifications.> and notifications.*.x in full while notifications.team gets the uncaptured one, on a listener of this head (proof entry 2); the refused-CAS and exhaustion-503 cases both go red when the route answers 503 at the first conflict (proof entry 3); the seven minors are each in place by reading (proof entry 4); and the file set, the suites, the rigs and the live proof hold on this pod's new image (proof entries 5 and 6). One half of the architect's item 1 was not pinned by anything in the suite, and I wrote the test that pins it rather than reporting it as a gap for a later round (proof entry 7)."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "The architect's item 1: the reviewer's case - a heartbeat and an envoy_subscribe planned at one revision, the heartbeat's consumer call landing after the subscribe's - leaves the consumer filter and the stored row holding the same topics, the subscribe's included; red at the previous head.",
-      "surface": "The listener's own package built from this head, against a real nats-server in the test process, driven through the registration route with the round's new seam.",
-      "command": "cd packages/envoy && go test -count=1 -run TestSessionConsumerFiltersAgainWhenItsWriteLosesTheCompareAndSwap ./cmd/listener/ ; then the same with packages/envoy/cmd/listener/api.go alone restored from 8b2034a07f09, the previous head, and everything else left at this head",
-      "observed": "PASS in 2.31s at this head. With the route's loop alone reverted it fails and names the gap: 'consumer filters [notifications.agent.ses_cas_refilter notifications.dispatch.issue.CAS-1.>], want [… CAS-1.> notifications.dispatch.issue.CAS-2.>]: a registration that re-plans after a lost compare-and-swap must filter on the plan it stores', with the listener's three subscribe lines beside it showing the heartbeat, the subscribe and the re-plan. So the fix is the route's one loop and the case is pinned on it, not on the seam. Reverting the whole of the round's listener and store changes instead does not compile the case at all (the seam beforeRegister is this round's), which is why the narrower revert is the honest control and is the one recorded here.",
-      "headSha": "8d4f9dac5b878fb4b3ad8a13285cc2fa9581a4a5",
-      "negativeControl": "The reverted-route run above, and its own message, which names the exact topic the old route filtered without: a pass that came from the seam rather than the fix could not produce it."
+      "criterion": "The architect's item 1, first half: a registration that plans again keeps the gap the creating pass found, so a session returning from a long absence is told messages are gone.",
+      "surface": "The listener's registration route built from this head, against a real nats-server in the test process, with the round's beforeRegister hook landing an unsubscribe in the window that refuses the first pass's write.",
+      "command": "cd packages/envoy && go test -count=1 -run TestSessionConsumerCarriesTheGapAndTheUnsubscribeAcrossARefusedWrite ./cmd/listener/ ; then the same with sessionDeliveryOutcome.carrying's gap branch removed, so a re-plan drops what the earlier pass learned",
+      "observed": "PASS at this head. With the carry removed it fails and the answer shows why: 'delivery':{'mode':'consumer','subject':'notifications.envoy.deliver.ses_gap_carry','stream_id':…,'gap':false} - the flag the creating pass set, lost by the re-plan. The mutation was reverted (jj restore; the file holds no such line and jj status is clean).",
+      "headSha": "abf78572f36568adf4a83d77ac1854c4d6bac20b",
+      "negativeControl": "The mutated run above. Reverting whole files from the previous head instead does not compile the case at all (registrationPlanAttempts and the hook are this round's), so the behaviour mutation is the control that can be run, and it is the one recorded."
     },
     {
-      "criterion": "The architect's item 2: a concurrent unsubscribe is still not merged back.",
-      "surface": "packages/envoy/internal/store against a real nats-server in the test process.",
-      "command": "cd packages/envoy && go test -count=1 -run TestUpsertPlannedKeepsAnUnsubscribeThatOutranItsPlan ./internal/store/",
-      "observed": "ok github.com/sjawhar/envoy/internal/store 0.716s - round 6's case, which this round's loop had to keep true, still holds.",
-      "headSha": "8d4f9dac5b878fb4b3ad8a13285cc2fa9581a4a5",
-      "negativeControl": "Round 6's own control stands and was not repeated: with the compare-and-swap replaced by an unconditional put the same case fails, naming the topic the unsubscribe removed and the write brought back."
+      "criterion": "The architect's item 2: on a listener of this head, notifications.> and notifications.*.x get the private warning sentence in full, and notifications.team the uncaptured one.",
+      "surface": "An envoy-listener and a nats-server with JetStream, both built from this head, driven with curl.",
+      "command": "curl -X POST http://127.0.0.1:39300/v1/interests/subscribe once per topic, reading .warnings[0]",
+      "observed": "notifications.> and notifications.*.x each answer 'notifications.<topic> was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or a Legion controller notice lane), and of those a session registers only its own agent subject, notifications.agent.<id>, and the notice lane of a project whose controller role it holds' - the private sentence whole, naming the session's own subject. notifications.team answers 'no stream subject captures it, so nothing would be delivered to <id> on it; follow a notifications.team.<name> topic instead'. Each registration is answered 200, so the topic is dropped and the session registers either way.",
+      "headSha": "abf78572f36568adf4a83d77ac1854c4d6bac20b",
+      "negativeControl": "notifications.agent.someone_else in the same run, which must take the private sentence and does, so the two sentences are told apart by the rule and not by the shape of the topic."
     },
     {
-      "criterion": "The architect's item 3: nothing still calls the deleted serving-port API, and the TypeScript packages typecheck.",
-      "surface": "The repository at this head.",
-      "command": "grep -rn 'subscribeServingPort|parseServingPortSubscribeAnswer|ServingPortSubscribeInput' --include=*.ts over packages/ and scripts/ with node_modules excluded; then bun run typecheck in every TypeScript package that exists",
-      "observed": "The grep finds nothing at all - no caller, no re-export, no test. Typecheck: envoy-client, pi-envoy, pi-legion, claude-envoy, contracts and pi-shared each clean. packages/envoy-plugin does not exist in this tree and does not exist on main either (main carries no packages/envoy-plugin path), and .github/workflows/ci.yaml names it nowhere, so there is no lane left expecting it; the census row that named it is the one stale line this leaves behind.",
-      "headSha": "8d4f9dac5b878fb4b3ad8a13285cc2fa9581a4a5",
-      "negativeControl": "The grep pattern is the three names the deleted API went by, and it was run over the whole tree rather than the changed files, so a caller left in a package this round did not touch would have shown."
+      "criterion": "The architect's item 3: the refused-CAS and exhaustion-503 cases are red when the route answers 503 at the first conflict.",
+      "surface": "The listener's own package built from this head, with the conflict branch of the registration loop mutated to return at once.",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestSessionConsumerCarriesTheGapAndTheUnsubscribeAcrossARefusedWrite|TestSessionConsumerRefusesARegistrationEveryPlanOfWhichIsOutrun' ./cmd/listener/ with ErrInterestPlanConflict returning the wrapped error in place of planning again",
+      "observed": "Both red: the refused-CAS case fails at its subscribe, and the exhaustion case fails with 'the registration made 1 plans, want 3'. So the loop is what both are pinned on. A cruder mutation, registrationPlanAttempts set to 1, reds only the first - the exhaustion case compares the pass count against that same constant, so it passes vacuously - which is why the conflict-branch mutation is the one recorded. The mutation was reverted and jj status is clean.",
+      "headSha": "abf78572f36568adf4a83d77ac1854c4d6bac20b",
+      "negativeControl": "The constant mutation above, recorded because it shows a control that looks like one and is not: a reader who had run only that would have called the exhaustion case pinned."
     },
     {
-      "criterion": "The architect's item 4, the file set: the PR's diff against main, and every file that joined or left since round 7.",
-      "surface": "The branch's history read at this head against main's merge-base.",
-      "command": "jj diff --from 0642a37a --to 8d4f9dac --name-only, compared with round 7's set",
-      "observed": "185 paths against main, where round 7 read 181: four joined, none left. Each joined is this round's own work - packages/contracts/src/dispatch-api.ts and src/envelope.ts (the generated-constants minor), packages/envoy-client/test/subscribe-answer.ts (the helper the one subscribe-refusal fix needs) and packages/envoy/internal/bus/testdata/private-stream-subjects.json (the shared fixture the review asked for, so the TypeScript mirror parses Go's table rather than copying it).",
-      "headSha": "8d4f9dac5b878fb4b3ad8a13285cc2fa9581a4a5",
-      "negativeControl": "The comparison is run both ways: nothing left the set, so no file this pull request carried has silently stopped differing from main."
+      "criterion": "The architect's item 4: the seven minors, by reading.",
+      "surface": "The repository at this head and the pull request body.",
+      "command": "grep for the deleted field, the moved constant and the stale names; read the test the review called self-comparing; grep the stand-ins' imports; read the body's Not proven / risk, Proven by and Look at first",
+      "observed": "InterestPlan.Requested is gone from internal/store/interest.go and store.InterestPlanAttempts from the whole module, the bound now being the listener's own registrationPlanAttempts beside the loop it bounds. uncapturedTopicWarning is nowhere; uncapturedTopicRefusal is contracts' one copy, imported by envoy-client rather than re-exported. The self-comparing assertion is gone: stream-topics.test.ts:60 now pins the sentence as a literal and :63 checks the topic and session id appear in it. Every stand-in takes the answer from @legion/envoy-client/test/subscribe-answer - pi-legion's role-claim test, pi-shared's omp-harness, claude-envoy's harness and its two tests - and omp-harness imports the DeliveryAnswer type rather than declaring one. The body no longer lists the filter/row mismatch under Not proven / risk; its presence line now reads 'Once dispatch://INFRA-626 lands, a session on a shared host user will be able to answer another session's presence probe', which is the conditional the review asked for; Proven by names this round's head and Look at first names the registration loop and what each pass carries.",
+      "headSha": "abf78572f36568adf4a83d77ac1854c4d6bac20b",
+      "negativeControl": "Each name was grepped over the whole tree rather than the diff, so a leftover in a file this round did not touch would have shown; the body was read live from GitHub rather than from the workspace copy."
     },
     {
-      "criterion": "The architect's item 4, the three round-7 checks once each: the stale topic dropped with a warning, the presence grant, and the load numbers.",
-      "surface": "An envoy-listener and a nats-server built from this head for the registration answers, the permissions package for the grant, and the load run's own record on this pod's disk for the numbers.",
-      "command": "curl against http://127.0.0.1:38300/v1/interests/subscribe for the stale and private topics and POST /v1/replay; cd packages/envoy/infra && go test -count=1 -run 'TestSessionPresenceSubjectIsStoredByNoStream|TestSessionPermissions' ./core/; and the body's figures read against runs/step-1x-round7",
-      "observed": "The stale topic beside a valid one answers 200, registering the valid topic and the session's own with the one warning; the stale topic alone answers 200 with only the session's own; a private topic answers 200 with its own warning; POST /v1/replay answers 404. The permissions tests pass (ok 0.017s). The load figures the body states are the same run's as round 7 verified figure by figure - 2,580 / 2,580 receipts, 400 sessions on a consumer and 0 without, 3,156 relay frames with 0 duplicates - and the body still states them unchanged.",
-      "headSha": "8d4f9dac5b878fb4b3ad8a13285cc2fa9581a4a5",
-      "negativeControl": "Round 6's measurement of the same two registration bodies, 400 with nothing written, is what these 200s are read against; and the load record's distinct (session, stream_seq) count equalling its row count is the control on the frame figure."
+      "criterion": "The architect's item 5: the file set against main, and the listener suite three times naming any failure.",
+      "surface": "The branch's history against main's merge-base, and the listener's own package against the pod's test Postgres.",
+      "command": "jj diff --from 0642a37a --to abf78572 --name-only, compared with round 8's set; then cd packages/envoy && for i in 1 2 3; do DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test -count=1 -timeout 40m ./cmd/listener/; done",
+      "observed": "185 paths against main, the same 185 as round 8: nothing joined and nothing left, so this round changed files it already carried. Three listener runs, three passes: ok 892.811s, ok 816.032s, ok 825.938s. No case failed and none was lost, so round 8's cut third run is made good and the 19:29Z flake has now not recurred in five runs across two rounds. These three ran on a tree with no mutation of mine: an earlier start of them overlapped my first mutation, so I stopped that loop and ran all three again after the last revert, which is why the times here are not the ones a mid-round poll showed.",
+      "headSha": "abf78572f36568adf4a83d77ac1854c4d6bac20b",
+      "negativeControl": "None: three green runs cannot prove a flake absent, only that it did not recur, and this entry says that rather than calling it fixed."
     },
     {
-      "criterion": "The architect's item 4, the plugin rigs and the live proof on this pod's image, with the build named.",
-      "surface": "The real-session suites against this pod's Oh My Pi binary and a real nats-server, and the live delivery proof on the full stack.",
-      "command": "LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:38222 bun test for pi-envoy's card-delivery-omp.test.ts and pi-legion's controller-start-omp.test.ts and legion-background-subagent-omp.test.ts; bun test in packages/claude-envoy; SESSION_DELIVERY_EVIDENCE_DIR=… bash scripts/e2e/envoy-session-delivery.sh",
-      "observed": "card-delivery-omp 10 pass 0 fail; controller-start-omp 17 pass 0 fail; legion-background-subagent-omp 1 pass 0 fail; claude-envoy 263 pass, 13 skip, 0 fail across 38 files. The live proof: exit 0, 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)', six windows, every count 1, with 'issue order compared in pi (12 comments): LDT0989-001Z@seq4:line17 …' and the same twelve for cc. The build, as the architect asked: the run's own line reads 'pi-envoy 14.2.0; claude-envoy 1.0.0; Claude Code 2.1.311; omp omp/18.12.2' - the plugins packed from this checkout, and the binary this pod carries is omp/18.12.2, NOT the 18.13.3 the merge lane's notice named, so the image that notice describes had not reached this pod when these ran.",
-      "headSha": "8d4f9dac5b878fb4b3ad8a13285cc2fa9581a4a5",
+      "criterion": "The architect's item 5: the plugin rigs and the live proof on this pod's image, with the build named.",
+      "surface": "The real-session suites against this pod's Oh My Pi binary and a real nats-server, the package suites, and the live delivery proof on the full stack.",
+      "command": "LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:39222 bun test for pi-envoy's card-delivery-omp.test.ts and pi-legion's controller-start-omp.test.ts and legion-background-subagent-omp.test.ts; bun test in packages/claude-envoy and packages/envoy-client; SESSION_DELIVERY_EVIDENCE_DIR=… bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "card-delivery-omp 10 pass 0 fail; controller-start-omp 17 pass 0 fail; legion-background-subagent-omp 1 pass 0 fail; claude-envoy 263 pass, 13 skip, 0 fail; envoy-client 1304 pass, 10 skip, 0 fail across 49 files. The live proof: exit 0, 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)', six windows, every count 1, with the order comparison naming the twelve comments in each transcript. The build, as asked: the run's own line reads 'pi-envoy 14.2.0; claude-envoy 1.0.0; Claude Code 2.1.311; omp omp/18.13.3' - this pod now carries the announced 18.13.3, where round 8's carried 18.12.2, so this is the first round of mine on that image.",
+      "headSha": "abf78572f36568adf4a83d77ac1854c4d6bac20b",
       "negativeControl": "Round 4's control for the card suite stands and was not repeated: with the plugin subscribing a wrong relay subject that file fails in 38s."
     },
     {
-      "criterion": "The architect's item 4, the listener suite three times, naming any failure. Two runs green; the third was cut by the restart.",
-      "surface": "The listener's own package built from this head, against the pod's test Postgres.",
-      "command": "cd packages/envoy && for i in 1 2 3; do DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test -count=1 -timeout 40m ./cmd/listener/; done",
-      "observed": "ok github.com/sjawhar/envoy/cmd/listener 996.770s, then ok 876.424s. The third run had started and had not finished when the merge lane's 00:39Z notice gave five minutes to the pod restart, so it is cut, not failed: no case of it reported anything. Two of three green, and no failure to name in those two. Where it stood is recorded here so the next round does not read two as three.",
-      "headSha": "8d4f9dac5b878fb4b3ad8a13285cc2fa9581a4a5",
-      "negativeControl": "None: a cut run is evidence of nothing, which is why it is recorded as cut rather than counted."
+      "criterion": "The architect's item 1, second half: a serving-port body refused on a later pass keeps the earlier pass's consumer in the answer. Nothing in the suite pinned it, so I wrote the test that does.",
+      "surface": "The listener's registration route built from this head, against a real nats-server, through the same rig and hook as the round's own cases.",
+      "command": "cd packages/envoy && go test -count=1 -run TestSessionConsumerKeepsAServingPortsConsumerWhenALaterPassIsRefused ./cmd/listener/ ; the new case is committed on this branch",
+      "observed": "The behaviour holds at this head and the new case passes: a serving-port registration whose first pass creates the consumer and whose write is refused by an unsubscribe in the window, and whose second pass finds the grant gone, is still answered mode consumer on notifications.envoy.deliver.<id>, and that consumer exists. It needed a test: with carrying's serving-port branch mutated to drop what the earlier pass learned, every case this round added still passed (ok, 74.5s) while the behaviour was broken - the answer then carries no delivery at all, which the new case now fails on and names. gofmt and go vet are clean on it, and the whole TestSessionConsumer/TestSubscribeHandler set passes with it (ok 62.857s).",
+      "headSha": "abf78572f36568adf4a83d77ac1854c4d6bac20b",
+      "negativeControl": "The mutation itself, run twice: before the new case it reded nothing, and after it the case fails with the answer that carries no delivery. That pair is the whole reason the test exists."
     }
   ],
   "notes": [
-    "Lanes: every lane at this head is unread. The code head is 7b9c47fb (8d4f9dac is the handoff commit and carries skip-checks), and its run 41364405271 was queued with 27 jobs still queued when the round ended; the run at 6ee5bcf9 before it was cancelled when this head superseded it. What is newly settled and green is round 7's head: run 41346827710 at fb97b493 concluded success with no job anything but success or skipped, so round 7's verdict is confirmed by GitHub. The last red on this branch remains 41294560423 at d5a918b1.",
-    "This pod carries omp/18.12.2, not the Oh My Pi 18.13.3 the merge lane's 23:46Z notice named, and the plugins the live proof ran are this checkout's (pi-envoy 14.2.0). So nothing here was tested on the announced image; a round after the restart should say which binary it ran on, as this one does.",
+    "Lanes: every lane at this head is unread. The code head is f8905ed3 (abf78572 is the handoff commit and carries skip-checks), and its run 41377460074 was queued when the round ended; I waited for none. Round 8's head never settled either - run 41364405271 at 7b9c47fb was cancelled when this head superseded it - so the newest settled run on this branch remains 41346827710 at fb97b493, round 7's head, which concluded success with no job anything but success or skipped.",
+    "This round's push carries a test of mine as well as the handoff, so its head takes no skip-checks trailer.",
+    "A note on method, since it cost a restart of the long runs: a mutation in the working copy reaches any go test that compiles after it, so the three listener runs were stopped and begun again once every revert was in. A round that mutates and measures at once has to keep the two apart.",
     "No -race run in this round or any earlier one; any future one goes as CGO_ENABLED=1 go test -race -timeout <bound> …, since these pods default CGO_ENABLED=0.",
-    "Leftover check: `ps -eo pid,args | grep -v grep | grep -E 'envoy-session-delivery|natsd|envoy-listener|envoy-dispatch|omp --mode rpc|claude-bridge|socat|held-port|testerprobe|go test|sleep 2'` read by its lines and not its status; what it listed was ended by exact pid. The third listener run was still in that list when the restart notice arrived and is ended with it; its log is /legion/scratch/tmp/listener-3x-r8.log on this pod's volume.",
+    "Leftover check: `ps -eo pid,args | grep -v grep | grep -E 'envoy-session-delivery|natsd|envoy-listener|envoy-dispatch|omp --mode rpc|claude-bridge|socat|held-port|go test|sleep 2'` read by its lines and not its status; every process it listed was ended by exact pid and the last read listed nothing.",
     "Still open from round 1, not a failure: a session may register the wildcard interest notifications.team.> and the listener puts that wildcard into its consumer filter, so one session durably receives every team topic."
   ]
 }
