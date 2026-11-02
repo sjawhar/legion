@@ -718,16 +718,16 @@ func TestPersonAnswersTheSignedInPersonAndTheMachineActingForThem(t *testing.T) 
 	}{
 		{name: "a person of the domain on a pinned machine",
 			token: personToken(person, true, signInDomain), actor: googleToken(pinnedAccount, true, cloudProject, instanceName), session: "example-box-1",
-			want: exchange.Claims{Session: "example-box-1", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: pinnedAccount}},
+			want: exchange.Claims{Session: "example-box-1", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: pinnedAccount, Fleet: pinnedService}},
 		{name: "the same person on a second box of a fleet that names nobody",
 			token: personToken(person, true, signInDomain), actor: googleToken(poolAccount, true, "", ""), session: "example-box-2",
-			want: exchange.Claims{Session: "example-box-2", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: poolAccount}},
+			want: exchange.Claims{Session: "example-box-2", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: poolAccount, Fleet: poolService}},
 		{name: "an address Google spells with capitals is the lowercase login",
 			token: personToken("Ada@example.com", true, signInDomain), actor: googleToken(poolAccount, true, "", ""), session: "example-box-3",
-			want: exchange.Claims{Session: "example-box-3", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: poolAccount}},
+			want: exchange.Claims{Session: "example-box-3", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: poolAccount, Fleet: poolService}},
 		{name: "email_verified as the string Google writes on some of its tokens",
 			token: personToken(person, "true", signInDomain), actor: googleToken(poolAccount, "true", "", ""), session: "example-box-4",
-			want: exchange.Claims{Session: "example-box-4", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: poolAccount}},
+			want: exchange.Claims{Session: "example-box-4", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal, Actor: poolAccount, Fleet: poolService}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			claims, err := set.Person(c.token, c.actor, c.session)
@@ -893,6 +893,50 @@ func TestMachineSubjectNamesOneMachineAndReadsItsAccountBack(t *testing.T) {
 		account, ok := exchange.MachineAccount(c.subject)
 		if ok != c.machine || account != c.account {
 			t.Errorf("MachineAccount(%q) = %q, %t; want %q, %t", c.subject, account, ok, c.account, c.machine)
+		}
+	}
+}
+
+// TestPersonSubjectNamesOneSignInAndReadsItsMachineBack: a sign-in's subject tells one person's
+// sign-in on one box from every other — two people on one box, and one person on two boxes, are
+// four different strings — and the machine's account reads back out of it, which is what holds
+// the credential to a listed fleet on every call. No subject of any other kind reads as a
+// sign-in's, and a sign-in's never reads as a machine's, whose credential acts for nobody.
+func TestPersonSubjectNamesOneSignInAndReadsItsMachineBack(t *testing.T) {
+	const (
+		boxOne = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		boxTwo = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	)
+	subjects := map[string]struct{ subject, account string }{
+		"one person on one box":                  {exchange.PersonSubject(person, pinnedAccount, boxOne), pinnedAccount},
+		"the same person on another box":         {exchange.PersonSubject(person, pinnedAccount, boxTwo), pinnedAccount},
+		"the same person on another fleet's box": {exchange.PersonSubject(person, poolAccount, boxOne), poolAccount},
+		"another person on the first box":        {exchange.PersonSubject(stranger, pinnedAccount, boxOne), pinnedAccount},
+	}
+	seen := map[string]string{}
+	for name, c := range subjects {
+		if other, taken := seen[c.subject]; taken {
+			t.Errorf("%s and %s spell one subject, %q: each sign-in holds a credential of its own", name, other, c.subject)
+		}
+		seen[c.subject] = name
+		account, ok := exchange.PersonSubjectAccount(c.subject)
+		if !ok || account != c.account {
+			t.Errorf("PersonSubjectAccount(%q) = %q, %t; want %q: it is what holds the sign-in to a listed fleet", c.subject, account, ok, c.account)
+		}
+		if _, machine := exchange.MachineAccount(c.subject); machine {
+			t.Errorf("MachineAccount(%q) read %s as a machine's subject, which would make its credential a fleet's", c.subject, name)
+		}
+	}
+	onInstance := exchange.ReadGoogleIdentity(googleToken(pinnedAccount, true, cloudProject, instanceName))
+	onNone := exchange.ReadGoogleIdentity(googleToken(poolAccount, true, "", ""))
+	for _, subject := range []string{
+		exchange.MachineSubject(onInstance, boxOne),
+		exchange.MachineSubject(onNone, boxOne),
+		workerAccount,
+		"",
+	} {
+		if account, ok := exchange.PersonSubjectAccount(subject); ok {
+			t.Errorf("PersonSubjectAccount(%q) = %q, true; want no sign-in: it is a subject of another kind", subject, account)
 		}
 	}
 }

@@ -74,9 +74,10 @@ func (s *server) listPersonSignIns(w http.ResponseWriter, r *http.Request, _ str
 }
 
 // revokePersonSignIn ends one sign-in of the person the body names
-// (store.Store.RevokePersonSignIn): that box key trades nothing more, and every access token
-// already minted under it ends in the revoke's own transaction, so nothing it minted outlives
-// it. The person's sign-ins on their other boxes are untouched, and the box signs in again with
+// (enroll.Service.RevokePersonSignIn): that box key trades nothing more, every access token
+// already minted under it ends, and the launcher credential the sign-in held ends with every
+// session it enrolled — all in the revoke's own transaction, so nothing it gave outlives it.
+// The person's sign-ins on their other boxes are untouched, and the box signs in again with
 // `agent-secrets login`, which makes a key of its own.
 //
 // A sign-in of any other person is answered as an unknown id, so nobody learns another person's
@@ -94,7 +95,8 @@ func (s *server) revokePersonSignIn(w http.ResponseWriter, r *http.Request, call
 	if !requirePerson(w, body.Person) {
 		return
 	}
-	ended, err := s.deps.Enroll.Store.RevokePersonSignIn(r.Context(), id, body.Person)
+	person := record.CanonicalLogin(body.Person)
+	ended, err := s.deps.Enroll.RevokePersonSignIn(r.Context(), id, person, record.HumanActor(person))
 	switch {
 	case errors.Is(err, store.ErrNoSignIn):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no sign-in of that person has that id")
@@ -103,7 +105,7 @@ func (s *server) revokePersonSignIn(w http.ResponseWriter, r *http.Request, call
 		writeInternal(w, "revoke person sign-in", err)
 		return
 	}
-	slog.Info("person sign-in revocation relayed", "caller", callerName, "person", record.CanonicalLogin(body.Person), "signin", id, "tokens_ended", ended)
+	slog.Info("person sign-in revocation relayed", "caller", callerName, "person", person, "signin", id, "tokens_ended", ended)
 	writeJSON(w, http.StatusOK, personSignInRevokedResponse{State: "revoked", TokensEnded: ended})
 }
 

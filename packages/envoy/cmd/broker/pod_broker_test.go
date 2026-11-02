@@ -100,8 +100,9 @@ func (b podBroker) enroll(by launcher, runtimeID, account string) pod {
 	return pod{runtimeID: runtimeID, key: key, enrollmentID: enrolled.EnrollmentID}
 }
 
-// ask has p request the agent secret secretName and returns the broker's reply.
-func (b podBroker) ask(p pod, secretName string) requestReply {
+// askRaw has p request the agent secret secretName and answers the broker's status and body,
+// for a caller proving that a session whose enrollment has ended reaches no secret at all.
+func (b podBroker) askRaw(p pod, secretName string) (int, []byte) {
 	b.t.Helper()
 	request, err := record.Sign(p.key, b.base, []record.AuthorizationDetail{
 		{Type: record.KindAgentSecret, Identifier: secretName, Actions: []string{"inject"}},
@@ -109,7 +110,13 @@ func (b podBroker) ask(p pod, secretName string) requestReply {
 	if err != nil {
 		b.t.Fatal(err)
 	}
-	status, answer := b.signed(p, "/v1/requests", map[string]any{"request": request, "session_id": nil})
+	return b.signed(p, "/v1/requests", map[string]any{"request": request, "session_id": nil})
+}
+
+// ask has p request the agent secret secretName and returns the broker's reply.
+func (b podBroker) ask(p pod, secretName string) requestReply {
+	b.t.Helper()
+	status, answer := b.askRaw(p, secretName)
 	if status != http.StatusOK {
 		b.t.Fatalf("%s's POST /v1/requests for %s = %d %s, want 200", p.runtimeID, secretName, status, answer)
 	}

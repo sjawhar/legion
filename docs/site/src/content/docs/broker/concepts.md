@@ -40,6 +40,15 @@ the shared agent-tier ones, and no person's. The person a fleet's
 `BROKER_VM_EXCHANGE_ACCOUNTS` entry names reaches the Dispatch token alone; that person reaches
 their own secrets on the machine only by signing in on it.
 
+A person signs in on a machine with `agent-secrets login`, which runs Google's device flow and then
+trades the person's own identity token at the exchange with the machine's as the actor token. That
+trade mints a machine login of its own, carrying the person rather than the fleet, so a session
+enrolled under it is that person's: it reads the secrets that person owns and the shared agent-tier
+ones, and no other person's and none of the fleet's. Each sign-in is bound to a box key the command
+makes there, so one person signed in on two machines holds a login on each, and two people signed
+in on one machine hold one each. Revoking a sign-in on Dispatch ends its machine login with it:
+every session it enrolled ends, and the box signs in again to work on.
+
 An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
 renews the sessions it registered, `agent-secrets renew` renews a box, and Legion's pod shim renews
 a pod. A pod's renewal carries the pod's current projected token, and the broker refuses it

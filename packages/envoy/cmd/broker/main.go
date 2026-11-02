@@ -845,10 +845,13 @@ func discoverVerifiers(ctx context.Context, cfg config.Config, keysFor keysFunc)
 }
 
 // machineCredentials is oauth.ExchangeConfig.MachineCredentials over the enrollment service: the
-// launcher credential a machine's exchange mints or moves, written in the exchange's own
-// transaction (enroll.Service.IssueTokenLoginTx), so the credential and the access token that
-// names it land together. A key another live credential holds is oauth.ErrMachineKeyTaken, which
-// the exchange answers invalid_grant.
+// launcher credential a trade mints or moves, written in the exchange's own transaction
+// (enroll.Service.IssueTokenLoginTx), so the credential and the access token that names it land
+// together. Both trades that mint one come through here — a machine's own, which carries its
+// fleet's service and no person, and a person's sign-in on such a machine, which carries that
+// person as its operator — so there is one way a credential is minted and not two. A key
+// another live credential holds is oauth.ErrMachineKeyTaken, which the exchange answers
+// invalid_grant.
 func machineCredentials(enr *enroll.Service) oauth.MachineCredentials {
 	return func(ctx context.Context, cred oauth.MachineCredential) (string, error) {
 		tx, ok := oauthstore.TxFrom(ctx)
@@ -859,6 +862,7 @@ func machineCredentials(enr *enroll.Service) oauth.MachineCredentials {
 			Subject:      cred.Subject,
 			Service:      cred.Service,
 			Host:         cred.Host,
+			Operator:     cred.Operator,
 			TokenExpires: cred.Expires,
 			Thumbprint:   cred.Thumbprint,
 			JWK:          cred.JWK,

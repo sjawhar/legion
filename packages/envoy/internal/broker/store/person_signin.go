@@ -105,22 +105,28 @@ func (s *Store) PersonSignIns(ctx context.Context, person string) ([]PersonSignI
 	return out, rows.Err()
 }
 
-// RevokePersonSignIn ends sign-in id of person and answers how many of that person's live access
-// tokens it ended with it. A row already revoked is revoked again by nobody: it answers no error
-// and no tokens, as revoking a machine login twice answers the same. An id no sign-in of that
-// person has is ErrNoSignIn, so one person cannot learn another's ids by trying them.
+// RevokePersonSignInTx ends sign-in id of person in tx and answers the box key thumbprint it
+// revoked and how many of that person's live access tokens it ended with it. A row already
+// revoked is revoked again by nobody: it answers an empty thumbprint, no tokens and no error,
+// as revoking a machine login twice answers the same. An id no sign-in of that person has is
+// ErrNoSignIn, so one person cannot learn another's ids by trying them.
 //
-// It is one statement, and that is the point. Revoking the sign-in alone would leave every token
-// already minted under it writing for up to BROKER_ACCESS_TOKEN_SECONDS, and a resource server's
-// affirmative introspection answer for as long again, so the tokens are ended in the revoke's own
-// transaction, exactly as revoking a machine login ends the tokens its credential holds
-// (oauthstore.EndCredential). Which tokens those are is written in each row's stored session: the
-// person it names and the key it is bound to, which together are this sign-in and no other, so
-// the person's sign-ins on their other boxes keep every token they hold. Only access tokens are
-// ended, because an exchanged trade is answered no refresh token at all.
-func (s *Store) RevokePersonSignIn(ctx context.Context, id, person string) (int, error) {
+// It takes tx rather than the pool because ending the sign-in is only half of it: the launcher
+// credential that sign-in's trades mint is ended in the same transaction
+// (enroll.Service.RevokePersonSignIn), and the thumbprint answered here is what names it.
+//
+// Its own half is one statement, and that is the point. Revoking the sign-in alone would leave
+// every token already minted under it writing for up to BROKER_ACCESS_TOKEN_SECONDS, and a
+// resource server's affirmative introspection answer for as long again, so the tokens are ended
+// here, exactly as revoking a machine login ends the tokens its credential holds
+// (oauthstore.EndCredential). Which tokens those are is written in each row's stored session:
+// the person it names and the key it is bound to, which together are this sign-in and no other,
+// so the person's sign-ins on their other boxes keep every token they hold. Only access tokens
+// are ended, because an exchanged trade is answered no refresh token at all.
+func RevokePersonSignInTx(ctx context.Context, tx pgx.Tx, id, person string) (string, int, error) {
 	var found, ended int
-	err := s.Pool.QueryRow(ctx, `with target as (
+	var thumbprint *string
+	err := tx.QueryRow(ctx, `with target as (
 			select id from person_signins where id = $1 and person = lower($2) for no key update
 		), revoked as (
 			update person_signins set revoked_at = now()
@@ -132,12 +138,16 @@ func (s *Store) RevokePersonSignIn(ctx context.Context, id, person string) (int,
 				in (select person, thumbprint from revoked)
 			returning 1
 		)
-		select (select count(*) from target), (select count(*) from tokens)`, id, person).Scan(&found, &ended)
+		select (select count(*) from target), (select count(*) from tokens),
+			(select thumbprint from revoked)`, id, person).Scan(&found, &ended, &thumbprint)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	if found == 0 {
-		return 0, ErrNoSignIn
+		return "", 0, ErrNoSignIn
 	}
-	return ended, nil
+	if thumbprint == nil {
+		return "", 0, nil
+	}
+	return *thumbprint, ended, nil
 }

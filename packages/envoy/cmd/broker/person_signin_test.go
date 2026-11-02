@@ -59,7 +59,7 @@ func TestTheBinaryTakesAPersonsSignInOnAMachine(t *testing.T) {
 	}
 	apiToken := accountToken(t, cluster, clusterKey, apiAccount)
 
-	broker := startBroker(t, brokerOptions{Env: personExchangeEnv(t, databaseURL, cluster, github, google, longAccessSeconds)})
+	broker := startBroker(t, brokerOptions{Env: googleExchangeEnv(t, databaseURL, cluster, github, google, longAccessSeconds)})
 	live := newLiveBroker(broker.Addr, firstBox)
 	secondLive := newLiveBroker(broker.Addr, secondBox)
 	plain := newPlainBroker(broker.Addr)
@@ -227,16 +227,6 @@ func TestTheBinaryTakesAPersonsSignInOnAMachine(t *testing.T) {
 			t.Fatalf("the person's second box = %d %v, want 200: revoking one sign-in ends one", status, body)
 		}
 	})
-}
-
-// personExchangeEnv is googleExchangeEnv with the person half configured: the audience of the
-// device-flow client `agent-secrets login` runs Google's device grant as. The Workspace domain
-// is productionEnv's BROKER_SIGNIN_DOMAIN, the very setting the broker's own approval sign-in
-// reads, so no second domain is configured anywhere.
-func personExchangeEnv(t *testing.T, databaseURL string, cluster, github, google *oidctest.Issuer, accessSeconds int) []string {
-	t.Helper()
-	return append(googleExchangeEnv(t, databaseURL, cluster, github, google, accessSeconds),
-		"BROKER_SIGNIN_DEVICE_AUDIENCE="+deviceAudience)
 }
 
 // mintPersonToken is a person's own Google identity token as the device grant answers one: the

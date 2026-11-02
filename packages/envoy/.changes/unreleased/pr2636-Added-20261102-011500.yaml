@@ -1,0 +1,19 @@
+kind: Added
+body: |
+  A person's sign-in on a machine now reaches that person's own secrets there. The trade that
+  signs them in mints a launcher credential of its own, in the exchange's own transaction and
+  through the seam a machine's credential already uses, and names it in the token answer's
+  `credential_id` and `credential_expires_at`. That credential carries the person as its
+  operator, so the session it enrols is that person's: it reads the secrets that person owns and
+  the shared agent-tier ones, and no other person's and none of the fleet's, while the machine's
+  own credential goes on carrying its fleet's service and no person. It is keyed by the person,
+  the machine's Google account and the box key's thumbprint, so two people signed in on one
+  machine hold one credential each and one person signed in on two machines holds one per
+  machine, and it is held to a listed fleet on every call as a machine's is. Revoking the
+  sign-in through `POST /v1/person-signins/{id}/revoke` now ends that credential in the same
+  transaction as the sign-in row and the access tokens minted under it, so no proof signed with
+  the box key authenticates again and every session it enrolled ends with its grants and pending
+  requests.
+time: 2026-11-02T01:15:00.000000000Z
+custom:
+  Issue: pr2636

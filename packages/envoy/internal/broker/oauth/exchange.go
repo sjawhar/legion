@@ -215,6 +215,11 @@ type MachineCredential struct {
 	// credential keyed by a subject carries one, which is what says the login is a service's
 	// and no person approved it.
 	Service string
+	// Operator is the person a sign-in's credential acts for, which makes its enrollments that
+	// person's sessions exactly as a dev box's machine login does. A machine's own credential
+	// leaves it empty, whatever its fleet's entry names: secret authority follows the access
+	// token, and a machine's token names a service and no person.
+	Operator string
 	// Host is the machine as an operator reads it on their machine-login page:
 	// <project>/<zone>/<instance name> for a machine minted on a Compute Engine instance, and
 	// the account for one minted anywhere else.
@@ -436,7 +441,14 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if request.GetRequestForm().Get(FormSubjectTokenType) == oauthwire.SubjectTokenTypePerson {
+		// The sign-in first, so a box key the person has revoked is refused before anything is
+		// minted for it, and then the credential that sign-in holds, in this same transaction.
 		if err := p.personSignIn(txCtx, session); err != nil {
+			p.writeError(ctx, w, request, err)
+			return
+		}
+		credentialID, credential, err = p.personCredential(txCtx, r, session)
+		if err != nil {
 			p.writeError(ctx, w, request, err)
 			return
 		}
@@ -752,6 +764,68 @@ func (p *Provider) personSignIn(ctx context.Context, session *oauthstore.Exchang
 		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
 	}
 	return nil
+}
+
+// personCredential creates or re-uses the launcher credential a person's sign-in on a machine
+// holds (ExchangeConfig.MachineCredentials, the same seam a machine's own credential is minted
+// through), in the exchange's own transaction, and writes its id onto the session so the stored
+// token names it. It answers the id and what it asked for, which is what the token answer's
+// extras repeat.
+//
+// It is why a person reaches their own secrets on a box at all. The exchange answers a Dispatch
+// access token, which writes Dispatch and reads no secret; every secrets route is an
+// enrollment's, made under a launcher credential and a proof signed by its key. The machine's
+// own credential acts for no person, so a session enrolled under it reaches its fleet's secrets
+// and no person's; this one carries the person as its operator, so a session enrolled under it
+// is that person's, exactly as a dev box's machine login's sessions are (enroll.authorized).
+// One sign-in gives the person both halves, and both end together, because the credential is
+// written in the transaction the token is written in and the revoke ends them together too
+// (enroll.Service.RevokePersonSignIn).
+//
+// It carries the fleet's service as well as the person, which the table requires of any
+// credential keyed by a subject (launcher_credentials_subject_names_service): that service is
+// what holds the credential to a listed fleet on every call (enroll.tokenLoginListed), and it
+// grants nothing on its own, since a session's service authority is read off the enrollment's
+// own recorded subject, which a credential carrying an operator never writes
+// (enroll.Service.Create).
+//
+// The credential is keyed by the sign-in (exchange.PersonSubject: the person, the machine's
+// account and the box key) and bound to that box key, so two people signed in on one box hold a
+// credential each, one person signed in on two boxes holds one per box, and no sign-in's trade
+// moves another's.
+func (p *Provider) personCredential(ctx context.Context, r *http.Request, session *oauthstore.ExchangeSession) (string, MachineCredential, error) {
+	person, _ := session.Extra[ClaimPerson].(string)
+	machine, _ := session.Extra[ClaimMachine].(string)
+	thumbprint := session.GetDPoPJWKThumbprint()
+	key, err := proofKey(r, thumbprint)
+	if err != nil {
+		return "", MachineCredential{}, oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+	}
+	expires, ok := expiryOf(session.GetSubjectToken())
+	if !ok {
+		return "", MachineCredential{}, oauth2.ErrInvalidRequest.WithHint("The subject token names no expiry, so there is nothing to expire the sign-in's credential with.")
+	}
+	cred := MachineCredential{
+		Subject:    exchange.PersonSubject(person, machine, thumbprint),
+		Service:    session.Fleet,
+		Operator:   person,
+		Host:       machineHost(exchange.ReadGoogleIdentity(session.GetActorToken())),
+		Thumbprint: thumbprint,
+		JWK:        key,
+		Expires:    expires,
+	}
+	id, err := p.exchange.MachineCredentials(ctx, cred)
+	if err != nil {
+		if errors.Is(err, ErrMachineKeyTaken) {
+			return "", MachineCredential{}, oauth2.ErrInvalidGrant.WithHint("Another live machine login holds the key this proof was signed with. A sign-in makes a box key of its own.").WithWrap(err).WithDebugError(err)
+		}
+		return "", MachineCredential{}, oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+	}
+	if session.Extra == nil {
+		session.Extra = map[string]any{}
+	}
+	session.Extra[oauthwire.ExtraCredentialID] = id
+	return id, cred, nil
 }
 
 // machineHost is the machine as its credential's row records it, which is what an operator reads

@@ -96,7 +96,12 @@ const (
 	sharedSecret      = "SHARED_SECRET"
 	pinnedFleetSecret = "PINNED_FLEET_SECRET"
 	poolFleetSecret   = "POOL_FLEET_SECRET"
+	// otherPersonSecret is person's own, nobody else's: what a signed-in person is refused on a
+	// box, so that a sign-in is read as that one person's authority and not as every person's.
+	otherPersonSecret = "OTHER_PERSON_SECRET"
 	// The values the fake store holds for them.
+	personSecretValue      = "person-secret-v1"
+	otherPersonSecretValue = "other-person-secret-v1"
 	sharedSecretValue      = "shared-secret-v1"
 	pinnedFleetSecretValue = "pinned-fleet-secret-v1"
 	poolFleetSecretValue   = "pool-fleet-secret-v1"
@@ -617,6 +622,99 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 		}
 	})
 
+	// The person half of the same shape: secret authority follows the access token, so what the
+	// machine was refused just above is exactly what a person signed in on that machine reaches,
+	// and nothing more. Each sign-in holds a box key of its own, as `agent-secrets login` makes
+	// one: a launcher credential is keyed on the key it holds.
+	graceBoxKey, graceSecondBoxKey := proofKey(t), proofKey(t)
+	graceBox := newLiveBroker(broker.Addr, graceBoxKey)
+	graceSecondBox := newLiveBroker(broker.Addr, graceSecondBoxKey)
+	signIn := func(live *liveBroker, account, session string) string {
+		t.Helper()
+		instance := fleetInstanceName
+		if account != pinnedFleetAccount {
+			instance = ""
+		}
+		status, body := live.exchange(t, signInForm(
+			mintPersonToken(t, google, googleKey, fleetPerson, deviceAudience, true, signInDomain),
+			mintMachineToken(t, google, googleKey, account, machineAudience, true, fleetCloudProject, instance), session))
+		credential, _ := body[oauthwire.ExtraCredentialID].(string)
+		if status != http.StatusOK || credential == "" {
+			t.Fatalf("%s's sign-in trade on %s = %d %v, want 200 with the launcher credential the sign-in holds", fleetPerson, account, status, body)
+		}
+		return credential
+	}
+
+	var graceCredential, graceSecondCredential string
+	var graceSessionPod, graceSecondPod pod
+	t.Run("a person signed in on a machine reads the secret that person owns", func(t *testing.T) {
+		graceCredential = signIn(graceBox, pinnedFleetAccount, "grace-box-1")
+		machine := podBroker{t: t, base: "http://" + broker.Addr}
+		graceSessionPod = machine.enrolMachine(graceBoxKey, graceCredential, "grace-box-1")
+		granted := machine.ask(graceSessionPod, personSecret)
+		if granted.State != "granted" || granted.GrantID == nil {
+			t.Fatalf("the signed-in person's request for %s = %+v, want it granted at once: %s owns it and she signed in on this box", personSecret, granted, fleetPerson)
+		}
+		if got := machine.values(graceSessionPod, *granted.GrantID)[personSecret]; got != personSecretValue {
+			t.Fatalf("the signed-in person read %s = %q, want %q", personSecret, got, personSecretValue)
+		}
+	})
+
+	t.Run("that session is still refused another person's secret", func(t *testing.T) {
+		machine := podBroker{t: t, base: "http://" + broker.Addr}
+		asked := machine.ask(graceSessionPod, otherPersonSecret)
+		if asked.State != "pending" || asked.GrantID != nil {
+			t.Fatalf("%s's session asking for %s = %+v, want it pending with no grant: that secret is %s's, and a sign-in is one person's authority", fleetPerson, otherPersonSecret, asked, person)
+		}
+	})
+
+	t.Run("the same person signs in on a second machine, under a box key of its own", func(t *testing.T) {
+		graceSecondCredential = signIn(graceSecondBox, poolFleetAccount, "grace-box-2")
+		if graceSecondCredential == graceCredential {
+			t.Fatalf("both boxes hold the credential %s, want one each: a sign-in is keyed on the person, the machine and the box key", graceCredential)
+		}
+		machine := podBroker{t: t, base: "http://" + broker.Addr}
+		graceSecondPod = machine.enrolMachine(graceSecondBoxKey, graceSecondCredential, "grace-box-2")
+		granted := machine.ask(graceSecondPod, personSecret)
+		if granted.State != "granted" || granted.GrantID == nil {
+			t.Fatalf("the second box's request for %s = %+v, want it granted: the person is signed in there too", personSecret, granted)
+		}
+	})
+
+	t.Run("revoking one sign-in ends its credential and its session, and leaves the other", func(t *testing.T) {
+		plain := newPlainBroker(broker.Addr)
+		status, body := plain.callAs(t, http.MethodGet, "/v1/person-signins?person="+url.QueryEscape(fleetPerson), apiToken, "", "")
+		if status != http.StatusOK {
+			t.Fatalf("GET /v1/person-signins = %d %v, want 200", status, body)
+		}
+		rows, _ := body["signins"].([]any)
+		var target string
+		for _, raw := range rows {
+			row, _ := raw.(map[string]any)
+			if row["machine"] == pinnedFleetAccount {
+				target, _ = row["signin_id"].(string)
+			}
+		}
+		if target == "" {
+			t.Fatalf("the list %v carries no sign-in on %s", body, pinnedFleetAccount)
+		}
+		if status, body := plain.callAs(t, http.MethodPost, "/v1/person-signins/"+target+"/revoke", apiToken,
+			"application/json", `{"person":"`+fleetPerson+`"}`); status != http.StatusOK || body["state"] != "revoked" {
+			t.Fatalf("the revoke = %d %v, want 200 revoked", status, body)
+		}
+		machine := podBroker{t: t, base: "http://" + broker.Addr}
+		if _, status, answer := machine.enrolSession(graceBoxKey, graceCredential, "grace-box-1-again"); status != http.StatusUnauthorized {
+			t.Fatalf("the revoked sign-in's credential enrolled = %d %s, want 401: no launcher proof signed with that box key authenticates again", status, answer)
+		}
+		if status, answer := machine.askRaw(graceSessionPod, personSecret); status == http.StatusOK {
+			t.Fatalf("the revoked sign-in's session read %s = %d %s, want it refused: the revoke ended every session that credential enrolled", personSecret, status, answer)
+		}
+		granted := machine.ask(graceSecondPod, personSecret)
+		if granted.State != "granted" || granted.GrantID == nil {
+			t.Fatalf("the person's second box asking for %s = %+v, want it granted: revoking one sign-in ends one", personSecret, granted)
+		}
+	})
+
 	// The negative controls on the machine grant, each the request that works but for one thing.
 	for _, refusal := range []struct {
 		name   string
@@ -706,7 +804,8 @@ func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Iss
 	t.Helper()
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
 	rows := append([]string{
-		fakeSecret("example/agent-secrets/person-secret", fleetPerson, "person-secret-v1"),
+		fakeSecret("example/agent-secrets/person-secret", fleetPerson, personSecretValue),
+		fakeSecret("example/agent-secrets/other-person-secret", person, otherPersonSecretValue),
 		fakeSecret("example/agent-secrets/shared-secret", "shared", sharedSecretValue),
 	}, extraSecrets...)
 	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": [`+strings.Join(rows, ",\n")+`]}`), 0o600); err != nil {
@@ -744,6 +843,9 @@ func googleExchangeEnv(t *testing.T, databaseURL string, cluster, github, google
 		"BROKER_VM_PROJECTS="+pinnedFleetAccount+"="+fleetCloudProject,
 		"BROKER_VM_INSTANCES="+pinnedFleetAccount+"="+fleetInstanceGlob,
 		"BROKER_VM_EXCHANGE_ACCOUNTS="+pinnedFleetAccount+"="+fleetProject+"="+fleetPerson,
+		// The device-flow client a person signs in on one of those machines through, which is
+		// what turns the person half of the exchange on (person_signin_test.go).
+		"BROKER_SIGNIN_DEVICE_AUDIENCE="+deviceAudience,
 	)
 }
 

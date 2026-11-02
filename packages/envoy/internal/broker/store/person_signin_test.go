@@ -115,8 +115,8 @@ func TestARevokedSignInIsRefusedForeverAndLeavesTheOthersWorking(t *testing.T) {
 		}
 	}
 	revoked := signInFor(t, st, signInPerson, signInBoxOne)
-	if _, err := st.RevokePersonSignIn(ctx, revoked.ID, signInPerson); err != nil {
-		t.Fatalf("RevokePersonSignIn: %v", err)
+	if _, _, err := revokeSignIn(t, st, revoked.ID, signInPerson); err != nil {
+		t.Fatalf("RevokePersonSignInTx: %v", err)
 	}
 	for i := range 2 {
 		if err := record(t, st, signInPerson, signInBoxOne, signInMachine); !errors.Is(err, store.ErrSignInRevoked) {
@@ -141,7 +141,6 @@ func TestARevokedSignInIsRefusedForeverAndLeavesTheOthersWorking(t *testing.T) {
 // already minted would go on writing for up to BROKER_ACCESS_TOKEN_SECONDS past the revoke.
 func TestRevokingASignInEndsTheTokensMintedUnderIt(t *testing.T) {
 	st := storetest.Open(t)
-	ctx := context.Background()
 	for _, c := range []struct{ person, thumbprint string }{
 		{signInPerson, signInBoxOne},
 		{signInPerson, signInBoxTwo},
@@ -162,9 +161,12 @@ func TestRevokingASignInEndsTheTokensMintedUnderIt(t *testing.T) {
 		storeAccessToken(t, st, c.signature, c.person, c.thumbprint)
 	}
 	target := signInFor(t, st, signInPerson, signInBoxOne)
-	ended, err := st.RevokePersonSignIn(ctx, target.ID, signInPerson)
+	thumbprint, ended, err := revokeSignIn(t, st, target.ID, signInPerson)
 	if err != nil {
-		t.Fatalf("RevokePersonSignIn: %v", err)
+		t.Fatalf("RevokePersonSignInTx: %v", err)
+	}
+	if thumbprint != signInBoxOne {
+		t.Fatalf("the revoke answered the box key %q, want %q: it is what names the launcher credential the sign-in held", thumbprint, signInBoxOne)
 	}
 	if ended != 2 {
 		t.Fatalf("the revoke ended %d tokens, want the 2 minted on that box under that person", ended)
@@ -181,8 +183,8 @@ func TestRevokingASignInEndsTheTokensMintedUnderIt(t *testing.T) {
 	}
 	// A second revoke of the same sign-in ends nothing and refuses nothing, as revoking a
 	// machine login twice answers the same.
-	if ended, err := st.RevokePersonSignIn(ctx, target.ID, signInPerson); err != nil || ended != 0 {
-		t.Fatalf("revoking it again = %d, %v; want 0 and no error", ended, err)
+	if thumbprint, ended, err := revokeSignIn(t, st, target.ID, signInPerson); err != nil || ended != 0 || thumbprint != "" {
+		t.Fatalf("revoking it again = %q, %d, %v; want no box key, no token ended and no error", thumbprint, ended, err)
 	}
 }
 
@@ -196,8 +198,8 @@ func TestRevokingASignInThatIsNotThePersonsIsAnUnknownId(t *testing.T) {
 	}
 	theirs := signInFor(t, st, signInOther, signInBoxOne)
 	for _, id := range []string{theirs.ID, "00000000-0000-4000-8000-000000000000"} {
-		if _, err := st.RevokePersonSignIn(ctx, id, signInPerson); !errors.Is(err, store.ErrNoSignIn) {
-			t.Errorf("RevokePersonSignIn(%s as %s) = %v, want %v", id, signInPerson, err, store.ErrNoSignIn)
+		if _, _, err := revokeSignIn(t, st, id, signInPerson); !errors.Is(err, store.ErrNoSignIn) {
+			t.Errorf("RevokePersonSignInTx(%s as %s) = %v, want %v", id, signInPerson, err, store.ErrNoSignIn)
 		}
 	}
 	if live, err := st.PersonSignIns(ctx, signInOther); err != nil || len(live) != 1 {
@@ -230,6 +232,27 @@ func TestPersonSignInsRefusesAValueOutsideItsVocabulary(t *testing.T) {
 			t.Errorf("record(%s) was accepted, want Postgres to refuse it", c.name)
 		}
 	}
+}
+
+// revokeSignIn revokes one sign-in through a transaction of its own, which is how
+// enroll.Service.RevokePersonSignIn calls it: the credential that sign-in held is ended in that
+// same transaction, which is the enrollment service's half and not this one's.
+func revokeSignIn(t *testing.T, st *store.Store, id, person string) (string, int, error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	thumbprint, ended, err := store.RevokePersonSignInTx(ctx, tx, id, person)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return thumbprint, ended, nil
 }
 
 // onlySignIn is the one live sign-in person holds, failing the test when they hold any other

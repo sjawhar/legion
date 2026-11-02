@@ -3,6 +3,7 @@ package oauth_test
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,8 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
@@ -65,12 +69,9 @@ func newSignInFixture(t *testing.T) *signInFixture {
 		c.Exchange.Policy = newPolicy(t, nil, nil, exchange.GoogleEntry{Account: signInMachine, Service: signInFleet})
 		c.Exchange.Google = oauth.IssuerConfig{Issuer: google.URL(), Audience: machineAudience, Keys: googleKeys}
 		c.Exchange.PersonAudience = deviceAudience
-		// A machine of this fleet never trades for itself here, but a broker that takes a
-		// Google subject token needs somewhere to mint its credential, so the configuration is
-		// complete as a deployment's is.
-		c.Exchange.MachineCredentials = func(context.Context, oauth.MachineCredential) (string, error) {
-			return "machine-credential-1", nil
-		}
+		// The credential a trade mints, written in the exchange's own transaction as
+		// cmd/broker writes it, so the access token's row may name it.
+		c.Exchange.MachineCredentials = recordCredential
 		c.Exchange.PersonSignIns = f.record
 	})
 	return f
@@ -370,10 +371,32 @@ func newExchangeFixtureWithoutPerson(t *testing.T, f *signInFixture) *exchangeFi
 	return newExchangeFixture(t, func(c *oauth.Config) {
 		c.Exchange.Policy = newPolicy(t, nil, nil, exchange.GoogleEntry{Account: signInMachine, Service: signInFleet})
 		c.Exchange.Google = oauth.IssuerConfig{Issuer: f.google.URL(), Audience: machineAudience, Keys: googleKeys}
-		c.Exchange.MachineCredentials = func(context.Context, oauth.MachineCredential) (string, error) {
-			return "machine-credential-1", nil
-		}
+		c.Exchange.MachineCredentials = recordCredential
 	})
+}
+
+// recordCredential is oauth.ExchangeConfig.MachineCredentials over the fixture's own database:
+// the launcher credential a trade mints, written in the exchange's transaction exactly as
+// cmd/broker writes it (enroll.Service.IssueTokenLoginTx), so the token row that names it has a
+// row to name.
+func recordCredential(ctx context.Context, cred oauth.MachineCredential) (string, error) {
+	tx, ok := oauthstore.TxFrom(ctx)
+	if !ok {
+		return "", errors.New("the credential is minted in the exchange's transaction")
+	}
+	var operator *string
+	if cred.Operator != "" {
+		operator = &cred.Operator
+	}
+	var id string
+	err := tx.QueryRow(ctx, `insert into launcher_credentials
+		(id, operator, service, host, key_thumbprint, public_jwk, subject, expires_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		on conflict (subject) where subject is not null and revoked_at is null
+		do update set key_thumbprint = excluded.key_thumbprint, expires_at = excluded.expires_at
+		returning id`,
+		uuid.NewString(), operator, cred.Service, cred.Host, cred.Thumbprint, []byte(cred.JWK), cred.Subject, cred.Expires).Scan(&id)
+	return id, err
 }
 
 // TestAProviderNeedsItsSignInRecorder: a configuration that takes a person's token and has

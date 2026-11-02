@@ -215,6 +215,15 @@ BROKER_VM_EXCHANGE_ACCOUNTS=example-fleet@example-project.iam.gserviceaccount.co
 A machine of that fleet then reads the secrets `example-fleet` owns and the shared agent-tier
 ones, and asks for the rest. `ada@example.com` is on the Dispatch token it trades for, not on its
 machine login: her own secrets stay hers until she signs in on that machine.
+
+When she does — `agent-secrets login`, which needs `BROKER_SIGNIN_DEVICE_AUDIENCE` set — that
+sign-in's trade mints a machine login of its own on that box, carrying her rather than the fleet,
+and a session enrolled under it reads her secrets and the shared agent-tier ones and nobody else's.
+It is bound to the box key the command makes there, so her sign-in on one machine is not her
+sign-in on another. Revoking that sign-in (`POST /v1/person-signins/{id}/revoke`, which Dispatch
+relays from her page) ends the access tokens it minted and the machine login with them, so every
+session it enrolled ends at once; the fleet's own machine login, and her sign-ins on other
+machines, are untouched.
 The broker refuses an exchange whose token is for another audience or does not verify, whose email
 Google does not hold verified, whose account no entry lists, or whose Compute Engine project or
 instance name the entry's pins do not allow, each `400 invalid_request` naming what did not match.

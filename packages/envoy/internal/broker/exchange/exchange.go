@@ -219,6 +219,11 @@ func MachineSubject(identity GoogleIdentity, thumbprint string) string {
 // system:serviceaccount:<namespace>:<name>, which carries neither "#" nor an "@" with a path
 // after it.
 func MachineAccount(subject string) (string, bool) {
+	if strings.HasPrefix(subject, signInSubjectPrefix) {
+		// A person's sign-in on a machine is a subject of its own kind, whose credential acts
+		// for that person; reading its account here would make it read as a machine's.
+		return "", false
+	}
 	if account, _, keyed := strings.Cut(subject, "#"); keyed {
 		return account, account != ""
 	}
@@ -227,6 +232,45 @@ func MachineAccount(subject string) (string, bool) {
 		return "", false
 	}
 	return subject[:at], true
+}
+
+// signInSubjectPrefix opens the subject of a person's sign-in on a machine, so that no subject
+// of any other kind can spell one: a Google account never begins with it, and a Kubernetes
+// ServiceAccount's subject begins with "system:serviceaccount:".
+const signInSubjectPrefix = "signin:"
+
+// PersonSubject names one person's sign-in on one box as the broker keys the launcher credential
+// the exchange mints for it: the row's `subject`, under the live-unique index that makes each
+// sign-in's credential its own and lets the sign-in's next trade move that one credential rather
+// than add another.
+//
+// It is signin:<person>|<machine account>#<box key thumbprint>, and all three parts are needed.
+// The person is there because two people signed in on one box each reach their own secrets and
+// must therefore hold a credential each, which one subject could not. The box key's thumbprint
+// is there because one person signed in on two boxes holds a sign-in on each, told apart by the
+// key `agent-secrets login` made there and by nothing else — the machine account is a fleet's
+// and is the same on every box of it. The machine account is there so that the credential can
+// still be held to a listed fleet on every call (enroll.Service.AuthenticateLauncher): a person
+// signs in from a box the deployment lists, and an account dropped from BROKER_VM_SERVICES ends
+// its boxes' sign-in credentials as it ends their machines'.
+func PersonSubject(person, account, thumbprint string) string {
+	return signInSubjectPrefix + person + "|" + account + "#" + thumbprint
+}
+
+// PersonSubjectAccount reads the machine's Google account back out of a PersonSubject, which is
+// what says whether a sign-in's box is still a listed fleet's. ok is false for a subject of any
+// other kind.
+func PersonSubjectAccount(subject string) (string, bool) {
+	rest, found := strings.CutPrefix(subject, signInSubjectPrefix)
+	if !found {
+		return "", false
+	}
+	_, after, split := strings.Cut(rest, "|")
+	if !split {
+		return "", false
+	}
+	account, _, keyed := strings.Cut(after, "#")
+	return account, keyed && account != ""
 }
 
 // String names the scope as a refusal or a log line spells it, the zero value included, so a
@@ -806,6 +850,10 @@ func (s *Set) Person(token, actor map[string]any, session string) (Claims, error
 		Scope:     ProjectScopePerson,
 		Principal: personPrincipal(login),
 		Actor:     machine.Account,
+		// The fleet the box belongs to, which the launcher credential the exchange mints for
+		// this sign-in records as its service: a credential keyed by a subject carries one.
+		// Nothing of the fleet reaches the token's claims — the token is the person's.
+		Fleet: entry.Service,
 	}, nil
 }
 
