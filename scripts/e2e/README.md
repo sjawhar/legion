@@ -2868,15 +2868,15 @@ The transcript records the duration of each wait.
   Right after tree 1's park, the script posts the controller's hold mark on tree 1 as session 1 (`Parked by Legion while it waits on: …`), the comment the controller posts when it parks a tree for a hold.
   Tree 2 gets no mark.
   The person sets tree 4 to `backlog`.
-  Each of the three gets to phase `done` with no slot, and its architect gets to `suspended`.
+  Right after those writes, the stand-in session (`dispatch_agent`) sets tree 5 to `backlog`.
+  A session outside a tree cannot park a root that waits on a person:
+  the daemon logs `workflow: a session wrote a lifecycle status; the daemon re-asserts its own` for tree 5 with `wrote=backlog`, Dispatch shows the logged status written back by `legion-daemon:<project>`, and tree 5 still waits on its gate and is not parked (`Engine.sessionStatusWrite`).
+  Each of trees 1, 2 and 4 gets to phase `done` with no slot, and its architect gets to `suspended`.
   A park can come while the architect's last turn still runs, with its suspension held for that turn.
   A decision made then goes to that live session, and the daemon has nothing to relay, so no check answers on a tree before its architect is suspended.
   The newest `backlog` write is by `session:legion-daemon:<project>` on trees 1 and 2 and by `user:smoke` on tree 4.
   Only tree 1 carries the mark.
-  The stand-in session then opens a question on each of the three, as its architect would.
-  The stand-in session (`dispatch_agent`) also sets tree 5 to `backlog`.
-  A session outside a tree cannot park a root that waits on a person:
-  the daemon logs `workflow: a session wrote a lifecycle status; the daemon re-asserts its own` for tree 5 with `wrote=backlog`, Dispatch shows the logged status written back by `legion-daemon:<project>`, and tree 5 still waits on its gate and is not parked (`Engine.sessionStatusWrite`).
+  Once tree 5 is set back, the stand-in session opens a question on each of trees 1, 2 and 4, as its architect would.
 
 - `answer-readmits`: A3.
   The person answers the question on tree 1.
@@ -2948,6 +2948,7 @@ The input is the JSON objects of the daemon, one to a line:
 ```bash
 jq -r '.[].jsonPayload | tojson' <log export>.json | jq -R -s -f scripts/e2e/lib/parked-decision-verdict.jq
 ```
+
 ## dispatch-user-turns.sh
 
 LEGION-394's acceptance: a person's direct Send or Aside from Dispatch's conversation page is the session's own user turn, and everything else keeps its Envoy card.
@@ -4463,7 +4464,7 @@ Each item below names a flag, then what it means.
 It writes `<dir>/hawk-token`, the key command:
 `hawk-token` (resolved on `PATH`) run under the caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset is unset for it), for that one command.
 It appends one line per invocation, one per mint, one per call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`, and one line per call and its outcome to `<dir>/hawk-token.calls` ([`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads it); stdout carries the key alone.
-The profile's `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey` and `X-Api-Key` both `!exec <dir>/hawk-token` (Oh My Pi runs a `!command` through `/bin/sh -c`, and `exec` makes the key command the process it started, so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model role, the roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets `enabledModels: [anthropic/*]`, disables `amazon-bedrock`, `bedrock-mantle`, `google`, `ollama`, `llama.cpp` and `lm-studio`, and sets `setupVersion: 2`, so the pinned Oh My Pi, whose `CURRENT_SETUP_VERSION` is 2, opens no setup wizard in the fresh profile.
+The profile's `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey` and `X-Api-Key` both `!exec <dir>/hawk-token` (Oh My Pi runs a `!command` through `/bin/sh -c`, and `exec` makes the key command the process it started, so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model role, the roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets `enabledModels: [anthropic/*]`, disables `amazon-bedrock`, `bedrock-mantle`, `google`, `ollama`, `llama.cpp` and `lm-studio`, and sets `startup.setupWizard: false`, so Oh My Pi opens no setup wizard in the fresh profile, whatever setup version its build counts to.
 Stdout is the key command's path.
 
 A pane cannot run `hawk-token` itself, which is why the command, and only it, gets the operator's environment.
@@ -4549,14 +4550,14 @@ Unlike `hawk-token` there is nothing to mint and no login to lose to a relocked 
 every call is a plain, fast file read, `served` or `failed` (there is no `timeout` or `killed` here, since nothing is minted or waited on).
 It appends one tab-separated line per call to `<dest>/anthropic-key.calls`, and to the caller's `MODEL_GATEWAY_CALLS_FILE` when its environment names one, in exactly the record shape [`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads
 — the installer's preflight (`--preflight`) is no agent's and is left out, the same rule `hawk-token`'s own key command follows.
-The profile's `agent/models.yml` points the `anthropic` provider at `--base-url` with `apiKey` and `X-Api-Key` both `!exec <key-dir>/anthropic-key`, and its `agent/config.yml` pins every model role to `anthropic/claude-opus-4-8` and disables every other provider a pane could reach without the key file, the same shape [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) writes, `setupVersion: 2` included.
+The profile's `agent/models.yml` points the `anthropic` provider at `--base-url` with `apiKey` and `X-Api-Key` both `!exec <key-dir>/anthropic-key`, and its `agent/config.yml` pins every model role to `anthropic/claude-opus-4-8` and disables every other provider a pane could reach without the key file, the same shape [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) writes, `startup.setupWizard: false` included.
 
 The script creates the profile's two directories, `<dest>` and `<key-dir>`, and removes neither;
 the caller does, with its work directory, `<key-dir>` unconditionally and `<dest>` only when it keeps no evidence.
 
 ## lib/model-endpoint.sh
 
-The model endpoint a Claude Code backend proof's key file is for, sourced by [`claude-backend-tmux.sh`](#claude-backend-tmuxsh) and [`claude-backend-sandbox.sh`](#claude-backend-sandboxsh), whose own `note` and `fail` it calls, and by [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh).
+The model endpoint a Claude Code backend proof's key file is for, sourced by [`claude-backend-tmux.sh`](#claude-backend-tmuxsh) and [`claude-backend-sandbox.sh`](#claude-backend-sandboxsh), whose own `note` and `fail` it calls, by [`parked-decision-devbox.sh`](#parked-decision-devboxsh), which checks `LEGION_E2E_MODEL_BASE_URL` with `model_base_url_refusal`, and by [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh).
 `anthropic_base_url` is Anthropic's own endpoint, the one a run with no `LEGION_E2E_MODEL_BASE_URL` calls.
 `model_base_url_refusal URL` prints why `URL` cannot be a model base URL, and nothing when it can:
 an `http://` or `https://` URL of letters, digits and `:/._~-` alone (so it carries no user or password, and stays a plain YAML scalar), ending in neither a colon nor a slash.
@@ -4587,7 +4588,7 @@ it never opens, reads, copies or hashes it, and runs no `omp` command that touch
 `--operator-home` is the operator's real home, which the stage proof captures before it runs anything under the run's own `HOME`;
 the script never takes it from its own `$HOME`.
 
-The profile's `agent/config.yml` is the key-file route's (every model role `anthropic/claude-opus-4-8`, `enabledModels` that one model, every other provider a pane could reach disabled, `setupVersion: 2`) plus `memory.backend: "off"`, so the run writes no memory into the operator's database.
+The profile's `agent/config.yml` is the key-file route's (every model role `anthropic/claude-opus-4-8`, `enabledModels` that one model, every other provider a pane could reach disabled, `startup.setupWizard: false`) plus `memory.backend: "off"`, so the run writes no memory into the operator's database.
 No `models.yml` is written, so no `apiKey` or `X-Api-Key` overrides the stored login.
 
 **The operator's build.**
