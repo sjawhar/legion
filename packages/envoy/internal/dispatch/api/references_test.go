@@ -402,7 +402,7 @@ func awaitGraphEdges(t *testing.T, handler http.Handler, query url.Values, want 
 // so it is read again, bounded by eventFeedWait. A read that answered within referencesSinceWait
 // was not held back: what it listed is what it owed, so holds failing on it, a missing edge as
 // much as a duplicate or a wrongly stamped one, is a product failure and fails the test at once.
-// what names the read in either failure.
+// The what argument names the read in either failure.
 func awaitSinceRead(
 	t *testing.T,
 	what string,

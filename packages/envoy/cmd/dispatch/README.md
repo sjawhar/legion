@@ -2315,6 +2315,8 @@ Each item below names a path with its method and identity, then its purpose.
   `404` for a node that does not exist, a block no current version or revision holds (unpinned; an ask's part is called a part, `no part "<part>" in ask <id>`, where a comment's and a message's is called a block) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's or the ask's current one or that did not hold the block.
   A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
   when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
+  A caller takes its next `since` from the highest `source_seq` the answer showed it and its first from `GET /auth/whoami`'s `event_head`, an event id at or below which every event is final, never from `max(events.id)` read straight from the database, since event ids are not commit order and an id taken that way can stand above an edge that commits later.
+  An empty answer is not proof that nothing is new, so the caller reads again with the id it holds.
 
 - `/api/v1/block-links?from=&to=` (GET; cookie, trusted header, or bearer)
 
