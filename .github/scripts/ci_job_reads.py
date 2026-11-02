@@ -739,7 +739,7 @@ GATES = [
         (f"{ENVOY}/scripts/e2e-local.test.sh", at("envoy-e2e-local", "Refusal test for e2e-local.sh")),
         (f"{ENVOY}/scripts/e2e-local.sh", f"{at('envoy-e2e-local', 'Local end-to-end acceptance')}; e2e-local.test.sh:6"),
         (f"{ENVOY}/scripts/fixtures/github/**", "packages/envoy/scripts/e2e-local.sh:54,610-641 posts each fixture"),
-        (ENVOY_CLIENT_SRC, "packages/envoy/scripts/e2e-local.sh:658-675 and :849-885 run bun in packages/envoy-client importing @legion/envoy-client/delivery and @legion/envoy-client/transport"),
+        (ENVOY_CLIENT_SRC, "packages/envoy/scripts/e2e-local.sh:658-675 and :851-895 run bun in packages/envoy-client importing @legion/envoy-client/delivery and @legion/envoy-client/transport"),
         (CONTRACTS_SRC, "packages/envoy-client/src/delivery.ts imports @legion/contracts"),
     ) + setup_go("envoy-e2e-local", f"{ENVOY}/go.mod") + bun_job("envoy-e2e-local") + CI_SELF),
 

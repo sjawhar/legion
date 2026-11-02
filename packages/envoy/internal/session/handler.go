@@ -65,8 +65,9 @@ func HandleAgentMessage(
 	// through directly rather than read a second time.
 	delivery, err := Resolve(item, sessionID, entry, storedSeq)
 	if err != nil {
-		// Session not found or delivery failed without interest — don't NAK,
-		// another listener may own this session.
+		// Resolve fails only with ErrNoSessionRecord. The result carries no error, so the
+		// listener defers the message for its retry window (cmd/listener/unplaceable_delivery.go)
+		// rather than NAK it.
 		return HandleAgentResult{Delivered: false}
 	}
 	return delivered(delivery)
