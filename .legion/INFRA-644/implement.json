@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-644",
-  "previousHandoff": "3b282aed7dfb2c38f43b0f196562fb486ef15279",
+  "previousHandoff": "ed3403537b52885e92a3a50afa82fc57bb455500",
   "proof": [
+    {
+      "criterion": "Round 4 (round-cap scope): main merged twice, keeping main's behaviour and this branch's change both; at the second merge the head uses no more Dispatch CPU than the base and both replay runs end in the same state",
+      "surface": "INFRA-639's replay of LINUX's write window and INFRA-589's 20-editor step (#2445's harness), Dispatch, Postgres, NATS and the listener built from each commit on one 2-vCPU pod (af5739ab), base then head",
+      "command": "replay: run-step.sh r8-replay-<side>-1 --replay --rate 0.15 --gomaxprocs 2 --uploads 0.25 --rng-seed 1 --dispatch-commit <rev>, base main 99565624, head 9cc41e31; ed1x: run-step.sh r8-ed1x-<side>-<n> --events 4 --sessions 400 --requests 60 --editors 20 --editor-rate 2 --editor-docs 10, ed-main 76d2f6f9 vs ed-merge 47cef40a; steps dispatch://INFRA-644/artifact/infra644-r8-*-tar-gz",
+      "observed": "replay 1149.1 vs 1104.3 Dispatch CPU-s, both end in 973d289e, observe 28.3 vs 16.6 cum-s; ed1x pair 2 55.47 vs 46.11 CPU-s (observe 5.37 vs 0.64); pair 1 41.13 vs 47.47 with base-1 perturbed by this box's own pprof extraction and serving half the work (per unit of work 9.30 vs 5.32 ms); merges: build, vet, gofmt, tidy clean; docs, pmdoc and race subset pass at 2164df49; load, recover, render-reuse, storm, format, stored-order, shadow, handover and every websocket_test/room_residency_test/document_copy_test test pass at 9cc41e31",
+      "headSha": "9cc41e31fcedfa3ee50a49d80c69fd42e55de9c4",
+      "negativeControl": "the base side is the control: no per-block render or load hand-over, observe 28.3 cum-s in the replay and 1.93-5.37 in the editor steps against 16.6 and 0.64-0.81"
+    },
     {
       "criterion": "Round 2 (review of 39eb0986): the no-origin credit rule lives in creditContentChange alone and its test asserts what the pinned ygo does; a margin publish records no rendering; the replica and every copy still hold the room, including under the room's own formatting writes",
       "surface": "docs package live rooms against the pod's own test Postgres (render-reuse harness, real ygo websocket rooms, browser peers, cold reads over the stored updates)",
@@ -46,21 +54,18 @@
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/websocket.go: observeAskBlocksForUpdate back to its base signature",
-    "packages/envoy/internal/dispatch/docs/mutation.go, livewrite.go, replica.go: a margin publish records no rendering; replicaRendering has no layout-less carve-out; ygo citations and spliceTouched's declines",
-    "packages/envoy/.changes/unreleased/pr2485-observer-renders-touched-blocks.yaml, packages/envoy/AGENTS.md: the no-origin credit rule; spliceTouched's declines",
-    "packages/envoy/internal/dispatch/docs/*_test.go: one renderOfRoom, replicaHoldsTheRoom, xmlTextWithPrefix, writeInRoom and forceRecover; raceEnabled; storm_race/norace and cold_formatting deleted; the cold churn case moved to format_replay_test.go"
+    "merge 2164df49 (main 05d65789): docs/tree.go, replica.go, websocket.go, livewrite.go, mutation.go, render_reuse_test.go, room_handover_test.go resolved; shadow.go, storedorder.go, flush_test.go adapted to the branch's renderDocumentForUpdate and lazy ask ids",
+    "merge 9cc41e31 (main 99565624, #2519): docs/websocket.go onLoadDocument"
   ],
   "trickyParts": [
-    "Round 2's only production change on a measured path is the margin publish: a publish the margin-only path does not answer (a room other than the one its fork was built from, or a replica holding no rendering) is now measured by the observer instead of compared against the write's markdown. The round 5 and 6 pairs were not re-run for it."
+    "CI at 9cc41e31: envoy-go-race-docs failed because GitHub's runner received a shutdown signal (exit 143, no test output); its failed jobs were re-run once (attempt 2)."
   ],
   "deviations": [
-    "cold_formatting_test.go was the tester's file (fdf027f0), not a red test; the review asked to fold or drop it. Its C1 case duplicated render_formatting_test.go's fixed case and was dropped; its churn case, which passed with and without WithFormatCleanup(false) because every churn commit reached the room as a remote apply, moved to format_replay_test.go and now also interleaves the room's own writes and checks the reload, so it fails without the option."
+    "The replica code main's #2496 rewrote in tree.go lives in replica.go on this branch, so main's changes were ported there; renderingAt is deleted because warmFork now takes the rendering from readPoint.",
+    "The r7 pair at the first merge was dropped (main took #2519 and the architect asked for the pairs at the second merge); a second ed1x pair (r8 pair 2) was run because this box's pprof extraction overlapped pair 1's base step."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Sent to the controller: Ledger.fail fails every room a write touched when a client cancels the write during its commit (r6-ed1x-head-1: four rooms failed, 693 editor updates unsent).",
-    "Sent to the controller: TestAnUploadHoldsNoIssueLockWhileTheStoreWrites is flaky on main's code.",
-    "Sent to the controller and the merge lane: the pod's test Postgres role lacks pg_signal_backend, so storetest's teardown fails."
+    "At main 99565624 the editor harness of #2445 loses sockets at room admission on both sides (401, 404, 500 after 10 s, 503), so editor steps ack far fewer updates than earlier rounds; #2445 is not merged and predates that main."
   ]
 }
