@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -37,15 +39,54 @@ func storeSessionHeartbeat(t *testing.T, client *bus.Client, sessionID string, h
 	}
 }
 
+// assertOneKeptCopy fails t unless role's kept lane holds exactly one copy - the copy of item -
+// stored under the id every writer of that lane keeps this message under (bus.KeptMsgID of its
+// dedupe key and the role). That id is what collapses the copies of the several listeners which
+// each took the same role publish and each found the role undeliverable into the single copy the
+// role's next holder is handed.
+func assertOneKeptCopy(t *testing.T, client *bus.Client, role string, item contracts.Envelope) {
+	t.Helper()
+	waitForKeptRoleMessage(t, client, role, item.EventID)
+	subject := bus.KeptRoleSubject(role)
+	info, err := client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
+	if err != nil {
+		t.Fatalf("read the stream's copies on %s: %v", subject, err)
+	}
+	if held := info.State.Subjects[subject]; held != 1 {
+		t.Fatalf("%s holds %d copies, want the one copy of event %s", subject, held, item.EventID)
+	}
+	stored, err := client.JS().GetLastMsg(bus.Stream, subject)
+	if err != nil {
+		t.Fatalf("read the copy on %s: %v", subject, err)
+	}
+	if got, want := stored.Header.Get(natsgo.MsgIdHdr), bus.KeptMsgID(item.DedupeKey, role); got != want {
+		t.Fatalf("the copy on %s is stored under Nats-Msg-Id %q, want %q", subject, got, want)
+	}
+}
+
 // TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating covers role delivery's liveness test of
 // a role's holder (laneHolderFresh, roles.Fresh), which resolveCoreRoleHolder applies for the role
 // lane: a claim naming a session whose entry is still in the session bucket, and so answers every
 // read, but which has not heartbeated within session.ClaimStaleAfter is a holder role delivery
-// does not forward to. The lane releases the lapsed claim and reports delivery_failed instead,
-// because a message dropped into a session whose process is very likely gone is costlier than
-// telling its sender the role has no live holder. The same holder, heartbeating, takes the
-// message: the freshness test is what separates the two, and nothing else about the two deliveries
-// differs.
+// does not forward to, because a message dropped into a session whose process is very likely gone
+// is costlier than not forwarding it.
+//
+// What the lane does with that message instead is the kept lane's rule: it releases the lapsed
+// claim, as it always did, and keeps the message on the role's kept lane for whoever claims the
+// role next (keepRoleLaneMessage). So the message is neither dropped into a probably-dead session
+// nor lost - the copy waits for a live holder - and no delivery exception is raised for it. The
+// same holder, heartbeating, takes the message: the freshness test is what separates the two, and
+// nothing else about those two deliveries differs.
+//
+// A sender that holds a queue of its own and redelivers from it - the Legion daemon's notice
+// queue, a phase worker's stall reminder - opts out of the keep. That opt-out is the publish
+// route's own request field and nothing else: no envelope carries a keep key, so a raw role
+// publish on the lane cannot ask for it and the lane always keeps (keepForNextHolder), and the
+// opt-out can only be exercised through POST /v1/messages/publish, which answers its sender
+// rather than publishing an exception. So that sender gets the refusal it had before this
+// change, by the route's own shape: with keep: false against the same stale holder, the claim is
+// still released and nothing is kept, and the answer is the 404 naming holder_lapsed, the holder
+// and claim_released, which the Legion daemon reads as notify.ErrNoHolder.
 func TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating(t *testing.T) {
 	const (
 		role   = "reviewer"
@@ -57,9 +98,14 @@ func TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating(t *testing.T) {
 		name          string
 		since         time.Duration
 		wantDelivered bool
+		// keepFalse sends through the publish route with its keep field false, the one give-up a
+		// sender can address, and the only route that can: no envelope carries a keep key, so the
+		// rows that publish raw on the role lane cannot ask for it and the lane keeps for them.
+		keepFalse bool
 	}{
-		{"a holder that heartbeated a moment ago", time.Second, true},
-		{"a holder that stopped heartbeating before the claim went stale", session.ClaimStaleAfter + time.Minute, false},
+		{name: "a holder that heartbeated a moment ago", since: time.Second, wantDelivered: true},
+		{name: "a holder that stopped heartbeating before the claim went stale", since: session.ClaimStaleAfter + time.Minute},
+		{name: "a stale holder whose sender keeps its own queue: keep false is refused 404 and keeps nothing", since: session.ClaimStaleAfter + time.Minute, keepFalse: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			harness := newListenerDeliveryHarness(t, nil)
@@ -95,7 +141,13 @@ func TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating(t *testing.T) {
 			}
 
 			item := listenerTestEnvelope(roleTopic, "role-holder-heartbeat")
-			harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+			var refusal *httptest.ResponseRecorder
+			if tc.keepFalse {
+				refusal, _ = publishThrough(harness.publishDeps(t),
+					`{"topic":"`+roleTopic+`","source":"agent","message":"the sender redelivers this itself","keep":false}`)
+			} else {
+				harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+			}
 			if err := harness.client.Conn.Flush(); err != nil {
 				t.Fatalf("flush the delivery's publications: %v", err)
 			}
@@ -130,13 +182,35 @@ func TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating(t *testing.T) {
 					if err := json.Unmarshal(forwarded.Data, &delivered); err != nil {
 						t.Fatalf("decode the message the stale holder received: %v", err)
 					}
-					t.Fatalf("the role lane delivered event %s to %s on %s, whose session entry last heartbeated %s ago - longer than session.ClaimStaleAfter (%s); want no forward to the stale holder, the delivery_failed exception and the claim released",
+					t.Fatalf("the role lane delivered event %s to %s on %s, whose session entry last heartbeated %s ago - longer than session.ClaimStaleAfter (%s); want no forward to the stale holder and the claim released",
 						delivered.EventID, holder, holderSubject, tc.since, session.ClaimStaleAfter)
 				}
-				if exceptionReason != "delivery_failed" || claimant != "" {
-					t.Fatalf("a role whose holder last heartbeated %s ago: exception reason %q, claim now held by %q; want reason \"delivery_failed\" and the claim released",
-						tc.since, exceptionReason, claimant)
+				if claimant != "" {
+					t.Fatalf("a role whose holder last heartbeated %s ago: the claim is still held by %q; want it released",
+						tc.since, claimant)
 				}
+				if exceptionReason != "" {
+					t.Fatalf("a role whose holder last heartbeated %s ago: the exception lane carried reason %q; want no exception, since nothing was dropped",
+						tc.since, exceptionReason)
+				}
+				if tc.keepFalse {
+					// The answer #2395 wrote, which this sender still gets: its own queue holds
+					// the message, and a copy kept for the role's next holder would deliver it
+					// twice.
+					if refusal.Code != http.StatusNotFound {
+						t.Fatalf("publish with keep: false to a stale holder: status %d, body %s; want 404", refusal.Code, refusal.Body.String())
+					}
+					var answer roleHolderError
+					if err := json.Unmarshal(refusal.Body.Bytes(), &answer); err != nil {
+						t.Fatalf("decode the refusal %s: %v", refusal.Body.String(), err)
+					}
+					if answer.Reason != roleHolderLapsed || answer.Holder != holder || answer.ClaimReleased == nil || !*answer.ClaimReleased {
+						t.Fatalf("the refusal is %+v, want reason holder_lapsed naming %s with its claim released", answer, holder)
+					}
+					assertNothingKept(t, harness.client, role)
+					return
+				}
+				assertOneKeptCopy(t, harness.client, role, item)
 				return
 			}
 			if forwarded == nil || exceptionReason != "" || claimant != holder {

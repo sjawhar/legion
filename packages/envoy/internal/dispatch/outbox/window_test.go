@@ -161,8 +161,13 @@ func destinationFamily(subject string) string {
 	return subject
 }
 
-// assertStreamInOrderPerDestination fails t unless the stream holds want messages, and each
-// destination's - each issue's topic family, each session's own subject - in event id order.
+// assertStreamInOrderPerDestination fails t unless the stream holds want messages on the
+// destinations the events were sent to - each issue's topic family, each session's own subject -
+// and each destination's in event id order.
+//
+// The copies a role's kept lane holds are no such destination: nothing was delivered to them, and
+// they are counted and ordered on their own (assertKeptLaneInOrder), so that a kept copy stands
+// in for no message here and a message lost on a destination still fails.
 func assertStreamInOrderPerDestination(t *testing.T, url string, want int) {
 	t.Helper()
 	reader, err := natsgo.Connect(url)
@@ -170,17 +175,84 @@ func assertStreamInOrderPerDestination(t *testing.T, url string, want int) {
 		t.Fatalf("connect the reader: %v", err)
 	}
 	defer reader.Close()
-	bySubject, all := streamOrder(t, reader)
-	if len(all) != want {
-		t.Fatalf("the stream holds %d messages, want %d, one per destination", len(all), want)
-	}
+	bySubject, _ := streamOrder(t, reader)
 	byFamily := map[string][]int64{}
+	sent := 0
 	for subject, ids := range bySubject {
+		if strings.HasPrefix(subject, bus.KeptRoleSubjectPrefix) {
+			continue
+		}
+		sent += len(ids)
 		byFamily[destinationFamily(subject)] = append(byFamily[destinationFamily(subject)], ids...)
+	}
+	if sent != want {
+		t.Fatalf("the stream holds %d messages on the destinations the events were sent to, want %d, one per destination", sent, want)
 	}
 	for family, ids := range byFamily {
 		if at := firstDescent(ids); at >= 0 {
 			t.Fatalf("%s holds event %d after event %d: %v", family, ids[at], ids[at-1], ids)
+		}
+	}
+}
+
+// assertKeptLaneInOrder fails t unless role's kept lane holds want copies - one per event of
+// seeded routed to role, no live holder having been there to take any of them - each stored
+// under the id every writer of that lane keeps a copy of that message under (bus.KeptMsgID of the
+// envelope's own dedupe key and the role, what collapses the outbox's copy and a listener's into
+// one), and each issue's copies in event id order.
+//
+// The lane is one destination shared by every issue routed to the role, as a live holder's agent
+// subject is (seedThroughputBacklog routes every issue to role:reviewer): the outbox sends one
+// chain per owner and destination (sendChains), so the owners' copies interleave on the lane as
+// their acknowledgements come back, and the order each owner's copies keep is its own events',
+// which is the order the next holder of the role is handed them in.
+func assertKeptLaneInOrder(t *testing.T, url, role string, seeded []model.Event, want int) {
+	t.Helper()
+	reader, err := natsgo.Connect(url)
+	if err != nil {
+		t.Fatalf("connect the reader: %v", err)
+	}
+	defer reader.Close()
+	js, err := reader.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	info, err := js.StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	issueOf := make(map[int64]string, len(seeded))
+	for _, event := range seeded {
+		issueOf[event.ID] = *event.IssueKey
+	}
+	subject := bus.KeptRoleSubject(role)
+	byIssue := map[string][]int64{}
+	kept := 0
+	for sequence := info.State.FirstSeq; sequence <= info.State.LastSeq && info.State.Msgs > 0; sequence++ {
+		message, err := js.GetMsg(bus.Stream, sequence)
+		if err != nil {
+			t.Fatalf("read stream message %d: %v", sequence, err)
+		}
+		if message.Subject != subject {
+			continue
+		}
+		var envelope contracts.Envelope
+		if err := json.Unmarshal(message.Data, &envelope); err != nil {
+			t.Fatalf("decode the copy kept at %d: %v", sequence, err)
+		}
+		if got, want := message.Header.Get(natsgo.MsgIdHdr), bus.KeptMsgID(envelope.DedupeKey, role); got != want {
+			t.Fatalf("the copy kept at %d is stored under %q, want %q", sequence, got, want)
+		}
+		id := envelopeEventID(t, message.Data)
+		kept++
+		byIssue[issueOf[id]] = append(byIssue[issueOf[id]], id)
+	}
+	if kept != want {
+		t.Fatalf("%s holds %d copies, want %d, one per event routed to the role", subject, kept, want)
+	}
+	for issue, ids := range byIssue {
+		if at := firstDescent(ids); at >= 0 {
+			t.Fatalf("%s holds %s's event %d after its event %d: %v", subject, issue, ids[at], ids[at-1], ids)
 		}
 	}
 }
@@ -200,7 +272,13 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	t.Cleanup(client.Close)
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	seedThroughputBacklog(t, database, broker, issues, count)
+	seeded := seedThroughputBacklog(t, database, broker, issues, count)
+	// What this backlog leaves on the stream, in two populations counted apart. The destinations
+	// its events are sent to: every event on its issue's topic and the replies - every second
+	// event - on the session's own topic. And the role route every one of its events carries,
+	// which no session holds here, so each leaves one copy kept on role:reviewer's kept lane for
+	// the holder that claims the role next.
+	const wantOnDestinations, wantKept = count + count/2, count
 
 	proxy.Cut()
 	stop := runOutbox(t, database, client, broker)
@@ -217,7 +295,8 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 		return unpublishedCount(t, database) == 0
 	})
 	t.Logf("the backlog of %d events was published %s after NATS came back", count, time.Since(restarted).Round(time.Millisecond))
-	assertStreamInOrderPerDestination(t, url, count+count/2)
+	assertStreamInOrderPerDestination(t, url, wantOnDestinations)
+	assertKeptLaneInOrder(t, url, "reviewer", seeded, wantKept)
 }
 
 // One issue's events reach its NATS subject in seq order, which is what the Legion daemon's sequence
@@ -389,7 +468,12 @@ func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 	}
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	seedThroughputBacklog(t, database, broker, issues, count)
+	seeded := seedThroughputBacklog(t, database, broker, issues, count)
+	// Two populations counted apart, as the outage case's: the destinations its events are sent
+	// to - every event on its issue's topic, every second event, the replies, on the session's
+	// own topic - and the copy every event's role route leaves on role:reviewer's kept lane,
+	// since no session holds that role here.
+	const wantOnDestinations, wantKept = count + count/2, count
 
 	stop := runOutbox(t, database, client, broker)
 	defer stop()
@@ -416,7 +500,8 @@ func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 	if attempted != 0 {
 		t.Fatalf("%d events were backed off for the cut, want every one released", attempted)
 	}
-	assertStreamInOrderPerDestination(t, url, count+count/2)
+	assertStreamInOrderPerDestination(t, url, wantOnDestinations)
+	assertKeptLaneInOrder(t, url, "reviewer", seeded, wantKept)
 }
 
 // An outbox that dies after NATS acknowledged an event's destinations and before it marked the
@@ -434,7 +519,13 @@ func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *tes
 	t.Cleanup(client.Close)
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	seedThroughputBacklog(t, database, broker, issues, count)
+	seeded := seedThroughputBacklog(t, database, broker, issues, count)
+	// Two populations counted apart, as the outage case's: the destinations its events are sent
+	// to - every event on its issue's topic, every second event, the replies, on the session's
+	// own topic - and the copy every event's role route leaves on role:reviewer's kept lane,
+	// since no session holds that role here.
+	const wantOnDestinations, wantKept = count + count/2, count
+
 	// The mark is what fails, as a process that dies right after the acknowledgements never makes it.
 	if _, err := database.Pool.Exec(context.Background(), `
 		create function refuse_mark() returns trigger language plpgsql as $$
@@ -453,9 +544,9 @@ func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *tes
 		t.Fatalf("connect the reader: %v", err)
 	}
 	defer reader.Close()
-	waitFor(t, 30*time.Second, "every destination acknowledged", func() bool {
+	waitFor(t, 30*time.Second, "every destination and the kept lane acknowledged", func() bool {
 		_, all := streamOrder(t, reader)
-		return len(all) == count+count/2
+		return len(all) == wantOnDestinations+wantKept
 	})
 	stop()
 	if left := unpublishedCount(t, database); left != count {
@@ -482,5 +573,6 @@ func TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates(t *tes
 	if took := time.Since(died); took < publisherHoldOptions.TTL-time.Second {
 		t.Fatalf("the next holder published %s after the death, before the dead holder's hold lapsed", took.Round(time.Millisecond))
 	}
-	assertStreamInOrderPerDestination(t, url, count+count/2)
+	assertStreamInOrderPerDestination(t, url, wantOnDestinations)
+	assertKeptLaneInOrder(t, url, "reviewer", seeded, wantKept)
 }
