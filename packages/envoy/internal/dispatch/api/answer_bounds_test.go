@@ -163,6 +163,56 @@ func downloadTestServer(t *testing.T, deadline time.Duration, bounds transferBou
 	return handler, database
 }
 
+// A row-backed download to a reader that stops is cut and recorded as the store-backed one is:
+// the cut logged at INFO and the access line marked aborted=true, the mark an operator reading
+// the access log tells a cut transfer by. Served from its row (serveFileVersion's content
+// branch), the cut was logged at INFO but the handler returned after its failed write, so the
+// access line read as a plain status=200 with fewer bytes than the answer's Content-Length: on
+// the real binary at 31efca5d, a 25 MiB row-backed version's stopped reader was cut 52.2 s in
+// and logged `status=200 elapsed_ms=52225 bytes=1113652`, where the store-backed one was logged
+// `status=200 elapsed_ms=54223 bytes=1129984 aborted=true`.
+func TestARowBackedDownloadToAReaderThatStopsIsCutAndLoggedAborted(t *testing.T) {
+	const idle, floor, chunk = time.Second, 2 << 20, 16 << 10
+	const margin = 3 * time.Second
+	size := 2 * int(maxSendBuffer())
+	bound := idle + time.Duration(min(int64(size), maxSendBuffer()))*time.Second/floor
+
+	logged := captureLog(t)
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{downloadDeadline: 1500 * time.Millisecond})
+	served.transfer = transferBounds{idle: idle, grace: time.Minute, floor: floor}
+	issue := fileIssue(t, handler)
+	file := make([]byte, size)
+	for i := range file {
+		file[i] = byte(i * 31)
+	}
+	uploadedFile := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts",
+		map[string]string{"name": "download.bin"}, "download.bin", "application/octet-stream", file, "alice")
+	if uploadedFile.Code != http.StatusCreated {
+		t.Fatalf("upload the file: status=%d body=%s", uploadedFile.Code, uploadedFile.Body.String())
+	}
+	version := decodeBody[uploaded](t, uploadedFile)
+	if row := versionRow(t, database, version.Artifact.ID, version.Version.Number); len(row) != size {
+		t.Fatalf("the version's row holds %d bytes; with no store it holds all %d", len(row), size)
+	}
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	response := downloadOverARealConnection(t, httpServer.Listener.Addr().String(), "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", chunk)
+	if _, err := io.ReadFull(response.Body, make([]byte, chunk)); err != nil {
+		t.Fatalf("read the download's first %d bytes: %v", chunk, err)
+	}
+	if line := awaitLineWith(t, logged, downloadCutMessage, bound+margin); line == "" {
+		t.Fatalf("a reader that stopped reading a row-backed download was not reported cut within %v; the log holds:\n%s", bound+margin, logged.String())
+	}
+	if _, err := io.Copy(io.Discard, response.Body); err == nil {
+		t.Fatal("the cut row-backed download ended as if whole")
+	}
+	line := awaitAccessLineOfRoute(t, logged, "/api/v1/artifacts/{id}/versions/{number}")
+	if !strings.Contains(line, "aborted=true") {
+		t.Fatalf("the cut row-backed download's access line is not marked aborted, as the store-backed one is:\n%s", line)
+	}
+}
+
 // storeBackedVersion uploads size bytes as a file version and answers the artifact that holds it
 // and the bytes it uploaded, having checked that the bytes went to the store and the row holds
 // none of them: what the download then reads is the object, at the pace its reader sets.
