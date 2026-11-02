@@ -21,6 +21,15 @@ type subscribeBody struct {
 	// claim without the flag cannot displace a live driving claim.
 	Driving        bool `json:"driving"`
 	SelfSubscribed bool `json:"self_subscribed"`
+	// Presence reports that this plugin answers the listener's presence check on the session's
+	// presence subject (bus.PresenceSubject), so a send to the session asks there whether the
+	// plugin still holds a NATS connection (presenceReply). It is a field of its own and
+	// deliberately not one of Capabilities, which is the closed list of targeted-delivery modes
+	// (DELIVERY_CAPABILITIES in packages/contracts/src/dispatch-api.ts) that Dispatch renders on
+	// its Agents page. Absent (an older plugin) means the plugin answers nothing there, and the
+	// send route then counts the session connected for as long as it holds an entry, as every
+	// release did before the check existed.
+	Presence bool `json:"presence"`
 	// Host is envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel
 	// hostname): where the session process actually runs, as opposed to machineID below,
 	// which is always the registering listener's own machine (unrelated to the caller). It is the
@@ -83,6 +92,7 @@ func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery se
 		Capabilities:     append([]string{}, body.Capabilities...),
 		Driving:          body.Driving,
 		SelfSubscribed:   body.SelfSubscribed,
+		Presence:         body.Presence,
 		Host:             body.Host,
 		Plugin:           strings.TrimSpace(body.Plugin),
 		PluginVersion:    strings.TrimSpace(body.PluginVersion),
