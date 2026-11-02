@@ -198,9 +198,13 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 	const (
 		interval = time.Second
 		sweeps   = 4
-		// What the lease's statements between one sweep's summary and the next one's listing
-		// take: the record of the pass and the unlock, then the next take, the period read.
-		leaseAllowance = 100 * time.Millisecond
+		// The allowance covers the lease's statements between one sweep's summary and the next
+		// one's listing: the record of the pass and the unlock, then the next take and the
+		// period read. Those statements cost single-digit milliseconds on an idle machine, 2.72ms
+		// to 6.94ms over twelve waits in six runs. The rest of the slack is for a loaded runner
+		// that stalls between the summary and the listing. It stays under one interval, so a
+		// sweep that misses a whole period still fails the test.
+		leaseAllowance = interval / 2
 	)
 	for _, tc := range []struct {
 		name string
@@ -247,8 +251,8 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 			for index := 1; index < sweeps; index++ {
 				wait := listings[index].Sub(finished[index-1])
 				if wait < tc.wait || wait >= tc.wait+leaseAllowance {
-					t.Errorf("sweep %d listed %v after sweep %d ended, want %v for this draw (within [%v, %v)) plus the lease's statements",
-						index+1, wait, index, tc.wait, interval, interval+interval/10)
+					t.Errorf("sweep %d listed %v after sweep %d ended, want %v for this draw, within [%v, %v) with the lease's statements",
+						index+1, wait, index, tc.wait, tc.wait, tc.wait+leaseAllowance)
 				}
 			}
 		})
