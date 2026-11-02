@@ -50552,6 +50552,326 @@
     "rendered_by_milkdown": "Callouts holding an unclosed fence that ends in a blank line, in a quoted item, a quote in an item and a quote, before the block after their quote.\n\n> * x\n>\n>   :::callout{#qf1 kind=\"note\" title=\"T\"}\n>   ```\n>   code\n>   ```\n>   :::\n>\n> after\n\nNext.\n\n* x\n  > :::callout{#qf2 kind=\"note\" title=\"T\"}\n  > ```\n  > code\n  > ```\n  > :::\n\nafter\n\n> :::callout{#qf3 kind=\"note\" title=\"T\"}\n> ```\n> code\n> ```\n> :::\n\nafter\n"
   },
   {
+    "name": "quoted-definition-fences-over-two-blank-lines",
+    "markdown": "A quoted item whose footnote definition holds a callout holding a quote with an unclosed fence, over one blank quoted line and over two, at the quote's end and before a paragraph: the first line ends the inner quote and the second is the list's.\n\n> - a\n>   [^f]: :::callout{#qd1 kind=\"note\" title=\"T\"}\n>   > ```\n>   > x\n>\n> after\n\n> - b\n>   [^g]: :::callout{#qd2 kind=\"note\" title=\"T\"}\n>   > ```\n>   > y\n>\n>\n> after\n\n> - c\n>   [^h]: :::callout{#qd3 kind=\"note\" title=\"T\"}\n>   > ```\n>   > z\n>\n>\n\nNext.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A quoted item whose footnote definition holds a callout holding a quote with an unclosed fence, over one blank quoted line and over two, at the quote's end and before a paragraph: the first line ends the inner quote and the second is the list's."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000005"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "footnote_definition",
+                      "attrs": {
+                        "label": "f",
+                        "blockId": "b-000006"
+                      },
+                      "content": [
+                        {
+                          "type": "callout",
+                          "attrs": {
+                            "kind": "note",
+                            "title": "T",
+                            "blockId": "qd1"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000007"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "blockquote",
+                      "attrs": {
+                        "blockId": "b-000008"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000009"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "after"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000012"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000013"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000014"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "footnote_definition",
+                      "attrs": {
+                        "label": "g",
+                        "blockId": "b-000015"
+                      },
+                      "content": [
+                        {
+                          "type": "callout",
+                          "attrs": {
+                            "kind": "note",
+                            "title": "T",
+                            "blockId": "qd2"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000016"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "blockquote",
+                      "attrs": {
+                        "blockId": "b-000017"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000018"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "y"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000019"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "after"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000020"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000021"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000022"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000023"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "c"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "footnote_definition",
+                      "attrs": {
+                        "label": "h",
+                        "blockId": "b-000024"
+                      },
+                      "content": [
+                        {
+                          "type": "callout",
+                          "attrs": {
+                            "kind": "note",
+                            "title": "T",
+                            "blockId": "qd3"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000025"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "blockquote",
+                      "attrs": {
+                        "blockId": "b-000026"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000027"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "z"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000028"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AWcBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQH1AUEgcXVvdGVkIGl0ZW0gd2hvc2UgZm9vdG5vdGUgZGVmaW5pdGlvbiBob2xkcyBhIGNhbGxvdXQgaG9sZGluZyBhIHF1b3RlIHdpdGggYW4gdW5jbG9zZWQgZmVuY2UsIG92ZXIgb25lIGJsYW5rIHF1b3RlZCBsaW5lIGFuZCBvdmVyIHR3bywgYXQgdGhlIHF1b3RlJ3MgZW5kIGFuZCBiZWZvcmUgYSBwYXJhZ3JhcGg6IHRoZSBmaXJzdCBsaW5lIGVuZHMgdGhlIGlubmVyIHF1b3RlIGFuZCB0aGUgc2Vjb25kIGlzIHRoZSBsaXN0J3MuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmJsb2NrcXVvdGUHAAH4AQMLYnVsbGV0X2xpc3QHAAH5AQMJbGlzdF9pdGVtBwAB+gEDCXBhcmFncmFwaAcAAfsBBgQAAfwBAWEoAAH7AQdibG9ja0lkAXcIYi0wMDAwMDWHAfsBAxNmb290bm90ZV9kZWZpbml0aW9uBwAB/wEDB2NhbGxvdXQHAAGAAgMJcGFyYWdyYXBoKAABgQIHYmxvY2tJZAF3CGItMDAwMDA3KAABgAIEa2luZAF3BG5vdGUoAAGAAgV0aXRsZQF3AVQoAAGAAgdibG9ja0lkAXcDcWQxKAAB/wEFbGFiZWwBdwFmKAAB/wEHYmxvY2tJZAF3CGItMDAwMDA2hwH/AQMKYmxvY2txdW90ZQcAAYgCAwpjb2RlX2Jsb2NrBwABiQIGBAABigIBeCgAAYkCB2Jsb2NrSWQBdwhiLTAwMDAwOSgAAYgCB2Jsb2NrSWQBdwhiLTAwMDAwOCgAAfoBBWxhYmVsAXcD4oCiKAAB+gEIbGlzdFR5cGUBdwZidWxsZXQoAAH6AQZzcHJlYWQBeSgAAfoBB2Jsb2NrSWQBdwhiLTAwMDAwNCgAAfkBBnNwcmVhZAF5KAAB+QEHYmxvY2tJZAF3CGItMDAwMDAzhwH5AQMJcGFyYWdyYXBoBwABlAIGBAABlQIFYWZ0ZXIoAAGUAgdibG9ja0lkAXcIYi0wMDAwMTAoAAH4AQdibG9ja0lkAXcIYi0wMDAwMDKHAfgBAwpibG9ja3F1b3RlBwABnQIDC2J1bGxldF9saXN0BwABngIDCWxpc3RfaXRlbQcAAZ8CAwlwYXJhZ3JhcGgHAAGgAgYEAAGhAgFiKAABoAIHYmxvY2tJZAF3CGItMDAwMDE0hwGgAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAaQCAwdjYWxsb3V0BwABpQIDCXBhcmFncmFwaCgAAaYCB2Jsb2NrSWQBdwhiLTAwMDAxNigAAaUCBGtpbmQBdwRub3RlKAABpQIFdGl0bGUBdwFUKAABpQIHYmxvY2tJZAF3A3FkMigAAaQCBWxhYmVsAXcBZygAAaQCB2Jsb2NrSWQBdwhiLTAwMDAxNYcBpAIDCmJsb2NrcXVvdGUHAAGtAgMKY29kZV9ibG9jawcAAa4CBgQAAa8CAXkoAAGuAgdibG9ja0lkAXcIYi0wMDAwMTgoAAGtAgdibG9ja0lkAXcIYi0wMDAwMTcoAAGfAgVsYWJlbAF3A+KAoigAAZ8CCGxpc3RUeXBlAXcGYnVsbGV0KAABnwIGc3ByZWFkAXkoAAGfAgdibG9ja0lkAXcIYi0wMDAwMTMoAAGeAgZzcHJlYWQBeCgAAZ4CB2Jsb2NrSWQBdwhiLTAwMDAxMocBngIDCXBhcmFncmFwaAcAAbkCBgQAAboCBWFmdGVyKAABuQIHYmxvY2tJZAF3CGItMDAwMDE5KAABnQIHYmxvY2tJZAF3CGItMDAwMDExhwGdAgMKYmxvY2txdW90ZQcAAcICAwtidWxsZXRfbGlzdAcAAcMCAwlsaXN0X2l0ZW0HAAHEAgMJcGFyYWdyYXBoBwABxQIGBAABxgIBYygAAcUCB2Jsb2NrSWQBdwhiLTAwMDAyM4cBxQIDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAHJAgMHY2FsbG91dAcAAcoCAwlwYXJhZ3JhcGgoAAHLAgdibG9ja0lkAXcIYi0wMDAwMjUoAAHKAgRraW5kAXcEbm90ZSgAAcoCBXRpdGxlAXcBVCgAAcoCB2Jsb2NrSWQBdwNxZDMoAAHJAgVsYWJlbAF3AWgoAAHJAgdibG9ja0lkAXcIYi0wMDAwMjSHAckCAwpibG9ja3F1b3RlBwAB0gIDCmNvZGVfYmxvY2sHAAHTAgYEAAHUAgF6KAAB0wIHYmxvY2tJZAF3CGItMDAwMDI3KAAB0gIHYmxvY2tJZAF3CGItMDAwMDI2KAABxAIFbGFiZWwBdwPigKIoAAHEAghsaXN0VHlwZQF3BmJ1bGxldCgAAcQCBnNwcmVhZAF5KAABxAIHYmxvY2tJZAF3CGItMDAwMDIyKAABwwIGc3ByZWFkAXgoAAHDAgdibG9ja0lkAXcIYi0wMDAwMjEoAAHCAgdibG9ja0lkAXcIYi0wMDAwMjCHAcICAwlwYXJhZ3JhcGgHAAHfAgYEAAHgAgVOZXh0LigAAd8CB2Jsb2NrSWQBdwhiLTAwMDAyOAA=",
+    "rendered_by_milkdown": "A quoted item whose footnote definition holds a callout holding a quote with an unclosed fence, over one blank quoted line and over two, at the quote's end and before a paragraph: the first line ends the inner quote and the second is the list's.\n\n> * a\n>   [^f]: :::callout{#qd1 kind=\"note\" title=\"T\"}\n>\n>       :::\n>   > ```\n>   > x\n>   > ```\n>\n> after\n\n> * b\n>   [^g]: :::callout{#qd2 kind=\"note\" title=\"T\"}\n>\n>       :::\n>   > ```\n>   > y\n>   > ```\n>\n> after\n\n> * c\n>   [^h]: :::callout{#qd3 kind=\"note\" title=\"T\"}\n>\n>       :::\n>   > ```\n>   > z\n>   > ```\n\nNext.\n"
+  },
+  {
     "name": "quoted-definition-first-items",
     "markdown": "Items that open with their footnote definitions[^a][^b][^c][^d][^e][^f][^h], in quotes.\n\n> 1. [^a]: a\n>\n>\n> Tail a.\n\nNext.\n\n> - [^b]: ```\n>       b\n>       ```\n>\n>\n> Tail b.\n\nNext.\n\n> - - [^c]: c\n>\n>\n>   Tail c.\n\nNext.\n\n> - [^d]: d\n>\n>\n> - e\n\nNext.\n\n> 1. [^e]: - ~~~\n>          e\n>          ~~~\n> Tail e.\n\nNext.\n\n> - [^f]: > - ```\n>       >   f\n>       >   ```\n>   Tail f.\n\nNext.\n\n> - [^h]:\n>       h\n",
     "pm_json": {

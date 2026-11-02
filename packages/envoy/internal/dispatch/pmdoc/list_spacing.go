@@ -489,7 +489,10 @@ func quotedListIn(quote ast.Node, directive *typedDirective) quotedList {
 // anything else or at the quote's end; in a typed block inside the quote, one before anything and
 // two at its fence, three where no fence closes it and the last of them holds nothing past the
 // quote's markers, and one more of each after an item ending in a quote; with the list's quote in
-// a typed block that stands in a quote, as quotedInTypedBlockSpread reads.
+// a typed block that stands in a quote, as quotedInTypedBlockSpread reads. The blank lines after
+// an item ending in a fenced code block no fence closed are that block's, except where the fence
+// stands in a quote deeper than the list's, which ends at the first of them, leaving the rest to
+// the counts above.
 func quotedListSpread(list *ast.List, in quotedList, lines sourceLines) bool {
 	// Blank lines after an item that ends in a list are that list's. In a typed block inside the
 	// quote, one after an item that ends in a quote is that quote's, and more spread the list.
@@ -516,8 +519,11 @@ func quotedListSpread(list *ast.List, in quotedList, lines sourceLines) bool {
 	// The blank lines after a list ending in a fenced code block no fence closed are that block's,
 	// or its quote's, and space no list, those after one ending in a typed block no fence closes
 	// are that block's (endsInOpenTypedBlock), and those after one ending in a footnote definition
-	// are the definition's (definitionEndSpreadsItem).
-	if endsWithList(last) || endsInOpenFence(list) || endsInOpenTypedBlock(last) || itemEndsInDefinition(last) {
+	// are the definition's (definitionEndSpreadsItem). Where that fence stands in a quote deeper
+	// than the list's own, only the first of those lines is that quote's, which ends at it, and the
+	// rest are the list's, so the threshold below decides them.
+	if endsWithList(last) || endsInOpenTypedBlock(last) || itemEndsInDefinition(last) ||
+		endsInOpenFence(list) && quoteDepth(lastFencedCode(last)) <= depth {
 		return false
 	}
 	next := nextBlock(list)
