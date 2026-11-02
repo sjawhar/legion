@@ -32,8 +32,8 @@ type Rebuild struct {
 	Edges int
 	// BlocksOwed is the number of documents marked owed a block index (document_block_versions).
 	BlocksOwed int
-	// ItemsOwed is the number of comments and messages marked owed a block index of their own
-	// blocks (comment_block_state and message_block_state owed_at).
+	// ItemsOwed is the number of comments, messages and asks marked owed a block index of their
+	// own blocks (comment_block_state, message_block_state and ask_block_state owed_at).
 	ItemsOwed int
 }
 
@@ -50,10 +50,11 @@ type Rebuild struct {
 // A document's blocks and the mentions they hold are cut from its tree too, so the rebuild marks
 // every document owed a block index (document_block_versions.version null), which the block-index
 // reconciliation (docs.Service.RunBlockIndexReconciliation) indexes. It marks every comment and
-// message, direct messages included, owed a block index of its own blocks too (owed_at, a missing
-// state row inserted owed), so the same reconciliation re-reads each item's blocks and the
-// mentions each holds with this build's parser and grammar. It leaves block_grammar_owed alone: it
-// has just re-read every comment, ask and issue message with this build's grammar itself.
+// message, direct messages included, and every ask owed a block index of its own blocks too
+// (owed_at, a missing state row inserted owed), so the same reconciliation re-reads each item's
+// blocks, an ask's parts included, and the mentions each holds with this build's parser and
+// grammar. It leaves block_grammar_owed alone: it has just re-read every comment, ask and issue
+// message with this build's grammar itself.
 func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, error) {
 	var report Rebuild
 	sources := []struct {
@@ -115,6 +116,9 @@ func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, erro
 		{"message", `
 			insert into message_block_state (message_id, owed_at) select id, now() from messages
 			on conflict (message_id) do update set owed_at = excluded.owed_at`},
+		{"ask", `
+			insert into ask_block_state (ask_id, owed_at) select id, now() from asks
+			on conflict (ask_id) do update set owed_at = excluded.owed_at`},
 	} {
 		owed, err := pool.Exec(ctx, mark.query)
 		if err != nil {
@@ -308,9 +312,10 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // owed for the next pass, which reads the edited text under the same lock. A new edge takes the
 // time the text was written and no source_seq, since no event introduced it, as a rebuild's does;
 // a re-index of text no one rewrote appends no event, as rebuild-refs appends none. An item whose
-// source is gone has its edges deleted with its owed row. A comment or message has its blocks
-// indexed too (PlanItemIndex, whose first queued statement takes the item's state row), so the
-// mentions its blocks hold are read with the same grammar as its own.
+// source is gone has its edges deleted with its owed row. A comment or a message has its blocks
+// indexed too, and an ask its parts (PlanItemIndex, PlanAskParts, whose first queued statement
+// takes the item's state row), each read from the row the owner lock guards, so the mentions its
+// blocks hold are read with the same grammar as its own.
 func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL string) error {
 	read, err := sourceRead(item.Kind, item.ID)
 	if err != nil {
@@ -328,18 +333,37 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 		return err
 	}
 	kind := ItemKind(item.Kind)
-	blocks := found && (kind == ItemComment || kind == ItemMessage)
+	// indexed is whether this pass plans an index of the item's own blocks: a comment's and a
+	// message's blocks, read from the body sourceRead read, and an ask's parts, read from its row.
+	indexed := false
 	var indexing ItemIndexing
 	var replacement Replacement
 	if found {
 		located := text.ExtractAt(body, serverURL)
-		if blocks {
+		switch kind {
+		case ItemComment, ItemMessage:
 			index, err := ReadItemIndex(ctx, tx, kind, item.ID)
 			if err != nil {
 				return fmt.Errorf("index the blocks of %s %s: %w", item.Kind, item.ID, err)
 			}
 			if indexing, err = PlanItemIndex(index, kind, item.ID, body, writtenAt, located, nil); err != nil {
 				return fmt.Errorf("index the blocks of %s %s: %w", item.Kind, item.ID, err)
+			}
+			indexed = true
+		case ItemAsk:
+			// An ask's parts are its question, its options and its answer, where sourceText reads
+			// the question alone, which is what the ask's own refs are written from. They are read
+			// from the row the owner lock guards, in the read phase, and planned as every other
+			// item's blocks are.
+			ask, _, held, err := askForParts(ctx, tx, item.ID)
+			if err != nil {
+				return err
+			}
+			if held {
+				if indexing, err = PlanAskParts(ctx, tx, ask, serverURL, writtenAt); err != nil {
+					return err
+				}
+				indexed = true
 			}
 		}
 		if replacement, err = PlanReplace(ctx, tx, item.Kind, item.ID, text.Refs(located), &writtenAt); err != nil {
@@ -348,7 +372,7 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 	}
 	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
 		if found {
-			if blocks {
+			if indexed {
 				indexing.Queue(b)
 			}
 			replacement.Queue(b)

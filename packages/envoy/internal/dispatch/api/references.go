@@ -17,9 +17,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -31,6 +33,38 @@ func (s *server) replaceReferences(
 	fromKind, fromID, body string,
 ) (model.ReferenceChanges, error) {
 	return refs.ReplaceCounted(ctx, tx, fromKind, fromID, body, s.deps.ServerURL)
+}
+
+// queueAskParts is queueItemReferences' shape for an ask, whose parts - its question, its options
+// and its answer - are its blocks: it plans the parts this transaction's write leaves, as they
+// stand at `at`, writing nothing (refs.PlanAskParts), resolves the counted targets the plan moves
+// and merges them into beside, what the same write already holds, and queues the index's
+// statements on ledger, where the route makes the write, so the event it appends names them all.
+// The route queues the ask's own row write before calling: every part table references the ask's
+// row, so the index's statements have to follow that write in the batch.
+func (s *server) queueAskParts(
+	ctx context.Context,
+	tx pgx.Tx,
+	ledger *docs.Ledger,
+	ask model.Ask,
+	at time.Time,
+	beside model.ReferenceChanges,
+) (model.ReferenceChanges, error) {
+	indexing, err := refs.PlanAskParts(ctx, tx, ask, s.deps.ServerURL, at)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	counted, err := refs.CountedChanges(ctx, tx, indexing.Moved())
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	if err := ledger.Queue(func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}); err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return refs.MergeChanges(beside, counted), nil
 }
 
 // referencesSinceWait bounds how long a since read waits for the safe horizon to pass every event
@@ -45,8 +79,8 @@ const referencesSinceWait = time.Second
 // edge types and ?since= keeps mentions introduced after an events.id, which excludes
 // structural edges. Cross-project by design: no project filter. A block reference names a
 // block node carrying its whole current text; one pinned to a version of its document, or a
-// revision of its comment, also reads the block as that version or revision recorded it
-// (blockReferenceNode, itemBlockReferenceNode).
+// revision of its ask's parts or of its comment, also reads the block as that version or revision
+// recorded it (blockReferenceNode, itemBlockReferenceNode).
 //
 // A since read keeps only mentions whose event is at or below the safe horizon
 // (events.Horizon), at or below which every event is final. A poller passes the highest
@@ -211,18 +245,20 @@ func (s *server) blockReferenceNode(ctx context.Context, query refs.Query, ref t
 	return node, nil
 }
 
-// itemBlockReferenceNode is the block node ref, a block of a comment or a message, names (query
-// addresses it), with its whole current text (refs.CurrentItemBlockText). A block no current
-// revision of its item holds answers 404, as a document's does, unless ref is pinned to a revision
-// N of its comment that held it: the node then carries what N recorded (model.BlockPin, its
-// Version the revision), "unchanged" or "changed" by comparing the current text with N's, or
-// "removed" with the revision that removed it (RemovedVersion), as a node with no text or changed
-// revision whose facts are a removed block's (refs.RemovedCommentBlockNode). A pin past the
-// comment's current revision, or to one that did not hold the block, answers 404, each saying
-// which. A message never changes, so no reference pins a message's block (parseReferencesQuery
-// refuses one).
+// itemBlockReferenceNode is the block node ref, a part of an ask or a block of a comment or a
+// message, names (query addresses it), with its whole current text (refs.CurrentItemBlockText). A
+// block no current revision of its item holds answers 404, as a document's does, unless ref is
+// pinned to a revision N of its ask or comment that held it: the node then carries what N
+// recorded (model.BlockPin, its Version the revision), "unchanged" or "changed" by comparing the
+// current text with N's, or "removed" with the revision that removed it (RemovedVersion), as a
+// node with no text or changed revision whose facts are a removed block's
+// (refs.RemovedItemBlockNode). A pin past the item's current revision, or to one that did not
+// hold the block, answers 404, each saying which. A message never changes, so no reference pins
+// a message's block (parseReferencesQuery refuses one).
 func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, ref text.Ref) (model.GraphNode, error) {
 	pool := s.deps.Store.Pool
+	kind := refs.ItemKind(ref.Item)
+	noun := itemBlockNoun(ref.Item)
 	item, found, err := refs.Node(ctx, pool, ref.Item, ref.ID, true)
 	if err != nil {
 		return model.GraphNode{}, err
@@ -235,34 +271,34 @@ func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, r
 		return model.GraphNode{}, err
 	}
 	if current {
-		if node.Text, err = refs.CurrentItemBlockText(ctx, pool, refs.ItemKind(ref.Item), query.ID); err != nil {
+		if node.Text, err = refs.CurrentItemBlockText(ctx, pool, kind, query.ID); err != nil {
 			return model.GraphNode{}, err
 		}
 	}
 	if ref.Pin == 0 {
 		if !current {
-			return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no block %q in %s %s", ref.Block, ref.Item, item.ID)
+			return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no %s %q in %s %s", noun, ref.Block, ref.Item, item.ID)
 		}
 		return node, nil
 	}
-	at, err := refs.CommentBlockAt(ctx, pool, item.ID, ref.Block, ref.Pin)
+	at, err := refs.ItemBlockAt(ctx, pool, kind, item.ID, ref.Block, ref.Pin)
 	if err != nil {
 		return model.GraphNode{}, err
 	}
 	switch {
 	case ref.Pin > at.Current:
-		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no revision %d of comment %s; its current revision is %d", ref.Pin, item.ID, at.Current)
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no revision %d of %s %s; its current revision is %d", ref.Pin, ref.Item, item.ID, at.Current)
 	case at.Text == nil:
-		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no block %q in comment %s at revision %d", ref.Block, item.ID, ref.Pin)
+		return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no %s %q in %s %s at revision %d", noun, ref.Block, ref.Item, item.ID, ref.Pin)
 	}
 	pin := &model.BlockPin{Version: ref.Pin, Ref: refs.BlockRef(item.Ref, ref.Block) + "@v" + strconv.Itoa(ref.Pin), Text: *at.Text}
 	if !current {
-		removed, found, err := refs.RemovedCommentBlockNode(ctx, pool, query.ID, at.RemovedRevision)
+		removed, held, err := refs.RemovedItemBlockNode(ctx, pool, kind, query.ID, at.RemovedRevision)
 		if err != nil {
 			return model.GraphNode{}, err
 		}
-		if !found {
-			return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no block %q in comment %s", ref.Block, item.ID)
+		if !held {
+			return model.GraphNode{}, errorf(http.StatusNotFound, "NOT_FOUND", "no %s %q in %s %s", noun, ref.Block, ref.Item, item.ID)
 		}
 		pin.State, pin.RemovedVersion = "removed", at.RemovedRevision
 		removed.Pin = pin
@@ -274,6 +310,15 @@ func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, r
 	}
 	node.Pin = pin
 	return node, nil
+}
+
+// itemBlockNoun is what one block of an item of kind is called where a refusal names it: a part
+// of an ask, a block of a comment or a message.
+func itemBlockNoun(kind string) string {
+	if kind == string(refs.ItemAsk) {
+		return "part"
+	}
+	return "block"
 }
 
 // blockPin is a trailing `@v<N>` pin, as a block reference writes one.
@@ -292,7 +337,7 @@ func pinsAMessageBlock(raw, serverURL string) bool {
 
 // parseReferencesQuery turns ?to=|?from=, ?kind=, and ?since= into an edge query addressed the
 // way graph_edges stores the node (refs.TargetOf): text.TargetID for the to side (ref_key for
-// artifacts; a comment's or message's block under its storage kind), the
+// artifacts; an ask's part and a comment's or message's block under its storage kind), the
 // item id for the from side (the caller swaps an artifact's ref_key for its uuid). The reference
 // is read by text.ParseRef, so a node is read whatever the length of its name: the target bound
 // decides only what text indexes, and a node no index holds an edge to simply has fewer edges.
@@ -313,7 +358,8 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 		}
 		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, block, ask, comment, message, or component", raw)
 	}
-	// The node as graph_edges stores it: a block of a comment or message under its storage kind.
+	// The node as graph_edges stores it: an ask's part and a comment's or message's block under
+	// its storage kind.
 	target, _ := refs.TargetOf(ref)
 	query := refs.Query{Direction: direction, Kind: target.Kind, ID: target.ID}
 	if kinds := strings.TrimSpace(values.Get("kind")); kinds != "" {
@@ -331,15 +377,19 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 		}
 	}
 	// An ask's inbound `replies_to` edges are its own clarification thread, which every ask
-	// surface renders inline; "what references this ask" never means them. A caller that asks
-	// for that kind explicitly still gets it — this is the default, not a hidden rule.
-	if direction == "in" && ref.Kind == "ask" && len(query.Kinds) == 0 {
-		query.ExcludeKinds = refs.AskBacklinkExclusions
-	}
-	// A document's, comment's or message's blocks are each part_of it; its links are what its
-	// read means, so those edges are listed only when asked for by kind.
-	if (ref.Kind == "artifact" || ref.Kind == "comment" || ref.Kind == "message") && len(query.Kinds) == 0 {
-		query.ExcludeKinds = []string{"part_of"}
+	// surface renders inline, and its parts are each part_of it: "what references this ask" means
+	// neither (refs.AskBacklinkExclusions, the exclusion the count on its card reads too). A
+	// document's, a comment's or a message's blocks are each part_of it the same way; its links
+	// are what its read means, so those edges are listed only when asked for by kind. A caller
+	// that asks for one of those kinds explicitly still gets it — this is the default, not a
+	// hidden rule.
+	if len(query.Kinds) == 0 {
+		switch {
+		case direction == "in" && ref.Kind == "ask":
+			query.ExcludeKinds = refs.AskBacklinkExclusions
+		case ref.Kind == "artifact" || ref.Kind == "ask" || ref.Kind == "comment" || ref.Kind == "message":
+			query.ExcludeKinds = []string{"part_of"}
+		}
 	}
 	if since := strings.TrimSpace(values.Get("since")); since != "" {
 		value, err := strconv.ParseInt(since, 10, 64)

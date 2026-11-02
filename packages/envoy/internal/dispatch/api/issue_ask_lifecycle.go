@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -163,15 +164,25 @@ func (s *server) prepareRestoration(ctx context.Context, tx pgx.Tx, issueKey str
 	return restored, nil
 }
 
-// recordRestoredAsksTx is the reopen's second half: it queues one ask.opened event for each of
-// restored, whose actor is actor, the reopener, as settlement's own restoration of an ask appends,
-// and answers the events, filled in once Commit has run the write phase.
-func (s *server) recordRestoredAsksTx(ledger *docs.Ledger, issueKey string, restored []model.Ask, actor model.Actor) ([]*model.Event, error) {
+// recordRestoredAsksTx is the reopen's second half: it indexes the parts of each of restored, the
+// asks prepareRestoration wrote back open, and queues one ask.opened event for each, whose actor
+// is actor, the reopener, as settlement's own restoration of an ask appends. It answers the
+// events, filled in once Commit has run the write phase.
+func (s *server) recordRestoredAsksTx(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, issueKey string, restored []model.Ask, actor model.Actor) ([]*model.Event, error) {
 	appended := make([]*model.Event, 0, len(restored))
+	restoredAt := time.Now().UTC()
 	for _, ask := range restored {
+		// The restore took each ask's answer off, which removes its answer part: the index is
+		// queued after the row write that took it off (prepareRestoration), and the ask.opened
+		// names what that moved and stamps the part rows the index leaves with its own id, so a
+		// ?since= read lists them.
+		changes, err := s.queueAskParts(ctx, tx, ledger, ask, restoredAt, model.ReferenceChanges{})
+		if err != nil {
+			return nil, err
+		}
 		event, err := s.queueLoggedEvent(ledger, issueOwner(issueKey).event(
-			"ask.opened", actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-		), events.ThreadLoginsOf(ask.ID), "", "")
+			"ask.opened", actor, model.NewAskEventPayload(ask, changes),
+		), events.ThreadLoginsOf(ask.ID), "ask", ask.ID)
 		if err != nil {
 			return nil, err
 		}

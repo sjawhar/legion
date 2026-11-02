@@ -331,7 +331,7 @@ func (s *server) createStoredMessage(
 		return model.Message{}, nil, err
 	}
 	message.RepliesToBlock = block.nodeID()
-	message.ReplyBlock = block.replyBlock(refs.ItemMessage, issueKey, "", "")
+	message.ReplyBlock = block.replyBlock(issueKey, "", "")
 	// An issue message's blocks, the mentions each holds and its own references are indexed as
 	// one write (refs.ReplaceCountedItem); a direct message, which writes no mention, has its
 	// blocks indexed alone and moves nothing.

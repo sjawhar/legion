@@ -466,11 +466,12 @@ func approvalAfterRequest(approval model.ArtifactApproval, ask model.Ask) model.
 }
 
 // openApprovalAsk queues the insert of the document's approval request at version, asking
-// question, and the append of its ask.opened event; the requester follows it. A document a human
-// approved before carries that approval's version, time and approver on the request
-// (approval.approved), so the human reads what the re-approval follows; a first request carries
-// none. The event is filled in once Commit has run the write phase (queueLoggedEvent), and so is
-// the ask's OpenedEventID, which its caller takes from the event then.
+// question, the index of its parts and the append of its ask.opened event; the requester follows
+// it. A document a human approved before carries that approval's version, time and approver on
+// the request (approval.approved), so the human reads what the re-approval follows; a first
+// request carries none. The event is filled in once Commit has run the write phase
+// (queueLoggedEvent), and so is the ask's OpenedEventID, which its caller takes from the event
+// then.
 func (s *server) openApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -539,6 +540,14 @@ func (s *server) openApprovalAsk(
 		return nil, nil, err
 	}
 	askChanges, err := s.queueReferences(ctx, tx, ledger, "ask", ask.ID, ask.Question)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The request's parts - its question and its two review options - beside its own references,
+	// both named by the ask.opened below. The parts are planned against the ask this route
+	// writes, since the row holding it is queued above, and their statements are queued after
+	// that insert, which the rows of a part reference.
+	askChanges, err = s.queueAskParts(ctx, tx, ledger, ask, ask.CreatedAt, askChanges)
 	if err != nil {
 		return nil, nil, err
 	}

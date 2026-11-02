@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -72,7 +74,7 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 	if err := client.Publish(published); !errors.Is(err, ErrStreamFull) {
 		t.Fatalf("a publish of the delivery into the full stream = %v, want ErrStreamFull", err)
 	}
-	if err := <-client.Window().PublishAsync(sent); !errors.Is(err, ErrStreamFull) {
+	if err := <-client.WindowUntil(nil).PublishAsync(sent); !errors.Is(err, ErrStreamFull) {
 		t.Fatalf("a window's send of the delivery into the full stream = %v, want ErrStreamFull", err)
 	}
 
@@ -94,7 +96,7 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 	retry := func(when string) (publishErr, sendErr error) {
 		t.Helper()
 		publishErr = client.Publish(published)
-		sendErr = <-client.Window().PublishAsync(sent)
+		sendErr = <-client.WindowUntil(nil).PublishAsync(sent)
 		for _, answer := range []struct {
 			how  string
 			item contracts.Envelope
@@ -135,5 +137,87 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 		if msg.Sequence == 0 || string(msg.Data) != string(want) || msg.Header.Get(nats.MsgIdHdr) != "" {
 			t.Fatalf("stored %s = sequence %d, %s, id %q; want a sequence, %s and no id", item.Topic, msg.Sequence, msg.Data, msg.Header.Get(nats.MsgIdHdr), want)
 		}
+	}
+}
+
+// A window's send that the stream acknowledges a duplicate with no sequence (ErrNotStored) is sent
+// once more without its id only while the window's deadline has not passed: the resend is a write,
+// and a publisher whose hold lapsed while the first answer was on its way writes nothing more. The
+// answer then wraps ErrNotStored and ErrWindowDeadline, and the stream holds nothing of it. The
+// same envelope through a window whose deadline is still ahead is stored, without its id.
+func TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline(t *testing.T) {
+	const limit = 16 << 10
+	cluster := testnats.StartCluster(t, 3)
+	client := startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(limit))
+	js := cluster.JetStream(t)
+	testnats.AwaitSettledStream(t, js, Stream)
+
+	item := contracts.Envelope{
+		EventID: "event-fenced", Source: "dispatch", SourceEventID: "fenced",
+		Topic: "notifications.dispatch.issue.T-1.comment.created", DedupeKey: "dispatch.event.fenced",
+	}
+	if !contracts.DedupeKeyNamesTheUpstreamEvent(item) {
+		t.Fatal("the envelope publishes under no MsgId")
+	}
+	for filled := 0; ; filled++ {
+		if filled == 1024 {
+			t.Fatal("1024 fill publishes all stored; want the stream full")
+		}
+		err := client.Publish(contracts.Envelope{
+			EventID: fmt.Sprintf("fill-%d", filled), Source: "dispatch",
+			Topic: fmt.Sprintf("notifications.agent.s%d", filled), DedupeKey: fmt.Sprintf("fill.%d", filled),
+		})
+		if errors.Is(err, ErrStreamFull) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("fill publish %d = %v, want nil or ErrStreamFull", filled, err)
+		}
+	}
+	// The full stream refuses the envelope and records its id at sequence 0; after a purge, every
+	// send under that id is acknowledged a duplicate with no sequence.
+	if err := <-client.WindowUntil(nil).PublishAsync(item); !errors.Is(err, ErrStreamFull) {
+		t.Fatalf("a send into the full stream = %v, want ErrStreamFull", err)
+	}
+	if err := js.PurgeStream(Stream); err != nil {
+		t.Fatalf("purge the stream: %v", err)
+	}
+	stored := func() bool {
+		t.Helper()
+		_, err := js.GetLastMsg(Stream, item.Topic)
+		if errors.Is(err, nats.ErrMsgNotFound) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", item.Topic, err)
+		}
+		return true
+	}
+
+	var deadline atomic.Int64
+	deadline.Store(time.Now().Add(time.Hour).UnixNano())
+	window := client.WindowUntil(func() time.Time { return time.Unix(0, deadline.Load()) })
+	answer := window.PublishAsync(item)
+	// The first send has left; the deadline passes before its acknowledgement can come back.
+	deadline.Store(time.Now().Add(-time.Second).UnixNano())
+	var err error
+	select {
+	case err = <-answer:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the send was not answered within 10 s")
+	}
+	if !errors.Is(err, ErrNotStored) || !errors.Is(err, ErrWindowDeadline) {
+		t.Fatalf("a not-stored send whose window's deadline passed = %v, want ErrNotStored and ErrWindowDeadline", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if stored() {
+		t.Fatal("the stream holds the envelope the window resent past its deadline")
+	}
+
+	if err := <-client.WindowUntil(func() time.Time { return time.Now().Add(time.Hour) }).PublishAsync(item); err != nil {
+		t.Fatalf("the same send through a window whose deadline is ahead = %v, want it stored", err)
+	}
+	if !stored() {
+		t.Fatal("the send through a window whose deadline is ahead answered nil and the stream does not hold it")
 	}
 }

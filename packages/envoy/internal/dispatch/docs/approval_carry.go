@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -126,7 +127,7 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 		return err
 	}
 	if open != nil {
-		if err := answerApprovalAsk(ctx, tx, s.events, artifactID, open, review.Actor, reason, sink); err != nil {
+		if err := answerApprovalAsk(ctx, tx, s.events, artifactID, open, review.Actor, reason, s.serverURL, sink); err != nil {
 			return err
 		}
 		askID = &open.ID
@@ -436,11 +437,12 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 // which the update's callback returns, so the write phase stops there. The answer's time is the
 // transaction's now() (transactionNow), as the answer route's is: each process's host keeps its
 // own clock, and this one is the created_at of the ask.answered event appended here and of the
-// review the carry writes beside it. The update and the append are one step (write); the event
-// carries the row as the step leaves it, after the move this version write queued before it, which
-// set the request's edited_at (RewriteApprovalAsk). Where the step is queued, the ledger records
-// the request closed, so nothing later in the transaction answers it again.
-func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, ask *model.Ask, actor model.Actor, reason string, sink func(model.Event)) error {
+// review the carry writes beside it, and the time the answer's part is written at (planAskParts).
+// The update, the parts, the append and the stamp are one step (write); the event carries the
+// row as the step leaves it, after the move this version write queued before it, which set the
+// request's edited_at (RewriteApprovalAsk). Where the step is queued, the ledger records the
+// request closed, so nothing later in the transaction answers it again.
+func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, ask *model.Ask, actor model.Actor, reason, serverURL string, sink func(model.Event)) error {
 	answeredAt, err := transactionNow(ctx, tx)
 	if err != nil {
 		return err
@@ -450,11 +452,20 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ar
 	if err != nil {
 		return fmt.Errorf("encode approval answer: %w", err)
 	}
+	// The row the update below leaves: the event carries it and the parts are read from it, so a
+	// later rewording of the same request in this transaction reaches neither.
+	answered := *ask
+	answered.State = "answered"
+	answered.Answer = &answer
+	// The answer is a part of the request, so its text reaches the graph with it, and the
+	// ask.answered below names what it moved. The parts are planned here and written in the
+	// step below, after the update whose row they describe.
+	changes, parts, err := planAskParts(ctx, tx, answered, serverURL, answer.At, model.ReferenceChanges{})
+	if err != nil {
+		return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
+	}
 	recordPendingApproval(ctx, tx, artifactID, pendingApproval{ask: ask, closed: true})
 	return write(ctx, tx, func(b *store.WriteBatch) error {
-		answered := *ask
-		answered.State = "answered"
-		answered.Answer = &answer
 		b.Queue("answer approval ask", `update asks set state = 'answered', answer = $2 where id = $1 and state = 'open'`, ask.ID, encoded).Exec(func(tag pgconn.CommandTag) error {
 			if tag.RowsAffected() != 1 {
 				return fmt.Errorf("answer approval ask %s: it is no longer open", ask.ID)
@@ -463,14 +474,20 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ar
 			ask.Answer = answered.Answer
 			return nil
 		})
+		if err := parts(b); err != nil {
+			return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
+		}
 		// The ask's thread_logins are read by the event's insert, after the answer's update.
 		if err := broker.QueueAppendWithLogins(b, model.Event{
 			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
 			Type: "ask.answered", Actor: actor,
-			Payload: model.AskAnsweredEventPayload{AskEventPayload: model.NewAskEventPayload(answered, model.ReferenceChanges{})},
+			Payload: model.AskAnsweredEventPayload{AskEventPayload: model.NewAskEventPayload(answered, changes)},
 		}, events.ThreadLoginsOf(ask.ID), sink); err != nil {
 			return fmt.Errorf("append approval ask answer: %w", err)
 		}
+		// The answer's part edges are new rows of this transaction, so they take the id of the
+		// event queued just above and a ?since= read lists them.
+		refs.QueueStamp(b, "ask", ask.ID)
 		return nil
 	})
 }

@@ -25,8 +25,10 @@ type commentInput struct {
 	Body    string             `json:"body"`
 	Anchor  *model.AnchorInput `json:"anchor"`
 	ReplyTo *string            `json:"reply_to"`
-	// ReplyToBlock is the id of the block of comment ReplyTo the reply answers ("b2"), checked
-	// against that comment before reply_to climbs to the thread's head.
+	// ReplyToBlock is the id of the block the reply answers ("b2"), read from the item the same
+	// request names (namedReplyBlock): a block of comment ReplyTo, checked against that comment
+	// before reply_to climbs to the thread's head, or, with AskID in place of ReplyTo, a part of
+	// that ask.
 	ReplyToBlock *string `json:"reply_to_block"`
 	AskID        *string `json:"ask_id"`
 	Mentions     []struct {
@@ -246,11 +248,9 @@ func (s *server) normalizeCommentThreadTarget(
 	if input.Suggestion != nil && (input.ReplyTo != nil || input.AskID != nil) {
 		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry suggestions")
 	}
-	if input.ReplyToBlock != nil && input.AskID != nil {
-		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", replyBlockInAskThread)
-	}
-	if input.ReplyToBlock != nil && input.ReplyTo == nil {
-		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to_block requires reply_to, the comment whose block it names")
+	if input.ReplyToBlock != nil && input.ReplyTo == nil && input.AskID == nil {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT",
+			"reply_to_block requires reply_to, the comment whose block it names, or ask_id, the ask whose part it names")
 	}
 	if input.ReplyTo != nil {
 		if strings.TrimSpace(*input.ReplyTo) == "" {
@@ -267,11 +267,7 @@ func (s *server) normalizeCommentThreadTarget(
 		if err != nil || input.ReplyToBlock == nil {
 			return target, err
 		}
-		if target.AskID != nil {
-			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", replyBlockInAskThread)
-		}
-		// The block is the named comment's, read under the owner's lock the climb took.
-		target.ReplyBlock, err = s.replyBlockOf(ctx, tx, ledger, refs.ItemComment, parent.ID, *input.ReplyToBlock, "reply_to_block", "INVALID_COMMENT")
+		target.ReplyBlock, err = s.namedReplyBlock(ctx, tx, ledger, refs.ItemComment, parent.ID, *input.ReplyToBlock)
 		if err != nil {
 			return commentThreadTarget{}, err
 		}
@@ -286,7 +282,29 @@ func (s *server) normalizeCommentThreadTarget(
 	if _, err := uuid.Parse(*input.AskID); err != nil {
 		return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
 	}
-	return s.describeAsk(ctx, tx, owner, input.AskID)
+	target, err := s.describeAsk(ctx, tx, owner, input.AskID)
+	if err != nil || input.ReplyToBlock == nil {
+		return target, err
+	}
+	target.ReplyBlock, err = s.namedReplyBlock(ctx, tx, ledger, refs.ItemAsk, *input.AskID, *input.ReplyToBlock)
+	if err != nil {
+		return commentThreadTarget{}, err
+	}
+	return target, nil
+}
+
+// namedReplyBlock is the block reply_to_block names, read from the item the same request named:
+// the comment reply_to names, read under the owner's lock the thread climb took, or the ask
+// ask_id names. It is never read from the thread's head: a reply to a comment in an ask's thread
+// names a block of that comment, as the client and the tool that write it mean, where only a
+// reply naming the ask names one of the ask's parts. The ask is ordered against a write of its
+// own by the owner's lock, which this transaction took before it read either (lockCommentOwner,
+// asks.go's readAskForTransition). The index the item owes is queued on ledger, which is nil on
+// a route that holds no write phase (the delivery replies), where it is written at once.
+func (s *server) namedReplyBlock(
+	ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, kind refs.ItemKind, itemID, blockID string,
+) (*namedBlock, error) {
+	return s.replyBlockOf(ctx, tx, ledger, kind, itemID, blockID, "reply_to_block", "INVALID_COMMENT")
 }
 
 // threadHeadOf climbs reply_to from a comment read under the owner's lock to the head of its
@@ -434,9 +452,9 @@ func (s *server) resolveCommentDeliveries(
 // transaction re-reads it under the owner's lock (lockCommentOwner). sessionRoutes reports, from
 // the same read, whether the outbox reaches a session of the issue beyond the route and the
 // comment's mentions whatever the comment's thread or anchor: the issue's claimant is a session
-// (the outbox's publishClaimantRoute), the ask the comment replies to by askID has a follower
-// (publishFollowerRoutes), or the issue's primary document credits a session
-// (publishPrimaryDocumentAuthors, which reads the credits through the outbox's documentCreditsSQL
+// (the outbox's addClaimantRoute), the ask the comment replies to by askID has a follower
+// (addFollowerRoutes), or the issue's primary document credits a session
+// (addPrimaryDocumentAuthors, which reads the credits through the outbox's documentCreditsSQL
 // and sessionCreditSQL; the query below reads them the same way). Like the route, these are read
 // before the transaction and not rechecked under the lock: the outbox reads them again when it
 // publishes in any case.
@@ -747,7 +765,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			s.writeHandlerError(w, err)
 			return
 		}
-		comment.ReplyBlock = threadTarget.ReplyBlock.replyBlock(refs.ItemComment, issueKey, project, slug)
+		comment.ReplyBlock = threadTarget.ReplyBlock.replyBlock(issueKey, project, slug)
 	}
 	if comment.Anchor != nil {
 		s.registerCommentAnchor(ledger, comment, actor, false)

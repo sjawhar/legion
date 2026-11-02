@@ -172,6 +172,47 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 	return nil
 }
 
+// attachAskPartIDs reads, in one query over `ask_blocks`, the part id of every listed ask's
+// options and answer and the ask's current part revision (`refs.AskPartIDs`), so every read
+// that shows an ask's options shows the reference of each: `dispatch://<key>/ask/<id>#b-<part
+// id>`, pinned to the ask's `revision` with `@v<N>`. It is read beside attachAskBacklinkCounts,
+// which every list and detail read of an ask already pays for, and never by a write, whose
+// answer carries no id.
+//
+// Which option or answer each stored part stands for, and what an ask the index has not reached
+// or an option no part stands for carries, is refs.AskPartIDs'.
+func attachAskPartIDs(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if len(asks) == 0 {
+		return nil
+	}
+	partIDs, err := refs.AskPartIDs(ctx, q, asks)
+	if err != nil {
+		return err
+	}
+	for index, ask := range asks {
+		ask.Revision = partIDs[index].Revision
+		for option := range ask.Options {
+			ask.Options[option].ID = partIDs[index].Options[option]
+		}
+		if ask.Answer != nil {
+			ask.Answer.ID = partIDs[index].Answer
+		}
+	}
+	return nil
+}
+
+// attachAskReadFields is what every list and detail read of an ask attaches beyond its row: its
+// inbound graph-edge count (attachAskBacklinkCounts), then the part ids of its options and of its
+// answer with its part revision (attachAskPartIDs). A write attaches neither. The two are always
+// read together and in this order, so the reads a caller pays for, and the error it reports, are
+// the same at every site.
+func attachAskReadFields(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if err := attachAskBacklinkCounts(ctx, q, asks); err != nil {
+		return err
+	}
+	return attachAskPartIDs(ctx, q, asks)
+}
+
 func (s *server) loadAskAnchorArtifact(
 	ctx context.Context,
 	q queryer,

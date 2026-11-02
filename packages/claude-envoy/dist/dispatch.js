@@ -14584,6 +14584,11 @@ var IssueDeployedEventPayloadSchema = strictObject({
   run_id: number2().int().positive(),
   completed_at: exports_iso.datetime()
 });
+var HandoffRecordedPayloadSchema = strictObject({
+  handoff_id: string2(),
+  phase: string2(),
+  version: number2().int().positive()
+});
 var DispatchServerStartedPayloadSchema = strictObject({
   commit: string2().min(1),
   started_at: exports_iso.datetime()
@@ -15008,6 +15013,39 @@ function imagesArgument(z, owner, cap) {
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 2000;
 var DISPATCH_BODY_MAX = 32000;
+var DISPATCH_HANDOFF_BODY_MAX = 262144;
+var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+var HANDOFF_PHASE_RULE = `phase is not a handoff phase: ${HANDOFF_PHASE_RULE_WORDS}`;
+function isJsonObjectText(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+function handoffProblem(value) {
+  const { phase, body } = value;
+  if (typeof phase === "string" && !HANDOFF_PHASE_PATTERN.test(phase))
+    return HANDOFF_PHASE_RULE;
+  if (typeof body !== "string")
+    return;
+  const bytes = new TextEncoder().encode(body).length;
+  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
+    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
+  }
+  if (!isJsonObjectText(body)) {
+    return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
+  }
+  return;
+}
+var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+var handoffValidation = {
+  check: (value) => handoffProblem(value) === undefined,
+  message: HANDOFF_RULE,
+  refusal: (value) => handoffProblem(value) ?? HANDOFF_RULE
+};
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var SEARCH_KIND_DEPTH = 100;
@@ -15323,7 +15361,7 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key for an unlinked document.").optional(),
@@ -15468,6 +15506,34 @@ var dispatchToolSpecs = [
     example: {},
     description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or null. project is the one project key your credential may write, or null when it names none.",
     arguments: () => ({}),
+    strict: true
+  },
+  {
+    name: "dispatch_handoff_write",
+    example: {
+      issue: "DSP-1",
+      phase: "implement",
+      body: '{"schemaVersion":1,"phase":"implement","issue":"DSP-1"}'
+    },
+    description: "Record this session's handoff for one phase of an issue: the body, one JSON object, is " + "stored on the issue exactly as sent, under this session, and read back byte for byte. Each " + "write is the next version (1, 2, ...) of that phase's handoff; earlier versions stay. Write " + "the body to a file outside your workspace and pass it with --body-file (- reads stdin). A " + "closed issue refuses it with 409 ISSUE_CLOSED, and a body over " + `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED. Read it back with dispatch ` + `handoff-read. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z.string().describe("The phase the handoff ends: a lowercase slug such as plan, implement, test or review."),
+      body: z.string({ min: 1 }).describe(`The handoff: one JSON object, at most ${DISPATCH_HANDOFF_BODY_MAX} bytes, stored and read back exactly as sent.`)
+    }),
+    validation: handoffValidation,
+    strict: true
+  },
+  {
+    name: "dispatch_handoff_read",
+    example: { issue: "DSP-1", phase: "implement" },
+    description: "Read the newest handoff recorded for one phase of an issue, or the version you name: one " + "line naming the phase, version, id, the session that wrote it and when, then the body " + "exactly as stored. A closed issue's handoffs read too. A phase with no handoff, or no " + `such version, is 404 HANDOFF_NOT_FOUND. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z.string().describe("The handoff's phase: a lowercase slug such as plan, implement, test or review."),
+      version: z.number({ int: true, min: 1 }).describe("The version to read, from 1; omit it to read the newest.").optional()
+    }),
+    validation: handoffValidation,
     strict: true
   }
 ];
@@ -15995,7 +16061,8 @@ function fieldKinds(spec) {
       nullable,
       required: required.has(field),
       ...description === undefined ? {} : { description },
-      ...values === undefined ? {} : { values }
+      ...values === undefined ? {} : { values },
+      shape: inner === undefined ? [] : shapeLines(inner, "")
     });
   }
   return fields;
@@ -16029,6 +16096,58 @@ function kindOf(field, node) {
     default:
       return "json";
   }
+}
+function withoutNull(node) {
+  const members = (node.anyOf ?? [node]).filter((member) => member.type !== "null");
+  return members.length === 1 ? members[0] : undefined;
+}
+function typeName(node) {
+  if (node.anyOf !== undefined)
+    return node.anyOf.map(typeName).join(" or ");
+  if (node.enum !== undefined)
+    return node.enum.map(String).join("|");
+  switch (node.type) {
+    case "string":
+      return "text";
+    case "integer":
+    case "number":
+    case "boolean":
+    case "null":
+      return node.type;
+    case "object":
+      return "object";
+    case "array":
+      return node.items === undefined ? "list" : `list of ${pluralTypeName(node.items)}`;
+    default:
+      return "any JSON";
+  }
+}
+function pluralTypeName(node) {
+  if (node.type === "object")
+    return "objects";
+  if (node.type === "integer")
+    return "integers";
+  if (node.type === "number")
+    return "numbers";
+  return typeName(node);
+}
+function shapeLines(node, indent) {
+  const item = node.type === "array" ? node.items : undefined;
+  const properties = (item ?? node).properties;
+  if (properties === undefined)
+    return [];
+  const required = new Set((item ?? node).required ?? []);
+  return [
+    `${indent}${item === undefined ? "Its keys:" : "Each item's keys:"}`,
+    ...Object.entries(properties).flatMap(([key, child]) => {
+      const about = [required.has(key) ? "required" : undefined, typeName(child)].filter((part) => part !== undefined).join("; ");
+      const inner = withoutNull(child);
+      return [
+        `${indent}  ${key} (${about})${child.description === undefined ? "" : `: ${child.description}`}`,
+        ...inner === undefined ? [] : shapeLines(inner, `${indent}    `)
+      ];
+    })
+  ];
 }
 function singular(field) {
   return field.endsWith("s") ? field.slice(0, -1) : field;
@@ -16077,10 +16196,17 @@ function flagTable(tool, fields) {
         field,
         action: "json",
         value: "<json>",
-        text: `Every option as a JSON list of {label, description?}, in place of --${singular(name)}.`
+        text: [`Every option as a JSON list, in place of --${singular(name)}.`, ...info.shape].join(`
+`)
       });
     } else if (kind === "json") {
-      add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
+      add(`--${name}-json`, {
+        field,
+        action: "json",
+        value: "<json>",
+        text: [about, ...info.shape].filter((line) => line !== "").join(`
+`)
+      });
       add(`--${name}-json-file`, {
         field,
         action: "json-file",
@@ -16358,7 +16484,8 @@ function commandHelp(tool) {
     surface.spec.description,
     "",
     "Flags:",
-    ...commandFlagTable(tool).flatMap((row) => row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, `      ${row.text}`]),
+    ...commandFlagTable(tool).flatMap((row) => row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, ...row.text.split(`
+`).map((line) => `      ${line}`)]),
     "",
     `Example: ${commandLine(tool, surface.spec.example)}`,
     ""
@@ -16631,6 +16758,35 @@ var KEYED_LAYER_MEMORY_MS = 5 * 60000;
 var KEYED_LAYER_SEEN = new Map;
 var KEYED_LAYER_PROBES = new Map;
 var KEY_LAYER_PROBE_MS = 5000;
+function keyedLayerMemory() {
+  const wall = Date.now();
+  const now = performance.now();
+  const kept = {};
+  for (const [origin, seen] of KEYED_LAYER_SEEN) {
+    const age = now - seen;
+    if (age >= 0 && age < KEYED_LAYER_MEMORY_MS) {
+      kept[origin] = new Date(wall - age).toISOString();
+    }
+  }
+  return kept;
+}
+function rememberKeyedLayer(saved) {
+  if (typeof saved !== "object" || saved === null)
+    return;
+  const wall = Date.now();
+  const now = performance.now();
+  for (const [origin, at] of Object.entries(saved)) {
+    if (typeof at !== "string")
+      continue;
+    const age = wall - Date.parse(at);
+    if (!(age >= 0 && age < KEYED_LAYER_MEMORY_MS))
+      continue;
+    const seen = now - age;
+    const known = KEYED_LAYER_SEEN.get(origin);
+    if (known === undefined || known < seen)
+      KEYED_LAYER_SEEN.set(origin, seen);
+  }
+}
 function keyEchoed(response, key) {
   const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
   return echoed.replace(/^"(.*)"$/, "$1") === key;
@@ -17096,6 +17252,26 @@ class DispatchClient {
   }
   async getComments(issue) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
+  }
+  async writeHandoff(issue, phase, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs", phase], input);
+  }
+  async listHandoffs(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs"]);
+  }
+  async latestHandoff(issue, phase) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "handoffs",
+      phase,
+      "latest"
+    ]);
+  }
+  async handoff(id) {
+    return this.#json("GET", ["api", "v1", "handoffs", id]);
   }
   async getIssueReferences(issue) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "references"], undefined, { versions: "latest" });
@@ -19342,16 +19518,11 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const byId = artifacts.find((candidate) => candidate.id === artifactReference);
   if (byId !== undefined)
     return byId;
-  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
-  if (bySlug !== undefined) {
-    const named = byName.filter((candidate) => candidate.id !== bySlug.id && candidate.kind === "doc");
-    if (named.length > 0) {
-      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
-    }
+  if (bySlug !== undefined)
     return bySlug;
-  }
+  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -19406,10 +19577,10 @@ async function documentTargets(client, resolution) {
   };
 }
 var documentHintLimit = 8;
-function documentReferenceProblem(reference, documents, owner, use) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => use === "id" ? `${document.id} (${document.slug}, ${document.name})` : `${document.slug} (${document.name})`);
+function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
+  const hints = documents.slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return use === undefined ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}` : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
+  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
@@ -21078,6 +21249,61 @@ Document token: ${listed.token}`,
         details: await followedAskDetails(client, read.ask)
       };
     }
+    case "dispatch_handoff_write": {
+      if (!input.sessionId?.trim()) {
+        throw new Error("host session id is required for dispatch handoff-write");
+      }
+      let recorded;
+      try {
+        recorded = await client.writeHandoff(issue(), stringArg(args, "phase"), {
+          actor,
+          body: stringArg(args, "body")
+        });
+      } catch (error) {
+        throw refusalWithCode(error);
+      }
+      return {
+        text: `Recorded the ${recorded.phase} handoff of ${recorded.issue_key}, version ${recorded.version} (id ${recorded.id})`,
+        details: {
+          issue: recorded.issue_key,
+          phase: recorded.phase,
+          version: recorded.version,
+          handoff: recorded.id
+        }
+      };
+    }
+    case "dispatch_handoff_read": {
+      const issueKey = issue();
+      const phase = stringArg(args, "phase");
+      const version = optionalNumber(args, "version");
+      let handoff;
+      try {
+        if (version === undefined) {
+          handoff = await client.latestHandoff(issueKey, phase);
+        } else {
+          const listed = await client.listHandoffs(issueKey);
+          const ofPhase = listed.filter((summary) => summary.phase === phase);
+          const match = ofPhase.find((summary) => summary.version === version);
+          if (match === undefined) {
+            const newest = Math.max(0, ...ofPhase.map((summary) => summary.version));
+            throw new Error(`HANDOFF_NOT_FOUND: issue ${issueKey} has no ${phase} handoff version ${version}; ${newest === 0 ? `it has no ${phase} handoff at all` : `its newest ${phase} handoff is version ${newest}`}`);
+          }
+          handoff = await client.handoff(match.id);
+        }
+      } catch (error) {
+        throw refusalWithCode(error);
+      }
+      return {
+        text: `${handoff.issue_key} ${handoff.phase} handoff, version ${handoff.version} (id ${handoff.id}), written by ${actorText(handoff.author)} at ${handoff.created_at}
+${handoff.body}`,
+        details: {
+          issue: handoff.issue_key,
+          phase: handoff.phase,
+          version: handoff.version,
+          handoff: handoff.id
+        }
+      };
+    }
     case "dispatch_read": {
       const message = optionalString(args, "message");
       const picturesOf = (texts) => readPictures(client, picturesNewestFirst(texts), shown);
@@ -21321,13 +21547,15 @@ function loadSessionMemory(dir, sessionId) {
   const pictures = shownPictures(sessionId);
   for (const address of stringList(state.pictures))
     pictures.add(address);
+  rememberKeyedLayer(state.keyedLayer);
   return new Set(stringList(state.follows));
 }
 function writeMemory(dir, sessionId, follows) {
   const state = {
     advice: [...adviceMemory()],
     pictures: [...shownPictures(sessionId)],
-    follows: [...follows]
+    follows: [...follows],
+    keyedLayer: keyedLayerMemory()
   };
   writeAtomically(join4(dir, "state.json"), `${JSON.stringify(state)}
 `);
@@ -22253,7 +22481,8 @@ var ErrorWireSchema = object({
 });
 var EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: string2().optional(),
-  holder: string2().optional()
+  holder: string2().optional(),
+  duplicate: boolean2().optional()
 });
 var ReplayWireSchema = object({
   stream: object({
@@ -22339,44 +22568,84 @@ class EnvoyApiError extends Error {
     this.code = parsed?.code;
   }
 }
+var mintedDedupeKey2 = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
+
+class EnvoySendUnconfirmedError extends Error {
+  targetSessionID;
+  idempotencyKey;
+  attempts;
+  last;
+  name = "EnvoySendUnconfirmedError";
+  resendSafe;
+  constructor(targetSessionID, idempotencyKey, attempts, last) {
+    const got = last instanceof EnvoyApiError ? `the listener answered ${last.details.status} (${last.message})` : `the listener did not answer (${last instanceof Error ? last.message : String(last)})`;
+    const tried = attempts === 1 ? "on its only attempt" : `on the last of ${attempts} attempts`;
+    const resendSafe = mintedDedupeKey2.test(`agent.${targetSessionID.trim()}.${idempotencyKey}`);
+    const resend = resendSafe ? `Sending it again with idempotency_key ${idempotencyKey} within ` + `${DELIVERY_DUPLICATE_WINDOW_MS / 3600000} hours is the safe resend: Envoy drops it as ` + "a repeat if the first copy arrived (a recipient that restarted in between can rarely " + "see it twice)." : `Envoy cannot recognise a resend under idempotency_key ${idempotencyKey} as a repeat ` + "(the key is not a lower-case UUID, or the session id holds a dot): ask the recipient " + "whether it arrived before sending it again.";
+    super(`The send to ${targetSessionID} is not confirmed delivered: ${got} ${tried}. It may or may ` + `not have arrived. ${resend}`, { cause: last });
+    this.targetSessionID = targetSessionID;
+    this.idempotencyKey = idempotencyKey;
+    this.attempts = attempts;
+    this.last = last;
+    this.resendSafe = resendSafe;
+  }
+}
 function createEnvoyClient(config) {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config.token;
+  const attempts = config.retry === false ? 1 : 2;
+  const attemptOnce = async (url, init, deadlineMs) => {
+    const headers = new Headers(init.headers);
+    if (apiToken)
+      headers.set("Authorization", `Bearer ${apiToken}`);
+    let response;
+    try {
+      response = await config.fetch(url, {
+        ...init,
+        headers,
+        signal: AbortSignal.timeout(deadlineMs)
+      });
+    } catch (error) {
+      return { unanswered: error };
+    }
+    try {
+      return { response, body: await response.text() };
+    } catch (error) {
+      if (response.status >= 400 && response.status < 500) {
+        return { response, body: `(its body did not arrive: ${String(error)})` };
+      }
+      return { unanswered: error };
+    }
+  };
   const request = async (path, init, options = {}) => {
     const url = `${baseUrl}${path}`;
-    const attempts = config.retry === false ? 1 : 2;
     const tries = options.retry === false ? 1 : attempts;
     for (let attempt = 0;attempt < tries; attempt += 1) {
-      let response;
-      try {
-        const headers = new Headers(init.headers);
-        if (apiToken)
-          headers.set("Authorization", `Bearer ${apiToken}`);
-        response = await config.fetch(url, {
-          ...init,
-          headers,
-          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
-        });
-      } catch (error) {
+      const outcome = await attemptOnce(url, init, options.timeoutMs ?? timeoutMs);
+      if ("unanswered" in outcome) {
+        options.onUnanswered?.();
         if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
-        throw error;
+        throw outcome.unanswered;
       }
-      const responseBody = await response.text();
+      const { response, body } = outcome;
       if (response.ok)
-        return responseBody;
+        return body;
       const error = new EnvoyApiError({
         method: init.method ?? "GET",
         url,
         status: response.status,
-        responseBody
+        responseBody: body
       });
-      if (response.status >= 500 && attempt + 1 < tries) {
-        await waitForRetry();
-        continue;
+      if (response.status >= 500) {
+        options.onUnanswered?.();
+        if (attempt + 1 < tries) {
+          await waitForRetry();
+          continue;
+        }
       }
       throw error;
     }
@@ -22412,18 +22681,33 @@ function createEnvoyClient(config) {
     getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
     send: async (input) => {
       const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/send", {
-        source: input.source ?? "agent",
-        ...sourceSession(input.sourceSessionID),
-        target_session: input.targetSessionID,
-        message: input.message,
-        idempotency_key: idempotencyKey,
-        ...messageMetadata(input)
-      })));
+      let unanswered = false;
+      let response;
+      try {
+        const answer = await post("/v1/messages/send", {
+          source: input.source ?? "agent",
+          ...sourceSession(input.sourceSessionID),
+          target_session: input.targetSessionID,
+          message: input.message,
+          idempotency_key: idempotencyKey,
+          ...messageMetadata(input)
+        }, {
+          onUnanswered: () => {
+            unanswered = true;
+          }
+        });
+        response = EnvelopeResponseSchema.parse(JSON.parse(answer));
+      } catch (error) {
+        if (error instanceof EnvoyApiError && error.details.status < 500 && !unanswered) {
+          throw error;
+        }
+        throw new EnvoySendUnconfirmedError(input.targetSessionID, idempotencyKey, attempts, error);
+      }
       return {
         envelope: response,
         recipient: response.recipient ?? input.targetSessionID,
-        confirmed: response.recipient !== undefined
+        confirmed: response.recipient !== undefined,
+        duplicate: response.duplicate === true
       };
     },
     publish: async (input) => {
@@ -22462,7 +22746,13 @@ function createEnvoyClient(config) {
         raw = await post("/v1/roles/set", body);
       } catch (error) {
         if (error instanceof EnvoyApiError && error.details.status === 409) {
-          const held = RoleHeldWireSchema.safeParse(JSON.parse(error.details.responseBody));
+          let answer;
+          try {
+            answer = JSON.parse(error.details.responseBody);
+          } catch {
+            throw error;
+          }
+          const held = RoleHeldWireSchema.safeParse(answer);
           if (held.success)
             return { claimed: false, holder: held.data.holder };
         }
@@ -22559,9 +22849,10 @@ async function runDispatchCli(argv, rawEnv, io) {
     if (value !== undefined && value !== "")
       env[name] = value;
   }
+  const claudeSession = env.ENVOY_SESSION_ID ?? env.CLAUDE_CODE_SESSION_ID;
   const refuse = (text, code, tool, askgate) => {
     print(text);
-    const sessionId = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
+    const sessionId = claudeSession ?? env.DISPATCH_SESSION_ID;
     if (sessionId !== undefined) {
       try {
         appendResult(sessionDirectory(env, sessionId), {
@@ -22593,8 +22884,7 @@ async function runDispatchCli(argv, rawEnv, io) {
   if (host === undefined) {
     return refuse(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp or claude.`, USAGE, parsed.tool);
   }
-  const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
-  const sessionId = env[sessionVariable];
+  const [sessionId, sessionVariable] = host === "claude" ? [claudeSession, "ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID"] : [env.DISPATCH_SESSION_ID, "DISPATCH_SESSION_ID"];
   if (sessionId === undefined) {
     return refuse(`dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`, USAGE, parsed.tool);
   }

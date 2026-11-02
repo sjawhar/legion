@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -56,10 +57,11 @@ const decidedWordingDiffers = `
 	and (a.question, a.options, a.multiple, a.urgency) is distinct from (` + decidedWordingColumns + `)`
 
 // decidedWordingPlan reads each ask decidedWordingRestore would give back its decided wording,
-// writing nothing: its id, its document and block (both null for an ask no block holds) and the
-// wording.
+// writing nothing: its id, its document and block (both null for an ask no block holds), the
+// wording, and the answer the decision was given on, which the restore leaves as it is and the
+// restored ask's parts are indexed with (restoreWordings).
 const decidedWordingPlan = decidedWordingEdits + `
-	select a.id::text, a.block_artifact_id::text, a.block_id, ` + decidedWordingColumns + `
+	select a.id::text, a.block_artifact_id::text, a.block_id, ` + decidedWordingColumns + `, a.answer
 	from asks a join first_edit f on a.id = f.id
 	where ` + decidedWordingDiffers + `
 	order by a.id`
@@ -87,6 +89,9 @@ type restoredWording struct {
 	document *string
 	block    *string
 	wording  model.AskEditPrevious
+	// answer is the decision the restored wording was given on, which the restore leaves as it
+	// is: the restored ask's parts are read with it beside the wording (restoreWordings).
+	answer *model.AskAnswer
 }
 
 // decidedWordingRollbackTimeout bounds the rollback of a boot restoration that did not commit,
@@ -105,13 +110,13 @@ const decidedWordingRollbackTimeout = 5 * time.Second
 // it marked owed. cmd/dispatch runs it once at boot; a task of the earlier release still running
 // during a rolling deploy can reword one again, which the next settlement of its document on this
 // release restores (restoreDocumentDecidedWordings), writing the decided wording back in that same
-// settlement. It reads what it restores, plans the questions' references, takes the copy locks and
-// reads the owed documents before it writes anything, holding no ask's row; then it restores them,
-// writes their references and marks the documents owed back to back, and commits. Its update
-// restores exactly the asks it read or the restoration is refused (errDecidedWordingsMoved). A
-// settlement takes its own document's owner lock before its copy lock and an answer or a
-// resolution its ask's owner lock before SettleCopiesOf, so none of them waits on a lock this
-// holds once it holds the copy lock.
+// settlement. It reads what it restores, plans the questions' references and the asks' parts,
+// takes the copy locks and reads the owed documents before it writes anything, holding no ask's
+// row; then it restores them, writes their references and their parts and marks the documents
+// owed back to back, and commits. Its update restores exactly the asks it read or the restoration
+// is refused (errDecidedWordingsMoved). A settlement takes its own document's owner lock before
+// its copy lock and an answer or a resolution its ask's owner lock before SettleCopiesOf, so none
+// of them waits on a lock this holds once it holds the copy lock.
 func (s *Service) RestoreDecidedWordings(ctx context.Context) (restored, copies int, err error) {
 	ctx = store.WithTransactionTracking(ctx)
 	tx, err := s.store.Pool.Begin(ctx)
@@ -229,12 +234,17 @@ func (s *Service) restoreDocumentDecidedWordings(ctx context.Context, tx pgx.Tx,
 }
 
 // restoreWordings gives the decided asks ids names, or every decided ask when ids is nil, their
-// decided wording back, and indexes each restored question's references again, as every write of
-// an ask's question does (refs.ReplaceCounted); no event carries the change, as none does for
-// refs.RebuildAll's. Which asks it restores and their references are read and planned where it is
-// called (decidedWordingPlan, planReplaceCounted); the restoration and the references go through
-// write. The restoration names the planned asks and refuses to have restored any other set
-// (errDecidedWordingsMoved).
+// decided wording back, and indexes each restored ask again, as every write of an ask's question
+// and options does: its own references (planAskReferences, refs.ReplaceCounted's read half) and
+// its parts (refs.PlanAskParts), the parts read from the plan's row - the restored wording with
+// the answer the decision left on it. The parts are indexed at the time this restoration writes
+// them, the change they record, and not at the time of the edit it undoes, which the restore
+// leaves on the row (edited_at). No event carries the change, as none does for refs.RebuildAll's,
+// so nothing counts what the restoration moved. Which asks it restores, their references and
+// their parts are read and planned where it is called (decidedWordingPlan); the restoration, the
+// references and the parts go through write, queued in that order, so an ask's parts are written
+// after the update whose wording they hold. The restoration names the planned asks and refuses to
+// have restored any other set (errDecidedWordingsMoved).
 func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) ([]restoredWording, error) {
 	rows, err := tx.Query(ctx, decidedWordingPlan, ids)
 	if err != nil {
@@ -242,13 +252,20 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 	}
 	restored, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (restoredWording, error) {
 		var wording restoredWording
-		var options []byte
+		var options, answer []byte
 		if err := row.Scan(&wording.ask, &wording.document, &wording.block, &wording.wording.Question, &options,
-			&wording.wording.Multiple, &wording.wording.Urgency); err != nil {
+			&wording.wording.Multiple, &wording.wording.Urgency, &answer); err != nil {
 			return restoredWording{}, err
 		}
 		if err := json.Unmarshal(options, &wording.wording.Options); err != nil {
 			return restoredWording{}, fmt.Errorf("decode the options of ask %s: %w", wording.ask, err)
+		}
+		if len(answer) > 0 {
+			var decided model.AskAnswer
+			if err := json.Unmarshal(answer, &decided); err != nil {
+				return restoredWording{}, fmt.Errorf("decode the answer of ask %s: %w", wording.ask, err)
+			}
+			wording.answer = &decided
 		}
 		return wording, nil
 	})
@@ -258,15 +275,38 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 	if len(restored) == 0 {
 		return nil, nil
 	}
-	planned := make([]string, len(restored))
-	steps := make([]WriteStep, len(restored))
-	for index, wording := range restored {
-		planned[index] = wording.ask
+	// The parts are written in this transaction, so they are indexed at its time.
+	at, err := transactionNow(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	planned := make([]string, 0, len(restored))
+	steps := make([]WriteStep, 0, 2*len(restored))
+	for _, wording := range restored {
+		planned = append(planned, wording.ask)
 		_, step, err := planAskReferences(ctx, tx, wording.ask, wording.wording.Question, s.serverURL)
 		if err != nil {
 			return nil, fmt.Errorf("index the restored question of ask %s: %w", wording.ask, err)
 		}
-		steps[index] = step
+		steps = append(steps, step)
+		// The restored ask's parts are its question, its restored options and the answer the
+		// decision was given on, which the restore leaves on the row. Their write is queued
+		// after the restore's, so the trigger that marks the ask's parts owed on that update has
+		// already run when this index clears it.
+		ask := model.Ask{
+			ID:       wording.ask,
+			Question: wording.wording.Question,
+			Options:  wording.wording.Options,
+			Answer:   wording.answer,
+		}
+		indexing, err := refs.PlanAskParts(ctx, tx, ask, s.serverURL, at)
+		if err != nil {
+			return nil, fmt.Errorf("index the parts of the restored ask %s: %w", wording.ask, err)
+		}
+		steps = append(steps, func(b *store.WriteBatch) error {
+			indexing.Queue(b)
+			return nil
+		})
 	}
 	slices.Sort(planned)
 	if err := write(ctx, tx, func(b *store.WriteBatch) error {

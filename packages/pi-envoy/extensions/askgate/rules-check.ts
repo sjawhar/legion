@@ -420,12 +420,12 @@ async function readAsks(
     });
     return { asks, textMissing, asksPartial: false };
   }
-  // An upload replaces the document of its name, as the server matches one; the asks that version
-  // already holds are not new. Any other document the reference found says nothing about this
-  // upload, so every opener in it is judged.
+  // An upload replaces the document whose name or slug its name is, as the server matches one; the
+  // asks that version already holds are not new. Any other document the reference found (one whose
+  // id it is) says nothing about this upload, so every opener in it is judged.
   const name = uploadName(call.input);
   const currentIds =
-    read !== "not-found" && read.name === name
+    read !== "not-found" && (read.name === name || read.slug === name)
       ? new Set(read.blocks.map((block) => block.id))
       : undefined;
   return {

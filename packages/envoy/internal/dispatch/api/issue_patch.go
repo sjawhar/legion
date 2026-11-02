@@ -472,7 +472,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	case closing:
 		withdrawn, appended, err = s.recordWithdrawnAsksTx(documentCtx, tx, ledger, key, closingAsks, actor)
 	case reopening:
-		appended, err = s.recordRestoredAsksTx(ledger, key, reopenedAsks, actor)
+		appended, err = s.recordRestoredAsksTx(documentCtx, tx, ledger, key, reopenedAsks, actor)
 	}
 	if err != nil {
 		s.writeHandlerError(w, err)

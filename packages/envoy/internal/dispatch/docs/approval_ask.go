@@ -86,10 +86,11 @@ func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 }
 
 // RewriteApprovalAsk rewords one open approval row to name version with summary, indexes its new
-// question, stamps edited_at, and records its ask.edited event. A document version move and a
-// request with a new summary both reword; neither hands the request back, so requested_version
-// stays as it was. A move of a request that an earlier version already moved since it was opened
-// or handed back, requested_version below the version it named, is recorded quiet
+// question and the parts that question is the first of, stamps edited_at, and records its
+// ask.edited event. A document version move and a request with a new summary both reword;
+// neither hands the request back, so requested_version stays as it was. A move of a request that
+// an earlier version already moved since it was opened or handed back, requested_version below
+// the version it named, is recorded quiet
 // (model.AskEditEventPayload.Quiet): it changes only that version, so like a human's unnamed version
 // it wakes nobody. The event it appends goes to the ledger of the transaction it runs in, as every
 // document operation's does (eventSink), which publishes it after its Commit; no caller reads it
@@ -101,8 +102,9 @@ func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 // settlement's ledger and the block-id backfill's are in the context of the writes they own, so
 // this refuses neither.
 //
-// The new question, the approval it encodes, the references it cites and its edited_at are worked
-// out here; the update, the references' writes, the append and the stamp are one step (write).
+// The new question, the approval it encodes, the references it cites, the parts it leaves and
+// its edited_at are worked out here; the update, the references' writes, the parts' writes, the
+// append and the stamp are one step (write).
 // edited_at is clock_timestamp(), read here rather than in the update, so the event's copy of the
 // row carries it before the write phase runs, and so does ask, which a later step of the same
 // transaction queues from (carryApproval's answer).
@@ -142,6 +144,13 @@ func RewriteApprovalAsk(
 	}
 	ask.EditedAt = askTimestamp(&editedAt)
 	row := *ask
+	// The rewording is a revision of the request's question part, which its ask.edited names
+	// beside the request's own references. The parts are planned from the row the update below
+	// writes, which the read of the index does not show yet, and written in that same step.
+	changes, parts, err := planAskParts(ctx, tx, row, serverURL, editedAt, changes)
+	if err != nil {
+		return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
+	}
 	payload := model.NewAskEditEventPayload(row, previous, actor, changes)
 	payload.Quiet = quiet
 	return write(ctx, tx, func(b *store.WriteBatch) error {
@@ -152,6 +161,9 @@ func RewriteApprovalAsk(
 		`, ask.ID, row.Question, approval, editedAt)
 		if err := index(b); err != nil {
 			return fmt.Errorf("index approval ask: %w", err)
+		}
+		if err := parts(b); err != nil {
+			return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
 		}
 		if err := broker.QueueAppend(b, model.Event{
 			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,

@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -332,6 +333,16 @@ func (s *Service) reconcileAskBlocks(
 			if err := write(ctx, tx, index); err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
+			// The new ask's parts, beside its own references: both named by the ask.opened. The
+			// parts are planned here and written after the row's own insert, which this
+			// transaction has queued (createAskBlock), since every part row names its ask.
+			changes, parts, err := planAskParts(ctx, tx, ask, s.serverURL, ask.CreatedAt, changes)
+			if err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index the parts of new ask block %s: %w", ask.ID, err)
+			}
+			if err := write(ctx, tx, parts); err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index the parts of new ask block %s: %w", ask.ID, err)
+			}
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner, artifactID, "ask.opened", blockActor, model.NewAskEventPayload(ask, changes),
 			))
@@ -351,7 +362,18 @@ func (s *Service) reconcileAskBlocks(
 			if ask.State == "answered" {
 				eventType = "ask.answered"
 			}
-			payload := model.NewAskEventPayload(ask, model.ReferenceChanges{})
+			// The restoration writes state, answer and resolution back: the answer it brings
+			// back is a part again, and the event names what that moved. The parts are written
+			// after the restoring update, which this transaction has queued.
+			restoredAt := refs.AskPartsAt(ask)
+			changes, parts, err := planAskParts(ctx, tx, ask, s.serverURL, restoredAt, model.ReferenceChanges{})
+			if err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index the parts of restored ask %s: %w", ask.ID, err)
+			}
+			if err := write(ctx, tx, parts); err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index the parts of restored ask %s: %w", ask.ID, err)
+			}
+			payload := model.NewAskEventPayload(ask, changes)
 			payload.Restored = true
 			reconciled.events = append(reconciled.events, documentAskEvent(owner, artifactID, eventType, actor, payload))
 		}
@@ -401,6 +423,16 @@ func (s *Service) reconcileAskBlocks(
 			}
 			if err := write(ctx, tx, index); err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
+			}
+			// The block's wording is now the row's: its parts are that wording too, and the
+			// ask.edited names what they moved beside the ask's own references. The parts are
+			// written after the queued update that gives the row that wording.
+			changes, parts, err := planAskParts(ctx, tx, ask, s.serverURL, editedAt, changes)
+			if err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index the parts of reconciled ask %s: %w", ask.ID, err)
+			}
+			if err := write(ctx, tx, parts); err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index the parts of reconciled ask %s: %w", ask.ID, err)
 			}
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner,
@@ -795,6 +827,36 @@ func recordAskBlock(ctx context.Context, tx pgx.Tx, artifactID string, ask model
 		ledger.askBlocks[artifactID] = make(map[string]model.Ask)
 	}
 	ledger.askBlocks[artifactID][*ask.BlockID] = ask
+}
+
+// planAskParts is the counted index of an ask's parts as this package makes its writes: it plans
+// the parts the ask's row holds at `at` - its question, its options and the answer it carries -
+// against the stored index (refs.PlanAskParts, which writes nothing), resolves the counted
+// targets they move and merges them into beside, what the same write moved elsewhere (the ask's
+// own references, or model.ReferenceChanges{} for a write that reconciles none), and returns
+// those with the step that writes the parts. The step is queued after the statements that leave
+// the row as the plan reads it, since a part row names its ask; the plan itself runs in the
+// read phase, where the counts the event carries are worked out.
+func planAskParts(
+	ctx context.Context,
+	tx pgx.Tx,
+	ask model.Ask,
+	serverURL string,
+	at time.Time,
+	beside model.ReferenceChanges,
+) (model.ReferenceChanges, WriteStep, error) {
+	indexing, err := refs.PlanAskParts(ctx, tx, ask, serverURL, at)
+	if err != nil {
+		return model.ReferenceChanges{}, nil, err
+	}
+	counted, err := refs.CountedChanges(ctx, tx, indexing.Moved())
+	if err != nil {
+		return model.ReferenceChanges{}, nil, err
+	}
+	return refs.MergeChanges(beside, counted), func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}, nil
 }
 
 // createAskBlock opens the ask of block, a new ask block of artifactID: its id and its created_at,

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
@@ -13,14 +14,24 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// replyBlockInAskThread is the refusal of a reply in an ask's thread that names a block: an ask's
-// thread has no blocks to answer until INFRA-369 gives an ask's replies blocks of their own.
-const replyBlockInAskThread = "a reply in an ask's thread names no block yet"
+// replyBlockOwner is the kind of item the block a reply names belongs to, read from the node id
+// replies_to_block stores (refs.ParseItemBlockNode): `ask/<id>#<part>` is a part of an ask,
+// which a reply naming that ask names, and `comment/<id>#<block>` a block of the comment the
+// reply answers. A node id of no shape this build knows is read as a comment's, the kind every
+// reply written before ask parts named.
+func replyBlockOwner(nodeID string) refs.ItemKind {
+	if kind, _, _, ok := refs.ParseItemBlockNode(nodeID); ok {
+		return kind
+	}
+	return refs.ItemComment
+}
 
 // namedBlock is the block of its parent a reply names (reply_to_block, in_reply_to_block): the
-// node id replies_to_block stores, the item holding the block, the block's own id and its
-// stored excerpt.
+// kind of item holding it, since a comment's reply may name a block of the comment it answers or
+// a part of the ask it was asked under, the node id replies_to_block stores, the item holding the
+// block, the block's own id and its stored excerpt.
 type namedBlock struct {
+	kind    refs.ItemKind
 	node    string
 	item    string
 	id      string
@@ -29,15 +40,15 @@ type namedBlock struct {
 
 // replyBlock is the block as a reply carries it (model.ReplyBlock), for a write whose reply row
 // is queued and so has nothing for the read of a stored reply to join (refs.ReplyBlocks). The
-// block is one the item holds now, so it is not removed; issueKey, project and slug address the
-// item as that read addresses it, under the reply's owner (ownerAddress).
-func (block *namedBlock) replyBlock(kind refs.ItemKind, issueKey *string, project, slug string) *model.ReplyBlock {
+// block is one the item holds now, so it is not removed; the item's own kind addresses it, with
+// issueKey, project and slug, as that read addresses it, under the reply's owner (ownerAddress).
+func (block *namedBlock) replyBlock(issueKey *string, project, slug string) *model.ReplyBlock {
 	if block == nil {
 		return nil
 	}
 	return &model.ReplyBlock{
 		Node:    block.node,
-		Ref:     refs.ItemBlockRef(kind, issueKey, project, slug, block.item, block.id),
+		Ref:     refs.ItemBlockRef(block.kind, issueKey, project, slug, block.item, block.id),
 		BlockID: block.id,
 		Text:    block.excerpt,
 	}
@@ -57,12 +68,13 @@ func (s *server) ownerAddress(ctx context.Context, tx pgx.Tx, owner owner) (issu
 	return owner.IssueKey, project, slug, nil
 }
 
-// planReplyBlock checks that blockID is a current block of item itemID, the comment or message a
-// reply answers, and returns it with the index the item owes, which the caller queues in its
-// write phase. The caller holds the item's owner (when it has one) and, for a message, the item
-// row; an item an older build wrote, or wrote after its last index, is indexed by the same
-// transaction (refs.PlanItemIfOwed), so the block named is one of the item's current body: the
-// repaired index is read from its plan, the stored one from the block rows. A block the item
+// planReplyBlock checks that blockID is a current block of item itemID — the comment or the
+// message a reply answers, or the ask a reply names, whose blocks are the parts of its question,
+// its options and its answer — and returns it with the index the item owes, which the caller
+// queues in its write phase. The caller holds the item's owner (when it has one) and, for a
+// message, the item row; an item an older build wrote, or wrote after its last index, is indexed
+// by the same transaction (refs.PlanItemIfOwed), so the block named is one the item holds now:
+// the repaired index is read from its plan, the stored one from the block rows. A block the item
 // does not hold now answers 400 with code, naming field and the block.
 func (s *server) planReplyBlock(
 	ctx context.Context, tx pgx.Tx, kind refs.ItemKind, itemID, blockID, field, code string,
@@ -80,7 +92,7 @@ func (s *server) planReplyBlock(
 	if !found {
 		return refs.ItemRepair{}, nil, errorf(http.StatusBadRequest, code, "%s %s is not a block of %s %s", field, blockID, kind, itemID)
 	}
-	return repair, &namedBlock{node: node, item: itemID, id: blockID, excerpt: excerpt}, nil
+	return repair, &namedBlock{kind: kind, node: node, item: itemID, id: blockID, excerpt: excerpt}, nil
 }
 
 // replyBlockOf is planReplyBlock with the item's owed index queued on ledger, at the point the
@@ -139,20 +151,27 @@ func lockReplyParentMessage(ctx context.Context, tx pgx.Tx, id string) error {
 }
 
 // hydrateCommentReplyBlocks sets each comment's ReplyBlock, the block of its parent it answers
-// (null when it names none), in one query over every comment that names one (RepliesToBlock),
-// however many there are, and none when no comment does. A comment that already carries its
-// block is left alone: its writer read that block before its row was written, and its insert may
-// still be queued, where this read would find nothing (namedBlock.replyBlock).
+// (null when it names none), in one query per kind of item the named blocks belong to: a reply
+// under an ask names a part of that ask, every other reply a block of the comment it answers
+// (replyBlockOwner), so a page of either costs one query and a page of both two. A comment that
+// already carries its block is left alone: its writer read that block before its row was
+// written, and its insert may still be queued, where this read would find nothing
+// (namedBlock.replyBlock).
 func hydrateCommentReplyBlocks(ctx context.Context, q queryer, comments ...*model.Comment) error {
-	ids := make([]string, 0, len(comments))
+	ids := map[refs.ItemKind][]string{}
 	for _, comment := range comments {
 		if comment.RepliesToBlock != nil && comment.ReplyBlock == nil {
-			ids = append(ids, comment.ID)
+			owner := replyBlockOwner(*comment.RepliesToBlock)
+			ids[owner] = append(ids[owner], comment.ID)
 		}
 	}
-	blocks, err := refs.ReplyBlocks(ctx, q, refs.ItemComment, ids)
-	if err != nil {
-		return err
+	blocks := make(map[string]*model.ReplyBlock, len(ids))
+	for owner, owned := range ids {
+		found, err := refs.ReplyBlocks(ctx, q, owner, owned)
+		if err != nil {
+			return err
+		}
+		maps.Copy(blocks, found)
 	}
 	for _, comment := range comments {
 		if block, read := blocks[comment.ID]; read {

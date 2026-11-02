@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -359,27 +360,40 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	return ask, nil
 }
 
-// closeAskTx applies a transition to an open ask inside the caller's transaction, appends the
-// transition's event and runs its After; the caller commits and publishes the events. Every write
-// is queued on ledger, in the order made, so the copies' pending rows SettleCopiesOf takes come
-// before the event appends, as the copy lock's order requires (docs.lockProjectCopies), and the
-// events are filled in once Commit has run the write phase (appendedEvents).
+// closeAskTx applies a transition to an open ask inside the caller's transaction, indexes the
+// ask's parts, appends the transition's event and runs its After; the caller commits and
+// publishes the events. Every write is queued on ledger, in the order made, so the copies'
+// pending rows SettleCopiesOf takes come before the parts' index and the event appends, as the
+// copy lock's order requires (docs.lockProjectCopies), and the events are filled in once Commit
+// has run the write phase (appendedEvents).
 func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, id string, actor model.Actor, transition askTransition) (model.Ask, []*model.Event, error) {
 	ask, err := s.transitionAskTx(ctx, tx, ledger, id, transition)
 	if err != nil {
 		return model.Ask{}, nil, err
 	}
-	// A transition writes no question text, so it moves no references and says so. The answer
-	// it may have written is queued before the event, so the ask's Replies rows are read by the
-	// event's insert, after it.
-	base := model.NewAskEventPayload(ask, model.ReferenceChanges{})
+	// A transition writes no question text, so it reconciles none of the ask's own references.
+	// An answer is a part of the ask, though, so both transitions index the parts here, where
+	// the row write they queued comes before the index: a resolution adds no part, but its
+	// indexing still takes the ask's state row, reconciles the links its parts hold and clears
+	// owed_at, and writes every part of an ask an older build left owed. The answer a transition
+	// wrote is queued before the event, so the ask's Replies rows are read by the event's insert,
+	// after it.
+	at := refs.AskPartsAt(ask)
+	changes, err := s.queueAskParts(ctx, tx, ledger, ask, at, model.ReferenceChanges{})
+	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	base := model.NewAskEventPayload(ask, changes)
 	payload := any(base)
 	if transition.Payload != nil {
 		payload = transition.Payload(base)
 	}
+	// The part edges the index above moves are new rows of this transaction, so the event stamps
+	// them with its id ("ask", ask.ID) and a ?since= read lists them, as a create's and an edit's
+	// do.
 	event, err := s.queueLoggedEvent(ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		transition.EventType, actor, payload,
-	), events.ThreadLoginsOf(ask.ID), "", "")
+	), events.ThreadLoginsOf(ask.ID), "ask", ask.ID)
 	if err != nil {
 		return model.Ask{}, nil, err
 	}
