@@ -12,10 +12,10 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// testEnv is the store a listener and the sessions registered through it share, over the test's
-// own NATS server: the bus client, the interest registry a fan-out reads, and the session registry
-// a delivery resolves its target in. The tests here exercise those stores and the reaper over a
-// real server; a delivery decision is the listener's, and `cmd/listener`'s own tests drive it.
+// testEnv is what a test of this package holds: its own NATS server, the bus client a producer
+// publishes through, the interest registry a fan-out reads, and the session registry a delivery
+// resolves its target in. A delivery decision is the listener's, and `cmd/listener`'s own tests
+// drive it.
 type testEnv struct {
 	t        *testing.T
 	client   *bus.Client
@@ -110,9 +110,7 @@ func containsTopic(topics []string, want string) bool {
 
 func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
 	env := setupTestEnv(t)
-	env.registerKVSession("ses_role_a")
 	env.registerInterest("ses_role_a", nil)
-	env.registerKVSession("ses_role_b")
 	env.registerInterest("ses_role_b", nil)
 
 	if _, err := env.registry.SetRole("ses_role_a", "test-machine", "legion-controller", false); err != nil {

@@ -234,9 +234,9 @@ func TestTheRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
 // The test drives the delivery handler directly, with a core message of an ad-hoc topic the
 // stream does not store (bus.UsesCoreTransport). No lane carries such a message to the fan-out
 // in production: the listener's core handler is wired to the role lane alone
-// (bus.ConnectRoleLane on notifications.role.>), and with the live topics lane deleted the
-// fan-out runs for durable messages only. What the test pins is the rule itself,
-// judgeFollowedTopic's echo arm, which decides the same way on every lane.
+// (bus.ConnectRoleLane on notifications.role.>), so the fan-out runs for durable messages only.
+// The verdict is the same either way, because judgeFollowedTopic is never told the lane: its
+// signature takes no deliveryMessage, so a core message earns the verdict a durable one would.
 func TestTheFanoutSkipsAMessageOnAFollowedTopicAsAnEchoOfTheSessionThatPublishedIt(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
 	run := id.New()
