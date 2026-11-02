@@ -3813,6 +3813,36 @@ describe("executeDispatchTool", () => {
     expect(result.text).not.toContain("which is not this host session");
   });
 
+  // A token that names a service and no person is refused every Dispatch write with
+  // SIGN_IN_REQUIRED, whose message names `agent-secrets login`. whoami is where a person asks
+  // what their credential may do, so its sentence for that caller must not describe the issue
+  // creation the server refuses, and must name the command that gets them a write.
+  test("dispatch_whoami tells a service-only caller its writes need a sign-in", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: null,
+        service: "example-fleet",
+        session: "session-1",
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.text).toContain("runs as service example-fleet");
+    expect(result.text).not.toMatch(/issues? you create/);
+    expect(result.text).toContain("agent-secrets login");
+  });
+
   test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {
     const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
     const existingLink = { url: "https://ci.example/run/1", kind: "url" };
