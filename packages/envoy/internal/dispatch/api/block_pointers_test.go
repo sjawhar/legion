@@ -179,7 +179,8 @@ func TestARebuildFromMarkdownRefusesABlockPointerToADisallowedType(t *testing.T)
 // setBlockAttributes writes typed-block state through the live room's own service call, as the
 // answer route does (answerAsk's WriteBlock): inside a transaction joined with Docs.Join, the
 // only way a document write runs, committed when the write succeeds. It returns
-// SetBlockAttributes' own error, which the test asserts on.
+// SetBlockAttributes' own error, which a caller testing a refusal asserts on;
+// setLiveBlockAttributes is the same write for a caller that wants it to succeed.
 func setBlockAttributes(database *store.Store, documentService docs.API, artifactID, blockID string, attributes map[string]any, actor model.Actor) error {
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
@@ -193,14 +194,6 @@ func setBlockAttributes(database *store.Store, documentService docs.API, artifac
 		return err
 	}
 	return ledger.Commit(ctx)
-}
-
-// artifactMarkdown is the document as the room renders it now.
-func artifactMarkdown(t *testing.T, handler http.Handler, artifactID string) string {
-	t.Helper()
-	return decodeBody[struct {
-		Markdown string `json:"markdown"`
-	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", nil, "alice")).Markdown
 }
 
 // The server's own write of a typed block's state (Docs.SetBlockAttributes) meets both refusals a
@@ -225,7 +218,7 @@ func TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom(t *testing.T) {
 		t.Fatalf("upload checks.md: status=%d body=%s, want 201", response.Code, response.Body.String())
 	}
 	saved := readChecks(t, database, issue.Key)
-	before := artifactMarkdown(t, handler, saved.ID)
+	before := documentMarkdown(t, handler, saved.ID)
 
 	for _, test := range []struct {
 		name string
@@ -265,7 +258,7 @@ func TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom(t *testing.T) {
 					t.Fatalf("error = %v, want it to name %s", err, want)
 				}
 			}
-			if after := artifactMarkdown(t, handler, saved.ID); after != before {
+			if after := documentMarkdown(t, handler, saved.ID); after != before {
 				t.Fatalf("the room after a refused write = %q, want %q unchanged", after, before)
 			}
 			if after := readChecks(t, database, issue.Key); !reflect.DeepEqual(after, saved) {
@@ -278,7 +271,7 @@ func TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom(t *testing.T) {
 		t.Fatalf("a pointer at a requirement: %v, want the write accepted", err)
 	}
 	want := ":::requirement{#r2}\nOurs.\n:::\n\n" + claimMarkdown("c1", checks+"#b-r2")
-	if after := artifactMarkdown(t, handler, saved.ID); after != want {
+	if after := documentMarkdown(t, handler, saved.ID); after != want {
 		t.Fatalf("the room after the accepted write = %q, want %q", after, want)
 	}
 }

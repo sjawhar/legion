@@ -14,8 +14,11 @@ import (
 // one the set holds (0161_delivery_run_warnings): 20261101143211_ask_blocks and
 // 20261101143212_asks_block_parts_trigger are timestamped, so they sort after every number and
 // apply after it. askBlockTables is 20261101143211, which creates the tables 20261101143212
-// attaches its trigger to and seeds. A numbered migration that merges above this one moves it:
-// it must name the version this pair applies directly after.
+// attaches its trigger to and seeds. No numbered migration can move beforeAskBlocks, since
+// migrationid closed Dispatch's numbered series at 161 and every migration written since takes a
+// timestamp. What moves it is a timestamped migration whose version sorts between 161 and
+// 20261101143211 merging later: beforeAskBlocks must name the version this pair applies
+// directly after, so these tests see the schema as it stands just before the pair.
 const (
 	beforeAskBlocks = 161
 	askBlockTables  = 20261101143211
