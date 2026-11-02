@@ -2,16 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-11-01T22:02:12Z",
-  "round": 16,
-  "headReviewed": "95ef78087492a3b5090986869215f31cad567838",
+  "completed": "2026-11-02T00:30:33Z",
+  "round": 17,
+  "headReviewed": "fccd461afa15311f91a9419defaaebd842e61924",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 0,
-  "codeVerdict": "Approved apart from the two tests and the merge. b3a91c12: the stored-order check counts versions recorded below a compaction base (VersionsCompacted), names them on its line, and a document with none compared is unchecked (exit 1), with tests in docs and cmd/dispatch. 95ef7808: passRoomLock also runs on a failed read or fold (its error joined); lockRoom takes the pool connection before the in-process TryLock when it does not wait; noteAppended notes each source directly; the copy, note and eviction rules are stated once. Merge of main through 0642a37a in 13f952a8.",
-  "ci": "At 95ef7808 (run 41351722573), read 22:01 UTC: no red; typecheck, test, pr-title and most lanes green, lint, dispatch, envoy-go, envoy-go-race and others still running. GitHub reports the pull request CONFLICTING: main's #2640 re-broke cmd/dispatch/README.md's stored-order lines one sentence per line, the file the stored-order fix also changed.",
+  "roundShape": "round-shape.py v3, old 95ef78087492a3b5090986869215f31cad567838 -> new fccd461afa15311f91a9419defaaebd842e61924: 68 files both, 2 whose own diff differs: docs/compaction_test.go (the two regression tests, +188) and cmd/dispatch/README.md (the #2640 merge: the PR's sentences unchanged, on main's line breaks). No runtime file.",
+  "codeVerdict": "Approved apart from the merge. TestACompactionThatDoesNotWaitHoldsNoRoomLockWhileItWaitsForAConnection and TestAWaitingCompactionWhoseReadFailedStillWaitsForTheRoomsLock pin round 15's two lock fixes; each waits on events bounded by roomWait, runs on its own cloned database (storetest.Open), and per tester round 22 fails with its fix reverted and passes 20/20 under -race.",
+  "ci": "At fccd461a (run 41356973556), read 00:30 UTC: lint, typecheck, test, pr-title, dispatch, envoy-go and every other lane success; ci-ok still queued. GitHub reports the pull request CONFLICTING.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs", "description": "Two behaviour fixes of round 15 have no committed regression test: a non-waiting compaction holding a room's in-process lock while it waits for a compaction-pool connection (a writer of that room waits behind it), and passRoomLock skipped on a read or fold error. Commit the tester's probes (zz_minors_probe_test.go in dispatch://INFRA-593/artifact/infra-593-tester-rig-round-21-tar-gz), renamed to the package's test naming, each failing at f533f33c and passing at the head. With them, merge main for #2640's README conflict."}
+    {"severity": "important", "file": "(branch)", "description": "Main merged #2519 ('a long or deeply nested list no longer freezes a reader's tab') after this head's base, changing ten of the PR's files, runtime among them (docs/ledger.go, mutation.go, persistence.go, roomcursor.go, service.go, tree.go, websocket.go). The implementer merges main; round-shape decides the next round."}
   ]
 }
