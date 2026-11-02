@@ -109,12 +109,15 @@ export function refusingNats(cleanup: Cleanup): string {
  * Writes the profile under `home`: the stand-in at `base` as its one provider, keyed by a literal
  * like a plain API-key caller, every model role on it, and every provider a devbox or runner could
  * answer from without it disabled, so no turn reaches a real model. `config` lines are appended to
- * config.yml.
+ * config.yml. `modelRoles: false` writes no `modelRoles` at all, as a session started without the
+ * settings overlay that names them has none; its session still runs on the stand-in, the one model
+ * it can reach.
  */
 export async function writeStandinProfile(
   home: string,
   base: string,
-  config: readonly string[] = []
+  config: readonly string[] = [],
+  options: { readonly modelRoles?: boolean } = {}
 ): Promise<void> {
   const agent = path.join(home, ".omp", "agent");
   await writeFile(
@@ -143,10 +146,22 @@ export async function writeStandinProfile(
       "enabledModels:",
       "  - standin/*",
       "disabledProviders: [amazon-bedrock, bedrock-mantle, google, google-vertex, ollama, llama.cpp, lm-studio]",
-      "modelRoles:",
-      ...["default", "smol", "slow", "plan", "task", "commit", "tiny", "vision", "advisor"].map(
-        (role) => `  ${role}: standin/standin-model`
-      ),
+      ...(options.modelRoles === false
+        ? []
+        : [
+            "modelRoles:",
+            ...[
+              "default",
+              "smol",
+              "slow",
+              "plan",
+              "task",
+              "commit",
+              "tiny",
+              "vision",
+              "advisor",
+            ].map((role) => `  ${role}: standin/standin-model`),
+          ]),
       ...config,
       "",
     ].join("\n")

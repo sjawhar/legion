@@ -64,9 +64,10 @@ const ASKS = "/api/v1/issues/DSP-1/asks";
  * The `dispatch` is a stand-in whose --dry-run prints the arguments and whose send prints that it
  * sent, or, with `cli: "real"`, a shim that runs the real CLI from source against the fake Dispatch
  * the stand-in serves, which records each ask it takes. `envoyJson` is the session's envoy.json and
- * `config` lines are added to the profile's config.yml. `files` are written into the root, beside
- * `bin/`, before the session starts, and `dispatchUrl` names another fake Dispatch. Gives back every
- * request the stand-in took and where the session file landed.
+ * `config` lines are added to the profile's config.yml. `modelRoles: false` leaves the profile with
+ * no model roles at all. `files` are written into the root, beside `bin/`, before the session
+ * starts, and `dispatchUrl` names another fake Dispatch. Gives back every request the stand-in took
+ * and where the session file landed.
  */
 async function runSession(options: {
   gateAnswer: string;
@@ -78,6 +79,7 @@ async function runSession(options: {
   dispatchUrl?: string;
   /** OMP_ASKGATE for the session: unset leaves the defaults, block for a verdict, warn for checks. */
   mode?: "warn" | "block";
+  modelRoles?: false;
 }): Promise<{ requests: Request[]; sessions: string }> {
   if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
   const { root, home, workspace, sessions } = await ompRoot(omp, "askgate-omp-", cleanup);
@@ -142,7 +144,9 @@ async function runSession(options: {
       topics: [],
     });
   });
-  await writeStandinProfile(home, base, options.config ?? []);
+  await writeStandinProfile(home, base, options.config ?? [], {
+    modelRoles: options.modelRoles ?? true,
+  });
 
   let settled = Promise.withResolvers<void>();
   const rpc = spawnRpc(
@@ -324,6 +328,83 @@ test.skipIf(omp === undefined && !onActions)(
     expect(await gateEntries(sessions)).toMatchObject([
       { tool: "dispatch_ask", outcome: "verdict", decision: "allow" },
     ]);
+  },
+  180_000
+);
+
+// A session started without the settings overlay that names its model roles has none: the gate
+// refused every Dispatch write of such a session, naming two roles to set, and a session left
+// waiting on a permission prompt never recovered. It reviews with the session's own model instead,
+// and says so in the call's result, since a model judging its own session's write is the weaker
+// review.
+test.skipIf(omp === undefined && !onActions)(
+  "a session with no model roles reviews a dispatch ask with its own model, posts it once and says so",
+  async () => {
+    const { requests, sessions } = await runSession({
+      cli: "real",
+      modelRoles: false,
+      gateAnswer: '{"decision":"allow"}',
+      firstTurn: (dispatch) => ({
+        type: "tool_use",
+        name: "bash",
+        input: { command: ask(dispatch) },
+      }),
+    });
+    // The entry first: on a gate that refuses, its outcome and reason say why.
+    expect(await gateEntries(sessions)).toMatchObject([
+      {
+        tool: "dispatch_ask",
+        outcome: "verdict",
+        decision: "allow",
+        model: "standin/standin-model",
+        sessionModel: "standin/standin-model",
+      },
+    ]);
+    expect(lastTurn(requests)).toContain(
+      "AskGate reviewed this call with this session's own model, standin/standin-model"
+    );
+    const gate = requests.filter(
+      (request) => request.path === "/anthropic/v1/messages" && isGateRequest(request)
+    );
+    expect(gate).toHaveLength(1);
+    expect(asksPosted(requests)).toBe(1);
+  },
+  180_000
+);
+
+// The review of #2654 at 7fe67d3fa1, finding 1: a session whose modelRoles.askgate names a model it
+// cannot use was told that no role is set. The gate reviews it with the session's own model, as a
+// session with no role, and the note and the entry say what the role is set to.
+test.skipIf(omp === undefined && !onActions)(
+  "a session whose askgate role names a model it cannot use is told the role's value, not that no role is set",
+  async () => {
+    const { requests, sessions } = await runSession({
+      cli: "real",
+      modelRoles: false,
+      config: ["modelRoles:", "  askgate: standin/missing-reviewer"],
+      gateAnswer: '{"decision":"allow"}',
+      firstTurn: (dispatch) => ({
+        type: "tool_use",
+        name: "bash",
+        input: { command: ask(dispatch) },
+      }),
+    });
+    expect(await gateEntries(sessions)).toMatchObject([
+      {
+        tool: "dispatch_ask",
+        outcome: "verdict",
+        decision: "allow",
+        model: "standin/standin-model",
+        sessionModel: "standin/standin-model",
+        unresolvedRoles: [{ role: "askgate", value: "standin/missing-reviewer" }],
+      },
+    ]);
+    const turn = lastTurn(requests);
+    expect(turn).toContain(
+      "because modelRoles.askgate is set to standin/missing-reviewer, which resolves to no model this session can use, and modelRoles.default is not set."
+    );
+    expect(turn).not.toContain("neither modelRoles.askgate nor modelRoles.default is set");
+    expect(asksPosted(requests)).toBe(1);
   },
   180_000
 );
