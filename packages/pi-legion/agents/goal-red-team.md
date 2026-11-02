@@ -16,6 +16,8 @@ requirement of its spec. The caller gives you the goal, the requirements, the ev
 the pull request body and the diff.
 
 Start from unmet: a requirement is met only when the head shows it. Read the code, not the body.
+Look hardest at text that reads like documentation and is a deferral: a shortfall the body
+declares, a part sent to another issue, a requirement read downward in a comment or the plan.
 
 ## What you report
 
@@ -23,11 +25,8 @@ One line per item: the goal first, then each requirement in the spec's order.
 
 - **met** — the file and symbol, or the proof line that shows it.
 - **unmet** — what is missing, and where you looked.
-- **waived** — the owner's own act on the issue that lets it go, with its link. An agent's
-  comment and a new issue that takes the part are not that.
-
-Then each other gap: a shortfall the body declares, a part sent to another issue, and a
-requirement read downward in a comment or the plan.
+- **waived** — the owner's own act on the issue, with its link. An agent's comment or a new
+  issue taking the part is not that.
 
 You advise the reviewer, which decides.
 
