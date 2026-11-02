@@ -339,21 +339,25 @@ func (s *server) markStaleLinks(
 // staleLink is that rule for one link, over the sums markStaleLinks read. A time keys those
 // reads by its own instant (UnixNano), since a time read back from Postgres is the same instant
 // in another `time.Time` value, which no map matches.
+//
+// A version this document does not hold leaves the link as it is. A version it holds that gives
+// this decision no sum - the heading was renamed since, or that version carried it twice - is
+// text that differs from the text now, which it is.
 func staleLink(
 	now, heading string,
 	link model.DecisionLink,
 	sums map[int]map[string]string,
 	atTime map[int64]int,
 ) bool {
-	atCreated, ok := sums[link.CreatedVersion][heading]
-	if !ok || atCreated == now {
+	atCreated, read := sums[link.CreatedVersion]
+	if !read || atCreated[heading] == now {
 		return false
 	}
 	if link.To.ChangedAt == nil {
 		return false
 	}
-	number, ok := atTime[link.To.ChangedAt.UnixNano()]
-	if !ok {
+	number, asked := atTime[link.To.ChangedAt.UnixNano()]
+	if !asked {
 		return false
 	}
 	if number == 0 {
@@ -361,8 +365,8 @@ func staleLink(
 		// change of the decision came after it.
 		return true
 	}
-	atChange, ok := sums[number][heading]
-	return ok && atChange != now
+	atChange, read := sums[number]
+	return read && atChange[heading] != now
 }
 
 // versionsAtTimes is, for each time, the document's greatest version written at or before it:
@@ -516,7 +520,8 @@ func codeFence(line string) string {
 }
 
 // markdownHeading is a line's ATX heading level and title, or level 0 for a line that is no
-// heading. It reads what `headingOf` reads off a heading block's own markdown.
+// heading. It reads a title as `headingOf` reads one off a heading block's own markdown, closing
+// hashes and all, so the heading a version is keyed by is the heading the view names.
 func markdownHeading(line string) (int, string) {
 	level := 0
 	for level < len(line) && line[level] == '#' {
@@ -525,7 +530,7 @@ func markdownHeading(line string) (int, string) {
 	if level == 0 || level > 6 || level >= len(line) || line[level] != ' ' {
 		return 0, ""
 	}
-	return level, strings.TrimSpace(strings.TrimRight(line[level+1:], "#"))
+	return level, strings.TrimSpace(line[level:])
 }
 
 // sortedNumbers and sortedTimes are the keys of a set, in order, so one read asks for each once.
