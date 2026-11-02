@@ -50,18 +50,7 @@ func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testi
 				t.Fatalf("claim the role: %v", err)
 			}
 			subject := contracts.AgentSubject(tc.holder)
-			receipts, err := harness.client.Conn.Subscribe(subject, func(message *natsgo.Msg) {
-				if message.Reply != "" {
-					_ = message.Respond(nil)
-				}
-			})
-			if err != nil {
-				t.Fatalf("subscribe the holder's receipt: %v", err)
-			}
-			t.Cleanup(func() { _ = receipts.Unsubscribe() })
-			if err := harness.client.Conn.Flush(); err != nil {
-				t.Fatalf("flush the holder's subscription: %v", err)
-			}
+			forwardThrough := startRoleForward(harness.client)
 
 			for index, item := range tc.sends {
 				cfg := harness.config
@@ -70,16 +59,18 @@ func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testi
 				t.Cleanup(cfg.attemptCache.Stop)
 				var forwardErr error
 				forwards := 0
-				cfg.forwardRole = inlineForward(func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error {
+				cfg.forwardRole = func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
 					forwards++
-					forward, err := harness.client.StartRequestStoredTo(subject, item, msgID, timeout)
+					wait, err := forwardThrough(subject, item, msgID, timeout)
 					if err != nil {
 						forwardErr = err
-						return forwardErr
+						return nil, err
 					}
-					forwardErr = forward.Wait()
-					return forwardErr
-				})
+					return func() error {
+						forwardErr = wait()
+						return forwardErr
+					}, nil
+				}
 				cfg = wireTestDeliveryWorkers(t, cfg)
 				item.Topic = contracts.RoleTopicPrefix + role
 				item.Payload = `{"type":"worker-queued"}`

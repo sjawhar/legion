@@ -1357,7 +1357,8 @@ func ReachesNoSession(topic string) bool {
 
 // ErrRefused is returned for an envelope that is refused the same way however often it is
 // published, or a KV key refused however often a call names it, so a caller answers it as a
-// refusal rather than a failure to retry. It is ErrTooLarge, ErrInvalidSubject or ErrInvalidKey.
+// refusal rather than a failure to retry. It is ErrTooLarge, ErrInvalidSubject, ErrInvalidKey or
+// ErrNoForwardMsgID.
 var ErrRefused = errors.New("refused")
 
 // refusal is a kind of ErrRefused. Its text names only the kind, since every line and answer that
@@ -1696,6 +1697,13 @@ func ForwardMsgID(dedupeKey, subject string) string {
 	return dedupeKey + ":" + subject
 }
 
+// ErrNoForwardMsgID is the ErrRefused of a forward sent with no Nats-Msg-Id. A forward's one
+// lasting copy is the stored one, so the name the stream keeps it under is what holds it to one
+// copy per message and recipient however often the forward is sent, and every caller has that
+// name (ForwardMsgID). An unnamed forward is stored again by every attempt, so
+// StartRequestStoredTo refuses it rather than send it.
+var ErrNoForwardMsgID error = refusal("a forward without a " + nats.MsgIdHdr)
+
 // ErrForwardNotStored is returned by a forward's Wait when the stream's acknowledgement that it
 // stored the forward did not arrive before the deadline, or came back as the stream's error: the
 // forward's one lasting copy, which the holder's session consumer delivers, is missing. The
@@ -1710,15 +1718,17 @@ var ErrForwardNotStored = errors.New("bus: the stream did not acknowledge storin
 // the holder's session consumer delivers through the listener's relay, with acknowledgement and
 // redelivery.
 //
-// The forward carries msgID as its Nats-Msg-Id header when msgID is not empty, and no header when
-// it is: whether a forward is one the stream may store once is its caller's choice
-// (ForwardMsgID). A sender that forwards one envelope again under one MsgId until it is stored
-// leaves the stream one copy per message and recipient, however many attempts it makes, and the
-// stream acknowledges each repeat as a duplicate, which counts as stored; a forward without one
-// is stored each time it is sent. An error here is the publish's own, before any reply could
-// arrive (a denied or invalid forward, a connection that never came back within timeout); every
-// returned forward must be waited for, which releases its reply subscription.
+// The forward carries msgID as its Nats-Msg-Id header, and an empty msgID is refused
+// ErrNoForwardMsgID before anything is sent. A sender that forwards one
+// envelope again under one MsgId until it is stored leaves the stream one copy per message and
+// recipient, however many attempts it makes, and the stream acknowledges each repeat as a
+// duplicate, which counts as stored. An error here is the publish's own, before any reply could
+// arrive (a refused, denied or invalid forward, a connection that never came back within
+// timeout); every returned forward must be waited for, which releases its reply subscription.
 func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (*PendingForward, error) {
+	if msgID == "" {
+		return nil, fmt.Errorf("%w: to %q", ErrNoForwardMsgID, subject)
+	}
 	if err := checkSubject(subject); err != nil {
 		return nil, err
 	}
@@ -1738,9 +1748,11 @@ func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, m
 	if err != nil {
 		return nil, err
 	}
-	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data}
-	if msgID != "" {
-		forward.Header = nats.Header{nats.MsgIdHdr: []string{msgID}}
+	forward := &nats.Msg{
+		Subject: subject,
+		Reply:   inbox,
+		Data:    data,
+		Header:  nats.Header{nats.MsgIdHdr: []string{msgID}},
 	}
 	err = c.publishConfirmed(ctx, conn, forward, conn.PublishMsg)
 	if err != nil && !errors.Is(err, ErrPublishUnconfirmed) {

@@ -64,6 +64,42 @@ func TestStartRequestStoredToCountsTheStreamsAcknowledgementAlone(t *testing.T) 
 	}
 }
 
+// A forward with no Nats-Msg-Id is refused before anything is sent: the stored copy is the whole
+// of the delivery, and an unnamed one is stored again by every attempt, so the name is required
+// rather than optional. The refusal is an ErrRefused, which the listener answers at once instead
+// of retrying it for the rest of the send's window (forwardRefused).
+func TestStartRequestStoredToRefusesAForwardWithoutAMsgID(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	subject := contracts.AgentSubject("ses_unnamed_forward")
+
+	forward, err := client.StartRequestStoredTo(subject, contracts.Envelope{
+		EventID:        "evt_unnamed",
+		Source:         "agent",
+		SourceEventID:  "src_unnamed",
+		Topic:          "notifications.role.unnamed",
+		DedupeKey:      "publish.unnamed",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "a forward with no Nats-Msg-Id",
+	}, "", 2*time.Second)
+	if forward != nil {
+		t.Fatalf("an unnamed forward returned a pending forward; want none, since nothing was sent")
+	}
+	if !errors.Is(err, bus.ErrNoForwardMsgID) || !errors.Is(err, bus.ErrRefused) {
+		t.Fatalf("an unnamed forward returned %v, want ErrNoForwardMsgID and ErrRefused", err)
+	}
+	info, err := client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	if stored := info.State.Subjects[subject]; stored != 0 {
+		t.Fatalf("the stream stores %d messages on %s after a refused forward, want none", stored, subject)
+	}
+}
+
 // A forward whose flush times out is refused by StartRequestStoredTo itself, before any wait, and
 // within the window the caller gave rather than the client's default 10 s flush: the forward is
 // still buffered on this side of a stalled connection and is not known to have reached anyone, so

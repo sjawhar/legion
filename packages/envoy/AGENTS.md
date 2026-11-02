@@ -2541,7 +2541,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   after a forward the stream did not acknowledge it waits 100 ms (`publishRetryPause`) and tries again, until the stream stores one or 4 s from the request's arrival have passed (`publishDeliveryWindow`, which bounds every read, forward and pause of the send, and keeps the answer inside envoy-client's 5 s attempt and the Legion daemon's 10 s client).
   No holder answers a receipt: the stored copy is the delivery, which the holder's own session consumer relays, or, for a serving-port holder of the forwarding listener, which its port is pushed.
   Every attempt forwards the same envelope, one `event_id` under the dedupe key `envoy.role.forward.<key>`, so a holder that took two copies drops the second.
-  `RequestCoreTo` sends a forward under the `Nats-Msg-Id` its caller passes, and none when that is empty:
+  `StartRequestStoredTo` refuses a forward with no `Nats-Msg-Id` (`bus.ErrNoForwardMsgID`, an `ErrRefused`), since the stored copy is the whole delivery and an unnamed one is stored again by every attempt:
   the route passes the forward's dedupe key and subject (`bus.ForwardMsgID`) on every attempt, so the stream, which captures agent subjects, keeps one copy per message and recipient however many attempts it makes, and the role lane passes the name `roleForward.msgID` chooses (below): the forward's dedupe key and subject when the original envelope's key names its event (`contracts.DedupeKeyNamesTheUpstreamEvent`, asked of the envelope before `contracts.RoleForwardDedupePrefix` is added to its key), and its `event_id` and subject otherwise, since two distinct envelopes can share a key their sender chose and the stream must store each.
   The route answers the outcome to its sender (the Listener API's `/v1/messages/publish` row), writes it on its `listener publish` record line, and publishes no exception.
 
@@ -3647,7 +3647,9 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   A forward the stream did not store within the window is `delivery_failed`; no answer is `receipt_timeout` any more.
 
 - **Trust:** `core.SessionPermissions` subscribes to `notifications.envoy.deliver.*`, the presence subject `notifications.envoy.presence.*` and no other `notifications.` subject, so a client holding a session user can read any session's relay frames and publish `done` to a frame's reply subject (an `_INBOX.` subject, which every session user may publish to), which acknowledges that session's message away:
-  it can remove a stored message from the consumer of a session that is away, so that session never sees it. Nothing here publishes or subscribes to a presence subject: the grant is ahead of dispatch://INFRA-626, which has a listener probe a session before it reports a send delivered, so that change needs no grant change of its own. No stream subject captures the subject and it carries no message; once that change lands, a session on a shared user will be able to answer another's probe, so a stopped session reads as live.
+  it can remove a stored message from the consumer of a session that is away, so that session never sees it.
+  Nothing here publishes or subscribes to a presence subject: the grant is ahead of dispatch://INFRA-626, which has a listener probe a session before it reports a send delivered, so that change needs no grant change of its own.
+  No stream subject captures the subject and it carries no message; once that change lands, a session on a shared user will be able to answer another's probe, so a stopped session reads as live.
   dispatch://INFRA-840 narrows both grants to the session's own subjects.
   A host user (`HostPermissions`), which a host's sessions share with its listener, still names `notifications.>`, so there a session reads every notification topic until that change lands.
 

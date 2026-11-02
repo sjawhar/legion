@@ -278,6 +278,24 @@ forward is stored on the holder's agent subject (one copy per message and holder
 serving-port holder counts the same acknowledgement, since its relay, or the owning listener's
 durable, pushes the stored copy to its port.
 
+Dispatch's outbox forwards its own role-routed events to the holder itself: it resolves the
+holder with the resolution the listener's lane uses (`roles.ResolveHolder`) and sends the
+envelope, its role topic kept, to the holder's agent subject, so Dispatch's events no longer
+cross `notifications.role.*`.
+That forward is stored only: one copy on the holder's agent subject under its own
+`Nats-Msg-Id` (`bus.ForwardMsgID` of the forward's dedupe key and that subject), counted
+reached on the stream's acknowledgement of the copy and on nothing else, with no receipt from
+any holder, since the holder reads the copy from its own session consumer.
+A role with no claim counts as reached with nothing sent, and a forward the stream did not
+acknowledge stays pending in the outbox and is retried; the outbox raises no exception.
+The listener's role lane names its own forward by the same rule with one exception
+(`roleForward.msgID`): the forward's dedupe key and the agent subject when the original
+envelope's dedupe key, before the forward's `envoy.role.forward.` prefix is added, names its
+event, and the envelope's `event_id` and the agent subject otherwise, since two distinct
+envelopes can share a key their sender chose.
+So the stream stores one copy of a message per recipient however often it is forwarded, and
+two messages under one key as two.
+
 When a control delivery has no holder, or the stream stored no forward for the holder it found,
 Envoy emits an envelope on `notifications.envoy.exceptions.<original-topic>`. The exception
 payload preserves the original delivery fields:

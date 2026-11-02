@@ -68,17 +68,16 @@ func TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating(t *testing.T) {
 				t.Fatalf("claim the role: %v", err)
 			}
 
-			// The holder answers the forward's receipt only after the message is recorded, so a
-			// forward the lane reports delivered is on this channel by the time the handler
-			// returns (bus.Client.RequestCoreTo waits for the receipt).
+			// The lane waits for the stream's acknowledgement that it stored the forward
+			// (bus.Client.StartRequestStoredTo), and the server takes the holder's copy and the
+			// stream's on one publish, so a forward the lane reports delivered is on this channel
+			// by the time the handler returns. The holder answers nothing: no session answers a
+			// forward's receipt any more.
 			forwards := make(chan *natsgo.Msg, 4)
 			received, err := harness.client.Conn.Subscribe(holderSubject, func(message *natsgo.Msg) {
 				select {
 				case forwards <- message:
 				default:
-				}
-				if message.Reply != "" {
-					_ = message.Respond(nil)
 				}
 			})
 			if err != nil {

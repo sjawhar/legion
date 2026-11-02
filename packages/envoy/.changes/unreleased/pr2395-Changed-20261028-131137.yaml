@@ -24,7 +24,7 @@ body: |-
     `notifications.role.<role>`: Dispatch resolves the holder as the listener does and forwards the
     event to the holder's own subject, publishing it once the stream has stored that copy, which
     is a forward's whole answer: no holder answers one. The listener's role
-    lane's forward (`bus.Client.RequestCoreTo`) carries a `Nats-Msg-Id` of its dedupe key and subject
+    lane's forward (`bus.Client.StartRequestStoredTo`) carries a `Nats-Msg-Id` of its dedupe key and subject
     (`bus.ForwardMsgID`) when the original envelope's key names its event
     (`contracts.DedupeKeyNamesTheUpstreamEvent`, asked of the key without
     `contracts.RoleForwardDedupePrefix`), so a forward sent again is stored once per message and

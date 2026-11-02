@@ -231,6 +231,39 @@ func TestPublishRouteStoresTheForwardForAHolderThatIsNotConnected(t *testing.T) 
 	noException(t, probe)
 }
 
+// The publish route names its role forward with the forward's own Nats-Msg-Id (bus.ForwardMsgID
+// of the forward's dedupe key and the holder's agent subject), so the stream, which captures
+// agent subjects, keeps one copy of the message for its holder however often the route sends it.
+// Two sends of one idempotency key through two routes - a second listener, which holds no record
+// of the first one's confirmation - forward the envelope to the holder twice, and the stream
+// stores that one copy.
+func TestPublishRouteStoresOneCopyOfARoleForwardSentTwice(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "stored-once"
+	claimRoleFor(t, harness.registry, harness.sessions, "ses_one_copy", role, nil)
+	frames := startStandIn(t, testnats.URL(t), "ses_one_copy")
+	probe := exceptionProbe(t, harness.client)
+	body := `{"topic":"` + contracts.RoleTopicPrefix + role + `","message":"twice over","idempotency_key":"stored-once-1"}`
+
+	for send, deps := range []*listenerDeps{harness.publishDeps(t), harness.publishDeps(t)} {
+		recorder, elapsed := publishThrough(deps, body)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("send %d: status %d after %s, want 200; body %s", send+1, recorder.Code, elapsed, recorder.Body.String())
+		}
+	}
+	// Both sends forwarded, so the stream took the message twice and stored it under one name.
+	for i, frame := range expectFrames(t, frames, 2, 300*time.Millisecond) {
+		if frame.DedupeKey != roleForwardDedupePrefix+"publish.stored-once-1" {
+			t.Fatalf("forward %d: dedupe key %s, want %s", i+1, frame.DedupeKey, roleForwardDedupePrefix+"publish.stored-once-1")
+		}
+	}
+	subject := contracts.AgentSubject("ses_one_copy")
+	if count := storedForwards(t, harness.client, subject); count != 1 {
+		t.Fatalf("the stream holds %d messages on %s after two forwards of publish.stored-once-1, want the one copy their Nats-Msg-Id keeps", count, subject)
+	}
+	noException(t, probe)
+}
+
 // A role-claim read that cannot finish, the server having stopped answering under a live
 // connection, ends the send's first resolution at sendRequestBudget with the answer GET
 // /v1/roles/<role> gives the same stalled read - the bus-unavailable 503 with Retry-After: 1,

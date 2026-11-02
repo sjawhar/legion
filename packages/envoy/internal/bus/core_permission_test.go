@@ -137,7 +137,7 @@ func TestPublishReportsAJetStreamPublishNATSDenies(t *testing.T) {
 func TestStartRequestStoredToReportsAForwardNATSDenies(t *testing.T) {
 	client, _ := grantedClient(t)
 	started := time.Now()
-	_, err := client.StartRequestStoredTo(deniedRole, roleEnvelope(deniedRole), "", 2*time.Second)
+	_, err := client.StartRequestStoredTo(deniedRole, roleEnvelope(deniedRole), bus.ForwardMsgID("denied-forward", deniedRole), 2*time.Second)
 	if !errors.Is(err, bus.ErrPublishDenied) {
 		t.Fatalf("denied forward returned %v, want ErrPublishDenied", err)
 	}
