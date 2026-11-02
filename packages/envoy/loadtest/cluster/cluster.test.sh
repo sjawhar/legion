@@ -148,7 +148,13 @@
 # failures, and the wait stops its job and then keeps polling until the job records an exit
 # status, SIGKILLing once a job that ignored the TERM; and a TERM that lands while the watcher
 # acts is taken, not lost, with pg_disk_watch_stop killing a watcher that outlasts its bound
-# and saying which step's it was.
+# and saying which step's it was; (ee) a runner pod that answers no exec bounds the wait past
+# its deadline: no SIGTERM delivered within RUNNER_STOP_GRACE_SECONDS of the deadline, no
+# SIGKILL within two of them of the SIGTERM, and no exit status within one of them of the
+# SIGKILL each end the wait non-zero, naming the pod it could not reach and giving no exit
+# status, so a whole step command whose runner pod stops answering exec ends non-zero within
+# that bound and its heartbeat renews the lock no more, while a TERM that lands between the
+# disk watcher's failed act and its next nap leaves it without a second act.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -293,6 +299,13 @@ case $verb in
       sed -i 1d "$FAKE_EXEC_ERRORS"
       exit 1
     fi
+    # FAKE_RUNNER_EXEC_FAIL=FILE: once FILE exists, every exec into the runner pod fails the way
+    # kubectl answers an exec into a pod that has gone -- the reads of a job's .rc and .log and
+    # the kill by its recorded pid alike, so nothing of that pod can be read or killed any more.
+    if [ -n "${FAKE_RUNNER_EXEC_FAIL:-}" ] && [ -f "$FAKE_RUNNER_EXEC_FAIL" ] && [[ " $* " == *" exec runner "* ]]; then
+      echo 'error: cannot exec into a container in a completed pod; current phase is Failed' >&2
+      exit 1
+    fi
     case $c in
       "sh -c while :; do"*)
         if [ -n "${FAKE_EXEC_FAIL:-}" ]; then
@@ -306,9 +319,12 @@ case $verb in
       # The job a stop names (runner_stop, runner_wait's bound, typing_stop) and, in a file of
       # its own so that every exact check of runner-stops keeps reading one job name per line,
       # the job a SIGKILL names (runner_wait past its grace).
+      # FAKE_RUNNER_EXEC_FAIL_AT_STOP: the pod goes away with that signal, so the stop is the
+      # last exec of the runner that answers (the TERM left this pod, and nothing after it does).
       "sh -c pid="*)
         printf '%s\n' "${cmd[4]}" >>"$FAKE_DIR/runner-stops"
         [[ ${cmd[2]} != *"kill -KILL"* ]] || printf '%s\n' "${cmd[4]}" >>"$FAKE_DIR/runner-kills"
+        [ -z "${FAKE_RUNNER_EXEC_FAIL_AT_STOP:-}" ] || : >"$FAKE_RUNNER_EXEC_FAIL"
         ;;
       # replay-prepare: the dump streamed into the Postgres pod, its sha256 there, the restore.
       'sh -c cat >"$1" sh '*) cat >"$FAKE_DIR/pod-dump" ;;
@@ -795,7 +811,8 @@ export PATH="$bin:$PATH"
 unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER \
   FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL \
   FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_RC_UNTIL_KILL FAKE_HEAP_COPY_FAIL FAKE_HEAP_EXISTS_FAIL FAKE_HEAP_KEEP_REMOVE_FAIL \
-  FAKE_LOCK_GET_FAIL FAKE_LOCK_GET_FAIL_TIMES FAKE_LOCK_GET_OK_TIMES FAKE_LOCK_GET_DELAY
+  FAKE_LOCK_GET_FAIL FAKE_LOCK_GET_FAIL_TIMES FAKE_LOCK_GET_OK_TIMES FAKE_LOCK_GET_DELAY \
+  FAKE_RUNNER_EXEC_FAIL FAKE_RUNNER_EXEC_FAIL_AT_STOP
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
 # The manifest names no issue: the operator does, and replay-prepare refuses without it.
 export LOADTEST_REPLAY_ISSUE=INFRA-639
@@ -906,7 +923,7 @@ reset_fake() {
     "$fake/runner-stops" "$fake/runner-kills" "$fake/rc-polls" "$fake/rc-kill-polls" "$fake/df-seq" "$fake/runner-heap-kept" "$fake/lock-get-fails" "$fake/lock-get-oks" \
     "$fake/sleep.log" "$fake/apply-errors" "$fake/replay-template" "$fake/restores" "$fake/pod-dump" \
     "$fake/stored-order.log" "$fake/go-dispatch.log" "$fake/go-browsertype.log" "$fake/git.log" \
-    "$fake/go-dispatch-tree.log" "$fake/go-subcommands.go"
+    "$fake/go-dispatch-tree.log" "$fake/go-subcommands.go" "$fake/runner-exec-fail"
   rm -rf -- "$fake/runner" "$fake/bundle-fixture"
   write_pods
   echo '1600000 100000' >"$fake/cpu.max"
@@ -3159,7 +3176,7 @@ rm -f -- "$fake/lock.json"
 pass "copy_exec takes -t and -i in either order, stops its parse at the first argument that is neither, and gives kube_for the bound, the pod and its container"
 
 # (dd) One read of the lock per poll, and a TERM the disk watcher cannot lose. The two pollers
-# decide on their own read of the lock and then kill through runner_term, which reads no lock:
+# stop a job through runner_stop, which reads the lock once there and kills on that one answer:
 # a second read inside the kill could fail where the first answered, and the watcher would then
 # leave with the load still running, or the wait end its step with the job it never stopped. And
 # while the watcher acts its TERM only sets a flag, so a TERM that lands inside its read of the
@@ -3333,3 +3350,196 @@ run_cluster down --namespace "$ns"
 ((RC == 0)) || fail "down exited $RC: $(cat "$tmp/out")"
 rm -f -- "$fake/lock-get-fails" "$fake/lock-get-oks"
 pass "each poll of the disk watcher and of the runner-job wait reads the lock once and kills by that one answer, a wait keeps polling until the job it stopped records an exit status and SIGKILLs one that ignored the TERM, and a TERM that lands while the watcher acts is taken, with pg_disk_watch_stop killing a watcher that outlasts its bound and saying so"
+
+# (ee) A runner pod no exec reaches bounds the wait, so the step ends and stops holding the lock.
+# Past its deadline the wait stops the job and then polls that job's .rc for the exit status the
+# stop makes it record. A runner pod that has gone answers every exec with "cannot exec into a
+# container in a completed pod", so neither the stop nor the .rc read ever answers again: with
+# nothing to bound it the wait polls for an exit status nothing is left to record, the step's
+# command never returns, and its heartbeat renews the lock for ever while no load runs.
+# RUNNER_STOP_GRACE_SECONDS bounds each step of the stop instead -- the TERM after the deadline,
+# the SIGKILL after the TERM, the exit status after the SIGKILL -- and the wait ends non-zero
+# naming the pod it could not reach, which ends the step command and lets the lock age.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-unreach
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --pg-volume 150Gi
+((RC == 0)) || fail "up exited $RC: $(cat "$tmp/out")"
+unreach_run=$(jq -r .data.run "$fake/lock.json")
+unreach_dir=$LOADTEST_CLUSTER_ROOT/$unreach_run/steps/pgterm
+unreach_fail=$fake/runner-exec-fail
+unreach_out=$tmp/unreachable.out
+unreach_print=$tmp/unreachable.print
+unreach_rc=$tmp/unreachable.rc
+unreach_stop=$tmp/unreachable-stop.out
+unreach_step=$tmp/unreachable-step.out
+# stop_tries: how many kills of a runner job the fake kubectl has been asked for, delivered or
+# not; kill_tries: how many of those named SIGKILL.
+stop_tries() { grep -c -- 'exec runner -c runner -- sh -c pid=' "$fake/kubectl.log" || true; }
+kill_tries() { grep -c -- 'kill -KILL' "$fake/kubectl.log" || true; }
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  NS=$ns
+  set_run "$unreach_run"
+  mkdir -p "$RUN_DIR/logs" "$unreach_dir"
+  self=$BASHPID
+  self_start=$(proc_start "$self")
+  # The guard's 2 s between tries is a fast sleep; the wait's 15 s poll is a real one, so each
+  # stage of its stop takes one poll and no assertion counts a spin. Three seconds of grace, so
+  # the bound is one poll wide.
+  export FAKE_FAST_SLEEP=2
+  RUNNER_STOP_GRACE_SECONDS=3
+  export FAKE_RUNNER_EXEC_FAIL=$unreach_fail
+  # The deadline has passed and the runner pod is gone: no TERM leaves this pod, and the job's
+  # .rc cannot be read either.
+  rm -f -- "$fake/runner-stops" "$fake/runner-kills"
+  : >"$unreach_fail"
+  gone_at=$EPOCHSECONDS
+  (
+    rc=0
+    runner_wait step-unreach 0 "$RUN_DIR/logs" "$self" "$self_start" >"$unreach_print" 2>"$unreach_out" || rc=$?
+    printf '%s\n' "$rc" >"$unreach_rc"
+  ) &
+  waiter=$!
+  stop_watchdog 90 "$waiter"
+  wait "$waiter" 2>/dev/null || true
+  stop_watchdog_end
+  gone_took=$((EPOCHSECONDS - gone_at))
+  [ ! -f "$fake/stop-late" ] ||
+    fail "the wait past its deadline did not end within 90 s while every exec of the runner pod failed: it polls for an exit status nothing can record, and its step never returns"
+  [ "$(cat "$unreach_rc")" != 0 ] ||
+    fail "that wait ended with status 0 although no TERM reached the job and no exit status was read: $(cat "$unreach_out")"
+  [ ! -s "$unreach_print" ] ||
+    fail "that wait printed '$(cat "$unreach_print")', which its caller reads as the job's exit status"
+  ((gone_took <= RUNNER_STOP_GRACE_SECONDS + 45)) ||
+    fail "that wait took $gone_took s to end, past the $RUNNER_STOP_GRACE_SECONDS s it gives the TERM and a poll's margin: $(cat "$unreach_out")"
+  grep -qF 'runner pod' "$unreach_out" ||
+    fail "that wait's note does not name the runner pod it could not reach: $(cat "$unreach_out")"
+  [ ! -s "$fake/runner-stops" ] ||
+    fail "that wait recorded a TERM as delivered although every exec of the runner pod failed: $(cat "$fake/runner-stops")"
+  # The TERM lands and the pod goes away with it (FAKE_RUNNER_EXEC_FAIL_AT_STOP): the SIGKILL
+  # its grace then calls for reaches nothing, and a second grace past the TERM ends the wait.
+  rm -f -- "$unreach_fail" "$fake/runner-stops" "$fake/runner-kills" "$fake/rc-polls"
+  export FAKE_RC_UNTIL_STOP=1 FAKE_RUNNER_EXEC_FAIL_AT_STOP=1
+  kills=$(kill_tries)
+  termed_at=$EPOCHSECONDS
+  (
+    rc=0
+    runner_wait step-termed 0 "$RUN_DIR/logs" "$self" "$self_start" >"$unreach_print" 2>"$unreach_out" || rc=$?
+    printf '%s\n' "$rc" >"$unreach_rc"
+  ) &
+  waiter=$!
+  stop_watchdog 90 "$waiter"
+  wait "$waiter" 2>/dev/null || true
+  stop_watchdog_end
+  termed_took=$((EPOCHSECONDS - termed_at))
+  [ ! -f "$fake/stop-late" ] ||
+    fail "the wait whose TERM was the last exec the runner pod answered did not end within 90 s: it polls for an exit status the SIGKILL it cannot send would have made"
+  grep -qx 'step-termed' "$fake/runner-stops" ||
+    fail "that wait sent no TERM at its deadline, so this case never reached the pod going away: $(cat "$unreach_out")"
+  [ "$(cat "$unreach_rc")" != 0 ] ||
+    fail "that wait ended with status 0 although no SIGKILL reached the job and no exit status was read: $(cat "$unreach_out")"
+  [ ! -s "$unreach_print" ] ||
+    fail "that wait printed '$(cat "$unreach_print")', which its caller reads as the job's exit status"
+  ((termed_took <= 2 * RUNNER_STOP_GRACE_SECONDS + 45)) ||
+    fail "that wait took $termed_took s to end, past the two graces the TERM and the SIGKILL get and a poll's margin: $(cat "$unreach_out")"
+  [ "$(($(kill_tries) - kills))" = 1 ] ||
+    fail "that wait asked for $(($(kill_tries) - kills)) SIGKILL(s), not the one attempt its second grace leaves room for: $(cat "$unreach_out")"
+  grep -qF 'runner pod' "$unreach_out" ||
+    fail "that wait's note does not name the runner pod it could not reach: $(cat "$unreach_out")"
+  unset FAKE_RC_UNTIL_STOP FAKE_RUNNER_EXEC_FAIL_AT_STOP
+  # The disk watcher's TERM, between an act that failed and its next nap: the watcher took the
+  # act's answer (the lock is this run's, the kill never left this pod), recorded the step
+  # failed and went back to polling, and the TERM there leaves it without a second act --
+  # instead of a watcher that polls on until pg_disk_watch_stop kills it at its bound.
+  export FAKE_PG_DF_SEQ=$fake/df-seq FAKE_RC_UNTIL_STOP=1
+  df_seq "$pg_size $pg_used_high $pg_free_high"
+  rm -f -- "$fake/runner-stops" "$unreach_dir/step-failed.json"
+  : >"$unreach_fail"
+  stops=$(stop_tries)
+  pg_disk_watch pgterm "$unreach_dir" step-pgterm "$unreach_dir/.pg-disk.jsonl" "$self" "$self_start" 2>"$unreach_out" &
+  PG_DISK_WATCHER=$! PG_DISK_WATCH_STEP=pgterm
+  watcher=$PG_DISK_WATCHER
+  # The watcher's 30 s poll is a real sleep here, so the act below is its only one: a watcher
+  # that took the TERM leaves before the next nap ends, and one that lost it acts again.
+  until [ -f "$unreach_dir/step-failed.json" ] || ! kill -0 "$watcher" 2>/dev/null; do sleep 0.05; done
+  [ -f "$unreach_dir/step-failed.json" ] ||
+    fail "the watcher ended before it recorded the step failed, so no TERM of this case lands after an act that failed: $(cat "$unreach_out")"
+  PG_DISK_STOP_SECONDS=5
+  stop_watchdog 45 "$watcher"
+  pg_disk_watch_stop 2>"$unreach_stop"
+  stop_watchdog_end
+  [ ! -f "$fake/stop-late" ] ||
+    fail "pg_disk_watch_stop did not return within 45 s of the TERM it sent between the watcher's failed act and its next nap: $(cat "$unreach_stop")"
+  ! grep -qF 'so it was killed' "$unreach_stop" ||
+    fail "pg_disk_watch_stop had to kill the watcher at its bound: the TERM between its failed act and its next nap was lost: $(cat "$unreach_stop")"
+  ! kill -0 "$watcher" 2>/dev/null ||
+    fail "the disk watcher still runs after pg_disk_watch_stop returned: $(cat "$unreach_out")"
+  jq -e '[.reasons[] | select(.kind == "pg_disk")] | length == 1' "$unreach_dir/step-failed.json" >/dev/null 2>&1 ||
+    fail "the watcher recorded $(jq -r '[.reasons[] | select(.kind == "pg_disk")] | length' "$unreach_dir/step-failed.json" 2>/dev/null) pg_disk failure(s), not the one it records however many polls the stop takes: $(cat "$unreach_dir/step-failed.json" 2>/dev/null)"
+  [ "$(($(stop_tries) - stops))" = 1 ] ||
+    fail "the watcher asked for $(($(stop_tries) - stops)) kills of its job, not the one act it made before the TERM: it acted again after it"
+  [ ! -s "$fake/runner-stops" ] ||
+    fail "the watcher recorded a TERM as delivered although every exec of the runner pod failed: $(cat "$fake/runner-stops")"
+)
+rm -f -- "$unreach_fail"
+# A whole step command whose runner pod goes away once its loadgen run has started: it ends
+# non-zero within its bound, and nothing of that run renews the lock after it has.
+run_cluster seed --namespace "$ns"
+((RC == 0)) || fail "seed exited $RC: $(cat "$tmp/out")"
+# The heartbeat up started sleeps a real 60 s; the step below starts one whose 60 s is a fast
+# sleep, so the periods this case waits out cost it no clock.
+unreach_hb=$(<"$LOADTEST_CLUSTER_ROOT/$unreach_run/heartbeat.pid")
+kill -TERM -- "-$unreach_hb" 2>/dev/null || true
+until ! kill -0 "$unreach_hb" 2>/dev/null; do sleep 0.05; done
+# Two bounds a test can reach, as (dd) reaches the grace: the slack the wait gives the loadgen
+# run over the bound that run was started with, and the grace each step of its stop gets.
+# Everything else -- the parse, the lock, the run's daemons, the step's shell and its EXIT trap
+# -- is the step command's own.
+cat >"$tmp/step-bounded.sh" <<EOF
+source "$cluster"
+RUNNER_RUN_SLACK_SECONDS=1
+RUNNER_STOP_GRACE_SECONDS=3
+main "\$@"
+EOF
+rm -f -- "$fake/runner-starts" "$fake/runner-stops" "$fake/rc-polls"
+step_at=$EPOCHSECONDS
+FAKE_RC_UNTIL_STOP=1 FAKE_RUNNER_EXEC_FAIL=$unreach_fail FAKE_FAST_SLEEP=60 \
+  bash "$tmp/step-bounded.sh" step --namespace "$ns" unreach 1 --duration 1s >"$unreach_step" 2>&1 &
+unreach_pid=$!
+# The pod goes away once the load runs in it, which is when a step has nothing but this wait left.
+until grep -q '^step-unreach ' "$fake/runner-starts" 2>/dev/null || ! kill -0 "$unreach_pid" 2>/dev/null; do sleep 0.05; done
+grep -q '^step-unreach ' "$fake/runner-starts" 2>/dev/null ||
+  fail "the step command ended before it started its loadgen run, so no runner pod of it went away: $(cat "$unreach_step")"
+: >"$unreach_fail"
+stop_watchdog 240 "$unreach_pid"
+unreach_step_rc=0
+wait "$unreach_pid" 2>/dev/null || unreach_step_rc=$?
+stop_watchdog_end
+step_took=$((EPOCHSECONDS - step_at))
+[ ! -f "$fake/stop-late" ] ||
+  fail "the step command did not end within 240 s of a runner pod that answers no exec: it waits for an exit status nothing can record, and its heartbeat renews the lock while no load runs: $(cat "$unreach_step")"
+((unreach_step_rc != 0)) ||
+  fail "the step command exited 0 although its runner job was never stopped and gave no exit status: $(cat "$unreach_step")"
+((step_took <= 180)) ||
+  fail "the step command took $step_took s to end, past its wait's deadline and the graces of its stop: $(cat "$unreach_step")"
+# The heartbeat ends with the command, as (o) has it for a run whose command is gone: the lock
+# it renewed every 60 s is renewed no more, so it ages and up calls it stale.
+unreach_hb=$(<"$LOADTEST_CLUSTER_ROOT/$unreach_run/heartbeat.pid")
+for ((i = 0; i < 50; i++)); do
+  kill -0 "$unreach_hb" 2>/dev/null || break
+  sleep 0.1
+done
+unreach_hb_alive=no
+kill -0 "$unreach_hb" 2>/dev/null && unreach_hb_alive=yes
+unreach_patches=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
+sleep 1
+unreach_patches_after=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
+[ "$unreach_hb_alive" = no ] ||
+  fail "the heartbeat daemon (pid $unreach_hb) still runs 5 s after the step command it outlived ended: a run no command drives keeps its lock fresh"
+[ "$unreach_patches_after" = "$unreach_patches" ] ||
+  fail "the lock was patched $((unreach_patches_after - unreach_patches)) more times after the step command ended: the copy's lock never ages, so no other worker may take it"
+rm -f -- "$unreach_fail"
+run_cluster down --namespace "$ns"
+((RC == 0)) || fail "down exited $RC: $(cat "$tmp/out")"
+pass "a runner pod that answers no exec bounds the wait past its deadline, after its TERM and after its SIGKILL, each end naming that pod and giving no exit status, so the step command ends and its heartbeat stops renewing the lock, while a TERM between the disk watcher's failed act and its next nap leaves it without a second act"

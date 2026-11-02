@@ -2412,6 +2412,20 @@ the next poll, while a lock that names another run ends them. A step that ends b
 found the lock renamed therefore stops no typing job and deletes no document list of the run
 that holds the namespace now.
 
+A runner pod that can take no exec at all is the other way a step could hold the namespace for
+ever: an OOM kill, an eviction, a `delete` or the 12 h `activeDeadlineSeconds` of the runner
+pod itself leaves every `kubectl exec runner` answering `cannot exec into a container in a
+completed pod`, so past its deadline the step's wait can neither stop the runner job nor read
+that job's `.rc`. Each step of that stop is bounded by 120 s instead: no SIGTERM delivered
+within one of the deadline, no SIGKILL within two of the SIGTERM, or no exit status within one
+of the SIGKILL ends the wait non-zero, naming the pod it could not reach. The step
+command then ends under `set -e` — its `EXIT` trap stops the disk watcher and the browser
+typing — so no command of the run is live, the heartbeat stops, and the lock ages into the
+stale state above instead of being renewed while no load runs. The disk watcher is bounded the
+same way from the other side: a kill `kubectl` refused has it try again at its next poll, and
+the TERM `pg_disk_watch_stop` sends at the end of the step ends it at its next check, between a
+failed kill and the nap that would follow it included.
+
 ## What this harness does not do
 
 - A run of `loadgen run -allow-foreign` against another stack, with every endpoint and token flag
