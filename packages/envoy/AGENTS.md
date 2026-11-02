@@ -3690,6 +3690,8 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   its first `Next` reports a missing consumer (`ErrSessionConsumerNotFound`), and a pull that hears nothing for 30 s ends (`ErrSessionPullStalled`) and the relay restarts.
   A reconnect ends every pull at once (`ErrSessionPullReconnected`, the client's reconnect hook):
   the server drops a pull request with the connection it was sent on, so the relay restarts at the ack floor rather than waiting the 30 s of silence out.
+  That restart waits out no retry backoff either, however far a run's earlier failures had doubled it (`relayReconnected`, `cmd/listener/session_relay.go`), and it puts that wait back to `relayRetryFirst`:
+  a pull request lost with its connection says nothing about the session or its consumer, and a run is never replaced while the session's epoch stands, so a reconnect would otherwise cost a long-lived run's session up to `relayRetryMax`, 30 s, every time.
 
 - **Relay over NATS:** the owner pulls the consumer and publishes each message, in stream order, as a core frame on `notifications.envoy.deliver.<session id>` (`bus.DeliverSubject`;
   the stream does not store it, and the live topics lane skips it).

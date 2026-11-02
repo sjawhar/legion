@@ -183,7 +183,7 @@ func TestAStandbyOutlivesThreeSelfHealthIntervals(t *testing.T) {
 			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, standby.client, caches) },
 			standby.client.Connected,
 			func() error {
-				return rebuildListenerDependencies(ctx, standby.client, caches, probe, standby.receiver.resubscribe, nil)
+				return rebuildListenerDependencies(ctx, standby.client, caches, probe, standby.receiver.resubscribe)
 			},
 			func() { terminated.Store(true) },
 			interval, 3)

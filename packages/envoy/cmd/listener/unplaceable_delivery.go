@@ -287,7 +287,7 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 			logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, giveUpStatus, slog.String("reason", reason))
 		},
 		exceptionReason: "no_holder",
-		origin:          exceptionOrigin(message),
+		origin:          message.exceptionOrigin(),
 		settle:          settleKeep,
 	})
 	message.finalize(false)

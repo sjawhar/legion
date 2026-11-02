@@ -104,19 +104,28 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 	return nil
 }
 
-// exceptionOrigin identifies the durable message message for an exception's Nats-Msg-Id: its own
-// Nats-Msg-Id, else its stream sequence; "" for a message that is not durable.
-func exceptionOrigin(message deliveryMessage) string {
+// exceptionOrigin identifies the stored message an exception is about for its Nats-Msg-Id: the
+// message's own Nats-Msg-Id, else its stream sequence, and "" for a message that is stored under
+// neither. Two pods that raise the same exception for one stored message therefore raise one
+// stored exception, whether it reached them through the machine's durable (deliveryMessage) or
+// through a session consumer's relay (bus.SessionMessage).
+func exceptionOrigin(header nats.Header, streamSeq uint64) string {
+	if msgID := header.Get(nats.MsgIdHdr); msgID != "" {
+		return msgID
+	}
+	if streamSeq == 0 {
+		return ""
+	}
+	return strconv.FormatUint(streamSeq, 10)
+}
+
+// exceptionOrigin is exceptionOrigin for a durable message, and "" for a core or live one, which
+// the stream stores nothing of to dedupe an exception by.
+func (message deliveryMessage) exceptionOrigin() string {
 	if message.mode != durableDelivery || message.msg == nil {
 		return ""
 	}
-	if msgID := message.msg.Header.Get(nats.MsgIdHdr); msgID != "" {
-		return msgID
-	}
-	if meta, err := message.msg.Metadata(); err == nil {
-		return strconv.FormatUint(meta.Sequence.Stream, 10)
-	}
-	return ""
+	return exceptionOrigin(message.msg.Header, message.storedSeq())
 }
 
 // ledgerSettle is what a delivery outcome does with the pair's delivery-ledger attempt. settleNone

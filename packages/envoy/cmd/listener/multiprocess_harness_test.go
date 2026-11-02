@@ -485,6 +485,21 @@ func mpNATS(t *testing.T) string {
 	return uri
 }
 
+// mpCorePathNATS starts a row's NATS server under the host's grant, which carries no session
+// consumer's call (core.HostPermissions, infra/core/permissions.go), so every registration the
+// row's pods answer is answered core with the reason no_grant and every serving-port session of
+// the row is on the core path: its stored messages reach it through the machine's durable and the
+// receiver of whichever pod holds the delivery lease, as production's no_grant and
+// consumer_error sessions do, rather than through a consumer of its own whose relay pushes them
+// in milliseconds. A row that bounds the durable path's take-over needs that; the rows on
+// mpNATS, whose sessions each get a consumer, read the relay instead. It returns the URL the
+// row's own clients use.
+func mpCorePathNATS(t *testing.T) string {
+	t.Helper()
+	_, uri := mpStartNATS(t, testnats.HostGrant)
+	return uri
+}
+
 // mpStartNATS starts a row's NATS server, where every pod the row starts connects as mpMachine's
 // nkey user holding exactly the grant grant reads for mpMachine: testnats.ListenerGrant, the grant
 // envoy-infra renders for a listener, unless the row's pods need another role's (testnats.HostGrant
@@ -620,11 +635,35 @@ func (p *mpPod) kill(t *testing.T) time.Time {
 // serving port at 127.0.0.1 and subscribed to topics besides its own inbox, and requires a 200.
 func (p *mpPod) registerPort(t *testing.T, serving *mpServingPort, sessionID string, topics ...string) {
 	t.Helper()
+	p.subscribe(t, mpPortRegistration(t, serving, sessionID, topics...))
+}
+
+// registerCorePath registers sessionID as registerPort does and requires the answer to leave it
+// on the core path: delivery core with the reason no_grant, which the host's grant earns
+// (mpCorePathNATS). A row that bounds the durable path's take-over of a serving-port session
+// rests on that answer, and would otherwise measure the milliseconds of a session consumer's
+// relay without saying so.
+func (p *mpPod) registerCorePath(t *testing.T, serving *mpServingPort, sessionID string, topics ...string) {
+	t.Helper()
+	body := mpPortRegistration(t, serving, sessionID, topics...)
+	answer := p.call(http.MethodPost, "/v1/interests/subscribe", body)
+	if answer.status != http.StatusOK {
+		t.Fatalf("subscribe %s through %s: status %d %s %v", body, p.instance, answer.status, answer.body, answer.err)
+	}
+	if !strings.Contains(answer.body, `"mode":"core"`) || !strings.Contains(answer.body, `"reason":"no_grant"`) {
+		t.Fatalf("%s's registration through %s answered %s, want delivery core with the reason no_grant: this row is about a serving-port session the durable path delivers to", sessionID, p.instance, answer.body)
+	}
+}
+
+// mpPortRegistration is the registration body of sessionID on serving's port, following topics
+// besides its own inbox.
+func mpPortRegistration(t *testing.T, serving *mpServingPort, sessionID string, topics ...string) string {
+	t.Helper()
 	topicsJSON, err := json.Marshal(append([]string{}, topics...))
 	if err != nil {
 		t.Fatalf("encode %s's topics: %v", sessionID, err)
 	}
-	p.subscribe(t, fmt.Sprintf(`{"session_id":%q,"topics":%s,"port":%d,"host":"127.0.0.1"}`, sessionID, topicsJSON, serving.port))
+	return fmt.Sprintf(`{"session_id":%q,"topics":%s,"port":%d,"host":"127.0.0.1"}`, sessionID, topicsJSON, serving.port)
 }
 
 // subscribe posts body to the pod's /v1/interests/subscribe, a registration or its heartbeat, and

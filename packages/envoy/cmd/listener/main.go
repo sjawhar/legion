@@ -190,17 +190,21 @@ func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []li
 // consumer gone or not delivering to this listener's subscription, subscribes the durable again
 // (resubscribe), creating it when it is gone. The resubscribe reports success only once the server
 // reports this listener bound, so the probe that follows a rebuild reads a settled consumer rather
-// than the gap in which the subscription is being replaced. rebound, when not nil, is called once
-// the server reports the durable bound to this listener again: the pod holds its machine's durable
-// binding once more (sessionRelays.setOwned). Only the receiving pod's probe reports the consumer
-// gone or unbound; a standby's never does, so a standby's rebuild touches nothing but the caches.
+// than the gap in which the subscription is being replaced. Only the receiving pod's probe reports
+// the consumer gone or unbound; a standby's never does, so a standby's rebuild touches nothing but
+// the caches.
+//
+// Nothing here touches relay ownership: the receive term alone elects the pod that relays its
+// machine's session consumers (durableReceiver.begin and durableReceiver.end,
+// sessionRelays.setOwned). A resubscribe reports success for a pod with no term as well
+// (durableReceiver.resubscribe), so a rebuild that set the flag would have a standby relay beside
+// the holder.
 func rebuildListenerDependencies(
 	ctx context.Context,
 	client *bus.Client,
 	caches []listenerCache,
 	durableProbe func() error,
 	resubscribe func(context.Context) error,
-	rebound func(),
 ) error {
 	if !client.Connected() {
 		return nats.ErrConnectionClosed
@@ -215,9 +219,6 @@ func rebuildListenerDependencies(
 	}
 	if durableErr := resubscribe(ctx); durableErr != nil {
 		return errors.Join(err, fmt.Errorf("resubscribe the durable consumer: %w", durableErr))
-	}
-	if rebound != nil {
-		rebound()
 	}
 	return err
 }
@@ -1478,24 +1479,15 @@ func main() {
 	summaryDone := make(chan struct{})
 	close(summaryDone)
 	holderLoops := func(ctx context.Context) []<-chan struct{} {
-		// This pod receives its machine's durable for as long as this term lasts, so among the
-		// pods of one machine id it alone relays its sessions' consumers (sessionRelays.setOwned):
-		// a standby relays nothing, and a pod that loses or hands back the lease stops relaying
-		// when its term ends, leaving each consumer's position in the stream for the pod that
-		// takes over.
-		relays.setOwned(true)
-		relayOwnership := make(chan struct{})
-		go func() {
-			defer close(relayOwnership)
-			<-ctx.Done()
-			relays.setOwned(false)
-		}()
+		// Relay ownership is no loop of this term's: the receive term itself sets and clears it
+		// (durableReceiver.begin and durableReceiver.end, sessionRelays.setOwned), so among the
+		// pods of one machine id only the one receiving relays its sessions' consumers.
+		//
 		// The interest reaper cross-references envoy_sessions (5-min TTL) with envoy_interests
 		// (permanent) to prune orphaned interests from dead sessions, each kept until more than
 		// store.InterestReapGrace plus store.InterestRefreshAge (15 minutes) has passed since its
 		// last write; the role-claim reaper ends the claims of holders whose sessions are gone.
 		done := []<-chan struct{}{
-			relayOwnership,
 			registry.StartReaper(ctx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),
 			registry.StartRoleClaimReaper(ctx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL()),
 			// The collector removes the interest bucket's delete markers, which the reaper leaves
@@ -1531,6 +1523,10 @@ func main() {
 		lease:    deliveryLease,
 		handle:   jetStreamDeliveryHandler(deliveryConfig),
 		loops:    holderLoops,
+		// The term elects the pod that relays its machine's session consumers, and the pushes its
+		// handler hands to the serving-port workers are its own: both end with it.
+		relays:  relays,
+		workers: deliveryConfig.servePorts,
 		// A durable refused after the check above (an operator changed it since) can never be
 		// received from, so the listener stops, as that check stops a start.
 		refused: func(err error) {
@@ -1579,7 +1575,10 @@ func main() {
 	deps.Store(ready)
 	logger.Info("envoy-listener ready (NATS connected)")
 	// This pod relays its machine's session consumers only while it receives the durable, which
-	// the receive term sets and clears (holderLoops above, sessionRelays.setOwned).
+	// the receive term sets and clears (durableReceiver.begin and durableReceiver.end,
+	// sessionRelays.setOwned). Nothing below writes it: the self-health monitor's probe and
+	// rebuild judge the durable's binding, which a standby's resubscribe reports bound with no
+	// term behind it.
 
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;
@@ -1590,13 +1589,7 @@ func main() {
 	// monitorCtx, each JetStream read included, so the shutdown's monitorCancel cuts a read the
 	// server has not answered and the 10 s shutdown budget is held by neither.
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
-	probeDurable := func() error {
-		err := receiver.probe(monitorCtx)
-		if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, errDurableUnbound) {
-			relays.setOwned(false)
-		}
-		return err
-	}
+	probeDurable := func() error { return receiver.probe(monitorCtx) }
 	monitorDone := make(chan struct{})
 	go func() {
 		defer close(monitorDone)
@@ -1611,7 +1604,7 @@ func main() {
 			},
 			client.Connected,
 			func() error {
-				return rebuildListenerDependencies(monitorCtx, client, caches, probeDurable, receiver.resubscribe, func() { relays.setOwned(true) })
+				return rebuildListenerDependencies(monitorCtx, client, caches, probeDurable, receiver.resubscribe)
 			},
 			func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) },
 			30*time.Second,

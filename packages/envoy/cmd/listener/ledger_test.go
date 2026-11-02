@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 )
 
 // settledMessage is a durable message whose ack or NAK the test reads back: its reply subject is
@@ -311,7 +312,11 @@ func TestARedeliveryAfterAFailedPromptWhoseClearFailedPromptsTheSession(t *testi
 
 // A session another listener owns, or a self-subscribed one, is never prompted by this listener,
 // so its delivery writes nothing to the ledger, and a message that reaches only such sessions is
-// acked as before.
+// acked as before. The fan-out holds to the same rule: it asks the ledger for a recipient it
+// prompts (promptsHere) and for one it refuses, whose exception the pair's record dedupes, and
+// for no other. A recipient that simply takes the message would otherwise cost two KV round
+// trips on the durable's handler for a delivery this pod never makes, and a 30 s retry of the
+// message for every one of its recipients while the ledger is down.
 func TestASessionThisListenerDoesNotPromptCostsNoLedgerWrite(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, countingPrompts(new(atomic.Int32)))
 	cfg := harness.config
@@ -330,6 +335,25 @@ func TestASessionThisListenerDoesNotPromptCostsNoLedgerWrite(t *testing.T) {
 			t.Fatalf("%s: settlement = %q, want an ack", sessionID, got)
 		}
 	}
+
+	// The fan-out's recipients here are a self-subscribed session, which takes the message on its
+	// own subscription, and one whose entry has lapsed while its interest stands, which this
+	// listener delivers to nobody. The durable path still fans the message out, since the lapsed
+	// session's interest is no session of this machine that takes it another way
+	// (durableNeedsDelivery), and neither recipient costs a ledger call.
+	const topic = "notifications.github.owner.repo.fanout-unprompted"
+	for _, sessionID := range []string{"ses_self", "ses_lapsed"} {
+		if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
+			t.Fatalf("register %s's interest in %s: %v", sessionID, topic, err)
+		}
+	}
+	item := listenerTestEnvelope(topic, "unprompted-fanout")
+	msg, settlement := settledMessage(t, harness.client.Conn, marshalListenerEnvelope(t, item))
+	jetStreamDeliveryHandler(cfg)(context.Background(), msg)
+	if got := settlement(t); got != "+ACK" {
+		t.Fatalf("the fan-out's settlement = %q, want an ack", got)
+	}
+
 	if logs := harness.logs.String(); strings.Contains(logs, ledgerUnavailableLine) {
 		t.Fatalf("a session this listener does not prompt touched the ledger:\n%s", logs)
 	}

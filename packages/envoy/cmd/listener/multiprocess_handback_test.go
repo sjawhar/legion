@@ -299,6 +299,21 @@ func mpRetryOutstanding(t *testing.T, uri string, a *mpPod, row string) (serving
 	return serving, publisher, healthy
 }
 
+// mpCorePathRetryOutstanding is mpRetryOutstanding for a row whose pods run under the host's
+// grant (mpCorePathNATS): it registers each healthy session again through the same pod, as the
+// plugin's heartbeat does, and requires the answer to leave it on the core path. A row that
+// bounds the durable's own take-over needs that of every session it measures, since a session
+// with a consumer of its own is relayed from the moment a term begins and waits for no settle
+// hold.
+func mpCorePathRetryOutstanding(t *testing.T, uri string, a *mpPod, row string) (serving *mpServingPort, publisher *mpPublisher, healthy []string) {
+	t.Helper()
+	serving, publisher, healthy = mpRetryOutstanding(t, uri, a, row)
+	for _, sessionID := range healthy {
+		a.registerCorePath(t, serving, sessionID)
+	}
+	return serving, publisher, healthy
+}
+
 // mpTo is the messages published to the sessions given.
 func mpTo(messages []mpMessage, sessions ...string) []mpMessage {
 	var to []mpMessage

@@ -165,6 +165,12 @@ func (s *SessionConsumers) SetCreateFault(fault func(consumer string) error) {
 	s.createFault = fault
 }
 
+// ForceReconnect has nats.go reconnect the connection in place, as it does when the server drops
+// it: every pull in progress ends (pullsLost, ErrSessionPullReconnected) and its caller pulls
+// again. It is a seam for tests, which measure what a relay does with a lost pull; nothing else
+// calls it.
+func (s *SessionConsumers) ForceReconnect() error { return s.client.Conn.ForceReconnect() }
+
 // Drain drains the connection, letting acks already sent reach the server, within timeout.
 func (s *SessionConsumers) Drain(timeout time.Duration) error { return s.client.Drain(timeout) }
 

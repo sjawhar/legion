@@ -742,7 +742,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		return
 	}
 	if result.Push {
-		handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: sessionID, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), logLine: "listener agent delivered", timer: deliveryTimer})
+		handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: sessionID, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), logLine: "listener agent delivered", term: message.ctx, timer: deliveryTimer})
 		return
 	}
 	if result.OwnedElsewhere {
@@ -778,7 +778,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 				logger.DeliveryLog(slog.LevelError, "listener agent delivery failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", result.Err.Error()))
 			},
 			exceptionReason: "delivery_failed",
-			origin:          exceptionOrigin(message),
+			origin:          message.exceptionOrigin(),
 			settle:          settleClearIf(result.ShouldNAK || refused),
 		})
 	}
@@ -987,14 +987,25 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		relayJudges := relayed && target.Port > 0
 		// The delivery ledger is asked after the echo check and before the delivery-mode checks,
 		// so a duplicate of a message already delivered is skipped before the recipient's current
-		// capabilities can refuse it, and for every recipient this path judges, a portless one
-		// included: the exception it reports is deduped by the pair's record as the push of a
-		// serving-port recipient is, so one `delivery_failed` holds across the copies of an event
-		// stored on several of the session's topics and across the pods of the machine. Only a
-		// session whose own consumer relays the message is left out: that pair is its relay's to
-		// claim (sessionRelays.followedTopicVerdict).
+		// capabilities can refuse it. It is asked for the recipients this path spends a ledger
+		// write on, and for no other (promptsHere, as the agent-subject path asks it):
+		//
+		//   - a recipient this listener prompts over HTTP, whose push the record keeps another
+		//     pod from making again;
+		//   - a recipient this path refuses (verdict != takeFollowedTopic), portless or
+		//     self-subscribed included, since the exception it reports is deduped by the pair's
+		//     record as a push is, so one `delivery_failed` holds across the copies of an event
+		//     stored on several of the session's topics and across the pods of the machine.
+		//
+		// A recipient that simply takes the message - a self-subscribed session reading it on its
+		// own subscription, one another listener prompts - costs no ledger write, as it did
+		// before the session consumers came in: two KV round trips on the durable's handler for a
+		// delivery nothing here makes, which a ledger that is down would turn into a 30 s retry
+		// of the message for every recipient of it. A session whose own consumer relays the
+		// message is left out too: that pair is its relay's to claim
+		// (sessionRelays.followedTopicVerdict).
 		var attempt dedupe.Attempt
-		if !relayed {
+		if !relayed && (promptsHere(cfg.machineID, &interest, target) || verdict != takeFollowedTopic) {
 			var deliver bool
 			var wait time.Duration
 			if attempt, deliver, wait = ledgerAttempt(cfg, message, item, interest.SessionID, false); !deliver {
@@ -1027,7 +1038,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				// The durable path's push waits behind the session's earlier messages in its own
 				// worker, which settles the ledger attempt with it, and the message is
 				// acknowledged once that push ends.
-				if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), timer: deliveryTimer}) {
+				if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), term: message.ctx, timer: deliveryTimer}) {
 					retryIn = max(retryIn, durableRetryDelay)
 				}
 				continue

@@ -2368,7 +2368,7 @@ func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
 		if err := probe(); !errors.Is(err, natsgo.ErrConsumerNotFound) {
 			t.Fatalf("rebuild %d: the probe of a lost durable: %v, want nats.ErrConsumerNotFound", rebuild, err)
 		}
-		if err := rebuildListenerDependencies(ctx, rig.client, nil, probe, rig.receiver.resubscribe, nil); err != nil {
+		if err := rebuildListenerDependencies(ctx, rig.client, nil, probe, rig.receiver.resubscribe); err != nil {
 			t.Fatalf("rebuild %d: %v", rebuild, err)
 		}
 		if got := rig.client.Conn.NumSubscriptions(); got != subscriptions {
@@ -4860,7 +4860,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 		},
 		client.Connected,
 		func() error {
-			return rebuildListenerDependencies(context.Background(), client, []listenerCache{{name: "interest", cache: registry}}, nil, nil, nil)
+			return rebuildListenerDependencies(context.Background(), client, []listenerCache{{name: "interest", cache: registry}}, nil, nil)
 		},
 	)
 

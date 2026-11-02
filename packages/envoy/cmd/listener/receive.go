@@ -122,6 +122,12 @@ const (
 	inProgressEvery           = 2 * time.Second
 	inflightGrace             = 3 * time.Second
 	inflightCancelWait        = time.Second
+	// servePortTermStopWait bounds the end of a term's wait for the serving-port workers to leave
+	// its pushes once it has cancelled them (servePortWorkers.endTerm): a cancel reaches a push
+	// in flight as it reaches a prompt the handler is making, so this is a round trip's worth and
+	// no more. A worker still inside a push when it runs out holds a message of the term, which
+	// its graceful stop writes no clean-hand-back mark for (durableReceiver.markHandBack).
+	servePortTermStopWait = 500 * time.Millisecond
 	// holderLoopsStopWait bounds how long the end of a term waits for a pass of the holder-only
 	// loops in flight, measured from when they were told to stop.
 	holderLoopsStopWait = 5 * time.Second
@@ -270,6 +276,17 @@ type durableReceiverOptions struct {
 	// loops starts the loops only the deliverer runs, under ctx, and returns a channel per loop
 	// that closes once it has returned; nil starts none.
 	loops func(ctx context.Context) []<-chan struct{}
+	// relays are this listener's session-consumer relays, which the term elects: a term that
+	// begins has this pod relay its machine's sessions, and its end has it stop
+	// (sessionRelays.setOwned). Among the pods of one machine id only the one receiving relays,
+	// so this is the one writer of that flag. Nil for a listener that relays nothing, and in a
+	// rig that has no relays.
+	relays *sessionRelays
+	// workers are the serving-port workers the durable's handler hands its pushes to
+	// (servePortWorkers, wireDeliveryWorkers). The pushes of a term's messages end with the term:
+	// a graceful stop takes them back and hands their messages to the next holder, and a lost
+	// lease drops them (receive_stop.go). Nil in a rig whose handler hands no push over.
+	workers *servePortWorkers
 	// refused is called once the durable is refused (errListenerDurableRefused); the receive loop
 	// ends after it.
 	refused func(error)
@@ -836,6 +853,10 @@ func (r *durableReceiver) awaitUnbound(ctx context.Context) error {
 // flush that fails leaves the SUB to nats.go's reconnect, records no term receiving and so earns
 // no mark: the hold runs to its 7 s cap, which is what the messages that reached no subscriber
 // meanwhile need.
+//
+// The term elects this pod the relayer of its machine's session consumers (sessionRelays.setOwned,
+// cleared by durableReceiver.end): gaining the durable starts the relay of every such session the
+// cache holds for this machine, each restarted at its ack floor.
 func (r *durableReceiver) begin(subject string, hold time.Duration, term uint64) error {
 	t := &receiveTerm{
 		subject:   subject,
@@ -869,6 +890,7 @@ func (r *durableReceiver) begin(subject string, hold time.Duration, term uint64)
 	if flushed && r.lease != nil {
 		r.lease.SetReceiving(term)
 	}
+	r.relays.setOwned(true)
 	go t.handle(r)
 	go t.keepAlive(r.timing.inProgressEvery)
 	return nil

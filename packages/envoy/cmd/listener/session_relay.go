@@ -134,6 +134,12 @@ const (
 	// relayRetry: a consumer call or the pull failed; the relay restarts at the ack floor after a
 	// wait while it is still this listener's.
 	relayRetry
+	// relayReconnected: the pull's request was lost with its connection
+	// (bus.ErrSessionPullReconnected), which is no failure of the session's or of its consumer's.
+	// The relay restarts at the ack floor at once, with no wait, and its retry backoff starts
+	// again from relayRetryFirst: the failures before this reconnect say nothing about the pull
+	// the new connection makes (sessionRelays.relay).
+	relayReconnected
 	// relayPaused: the session answered no frame within relayReceiptWait; the relay restarts at the
 	// ack floor after the pause backoff, or at the session's next registration, whichever is first.
 	relayPaused
@@ -157,6 +163,12 @@ type sessionRelays struct {
 	delivery  *sessionDelivery
 	registry  *store.Registry
 	deliverer *session.Deliverer
+	// cfg is the delivery configuration every path of this listener delivers and reports
+	// through: the relay's own refusal of a message goes through its bookkeeping
+	// (applyDeliveryOutcome, refuseUnreachableAddress), under the rules the durable path
+	// applies. client below is its client, and rules its ledger and sessions, each kept apart
+	// for the hot paths that read them.
+	cfg listenerDeliveryHandlerConfig
 	// client publishes the exception of a stored message a serving-port relay refuses to push.
 	client *bus.Client
 	// rules are the refusals a message on a topic the session follows is judged by
@@ -292,6 +304,7 @@ func startSessionRelays(delivery *sessionDelivery, cfg listenerDeliveryHandlerCo
 		delivery:    delivery,
 		registry:    cfg.registry,
 		deliverer:   cfg.deliverer,
+		cfg:         cfg,
 		client:      cfg.client,
 		rules:       cfg.followedTopicRules(),
 		machineID:   cfg.machineID,
@@ -549,6 +562,13 @@ func (m *sessionRelays) start(sessionID string, servingPort bool, previous <-cha
 // (relayPaused), with a wait that doubles from pauseFirst to pauseMax, cut short by the session's
 // next registration. Both only while the session is still this listener's.
 //
+// A pull the connection's reconnect ended (relayReconnected) waits for neither: the relay
+// restarts at the session's ack floor at once, and the wait a run's earlier failures had raised
+// starts again from relayRetryFirst, since a lost pull request says nothing about the session or
+// its consumer. Without that, a run that had met a handful of failures would cost its session
+// relayRetryMax, 30 s, at every later reconnect: a serving-port registration keeps its epoch, so
+// the run is never replaced and its wait was only ever doubled.
+//
 // The pause is logged once an episode: the line is written for the first pause since the session
 // last answered a frame, not for each probe that found it silent again.
 func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
@@ -563,6 +583,8 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 		switch outcome {
 		case relayEnded:
 			return
+		case relayReconnected:
+			retry = relayRetryFirst
 		case relayPaused:
 			if run.answered.Swap(false) {
 				// The session answered a frame since the last pause: this one is a new episode.
@@ -712,6 +734,10 @@ func (m *sessionRelays) relayNATS(ctx context.Context, run *relayRun) relayOutco
 			if errors.Is(err, context.DeadlineExceeded) {
 				continue
 			}
+			if errors.Is(err, bus.ErrSessionPullReconnected) {
+				m.logger.Info("session relay pull lost with its connection; restarting at the ack floor at once", slog.String("session_id", sessionID))
+				return relayReconnected
+			}
 			m.logger.Warn("session relay pull ended; restarting at the ack floor", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 			return relayRetry
 		}
@@ -841,6 +867,10 @@ func (m *sessionRelays) relayServingPort(ctx context.Context, run *relayRun) rel
 			if ctx.Err() != nil {
 				return relayEnded
 			}
+			if errors.Is(err, bus.ErrSessionPullReconnected) {
+				m.logger.Info("session relay pull lost with its connection; restarting at the ack floor at once", slog.String("session_id", run.sessionID))
+				return relayReconnected
+			}
 			m.logger.Warn("session relay pull ended; restarting at the ack floor", slog.String("session_id", run.sessionID), slog.String("error", err.Error()))
 			return relayRetry
 		}
@@ -918,32 +948,31 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 // registration, so no attempt of this pod reaches it and a retry loop would hold the session's
 // messages behind this one for as long as the registration stands. The durable path reports such
 // a refusal as a terminal delivery_failed and retries nothing (delivery.go, both the agent
-// subject's branch and the fan-out's), and this is that refusal on the relay: the exception is
-// published as the path the message is stored for publishes it, the ledger attempt is given up so
-// a resend after the session registers through this pod is pushed rather than skipped as one in
-// flight, and the message is acked, since no later pull of this consumer would reach the session
-// either.
+// subject's branch and the fan-out's), and this is that refusal on the relay: it goes through
+// the durable path's own bookkeeping (applyDeliveryOutcome), so the exception is published, or
+// withheld, by exactly the rules that path applies - a message on an exceptions topic earns no
+// exception about an exception - the ledger attempt is given up so a resend after the session
+// registers through this pod is pushed rather than skipped as one in flight, and the message is
+// acked here, since no later pull of this consumer would reach the session either.
+//
+// The exception is a fan-out refusal unless the message is on a control topic, as the fan-out's
+// own refusal of an unreachable address is, and it names the stored message it is about
+// (exceptionOrigin), so two pods that refuse the same stored message raise one stored exception.
 func (m *sessionRelays) refuseUnreachableAddress(sessionID string, item contracts.Envelope, msg bus.SessionMessage, claim dedupe.Attempt, err error) {
-	m.logger.DeliveryLog(slog.LevelError, "session relay refused a message the session's address does not accept", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
-	if publishErr := publishDeliveryException(m.client, item, "delivery_failed", sessionID, !isControlTopic(item.Topic), storedMessageOrigin(msg)); publishErr != nil {
-		m.logger.Warn("session relay could not publish a delivery exception", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", publishErr.Error()))
-	}
-	if clearErr := m.rules.ledger.Clear(claim); clearErr != nil {
-		m.logger.Warn(ledgerUnavailableLine, slog.String("operation", "clear"), slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", clearErr.Error()))
-	}
+	applyDeliveryOutcome(m.cfg, item, deliveryOutcome{
+		sessionID: sessionID,
+		attempt:   claim,
+		log: func(logger *logging.Logger) {
+			logger.DeliveryLog(slog.LevelError, "session relay refused a message the session's address does not accept", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+		},
+		exceptionReason: "delivery_failed",
+		fanoutRefusal:   !isControlTopic(item.Topic),
+		origin:          exceptionOrigin(msg.Header, msg.StreamSeq),
+		settle:          settleClear,
+	})
 	if ackErr := msg.Ack(); ackErr != nil {
 		m.logger.Warn("session relay could not ack a refused message", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", ackErr.Error()))
 	}
-}
-
-// storedMessageOrigin identifies the stored message msg for an exception's Nats-Msg-Id, as
-// exceptionOrigin identifies a durable one: its own Nats-Msg-Id, else its stream sequence. Two
-// pods that refuse the same stored message therefore raise one stored exception.
-func storedMessageOrigin(msg bus.SessionMessage) string {
-	if msgID := msg.Header.Get(nats.MsgIdHdr); msgID != "" {
-		return msgID
-	}
-	return strconv.FormatUint(msg.StreamSeq, 10)
 }
 
 // push makes one prompt_async push of item to the session's port at the address its current entry

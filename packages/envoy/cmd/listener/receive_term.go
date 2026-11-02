@@ -94,12 +94,14 @@ func (t *receiveTerm) close() {
 	t.stopHandling()
 }
 
-// handBack NAKs with delay every message the term holds or has queued, as one batch in stream
-// order, and from then on has intake hand back each message that arrives (handBackLocked).
-func (t *receiveTerm) handBack(delay time.Duration) {
+// handBack NAKs with delay every message the term holds or has queued, parked among them, as one
+// batch in stream order, and from then on has intake hand back each message that arrives
+// (handBackLocked). parked are the messages of this term the serving-port workers gave up when
+// the stop took their pushes back (servePortWorkers.endTerm), which nothing settles any more.
+func (t *receiveTerm) handBack(delay time.Duration, parked []*nats.Msg) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	batch := t.takeQueuedLocked()
+	batch := append(t.takeQueuedLocked(), parked...)
 	sortByStreamSequence(batch)
 	t.handedBack, t.handBackDelay = map[uint64]int{}, delay
 	for _, m := range batch {

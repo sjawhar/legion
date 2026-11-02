@@ -14,6 +14,11 @@ import (
 // then gives the message in hand inflightGrace, cancels its handling and NAKs what is queued. A
 // shutdown (ctx ended) of a term that still holds the lease hands its messages back (handBack),
 // and one without a lease drains (endWithoutLease).
+//
+// The term stops electing this pod the relayer of its machine's session consumers before any of
+// that (sessionRelays.setOwned, set by durableReceiver.begin): every relay stops here, so the
+// pod that takes over is the only one pulling each session's consumer, and each consumer's
+// position in the stream is left for it.
 func (r *durableReceiver) end(ctx context.Context) {
 	r.mu.Lock()
 	t := r.term
@@ -23,6 +28,7 @@ func (r *durableReceiver) end(ctx context.Context) {
 	// lease's signal reads this pod's connection alone again (durableReceiver.receiveUp).
 	r.subscribed.Store(nil)
 	r.mu.Unlock()
+	r.relays.setOwned(false)
 	switch {
 	case ctx.Err() == nil:
 		r.endLost(ctx, t)
@@ -40,6 +46,7 @@ func (r *durableReceiver) end(ctx context.Context) {
 // endLost ends a term whose lease was lost: it unsubscribes and stops taking messages, drops what
 // is queued while ctx is live and waits for the message in hand, and once ctx has ended (a
 // shutdown) gives the message in hand inflightGrace, cancels its handling and NAKs what is queued.
+// Either way the pushes the term handed to the serving-port workers end with it.
 func (r *durableReceiver) endLost(ctx context.Context, t *receiveTerm) {
 	r.mu.Lock()
 	sub, conn := t.sub, t.conn
@@ -60,23 +67,38 @@ func (r *durableReceiver) endLost(ctx context.Context, t *receiveTerm) {
 	}
 	if ctx.Err() != nil {
 		r.settleInHand(t)
-		queued := t.takeQueued()
-		for _, m := range queued {
-			_ = m.Nak()
-		}
-		r.logger.Info("stopped receiving the durable", slog.String("consumer", r.consumer), slog.Int("naked", len(queued)))
 	}
+	// The pushes this term handed to the serving-port workers are the term's as much as its queue
+	// is, and are taken back once nothing of the term is handing more over: the workers stop
+	// pushing them and keeping their messages in progress (servePortWorkers.endTerm), so a pod
+	// whose lease is gone pushes nothing more, and the server gives those messages to the pod
+	// holding the lease now once their ack wait runs out, as it does the queue's.
+	parked, _ := r.workers.endTerm(t.handling, servePortTermStopWait)
+	if ctx.Err() == nil {
+		if len(parked) > 0 {
+			r.logger.Info("dropped the serving-port pushes of the term whose lease was lost",
+				slog.String("consumer", r.consumer), slog.Int("dropped_pushes", len(parked)))
+		}
+		return
+	}
+	queued := append(t.takeQueued(), parked...)
+	for _, m := range queued {
+		_ = m.Nak()
+	}
+	r.logger.Info("stopped receiving the durable", slog.String("consumer", r.consumer), slog.Int("naked", len(queued)))
 }
 
 // endWithoutLease ends a listener's receiving without a lease on a shutdown: the handler takes no
 // more messages, the message in hand gets inflightGrace, the subscription drains, and everything
-// queued is NAKed at once, in stream order, and flushed.
+// queued, the serving-port workers' pushes of this term included, is NAKed at once, in stream
+// order, and flushed.
 func (r *durableReceiver) endWithoutLease(t *receiveTerm) {
 	t.stopHandling()
 	r.settleInHand(t)
 	conn, _ := r.drain(t)
 	t.close()
-	queued := t.takeQueued()
+	parked, _ := r.workers.endTerm(t.handling, servePortTermStopWait)
+	queued := append(t.takeQueued(), parked...)
 	sortByStreamSequence(queued)
 	for _, m := range queued {
 		_ = m.Nak()
@@ -117,8 +139,16 @@ func (r *durableReceiver) endWithoutLease(t *receiveTerm) {
 func (r *durableReceiver) handBack(t *receiveTerm) {
 	t.stopHandling()
 	handled := r.settleInHand(t)
+	// The pushes this term handed to the serving-port workers are its messages too, and are
+	// taken back now that nothing of the term hands more over: the workers stop pushing them and
+	// keeping them in progress, and give them up unsettled (servePortWorkers.endTerm), so they
+	// are NAKed in the batch below with everything else the term holds and the next holder is
+	// given them after the hand-back delay. A worker still inside a push when the take-back's
+	// wait ran out holds a message of this term that this stop cannot account for, which is what
+	// idle says (markHandBack).
+	parked, idle := r.workers.endTerm(t.handling, servePortTermStopWait)
 	deadline := time.Now().Add(r.timing.lingerMax)
-	t.handBack(r.timing.handBackDelay)
+	t.handBack(r.timing.handBackDelay, parked)
 	r.lease.Unsettle(t.leaseTerm)
 	r.mu.Lock()
 	conn := t.conn
@@ -133,7 +163,7 @@ func (r *durableReceiver) handBack(t *receiveTerm) {
 	lingered, end := r.linger(deadline)
 	_, drained := r.drain(t)
 	t.close()
-	marked, why := r.markHandBack(end, drained, handled)
+	marked, why := r.markHandBack(end, drained, handled, idle)
 	handedBack, renaked, dropped := t.handBackCounts()
 	fields := []slog.Attr{
 		slog.String("consumer", r.consumer),
@@ -155,14 +185,16 @@ func (r *durableReceiver) handBack(t *receiveTerm) {
 // line. Every part of the hand-over must have gone through: end is the linger's, which must be
 // another pod receiving on the deliver subject, drained the server's word that this pod's
 // subscription is closed, rather than the drain's wait running out with messages possibly still
-// coming, and handled whether the message in hand's handler returned, since one still running
-// holds a message that comes back only at its ack wait, long after the successor's 3 s hold has
-// ended. The lease adds what it knows: its own release wrote the record, and that record carried
-// no stale binding (lease.MarkHandBack). A write that fails leaves the next holder the settle
-// hold of a hard take-over and nothing worse, so it is a warning and no more;
-// listenerStateRequestWait bounds it, and a stop past the shutdown's budget can be cut off
-// before it by the listener's own exit (shutdownListener).
-func (r *durableReceiver) markHandBack(end lingerEnd, drained, handled bool) (bool, string) {
+// coming, handled whether the message in hand's handler returned, since one still running holds a
+// message that comes back only at its ack wait, long after the successor's 3 s hold has ended,
+// and workersIdle whether the serving-port workers had left this term's pushes, since one they
+// are still inside holds a message of the term the same way (servePortWorkers.endTerm). The lease
+// adds what it knows: its own release wrote the record, and that record carried no stale binding
+// (lease.MarkHandBack). A write that fails leaves the next holder the settle hold of a hard
+// take-over and nothing worse, so it is a warning and no more; listenerStateRequestWait bounds
+// it, and a stop past the shutdown's budget can be cut off before it by the listener's own exit
+// (shutdownListener).
+func (r *durableReceiver) markHandBack(end lingerEnd, drained, handled, workersIdle bool) (bool, string) {
 	switch {
 	case end != lingerEndReceiving:
 		return false, noMarkNoSuccessor
@@ -170,6 +202,8 @@ func (r *durableReceiver) markHandBack(end lingerEnd, drained, handled bool) (bo
 		return false, noMarkUndrained
 	case !handled:
 		return false, noMarkHandlerRunning
+	case !workersIdle:
+		return false, noMarkWorkerPushing
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), listenerStateRequestWait)
 	defer cancel()
@@ -191,6 +225,7 @@ const (
 	noMarkNoSuccessor    = "no successor was receiving when the linger ended"
 	noMarkUndrained      = "the server did not confirm the drain"
 	noMarkHandlerRunning = "the message in hand was still being handled after its cancel"
+	noMarkWorkerPushing  = "a serving-port worker still held a message of the term after its cancel"
 	noMarkWriteFailed    = "the mark's write failed"
 	noMarkRelease        = "this stop's own release wrote no record, or one beside a lost node's binding"
 )

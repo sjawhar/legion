@@ -30,6 +30,9 @@ const (
 	// redelivered to the standby that takes the lease over quickly), so none is delivered again
 	// while it waits for its port.
 	servePortProgressInterval = 2 * time.Second
+	// servePortTermStopPoll is how often the end of a receive term reads whether the workers have
+	// left its pushes (servePortWorkers.endTerm), which its cancel ends within a round trip.
+	servePortTermStopPoll = 5 * time.Millisecond
 )
 
 // durableSettle settles one durable message once its handler and every push the handler handed to
@@ -100,8 +103,27 @@ func (s *durableSettle) progress() {
 	}
 }
 
+// abandon ends this message's settling by the workers: the receive term that took it is over, so
+// no push of it acks it, NAKs it or keeps it in progress any more, and the term's stop disposes
+// of the message itself (servePortWorkers.endTerm). It returns the message, and nil when it is
+// settled or abandoned already, so a message held for several sessions is disposed of once.
+func (s *durableSettle) abandon() *nats.Msg {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settled {
+		return nil
+	}
+	s.settled = true
+	return s.msg
+}
+
 // servePortPush is one durable message's push to one serving-port session, handed to the session's
 // worker. forward marks the stored copy of a role forward, whose delivery the role lane reported.
+// term is the receive term whose message this is: the handling context of that term
+// (deliveryMessage.ctx), which the workers take as the term's identity, so the term's end stops
+// its pushes and takes their messages back (servePortWorkers.endTerm). It is nil for a push of no
+// term: the core and live lanes hand none over, and a rig that calls the durable's handler itself
+// has no term behind it.
 type servePortPush struct {
 	item      contracts.Envelope
 	sessionID string
@@ -116,6 +138,7 @@ type servePortPush struct {
 	forward   bool
 	// logLine is the line a delivered push logs, "" for none.
 	logLine string
+	term    context.Context
 	timer   metrics.Timer
 }
 
@@ -140,6 +163,12 @@ func (p servePortPush) storedSubject() string {
 // pass it. A worker whose session is no longer a serving port this listener owns hands its pushes
 // back to the durable, which delivers them again under the rules of the session's new state. A
 // worker ends once its queue is empty.
+//
+// Every push is a message of the receive term whose handler handed it over (servePortPush.term),
+// and ends with that term: the end of a term stops its pushes and takes their messages back
+// (endTerm), so a pod that lost the lease pushes nothing more and a pod that stopped gracefully
+// hands those messages to the next holder with the rest of what it held (receive_stop.go). A
+// push handed over after its term ended is refused, and its message goes back to the durable.
 type servePortWorkers struct {
 	cfg    listenerDeliveryHandlerConfig
 	ctx    context.Context
@@ -148,23 +177,47 @@ type servePortWorkers struct {
 
 	mu sync.Mutex
 	// queues holds each session's pushes in arrival order, its head the one being pushed. A session
-	// has a key exactly while its worker runs.
-	queues  map[string][]servePortPush
+	// has a key exactly while its worker runs, so a queue the end of a term empties keeps its key
+	// until that worker reads it empty: a second worker for one session would push its messages
+	// out of order.
+	queues map[string][]servePortPush
+	// terms holds what the workers keep of each receive term with pushes here, by that term's
+	// handling context (servePortPush.term); a push of no term has no entry.
+	terms   map[context.Context]*servePortTerm
 	stopped bool
+}
+
+// servePortTerm is what the workers hold of one receive term: the context its pushes are made
+// under, which the term's end cancels (endTerm), and how many of its pushes a worker is inside
+// right now, which that end waits for.
+type servePortTerm struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	// pushing counts the term's pushes a worker is inside (pushUntilSettled); ended is set once
+	// the term's end took its pushes back, after which the workers take no push of it.
+	pushing int
+	ended   bool
 }
 
 // startServePortWorkers starts the workers' progress loop. cfg is the delivery configuration the
 // pushes are made (deliverer, sessions, registry) and reported (applyDeliveryOutcome) through.
 func startServePortWorkers(cfg listenerDeliveryHandlerConfig) *servePortWorkers {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &servePortWorkers{cfg: cfg, ctx: ctx, cancel: cancel, queues: map[string][]servePortPush{}}
+	w := &servePortWorkers{
+		cfg:    cfg,
+		ctx:    ctx,
+		cancel: cancel,
+		queues: map[string][]servePortPush{},
+		terms:  map[context.Context]*servePortTerm{},
+	}
 	w.runs.Go(w.keepInProgress)
 	return w
 }
 
 // enqueue queues push behind its session's earlier pushes, starting the session's worker when it
 // has none, and holds push's message until the push ends. It reports false, holding nothing, when
-// the workers stopped or are full: the caller hands the message back to the durable.
+// the workers stopped or are full, or when the receive term whose message this is has ended: the
+// caller hands the message back to the durable.
 func (w *servePortWorkers) enqueue(push servePortPush) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -172,11 +225,33 @@ func (w *servePortWorkers) enqueue(push servePortPush) bool {
 	if w.stopped || (!running && len(w.queues) >= servePortWorkerLimit) || len(queue) >= servePortQueueLimit {
 		return false
 	}
+	if !w.holdTermLocked(push.term) {
+		return false
+	}
 	push.settle.hold()
 	w.queues[push.sessionID] = append(queue, push)
 	if !running {
 		w.runs.Go(func() { w.work(push.sessionID) })
 	}
+	return true
+}
+
+// holdTermLocked reports whether the workers take a push of term, recording the term when they
+// hold none of its pushes yet. A push of no term is always taken; one of a term that has ended,
+// or whose handling is cancelled, is not: that term's messages are its stop's to dispose of
+// (endTerm), so this one goes back to the durable instead of outliving the term.
+func (w *servePortWorkers) holdTermLocked(term context.Context) bool {
+	if term == nil {
+		return true
+	}
+	if state, held := w.terms[term]; held {
+		return !state.ended
+	}
+	if term.Err() != nil {
+		return false
+	}
+	ctx, cancel := context.WithCancel(w.ctx)
+	w.terms[term] = &servePortTerm{ctx: ctx, cancel: cancel}
 	return true
 }
 
@@ -195,31 +270,136 @@ func (w *servePortWorkers) stop(ctx context.Context) {
 	}
 }
 
+// endTerm takes back every push of term the workers hold: it stops those pushes and the keeping
+// of their messages in progress, and returns the messages, which nothing here settles any more,
+// for the term's stop to dispose of - a graceful stop NAKs them in its hand-back batch, and a
+// lost lease leaves them to their ack wait (receive_stop.go). A push handed over after this is
+// refused (enqueue), so the term's messages end with the term.
+//
+// idle reports whether every worker had left the term's pushes within wait: one still inside a
+// push holds a message of the term that its stop cannot account for, so a graceful stop writes no
+// clean-hand-back mark for it (durableReceiver.markHandBack).
+func (w *servePortWorkers) endTerm(term context.Context, wait time.Duration) (parked []*nats.Msg, idle bool) {
+	if w == nil || term == nil {
+		return nil, true
+	}
+	w.mu.Lock()
+	state := w.terms[term]
+	if state == nil {
+		w.mu.Unlock()
+		return nil, true
+	}
+	state.ended = true
+	for sessionID, queue := range w.queues {
+		kept := queue[:0]
+		for _, push := range queue {
+			if push.term != term {
+				kept = append(kept, push)
+				continue
+			}
+			if msg := push.settle.abandon(); msg != nil {
+				parked = append(parked, msg)
+			}
+		}
+		clear(queue[len(kept):])
+		w.queues[sessionID] = kept
+	}
+	w.mu.Unlock()
+	state.cancel()
+	idle = w.awaitTermIdle(state, wait)
+	w.mu.Lock()
+	delete(w.terms, term)
+	w.mu.Unlock()
+	return parked, idle
+}
+
+// awaitTermIdle waits for the workers to leave the term's pushes, for wait at most, and reports
+// whether they did.
+func (w *servePortWorkers) awaitTermIdle(state *servePortTerm, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		w.mu.Lock()
+		pushing := state.pushing
+		w.mu.Unlock()
+		if pushing == 0 {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(servePortTermStopPoll)
+	}
+}
+
 // work is sessionID's worker: it pushes the session's queued messages in order and ends once the
 // queue is empty, or when the workers stop.
 func (w *servePortWorkers) work(sessionID string) {
 	for {
-		w.mu.Lock()
-		queue := w.queues[sessionID]
-		if len(queue) == 0 {
-			delete(w.queues, sessionID)
-			w.mu.Unlock()
+		head, ctx, left, ok := w.head(sessionID)
+		if !ok {
 			return
 		}
-		head := queue[0]
-		w.mu.Unlock()
-
-		retry, ended := w.pushUntilSettled(head)
+		retry, ended := w.pushUntilSettled(ctx, head)
+		left()
 		if !ended {
-			return
+			// The workers stopped, or the end of this push's term cancelled it. A push still at
+			// the head is the stopped workers': it is left unsettled, for a later delivery of its
+			// message. One the term's end took back is gone from the queue, and what a later term
+			// queued behind it is this worker's to push.
+			if !w.takenBack(sessionID, head) {
+				return
+			}
+			continue
 		}
+		w.settleHead(sessionID, head, retry)
+	}
+}
+
+// head takes sessionID's head push, the context it is pushed under - its term's, which the term's
+// end cancels, or the workers' own for a push of no term - and the end of the count of its term's
+// pushes in flight. ok is false once the session's queue is empty, which ends its worker.
+func (w *servePortWorkers) head(sessionID string) (push servePortPush, ctx context.Context, left func(), ok bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	queue := w.queues[sessionID]
+	if len(queue) == 0 {
+		delete(w.queues, sessionID)
+		return servePortPush{}, nil, nil, false
+	}
+	push = queue[0]
+	state := w.terms[push.term]
+	if state == nil {
+		return push, w.ctx, func() {}, true
+	}
+	state.pushing++
+	return push, state.ctx, func() {
 		w.mu.Lock()
-		queue = w.queues[sessionID]
+		state.pushing--
+		w.mu.Unlock()
+	}, true
+}
+
+// takenBack reports whether push is no longer its session's head: the end of its term took it
+// back while the worker was pushing it (endTerm).
+func (w *servePortWorkers) takenBack(sessionID string, push servePortPush) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	queue := w.queues[sessionID]
+	return len(queue) == 0 || queue[0].settle != push.settle
+}
+
+// settleHead takes the ended push off its session's queue and ends its hold on the message,
+// asking for a retry when the push did. A push the end of its term took back meanwhile is off the
+// queue already and its message is that end's (endTerm), so the hold it ends there is no longer
+// the message's.
+func (w *servePortWorkers) settleHead(sessionID string, push servePortPush, retry bool) {
+	w.mu.Lock()
+	if queue := w.queues[sessionID]; len(queue) > 0 && queue[0].settle == push.settle {
 		queue[0] = servePortPush{}
 		w.queues[sessionID] = queue[1:]
-		w.mu.Unlock()
-		head.settle.end(retry)
 	}
+	w.mu.Unlock()
+	push.settle.end(retry)
 }
 
 // pushRefusedLine is the line a push to a serving port logs when the port refused it and it waits
@@ -250,12 +430,14 @@ func pushWithBackoff(ctx context.Context, logger *logging.Logger, sessionID stri
 	}
 }
 
-// pushUntilSettled pushes push until its port answers 204, or until its session is no longer a
-// serving port this listener owns, and reports the outcome: whether the message needs a retry, and
-// whether the push ended at all (false when the workers stopped first).
-func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bool) {
+// pushUntilSettled pushes push under ctx until its port answers 204, or until its session is no
+// longer a serving port this listener owns, and reports the outcome: whether the message needs a
+// retry, and whether the push ended at all (false when the workers stopped, or the end of the
+// push's term took it back, first). ctx is the push's term's, which that end cancels, or the
+// workers' own for a push of no term (head).
+func (w *servePortWorkers) pushUntilSettled(ctx context.Context, push servePortPush) (retry, ended bool) {
 	cfg := w.cfg
-	ended = pushWithBackoff(w.ctx, cfg.logger, push.sessionID, push.item, func(attempt int) (bool, error) {
+	ended = pushWithBackoff(ctx, cfg.logger, push.sessionID, push.item, func(attempt int) (bool, error) {
 		entry, verdict := w.target(push)
 		switch verdict {
 		case servePortConsumerRelays:
@@ -299,7 +481,7 @@ func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bo
 			retry = true
 			return true, nil
 		}
-		if err := cfg.deliverer.Push(w.ctx, push.item, push.sessionID, entry); err != nil {
+		if err := cfg.deliverer.Push(ctx, push.item, push.sessionID, entry); err != nil {
 			return false, err
 		}
 		applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
