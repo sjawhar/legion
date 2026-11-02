@@ -418,7 +418,7 @@ func main() {
 	// whose loops would each run everywhere, so it ends here.
 	//
 	// The loops come in these shapes, so that a database nobody writes costs them nothing except
-	// where GitHub gives them nothing to wake on, and the four timers of the last shape:
+	// where GitHub gives them nothing to wake on, and the five timers of the last shape:
 	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
 	//     shared listener below says their work may have changed, or when a due time their last
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
@@ -450,9 +450,10 @@ func main() {
 	//     batch is full), the repair of closed and reopened issues' asks (api.RunIssueAskRepair,
 	//     every 10 minutes on a plain ticker, after the boot's own unleased pass), the prune of
 	//     the server process registry (processes.RunPrune, every minute, which joinRegistry starts
-	//     below) and the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute),
-	//     each recording its passes in duty_passes like the timers above; each tick sends its
-	//     statements whether or not anything is owed.
+	//     below), the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute) and
+	//     the document compaction sweep (docs.Service.RunCompactionSweep, every hour from a tick at
+	//     start, with or without NATS), each recording its passes in duty_passes like the timers
+	//     above; each tick sends its statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
 	// listener pool, carrying every woken loop's channel and the document rooms' room-sync
@@ -465,7 +466,7 @@ func main() {
 	// The events outbox publishes under a hold of its own rather than such a lease
 	// (outbox.Outbox): it renews duty.Hold "dispatch-outbox" on its own pool every two seconds, so
 	// one process publishes at a time and the other takes over within seconds of a holder that
-	// stops, dies or loses NATS. Its daily document compaction is leased like the loops above.
+	// stops, dies or loses NATS.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
@@ -474,7 +475,10 @@ func main() {
 	//     push-durable exclusivity, which delivery.StartIntakes takes).
 	//   - per-process by design, because each serves this process's own connections or memory:
 	//     the delivery live hub and its listener (migration 0107_events_notify.up.sql states that
-	//     purpose), the event stream relay, the document rooms' timers, the process's shared
+	//     purpose), the event stream relay, the document rooms' timers, the document compaction
+	//     queue (docs.New starts it; it compacts the documents this process's own appends and
+	//     loads noted, and the hourly compaction sweep below is the leased pass over the
+	//     documents doc_compaction_owed names, those with rows to fold), the process's shared
 	//     listener hub (its connection is this process's membership and every loop above waits on
 	//     a wake of this process's own, so it has to run in every process) and the room sync
 	//     registered on it (it serves the rooms resident in this process: it catches them up with
@@ -517,8 +521,6 @@ func main() {
 			Publisher:       natsClient,
 			Broker:          broker,
 			Listen:          database.Pool.Listener,
-			Docs:            documentService,
-			Leases:          leases,
 			RoleClaims:      holders,
 			Sessions:        holders,
 			PublishFailures: outboxPublishFailures,
@@ -598,6 +600,10 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531), woken by the refs trigger that announces each mention left owed.
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases, excerptsWake)
+	// Documents the compaction queues let go - every room a restart, a Shutdown or a Quiesce
+	// dropped from one - fold within an hour of coming due, whether or not NATS is configured
+	// (INFRA-593).
+	go documentService.RunCompactionSweep(ctx, leases)
 	// Each document's edit notice goes once its quiet window after a person's last
 	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
 	// still pending when this process stops is sent by the next sweep of either process. The sweep

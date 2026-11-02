@@ -171,7 +171,7 @@ func observedBeforeClose(observed time.Time, age, closedFor time.Duration) bool 
 // and reloaded at the head (Service.closeRoomOnReplacedHistory), rather than taking every later
 // update of its browsers down this path, a decode of the whole stored document under the
 // document's lock each.
-func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time, update []byte, read appendGateRead) (latest int64, replaced bool, err error) {
+func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time, update []byte, read appendGateRead, maxPending int) (latest int64, replaced bool, err error) {
 	latest, intact, closedFor := read.latest, read.intact, read.closedFor
 	// The update's age is taken at the read, as the database measures the close's.
 	var age time.Duration
@@ -184,7 +184,7 @@ func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind
 			ErrIssueClosed, room, closedFor.Round(time.Millisecond), age.Round(time.Millisecond))
 	case historyReplaced(through, latest, intact):
 		if kind == appendBrowser && latest > through {
-			holds, holdsErr := storedHistoryHolds(ctx, tx, room, latest, update)
+			holds, holdsErr := storedHistoryHolds(ctx, tx, room, latest, update, maxPending)
 			if holdsErr != nil {
 				return 0, false, holdsErr
 			}
@@ -207,8 +207,9 @@ func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind
 // history lacks. A compaction's fold keeps every item it folds, so it holds what a room's update
 // was made on; a rebuild's seed is a document of other items, which a room's update parks on. A
 // history that already parks something answers false, as does an update it cannot apply.
-func storedHistoryHolds(ctx context.Context, tx pgx.Tx, room string, head int64, update []byte) (bool, error) {
-	doc, err := documentThrough(ctx, tx, room, persistence.Version(head))
+func storedHistoryHolds(ctx context.Context, tx pgx.Tx, room string, head int64, update []byte, maxPending int) (bool, error) {
+	version := persistence.Version(head)
+	doc, err := documentThrough(room, version, storedUpdates(ctx, tx, room, version), maxPending)
 	if err != nil || doc == nil {
 		return false, err
 	}
@@ -227,7 +228,7 @@ func storedHistoryHolds(ctx context.Context, tx pgx.Tx, room string, head int64,
 // below it remains (intact false): a rebuild deleted every row and seeded head+1, or a compaction
 // folded the rows the room holds into a later one. Neither leaves a row the room could take in on
 // its own, so the room is closed and reloaded instead (catchUpRoom, closeRoomBehindHead). A
-// compaction with compactKeep = 1 keeps the head row, so a room at the head is unaffected.
+// compaction keeps the row it folds into, so a room at the head is unaffected.
 func historyReplaced(through, latest int64, intact bool) bool {
 	return latest < through || (through > 0 && !intact)
 }

@@ -407,7 +407,7 @@ func TestACompactionLeavesACurrentRoomOpen(t *testing.T) {
 	for keystroke := range 3 {
 		requireRoomStillWrites(t, pair.taskA, pair.artifactID, uint64(keystroke+1))
 	}
-	if deleted, err := pair.taskB.persistence.Compact(context.Background(), pair.artifactID, compactKeep); err != nil || deleted == 0 {
+	if deleted, err := pair.taskB.persistence.Compact(context.Background(), pair.artifactID, 1); err != nil || deleted == 0 {
 		t.Fatalf("compact the document on task B = %d rows, %v, want some folded", deleted, err)
 	}
 

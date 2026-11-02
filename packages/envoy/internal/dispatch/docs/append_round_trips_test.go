@@ -20,7 +20,10 @@ import (
 // what a keystroke's store costs under the document's advisory lock, where every other writer of
 // the document waits, so the tests here count the trips of one store rather than its statements:
 // a batch is one trip whatever it queues (appendWrites), a statement is one of its own, and so is
-// a prepare the connection's statement cache misses (TracePrepareStart).
+// the prepare of a statement the connection's cache misses. A statement run on its own is
+// prepared in a trip pgx reports (TracePrepareStart); a batch's uncached statements are prepared
+// in a pipeline trip of its own that pgx reports nothing for, so the recorder counts that one
+// itself, from the SQL it has seen each connection send (TraceBatchStart, sawSQL).
 
 // roundTrip is one exchange the code under test made on one connection: the SQL it sent, the
 // arguments it sent with it, whether it was a batch, and whether it was a prepare of that SQL
@@ -51,9 +54,14 @@ func (t roundTrip) names(room string) bool {
 type roundTripRecorder struct {
 	mu    sync.Mutex
 	trips []roundTrip
+	// seen is the SQL each connection has sent, which is what its statement cache holds. It
+	// outlives reset, as the cache outlives the step under test: a statement a warm-up store
+	// prepared on this connection is not prepared again by the store being measured.
+	seen map[*pgx.Conn]map[string]bool
 }
 
 func (r *roundTripRecorder) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	r.sawSQL(conn, data.SQL)
 	r.record(roundTrip{conn: conn, sql: []string{data.SQL}, args: slices.Clone(data.Args)})
 	return ctx
 }
@@ -68,17 +76,26 @@ func (r *roundTripRecorder) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQ
 // only on a miss, so every prepare recorded is a trip. The query that triggers one is reported
 // first (TraceQueryStart), so the prepare is recorded just after it.
 func (r *roundTripRecorder) TracePrepareStart(ctx context.Context, conn *pgx.Conn, data pgx.TracePrepareStartData) context.Context {
+	r.sawSQL(conn, data.SQL)
 	r.record(roundTrip{conn: conn, sql: []string{data.SQL}, prepare: true})
 	return ctx
 }
 
 func (r *roundTripRecorder) TracePrepareEnd(context.Context, *pgx.Conn, pgx.TracePrepareEndData) {}
 
+// TraceBatchStart records the batch and, ahead of it, the prepare trip it owes. pgx prepares a
+// batch's uncached statements in a pipeline exchange of its own before it sends the batch
+// (SendPrepare, Sync, GetResults in pgx v5.11 conn.go), and reports no TracePrepareStart for it,
+// so a statement new to this connection costs a trip nothing else here would see. One trip covers
+// however many of the batch's statements are new, since they are prepared in that one exchange.
 func (r *roundTripRecorder) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchStartData) context.Context {
 	trip := roundTrip{conn: conn, batch: true}
 	for _, queued := range data.Batch.QueuedQueries {
 		trip.sql = append(trip.sql, queued.SQL)
 		trip.args = append(trip.args, queued.Arguments...)
+	}
+	if r.sawSQL(conn, trip.sql...) {
+		r.record(roundTrip{conn: conn, sql: slices.Clone(trip.sql), batch: true, prepare: true})
 	}
 	r.record(trip)
 	return ctx
@@ -94,8 +111,30 @@ func (r *roundTripRecorder) record(trip roundTrip) {
 	r.mu.Unlock()
 }
 
-// reset drops what the recorder holds, so the trips it reports next are the ones the step under
-// test made.
+// sawSQL marks each of sql as sent on conn and reports whether any of them was new to it, which
+// is whether the connection's statement cache has to prepare it.
+func (r *roundTripRecorder) sawSQL(conn *pgx.Conn, sql ...string) (fresh bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.seen == nil {
+		r.seen = make(map[*pgx.Conn]map[string]bool)
+	}
+	cached := r.seen[conn]
+	if cached == nil {
+		cached = make(map[string]bool)
+		r.seen[conn] = cached
+	}
+	for _, statement := range sql {
+		if !cached[statement] {
+			cached[statement] = true
+			fresh = true
+		}
+	}
+	return fresh
+}
+
+// reset drops the trips the recorder holds, so the ones it reports next are the ones the step
+// under test made. What each connection has sent (seen) stays: its statement cache does.
 func (r *roundTripRecorder) reset() {
 	r.mu.Lock()
 	r.trips = nil
@@ -135,18 +174,37 @@ func (r *roundTripRecorder) roomLockRuns(room string) [][]roundTrip {
 	return runs
 }
 
-// prepares are the labels of the statements prepared since the last reset, each a round trip of
-// its own (TracePrepareStart). A measured store runs on a connection a warm-up store has already
-// used, so it should prepare nothing; one that does is reported rather than left out of the
-// count.
-func (r *roundTripRecorder) prepares() []string {
-	var prepared []string
+// connOf waits up to within for a round trip naming room whose SQL holds statement, and returns
+// the connection it went on: the one the call that made it runs on, whose backend a lock wait
+// watches (storetest.WaitForQueuedBehind). pgx reports a query as it starts, before the server
+// answers, so the connection is named while the call still waits on its lock. The caller resets
+// the recorder first, so the trip found is the call's own.
+func (r *roundTripRecorder) connOf(t *testing.T, room, statement string, within time.Duration) *pgx.Conn {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		for _, trip := range r.recorded() {
+			if !trip.batch && !trip.prepare && trip.names(room) && strings.Contains(trip.sql[0], statement) {
+				return trip.conn
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no round trip ran %q for document %s within %s", statement, room, within)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// labelsOn names, in order, the round trips the recorder holds for conn, which is how far the
+// call running on it had got.
+func (r *roundTripRecorder) labelsOn(conn *pgx.Conn) []string {
+	var trips []roundTrip
 	for _, trip := range r.recorded() {
-		if trip.prepare {
-			prepared = append(prepared, roundTripLabel(trip))
+		if trip.conn == conn {
+			trips = append(trips, trip)
 		}
 	}
-	return prepared
+	return roundTripLabels(trips)
 }
 
 // roundTripLabels names each trip for an assertion's message: the statements one store runs are
@@ -161,6 +219,9 @@ func roundTripLabels(trips []roundTrip) []string {
 
 func roundTripLabel(trip roundTrip) string {
 	if trip.batch {
+		if trip.prepare {
+			return "a prepare of the append's writes (one batch)"
+		}
 		return "the append's writes (one batch)"
 	}
 	sql := oneLineSQL(trip.sql[0])
@@ -217,8 +278,10 @@ func tracedRoomService(t *testing.T) (*Service, string, *roundTripRecorder) {
 // appendUpdateTxClass). The transaction-level lock is not among them: the session already holds
 // the document's lock on this very connection, so taking it again would grant what the session
 // has and cost a seventh trip - the one every other writer of the document waits out. A prepare
-// is counted as the trip it is (TracePrepareStart), and the measured keystroke runs on a
-// connection the warm-up keystroke has already prepared every statement of, so it makes none.
+// is one of the trips the list below names, a statement's own and a batch's alike, and the
+// measured keystroke runs on a connection the warm-up keystroke has already prepared every
+// statement of, so it makes none: a statement new to that connection, in the batch or beside it,
+// adds a trip the list does not hold and fails this test.
 func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
 	service, artifactID, recorder := tracedRoomService(t)
 	// The first keystroke warms the room, the pool and the store's prepared statements; the
@@ -246,10 +309,6 @@ func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
 		t.Fatalf("a warm keystroke's store made %d round trips:\n\t%s\nwant %d:\n\t%s",
 			len(got), strings.Join(got, "\n\t"), len(want), strings.Join(want, "\n\t"))
 	}
-	if prepares := recorder.prepares(); len(prepares) != 0 {
-		t.Errorf("the measured keystroke prepared %d statement(s), each a round trip of its own:\n\t%s",
-			len(prepares), strings.Join(prepares, "\n\t"))
-	}
 }
 
 // What the saving above must not cost: the room's two durable writers of one document, a live
@@ -261,13 +320,18 @@ func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
 // transaction its caller already locked the room in.
 //
 // Here a transaction of the test's own holds the room's lock, Bob's keystroke queues on it and
-// the live write queues behind the keystroke. Nothing either of them writes is stored while the
-// lock is held, and once it is free both land, in the order they queued, with both edits in the
-// document and neither lost. The holder is what isolates this lock: two live writes queue on the
-// document's owner row before they ever read (lockArtifactOwner), so they serialise whatever the
-// room's lock does, while nothing but this lock orders a live write against the room's worker.
+// the live write queues behind the keystroke, watched on its own backend: the write's one read
+// of the document is where it waits. Nothing either of them writes is stored while the lock is
+// held, and once it is free both land, one append each, with both edits in the document and
+// neither lost. Which of the two updates each stored version holds is not what this pins: the
+// write stores the keystroke's update ahead of its own (flushThrough), so either order of the
+// two writers leaves the same stored history.
+//
+// The holder is what isolates this lock: two live writes of one document never reach it
+// together, since each takes the document's owner row first (lockArtifactOwner), while nothing
+// but this lock orders a live write against the room's worker.
 func TestALiveWriteAndAKeystrokeQueueOnTheRoomsLockAndNeitherIsLost(t *testing.T) {
-	service, artifactID, _ := tracedRoomService(t)
+	service, artifactID, recorder := tracedRoomService(t)
 	head := storedHead(t, service.store, artifactID)
 	ctx := context.Background()
 	holder, err := service.store.Pool.Begin(ctx)
@@ -284,19 +348,29 @@ func TestALiveWriteAndAKeystrokeQueueOnTheRoomsLockAndNeitherIsLost(t *testing.T
 		t.Fatal("the keystroke's append never came to wait on the room's lock")
 	}
 	written := make(chan error, 1)
+	// The write's trips from here on are its own, so the first of them that takes the room's
+	// transaction-level lock names the connection it runs on (connOf).
+	recorder.reset()
 	go func() {
 		_, err := joinedApplyOps(service, artifactID, []model.EditOp{
 			{Op: "replace", Find: "First.", With: "First, written."},
 		}, storedOrderAgent, nil)
 		written <- err
 	}()
-	if waiting := storetest.WaitForLockWaiters(t, holder, 2, roomWait(t)); waiting < 2 {
-		t.Fatal("the live write never came to wait on the room's lock behind the keystroke's append")
+	// The write's own backend, not a count of the backends queued: a count is met by any session
+	// behind this lock, the write's own later lock at its append included, so it passes a write
+	// that never waited at its read. The wait returns at once if the write answers without having
+	// queued, and the trips it has made say where it queued: its transaction, the document's
+	// owner row and the room's lock, with none of its append's.
+	writeConn := recorder.connOf(t, artifactID, "pg_advisory_xact_lock(hashtext", roomWait(t))
+	if err, early := storetest.WaitForQueuedBehind(t, holder, writeConn.PgConn().PID(), written, roomWait(t)); early {
+		t.Fatalf("the live write answered %v before it queued behind the room's lock: it waited on no lock of the room", err)
 	}
-	select {
-	case err := <-written:
-		t.Fatalf("the live write answered %v while the room's lock was held: it waited on no lock of the room", err)
-	default:
+	for _, appended := range []string{"the append gate read", "the append's writes (one batch)"} {
+		if labels := recorder.labelsOn(writeConn); slices.Contains(labels, appended) {
+			t.Fatalf("the live write queued behind the room's lock only after %q, so it did not wait at its one read of the document (readFork, lockedHead); it ran:\n\t%s",
+				appended, strings.Join(labels, "\n\t"))
+		}
 	}
 	if moved := storedHead(t, service.store, artifactID); moved != head {
 		t.Fatalf("the document moved from update %d to %d while the room's lock was held", head, moved)
@@ -319,7 +393,7 @@ func TestALiveWriteAndAKeystrokeQueueOnTheRoomsLockAndNeitherIsLost(t *testing.T
 		t.Fatalf("the stored history holds %d updates to check, want the keystroke's and the write's", report.UpdatesChecked)
 	}
 	if moved := storedHead(t, service.store, artifactID); moved != head+2 {
-		t.Fatalf("the document moved from update %d to %d, want one append each, in the order they queued", head, moved)
+		t.Fatalf("the document moved from update %d to %d, want one append each", head, moved)
 	}
 	stored := storedMarkdown(t, service.store, artifactID)
 	for _, want := range []string{"First, written.", "Second, bob."} {

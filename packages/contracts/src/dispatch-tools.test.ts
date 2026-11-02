@@ -948,7 +948,7 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
-  test("requires artifact with project on document tools but not dispatch_artifact", () => {
+  test("requires artifact with project on document tools but not dispatch_artifact or dispatch_read", () => {
     const cases = [
       [
         "dispatch_ask",
@@ -961,7 +961,6 @@ describe("dispatchToolSpecs", () => {
         { project: "CORE", ops: [{ op: "replace", find: "draft", with: "final" }] },
       ],
       ["dispatch_doc_read", { project: "CORE" }],
-      ["dispatch_read", { project: "CORE" }],
     ] as const;
 
     for (const [name, args] of cases) {
@@ -974,6 +973,8 @@ describe("dispatchToolSpecs", () => {
         content: "# Runbook",
       }).success
     ).toBe(true);
+    // A project alone is the read of its documents' list.
+    expect(schemaFor("dispatch_read").safeParse({ project: "CORE" }).success).toBe(true);
   });
 
   test("accepts a project-document ref in place of issue/project on every ref-aware tool", () => {
@@ -1156,7 +1157,7 @@ describe("dispatchToolSpecs", () => {
     ],
     [
       "dispatch_artifact",
-      "Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version.",
+      "Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md).",
     ],
     [
       "dispatch_ask",

@@ -354,9 +354,10 @@ func TestStoredHistoryIsNeverTorn(t *testing.T) {
 		}
 
 		if (round+1)%compactEvery == 0 {
-			// Both rooms at the head, as a compaction with compactKeep leaves them standing.
+			// Both rooms at the head, as a compaction that keeps the head row alone leaves them
+			// standing.
 			catchUp(other)
-			if _, err := NewPgVersioned(database).Compact(context.Background(), artifactID, compactKeep); err != nil {
+			if _, err := NewPgVersioned(database).Compact(context.Background(), artifactID, 1); err != nil {
 				t.Fatalf("round %d: compact the stored history: %v", round, err)
 			}
 			requireStoreNeverTorn(t, database, artifactID, fmt.Sprintf("round %d: after a compaction", round))

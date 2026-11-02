@@ -65,7 +65,7 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		return 0, err
 	}
 	if read.pruneCeiling != nil {
-		if err := p.recoverPruneTx(ctx, tx, room); err != nil {
+		if _, err := p.recoverPruneTx(ctx, tx, room); err != nil {
 			return 0, err
 		}
 		if read, err = readAppendGate(ctx, tx, room, through); err != nil {
@@ -77,7 +77,7 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		var replaced bool
 		// Only a browser's append is admitted on a replaced history, so a derived append reads
 		// the decision alone.
-		latest, replaced, err = gateAppend(ctx, tx, room, through, kind, observed, update, read)
+		latest, replaced, err = gateAppend(ctx, tx, room, through, kind, observed, update, read, p.maxPendingItems)
 		if replaced && replacedCursor != nil {
 			replacedCursor.markReplaced()
 			if p.storedHistoryHeld != nil {
@@ -103,19 +103,28 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// so the ledger's transaction is tx; the two are not compared, since a pgx.Tx's dynamic type
 	// need not be comparable. The room is passed twice because its two parameters are different
 	// types: doc_updates.artifact_id is a uuid, and pg_notify takes text.
+	//
+	// The same statement names the document in doc_compaction_owed, the documents the compaction
+	// sweep reads (compactionCandidates), once the row it appends is not the document's first: a
+	// first row has nothing to fold into, and a document already named stays as it is.
 	var writes appendWrites
 	if ledger := ledgerFrom(ctx); ledger != nil && ledger.tx != nil {
 		writes.queue("append document update", `
-			insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
-		`, room, int64(version), update, contentChanged)
+			with appended as (
+				insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
+			)
+			insert into doc_compaction_owed (artifact_id) select $1 where $5 on conflict do nothing
+		`, room, int64(version), update, contentChanged, latest > 0)
 		ledger.deferAnnouncement(room, version)
 	} else {
 		writes.queue("append document update", `
 			with appended as (
 				insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
+			), owed as (
+				insert into doc_compaction_owed (artifact_id) select $1 where $7 on conflict do nothing
 			)
 			select `+announceDocumentHead("$5::text", "$2::bigint", "$6::text"),
-			room, int64(version), update, contentChanged, room, p.processID)
+			room, int64(version), update, contentChanged, room, p.processID, latest > 0)
 	}
 	authors, lastActor, include := credit.take()
 	// An edit credited to authors names its latest edit source, none included when no one

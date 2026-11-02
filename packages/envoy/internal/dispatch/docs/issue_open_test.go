@@ -347,13 +347,14 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHist
 
 // foldHistoryPastRoom writes artifactID as another process would, in holder, which holds the
 // document's lock, past head, the cursor of the room a test holds, and then folds the history as
-// Compact does with compactKeep: one row, the head, holding the state of every row through it. No
+// Compact does with a keep of one: one row, the head, holding the state of every row through it. No
 // row at or below head remains, and the fold keeps every item of the history, so the room's
 // browser updates still build on it (storedHistoryHolds).
 func foldHistoryPastRoom(t *testing.T, holder pgx.Tx, artifactID string, head int64) {
 	t.Helper()
 	ctx := context.Background()
-	stored, err := documentThrough(ctx, holder, artifactID, persistence.Version(head))
+	through := persistence.Version(head)
+	stored, err := documentThrough(artifactID, through, storedUpdates(ctx, holder, artifactID, through), maxUpdateItems)
 	if err != nil {
 		t.Fatalf("read the stored document: %v", err)
 	}
@@ -367,7 +368,8 @@ func foldHistoryPastRoom(t *testing.T, holder pgx.Tx, artifactID string, head in
 		artifactID, writtenAt, crdt.EncodeStateAsUpdateV1(stored, before)); err != nil {
 		t.Fatalf("write the document as task B: %v", err)
 	}
-	state, misread, err := foldThrough(ctx, holder, artifactID, persistence.Version(writtenAt))
+	folding := persistence.Version(writtenAt)
+	state, _, misread, err := fold(storedUpdates(ctx, holder, artifactID, folding), maxUpdateItems)
 	if err != nil {
 		t.Fatalf("fold the document's history: %v", err)
 	}

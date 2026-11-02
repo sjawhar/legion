@@ -7,9 +7,9 @@ body: |-
   connection, which already carried the background loops' wakes, now carries the document rooms'
   room sync as well and is named `dispatch-listener <process id>`, replacing the stale-room
   listener. The processes read that name in `pg_stat_activity` to know which processes are
-  members. One process holds up to 93 connections at its ceiling
-  (`store.ConnectionsPerProcess`), up from 92, and `infra/gcp`'s `dispatchConnectionsPerPod` is
-  93 to match.
+  members. One process holds up to 95 connections at its ceiling
+  (`store.ConnectionsPerProcess`), up from 94, and `infra/gcp`'s `dispatchConnectionsPerPod` is
+  95 to match.
 time: 2026-10-28T12:12:18Z
 custom:
   Issue: pr2414
