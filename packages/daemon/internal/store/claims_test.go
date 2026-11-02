@@ -245,6 +245,30 @@ func TestAClaimsPluginContractRoundTrips(t *testing.T) {
 	sameClaim(t, onlyClaim(t, store), want)
 }
 
+// The round a claim left is a column of its own, and it is read back exactly as it was written:
+// the daemon decides from it what the pod of a round took with it when it went, and a restart
+// has nothing else to read that from (INFRA-484). It round-trips independently of the round the
+// claim records, which a claim that leaves keeps.
+func TestTheRoundAClaimLeftRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := tmuxClaim("legion-LEGION-209-leftaround")
+	want.UpdateRound = supervise.PodRound("9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22")
+	want.UpdateLeftRound = want.UpdateRound
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+
+	// The round ends, which is the one thing that clears it.
+	want.UpdateRound = ""
+	want.UpdateLeftRound = ""
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim again: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+}
+
 // A locator is checked where it is read back: a row nothing could act on is refused by name rather
 // than loaded as a process the daemon believes in.
 func TestClaimsRefusesAStoredLocatorThatDoesNotValidate(t *testing.T) {
