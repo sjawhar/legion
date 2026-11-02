@@ -230,11 +230,12 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // enqueued_at item was listed with: an edit that lands meanwhile moves it, and the item stays
 // owed for the next pass. A new edge takes the time the text was written (sourceText) and no
 // source_seq, since no event introduced it, as a rebuild's does; a re-index of text no one
-// rewrote appends no event, as rebuild-refs appends none. An item whose source is gone has its
-// edges deleted with its owed row. A comment or message has its blocks indexed too (IndexItem,
-// which takes the item's block state row after the source row), and an ask its parts
-// (IndexAskParts, read from the same row sourceText locked), so the mentions its blocks hold are
-// read with the same grammar as its own.
+// rewrote appends no event, as rebuild-refs appends none. A ?since= read is therefore never
+// shown such an edge, which is right for a rebuild of text that was already indexed and already
+// seen. An item whose source is gone has its edges deleted with its owed row. A comment or
+// message has its blocks indexed too (IndexItem, which takes the item's block state row after
+// the source row), and an ask its parts (IndexAskParts, read from the same row sourceText
+// locked), so the mentions its blocks hold are read with the same grammar as its own.
 func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {

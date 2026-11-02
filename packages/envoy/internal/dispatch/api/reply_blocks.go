@@ -36,7 +36,10 @@ type namedBlock struct {
 // has one) and the item row; an item an older build wrote, or wrote after its last index, is
 // indexed first, in the caller's transaction (refs.IndexItemIfOwed), so the block named is one
 // of the item's current body. A block the item does not hold now answers 400 with code, naming
-// field and the block.
+// field and the block. The live write of this request is the reply, which its own route stamps;
+// the item indexed here is the parent, whose text an earlier write already carried an event for,
+// so a block mention this records takes that write's own source_seq at the item's first indexing
+// and none after it (refs.indexItemBlocks), and either way it is no new fact of this request.
 func (s *server) replyBlockOf(
 	ctx context.Context, tx pgx.Tx, kind refs.ItemKind, itemID, blockID, field, code string,
 ) (*namedBlock, error) {
