@@ -74,7 +74,7 @@ func wholeDocumentWrite(ctx context.Context, s *Service, artifactID, markID stri
 	if err != nil {
 		return err
 	}
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		marks := doc.GetMap(marksMapName)
 		transact(func(txn *crdt.Transaction) {
 			marks.Set(txn, markID, plain)

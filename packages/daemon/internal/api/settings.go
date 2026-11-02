@@ -118,7 +118,10 @@ type KubernetesSettings struct {
 	Plugins *PluginsSettings `json:"plugins,omitempty"`
 	// Setup is the argv every role runs before each start of its Oh My Pi, `[]` while the
 	// file sets none: every pod runs it, so every pod knows it, as with `omp_launch_prefix`.
-	Setup           []string                `json:"setup"`
+	Setup []string `json:"setup"`
+	// TestPostgres is whether every issue pod serves its own PostgreSQL for tests, which every
+	// role of such a pod is told as LEGION_TEST_PG_DSN, so every pod may read it.
+	TestPostgres    bool                    `json:"test_postgres"`
 	RepositoryCache RepositoryCacheSettings `json:"repository_cache"`
 }
 
@@ -338,6 +341,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 		},
 		SessionStore: string(block.SessionStore.Kind),
 		Setup:        stringsOf(block.Setup),
+		TestPostgres: block.TestPostgres,
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,

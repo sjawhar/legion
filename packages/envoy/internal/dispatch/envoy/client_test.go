@@ -389,6 +389,51 @@ func TestRolePreservesListenerNotFoundText(t *testing.T) {
 	}
 }
 
+// A listener that is starting answers every /v1 route 503 with a JSON reason ("service starting",
+// cmd/listener/main.go's startingGate), and a gateway in front of one that is gone answers 502 or
+// 504, so on a role lookup and on a send alike those are ErrUnavailable - a caller's "ask again" -
+// whatever body they carry, and the error keeps the listener's reason because a person reads it.
+// A 4xx is the listener's answer, never unavailable: that is the discriminating control.
+func TestRoleAndSendReportAStartingListenerAsUnavailable(t *testing.T) {
+	calls := map[string]func(*Client) error{
+		"role": func(client *Client) error {
+			_, err := client.Role(context.Background(), "legion-planner")
+			return err
+		},
+		"send": func(client *Client) error {
+			_, err := client.Send(context.Background(), SendInput{TargetSession: "s1", Message: "m", IdempotencyKey: "k"})
+			return err
+		},
+	}
+	for _, tc := range []struct {
+		status      int
+		body        string
+		unavailable bool
+		reason      string
+	}{
+		{status: http.StatusServiceUnavailable, body: `{"error":"service starting"}`, unavailable: true, reason: "service starting"},
+		{status: http.StatusBadGateway, body: `{"error":"upstream connect error"}`, unavailable: true, reason: "upstream connect error"},
+		{status: http.StatusGatewayTimeout, body: `{"error":"upstream timed out"}`, unavailable: true, reason: "upstream timed out"},
+		{status: http.StatusServiceUnavailable, body: ``, unavailable: true, reason: "503"},
+		{status: http.StatusBadRequest, body: `{"error":"message is required"}`, reason: "message is required"},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		for name, call := range calls {
+			err := call(New(listener.URL))
+			if err == nil || errors.Is(err, ErrUnavailable) != tc.unavailable || !strings.Contains(err.Error(), tc.reason) {
+				t.Errorf("%s answered %d %s: err = %v, want ErrUnavailable %v carrying %q", name, tc.status, tc.body, err, tc.unavailable, tc.reason)
+			}
+			if errors.Is(err, ErrReceiptTimeout) || errors.Is(err, ErrNotFound) {
+				t.Errorf("%s answered %d %s: err = %v, want neither a receipt timeout nor a missing session", name, tc.status, tc.body, err)
+			}
+		}
+		listener.Close()
+	}
+}
+
 // A per-session read is the question "is this session live, and how is it named", so the body it
 // decodes is one row of GET /v1/sessions: the same fields, filled the same way. The listener may
 // leave the id out of its own answer, and leaves a session with no roles or no capabilities
@@ -489,5 +534,65 @@ func TestSessionReportsAnUnreachableListenerAsUnavailable(t *testing.T) {
 		t.Fatalf("refused: err = %v, want ErrUnavailable", err)
 	} else if errors.Is(err, ErrNotFound) {
 		t.Fatalf("refused: err = %v, want it not to read as a missing session", err)
+	}
+}
+
+// Only what a listener being replaced gives - no connection, or a 502, 503 or 504 - is
+// ErrUnreachable, the failure a sender may wait out; a status the listener chose (a 401 for a token
+// it refuses, a 403, a 500) and an answer that does not decode are its answer, which asking again
+// repeats. ErrUnreachable is ErrUnavailable too, with the same text, so a caller that asks only
+// for ErrUnavailable reads a take-over exactly as before.
+func TestOnlyATakeOverIsUnreachable(t *testing.T) {
+	calls := map[string]func(*Client) error{
+		"session": func(client *Client) error {
+			_, err := client.Session(context.Background(), "s1")
+			return err
+		},
+		"role": func(client *Client) error {
+			_, err := client.Role(context.Background(), "legion-planner")
+			return err
+		},
+		"send": func(client *Client) error {
+			_, err := client.Send(context.Background(), SendInput{TargetSession: "s1", Message: "m", IdempotencyKey: "k"})
+			return err
+		},
+	}
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	for name, call := range calls {
+		err := call(New(closed.URL))
+		if !errors.Is(err, ErrUnreachable) || !errors.Is(err, ErrUnavailable) ||
+			!strings.HasPrefix(err.Error(), "envoy listener unavailable: ") {
+			t.Errorf("%s refused: err = %v, want ErrUnreachable and ErrUnavailable with ErrUnavailable's text", name, err)
+		}
+	}
+	for _, tc := range []struct {
+		status      int
+		body        string
+		unreachable bool
+	}{
+		{status: http.StatusServiceUnavailable, body: `{"error":"service starting"}`, unreachable: true},
+		{status: http.StatusBadGateway, body: ``, unreachable: true},
+		{status: http.StatusGatewayTimeout, body: `{"error":"upstream timed out"}`, unreachable: true},
+		{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
+		{status: http.StatusUnauthorized, body: ``},
+		{status: http.StatusForbidden, body: `{"error":"forbidden"}`},
+		{status: http.StatusInternalServerError, body: ``},
+		{status: http.StatusOK, body: `{"session_id":`},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		for name, call := range calls {
+			err := call(New(listener.URL))
+			if err == nil || errors.Is(err, ErrUnreachable) != tc.unreachable {
+				t.Errorf("%s answered %d %s: err = %v, want ErrUnreachable %v", name, tc.status, tc.body, err, tc.unreachable)
+			}
+			if tc.unreachable && !errors.Is(err, ErrUnavailable) {
+				t.Errorf("%s answered %d %s: err = %v, want it ErrUnavailable too", name, tc.status, tc.body, err)
+			}
+		}
+		listener.Close()
 	}
 }

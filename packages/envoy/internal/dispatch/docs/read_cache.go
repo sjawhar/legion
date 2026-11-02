@@ -161,16 +161,19 @@ func (r *documentReads) get(artifactID string, stamp DocumentStamp, heads headTo
 	return read
 }
 
-// put stores read as its document's rendering in place of any it held, then drops the least
-// recently read renderings until the cache's weight is within its budget. A rendering heavier than
-// an eighth of the budget is not stored, and the one it replaces goes. put does not compare stamps:
-// a slow fold of an older stamp can replace a newer rendering, which costs the next read a refold,
-// never a stale read, since get serves an entry only at the stamp its caller just read. A document
-// with a rendering stored holds its entry in heads (headTracker.hold) until its rendering goes, so
-// every write the tracker hears of it while it is cached moves the generation current compares.
-func (r *documentReads) put(read *documentRead, heads *headTracker) {
+// put stores read as its document's rendering in place of any it held, under token, the head
+// tracker's token its fold took before it read the store (set under the cache's lock, as get sets
+// a hit's), then drops the least recently read renderings until the cache's weight is within its
+// budget. A rendering heavier than an eighth of the budget is not stored, and the one it replaces
+// goes. put does not compare stamps: a slow fold of an older stamp can replace a newer rendering,
+// which costs the next read a refold, never a stale read, since get serves an entry only at the
+// stamp its caller just read. A document with a rendering stored holds its entry in heads
+// (headTracker.hold) until its rendering goes, so every write the tracker hears of it while it is
+// cached moves the generation current compares.
+func (r *documentReads) put(read *documentRead, token headToken, heads *headTracker) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	read.heads = token
 	element, held := r.entries[read.artifactID]
 	if held {
 		r.removeLocked(element)
@@ -427,8 +430,7 @@ func (s *Service) foldDocument(ctx context.Context, artifactID string, heads hea
 	// and refusal, as it would without the cache.
 	fold, _ = foldLoaded(artifactID, loaded)
 	if fold.read != nil {
-		fold.read.heads = heads
-		s.reads.put(fold.read, s.heads)
+		s.reads.put(fold.read, heads, s.heads)
 	}
 	return fold, nil
 }

@@ -16,6 +16,7 @@
 import { Editor, editorViewCtx, marksCtx, nodesCtx, remarkStringifyOptionsCtx } from '@milkdown/core';
 import { schema as commonmarkSchema } from '@milkdown/preset-commonmark';
 import { type BlockIdGenerator, blockIdSchemas, mintBlockId, withBlockIds } from './editor/schema/block-ids';
+import { withoutLeafMarks } from './editor/schema/leaf-marks';
 import {
   blockSchemaPlugins,
   remarkTypedBlocks,
@@ -40,6 +41,7 @@ import { remarkProofMarks, proofMarkHandler } from 'proof-sdk-upstream/src/forma
 import { dispatchMarkPlugins, remarkDispatchMarks, dispatchMarkHandler } from './dispatch-marks.js';
 import remarkInlineLinks from 'remark-inline-links';
 import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
+import { remarkHoistNestedLinks } from './nested-links.js';
 import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
 import { remarkReadOnlyDirectives } from './read-only-directives.js';
 import { remarkUnfitTypedBlocks } from './typed-block-drawing.js';
@@ -169,7 +171,11 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
       // as nothing, as CommonMark reads them; the schema has no node for an unresolved reference,
       // so without this the parse throws and the whole body falls back to its literal source.
       // The live editor's commonmark preset installs the same plugin on its own import parser.
-      .use(remarkInlineLinks);
+      .use(remarkInlineLinks)
+      // After remark-inline-links, so a reference-style link inside a label is already the link
+      // this splits out: a link inside a link label is hoisted beside the runs around it, each of
+      // them wrapped in a copy of the label's link, which is the tree Go's reader reads.
+      .use(remarkHoistNestedLinks);
     // remark leaves a soft break as a "\n" inside its text node; the policy either joins the
     // lines with a space or splits them around a `break` node, which the commonmark preset's
     // hardbreak parser takes.
@@ -192,7 +198,9 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
       parsers.set(softBreaks, parse);
     }
     try {
-      return withBlockIds(parse(markdown), mint);
+      // Beside `withBlockIds`, never inside it: that walk returns its input unchanged when no
+      // id was missing (see ./editor/schema/leaf-marks.ts).
+      return withoutLeafMarks(withBlockIds(parse(markdown), mint));
     } catch (error) {
       // A throw leaves this ParserState's stack open, so its next parses would throw too. Drop
       // it; the next parse of this policy builds a fresh one (about 0.03 ms).

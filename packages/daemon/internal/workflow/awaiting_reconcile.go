@@ -235,7 +235,7 @@ type awaitDecision struct {
 //  3. one whose tree has a member in a phase stays, since that member's work needs the slot;
 //  4. one that could not resume (Unresumable) stays, since released, nothing could resume it;
 //  5. one whose architect still owes the work it was given — a start queued, a claim still
-//     starting, a task not yet taken (owed) — stays: a suspension then would cancel that work;
+//     starting, a task not yet taken (owed) — stays: the wait begins only after that task is taken;
 //  6. otherwise the wait begins at the newest hand-back (DeclaredSeq), on the design gate when its
 //     approval request is with the person, else on the oldest question that is. When a person's
 //     act Dispatch recorded after that start is already in the record (answeredSince), the
@@ -353,9 +353,9 @@ func owed(run record.RoleRun) (string, bool) {
 // answeredSince names a person's act the record already holds that Dispatch recorded after waiting
 // began: their act on the subject question, or on any other ask of the root the mirror recorded one
 // on (record.RootAsk.PersonActSeq against the gate's document, read from the acts the ask handlers
-// record under one rule, personAct). A review of the root's spec is not read here: the architect it
-// would resume is running, and the daemon's own design-changes-requested notice is the work that
-// reaches it (a handout of its own).
+// record under one rule, personAct). A review of the root's spec is not read here: the architect
+// is already live, and the daemon's own design-changes-requested notice is the work that reaches
+// it (a handout of its own).
 func answeredSince(waiting record.Awaiting, asks []record.RootAsk, gateArtifact string) (record.Answer, string, bool) {
 	since := waiting.Since.Seq
 	for _, ask := range asks {
@@ -371,20 +371,16 @@ func answeredSince(waiting record.Awaiting, asks []record.RootAsk, gateArtifact 
 	return "", "", false
 }
 
-// enterAwaiting moves root into awaiting_person on waiting: admission releases its slot in the same
-// intake transaction and fills it from Waiting before the fact commits. The architect's daemon
-// suspension waits for its current turn to end, keeping the session for the answer's resume, and
-// the controller is told.
+// enterAwaiting moves root into awaiting_person on waiting: admission releases its slot in the
+// same intake transaction and fills it from Waiting before the fact commits. The architect stays
+// live to read the person's answer, and the controller is told.
 func (e *Engine) enterAwaiting(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting, reason string) error {
 	root.Phase, root.Awaiting = phase.AwaitingPerson, &waiting
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
 		return err
 	}
-	suspendReason := fmt.Sprintf("%s waits on a person (%s): its slot is released until they answer", root.Key, reason)
-	if err := e.suspend(ctx, tx, root, claim.RoleArchitect, suspendReason); err != nil {
-		return err
-	}
-	if err := e.enqueue(ctx, tx, root.Key, record.ControllerNotice{Kind: record.AwaitingPersonNotice, Reason: suspendReason}); err != nil {
+	waitReason := fmt.Sprintf("%s waits on a person (%s): its slot is released until they answer", root.Key, reason)
+	if err := e.enqueue(ctx, tx, root.Key, record.ControllerNotice{Kind: record.AwaitingPersonNotice, Reason: waitReason}); err != nil {
 		return err
 	}
 	e.logOnCommit(ctx, "workflow: root waits on a person and returns its admission slot", "issue", root.Key, "tree", root.Tree,
@@ -403,12 +399,11 @@ func (e *Engine) tellInPlace(ctx context.Context, tx pgx.Tx, root record.Issue, 
 	return e.ResumeAwaitedRoot(ctx, tx, root, waiting)
 }
 
-// ResumeAwaitedRoot starts an architect in the session its daemon suspension kept (or, told in
-// place, the one it runs), told what answered its wait, how its spec stands now, and what of the
-// root is still with the person or waits on it. It is a handout (Store.StartHandout): what the
-// architect handed back before it is answered or listed here, and only a hand-back after it starts
-// the next wait. When the gate is open it advances the now-admitted tree only after the root has
-// its slot again.
+// ResumeAwaitedRoot gives the architect's live claim a task telling it what answered its wait,
+// how its spec stands now, and what of the root is still with the person or waits on it. It is a
+// handout (Store.StartHandout): what the architect handed back before it is answered or listed
+// here, and only a hand-back after it starts the next wait. When the gate is open it advances the
+// now-admitted tree only after the root has its slot again.
 func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting) error {
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {

@@ -211,7 +211,7 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 		{
 			name: "a user naming neither a machine id nor permissions",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Permissions = nil },
-			err:  []string{`users[1]: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions`},
+			err:  []string{`users[1]: name machineId, for its host's permission set, listenerMachineId, for a listener's own user, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions`},
 		},
 		{
 			name: "a user with an empty machine id",
@@ -222,6 +222,25 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			name: "a user with an empty Dispatch machine id",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[2].DispatchMachineID = pulumi.StringRef("") },
 			err:  []string{`users[2].dispatchMachineId is empty`},
+		},
+		{
+			name: "a user naming both a machine id and a listener machine id",
+			edit: func(a *gcp.NatsHubArgs) { a.Users[0].ListenerMachineID = pulumi.StringRef("example-listener-b") },
+			err:  []string{"users[0]: machineId and listenerMachineId are both set; name one"},
+		},
+		{
+			name: "a user naming both a listener machine id and permissions",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Users[3].Permissions = &gcp.PermissionsArgs{
+					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
+				}
+			},
+			err: []string{"users[3]: listenerMachineId and permissions are both set; name one"},
+		},
+		{
+			name: "a user with an empty listener machine id",
+			edit: func(a *gcp.NatsHubArgs) { a.Users[3].ListenerMachineID = pulumi.StringRef("") },
+			err:  []string{`users[3].listenerMachineId is empty`},
 		},
 		{
 			name: "a user without a public key",
@@ -268,6 +287,11 @@ func TestNatsHubRefusesAMachineIdItsDurableCannotCarry(t *testing.T) {
 		args.Users[2].DispatchMachineID = pulumi.StringRef("a.b")
 		requireMachineIDRefusal(t, args, "users[2].dispatchMachineId", "users[2].dispatchMachineId contains '.'"+carry)
 	})
+	t.Run("listenerMachineId", func(t *testing.T) {
+		args := exampleArgs()
+		args.Users[3].ListenerMachineID = pulumi.StringRef("a.b")
+		requireMachineIDRefusal(t, args, "users[3].listenerMachineId", "users[3].listenerMachineId contains '.'"+carry)
+	})
 	t.Run("an id with an interior ordinary space is accepted", func(t *testing.T) {
 		args := exampleArgs()
 		args.Users[0].MachineID = pulumi.StringRef("example host a")
@@ -286,14 +310,20 @@ func TestNatsHubRefusesMachineIdsWhoseDurablesCollide(t *testing.T) {
 		name, input, want string
 		edit              func(*gcp.NatsHubArgs)
 	}{
-		{"two machineIds of one durable", "users[3].machineId",
-			"users[3]: machineId gives the same durable name as users[0].machineId",
+		{"two machineIds of one durable", "users[4].machineId",
+			"users[4]: machineId gives the same durable name as users[0].machineId",
 			func(a *gcp.NatsHubArgs) {
 				a.Users = append(a.Users, gcp.NATSUserArgs{Name: "example-host-b", NKey: key, MachineID: pulumi.StringRef("example-host-a")})
 			}},
 		{"a dispatchMachineId repeating a machineId", "users[2].dispatchMachineId",
 			"users[2]: dispatchMachineId gives the same durable name as users[0].machineId",
 			func(a *gcp.NatsHubArgs) { a.Users[2].DispatchMachineID = pulumi.StringRef("example-host-a") }},
+		{"a listenerMachineId repeating a machineId", "users[3].listenerMachineId",
+			"users[3]: listenerMachineId gives the same durable name as users[0].machineId",
+			func(a *gcp.NatsHubArgs) { a.Users[3].ListenerMachineID = pulumi.StringRef("example-host-a") }},
+		{"a listenerMachineId on the hub's own listener's durable", "users[3].listenerMachineId",
+			"users[3]: listenerMachineId gives the same durable name as the hub's own listener",
+			func(a *gcp.NatsHubArgs) { a.Users[3].ListenerMachineID = pulumi.StringRef("example-hub") }},
 		{"a space and a hyphen that hyphenate alike", "users[2].dispatchMachineId",
 			"users[2]: dispatchMachineId gives the same durable name as users[0].machineId",
 			func(a *gcp.NatsHubArgs) {
@@ -306,8 +336,8 @@ func TestNatsHubRefusesMachineIdsWhoseDurablesCollide(t *testing.T) {
 		{"a dispatchMachineId on the hub's own listener's durable", "users[2].dispatchMachineId",
 			"users[2]: dispatchMachineId gives the same durable name as the hub's own listener",
 			func(a *gcp.NatsHubArgs) { a.Users[2].DispatchMachineID = pulumi.StringRef("example-hub") }},
-		{"a second Dispatch user", "users[3].dispatchMachineId",
-			"users[3]: dispatchMachineId gives the same durable name as users[2].dispatchMachineId",
+		{"a second Dispatch user", "users[4].dispatchMachineId",
+			"users[4]: dispatchMachineId gives the same durable name as users[2].dispatchMachineId",
 			func(a *gcp.NatsHubArgs) {
 				a.Users = append(a.Users, gcp.NATSUserArgs{Name: "example-dispatch-b", NKey: key, DispatchMachineID: pulumi.StringRef("example-dispatch-b")})
 			}},
@@ -385,6 +415,9 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a seed inside a Dispatch machine id", "users[2].dispatchMachineId", func(a *gcp.NatsHubArgs) {
 			a.Users[2].DispatchMachineID = pulumi.StringRef(inside)
 		}},
+		{"a seed inside a listener machine id", "users[3].listenerMachineId", func(a *gcp.NatsHubArgs) {
+			a.Users[3].ListenerMachineID = pulumi.StringRef(inside)
+		}},
 		// A reader or a decoder takes a seed in lowercase, or split by '.', '-', '_' or whitespace, as
 		// the seed.
 		{"a lowercase seed as the hostname", "hostname", func(a *gcp.NatsHubArgs) { a.Hostname = lower }},
@@ -459,7 +492,7 @@ func TestNatsHubPassesOnCoresSeedRefusalOfUsers(t *testing.T) {
 		}, "users[1]: machineId and permissions are both set; name one"},
 		{"a seed as the name of a user naming neither", func(a *gcp.NatsHubArgs) {
 			a.Users[1].Name, a.Users[1].Permissions = lower, nil
-		}, "users[1]: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions"},
+		}, "users[1]: name machineId, for its host's permission set, listenerMachineId, for a listener's own user, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions"},
 		{"a seed as the name of a user with an empty machine id", func(a *gcp.NatsHubArgs) {
 			a.Users[0].Name, a.Users[0].MachineID = seed, pulumi.StringRef("")
 		}, "users[0].machineId is empty"},

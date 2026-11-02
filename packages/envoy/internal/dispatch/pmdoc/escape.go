@@ -349,17 +349,19 @@ func taskCheckboxText(value string, offset int) bool {
 // htmlBlockStart reports whether the browser editor's engine (micromark's html-flow, CommonMark
 // 0.31) opens an HTML block at the `<` line begins with, line being the markdown written from that
 // `<` to its line's end, where the `<` is the first character after its line's container prefix.
-// goldmark reads some of those as a paragraph: a declaration after a lowercase letter, and a
-// complete tag whose unquoted attribute value ends at an `=`, after which the engine reads another
-// value (`<span title=a=b;x>`). interrupt reports whether the line would go on a paragraph, which
-// only a complete tag (kind 7) cannot interrupt. Each byte is read at most once.
+// goldmark reads one of those as a paragraph: a complete tag whose unquoted attribute value ends
+// at an `=`, after which the engine reads another value (`<span title=a=b;x>`). A declaration whose
+// letter is lowercase is not one of them: this package's reader opens an HTML block there too
+// (declarationBlockParser), by the rule this arm asks as well (opensDeclaration). interrupt
+// reports whether the line would go on a paragraph, which only a complete tag (kind 7) cannot
+// interrupt. Each byte is read at most once.
 func htmlBlockStart(line string, interrupt bool) bool {
 	if end := strings.IndexAny(line, "\r\n"); end >= 0 {
 		line = line[:end]
 	}
 	switch {
 	case strings.HasPrefix(line, "<!--"), strings.HasPrefix(line, "<?"), strings.HasPrefix(line, "<![CDATA["),
-		len(line) > 2 && line[1] == '!' && isASCIILetter(line[2]):
+		opensDeclaration(line):
 		return true
 	}
 	closing := len(line) > 1 && line[1] == '/'

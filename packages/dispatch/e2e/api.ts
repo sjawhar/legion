@@ -28,10 +28,12 @@ import type {
   CreateProjectInput,
   EditAskInput,
   Event,
+  HandoffSummary,
   InboxRow,
   Issue,
   IssueDetails,
   IssueSummary,
+  ItemBlocks,
   Message,
   MessageDelivery,
   MessageRead,
@@ -536,6 +538,29 @@ export function getComment(
   return request(`/api/v1/comments/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
 
+/** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks in body order, each with its
+ *  span in the stored body, its revision, and whether the blocks are indexed from that body. */
+export function getCommentBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
+  return request<ItemBlocks>(
+    `/api/v1/comments/${encodeURIComponent(id)}/blocks`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** A reply to comment `comment` of `issue` that answers its block `block` (`b2`): `reply_to`
+ *  with `reply_to_block`. */
+export function replyToCommentBlock(
+  issue: string,
+  comment: string,
+  block: string,
+  input: Omit<CreateCommentInput, "reply_to" | "reply_to_block">,
+  options: ApiOptions = {}
+): Promise<Comment> {
+  return createComment(issue, { ...input, reply_to: comment, reply_to_block: block }, options);
+}
+
 export function getAsk(id: string, options: ApiOptions = {}): Promise<AskRead> {
   return request<AskRead>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
@@ -742,6 +767,33 @@ export function getMessage(
   );
 }
 
+/** `GET /api/v1/messages/{id}/blocks`: the message's blocks in body order, each with its span in
+ *  the stored body, and whether they are indexed from that body. */
+export function getMessageBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
+  return request<ItemBlocks>(
+    `/api/v1/messages/${encodeURIComponent(id)}/blocks`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** A reply to message `message` of `issue` that answers its block `block` (`b2`): `in_reply_to`
+ *  with `in_reply_to_block`. */
+export function replyToMessageBlock(
+  issue: string,
+  message: string,
+  block: string,
+  input: Omit<CreateMessageInput, "in_reply_to" | "in_reply_to_block">,
+  options: ApiOptions = {}
+): Promise<{ id: string }> {
+  return createMessage(
+    issue,
+    { ...input, in_reply_to: message, in_reply_to_block: block },
+    options
+  );
+}
+
 /** A session answers a targeted message's delivery. `followUp` is `dispatch message`'s
  *  `?follow_up=true`: once the attempt is answered, other text posts as a follow-up instead of
  *  handing back the stored reply. */
@@ -776,6 +828,23 @@ export function replyToCommentDelivery(
       actor,
       as: "agent",
     }
+  );
+}
+
+/** A session records the next version of `phase`'s handoff on the issue, as `dispatch
+ *  handoff-write` does: under the agent bearer, naming itself in `actor`. `body` is sent as the
+ *  one JSON object's text the server stores verbatim. */
+export function createHandoff(
+  issue: string,
+  phase: string,
+  body: object,
+  actor: Actor = seedActor
+): Promise<HandoffSummary> {
+  return request<HandoffSummary>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/handoffs/${encodeURIComponent(phase)}`,
+    "POST",
+    { body: JSON.stringify(body) },
+    { actor, as: "agent" }
   );
 }
 

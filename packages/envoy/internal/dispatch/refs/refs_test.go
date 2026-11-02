@@ -193,7 +193,7 @@ func TestABlockTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
 			citer, _ := createReferenceArtifact(t, tx, "", "ACME", "citer")
 			citingBlock := random(t, text.MaxBlockIDBytes)
 			blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
-			if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+			if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located, nil); err != nil {
 				t.Fatalf("write the reference at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
 			}
 			var fromComment, fromBlock int
@@ -272,7 +272,7 @@ func TestEveryTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
 	}
 	citingBlock := random(t, text.MaxBlockIDBytes)
 	blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
-	if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+	if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located, nil); err != nil {
 		t.Fatalf("write the references at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
 	}
 	for _, table := range []string{"refs", "block_refs"} {
@@ -333,11 +333,15 @@ func TestEveryTargetIDIsTheNodeIDTheGraphStores(t *testing.T) {
 		{"dispatch://CORE-1/comment/c%3B1", "comment", "c;1"},
 		{"https://dispatch.example/issues/CORE-1/spec?comment=c2", "comment", "c2"},
 		{"dispatch://CORE-1/message/m1", "message", "m1"},
+		{"dispatch://CORE-1/comment/c1#b-b2@v1", "comment_block", "comment/c1#b2"},
+		{"dispatch://CORE/artifact/handbook-md/comment/c2#b-b%31", "comment_block", "comment/c2#b1"},
+		{"https://dispatch.example/issues/CORE-1/messages/m1#b-b2", "message_block", "message/m1#b2"},
 	} {
 		t.Run(test.reference, func(t *testing.T) {
 			ref, ok := text.ParseRef(test.reference, server)
-			if !ok || ref.Kind != test.kind || text.TargetID(ref) != test.node {
-				t.Fatalf("%s parsed as %#v (%t), whose target id is %q; want a %s at %q", test.reference, ref, ok, text.TargetID(ref), test.kind, test.node)
+			target, _ := TargetOf(ref)
+			if !ok || target.Kind != test.kind || target.ID != test.node {
+				t.Fatalf("%s parsed as %#v (%t), whose target is %#v; want a %s at %q", test.reference, ref, ok, target, test.kind, test.node)
 			}
 			if _, err := replaceRefs(ctx, tx, "comment", from, text.Extract("See "+test.reference+".", server), nil); err != nil {
 				t.Fatalf("write the reference: %v", err)

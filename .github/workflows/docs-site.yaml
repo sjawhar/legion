@@ -1,0 +1,156 @@
+name: Docs site
+
+# The documentation site's build, in one place. ci.yaml's docs job calls it for a pull request and
+# a merge group. docs-pages.yaml's build job calls it for a push to main, and then publishes what
+# it built to GitHub Pages. Both callers ran these same steps side by side before, and nothing
+# held the two copies equal: a step changed in one copy alone made main build what no pull request
+# built.
+#
+# Two boolean inputs carry the only difference between the callers. Each adds one trailing step
+# that only docs-pages.yaml needs. Every other step is the same for both.
+#
+# A reusable workflow, not a composite action, for two reasons. A composite action's step keys do
+# not include timeout-minutes, which the screenshots step sets. `services:` is a job-level key,
+# which a composite action also cannot carry.
+#
+# No outputs. docs-pages.yaml's deploy job reads the Pages artifact, not an output: actions/
+# deploy-pages looks the artifact up by its name, `github-pages`, in the workflow run. A called
+# workflow's jobs run in the caller's run, so the artifact the build job uploads here is the one
+# the deploy job finds.
+#
+# No permissions: block either, so each caller's permissions stand. Both callers give this job
+# `contents: read` today.
+#
+# .github/scripts/ci_job_reads.py's docs gate cites the steps below by name, and
+# .github/scripts/check-ci-filters.sh fails when a cited step is gone. The docs filter of ci.yaml
+# names this file, and so does docs-pages.yaml's on.push.paths, so a change here selects the job.
+on:
+  workflow_call:
+    inputs:
+      upload-pages-artifact:
+        description: Upload docs/site/dist as the run's github-pages artifact, for a deploy job to publish.
+        type: boolean
+        default: false
+      save-cache:
+        description: Save the go-docs cache entry, on a push to main whose restore missed the exact key.
+        type: boolean
+        default: false
+
+env:
+  # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+  # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+  # proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
+  # go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same bytes
+  # straight from the source and checks them against go.sum, so this is a second path, not a weaker
+  # check.
+  GOPROXY: https://proxy.golang.org|direct
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
+    # truncate.
+    services:
+      postgres:
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      # Astro runs on Node.js (22.12 or newer).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run, and
+      # the screenshots step builds the Dispatch server; both modules name the same Go.
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache: false
+      # go-docs is a cache family of its own. This build compiles the daemon's legion command and
+      # envoy's dispatch, broker and agent-secrets commands. envoy-e2e-local's go-envoy entry
+      # holds the listener and natsd alone, so one key for both let whichever job saved first own
+      # it. ci.yaml's header says how every family is kept. This step restores go-docs in the form
+      # docs/solutions/github/join-a-job-to-the-ci-router.md gives: off main by the prefix too, on
+      # main by the exact key alone. The save-cache input names the one caller that writes the
+      # entry, and that caller is docs-pages.yaml.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-docs-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-docs-{0}-', runner.os) || '' }}
+      - run: bun install --frozen-lockfile
+      - name: Lint the docs site
+        run: bun run lint
+        working-directory: docs/site
+      - name: Typecheck the docs site
+        run: bun run typecheck
+        working-directory: docs/site
+      # The pages' screenshots are made, not committed (docs/site/media/README.md): Dispatch on
+      # the e2e harness, seeded with example data, captured in Chromium.
+      - name: Build the Dispatch dashboard the screenshots show
+        run: bun run build:web
+        working-directory: packages/dispatch
+      - name: Install Playwright Chromium
+        # The runner image's chrome-stable apt source intermittently fails `apt-get update`, which
+        # takes `--with-deps` down with it; Chrome itself is preinstalled, so the source goes.
+        run: |
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          bunx playwright install --with-deps chromium
+        working-directory: docs/site
+      - name: Take the screenshots
+        run: bun run docs:media
+        # A step of the run that hangs fails it within two minutes (STEP_TIMEOUT_MS in
+        # docs/site/media/harness.ts); this bounds the rest, the build and the boot.
+        timeout-minutes: 15
+        env:
+          DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # What each failed shot's page showed, and the harness's process logs: a hang leaves the
+      # Dispatch server's goroutines at the end of dispatch.log.
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-failed-shots-${{ github.run_attempt }}
+          path: |
+            docs/site/media/.work/failed-shots
+            docs/site/media/.work/harness
+          if-no-files-found: ignore
+      # Generates the reference pages, then builds the site; starlight-links-validator fails it on a
+      # broken internal link. The build writes dist/THIRD_PARTY_NOTICES.txt (docs/site/astro.config.mjs),
+      # failing on a package whose license cannot be determined; the listing shows the site ships it.
+      - name: Build the docs site
+        run: |
+          bun run docs:build
+          ls -l docs/site/dist/THIRD_PARTY_NOTICES.txt
+      # The built site, generated reference pages and copied media captions include no private
+      # deployment repository, company, internal host, or Tailscale MagicDNS host. ci.yaml's lint
+      # job checks the sources, on a pull request and on a push to main alike.
+      - name: Check the built site has no private name, internal host, or tailnet host
+        run: .github/scripts/check-private-names.sh docs/site/dist
+      # The caller's deploy job publishes this artifact. Only docs-pages.yaml asks for it.
+      - if: inputs.upload-pages-artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: docs/site/dist
+      - if: inputs.save-cache && github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}

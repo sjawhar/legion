@@ -511,7 +511,7 @@ interface DaemonController {
   deliver(message: string): void;
   /** Answers one RPC `get_state`, which Oh My Pi reads only once its startup is over. */
   state(): Promise<z.infer<typeof RpcStateSchema>>;
-  /** Sends one RPC `abort`, as a Legion daemon interrupts a turn, and resolves on its answer. */
+  /** Sends one RPC `abort`, as the terminal's Esc does, and resolves on its answer. */
   abort(): Promise<void>;
   /** Polls `probe` until it returns a value, failing at the deadline or when omp exits. */
   until<T>(what: string, probe: () => T | undefined | Promise<T | undefined>): Promise<T>;
@@ -1280,8 +1280,8 @@ test.skipIf(skip)(
   CASE_TIMEOUT_MS
 );
 
-// An interrupt of the start turn: RPC `abort`, as the daemon interrupts a turn (the terminal's Esc
-// ends the run with the same "Interrupted by user" reply), while the start turn's model request is
+// An interrupt of the start turn: RPC `abort`, as the terminal's Esc does (it ends the run with
+// the "Interrupted by user" reply), while the start turn's model request is
 // held. The startup card that reached the session while its ready was held is owed a wake after
 // the start turn, and that wake, a next-turn message with `triggerTurn`, would start the turn the
 // interrupt stopped: the card stays folded for the next turn instead. So the session settles with

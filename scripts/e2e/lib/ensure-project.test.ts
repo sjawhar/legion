@@ -191,6 +191,29 @@ describe("ensure_project", () => {
       "CHECK prerequisites: FAIL: Dispatch could not be reached to create LPROOF2: curl: (7) Failed to connect to dispatch.example port 443",
     ]);
   });
+
+  // ensure_project is the run's first write anywhere: it creates the project in production
+  // Dispatch when the identity has none. A development switch is read from the operator's
+  // environment alone, so a mistyped one must cost that write nothing — a run refused for its
+  // value leaves production as it found it.
+  test("stage 4b refuses every development switch above the call that creates the project", () => {
+    const lines = readFileSync(
+      join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"),
+      "utf8"
+    ).split("\n");
+    const creates = lines.indexOf("ensure_project");
+    expect(creates).toBeGreaterThan(-1);
+    for (const refusal of [
+      '    fail "STAGE4B_UNTIL=$until names no checkpoint of this driver"',
+      '  [ -n "$until" ] || fail "STAGE4B_SKIP_CONTROLLER is for a development run: set STAGE4B_UNTIL too"',
+      '  [ "$design_gate" = root-issues ] || fail "STAGE4B_DESIGN_GATE=$design_gate: the one policy it arms is root-issues"',
+      '  [ "$until" = deployment-pod-block ] || fail "LEGION_E2E_POD_FILE is for a development run stopped at it: set STAGE4B_UNTIL=deployment-pod-block"',
+    ]) {
+      const at = lines.indexOf(refusal);
+      expect(at).toBeGreaterThan(-1);
+      expect(at).toBeLessThan(creates);
+    }
+  });
 });
 
 describe("dispatch_agent", () => {

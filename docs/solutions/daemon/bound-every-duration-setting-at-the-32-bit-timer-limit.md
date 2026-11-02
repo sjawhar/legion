@@ -11,7 +11,7 @@ tags:
   - audit-method
   - env-parsing
 date: 2026-09-13
-status: active
+status: superseded — worker_idle_retire_seconds is rejected; a worker of an open issue stays live and is never retired or suspended for idleness
 module: packages/daemon/src/daemon/config.ts
 related_issues:
   - "LEGION-46"

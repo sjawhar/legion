@@ -166,11 +166,12 @@ type seenRequest struct {
 // api.NewServer over real claim machines and a fake runtime, on a loopback port, with every
 // request that reached it recorded.
 type operatorDaemon struct {
-	t         *testing.T
-	runtime   *fake.Runtime
-	url       string
-	port      int
-	tokenFile string
+	t               *testing.T
+	runtime         *fake.Runtime
+	claimSupervisor *memoryClaims
+	url             string
+	port            int
+	tokenFile       string
 
 	mu   sync.Mutex
 	seen []seenRequest
@@ -196,7 +197,7 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, OperatorToken: claimsOperatorToken, Log: quiet,
 	}).Handler
 
-	d := &operatorDaemon{t: t, runtime: rt, tokenFile: writeFile(t, "operator-token", claimsOperatorToken+"\n")}
+	d := &operatorDaemon{t: t, runtime: rt, claimSupervisor: claims, tokenFile: writeFile(t, "operator-token", claimsOperatorToken+"\n")}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -541,6 +542,36 @@ func TestClaimsRetryPostsToTheClaimsRetryRoute(t *testing.T) {
 	}
 }
 
+// forget-session posts the exact session the operator is abandoning and prints the failed claim as
+// the daemon left it.
+func TestClaimsForgetSessionPostsToTheClaimRoute(t *testing.T) {
+	d := newOperatorDaemon(t)
+	d.succeed(d.spawnArgs()...)
+	d.ready(architectClaim)
+	refused := fake.SpawnResult{Err: errors.New("the session table holds no such session")}
+	d.runtime.ScriptResume(refused, refused)
+	machine, _ := d.claimSupervisor.Machine(architectClaim)
+	if err := machine.Handle(context.Background(), supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *machine.Claim().Locator, Kind: runtime.Gone,
+	}}); err == nil {
+		t.Fatal("the missing-session relaunches answered no error")
+	}
+
+	session := machine.Claim().Session
+	out := d.succeed(append(append([]string{"forget-session"}, d.reach()...), "--claim", string(architectClaim), "--session", session)...)
+
+	seen := d.lastOperatorRequest()
+	wantOperatorRequest(t, seen, http.MethodPost, "/legion/v1/operator/claims/"+string(architectClaim)+"/forget-session")
+	var sent api.ForgetSessionRequest
+	decodeStrict(t, seen.body, &sent)
+	if sent.Session != session {
+		t.Fatalf("forget-session sent %+v, want %s", sent, session)
+	}
+	if want := "legion-legion-legion-208-architect architect LEGION-208 failed 3 " + thisBinarysContract + "\n"; out != want {
+		t.Fatalf("forget-session stdout = %q, want %q", out, want)
+	}
+}
+
 // retry --failed lists the claims and retries every one the daemon holds failed, in its token
 // order, printing each retried claim as --claim prints it, and asks nothing of a claim that has not
 // failed; with none failed it retries nothing and exits 0. --claim and --failed name what to retry,
@@ -882,6 +913,17 @@ func TestClaimsRefusesAPositionalArgument(t *testing.T) {
 
 	if code != 2 || !strings.Contains(errb, `legion claims stop: unexpected argument "`+string(architectClaim)+`"`) {
 		t.Fatalf("exit %d, stderr %q; want 2 naming the argument", code, errb)
+	}
+	d.wantNothingReached()
+}
+
+func TestClaimsForgetSessionRequiresTheRecordedSession(t *testing.T) {
+	d := newOperatorDaemon(t)
+
+	code, out, errb := d.claims(append(append([]string{"forget-session"}, d.reach()...), "--claim", string(architectClaim))...)
+
+	if code != 2 || out != "" || !strings.Contains(errb, "legion claims forget-session: --session is required") {
+		t.Fatalf("forget-session without --session: exit %d, stdout %q, stderr %q; want usage failure naming --session", code, out, errb)
 	}
 	d.wantNothingReached()
 }

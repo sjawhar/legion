@@ -21,9 +21,10 @@ with the other retro's edit to the same lines.
 
 ## Write a new file of your own
 
-Name it `docs/solutions/<category>/<slug>-<LEGION_ISSUE>.md`, so two issues' retros never choose
-the same path. `<category>` is an existing subdirectory of `docs/solutions/`; make a new one only
-when none fits. `<slug>` is the title in lowercase words joined by `-`.
+Name it `docs/solutions/<category>/<slug>-pr<number>.md`, `<number>` being the pull request's
+number, so two pull requests' retros never choose the same path. `<category>` is an existing
+subdirectory of `docs/solutions/`; make a new one only when none fits. `<slug>` is the title in
+lowercase words joined by `-`.
 
 - **A fresh topic:** state the rule in a few imperative lines. The incident goes under a
   `## Evidence` heading below the rule, never in the rule, because a reader takes a story as an
@@ -45,14 +46,12 @@ title: "Descriptive title matching the H1"
 category: subdirectory-name
 tags:
   - searchable-topic
-date: YYYY-MM-DD
+date: YYYY-MM-DD # (`date -u +%F` prints it)
 status: active
 module: affected-module
 related_issues:
-  - "LEGION-123"      # the Dispatch issue
   - "owner/repo#456"  # the pull request
 ---
 ```
 
-Commit it on the existing issue branch before the removal commit (step 4), so the removal stays
-the last commit.
+Commit it on the existing issue branch (step 3 of `skill://legion-retro`).

@@ -2,7 +2,6 @@ import type { MutationKey } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { WriteBounds } from "../../api/client";
 import type { Suggestion } from "../../api/types";
 import { Pill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
@@ -32,6 +31,8 @@ import {
 } from "../../theme/classes";
 import { useHeldSendsUnder } from "../conversation/held-sends";
 import { MentionComposer } from "../conversation/MentionComposer";
+import { passageItem, ReplyQuote } from "../conversation/ReplyQuote";
+import type { SaveCommentEdit } from "../conversation/send-request";
 import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
@@ -106,7 +107,7 @@ export interface ThreadCardProps {
   hovered: boolean;
   isClosed: boolean;
   onAction(id: string, action: MarginItemAction): void;
-  onEdit(id: string, body: string, bounds: WriteBounds): Promise<unknown>;
+  onEdit: SaveCommentEdit;
   onRetryAction(): void;
   onSelect?(): void;
   onToggle(): void;
@@ -440,6 +441,16 @@ export function ThreadCard({
                       renderEditor(reply)
                     ) : (
                       <>
+                        {reply.reply_block == null ? null : (
+                          <ReplyQuote
+                            author={
+                              passageItem(reply.reply_block, [root, ...thread.replies])?.author
+                            }
+                            block={reply.reply_block}
+                            className="mb-2"
+                            excerpt=""
+                          />
+                        )}
                         <CommentBody
                           artifactSlug={artifactSlug}
                           comment={reply}

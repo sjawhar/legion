@@ -928,7 +928,7 @@ test(
       deliveryUnsetError,
     ] = await Promise.all([
       unauthorized.whoAmI().catch((error: unknown) => error),
-      featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
+      featureOff.getCredentialGrants().catch((error: unknown) => error),
       documentSchema.getArtifactText("artifact-1").catch((error: unknown) => error),
       serverError.whoAmI().catch((error: unknown) => error),
       // The run route answers 404 DELIVERY_NOT_CONFIGURED while no settings row exists.
@@ -990,8 +990,8 @@ test(
     try {
       await expect(
         queryClient.fetchQuery({
-          queryFn: () => client.getCredentialRecord("record-1"),
-          queryKey: ["credential-record", "record-1"],
+          queryFn: () => client.getCredentialGrants(),
+          queryKey: ["credential-grants"],
         })
       ).rejects.toMatchObject({ code: "FEATURE_OFF" });
 
@@ -1151,6 +1151,31 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["GET", "/api/github/rest/repos/acme/dispatch"],
     ["GET", "/api/v1/settings/delivery"],
     ["PUT", "/api/v1/settings/delivery"],
+  ]);
+});
+
+test("API client lists an issue's handoffs and reads one handoff by id", async () => {
+  const summary = {
+    author: { id: "session-1", kind: "session" as const },
+    created_at: "2026-10-26T00:00:00Z",
+    id: "handoff/1",
+    issue_key: "CORE-1",
+    phase: "implement",
+    version: 2,
+  };
+  const handoff = { ...summary, body: '{"proof":["a"]}' };
+  const stub = stubFetch((request) =>
+    request.path === "/api/v1/issues/CORE-1/handoffs"
+      ? Response.json([summary])
+      : Response.json(handoff)
+  );
+  const api = createApiClient(stub.fetch);
+
+  expect(await api.listHandoffs("CORE-1")).toEqual([summary]);
+  expect(await api.getHandoff("handoff/1")).toEqual(handoff);
+  expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
+    ["GET", "/api/v1/issues/CORE-1/handoffs"],
+    ["GET", "/api/v1/handoffs/handoff%2F1"],
   ]);
 });
 

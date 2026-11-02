@@ -6,6 +6,8 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"math"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -133,7 +135,9 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	if err != nil {
 		return fmt.Errorf("migrations refused, none applied: %w", err)
 	}
-	if err := s.createVersionTable(ctx); err != nil {
+	// Only a set holding a version past an integer widens the column: see createVersionTable.
+	widen := slices.ContainsFunc(migrations, func(m pgmigrate.Migration) bool { return m.Version > math.MaxInt32 })
+	if err := s.createVersionTable(ctx, widen); err != nil {
 		return err
 	}
 	for _, migration := range migrations {
@@ -151,10 +155,22 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 const migrationLockKey int64 = 8150001
 
 // createVersionTable creates schema_migrations under the runner's advisory lock, as the broker's
-// runner creates its own. Created outside it, two processes booting at once against an empty
-// database race `create table if not exists` on the catalog, and the loser exits on pg_type's
-// unique index.
-func (s *Store) createVersionTable(ctx context.Context) error {
+// runner creates its own, and, when widen is set, widens the version column of a database that has
+// the table from before the versions became timestamps. Created outside the lock, two processes
+// booting at once against an empty database race `create table if not exists` on the catalog, and
+// the loser exits on pg_type's unique index.
+//
+// The column is a bigint because a migration added since the set stopped being numbered is named
+// for the UTC moment it was created, 14 digits, which is past the 2147483647 an integer column
+// holds. A database created before this change has the integer the statement below used to create.
+// It is widened only by a boot whose set holds such a version (widen), as the daemon widens its
+// own in the first timestamped migration's transaction, and not by a boot that records nothing past
+// an integer: the release before this change reads `max(version)` uncast, so a widening while its
+// processes still serve fails that read once on every connection that prepared it ("cached plan
+// must not change result type"). A release whose set first holds a timestamped migration is rolled
+// out over processes of this one, which read the version cast. The type is read before the ALTER
+// TABLE, which on a column already bigint rewrites nothing but still takes ACCESS EXCLUSIVE.
+func (s *Store) createVersionTable(ctx context.Context, widen bool) error {
 	ctx = WithTransactionTracking(ctx)
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -166,11 +182,24 @@ func (s *Store) createVersionTable(ctx context.Context) error {
 	}
 	if _, err := tx.Exec(ctx, `
 		create table if not exists schema_migrations (
-			version integer primary key,
+			version bigint primary key,
 			applied_at timestamptz not null default now()
 		)
 	`); err != nil {
 		return fmt.Errorf("create schema migrations table: %w", err)
+	}
+	if !widen {
+		return tx.Commit(ctx)
+	}
+	var dataType string
+	if err := tx.QueryRow(ctx, `select data_type from information_schema.columns
+		where table_schema = current_schema() and table_name = 'schema_migrations' and column_name = 'version'`).Scan(&dataType); err != nil {
+		return fmt.Errorf("read the type of schema_migrations.version: %w", err)
+	}
+	if dataType == "integer" {
+		if _, err := tx.Exec(ctx, "alter table schema_migrations alter column version type bigint"); err != nil {
+			return fmt.Errorf("widen schema_migrations.version to bigint: %w", err)
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -198,7 +227,11 @@ func (s *Store) applyMigrationOnce(ctx context.Context, migration pgmigrate.Migr
 		return fmt.Errorf("lock migrations: %w", err)
 	}
 	var applied bool
-	if err := tx.QueryRow(ctx, "select exists(select 1 from schema_migrations where version = $1)", migration.Version).Scan(&applied); err != nil {
+	// The parameter is cast, here and in the insert below, because pgx encodes it for the column
+	// it finds: a database whose column this boot is about to widen, or one widened by a boot
+	// whose statement this connection has not prepared again, would otherwise refuse a 14-digit
+	// version as too large for an int4.
+	if err := tx.QueryRow(ctx, "select exists(select 1 from schema_migrations where version = $1::bigint)", migration.Version).Scan(&applied); err != nil {
 		return fmt.Errorf("check migration: %w", err)
 	}
 	if applied {
@@ -207,7 +240,7 @@ func (s *Store) applyMigrationOnce(ctx context.Context, migration pgmigrate.Migr
 	if err := pgmigrate.Exec(ctx, tx, migration, s.Pool.Config().BeforeConnect); err != nil {
 		return fmt.Errorf("execute migration: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1)", migration.Version); err != nil {
+	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1::bigint)", migration.Version); err != nil {
 		return fmt.Errorf("record migration: %w", err)
 	}
 	return tx.Commit(ctx)

@@ -3,10 +3,8 @@ import path from "node:path";
 import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
-import {
-  sessionDirectory as dispatchSessionDirectory,
-  writeSessionTitle,
-} from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
+import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
 import {
   sessionConfigFile,
@@ -15,7 +13,7 @@ import {
 } from "@legion/envoy-client/session-settings";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
-import { findHandoffCommit } from "@legion/pi-shared/handoff-commit";
+import { paneHandoffReport } from "@legion/pi-shared/handoff-record";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_VERSION,
@@ -424,9 +422,15 @@ export default function legionExtension(pi: PiApi): void {
         },
         controllerGrant: (sessionId) => controllerSession.mintGrant(sessionId),
         onPhaseCompleted,
-        // The pane's own environment: its workspace and issue, and the identity the daemon put
-        // on it; PATH's jj, the one its shell runs.
-        handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
+        // The pane's own environment: its workspace and issue; PATH's jj, the one its shell runs;
+        // and the Dispatch pi-envoy's session reads (Oh My Pi's rule, in the same process), which
+        // the pane's `dispatch handoff-write` wrote the record to.
+        handoffReport: (phase, role) =>
+          paneHandoffReport(
+            sessionConfigFile("omp", process.env),
+            process.env,
+            process.cwd()
+          )(phase, role),
         resolveDocument: async (issue, reference) => {
           // The file pi-envoy's session reads: Oh My Pi's rule, in the same process.
           const config = activeDispatchSettings(

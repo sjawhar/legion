@@ -287,6 +287,60 @@ export const ASK_QUESTION_MAX = 2000;
 export const DISPATCH_BODY_MAX = 32000;
 
 /**
+ * Longest phase handoff body the Dispatch server accepts on
+ * `POST /api/v1/issues/{key}/handoffs/{phase}`, in UTF-8 bytes: the text of one JSON object,
+ * stored exactly as sent and read back byte for byte. Generated into Go as
+ * `contracts.DispatchHandoffBodyMax`, which the server enforces as `413 CAP_EXCEEDED` naming it.
+ */
+export const DISPATCH_HANDOFF_BODY_MAX = 262144;
+
+/** A handoff's phase, the `{phase}` segment of the handoff routes: a lowercase slug. Legion writes
+ *  `plan`, `implement`, `test` and `review`. Generated into Go as `contracts.HandoffPhasePattern`,
+ *  which the server compiles; the `handoffs.phase` check constraint holds the same rule. */
+export const HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** HANDOFF_PHASE_PATTERN's rule in words. Every refusal of a phase that is not a handoff phase
+ *  gives it, the tool's and the server's alike: generated into Go as `contracts.HandoffPhaseRule`. */
+export const HANDOFF_PHASE_RULE_WORDS =
+  "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+
+const HANDOFF_PHASE_RULE = `phase is not a handoff phase: ${HANDOFF_PHASE_RULE_WORDS}`;
+
+/** Whether text is exactly one JSON object, the only body a handoff holds. */
+function isJsonObjectText(text: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/** The refusal of the first rule a handoff call breaks, or undefined when it keeps them: the phase
+ *  slug, then (on a write) the body's byte cap and its being one JSON object. */
+function handoffProblem(value: unknown): string | undefined {
+  const { phase, body } = value as { readonly phase?: unknown; readonly body?: unknown };
+  if (typeof phase === "string" && !HANDOFF_PHASE_PATTERN.test(phase)) return HANDOFF_PHASE_RULE;
+  if (typeof body !== "string") return undefined;
+  const bytes = new TextEncoder().encode(body).length;
+  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
+    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
+  }
+  if (!isJsonObjectText(body)) {
+    return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
+  }
+  return undefined;
+}
+
+const HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+
+const handoffValidation: NonNullable<DispatchToolSpec["validation"]> = {
+  check: (value) => handoffProblem(value) === undefined,
+  message: HANDOFF_RULE,
+  refusal: (value) => handoffProblem(value) ?? HANDOFF_RULE,
+};
+
+/**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
  * query rides in the URL beside `project`, `limit` and `offset`, so this refusal and `project`'s
  * key rule are what keep the tool's URL under the load balancer's limit;
@@ -823,7 +877,9 @@ export const dispatchToolSpecs = [
         .string()
         .describe(
           "A comment id (uuid); replying to any comment in a thread continues that thread (an " +
-            "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " +
+            "ask's clarification thread included). A block reference to one block of the comment " +
+            "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " +
+            "passage the reply answers. To reply to an ask, use reply_to_ask with the " +
             "ask id instead."
         )
         .optional(),
@@ -918,6 +974,8 @@ export const dispatchToolSpecs = [
         .describe(
           "Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " +
             "this message under it so the reply stays with the original in the Conversation. " +
+            "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " +
+            "replies to that message and names the passage the reply answers. " +
             "A bare id with no issue answers a human's direct message to this session; a " +
             "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " +
             "reply on that issue."
@@ -1069,7 +1127,7 @@ export const dispatchToolSpecs = [
       "Do not use it for issue status, asks, or events; " +
       "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
       "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
-      "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
+      "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
@@ -1151,7 +1209,7 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
+      "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
       "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
       "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
@@ -1491,11 +1549,76 @@ export const dispatchToolSpecs = [
     strict: true,
   },
   {
+    name: "dispatch_answers",
+    example: {},
+    description:
+      "List every answer and comment a person wrote to this session in the last 72 hours, newest first, each in full: " +
+      "answers to its asks, replies on its asks and in its comment threads, comments on its documents and on issues routed to it, " +
+      "mentions of it, messages to it and replies to its messages. Each item names its time, its writer, what it is, its " +
+      "dispatch:// reference and its issue or document, an answer's question and choices, and the words, never cut. " +
+      "Run it when the list of people's answers on a model request says it left older items out. " +
+      "It reads this session's id from CLAUDE_CODE_SESSION_ID under Claude Code and DISPATCH_SESSION_ID elsewhere, so a subagent reads its parent's.",
+    arguments: () => ({}),
+    strict: true,
+  },
+  {
     name: "dispatch_whoami",
     example: {},
     description:
-      "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
+      "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or null. project is the one project key your credential may write, or null when it names none.",
     arguments: () => ({}),
+    strict: true,
+  },
+  {
+    name: "dispatch_handoff_write",
+    example: {
+      issue: "DSP-1",
+      phase: "implement",
+      body: '{"schemaVersion":1,"phase":"implement","issue":"DSP-1"}',
+    },
+    description:
+      "Record this session's handoff for one phase of an issue: the body, one JSON object, is " +
+      "stored on the issue exactly as sent, under this session, and read back byte for byte. Each " +
+      "write is the next version (1, 2, ...) of that phase's handoff; earlier versions stay. Write " +
+      "the body to a file outside your workspace and pass it with --body-file (- reads stdin). A " +
+      "closed issue refuses it with 409 ISSUE_CLOSED, and a body over " +
+      `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED. Read it back with dispatch ` +
+      `handoff-read. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z
+        .string()
+        .describe(
+          "The phase the handoff ends: a lowercase slug such as plan, implement, test or review."
+        ),
+      body: z
+        .string({ min: 1 })
+        .describe(
+          `The handoff: one JSON object, at most ${DISPATCH_HANDOFF_BODY_MAX} bytes, stored and read back exactly as sent.`
+        ),
+    }),
+    validation: handoffValidation,
+    strict: true,
+  },
+  {
+    name: "dispatch_handoff_read",
+    example: { issue: "DSP-1", phase: "implement" },
+    description:
+      "Read the newest handoff recorded for one phase of an issue, or the version you name: one " +
+      "line naming the phase, version, id, the session that wrote it and when, then the body " +
+      "exactly as stored. A closed issue's handoffs read too. A phase with no handoff, or no " +
+      `such version, is 404 HANDOFF_NOT_FOUND. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z
+        .string()
+        .describe("The handoff's phase: a lowercase slug such as plan, implement, test or review."),
+      version: z
+        .number({ int: true, min: 1 })
+        .describe("The version to read, from 1; omit it to read the newest.")
+        .optional(),
+    }),
+    validation: handoffValidation,
     strict: true,
   },
 ] as const satisfies readonly DispatchToolSpec[];

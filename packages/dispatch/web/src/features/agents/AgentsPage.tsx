@@ -306,6 +306,7 @@ function AgentExchangeReply({
           ? undefined
           : {
               author: parent.author,
+              block: reply.reply_block,
               excerpt: parent.body,
               ...(parent.issue_key === null
                 ? {}

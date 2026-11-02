@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"sync"
 
@@ -82,11 +83,18 @@ func (credit *UpdateCredit) landed() {
 	}
 	state := credit.state
 	state.mu.Lock()
-	if !credit.done {
-		credit.done = true
-		delete(state.inflight, credit.record.seq)
-	}
+	credit.landedLocked()
 	credit.service.unlockState(credit.room, state)
+}
+
+// landedLocked is landed for a caller that holds the credit's state.mu (commitConsuming), which
+// it leaves to that caller to release.
+func (credit *UpdateCredit) landedLocked() {
+	if credit == nil || credit.done {
+		return
+	}
+	credit.done = true
+	delete(credit.state.inflight, credit.record.seq)
 }
 
 // held records that the credit's room instance holds the update its append stored as version.
@@ -204,8 +212,9 @@ type uploadHold struct {
 
 // capturePendingAuthors reads R in tx, which holds the document's advisory lock, with the
 // document's latest person sender (readLastPerson), and takes whom a version lists
-// (captureAuthors) under room's state lock.
-func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor) (authorCapture, error) {
+// (captureAuthors), with the in-flight credits observed through `through`, under room's state
+// lock.
+func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor, through uint64) (authorCapture, error) {
 	owed, err := readPendingAuthors(ctx, tx, room)
 	if err != nil {
 		return authorCapture{}, err
@@ -216,15 +225,24 @@ func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room str
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	return captureAuthors(state, owed, durableLatest, write, actor), nil
+	return captureAuthors(state, owed, durableLatest, write, actor, through), nil
 }
 
+// everyCredit bounds no in-flight credit: a capture through it takes every credit its room has
+// observed (captureAuthors).
+const everyCredit = math.MaxUint64
+
 // captureAuthors is whom a version lists: owed, the pending authors its transaction read under
-// the document's advisory lock; the room's in-flight credits no committed version has listed; the
-// authors the calling transaction's own write records once it commits; and actor. The version's
-// commit deletes the pending authors it read and marks the in-flight credits it took consumed
-// (commitConsuming); a credit observed after this take is not among them and stays pending for
-// the next version. The caller holds state.mu.
+// the document's advisory lock; the room's in-flight credits no committed version has listed and
+// observed through `through`, a credit sequence (inflightCredit.seq) taken before the version read
+// the room, so each is for a change the version holds - for a version of the calling transaction's
+// own write, those observed by the write's read of the room (liveWrite.forkSeq), and none for a
+// fork read from the store; the authors the calling transaction's own write records once it
+// commits; and actor. The version's commit deletes the pending authors it read and marks the
+// in-flight credits it took consumed (commitConsuming); a credit observed after the bound is not
+// among them and stays pending for the next version, unless the version's transaction stored its
+// update (flushThrough), whose append wrote its authors to the pending authors read here. The
+// caller holds state.mu.
 //
 // It also names who made the document's latest change (authorCapture.latest), which is the sender
 // of the latest edit and never a name taken out of the credited set. Every edit this room
@@ -240,7 +258,7 @@ func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room str
 // the in-flight credits within milliseconds, so the process that holds the room reads it as one
 // that never loaded the document does. actor, the version's writer, names nobody by itself: an
 // agent writing a named version over someone's edit did not make that edit.
-func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, write *liveWrite, actor *model.Actor) authorCapture {
+func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, write *liveWrite, actor *model.Actor, through uint64) authorCapture {
 	capture := authorCapture{
 		state:    state,
 		authors:  make(map[string]model.Actor, len(owed)+1),
@@ -250,7 +268,7 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest
 		capture.authors[key] = author
 		capture.rAuthors = append(capture.rAuthors, author)
 	}
-	capture.inflight = state.unconsumedInflightLocked(state.creditSeq.Load())
+	capture.inflight = state.unconsumedInflightLocked(through)
 	for _, record := range capture.inflight {
 		maps.Copy(capture.authors, record.authors)
 	}
@@ -335,41 +353,44 @@ func cloneActor(actor *model.Actor) *model.Actor {
 }
 
 // withoutInflight is capture for a version rendered from the stored document rather than the
-// room: a room behind the durable head (captureLiveTextAndAuthors), or a write whose fork came from
-// the store (coldFork). The store holds no change still in flight in the room, so the version
-// lists none of the room's in-flight credits and its commit consumes none: each stays in F, to
-// reach R when its append lands, or, when the gate refuses that append from a room behind the
-// head, to be credited again when its browser resends the edit to the reloaded room. Listed here,
-// that author would be listed again on the version holding the resent edit. The pending authors
-// it read (R), the write's own credits and actor stay, as captureAuthors gave them. The person who
-// edited last is read again without those credits (latestEditSource over write and the stored
-// person alone), since an edit the version does not hold cannot name its notice.
-func (capture authorCapture) withoutInflight(write *liveWrite, actor *model.Actor) authorCapture {
+// room, whose room stands behind the durable head (captureLiveTextAndAuthors). The store holds no
+// change still in flight in the room, so the version lists none of the room's in-flight credits
+// and its commit consumes none: each stays in F, to reach R when its append lands, or, when the
+// gate refuses that append from a room behind the head, to be credited again when its browser
+// resends the edit to the reloaded room. Listed here, that author would be listed again on the
+// version holding the resent edit. The pending authors it read (R) and actor stay, as
+// captureAuthors gave them. The person who edited last is read again without those credits
+// (latestEditSource over the stored person alone), since an edit the version does not hold cannot
+// name its notice.
+func (capture authorCapture) withoutInflight(actor *model.Actor) authorCapture {
 	authors := make(map[string]model.Actor, len(capture.rAuthors)+1)
 	for _, author := range capture.rAuthors {
 		authors[actorKey(author)] = author
-	}
-	if write != nil {
-		maps.Copy(authors, write.credits)
 	}
 	if actor != nil {
 		authors[actorKey(*actor)] = *actor
 	}
 	capture.authors, capture.inflight = authors, nil
-	capture.latest = latestEditSource(nil, write, capture.durable)
+	capture.latest = latestEditSource(nil, nil, capture.durable)
 	return capture
 }
 
-// uploadCapture is an upload's capture over write: the in-flight credits observed by its last read
-// of the room (liveWrite.forkSeq), and the updates the room instance it read held then
-// (liveWrite.forkHold). The upload holds the document's advisory lock from before that read, so no
-// append lands between it and the commit.
+// uploadCapture is an upload's capture over write: the in-flight credits observed by its read of
+// the room (liveWrite.forkSeq), and the updates the room instance it read held then
+// (liveWrite.forkHold) with the room's updates the write's transaction stored ahead of its own
+// (RoomFlush.appended), whose pending-author rows that transaction wrote: the fork held them all.
+// The upload holds the document's advisory lock from before that read, so no other append lands
+// between it and the commit.
 func uploadCapture(write *liveWrite) authorCapture {
 	state := write.state
 	state.mu.Lock()
 	inflight := state.unconsumedInflightLocked(write.forkSeq)
 	state.mu.Unlock()
-	return authorCapture{state: state, inflight: inflight, upload: &uploadHold{held: write.forkHold.snapshot(), hold: write.forkHold}}
+	held := write.forkHold.snapshot()
+	for _, version := range write.flushed.appended(nil) {
+		held.since = append(held.since, int64(version))
+	}
+	return authorCapture{state: state, inflight: inflight, upload: &uploadHold{held: held, hold: write.forkHold}}
 }
 
 // unconsumedInflightLocked is state's F credits no committed version has listed, observed no later

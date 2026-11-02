@@ -13,15 +13,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// commitOrderLock is the key of the advisory lock events.Broker.Append takes before it writes an
-// event and holds until its transaction ends (commitOrderAdvisoryLock, events/broker.go): every
-// writer of an event on the database waits for it.
-const commitOrderLock int64 = 0x4449535041544348
-
-// commitOrderedTrips is how many round trips the first connection to take the events'
-// commit-order lock since mark made from that lock statement to its transaction's commit, both
-// included, and whether it was seen to commit.
-func (t *statementTracer) commitOrderedTrips(since int) (int, bool) {
+// ownerLockedTrips is how many round trips the first connection to take an event owner's row lock
+// since mark (a `for no key update` read of the issue, artifact or project row, which
+// events.Broker.AppendAll takes, or the document's owner row a version write locks first) made
+// from that lock statement to its transaction's commit, both included, and whether it was seen
+// to commit. Every writer of an event of that owner waits for that row lock until the
+// transaction ends.
+func (t *statementTracer) ownerLockedTrips(since int) (int, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var holder *pgx.Conn
@@ -29,7 +27,7 @@ func (t *statementTracer) commitOrderedTrips(since int) (int, bool) {
 	for _, trip := range t.trips[since:] {
 		if holder == nil {
 			for _, statement := range trip.statements {
-				if strings.Contains(statement.sql, "pg_advisory_xact_lock") && statement.names(fmt.Sprint(commitOrderLock)) {
+				if strings.Contains(strings.ToLower(statement.sql), "for no key update") {
 					holder = trip.conn
 					break
 				}
@@ -77,7 +75,7 @@ func (row anchoredRow) eventType() string {
 
 // versionAnchorRefreshTrips writes a named version of a fresh document carrying anchorRefreshMarks
 // open anchors, the first changed of which have stored quotes that no longer match their marks, and
-// returns how many round trips the version's transaction made holding the events' commit-order lock.
+// returns how many round trips the version's transaction made holding its owner's row lock.
 // It requires what the version leaves to be what it is today: every anchor's row carries its mark's
 // quote, and each changed anchor, and no other, has one refresh event of its kind, whose payload
 // names that quote, at the next sequences of the issue's events.
@@ -86,7 +84,7 @@ func versionAnchorRefreshTrips(t *testing.T, changed int) int {
 	ctx := context.Background()
 	database := storetest.Open(t)
 	tracer := &statementTracer{}
-	traced := storetest.Traced(t, database, tracer)
+	traced := storetest.TracedStore(t, database, tracer)
 	artifactID := createDocument(t, traced, "# First")
 	service, _ := newTestServiceInstance(t, traced)
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -165,9 +163,9 @@ func versionAnchorRefreshTrips(t *testing.T, changed int) int {
 	if _, err := namedVersion(t, service, artifactID, "Anchors", alice); err != nil {
 		t.Fatalf("write the named version: %v", err)
 	}
-	trips, committed := tracer.commitOrderedTrips(since)
+	trips, committed := tracer.ownerLockedTrips(since)
 	if !committed {
-		t.Fatalf("the version's transaction was not seen taking the events' commit-order lock and committing (%d round trips seen), so nothing here counts what it says", trips)
+		t.Fatalf("the version's transaction was not seen taking its owner's row lock and committing (%d round trips seen), so nothing here counts what it says", trips)
 	}
 
 	for _, row := range rows {
@@ -248,17 +246,19 @@ func versionAnchorRefreshTrips(t *testing.T, changed int) int {
 
 // A version write refreshes every open anchor of its document against the version's tree, and
 // each anchor whose quote changed is written back with an event of its own, all while the
-// transaction holds the advisory lock every event writer on the database waits for (events/broker.go).
-// One after another, each changed anchor costs an update, a reload of its row and an event append:
-// about seven round trips under that lock for each. Written together, the round trips the lock is
-// held for do not grow with the number of anchors that changed, and what the version leaves - the
-// rows, the events, their order among the issue's events - is what it was.
+// transaction holds its owner's row lock, which every event writer of that issue waits for
+// (events/broker.go). One after another, each changed anchor costs an update, a reload of its row
+// and an event append: about seven round trips under that lock for each. Written together, one
+// update per table and one batch of events, the round trips the lock is held for do not grow with
+// the number of anchors that changed: two changed anchors, the ask and a comment, so both tables
+// are written, cost what twenty do. And what the version leaves - the rows, the events, their
+// order among the issue's events - is what it was.
 func TestAVersionWritesChangedAnchorsInRoundTripsThatDoNotGrowWithTheirCount(t *testing.T) {
-	one := versionAnchorRefreshTrips(t, 1)
+	two := versionAnchorRefreshTrips(t, 2)
 	all := versionAnchorRefreshTrips(t, anchorRefreshMarks)
-	t.Logf("a version holding the events' commit-order lock: %d round trips with 1 changed anchor, %d with %d", one, all, anchorRefreshMarks)
-	if all > one+2 {
-		t.Errorf("a version with %d changed anchors made %d round trips holding the events' commit-order lock, against %d with one changed anchor: want at most %d",
-			anchorRefreshMarks, all, one, one+2)
+	t.Logf("a version holding its owner's row lock: %d round trips with 2 changed anchors, %d with %d", two, all, anchorRefreshMarks)
+	if all > two {
+		t.Errorf("a version with %d changed anchors made %d round trips holding its owner's row lock, against %d with two changed anchors: want no more",
+			anchorRefreshMarks, all, two)
 	}
 }

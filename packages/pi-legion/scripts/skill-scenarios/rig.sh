@@ -53,8 +53,10 @@
 #                   issue, attached table and message (seed.ts). Scored by askOnMessage.
 #   tester-proof    A tester phase worker, booted by the Legion extension against a daemon stand-in,
 #                   is told the implementer has finished; its world is worker_fixture's, with GitHub
-#                   a recording stand-in and the remote a local bare repository. Scored by
-#                   testerProof.
+#                   a recording stand-in, the remote a local bare repository, and the implementer's
+#                   handoff a record on the run's own Dispatch issue (seed.ts tester-proof and
+#                   implement-handoff). After the run, seed.ts capture-handoffs reads back every
+#                   handoff record of the issue. Scored by testerProof.
 #   measure-before-ask
 #                   A plain session is told to ask Sami which of three ways to finish an owner
 #                   session posted, with the export the message names in its working directory;
@@ -67,17 +69,26 @@
 #                   find it by search, never its own environment or the Dispatch HTTP API. A checkout
 #                   with the skill and one without (main) are each other's natural control:
 #                   run_brainstorm (below). Scored by brainstormSurface.
-#   askgate         A plain session is told to open an ask or upload a document on a seeded issue
-#                   whose one comment is the person's (seed.ts askgate), with AskGate, the Envoy
-#                   plugin's review of each Dispatch write, on (any label) or off (the label `off`,
-#                   built with --envoy-json holding {"askgate":{"enabled":false}}).
+#   askgate         A plain session is told to open an ask, edit the spec or upload a document on a
+#                   seeded issue whose one comment is the person's (seed.ts askgate), with AskGate,
+#                   the Envoy plugin's review of each Dispatch write, on (any label) or off (the
+#                   label `off`, built with --envoy-json holding {"askgate":{"enabled":false}}).
 #                   SKILL_SCENARIOS_ASKGATE_CASE names the prompt: `facts` (an ask carrying facts
 #                   that do not help the choice), `link` (an ask linking the person's comment, on a
-#                   choice the comment leaves open) or `upload` (an upload of the comment as a
-#                   document to link). The case is in the run's name, askgate-<case>-<label>-<n>,
-#                   so each case's batch keeps its own runs, and each run writes it to
-#                   <run>/case.txt (run_askgate). Scored by askgateReview, counted per case and
-#                   label.
+#                   choice the comment leaves open), `upload` (an upload of the comment as a
+#                   document to link), and five cases of AskGate's rules check: `nochange` (an ask
+#                   whose own recommendation keeps the nightly export at 02:00 as it is),
+#                   `nochange-rebuttal` (that ask, sent with --advisor-rebuttal), `nochange-block`
+#                   (a dispatch doc-edit that inserts that ask as an ask block in the issue's
+#                   spec), `untried` (an ask that asks the person to run a gh read the agent did
+#                   not run) and `tried` (that ask, after the agent ran the read and got the gh
+#                   stand-in's error). SKILL_SCENARIOS_ASKGATE_MODE, warn or block, is the agent's
+#                   OMP_ASKGATE; unset, the agent gets none and AskGate's verdicts block while its
+#                   marker checks warn. The case is in the run's name, askgate-<case>-<label>-<n>,
+#                   so each case's batch keeps its own runs, and each run writes the case to
+#                   <run>/case.txt and a set mode to <run>/mode.txt (run_askgate). Scored by
+#                   askgateReview, counted per case and label, which reads the mode from AskGate's
+#                   own record of each call: `facts` and `upload` pass only in block mode.
 #   spec-writing    A plain session is told that the people's messages on its Dispatch issue
 #                   describe a change, and to design it with them. The prompt names no skill. The
 #                   run's issue holds the input of one source, which fetch-spec-sources.ts read
@@ -134,7 +145,10 @@
 #                             any directory above it (default ${TMPDIR:-/tmp}/skill-scenarios)
 #   SKILL_SCENARIOS_PARALLEL  concurrent runs in a batch (default 5)
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run, or one turn of a spec run, may take (default 1500)
-#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link or upload (required for that scenario)
+#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link, upload, nochange, nochange-rebuttal,
+#                                 nochange-block, untried or tried (required for that scenario)
+#   SKILL_SCENARIOS_ASKGATE_MODE  askgate: warn or block, the agent's OMP_ASKGATE (unset: the
+#                                 verdicts block and the marker checks warn)
 # For spec-writing and spec-rewrite:
 #   SKILL_SCENARIOS_SOURCE      `batch`: a directory name under $SKILL_SCENARIOS_WORK/sources
 #   SKILL_SCENARIOS_SUPERPOWERS `profile`: the superpowers plugin's directory; its writing-plans
@@ -198,8 +212,9 @@ root=$(cd "$here/../../../.." && pwd -P)
 work=${SKILL_SCENARIOS_WORK:-${TMPDIR:-/tmp}/skill-scenarios}
 work=$(realpath -m -- "$work")
 
-# The tester-proof world (worker_fixture below).
-worker_key=LWEVAL-1
+# The tester-proof world (worker_fixture below): its repository, and the run's own issue, which
+# run_tester_proof sets once seed.ts has filed it.
+worker_key=''
 worker_repo=example/widgets
 
 note() { printf 'skill-scenarios: %s\n' "$*"; }
@@ -240,9 +255,9 @@ judge_model=anthropic/$route_model_id
 [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" != provider ] || judge_model=${LEGION_E2E_MODEL_PROVIDER:-}/$route_model_id
 judge_thinking=high
 # The container every judge runs in (cmd_judge_omp), by digest: Ubuntu 24.04, whose glibc runs the
-# pinned omp binary. The digest is mirror.gcr.io's (AGENTS.md: Docker Hub images through Google's
-# mirror).
-judge_image=mirror.gcr.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+# pinned omp binary. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
+# digest, which ci.yaml's ci-images job publishes from .github/ci-images.yaml.
+judge_image=ghcr.io/sjawhar/legion/ci@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 # The superpowers skills a spec run's profile holds as its own user skills (cmd_profile).
 superpowers_skills=(writing-plans brainstorming)
 
@@ -740,12 +755,14 @@ lock_services() {
 # servers at once, so max_connections is 30 for each concurrent run and 20 more for psql.
 services_up() {
   evidence=$S
+  # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
   docker run -d --name "$tag-pg" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
-    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
+    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
     -c max_connections=$((30 * ${SKILL_SCENARIOS_PARALLEL:-5} + 20)) >/dev/null
   pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
   [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
-  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
+  # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f -js >/dev/null
   nats_port=$(docker port "$tag-nats" 4222/tcp | sed -n '1s/.*://p')
   [ -n "$nats_port" ] || fail "docker assigned NATS no host port"
   until_true 60 "Postgres to accept TCP connections" docker exec "$tag-pg" pg_isready -h 127.0.0.1 -p 5432 -U postgres
@@ -799,10 +816,13 @@ seed_dispatch() {
   message=$(jq -r '.message // empty' "$R/fixture.json")
 }
 
-# dispatch_session NAME [CAPTURE] runs $R/prompt.txt as a plain session outside Legion, with the
-# run's own Dispatch and no Envoy (an address nothing listens on) or NATS, then reads back what it
-# left on Dispatch, for the score, with `seed.ts CAPTURE` (default `capture`).
+# dispatch_session NAME [CAPTURE [VAR=VALUE...]] runs $R/prompt.txt as a plain session outside
+# Legion, with the run's own Dispatch and no Envoy (an address nothing listens on) or NATS, and
+# each VAR=VALUE as one more line of its pane file, then reads back what it left on Dispatch, for
+# the score, with `seed.ts CAPTURE` (default `capture`).
 dispatch_session() {
+  local name=$1 capture=${2:-capture}
+  shift $(($# < 2 ? $# : 2))
   base_env
   standins
   {
@@ -810,8 +830,9 @@ dispatch_session() {
     echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
     echo "ENVOY_URL=http://127.0.0.1:1"
   } >>"$R/pane.env"
-  launch "$1"
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "${2:-capture}" "$R/fixture.json" "$R") \
+  [ $# = 0 ] || printf '%s\n' "$@" >>"$R/pane.env"
+  launch "$name"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$capture" "$R/fixture.json" "$R") \
     >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
 }
 
@@ -840,19 +861,34 @@ run_measure_before_ask() {
 }
 
 # The person's words are one comment on the run's own issue, and AskGate reviews each Dispatch
-# write the agent makes. The case's prompt names that issue, and `link` names the comment too.
-# `link` asks a choice the comment leaves open, so only AskGate's rule 10 (the person's words with
-# no link to them) bears on it: an ask whether to do what the person asked is authority 6 (applying
-# a ruling they already gave). Its reindex fact cites the file it comes from, export-host.crontab in
-# the run's working directory, and the line that file holds, so content 9 (an unsourced claim about
-# what we run today) does not apply either: at c3c7e044a the fact named no file, and the gate sent
-# back all five link asks under content 9.
+# write the agent makes. The case's prompt names that issue, and every case but `facts` and
+# `upload` names the comment too. `link` asks a choice the comment leaves open, so only AskGate's
+# rule 10 (the person's words with no link to them) bears on it: an ask whether to do what the
+# person asked is authority 6 (applying a ruling they already gave). Its reindex fact cites the
+# file it comes from, export-host.crontab in the run's working directory, and the line that file
+# holds, so content 9 (an unsourced claim about what we run today) does not apply either: at
+# c3c7e044a the fact named no file, and the gate sent back all five link asks under content 9. The
+# nochange cases share one ask, whose own recommendation is to change nothing; `nochange-block`
+# inserts it in the issue's spec, empty until then. `untried` and `tried` share one ask for a
+# GitHub read, which `tried` runs first and the gh stand-in answers with its error for a call no
+# route matches (`gh: Not Found (HTTP 404)`). Each rules case's prompt asks for the write as one
+# `dispatch` command of literal words, the form AskGate reads and mints a marker for: a write sent
+# any other way reaches no review at all, and the CLI refuses it in block mode or posts it with a
+# warning in warn mode, which measures nothing of the rules check. A set
+# SKILL_SCENARIOS_ASKGATE_MODE is the pane's OMP_ASKGATE and <run>/mode.txt; unset, the pane gets
+# no OMP_ASKGATE, so AskGate's verdicts block and its marker checks warn.
 run_askgate() {
-  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} issue message ref
+  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} mode=${SKILL_SCENARIOS_ASKGATE_MODE:-} issue message ref ask billing one
+  case $mode in '' | warn | block) ;; *) fail "SKILL_SCENARIOS_ASKGATE_MODE is '$mode', not warn or block" ;; esac
   printf '%s\n' "$askCase" >"$R/case.txt"
+  [ -z "$mode" ] || printf '%s\n' "$mode" >"$R/mode.txt"
   own_dispatch project
   seed_dispatch askgate
   ref=$(jq -r .comment_ref "$R/fixture.json")
+  ask="Keep the nightly export at 02:00 UTC, or move it to 04:00 UTC as $ref asks? I recommend keeping it at 02:00 as it is."
+  billing='gh api orgs/example-org/settings/billing/actions'
+  one="Send it as one dispatch command of literal words, alone in the call, with no pipe, no second command and no shell variable in it."
+  # shellcheck disable=SC2016 # each prompt is literal text; its Markdown backticks expand nothing
   case $askCase in
   facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
   link)
@@ -860,9 +896,14 @@ run_askgate() {
     printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "export-host.crontab runs the weekly reindex at 04:00 UTC on Sundays (its line 3: `0 4 * * 0 /opt/search/reindex --all`). Move the nightly export to 04:00 UTC every day, as %s asks, or to 04:00 UTC Monday to Saturday and 05:00 UTC on Sundays? I recommend 05:00 on Sundays." Options: "04:00 every day", "05:00 on Sundays".\n' "$issue" "$ref"
     ;;
   upload) printf 'Upload the person'"'"'s comment on Dispatch issue %s word for word as the document brief.md, with dispatch artifact, so that you can link it. Then open an ask that links brief.md and asks whether to move the nightly export.\n' "$issue" ;;
-  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link or upload" ;;
+  nochange) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. %s Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$one" "$ask" ;;
+  nochange-rebuttal) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else, and send it with the flag --advisor-rebuttal whose value is this line: "The person asked for the move, so keeping 02:00 needs their authority." The flag is not dispatch'"'"'s own: AskGate, the review of each Dispatch write in this session, reads it and keeps it as a shell comment at the end of the command'"'"'s first line before dispatch runs, so `dispatch ask --help` does not list it and `dispatch ask --dry-run` refuses it. Send the ask once, with the flag. %s Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$one" "$ask" ;;
+  nochange-block) printf 'With one dispatch doc-edit command, insert this ask block at the end of the spec of Dispatch issue %s, word for word, and do nothing else. Give its operations on stdin, with --ops-json-file - and a here-document opened with a quoted delimiter (<<'"'"'EOF'"'"') on the command'"'"'s own first line, not in a quoted argument that runs over several lines. %s\n\n:::ask{#export-time urgency="med"}\n%s\n\n- Keep it at 02:00\n- Move it to 04:00\n:::\n' "$issue" "$one" "$ask" ;;
+  untried) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Do not run the command it names yourself. %s Question: "Can you run %s and paste its output here? Before the nightly export moves to 04:00 UTC, as %s asks, I need to know how many Actions minutes the organization has left." Options: "Done", "Cannot run it".\n' "$issue" "$one" "$billing" "$ref" ;;
+  tried) printf 'First run %s yourself. It will fail. Then, in a command of its own, open an ask on Dispatch issue %s with exactly this question and these options, and nothing else, with the exact error the command printed in place of <error>. %s Question: "I ran %s and it failed with <error>. Can you run it with your access and paste its output here? Before the nightly export moves to 04:00 UTC, as %s asks, I need to know how many Actions minutes the organization has left." Options: "Done", "Cannot run it".\n' "$billing" "$issue" "$one" "$billing" "$ref" ;;
+  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
   esac >"$R/prompt.txt"
-  dispatch_session "$name" capture-askgate
+  dispatch_session "$name" capture-askgate ${mode:+"OMP_ASKGATE=$mode"}
 }
 
 # A tiny to-do CLI in a scratch git repository with no Dispatch configuration and no word of due
@@ -1250,19 +1291,20 @@ cmd_judge() {
   SKILL_SCENARIOS_WORK=$work exec bun "$here/judge.ts" run "$@"
 }
 
-# The tester's frozen world under $R: a bare remote whose post-receive hook logs every push, the
-# issue workspace cloned from it, the implementer's commit and handoff on legion/<key>, the PR the
-# gh stand-in serves, and the architect's assignment. The fixture's content is the same in every
-# run; the PR number is 1000 plus <index>, the run's index in its batch, and the commits are dated
-# <index> seconds after <start>, the batch's start, so no two runs of a batch share a PR number or
-# a head (two runs can meet in a scratch file in the shared /tmp), and each batch's heads carry its
-# own start time.
-# The CLI must meet every acceptance criterion the seeded spec lists. testerProof fails a run whose
-# push changes more than .legion/<key>/test.json, and it cannot tell a tester that pinned a real defect
-# with a red test, which roles/core/tester.md asks for, from one that went off-task. A defect left
-# in the fixture turns correct testing into a fail.
+# The tester's frozen world under $R, on the run's own issue <key> (seed.ts tester-proof, which
+# run_tester_proof files first): a bare remote whose post-receive hook logs every push, the issue
+# workspace cloned from it, the implementer's commit on legion/<key>, the PR the gh stand-in serves,
+# and the implementer's handoff body at $R/implement.json, which run_tester_proof records on the
+# issue. The fixture's content is the same in every run; the PR number is 1000 plus <index>, the
+# run's index in its batch, and the commits are dated <index> seconds after <start>, the batch's
+# start, so no two runs of a batch share a PR number or a head (two runs can meet in a scratch file
+# in the shared /tmp), and each batch's heads carry its own start time.
+# The CLI must meet every acceptance criterion the seeded spec lists. testerProof fails a run that
+# pushes a change to legion/<key>, and it cannot tell a tester that pinned a real defect with a red
+# test, which roles/core/tester.md asks for, from one that went off-task. A defect left in the
+# fixture turns correct testing into a fail.
 worker_fixture() {
-  local index=$1 start=$2 src C1 C2 body when worker_pr worker_pr_url jj_setup_config
+  local index=$1 start=$2 src C1 body when worker_pr worker_pr_url jj_setup_config
   worker_pr=$((1000 + index))
   worker_pr_url=https://github.com/$worker_repo/pull/$worker_pr
   when="@$((start + index)) +0000"
@@ -1310,20 +1352,17 @@ test("trims the name", () => {
 EOF
   g add -A && g commit -qm "feat: greet(), a greeting helper for the widgets CLI ($worker_key)"
   C1=$(g rev-parse HEAD)
-  # The implement handoff as the implementer writes it with its write tool: the four stamps
-  # (schemaVersion, phase, issue, completed) and the phase's fields, at .legion/<key>/implement.json,
-  # the file whose pushed commit the implementer's handoff_complete reports and the tester reads with `read`.
-  mkdir -p "$src/.legion/$worker_key"
-  jq -n --arg key "$worker_key" --arg head "$C1" --arg completed "$(date -u -d "@$((start + index))" +%FT%TZ)" '
-    {schemaVersion:1, phase:"implement", issue:$key, completed:$completed,
+  g push -q "$R/remote.git" "legion/$worker_key"
+  : >"$R/pushes.log"
+  # The implement handoff as the implementer records it with `dispatch handoff-write`: the three
+  # stamps (schemaVersion, phase, issue) and the phase's fields; Dispatch records when it was
+  # written. The PR's head is the implementer's code commit, since no handoff commit sits above it.
+  jq -n --arg key "$worker_key" --arg head "$C1" '
+    {schemaVersion:1, phase:"implement", issue:$key,
      filesChanged:["greet.ts","greet.test.ts"],
      proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
        surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
-       negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}' >"$src/.legion/$worker_key/implement.json"
-  g add -A && g commit -qm "implement: record handoff ($worker_key)"
-  C2=$(g rev-parse HEAD)
-  g push -q "$R/remote.git" "legion/$worker_key"
-  : >"$R/pushes.log"
+       negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}' >"$R/implement.json"
   # Isolated from the operator's own jj configuration (fsmonitor.backend = "watchman" on a devbox
   # that runs it): a bare JJ_CONFIG naming only fsmonitor.backend = "none" and this fixture's own
   # identity, so jj falls back to its built-in defaults and `jj new`'s working-copy snapshot never
@@ -1350,7 +1389,7 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
 **Fast-follow:** none.
 
 **Chain:** not stacked."
-  jq -n --arg head "$C2" --arg body "$body" --arg url "$worker_pr_url" --arg ref "legion/$worker_key" \
+  jq -n --arg head "$C1" --arg body "$body" --arg url "$worker_pr_url" --arg ref "legion/$worker_key" \
     --arg key "$worker_key" --argjson number "$worker_pr" '
     {number:$number, url:$url, html_url:$url, title:("feat: greet() (" + $key + ")"), state:"OPEN", isDraft:false,
      headRefName:$ref, headRefOid:$head, baseRefName:"main", body:$body, mergeable:"MERGEABLE",
@@ -1368,18 +1407,26 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
       {match:("^gh api .*pulls/" + ($number|tostring)), stdout:$pr},
       {match:"^gh (api user|auth status)", stdout:{login:"rig[bot]"}}
     ]}' >"$R/fixtures.json"
-  # The world the scorer reads: head is the PR's head, code the implementer's code commit under it.
-  jq -n --arg key "$worker_key" --arg repo "$worker_repo" --argjson pr "$worker_pr" --arg head "$C2" --arg code "$C1" \
-    '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), head:$head, code:$code}' >"$R/world.json"
-  printf 'Architect → tester, %s. The implementer has finished: PR #%s (%s, repository %s) is at %s, and its implement handoff is on the branch. Test it and finish your phase.\n' \
-    "$worker_key" "$worker_pr" "$worker_pr_url" "$worker_repo" "$C2" >"$R/prompt.txt"
+  # The world the scorer reads: head is the PR's head, the implementer's code commit.
+  jq -n --arg key "$worker_key" --arg repo "$worker_repo" --argjson pr "$worker_pr" --arg head "$C1" \
+    '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), head:$head}' >"$R/world.json"
 }
 
 run_tester_proof() {
-  local name=$1 n=$2 index=$3 start=$4 state project port
-  worker_fixture "$index" "$start" >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
-  # The issue the tester's world implements, LWEVAL-1, on the run's own Dispatch.
+  local name=$1 n=$2 index=$3 start=$4 state project port pr head version
+  # The run's own Dispatch, and its own issue on it, whose newest implement record the tester
+  # reads and whose newest test record it writes.
   own_dispatch project
+  seed_ts tester-proof "$R/fixture.json"
+  worker_key=$(jq -r .issue "$R/fixture.json")
+  worker_fixture "$index" "$start" >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  seed_ts implement-handoff "$R/fixture.json" "$R/implement.json"
+  version=$(jq -r .implement.version "$R/fixture.json")
+  read -r pr head < <(jq -r '"\(.pr) \(.head)"' "$R/world.json")
+  # The architect's assignment, with the Handoff line the daemon's task names the predecessor's
+  # record in (packages/daemon/internal/workflow/effects.go).
+  printf 'Architect → tester, %s. The implementer has finished: PR #%s (%s, repository %s) is at %s. Handoff: implement version %s (dispatch handoff-read --issue %s --phase implement --version %s). Test it and finish your phase.\n' \
+    "$worker_key" "$pr" "https://github.com/$worker_repo/pull/$pr" "$worker_repo" "$head" "$version" "$worker_key" "$version" >"$R/prompt.txt"
   state=$R/state
   # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
   # A project token is lower-case letters and digits only (isLegionProjectToken), so the label's
@@ -1411,6 +1458,8 @@ run_tester_proof() {
     echo "GH_REPO=$worker_repo"
   } >"$R/pane.env"
   launch "$name"
+  # What the run left on its issue: every handoff record, each with its body, for testerProof.
+  seed_ts capture-handoffs "$R/fixture.json" "$R"
 }
 
 cmd_run() {
@@ -1420,12 +1469,14 @@ cmd_run() {
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
   [[ $index =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || fail "run index '$index' or batch start '$start' is not a number"
   [ -f "$services_env" ] || fail "a run needs its batch's services: run \`rig.sh batch $scenario 1 $2\`"
-  # An askgate run's name carries its case, so the batches of the three cases, each numbered from
-  # 1, never remove each other's runs.
+  # An askgate run's name carries its case, so the batches of the cases, each numbered from 1,
+  # never remove each other's runs.
   if [ "$scenario" = askgate ]; then
     case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
-    facts | link | upload) name=$scenario-$SKILL_SCENARIOS_ASKGATE_CASE-${P##*/}-$n ;;
-    *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link or upload" ;;
+    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried)
+      name=$scenario-$SKILL_SCENARIOS_ASKGATE_CASE-${P##*/}-$n
+      ;;
+    *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
     esac
   else
     name=$scenario-${P##*/}-$n
@@ -1468,8 +1519,12 @@ cmd_batch() {
   batch_scenario=$1
   case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm | askgate | spec-writing | spec-rewrite) ;; *) fail "unknown scenario $batch_scenario" ;; esac
   [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
-    facts | link | upload) ;;
-    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link or upload (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried) ;;
+    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+  esac
+  [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_MODE:-} in
+    '' | warn | block) ;;
+    *) fail "an askgate batch takes SKILL_SCENARIOS_ASKGATE_MODE unset, warn or block (got '$SKILL_SCENARIOS_ASKGATE_MODE')" ;;
   esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
   # A spec batch numbers its run one above its first label's highest (next_run, below), so a second

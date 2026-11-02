@@ -14,6 +14,37 @@ urgency: Blocking, High, Medium, or Low. The Inbox is where you find and answer 
   <track kind="captions" src="/legion/media/videos/answer-an-ask.vtt" srclang="en" label="English" default>
 </video>
 
+## The two columns
+
+From a window 1280 px wide or wider, the Inbox page is two columns. The left column lists every
+open question as a short row: the issue or document it belongs to, what kind of question it is,
+its first line, and its age. The right column holds the selected question itself, with the
+controls that act on it at its head.
+
+![The Dispatch Inbox in two columns: the open questions as short rows on the left, and the selected question, a decision block, open in its own document on the right.](/legion/media/dispatch/inbox.png)
+
+What the right column shows follows the question:
+
+- A question an agent wrote as a decision block opens as its own document, at the section the
+  block sits in. **Skip to the answer** brings the block itself into view.
+- A request to approve a document opens as that document's latest version, with **Approve** and
+  **Request changes** at the head of the column.
+- A question anchored on a quote, and a question on no document, open as the card described in
+  [Answering an ask](#answering-an-ask).
+
+The Inbox selects its first row when it opens. Click a row to select it, or press `j` or `k`.
+The arrow keys do the same while the focus is in the list. The selected row is in the page's
+address as `?item=<id>`, so a link or a reload keeps your place. A question the agent withdraws,
+or that somebody answers elsewhere, leaves the list at once, and the next row is selected.
+
+Two questions stay in the column until you select another row: one you had typed an answer into,
+which is shown closed with your text to copy, and one whose answer you sent and the server has
+not decided yet.
+
+Below 1280 px, and in the [Inbox drawer](#opening-the-inbox-as-a-drawer) at any width, there is
+no second column. Each row holds its own card and its own controls, as the whole Inbox always
+did.
+
 ## How the Inbox is sorted
 
 Every open ask is either waiting on a person or waiting on an agent. The Inbox splits them that
@@ -23,20 +54,22 @@ way:
 - **Waiting on agents** holds the asks where an agent owes the next reply. Your own **Ask back**
   puts an ask here, and so does an agent's progress note.
 
-The split follows whose turn it is, not who wrote last. When an agent has written last but the turn
-is still yours, the row shows a chip such as `Planner replied`. Each card also says
-`Waiting on you` or `Waiting on <agent>` on its status line.
+The split follows whose turn it is, not who wrote last. Where a row holds its own card, the row
+shows a chip such as `Planner replied` when an agent wrote last and the turn is still yours.
+Each card also says `Waiting on you` or `Waiting on <agent>` on its status line.
 
 Within each section, higher priority comes first and unset priority last. The banner at the top,
 for example `Blocked on you: 2 items, oldest 6h`, counts the asks waiting on you — the ones on
 issues assigned to you that you have not snoozed — and every credential request waiting on you,
 whatever the filter below it is set to.
 
-![The Inbox with its two sections, the Assignee filter set to you, and the Blocked on you banner](/legion/media/dispatch/inbox.png)
-
 A credential request is an agent asking you to let it use a secret, or a machine asking to start
-agent sessions as you. Pending ones are listed under **Credential requests**, above the sections,
-and each links to the page where you approve or deny it. They count toward **Needs you** and the
+agent sessions as you. Pending ones are listed under **Credential requests**, above the sections.
+A **Secret request** links to its page on the Secrets Broker, where you approve or deny it, signed
+in to the broker ([approve a request](/legion/broker/guides/approve-a-request/)); Dispatch itself
+decides no secret request. A **Machine login** links to Dispatch's machine-login page, where you
+type the code the machine shows and approve or deny it
+([log a machine in](/legion/broker/guides/log-a-machine-in/)). They count toward **Needs you** and the
 banner like an ask that waits on you. The Inbox says `Nothing needs you` only when your own list
 holds no ask and no credential request; with the filter on someone else it says `Nothing matches
 this filter`, and with the filter cleared, `Nothing needs anyone`. An open Inbox picks up a new
@@ -69,9 +102,10 @@ people as you like; the button then names the one you picked, or how many.
   ask on a project document.
 - Clear the filter to see every open ask.
 
-Any listed ask whose issue nobody is assigned has an **Assign to me** button, wherever it sits.
-Choosing it makes the issue yours, so the ask is in your own list, and your counts, from then on.
-An ask on a project document belongs to no issue and has no such button.
+An ask whose issue nobody is assigned has an **Assign to me** button: at the head of the right
+column, and on the ask's own row where there is no second column. Choosing it makes the issue
+yours, so the ask is in your own list, and your counts, from then on. An ask on a project
+document belongs to no issue and has no such button.
 
 The filter is part of the page's address: one `?assignee=` value per person, each a login or the
 word `unassigned`, so a link carries the list you are looking at. `?assignee=everyone` is the
@@ -93,8 +127,9 @@ the chip to remove the filter, or the **↗** beside it to open the agent's
 
 ### Later and snooze
 
-You can put off an ask instead of answering it now. Every row has a **Snooze** control with four
-choices:
+You can put off an ask instead of answering it now. Every ask has a **Snooze** control with four
+choices, at the head of the right column, or on the ask's own row where there is no second
+column:
 
 | Choice | Comes back |
 | --- | --- |
@@ -107,14 +142,19 @@ A snoozed ask moves into the folded **Later** band. Open the band to see when ea
 and to end a snooze early. A snooze outranks whose turn it is: an agent replying to a snoozed ask
 does not bring it back, and it does not count toward **Needs you** or the banner.
 
-To snooze several asks at once, tick each row's checkbox, or press `x` on a focused row. A bar
-appears above the list reading `3 selected`, with the same four choices and **Clear**. If the
-server refuses some of them, the bar says how many and why, and those rows stay selected. Press
-`Escape` with no row focused to clear the selection.
+To snooze several asks at once, tick each row's checkbox, or press `x` on the row the right
+column is showing (on the focused row where there is no second column). A bar appears above the
+list reading `3 selected`, with the same four choices and **Clear**. If the server refuses some
+of them, the bar says how many and why, and those rows stay ticked. Press `Escape` with no row
+focused to drop every tick.
 
 ## Answering an ask
 
-![An ask card with its question, options, an Other row, and the Answer and Ask back buttons](/legion/media/dispatch/ask-card.png)
+An ask card holds the question and the answer. The Inbox draws it in the right column for a
+question anchored on a quote and a question on no document, in the document itself for a
+decision block, and in the ask's own row where there is no second column.
+
+![An ask card in the Inbox: the question, its two options and Other, a note field, and Answer.](/legion/media/dispatch/ask-card.png)
 
 1. Read the question. The line under it names who asked, when, and the ask's `dispatch://`
    reference, which you can copy.
@@ -175,9 +215,16 @@ such as switching margin tabs away and back.
 
 ### Approvals
 
-An agent can ask you to approve a document at a specific version. The card reads
-**Approval requested**, and its question is `Approve <document> (version N)?`, followed by the
-agent's summary of what that version proposes. It has two fixed choices and no Other row:
+An agent can ask you to approve a document at a specific version.
+
+In the right column the Inbox opens the document's latest version, with **Approve** and
+**Request changes** at the head of the column. Where you approved the document before, every
+block that changed since the version you approved is marked, and **Next change** moves the
+column to the next one.
+
+Where there is no second column the request is a card. The card reads **Approval requested**,
+and its question is `Approve <document> (version N)?`, followed by the agent's summary of what
+that version proposes. The column and the card both offer two fixed choices and no Other row:
 
 - **Approve** approves that version.
 - **Request changes** needs a reason, which goes back to the agent.
@@ -195,7 +242,7 @@ changed between the version you approved and the one you are asked to approve, w
 decision block left out of both, since the answers in those blocks are your own. A first request,
 on a document nobody has approved, shows neither.
 
-Answering this card is the same review as the **Approve** and **Request changes** buttons on the
+Answering the request is the same review as the **Approve** and **Request changes** buttons on the
 document itself. [Documents](/legion/dispatch/documents/#approvals) covers approval states and what
 a later version does to an approval.
 
@@ -226,9 +273,10 @@ whatever page you're on, and so does a header button, which differs by screen wi
   its own **Needs you N** badge; a separate **Peek** button beside it, with no count of its own,
   opens the drawer instead.
 
-Either way it's the same list, cards, and actions as the Inbox page: answer, ask back, snooze, or
-open an ask without losing your place. The page underneath keeps its state, a half-typed message
-included, so a reply you were drafting is still there when you close the drawer.
+The drawer holds no second column at any width: every ask is a card in its own row, as it is on
+the narrow Inbox page. The actions are the same: answer, ask back, snooze, or open an ask
+without losing your place. The page underneath keeps its state, a half-typed message included,
+so a reply you were drafting is still there when you close the drawer.
 
 The drawer carries the same **Assignee** filter, with a selection of its own. It opens on your
 own asks, and picking people there changes the drawer alone: the address of the page underneath

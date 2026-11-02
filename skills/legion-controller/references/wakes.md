@@ -9,10 +9,13 @@ you act, because a wake can be stale.
 
 ## `triage on <KEY>` (`{kind: "triage"}`)
 
-An unrecorded root in `triage` that carries the `legion` label. The daemon sends it when the issue
-is created with the label, and on each later change while it stays in `triage`, the change that
-adds the label included: the dashboard creates an issue without labels, so a person adds it from
-the issue header. Triage it as `skill://legion-controller/references/triage.md` says.
+An unrecorded root in `triage` that carries the `legion` label, when no person set that label (a
+session's label, yours included). The daemon sends it when a session creates the issue with the
+label, and on each later change while it stays in `triage`, the change that adds the label
+included. Triage the root as `skill://legion-controller/references/triage.md` says. A person's
+label on a `triage` root wakes nobody: the root is queued by the daemon (its own `todo` write). A
+person's approval of a parked (`backlog` or `icebox`) labelled root's spec is queued by the daemon
+the same way and wakes nobody.
 
 ## `slot-free on <KEY>` (`{kind: "slot-free"}`)
 
@@ -63,13 +66,12 @@ wake gives it>; `todo` with the `legion` label queues it again". Other admission
 ## `awaiting-person on <KEY>` (`{kind: "awaiting-person", reason}`)
 
 A root whose architect asked a person a question, or handed its spec to a person for approval, and
-now waits only on them: the daemon returned
-its slot and suspends the architect after its turn, keeping its session. Read
-`issues.<KEY>.waitingOn`. Do not park it or start anything, and take nothing for the slot it
-returned: it is no reason to label or admit an issue ([Free
+now waits only on them: the daemon returned its slot while the architect stays live to read the
+person's comments and replies. Read `issues.<KEY>.waitingOn`. Do not park it or start anything, and
+take nothing for the slot it returned: it is no reason to label or admit an issue ([Free
 slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it at the front of
-`admission.waiting` by itself, and the next free slot resumes its architect. A lost label or a
-foreign Dispatch claim sends the separate `unslotted` wake.
+`admission.waiting` by itself, and the next free slot delivers its task. A lost label or a foreign
+Dispatch claim sends the separate `unslotted` wake.
 
 ## `held on <KEY>` (`{kind: "held", phase, role?, reason?}`)
 

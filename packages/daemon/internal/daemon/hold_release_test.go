@@ -46,7 +46,7 @@ func TestPollHoldReleaseClosesAHeldRootOnAQuietStreamWithinABound(t *testing.T) 
 		t.Fatalf("open JetStream: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: log,
 	})
 	if err != nil {
@@ -272,9 +272,13 @@ func (d *pilotDispatch) Approval(context.Context, string) (dispatch.Approval, er
 	return dispatch.Approval{}, nil
 }
 func (d *pilotDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *pilotDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *pilotDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *pilotDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // filteringDispatch honors the statuses argument exactly as the real HTTPClient does: only
 // summaries whose status is in the requested set, or every summary when the caller asks for none.
@@ -319,8 +323,14 @@ func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval
 	return dispatch.Approval{}, nil
 }
 func (d *filteringDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *filteringDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *filteringDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *filteringDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 // reconcile's boot listing read only todo through retro, so a root moved to
@@ -343,7 +353,7 @@ func TestReconcileHoldsAKeyTheBootListingShowsOutOfTheWorkflowStatusWindow(t *te
 		t.Fatalf("open JetStream: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: log,
 	})
 	if err != nil {
@@ -411,7 +421,7 @@ func TestReconcileOnThePilotsShapeAdmitsOnlyTheLabeledTodoRootQuickly(t *testing
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: log,
 	})
 	if err != nil {

@@ -19,7 +19,7 @@ type Permissions struct {
 // no name for them.
 const (
 	jsAPI      = "$JS.API." // the JetStream API
-	jsAck      = "$JS.ACK." // a push consumer's acknowledgements
+	jsAck      = "$JS.ACK." // a consumer's acknowledgements
 	jsFlow     = "$JS.FC."  // an ordered consumer's flow-control replies
 	kvStream   = "KV_"      // the stream behind a KV bucket, KV_<bucket>
 	kvSubjects = "$KV."     // a KV bucket's keys, $KV.<bucket>.<key>
@@ -28,12 +28,15 @@ const (
 // inboxes matches every reply inbox nats.go makes.
 const inboxes = nats.InboxPrefix + ">"
 
-// ListenerPermissions is the grant envoy-listener needs as machine machineID, built from Envoy's own
-// names. Publish, in this order:
+// listenerGrant is the grant every user that runs envoy-listener holds as machine machineID, built
+// from Envoy's own names: ListenerPermissions adds the session consumers' calls to it
+// (sessionConsumerCalls), ListenerHostPermissions those and the subscribe to every notification
+// topic, DispatchPermissions what Dispatch itself needs, and HostPermissions the session's
+// entries. Publish, in this order:
 //   - every notification topic (bus.NotificationTopicPrefix): the stream's subjects, the role
-//     lanes, every exception lane, and any other topic a caller of /v1/messages/publish names,
-//     which the listener publishes over core NATS (an ad-hoc topic such as
-//     notifications.team.deploy-squad);
+//     lanes, every exception lane, the session relay subjects (bus.DeliverSubjectPrefix), and any
+//     other topic a caller of /v1/messages/publish names, which the listener publishes over core
+//     NATS (an ad-hoc topic such as notifications.team.deploy-squad);
 //   - the stream's info, create and update, its stored-message get, its durable's
 //     (bus.ListenerDurable) info and create, the durable's acknowledgements, and JetStream's
 //     account info. The stored-message get is the read /v1/replay makes to return the retained
@@ -45,8 +48,12 @@ const inboxes = nats.InboxPrefix + ">"
 //     watchers' consumer create and delete, and their flow-control replies;
 //   - the purge of the interest bucket, which its delete-marker collection sends.
 //
-// Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
-func ListenerPermissions(machineID string) Permissions {
+// Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue),
+// which a listener of an earlier release subscribes in, and in the queue group every listener
+// shares (bus.RoleLaneQueue). Every user built on this grant runs a listener that subscribes a
+// role lane, Dispatch's user included (the envoy-listener beside envoy-dispatch), so each holds
+// both groups.
+func listenerGrant(machineID string) Permissions {
 	durable := bus.ListenerDurable(machineID)
 	publish := []string{
 		bus.NotificationTopicPrefix + ">",
@@ -64,13 +71,67 @@ func ListenerPermissions(machineID string) Permissions {
 	}
 	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
 	return Permissions{
-		Publish:   Rules{Allow: publish},
-		Subscribe: Rules{Allow: []string{inboxes, contracts.RoleTopicPrefix + "> " + bus.ListenerQueue(machineID)}},
+		Publish: Rules{Allow: publish},
+		Subscribe: Rules{Allow: []string{
+			inboxes,
+			contracts.RoleTopicPrefix + "> " + bus.ListenerQueue(machineID),
+			contracts.RoleTopicPrefix + "> " + bus.RoleLaneQueue,
+		}},
 	}
 }
 
+// sessionConsumerCalls are the calls bus.SessionConsumers makes, which only the sets of a user no
+// session shares hold (ListenerPermissions and ListenerHostPermissions): consumer create, with and
+// without a filter subject in its subject, info, delete, pull (CONSUMER.MSG.NEXT) and
+// acknowledgements, each on any consumer of the stream, since a session consumer is named for its
+// session (bus.SessionConsumerName), and the stream's consumer list, which a listener that starts
+// relaying every session at once reads instead of one info each
+// (bus.SessionConsumers.ListSessionConsumers). A NATS wildcard is a whole token, so these reach
+// every consumer of the stream, other listeners' durables and Dispatch's included, and a consumer
+// created through them can deliver the stream's messages to any subject. That reach is the
+// listener user's alone: DispatchPermissions and HostPermissions keep their per-durable scope and
+// hold none of these, so the listener those users run answers every registration that asks for
+// consumer delivery core (bus.ErrConsumerNotGranted) and keeps only its own durable.
+func sessionConsumerCalls() []string {
+	return []string{
+		jsAPI + "CONSUMER.CREATE." + bus.Stream + ".*",
+		jsAPI + "CONSUMER.CREATE." + bus.Stream + ".*.>",
+		jsAPI + "CONSUMER.INFO." + bus.Stream + ".*",
+		jsAPI + "CONSUMER.DELETE." + bus.Stream + ".*",
+		jsAPI + "CONSUMER.MSG.NEXT." + bus.Stream + ".*",
+		jsAPI + "CONSUMER.LIST." + bus.Stream,
+		jsAck + bus.Stream + ".*.>",
+	}
+}
+
+// ListenerPermissions is the grant envoy-listener needs as machine machineID: the listener grant
+// (listenerGrant), then the session consumers' calls (sessionConsumerCalls), which only this set
+// and ListenerHostPermissions hold. A hub that renders this set for its own listener gives that
+// listener consumer delivery; a listener connecting as a host or Dispatch user does not have it,
+// and its sessions stay on the core path.
+func ListenerPermissions(machineID string) Permissions {
+	grant := listenerGrant(machineID)
+	grant.Publish.Allow = append(grant.Publish.Allow, sessionConsumerCalls()...)
+	return grant
+}
+
+// ListenerHostPermissions is the grant of a listener's own NATS user, one no session shares, as
+// machine machineID: the listener's set (ListenerPermissions), the session consumers' calls
+// included, then the subscribe to every notification topic (bus.NotificationTopicPrefix) that
+// ENVOY_SUBSCRIBE_ALL_TOPICS needs, which the role-lane entries of listenerGrant do not cover: a
+// listener opted in holds a core subscription on notifications.> in its machine's queue group, so
+// a session it serves receives a topic the stream does not store. That subscribe is all this set
+// adds to the listener's: it holds none of SessionPermissions' publish entries, so a process
+// connecting as this user can neither publish a session's agent stream frames nor subscribe to a
+// session's control subject. HostPermissions stays the set of a user a host's sessions share.
+func ListenerHostPermissions(machineID string) Permissions {
+	grant := ListenerPermissions(machineID)
+	grant.Subscribe.Allow = append(grant.Subscribe.Allow, bus.NotificationTopicPrefix+">")
+	return grant
+}
+
 // bucketPermissions are the calls nats.go's KV makes on one bucket, in the order the grants list
-// them: ListenerPermissions lists them for each of bus.ListenerBuckets, DispatchPermissions for the
+// them: listenerGrant lists them for each of bus.ListenerBuckets, DispatchPermissions for the
 // redelivery bucket. Beside them is the update of the bucket's stream: a start, and the program's
 // keeper every 30 seconds after it, raises a bucket found with fewer copies than the deployment's
 // replica count (bus.ReplicasEnvVar) with a stream update (bus.EnsureKeyValue,
@@ -99,9 +160,11 @@ func DispatchDurables() []string {
 }
 
 // DispatchPermissions is the grant of Dispatch's one NATS user, which envoy-dispatch and the
-// envoy-listener beside it share: ListenerPermissions(machineID), the listener's machine id, then
-// what Dispatch itself needs. No session connects as this user, so it holds none of
-// SessionPermissions: it is a direct publish to a session's frames, or a subscription to its
+// envoy-listener beside it share: the listener grant (listenerGrant) of the listener's machine id,
+// then what Dispatch itself needs. It holds no session-consumer call (sessionConsumerCalls), so
+// the listener beside envoy-dispatch keeps its own durable alone and answers every registration
+// that asks for consumer delivery core. No session connects as this user either, so it holds none
+// of SessionPermissions: it is a direct publish to a session's frames, or a subscription to its
 // control subject, that is refused. The seed's reach is the whole server even so: its _INBOX.>
 // subscription receives every reply any client gets, other listeners' durable push deliveries
 // included; the filtered create on delivery-events lets it create that durable on any filter, so
@@ -111,7 +174,7 @@ func DispatchDurables() []string {
 // webhook-redelivery bucket, and every session's agent stream control subject. Subscribe: every
 // session's agent stream frames.
 func DispatchPermissions(machineID string) Permissions {
-	listener := ListenerPermissions(machineID)
+	listener := listenerGrant(machineID)
 	publish := listener.Publish.Allow
 	for _, durable := range DispatchDurables() {
 		publish = append(publish,
@@ -151,9 +214,14 @@ func DaemonPermissions() Permissions {
 }
 
 // HostPermissions is the grant of a host's one NATS user, which its listener and every session on
-// the host share: in each direction the listener's set, then each entry of the session's it lacks.
+// the host share: in each direction the listener grant (listenerGrant), then each entry of the
+// session's it lacks. It holds no session-consumer call (sessionConsumerCalls), so a listener
+// connecting as a host user keeps its own durable alone and answers every registration that asks
+// for consumer delivery core; its sessions read on their own subscriptions and catch up through
+// /v1/replay. A listener whose user no session shares takes ListenerHostPermissions instead,
+// which holds those calls beside the same notifications.> subscribe.
 func HostPermissions(machineID string) Permissions {
-	listener, agent := ListenerPermissions(machineID), SessionPermissions()
+	listener, agent := listenerGrant(machineID), SessionPermissions()
 	return Permissions{
 		Publish:   Rules{Allow: union(listener.Publish.Allow, agent.Publish.Allow)},
 		Subscribe: Rules{Allow: union(listener.Subscribe.Allow, agent.Subscribe.Allow)},

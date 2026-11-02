@@ -61,6 +61,7 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 				requireConsumerPushBound(t, live.js, bus.DispatchJobDurable)
 				requireDurablesAcknowledge(t, live.js)
 				requireIssueEventPublished(t, live.process, live.conn, live.port)
+				requireCommentQuietPublished(t, live.process, live.conn, live.port)
 				requireAgentStreamRelayed(t, live.conn, live.port)
 				requireWebhookRedeliveryBucket(t, live.js, live.process, live.github)
 
@@ -300,6 +301,50 @@ func requireIssueEventPublished(t *testing.T, process *cmdtest.Process, conn *na
 	require.True(t, strings.HasSuffix(envelope.Topic, ".issue.created"), "event topic %q", envelope.Topic)
 }
 
+// requireCommentQuietPublished proves what a session subscribed to an issue is there for: a
+// comment an agent writes through Dispatch's HTTP API reaches a subscriber holding
+// SessionPermissions on that issue's own comment.created subject, and the frame says in a field
+// of its own, quiet, that it is not quiet. The actor is a session, not a person, which is the
+// case a reader judging the frame by notify drops: notify is false for every actor that is not a
+// person, so such a reader shows a session its peers' silence on the issue it watches. The
+// payload is read as raw JSON so a frame carrying no quiet at all fails here; decoded into a
+// bool, a missing field would read as false and the check would pass on the frames that keep the
+// stored 72 hours quiet. The create is forced because its title shares "example", the only word
+// of the title requireIssueEventPublished created, so the title-overlap check
+// (duplicateCandidates) would refuse it 409 POSSIBLE_DUPLICATE; what is under test here is the
+// published frame, not duplicate detection.
+func requireCommentQuietPublished(t *testing.T, process *cmdtest.Process, conn *natsgo.Conn, port int) {
+	t.Helper()
+	client := &http.Client{Timeout: 10 * time.Second}
+	actor := `"actor":{"kind":"session","id":"` + dispatchSessionID + `"}`
+	answer := postDispatchJSON(t, client, port, "/api/v1/issues", `{"project":"ACME","title":"quiet example","force":true,`+actor+`}`)
+	var created struct {
+		Key string `json:"key"`
+	}
+	require.NoError(t, json.Unmarshal(answer, &created))
+	require.NotEmpty(t, created.Key, "Dispatch named no issue key: %s", answer)
+
+	topic := "notifications.dispatch.issue." + created.Key + ".comment.created"
+	subscription, err := conn.SubscribeSync(topic)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	require.NoError(t, conn.Flush())
+	postDispatchJSON(t, client, port, "/api/v1/issues/"+created.Key+"/comments", `{"body":"example comment",`+actor+`}`)
+
+	envelope, _ := nextEnvelope(t, process, subscription)
+	require.Equal(t, topic, envelope.Topic)
+	var payload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(envelope.Payload), &payload))
+	require.Contains(t, payload, "actor", "the comment frame names no actor: %s", envelope.Payload)
+	var wrote model.Actor
+	require.NoError(t, json.Unmarshal(payload["actor"], &wrote))
+	require.Equal(t, model.Actor{Kind: "session", ID: dispatchSessionID}, wrote)
+	require.Contains(t, payload, "quiet", "the comment frame carries no quiet field: %s", envelope.Payload)
+	var quiet bool
+	require.NoError(t, json.Unmarshal(payload["quiet"], &quiet))
+	require.False(t, quiet, "an agent's comment on an issue was published quiet: %s", envelope.Payload)
+}
+
 // requireAgentStreamRelayed signs a person in and watches the session's conversation through an
 // agent view on Dispatch's live socket: Dispatch tells the session a viewer is attached and asks
 // for its replay on the session's control subject, which its grant publishes, and relays the frame
@@ -398,7 +443,10 @@ func requireWebhookRedeliveryBucket(t *testing.T, js natsgo.JetStreamContext, pr
 	}
 }
 
-func postDispatchJSON(t *testing.T, client *http.Client, port int, path, body string) {
+// postDispatchJSON posts body to one of Dispatch's write routes as the session bearer and returns
+// what it answered. Every route it is used for creates something, so an answer that is not 201
+// fails the call with the body Dispatch gave.
+func postDispatchJSON(t *testing.T, client *http.Client, port int, path, body string) []byte {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodPost, dispatchURL(port, path), strings.NewReader(body))
 	require.NoError(t, err)
@@ -410,6 +458,7 @@ func postDispatchJSON(t *testing.T, client *http.Client, port int, path, body st
 	answer, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, response.StatusCode, "POST %s: %s", path, answer)
+	return answer
 }
 
 func dispatchURL(port int, path string) string {

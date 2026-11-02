@@ -62,6 +62,8 @@ import type {
   EditCommentInput,
   Event,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   InboxRow,
   Issue,
   IssueAskRow,
@@ -70,6 +72,7 @@ import type {
   IssueReferenceSummary,
   IssueReferences,
   IssueSummary,
+  ItemBlocks,
   ListUsersResponse,
   MachineLoginsResponse,
   Message,
@@ -279,6 +282,16 @@ export function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiError && error.status === 401;
 }
 
+/** Whether `error` is the sign-in check's `503 EVENT_HEAD_UNAVAILABLE`: Dispatch has no event id
+ *  it can vouch for as final yet, which a process just restarted while an event write from before
+ *  it is still open answers until that write ends. The page asks again until it answers
+ *  (`queryRetry`); nothing about the session is wrong. */
+export function isEventHeadUnavailable(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 503 && error.code === "EVENT_HEAD_UNAVAILABLE"
+  );
+}
+
 /** Whether `error` is Dispatch's own answer that the caller is signed in to nobody
  *  (`401 AUTH_NO_IDENTITY`), rather than a 401 from something in front of Dispatch - an
  *  authenticating proxy refusing the request, which says nothing about the Dispatch session. A
@@ -323,6 +336,12 @@ export function isDeliveryNotConfigured(error: unknown): boolean {
 // retrying the read cannot repair it, while opening its live editor could let the browser rewrite it.
 export function isDocumentSchemaError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOC_SCHEMA";
+}
+
+// The server refusing a send because the document does not hold the mark it names
+// (`docs.VerifyMark`): the margin answers it by writing the mark again over the same words.
+export function isAnchorMissing(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "ANCHOR_MISSING";
 }
 
 // A document whose stored history cannot load at all: the state a rebuild from its latest saved
@@ -1079,6 +1098,12 @@ export class DispatchApiClient {
     );
   }
 
+  /** The comment's current blocks, each with its span in the stored body, and its revision: what
+   *  the editor carries block ids from (`editComment`'s `blocks` and `base_revision`). */
+  commentBlocks(id: string): Promise<ItemBlocks> {
+    return this.json<ItemBlocks>(`/api/v1/comments/${pathSegment(id)}/blocks`);
+  }
+
   acceptComment(id: string, bounds: WriteBounds): Promise<Comment> {
     return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/accept`, {}, bounds);
   }
@@ -1150,6 +1175,17 @@ export class DispatchApiClient {
    *  with its deliveries and its replies. */
   listIssueMessages(key: string): Promise<MessageRead[]> {
     return this.json<MessageRead[]>(`/api/v1/issues/${pathSegment(key)}/messages`);
+  }
+
+  /** `GET /api/v1/issues/{key}/handoffs`: every phase handoff of the issue, newest first, without
+   *  its body. */
+  listHandoffs(key: string): Promise<HandoffSummary[]> {
+    return this.json<HandoffSummary[]>(`/api/v1/issues/${pathSegment(key)}/handoffs`);
+  }
+
+  /** `GET /api/v1/handoffs/{id}`: one handoff with the body its session wrote. */
+  getHandoff(id: string): Promise<Handoff> {
+    return this.json<Handoff>(`/api/v1/handoffs/${pathSegment(id)}`);
   }
 
   listArtifacts(key: string): Promise<Artifact[]> {
@@ -1418,7 +1454,8 @@ export class DispatchApiClient {
 
   /** `GET /api/v1/credential-requests?approver=me`: every request the viewer may decide - the
    *  ones naming the viewer, and the ones any signed-in person may decide - as the Inbox's
-   *  credential-requests section lists them, or `null` when this Dispatch has no secrets broker. */
+   *  credential-requests section lists them, each secret request with the secrets broker's page
+   *  where it is decided, or `null` when this Dispatch has no secrets broker. */
   getCredentialPending(): Promise<CredentialPendingResponse | null> {
     return this.json<CredentialPendingResponse | null>(
       pathWithQuery("/api/v1/credential-requests", { approver: "me" })
@@ -1429,9 +1466,10 @@ export class DispatchApiClient {
     return this.json<CredentialRecord>(`/api/v1/credential-requests/${pathSegment(recordId)}`);
   }
 
-  /** Approve a credential request as the signed-in viewer: Dispatch names the viewer's own login
-   *  as the approver, and the broker decides whether that login may. A machine login also carries
-   *  the code the viewer typed. */
+  /** Approve a machine login as the signed-in viewer with the code the viewer typed: Dispatch
+   *  names the viewer's own login as the approver, and the broker decides whether that login may.
+   *  A secret request is decided only on the secrets broker's own page, so the broker refuses it
+   *  here with 403 `DECIDE_ON_BROKER_PAGE`. */
   approveCredentialRecord(
     recordId: string,
     body: { code?: string },
@@ -1444,7 +1482,7 @@ export class DispatchApiClient {
     );
   }
 
-  /** Deny a credential request as the signed-in viewer; a machine login also carries its code. */
+  /** Deny a machine login as the signed-in viewer with the code the viewer typed. */
   denyCredentialRecord(
     recordId: string,
     body: { code?: string },

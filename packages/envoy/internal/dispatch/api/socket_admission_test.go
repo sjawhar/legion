@@ -95,7 +95,7 @@ const (
 func TestASocketOpenReadsTheIssueAndTheCallerOnce(t *testing.T) {
 	ctx := context.Background()
 	counter := &statementCounter{}
-	counted := storetest.Traced(t, storetest.Open(t), counter)
+	counted := storetest.TracedStore(t, storetest.Open(t), counter)
 	// No heartbeat resolves the caller again while the test counts.
 	handler, _, cookie, request, documentService := newCookieServerOn(t, counted, time.Hour)
 	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {

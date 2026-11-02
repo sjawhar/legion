@@ -271,14 +271,15 @@ export async function expectParagraphReadings(
     .toEqual(reading);
 }
 
-/** Opens the comment's thread in the Conversation and asserts the engine drew its body as
- *  `reading`. */
-export async function expectCommentReading(
+/** Opens the comment's thread in the Conversation and asserts `read` of the body the engine drew
+ *  there, `read` being given the body's `.dispatch-markdown` view. A spec whose rows are not
+ *  `ParagraphReading`s passes its own reader. */
+export async function expectCommentBody(
   page: Page,
   issueKey: string,
   commentId: string,
   project: string,
-  reading: ParagraphReading[]
+  read: (view: Locator) => Promise<void>
 ): Promise<void> {
   await page.goto(`/issues/${issueKey}/conversation`);
   // A collapsed card previews the body inline; the expanded thread draws its paragraphs, in
@@ -286,10 +287,24 @@ export async function expectCommentReading(
   const turn = page.locator(`[data-turn="comment:${commentId}"]`);
   await turn.getByRole("button", { name: "Expand thread" }).click();
   const thread = conversationThreadScope(page, project, turn);
-  await expectParagraphReadings(thread.locator(".dispatch-markdown"), reading);
+  await read(thread.locator(".dispatch-markdown"));
   // The engine drew the body: no literal-text fallback stands in for it.
   await expect(turn.locator("[data-markdown-fallback]")).toHaveCount(0);
   await expect(thread.locator("[data-markdown-fallback]")).toHaveCount(0);
+}
+
+/** Opens the comment's thread in the Conversation and asserts the engine drew its body as
+ *  `reading`. */
+export function expectCommentReading(
+  page: Page,
+  issueKey: string,
+  commentId: string,
+  project: string,
+  reading: ParagraphReading[]
+): Promise<void> {
+  return expectCommentBody(page, issueKey, commentId, project, (view) =>
+    expectParagraphReadings(view, reading)
+  );
 }
 
 /** The Conversation's All / Open / Closed control, the one filter over its cards. It starts on

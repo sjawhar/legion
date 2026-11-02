@@ -198,6 +198,10 @@ func TestTheReservationsAreTheNamesTheEntriesFix(t *testing.T) {
 	}
 }
 
+// TestPodAnswersTheListedAccount pins what each kind of entry answers, Instance included: an
+// entry that fixes no session answers the pod uid, which a registration has to name for the
+// exchange to go through, and an entry that fixes one answers none, since every pod of that
+// account writes under the configuration's name and is registered for nothing.
 func TestPodAnswersTheListedAccount(t *testing.T) {
 	set := listed(t)
 	for _, c := range []struct {
@@ -207,7 +211,7 @@ func TestPodAnswersTheListedAccount(t *testing.T) {
 		want    exchange.Claims
 	}{
 		{name: "the session the request names", token: podToken(workerAccount, podUID), session: "implementer-g1",
-			want: exchange.Claims{Session: "implementer-g1", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: workerPrincipal}},
+			want: exchange.Claims{Session: "implementer-g1", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: workerPrincipal, Instance: podUID}},
 		{name: "the session the entry fixes, the request naming none", token: podToken(daemonAccount, podUID), session: "",
 			want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: daemonPrincipal}},
 		{name: "the session the entry fixes, the request naming the same", token: podToken(daemonAccount, podUID), session: fixedSession,
@@ -256,6 +260,46 @@ func TestPodRefusesWhatItCannotDecide(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), c.names) {
 				t.Errorf("Pod(%s) refused with %q, which does not name %q", c.name, err, c.names)
+			}
+		})
+	}
+}
+
+// TestRegistrationRefusesWhatNeedsNoRegistration pins what a pod-session registration may be
+// written for: the pod of an entry that fixes no session, and nothing else. A token bound to no
+// pod proves only that the account exists, an account no entry lists exchanges nothing to begin
+// with, and an entry that fixes a session writes under the configuration's name, so registering
+// one of its pods would say something no exchange reads.
+func TestRegistrationRefusesWhatNeedsNoRegistration(t *testing.T) {
+	set := listed(t)
+	if err := set.Registration(workerAccount, podUID, "implementer-g1"); err != nil {
+		t.Fatalf("Registration of a pod of %s for a name of its own = %v, want it accepted", workerAccount, err)
+	}
+	for _, c := range []struct {
+		name         string
+		account, uid string
+		session      string
+		want         error
+		names        string
+	}{
+		{name: "a token bound to no pod", account: workerAccount, uid: "", session: "implementer-g1",
+			want: exchange.ErrNoPodBinding, names: workerAccount},
+		{name: "an account no entry lists", account: "system:serviceaccount:example-ns:example-other", uid: podUID,
+			session: "implementer-g1", want: exchange.ErrNoEntry, names: "system:serviceaccount:example-ns:example-other"},
+		{name: "an entry that fixes a session", account: daemonAccount, uid: podUID, session: fixedSession,
+			want: exchange.ErrSessionFixed, names: fixedSession},
+		{name: "a session carrying whitespace", account: workerAccount, uid: podUID, session: "implementer g1",
+			want: exchange.ErrSessionInvalid, names: workerAccount},
+		{name: "no session at all", account: workerAccount, uid: podUID, session: "",
+			want: exchange.ErrSessionInvalid, names: workerAccount},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := set.Registration(c.account, c.uid, c.session)
+			if !errors.Is(err, c.want) {
+				t.Fatalf("Registration(%s) = %v; want %v", c.name, err, c.want)
+			}
+			if !strings.Contains(err.Error(), c.names) {
+				t.Errorf("Registration(%s) refused with %q, which does not name %q", c.name, err, c.names)
 			}
 		})
 	}

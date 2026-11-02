@@ -39,19 +39,59 @@ type subscribeBody struct {
 	// Empty for a session whose plugin predates the fields.
 	Plugin        string `json:"plugin"`
 	PluginVersion string `json:"plugin_version"`
+	// ClientInstanceID is the id the client instance mints at its own start (one Oh My Pi Envoy
+	// extension instance, one Claude Code channel-server process) and sends on every
+	// registration, so a soft claim naming a predecessor session can tell that predecessor's
+	// own instance from another instance's live session (session.InstanceMatches). Empty for a
+	// client whose plugin predates the field, which keeps the old rule; absent here it is
+	// written empty, clearing any id a previous registration stored, since the entry is built
+	// fresh from this body.
+	ClientInstanceID string `json:"client_instance_id"`
+	// Delivery asks for consumer delivery (subscribeDelivery); absent from an older plugin's
+	// registration, which stays on the core path.
+	Delivery *subscribeDelivery `json:"delivery"`
 }
 
-func sessionEntryFromSubscribe(body subscribeBody, machineID string) session.SessionEntry {
-	return session.SessionEntry{
-		Port:           body.Port,
-		MachineID:      machineID,
-		Dir:            body.Dir,
-		Title:          body.Title,
-		Capabilities:   append([]string{}, body.Capabilities...),
-		Driving:        body.Driving,
-		SelfSubscribed: body.SelfSubscribed,
-		Host:           body.Host,
-		Plugin:         strings.TrimSpace(body.Plugin),
-		PluginVersion:  strings.TrimSpace(body.PluginVersion),
+// subscribeDelivery is a registration's delivery object. Consumer asks the listener for the
+// session's consumer (bus.SessionConsumers), relayed on the session's relay subject
+// (bus.DeliverSubject); Epoch is the plugin's random string for its current NATS connection; and
+// Resume, when the session's consumer is missing, seeds the new one from the plugin's persisted
+// resume point.
+type subscribeDelivery struct {
+	Consumer bool             `json:"consumer"`
+	Epoch    string           `json:"epoch"`
+	Resume   *subscribeResume `json:"resume"`
+}
+
+// subscribeResume is a session's resume point: the stream's identity (bus.StreamIDMetadataKey) and
+// a sequence below which the plugin holds nothing unwritten, so a consumer created from it starts at
+// Seq+1 when StreamID is still the stream's.
+type subscribeResume struct {
+	StreamID string `json:"stream_id"`
+	Seq      uint64 `json:"seq"`
+}
+
+// sessionEntryFromSubscribe is the session entry a registration writes: the body's fields, the
+// registering listener's machine id, and, when delivery says the listener holds the session's
+// consumer for it, consumer delivery, the plugin's epoch and the sequence that consumer starts at.
+func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery sessionDeliveryOutcome) session.SessionEntry {
+	entry := session.SessionEntry{
+		Port:             body.Port,
+		MachineID:        machineID,
+		Dir:              body.Dir,
+		Title:            body.Title,
+		Capabilities:     append([]string{}, body.Capabilities...),
+		Driving:          body.Driving,
+		SelfSubscribed:   body.SelfSubscribed,
+		Host:             body.Host,
+		Plugin:           strings.TrimSpace(body.Plugin),
+		PluginVersion:    strings.TrimSpace(body.PluginVersion),
+		ClientInstanceID: strings.TrimSpace(body.ClientInstanceID),
 	}
+	if delivery.relayed() {
+		entry.Delivery = session.DeliveryConsumer
+		entry.Epoch = delivery.epoch
+		entry.ConsumerStart = delivery.consumerStart
+	}
+	return entry
 }

@@ -37,13 +37,39 @@ test("an issue document URL carrying both item parameters is refused", () => {
 });
 
 // A block's link on a live document page names the block, its id written as `encodeBlockId`
-// writes it; an item in the query, or a fragment that names no block, leaves it. (A version page
-// is the shared table's.)
+// writes it; an item in the query, or a fragment that names no block, leaves it: the dashboard
+// writes a document block's fragment beside `?comment=`, so on any version of the document that
+// fragment names no block of the comment. A comment's or a message's own page names its block; an
+// ask's names the ask. (A document's version page is the shared table's.)
 test.each([
   ["/issues/CORE-1/spec#b-ship_it", "dispatch://CORE-1/spec#b-ship%5Fit"],
   [
     "/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444#b-ship-it",
     "dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444",
+  ],
+  [
+    "/issues/CORE-1/artifacts/notes-md?v=2&comment=44444444-4444-4444-8444-444444444444#b-b2",
+    "dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444",
+  ],
+  [
+    "/projects/CORE/documents/handbook-md?version=3&comment=88888888-8888-4888-8888-888888888888#b-b2",
+    "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888",
+  ],
+  [
+    "/issues/CORE-1/comments/11111111-1111-4111-8111-111111111111#b-b2",
+    "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
+  ],
+  [
+    "/issues/CORE-1/spec?ask=66666666-6666-4666-8666-666666666666#b-ship-it",
+    "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666",
+  ],
+  [
+    "/issues/CORE-1/asks/66666666-6666-4666-8666-666666666666#b-b2",
+    "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666",
+  ],
+  [
+    "/issues/CORE-1/comments/11111111-1111-4111-8111-111111111111#b-b2@v1",
+    "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111",
   ],
   // A pin is written only as a dispatch:// reference, so a raw @ here names no block.
   ["/issues/CORE-1/spec#b-ship-it@v2", "dispatch://CORE-1/spec"],

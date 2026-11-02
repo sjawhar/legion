@@ -1,5 +1,0 @@
-kind: Added
-body: 'The load test''s `stack.sh seed` adds production-shaped `dispatch://` references (`loadgen seed-refs`): 1,000 cited documents with 19,471 versions, drawn from the committed per-member version counts of 160 production references answers (`refs-sample-2026-10-27.json`, no keys), and one `references.md` on each of 310 LGA issues, so a step''s `GET /api/v1/issues/{key}/references` does the work it does in production. `loadgen refs-shape` checks the answers against production''s shape and `loadgen refs-fetch` records each one; `seed.meta.json` counts the references. The seed takes about 23 minutes more on 2 vCPU.'
-time: 2026-10-29T07:40:50.179644078Z
-custom:
-    Issue: pr2469

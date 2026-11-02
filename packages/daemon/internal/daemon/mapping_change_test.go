@@ -90,7 +90,7 @@ func mappingChangeAtRuntime(t *testing.T, ackWait, delay time.Duration) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.consumers, err = intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{
+	w.consumers, err = intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: heard, AckWait: ackWait, NakDelay: 10 * time.Millisecond, Logger: w.log,
 		RepositoryMapping: w.mappingChange,
 	})
@@ -99,7 +99,7 @@ func mappingChangeAtRuntime(t *testing.T, ackWait, delay time.Duration) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done, refreshed := make(chan error, 1), make(chan struct{})
-	go func() { done <- w.consumers.Run(ctx, pool) }()
+	go func() { done <- w.consumers.Run(ctx) }()
 	go func() { w.refreshOnMappingChange(ctx); close(refreshed) }()
 	t.Cleanup(func() { cancel(); <-done; <-refreshed })
 

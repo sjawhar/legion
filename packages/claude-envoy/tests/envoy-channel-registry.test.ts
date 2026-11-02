@@ -87,7 +87,9 @@ test("a resumed server rebuilds the interests its session id already registered 
 
   try {
     expect(subscribes).toEqual([[directSubject, "notifications.dispatch.issue.DSP-3", issueTopic]])
+    // The relay subject (consumer delivery) is subscribed, never registered as a topic.
     expect([...nats.subscriptions.keys()]).toEqual([
+      "notifications.envoy.deliver.ses_claude",
       directSubject,
       "notifications.dispatch.issue.DSP-3",
       issueTopic,

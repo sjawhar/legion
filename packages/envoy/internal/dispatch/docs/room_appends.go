@@ -2,7 +2,6 @@ package docs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 )
 
@@ -27,88 +25,65 @@ import (
 // persistence observer queues the same update (onLoadDocument), so when ygo calls for an update u,
 // the room's class queue already holds u and every update the room recorded after it. Unless
 // something waits on the room, u's call lingers until roomAppendLinger after u was recorded, so a
-// burst of keystrokes is queued by the time it goes on. The call then takes its batch, under the
-// room's state lock (planRoomAppend): u and the run of classes queued after it, while each is
-// durable work of the room instance u was made in (its cursor), is not stored, and has not been
-// taken by its own update's call, at most roomAppendBatchUpdates updates and roomAppendBatchBytes
-// bytes, but always u. It hands the batch to PgVersioned.AppendUpdatesWithCredit, which cuts it
-// before the first update that does not decode alone and stores the rest in about three round
-// trips, one row per update with its own content class and credit, the rows the same updates
-// leave stored one at a time (appendWrites). A batch is fixed once taken: when its transaction
-// holds the document's lock it can only lose what another transaction stored meanwhile
-// (roomAppend.recheck), and an update recorded while it waited goes in a later call's batch. A
-// class queued before u is not u's to take, even unstored: it is an update ygo hands on after u, as
-// two peers' read loops can (consumeUpdateClass), and it keeps its own call.
+// burst of keystrokes is queued by the time it goes on. The call then reads, under the room's state
+// lock, the commit position its batch runs through (roomBatchThrough): the last of the run of
+// classes queued after u that is durable work of the room instance u was made in (its cursor), is
+// not stored, and does not take the run past roomAppendBatchUpdates updates or roomAppendBatchBytes
+// bytes - u's own position at least. It hands that position to AppendRoomFlush, whose transaction
+// stores, through Service.flushThrough, every update of the instance recorded at a position through
+// it that no writer has stored yet, in the room's commit order, as one insert statement of one row
+// per update with its own content class and credit (appendWrites), and one pair of notifications.
+// The whole transaction is about three round trips under the document's lock, on a connection of
+// the room-appends pool.
 //
 // What holds:
 //
 //   - Durable on return. A call returns nil only once its update is committed: by its own
-//     transaction, or by another call's that took it in its batch and committed first (its class
-//     is then marked stored). ygo's flush still means every update it held is durable.
-//   - Stored once. No class is stored by two of the room's appends. A class is stored only by a
-//     transaction that holds the room's in-process lock and the document's advisory lock and finds
-//     it, under the room's state lock, still queued and not stored (roomAppend.recheck), and every
-//     transaction that commits classes marks them stored before it releases those locks
-//     (roomAppend.committed): two transactions that hold one class are ordered by the locks, and
-//     the second finds it stored. A class leaves its queue only with its own update's call, once
-//     that call's append has ended or it dropped the update (consumeUpdateClass, dropUpdate), or
-//     with its record, which is released only once every durable class on it has been taken by
-//     its own call and stored or dropped (unusedLocked). Every way an update reaches the store
-//     keeps to that, as the paths after this list show.
-//   - Versions follow the order in which batches commit, and within a batch the queue's order. A
-//     batch is u and the run after it, stored at consecutive versions from the head its gate read
-//     in the order the room recorded them, its update-log order, the order it applied them. A class
-//     queued before u that its own call stores later is at a later version.
-//   - A stored class's counts. At its commit an append marks every class it stored stored and
-//     finishes the durable append of each durable one on the record that holds the class then (a
-//     failed room's handover moves a queued class with its count and its mark,
-//     handOverFailedRoomLocked), so a waiter on the room's durable appends sees the batch durable
-//     at once. A class's pending count ends when ygo's own call for its update takes it: that call
-//     marks its class handed and leaves it queued for its own append, alone or in a batch, to find
-//     and mark, and the call for a class another append already stored consumes it, appending
-//     nothing and finishing nothing again.
+//     transaction, or by another writer's that stored it first and marked its class stored
+//     (RoomFlush.markStored). ygo's flush still means every update it held is durable.
+//   - Stored once. No class is stored by two transactions. A class is stored only by a transaction
+//     that holds the document's advisory lock and finds it, under the room's state lock, still
+//     queued and not stored (Service.flushThrough), and every such transaction marks what it
+//     stored before it releases that lock, so a transaction that takes the lock next finds the
+//     marks. A class leaves the queue only with its own update's call (finishUpdateClass), so a
+//     call whose update another writer stored finds the mark and appends nothing.
+//   - Versions follow the order in which transactions commit, and within one the room's commit
+//     order: a flush's run is stored at consecutive versions from the head its gate read, in the
+//     order the room recorded the updates, their update-log order (documentUpdateClass.seq).
+//   - A stored class's counts. A durable class's append is counted from the moment its observer
+//     recorded it (queueUpdateClass) until its own call returns (finishUpdateClass), whether that
+//     call stored the update or found it stored by another writer, so a wait for the room's
+//     appends (waitForRoomIdle) ends only once ygo has handed every update over.
 //   - Failure outcomes. A refused gate (ErrRoomBehindHead), or a statement or a commit the database
 //     refuses, stores nothing and marks nothing: the call that ran the batch fails the room and
 //     returns the error, and every other update of the batch meets the failed room on its own call,
-//     which drops it, ends its counts and lands its credit, as any failed room's update. Every
-//     credit of the updates the transaction would store lands before it releases the document's
-//     lock, committed or not (UpdateCredit.landed does nothing the second time). A batch whose own
-//     update another append stored lands none: the rest of it is left to its own calls.
-//   - A suppression slot forces the alone path. A published live write's update and a repair's are
-//     already durable, and the room's persistence knows each by the suppression slot queued for it,
-//     which it matches, in order, against the update it is handed (consumeSuppressedPersistence). A
-//     slot is queued before its update is recorded and leaves only with that update's own call,
-//     which marks the class handed before it checks the slot. A call that finds a slot of the room
-//     queued stores its update alone, slot check first; a batch is taken only while no slot of the
-//     room is queued, from classes recorded by then, and stops at a handed class, so it never holds
-//     a slot's update, and a slot queued once it is taken is for an update recorded after it. A
-//     failed room purges its slots (purgeSuppressedPersistence) and drops what its persistence
-//     hands on while it is failed; a call after its record is handed over meets such an update as
-//     any other.
+//     which drops it, ends its counts and lands its credit, as any failed room's update. The
+//     call's own credit lands before the transaction releases the document's lock, committed or
+//     not; the other updates' credits land with their own calls unless the transaction committed
+//     them (UpdateCredit.landed does nothing the second time).
+//   - A suppression slot forces the lone position. A published live write's update and a repair's
+//     are already durable, and the room's persistence knows each by the suppression slot queued for
+//     it, which it matches, in order, against the update it is handed
+//     (consumeSuppressedPersistence); their classes are queued stored, so no flush takes them. A
+//     call that finds a slot of the room queued runs its batch through its own update's position
+//     alone.
 //   - No holder of a document lock waits for a RoomAppends connection. A batch takes its connection
 //     (store.Pool.RoomAppends) before the document's lock and holds store.HoldsConnection on its
 //     context, so nothing under it takes a second connection; and nothing else takes a connection of
 //     that pool - settlements, live writes and the withRoomLock writers keep theirs. Whoever holds a
 //     lock a batch waits on finishes without one of these connections, so the pool cannot deadlock.
 //
-// The ways an update reaches the store, and why none stores a class another append stored:
+// The ways an update reaches the store, and why none stores a class another transaction stored:
 //
-//   - A batch (appendBatch) holds its call's own class and the run after it, each found again by
-//     recheck. Its own class found stored answers errUpdateStored, and the call stores nothing;
-//     another member found stored, or gone with its own call, is left out.
-//   - An update stored alone with its class (appendAlone: a class not durable, or one whose call
-//     found a suppression slot queued) is a batch of that one class, rechecked and marked the same
-//     way: a batch that took it and committed first stored it, and one that commits after it
-//     leaves it out.
+//   - A room's batch (AppendRoomFlush) stores the run its flush reads under the document's lock,
+//     which holds no class another writer has marked stored.
 //   - An update with no class - one no room recorded, as a test hands on, or a repair's whose
-//     record was released, since a class that is not durable holds no record - is stored alone
-//     with nothing to recheck or mark, and no batch holds it: a batch's classes come from the
-//     queue, a durable class stays queued until its own call takes it (it keeps its record
-//     pending until then), and ygo hands each update to one call.
+//     record was released - is stored alone (AppendUpdatesWithCredit) with nothing to mark: no
+//     flush holds it, since a flush's run comes from the queue.
 //   - A writer's own update - a live write's, a settlement's repair or stamp, the block-id
-//     backfill's, a seed's - is stored by its writer in its own transaction (AppendUpdateTx). The
-//     room's persistence skips it by its suppression slot, and no batch holds it (a suppression
-//     slot forces the alone path, above).
+//     backfill's, a seed's - is stored by its writer in its own transaction (AppendUpdateTx), which
+//     stores the room's unstored updates before it (Ledger.flushThrough). The room's persistence
+//     skips it by its suppression slot, and its class is queued stored.
 //   - AppendUpdate, which no room's call makes (a test's, a seed's), stores what it is handed and
 //     marks nothing: no class holds its update.
 
@@ -120,64 +95,80 @@ const roomAppendLinger = 50 * time.Millisecond
 
 // roomAppendBatchUpdates and roomAppendBatchBytes bound one batch: at most this many updates and
 // this many bytes of them, but always the update whose call runs it. A queue that reaches either
-// ends its batch's linger (recordUpdateClass).
+// ends its batch's linger (queueUpdateClass).
 const (
 	roomAppendBatchUpdates = 256
 	roomAppendBatchBytes   = 1 << 20
 )
 
-// BrowserUpdate is one update an append transaction stores (VersionedStore.AppendUpdatesWithCredit,
-// appendWrites): its bytes, whether it changes the document's rendered content, and the browser
-// edit's in-flight credit, nil for an update no browser edit credited. Its fields are exported so a
-// test store in another package can hand a batch on; UpdateCredit's are not.
+// BrowserUpdate is one update an append transaction stores (appendWrites): its bytes, whether it
+// changes the document's rendered content, and the browser edit's in-flight credit, nil for an
+// update no browser edit credited. Its fields are exported so a test store in another package can
+// hand a batch on; UpdateCredit's are not.
 type BrowserUpdate struct {
 	Update         []byte
 	ContentChanged bool
 	Credit         *UpdateCredit
 }
 
-// errUpdateStored is the answer of an append whose own update another append of the room stored
-// while this one waited for the document's lock: it stores nothing, and its call consumes the
-// class.
-var errUpdateStored = errors.New("the update was stored by another append of its room")
+// AppendRoomFlush is the room's persistence worker's append of its own update (StoreUpdateContext),
+// the whole flush its transaction runs: under the document's lock, in one transaction, it stores
+// every update of the room instance flush names through `through`, the last commit position of the
+// run its batch takes (roomBatchThrough), that no writer has stored yet, in the room's commit order
+// (Service.flushThrough). The update bytes are not passed: the room's queue holds them, with the
+// class and the credit its update observer recorded for each (documentUpdateClass). An update
+// another writer has stored already appends nothing. Each version it appends advances the
+// instance's cursor inside the lock, and once the transaction has committed each class is marked
+// stored and its credit held and landed before the lock is released, so the next holder of the lock
+// finds them stored, and the room's shadow is freed once no class it measures is left unstored
+// (dropDrainedShadowLocked). credit is the worker's own update's, which lands inside the lock
+// however the transaction ends; the credits of the other updates land only with their committed
+// appends, and stay with their own updates' calls otherwise. The version returned is the last the
+// flush appended, zero when it appended none.
+func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	_, err := p.appendRoomTx(ctx, room, flush, through, credit, nil)
+	if err != nil || len(flush.versions) == 0 {
+		return 0, err
+	}
+	return flush.versions[len(flush.versions)-1], nil
+}
 
 // AppendUpdatesWithCredit validates updates, each alone, and stores them in one transaction, the
-// first at the version after the head, and returns that first version. It holds the room's
-// in-process lock and a connection of the room-appends pool (store.Pool.RoomAppends) throughout,
-// and sends its statements as pgx pipelines, three round trips from the document's session lock to
-// its release:
+// first at the version after the head, and returns that first version: the append of a room's
+// update no class holds, and of an update a caller hands the store itself (AppendUpdate). It runs
+// the same transaction a room's batch does, with the updates given rather than read off the room's
+// queue, and is gated on the room cursor ctx is marked with, if any.
+func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
+	if len(updates) == 0 {
+		return 0, fmt.Errorf("append document updates: no update to append")
+	}
+	for _, update := range updates {
+		if err := validateUpdate(update.Update); err != nil {
+			return 0, err
+		}
+	}
+	return p.appendRoomTx(ctx, room, nil, 0, nil, updates)
+}
+
+// appendRoomTx is the transaction a room's updates are stored in: it holds the room's in-process
+// lock and a connection of the room-appends pool (store.Pool.RoomAppends) throughout, and sends its
+// statements as pgx pipelines, three round trips from the document's session lock to its release:
 //
 //  1. pg_advisory_lock, begin, pg_advisory_xact_lock, the prune recovery (recoverPruneStatement)
 //     and the gate's read (queueAppendGate);
 //  2. once the gate has passed, the append's writes (appendWrites) and commit;
-//  3. pg_advisory_unlock, once the commit's bookkeeping is done: each update's credit held at its
-//     version (UpdateCredit.held), afterAppendCommit, the room cursor ctx is marked with advanced
-//     once per version, the room's side of the append (roomAppend.committed), and the end of the
-//     write the head tracker has followed since the gate (beginOwnWrite), with the head it left.
-//     Every stored update's credit lands before this, committed or not.
+//  3. pg_advisory_unlock, once the commit's bookkeeping is done: each stored class marked stored
+//     with its credit held at its version (RoomFlush.markStored), afterAppendCommit, the room
+//     instance's cursor advanced once per version, the room's figures, and the end of the write the
+//     head tracker has followed since the gate (beginOwnWrite), with the head it left. credit lands
+//     before this, committed or not.
 //
-// A room's own call marks ctx with its side of the append (withRoomAppend): the classes updates
-// were taken from, one per update. For it an update after the first that does not decode alone
-// ends the batch before itself (roomAppend.cut), where any other append fails on it; and once the
-// first pipeline holds the document's lock, the append keeps only the classes still queued and
-// not stored (roomAppend.recheck), which may answer errUpdateStored. The gate decides on the cursor
-// as read once the document's lock is held (appendGate.head). Any database error rolls back what
-// is open and still releases the session lock, as lockRoom's does.
-func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
-	if len(updates) == 0 {
-		return 0, errors.New("append document updates: no update to append")
-	}
-	appending := roomAppendFrom(ctx)
-	for index, update := range updates {
-		if err := crdt.ApplyUpdateV1(newDocumentCopy(), update.Update, nil); err != nil {
-			cut, ok := appending.cut(updates, index)
-			if !ok {
-				return 0, err
-			}
-			updates = cut
-			break
-		}
-	}
+// What it stores is flush's run through `through`, read under the document's lock once the first
+// pipeline holds it (Service.flushThrough), or, for a nil flush, given, whose credits are held at
+// their versions once the commit lands and land, committed or not, with credit's; first is then
+// the version given's first update took. A run that holds nothing commits nothing. Any database
+// error rolls back what is open and still releases the session lock, as lockRoom's does.
+func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit, given []BrowserUpdate) (first persistence.Version, err error) {
 	conn, ctx, release, err := p.holdRoom(ctx, room, true, func(ctx context.Context) (*pgxpool.Conn, error) {
 		appends, err := p.store.Pool.RoomAppends()
 		if err != nil {
@@ -202,16 +193,17 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 	// The head tracker follows the transaction as this process's write from its gate until the
 	// commit's bookkeeping is done, the cursor's advance among it (beginOwnWrite, ownWrite.end).
 	write := p.heads.beginOwnWrite(room)
-	open, landing, stored := true, updates, int64(-1)
+	open, stored := true, int64(-1)
 	// finish ends the append however it ends, in this order: the head tracker's write ends while
-	// the session lock still orders it with every other writer of the document; the credits land
-	// while that lock is still held, whether the transaction committed or not, so no version reads
-	// the pending authors between a commit and its credits leaving the room's in-flight credits;
-	// then what is open is rolled back and the session lock released; and last the room's side of
-	// the append counts the round trips spent, the unlock's among them.
+	// the session lock still orders it with every other writer of the document; the call's own
+	// credit lands while that lock is still held, whether the transaction committed or not, so no
+	// version reads the pending authors between a commit and its credits leaving the room's
+	// in-flight credits; then what is open is rolled back and the session lock released; and last
+	// the round trips spent, the unlock's among them, go to the room's figures.
 	finish := func() {
 		write.end(stored >= 0, stored)
-		for _, update := range landing {
+		credit.landed()
+		for _, update := range given {
 			update.Credit.landed()
 		}
 		end := &pgx.Batch{}
@@ -220,27 +212,35 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 		}
 		end.Queue(`select pg_advisory_unlock(hashtext($1))`, room)
 		_ = send(context.Background(), end)
-		appending.spent(trips)
+		if flush != nil {
+			flush.service.appendFigures.roundTrips.Add(uint64(trips))
+		}
 	}
 	defer finish()
 
-	first := &pgx.Batch{}
-	first.Queue(`select pg_advisory_lock(hashtext($1))`, room)
-	first.Queue(`begin`)
-	first.Queue(`select pg_advisory_xact_lock(hashtext($1))`, room)
-	first.Queue(recoverPruneStatement, room)
-	gate := queueAppendGate(first, room, appendBrowser)
-	if err := send(ctx, first); err != nil {
+	opening := &pgx.Batch{}
+	opening.Queue(`select pg_advisory_lock(hashtext($1))`, room)
+	opening.Queue(`begin`)
+	opening.Queue(`select pg_advisory_xact_lock(hashtext($1))`, room)
+	opening.Queue(recoverPruneStatement, room)
+	gate := queueAppendGate(opening, room, appendBrowser)
+	if err := send(ctx, opening); err != nil {
 		return 0, fmt.Errorf("begin document update: %w", err)
 	}
-	updates, err = appending.recheck(updates)
-	landing = updates
+	head, err := gate.head(appendingThrough(ctx, room, flush))
 	if err != nil {
 		return 0, err
 	}
-	head, err := gate.head(appendingThrough(ctx, room))
-	if err != nil {
-		return 0, err
+	first = persistence.Version(head + 1)
+	var updates []BrowserUpdate
+	var taking []*queuedClass
+	if flush != nil {
+		updates, taking = flush.service.flushRun(flush, through)
+	} else {
+		updates = given
+	}
+	if len(updates) == 0 {
+		return 0, nil
 	}
 	statements, last, err := p.appendWrites(room, head, updates)
 	if err != nil {
@@ -255,166 +255,66 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 		return 0, fmt.Errorf("commit document update: %w", err)
 	}
 	open, stored = false, int64(last)
-	for index, update := range updates {
-		update.Credit.held(persistence.Version(head + int64(index) + 1))
-	}
 	if p.afterAppendCommit != nil {
-		p.afterAppendCommit(room, last)
-	}
-	// The room instance's cursor advances here, inside the lock the append holds, rather than
-	// where the caller marked the context with it (StoreUpdateContext): a writer that took the
-	// lock after this commit released it would otherwise read a cursor behind the head it reads
-	// under that lock, and the gate would refuse an agent's edit while nothing was wrong with its
-	// room.
-	cursor := roomCursorFrom(ctx)
-	for version := head + 1; version <= int64(last); version++ {
-		advanceRoomCursor(cursor, persistence.Version(version))
-	}
-	appending.committed(head, int64(last), gate.oldest())
-	return persistence.Version(head + 1), nil
-}
-
-// roomAppend is a room's side of one append transaction of its browser updates
-// (AppendUpdatesWithCredit), which the room's call marks the transaction's context with: the
-// service and room it counts and finishes on, and the classes the append stores. A nil roomAppend
-// is an append no room made - a test's, a seed's - and does nothing.
-type roomAppend struct {
-	service *Service
-	room    string
-	// members are the classes the append's updates were taken from, one per update and in the
-	// same order, the first the class of the update whose call makes the append (planRoomAppend);
-	// none for an update no class holds. Copies, taken under the room's state lock: each is found
-	// again on the queue by its update's slice (sameUpdate).
-	members []documentUpdateClass
-}
-
-type roomAppendContextKey struct{}
-
-// withRoomAppend marks ctx with appending, the room's side of the append made under it.
-func withRoomAppend(ctx context.Context, appending *roomAppend) context.Context {
-	return context.WithValue(ctx, roomAppendContextKey{}, appending)
-}
-
-// roomAppendFrom is the roomAppend withRoomAppend marked ctx with, nil for none.
-func roomAppendFrom(ctx context.Context) *roomAppend {
-	appending, _ := ctx.Value(roomAppendContextKey{}).(*roomAppend)
-	return appending
-}
-
-// cut ends a room's batch before updates[index], the first of them that does not decode alone,
-// and answers what is left of updates and true. The update cut is left to its own call, whose
-// append it then leads and fails, failing the room. The first update, and any update of an append
-// that is not a room's batch, cannot be cut: false.
-func (a *roomAppend) cut(updates []BrowserUpdate, index int) ([]BrowserUpdate, bool) {
-	if a == nil || index == 0 || len(a.members) != len(updates) {
-		return updates, false
-	}
-	a.members = a.members[:index]
-	return updates[:index], true
-}
-
-// recheck is what the append stores, read under the room's state lock once its transaction holds
-// the room's in-process lock and the document's advisory lock: of updates, those whose class is
-// still queued and not stored. Every append that commits a class marks it under those same locks
-// (committed), so a class found unstored here is one no other append has stored or can store
-// before this transaction ends. The append's own class found stored answers errUpdateStored. A
-// member no longer queued is left out: its own call has taken it off, having dropped it (a failed
-// room's update) or seen its own append end. The append's own class stays queued while its call
-// runs, unless the record goes with it, which only a class that is not durable allows: such a
-// class is never another append's, and its update is stored. updates and the members are compacted
-// in place: the room's call built both for this append alone.
-func (a *roomAppend) recheck(updates []BrowserUpdate) ([]BrowserUpdate, error) {
-	if a == nil || len(a.members) == 0 {
-		return updates, nil
-	}
-	var queue []documentUpdateClass
-	if state := a.service.lockExistingState(a.room); state != nil {
-		defer a.service.unlockState(a.room, state)
-		queue = state.updateClasses
-	}
-	// The members stand in the queue in the order taken, so each is looked for past the one
-	// before it.
-	kept, from := 0, 0
-	for index, member := range a.members {
-		at := queuedUpdateLocked(queue, member.update, from)
-		if at >= 0 {
-			from = at + 1
-		}
-		switch {
-		case at >= 0 && queue[at].stored && index == 0:
-			a.members = nil
-			return nil, errUpdateStored
-		case at >= 0 && queue[at].stored, at < 0 && index > 0:
-			continue
-		}
-		a.members[kept], updates[kept] = member, updates[index]
-		kept++
-	}
-	a.members = a.members[:kept]
-	return updates[:kept], nil
-}
-
-// queuedUpdateLocked is the index in queue, from from on, of the class that holds the very slice
-// update is (sameUpdate), -1 for none. A batch's members are copies of queued classes, so each is
-// found by its own slice. Its caller holds the queue's state.mu.
-func queuedUpdateLocked(queue []documentUpdateClass, update []byte, from int) int {
-	for index := from; index < len(queue); index++ {
-		if sameUpdate(queue[index].update, update) {
-			return index
+		for version := head + 1; version <= int64(last); version++ {
+			p.afterAppendCommit(room, persistence.Version(version))
 		}
 	}
-	return -1
-}
-
-// committed is the room's bookkeeping for a committed append, before the transaction releases the
-// document's lock: the figures, noteStoredUpdates with the head the append left and the
-// oldest version the gate read, every class it stored marked stored, with its durable append, if
-// it is durable, finished on the record that holds it now (countsFellLocked, which wakes the
-// room's waiters once nothing is left to store), and the settlement scheduled once when one of
-// the durable ones changed content. The marks are made under the lock, so another append that
-// takes the lock next finds them (recheck).
-func (a *roomAppend) committed(head, last, oldest int64) {
-	if a == nil {
-		return
-	}
-	a.service.appendFigures.committed(int(last - head))
-	a.service.noteStoredUpdates(a.room, last, oldest)
-	if len(a.members) == 0 {
-		return
-	}
-	settles := false
-	if state := a.service.lockExistingState(a.room); state != nil {
-		// The members stand in the queue in the order taken, as in recheck.
-		from := 0
-		for _, member := range a.members {
-			at := queuedUpdateLocked(state.updateClasses, member.update, from)
-			if at < 0 {
-				continue
-			}
-			from = at + 1
-			queued := &state.updateClasses[at]
-			if queued.stored {
-				continue
-			}
-			queued.stored = true
-			if queued.durable {
-				state.durableAppends.Add(-1)
-				settles = settles || queued.contentChanged
-			}
+	if flush == nil {
+		for index, update := range updates {
+			update.Credit.held(first + persistence.Version(index))
 		}
-		a.service.countsFellLocked(a.room, state)
-		a.service.unlockState(a.room, state)
+		// The room instance's cursor advances here, inside the lock the append holds, rather than
+		// where the caller marked the context with it (StoreUpdateContext): a writer that took the
+		// lock after this commit released it would otherwise read a cursor behind the head it
+		// reads under that lock, and the gate would refuse an agent's edit while nothing was wrong
+		// with its room.
+		cursor := roomCursorFrom(ctx)
+		for version := head + 1; version <= int64(last); version++ {
+			advanceRoomCursor(cursor, persistence.Version(version))
+		}
+		return first, nil
 	}
-	if settles {
-		a.service.scheduleSettleAfterAppend(a.room)
+	flush.appendedRun(taking, updates, persistence.Version(head+1))
+	advanceRoomCursorThrough(flush.cursor, flush.appended(nil))
+	for _, unlanded := range flush.markStored(nil) {
+		unlanded.landed()
 	}
+	state := flush.state
+	state.mu.Lock()
+	state.dropDrainedShadowLocked()
+	flush.service.unlockState(room, state)
+	flush.service.appendFigures.committed(len(updates))
+	flush.service.noteStoredUpdates(room, int64(last), gate.oldest())
+	return first, nil
 }
 
-// spent adds the round trips the append's transaction sent to the room figures.
-func (a *roomAppend) spent(trips int) {
-	if a != nil {
-		a.service.appendFigures.roundTrips.Add(uint64(trips))
+// roomBatchThrough is the commit position the call for class runs its batch through: the position
+// of the last class of the run its batch takes, read under room's state lock (batchRunLocked), and
+// class's own position when a suppression slot is queued for the room, which keeps a slot's update
+// out of the run, or when the queue no longer holds the class. With linger, a run that is not full
+// yet answers no position but the channel its linger waits on and how long it waits: until
+// roomAppendLinger after the class was recorded, none while the service is stopping, while a wait
+// for the room's appends is waiting (appendWaiters, waitForRoomIdle), or once something asked the
+// room's appends to go after the class was recorded (appendsFlushed, waitForRoomIdle). The call then
+// asks again without linger, and the run is read then.
+func (s *Service) roomBatchThrough(room string, class *queuedClass, linger bool) (through uint64, wake <-chan struct{}, wait time.Duration) {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return class.seq, nil, 0
 	}
+	defer s.unlockState(room, state)
+	at := slices.Index(state.updateClasses, class)
+	if at < 0 || s.suppressionQueued(room) {
+		return class.seq, nil, 0
+	}
+	end, full := batchRunLocked(state.updateClasses, at)
+	if linger && !full && state.appendWaiters == 0 && !s.stopping.Load() && !s.shuttingDown(room) && class.recorded.After(state.appendsFlushed) {
+		if wait = time.Until(class.recorded.Add(roomAppendLinger)); wait > 0 {
+			return 0, state.appendLinger.wait(), wait
+		}
+	}
+	return state.updateClasses[end-1].seq, nil, 0
 }
 
 // batchRunLocked is the run of queue a batch for the class at index at takes: from at to end, the
@@ -422,12 +322,12 @@ func (a *roomAppend) spent(trips int) {
 // another room instance (cursor) than at's, or that would take the run past
 // roomAppendBatchUpdates or roomAppendBatchBytes - at's own class is taken whatever its size. full
 // is whether a cap ended it, or the run fills one. Its caller holds the queue's state.mu.
-func batchRunLocked(queue []documentUpdateClass, at int) (end int, full bool) {
+func batchRunLocked(queue []*queuedClass, at int) (end int, full bool) {
 	cursor := queue[at].cursor
 	count, size := 0, 0
 	for index := at; index < len(queue); index++ {
 		class := queue[index]
-		if index > at && (class.stored || class.handed || !class.durable || class.cursor != cursor) {
+		if index > at && (class.stored.Load() || class.handed || !class.durable || class.cursor != cursor) {
 			return index, false
 		}
 		if count == roomAppendBatchUpdates || (count > 0 && size+len(class.update) > roomAppendBatchBytes) {
@@ -437,68 +337,6 @@ func batchRunLocked(queue []documentUpdateClass, at int) (end int, full bool) {
 		size += len(class.update)
 	}
 	return len(queue), count == roomAppendBatchUpdates || size >= roomAppendBatchBytes
-}
-
-// appendPlan is how a room's call stores its update (planRoomAppend).
-type appendPlan int
-
-const (
-	// appendAlone stores the update by itself, after its suppression slot check
-	// (StoreUpdateContext).
-	appendAlone appendPlan = iota
-	// appendBatch stores the update with the run of the room's queue after it (batchRunLocked).
-	appendBatch
-	// appendStored only consumes the update's class, which planRoomAppend does: another call's
-	// append stored it.
-	appendStored
-)
-
-// planRoomAppend is how the call for update stores it, read under room's state lock, and the
-// classes its append takes (roomAppend.members): appendStored, and none, for a class another
-// append already stored, which it consumes under the same lock (consumeUpdateClassLocked);
-// appendAlone for an update with no class, and none, for a class that is not durable or while a
-// suppression slot is queued for the room, and the class; appendBatch otherwise, and the class
-// with the run after it (batchRunLocked). Every class it finds and does not answer appendStored
-// for is marked handed, its pending count ended as a class consumed at the start of its call ends
-// it, since the call has taken it; it stays queued for the call's append to find and mark, and no
-// other call's batch takes it. With linger, a batch whose run is not full yet answers no classes
-// but the channel its linger waits on and how long it waits: until roomAppendLinger after the
-// class was recorded, none while the service is stopping, while a wait for the room's appends is
-// waiting (appendWaiters, waitForRoomIdle), or once something asked the room's appends to go after
-// the class was recorded (appendsFlushed, waitForRoomIdle). The call then asks again without
-// linger, and the batch is taken then.
-func (s *Service) planRoomAppend(room string, update []byte, linger bool) (plan appendPlan, members []documentUpdateClass, wake <-chan struct{}, wait time.Duration) {
-	state := s.lockExistingState(room)
-	if state == nil {
-		return appendAlone, nil, nil, 0
-	}
-	defer s.unlockState(room, state)
-	at := findUpdateClassLocked(state.updateClasses, update)
-	if at < 0 {
-		return appendAlone, nil, nil, 0
-	}
-	class := &state.updateClasses[at]
-	if class.stored {
-		s.consumeUpdateClassLocked(room, state, at)
-		return appendStored, nil, nil, 0
-	}
-	if !class.handed {
-		class.handed = true
-		if class.durable {
-			state.pendingUpdates--
-			s.countsFellLocked(room, state)
-		}
-	}
-	if !class.durable || s.suppressionQueued(room) {
-		return appendAlone, []documentUpdateClass{*class}, nil, 0
-	}
-	end, full := batchRunLocked(state.updateClasses, at)
-	if linger && !full && state.appendWaiters == 0 && !s.stopping.Load() && !s.shuttingDown(room) && class.recorded.After(state.appendsFlushed) {
-		if wait = time.Until(class.recorded.Add(roomAppendLinger)); wait > 0 {
-			return appendBatch, nil, state.appendLinger.wait(), wait
-		}
-	}
-	return appendBatch, slices.Clone(state.updateClasses[at:end]), nil, 0
 }
 
 // suppressionQueued is whether a suppression slot is queued for room's persistence. Its caller
@@ -559,40 +397,6 @@ func (f *roomAppendFigures) committed(size int) {
 	f.sizes[min(sort.SearchInts(roomAppendBatchSizes[:], size), len(f.sizes)-1)].Add(1)
 }
 
-// storeUpdates stores update with members, the classes planRoomAppend took for its append - update's
-// own class and the run after it for a batch, the one class for an update stored alone, none for
-// an update with no class - gated on the cursor of update's class, and consumes update's class once
-// the append has ended (planRoomAppend ended its pending count when the call took it). Stored, by
-// this append or by another that marked it, its append finished the rest; refused, the call fails
-// the room and ends the class's durable count and credit as a failed room's update.
-func (a *servicePersistenceAdapter) storeUpdates(ctx context.Context, room string, update []byte, members []documentUpdateClass) error {
-	var updates []BrowserUpdate
-	var cursor *roomCursor
-	if len(members) == 0 {
-		updates = []BrowserUpdate{{Update: update, ContentChanged: true}}
-	} else {
-		cursor = members[0].cursor
-		updates = make([]BrowserUpdate, len(members))
-		for index, class := range members {
-			updates[index] = BrowserUpdate{Update: class.update, ContentChanged: class.contentChanged, Credit: class.credit}
-		}
-	}
-	ctx = withRoomAppend(withRoomCursor(ctx, cursor), &roomAppend{service: a.service, room: room, members: members})
-	_, err := a.store.AppendUpdatesWithCredit(ctx, room, updates)
-	if errors.Is(err, errUpdateStored) {
-		err = nil
-	}
-	consumed, counted, found := a.service.consumeUpdateClass(room, update)
-	if err != nil {
-		a.service.failRoom(room, err)
-	}
-	if found && consumed.durable && !consumed.stored {
-		a.service.finishDurableAppend(room, counted)
-	}
-	consumed.credit.landed()
-	return err
-}
-
 // dropUpdate takes an update the room's persistence does not store off its record: a failed
 // room's, or one a suppression slot matched, which its writer made durable. A failed room's update
 // is dropped and its browser resends it to the room that replaces this one, but its class is taken
@@ -600,13 +404,11 @@ func (a *servicePersistenceAdapter) storeUpdates(ctx context.Context, room strin
 // append no callback can ever finish: the record - or the one registered in its place, which
 // carries the updates the room's persistence never took (handOverFailedRoomLocked) - would wait on
 // it for ever, so its settlement would retry without end, never closing a room behind the head
-// (reloadRoomBehindHead), and the record would never be released (unusedLocked). A class an append
-// stored before the room failed has had its durable count finished already, and ends only its
-// pending one.
+// (reloadRoomBehindHead), and the record would never be released (unusedLocked).
 func (a *servicePersistenceAdapter) dropUpdate(room string, update []byte) {
 	class, counted, found := a.service.consumeUpdateClass(room, update)
-	if found && class.durable && !class.stored {
-		a.service.finishDurableAppend(room, counted)
+	if found {
+		a.service.finishUpdateClass(room, counted, class)
 	}
 	class.credit.landed()
 }

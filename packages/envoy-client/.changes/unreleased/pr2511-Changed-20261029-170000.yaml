@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    The related-item check's lines take which form an answer holds from `@legion/contracts`'
-    `relatedCheckFormOf` rather than judging it here, and word that form exactly as before. For
-    every answer a Dispatch server sends, no line a reader sees changes; an answer whose `related`
-    is not an array, which the contract does not allow, now prints the not-made line naming why.
-time: 2026-10-29T17:00:00.000000000Z
-custom:
-    Issue: pr2511

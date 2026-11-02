@@ -11,10 +11,38 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
+
+// deferBlockIndexBlocks is the number of blocks above which a document write leaves the block
+// index to the block-index reconciliation instead of paying for it in the request. Not every
+// document defers: one of this many blocks or fewer is indexed by its own write, as every
+// document was.
+//
+// The in-request index costs about 46 µs a block on a two-core pod: refs.IndexBlocks writes two
+// rows a block, one in document_blocks and one in document_block_texts. At the bound itself a
+// write of a list of 1,999 blocks took 234, 239 and 252 ms against 144, 145 and 157 ms for the
+// same list one block longer, which defers - 92 ms for 2,000 blocks - and the same difference at
+// 5,000 blocks is 239 ms, 48 µs a block. The heavy write measured for sjawhar/legion#2519 agrees:
+// its 8,000-item list body is 8,001 blocks and spends 347 ms in IndexDocumentReferences, 43 µs a
+// block, of a request total of 939-1,130 ms against the 1 s that write is held to. A bullet list
+// is one block for the list and one for each item's paragraph; the list item itself is no block.
+//
+// The budget this holds the in-request index to is a tenth of that 1 s, 100 ms, which is well
+// inside the ±150 ms by which this pod moves the same byte-identical write, so the block index of
+// a document that stays inline is never what carries its write past the bound. 100 ms ÷ 48 µs a
+// block is 2,083 blocks, and the bound is 2,000 of them, the 92 ms measured above. A document of
+// 1,999 blocks is indexed by its own write and pays that there; one of 2,001 pays nothing in the
+// request, and its blocks reach the index out of it, through the block-index reconciliation,
+// which indexes every document owed one and runs every BlockIndexReconcileInterval, 30 s
+// (RunBlockIndexReconciliation, block_index.go). The settlement the write queues indexes them
+// only where it writes a version of its own, which it does only where the document changed after
+// that write (contentChangedSinceVersion, mutation.go), so an upload nothing follows is the
+// reconciliation's. The 8,000-item list pays nothing instead of 347 ms.
+const deferBlockIndexBlocks = 2000
 
 // IndexDocumentReferences indexes version's markdown, which the calling transaction has just
 // stored as the document's version (indexDocument): its references, each mention's excerpt and
@@ -22,7 +50,9 @@ import (
 // or a seeded spec. A seed renders its tree once. An upload that changes the document renders it
 // twice - ReplaceText's render of the replacement, which is the version's markdown, and
 // applyLive's render of the fork, which the ledger records - so the excerpts and blocks are cut
-// from applyLive's render only when the two agree. It refuses a context that was not joined.
+// from applyLive's render only when the two agree. A document of more blocks than a write indexes
+// in its own request leaves them to the block-index reconciliation (deferBlockIndexBlocks). It
+// refuses a context that was not joined.
 func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -39,6 +69,16 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 			"artifact", artifactID, "version", version)
 		rendered = renderedTree{}
 	}
+	// Above deferBlockIndexBlocks the write indexes this version's references alone: migration
+	// 0122's trigger marked the document owed a block index (document_block_versions.version
+	// null) when the version's row was inserted, and nothing here settles that mark, so the
+	// block-index reconciliation (RunBlockIndexReconciliation) indexes the blocks and the
+	// mentions they hold out of the request.
+	if blocks := len(rendered.offsets); rendered.tree != nil && blocks > deferBlockIndexBlocks {
+		slog.Info("dispatch: a document version left its blocks to the block-index reconciliation: it holds more blocks than a write indexes in its own request",
+			"artifact", artifactID, "version", version, "blocks", blocks, "bound", deferBlockIndexBlocks)
+		rendered = renderedTree{}
+	}
 	return s.indexDocument(ctx, tx, artifactID, version, versionAt, markdown, rendered)
 }
 
@@ -46,37 +86,68 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 // which holds the document's owner row, from the render the version's markdown came from:
 // indexRenderedVersion with rendered's blocks. The blocks are rendered.offsets; GET …/blocks lists
 // one block per offset of the same renderer (renderedBlocks), so both list one set of blocks. A
-// version with no rendering - an upload whose replacement changed nothing, which writes no tree -
-// is indexUnrenderedVersion, which indexes no blocks: migration 0122's trigger left the document
-// owed when the version's row was inserted, for the block-index reconciliation, which reads the
-// document itself.
+// version with no rendering - an upload whose replacement changed nothing, which writes no tree,
+// or one whose blocks the write deferred (deferBlockIndexBlocks) - is indexUnrenderedVersion,
+// which indexes no blocks: migration 0122's trigger left the document owed when the version's row
+// was inserted, for the block-index reconciliation, which reads the document itself.
 func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, rendered renderedTree) (model.ReferenceChanges, error) {
 	if rendered.tree == nil {
 		return s.indexUnrenderedVersion(ctx, tx, artifactID, version, versionAt, markdown)
 	}
-	blocks := make([]model.ArtifactBlock, len(rendered.offsets))
-	for index, offset := range rendered.offsets {
+	return s.indexRenderedVersion(ctx, tx, artifactID, version, versionAt, markdown, offsetBlocks(rendered.offsets), rendered.tree)
+}
+
+// offsetBlocks is the blocks a render's offsets name, as the block index takes them.
+func offsetBlocks(offsets []pmdoc.BlockOffset) []model.ArtifactBlock {
+	blocks := make([]model.ArtifactBlock, len(offsets))
+	for index, offset := range offsets {
 		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
 	}
-	return s.indexRenderedVersion(ctx, tx, artifactID, version, versionAt, markdown, blocks)
+	return blocks
 }
 
 // indexRenderedVersion indexes one document version, written at versionAt, in a transaction
 // holding the document's owner row: its references, the excerpt of each mention, and its blocks
-// with the mentions each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
-// index into markdown, the render they came from. The event the caller appends names the counted
-// targets the document's references and their excerpts, its blocks and its blocks' mentions moved
+// with the links each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
+// index into markdown, the render they came from; tree, when the caller holds it, is the tree
+// markdown was rendered from, and nil otherwise. The event the caller appends names the counted
+// targets the document's references and their excerpts, its blocks and its blocks' links moved
 // (refs.ReplaceDocumentCounted), since a node is counted once for each block citing it.
-func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock) (model.ReferenceChanges, error) {
+func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock, tree *pmdoc.Node) (model.ReferenceChanges, error) {
 	located := text.ExtractAt(markdown, s.serverURL)
 	// The blocks are indexed before the document's own references are reconciled: a first
 	// indexing dates a block's mention from the document's refs row for its target, which a
 	// surviving target already holds and a new one gets with this same time.
-	moved, err := refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, markdown, blocks, located)
+	moved, err := refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, markdown, blocks, located, blockPointers(artifactID, markdown, blocks, tree))
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
 	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, located, moved, refs.MentionExcerpts(markdown, blocks, located))
+}
+
+// blockPointers is each `block[]` value of the version (pmdoc.BlockPointers) as the block index
+// writes it: none when the schema declares no `block[]` attribute or the version has no blocks;
+// otherwise those of tree, or, with no tree, of markdown read back. A version whose markdown does
+// not read back is indexed with no pointers, as one the server cannot read is with no blocks.
+func blockPointers(artifactID, markdown string, blocks []model.ArtifactBlock, tree *pmdoc.Node) []refs.Pointer {
+	if len(blocks) == 0 || !pmdoc.HasLinkKinds() {
+		return nil
+	}
+	if tree == nil {
+		read, err := pmdoc.ParseRendering(markdown)
+		if err != nil {
+			slog.Warn("dispatch: a document version's block pointers are not indexed: its markdown does not read back",
+				"artifact", artifactID, "error", err)
+			return nil
+		}
+		tree = read
+	}
+	found := pmdoc.BlockPointers(tree)
+	pointers := make([]refs.Pointer, len(found))
+	for index, pointer := range found {
+		pointers[index] = refs.Pointer{Block: pointer.Block, BlockType: pointer.BlockType, Kind: pointer.Attribute, Target: pointer.Target, Targets: pointer.Targets}
+	}
+	return pointers
 }
 
 // indexUnrenderedVersion indexes one document version with no rendering, written at versionAt, in
@@ -91,98 +162,161 @@ func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifac
 // located in its version, stores excerpts on them (nil: marks them owed), and counts the targets
 // moved, which its blocks and their mentions moved, as well (refs.ReplaceDocumentCounted).
 func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, located []text.Located, moved []refs.Target, excerpts map[refs.Target]model.GraphExcerpt) (model.ReferenceChanges, error) {
-	found := make([]text.Ref, len(located))
-	for i, mention := range located {
-		found[i] = mention.Ref
-	}
-	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, versionAt, found, moved, excerpts)
+	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, versionAt, text.Refs(located), moved, excerpts)
 }
 
-// referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
-// is the wait before the next tick while a full batch says drift remains,
-// ReferenceExcerptReconcileInterval the wait once a tick finds less than a batch, and
-// referenceExcerptStaleWindow how long after its start the reconciliation also looks for excerpts
-// a version older than this binary left behind (refs.MarkStaleExcerpts).
+// ExcerptsOwedChannel is the Postgres notification channel every artifact mention left owed an
+// excerpt announces itself on at commit (refs_excerpts_owed_notify, migration 0153): the channel
+// whose pglisten.Hub wake the server passes to RunReferenceExcerptReconciliation.
+const ExcerptsOwedChannel = "dispatch_excerpts_owed"
+
+// referenceExcerptBatch is how many documents one reconciliation pass reads, and
+// referenceExcerptRetryCeiling the longest a document that keeps failing waits between attempts
+// (refs.DeferExcerpts).
 const (
-	referenceExcerptBatch             = 20
-	referenceExcerptStep              = 2 * time.Second
-	ReferenceExcerptReconcileInterval = 5 * time.Minute
-	referenceExcerptStaleWindow       = time.Hour
+	referenceExcerptBatch        = 20
+	referenceExcerptRetryCeiling = 6 * time.Hour
 )
 
-// referenceExcerptLease names the lease one reconciliation tick runs under. The excerpts it
+// excerptSchedule is the reconciliation's pace. minGap is the least time from one pass's start to
+// the next one's, whatever woke it (duty.WokenLoop.MinGap), and also how long a pass waits when
+// another process holds the lease; retryBase is how long a document whose read or record failed
+// waits before its first retry, doubling with each failure after (refs.DeferExcerpts), and how
+// long a pass whose own read failed waits before the next. A test runs the loop faster.
+type excerptSchedule struct {
+	minGap    time.Duration
+	retryBase time.Duration
+}
+
+// referenceExcerptSchedule is the server's pace: two seconds between passes, the step the timer
+// this loop replaced took while a batch was full, so under load the loop runs no more often than
+// that timer did; one minute before a failed document's first retry.
+var referenceExcerptSchedule = excerptSchedule{minGap: 2 * time.Second, retryBase: time.Minute}
+
+// referenceExcerptLease names the lease one reconciliation pass runs under. The excerpts it
 // stores are the same whichever process cuts them, and a mention is owed one until some process
 // does, so two processes reading the same batch of documents and writing the same rows is work
-// done twice for one result - and, because each tick claims nothing, the same documents twice.
+// done twice for one result - and, because each pass claims nothing, the same documents twice.
 const referenceExcerptLease = "reference-excerpts"
 
 // RunReferenceExcerptReconciliation stores the excerpts of every document some of whose mentions
 // are owed one (refs.DriftedExcerpts): every mention indexed before migration 0092, each one
-// rebuild-refs inserts, and each a version write could not cut. One batch per tick, at start, then
-// every referenceExcerptStep while a full batch says drift remains and every
-// ReferenceExcerptReconcileInterval once none does, until ctx ends. For the first
-// referenceExcerptStaleWindow after it starts, each tick first marks owed the excerpts a version
-// written by the binary a deploy replaces left behind, while both run; until a tick marks one,
-// GET /api/v1/references serves that older excerpt. A mention owed an excerpt is answered with
-// the document's name until this stores one.
+// rebuild-refs inserts, and each a version write could not cut. It is a woken loop
+// (duty.RunWoken) under the reference-excerpts lease: one pass at start, then a pass when wake is
+// signalled - in the server, the pglisten.Hub wake on ExcerptsOwedChannel, which every mention
+// left owed announces through a trigger on refs, and which the hub also signals after each
+// successful LISTEN, so what was written while the listener had no connection is caught up then -
+// and when a pass asks for one: at once while a full batch leaves documents it can still record,
+// and when the earliest document it deferred falls due (refs.NextExcerptRetry). Passes start at
+// least two seconds apart. With nothing owed and nothing deferred it holds no timer and makes no
+// statement. A nil wake leaves the loop with its start and its own due times.
 //
-// The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
-// that pass returned, and so is the period each runs under: that wait, referenceExcerptStep while
-// drift remains and the full interval once none does. A tick inside it is a tick some process has
-// already made, so it is skipped; passing the full interval instead would make the converging 2 s
-// steps - this loop's whole point when a rebuild leaves thousands of mentions owed an excerpt - one
-// batch per five minutes. A tick whose lease another process holds, or whose period that process
-// has already served, waits the full interval: that process is doing this work, and the drift it
-// leaves is what the next tick to take the lease finds. leases is required, as it is of every
-// leased loop.
-func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases) {
+// A document the pass cannot read or record is deferred, one minute after its first failure and
+// doubling to six hours (refs.DeferExcerpts), so it neither holds the loop at two seconds nor
+// fills every batch ahead of the documents that sort after it. The first pass each process runs
+// also marks owed the excerpts a version written by a binary predating migration 0092 left behind
+// (refs.MarkStaleExcerpts); every build since records its excerpts in each version write, so one
+// marking per process is enough. A mention owed an excerpt is answered with the document's name
+// until this stores one.
+func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases, wake <-chan struct{}) {
+	s.runReferenceExcerptReconciliation(ctx, leases, wake, referenceExcerptSchedule)
+}
+
+func (s *Service) runReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases, wake <-chan struct{}, schedule excerptSchedule) {
 	ctx = store.WithTransactionTracking(ctx)
-	started := time.Now()
-	duty.RunLeasedAfterEachPass(ctx, leases, referenceExcerptLease, ReferenceExcerptReconcileInterval, func(ctx context.Context) time.Duration {
-		return s.reconcileExcerptTick(ctx, started)
+	// marked is whether a pass of this process has marked the stale excerpts; a marking that
+	// failed is tried again by the next pass that runs.
+	marked := false
+	duty.RunWoken(ctx, duty.WokenLoop{
+		Lease:  referenceExcerptLease,
+		Leases: leases,
+		Wake:   wake,
+		MinGap: schedule.minGap,
+		Pass: func(ctx context.Context) time.Time {
+			if !marked {
+				marked = s.markStaleExcerpts(ctx)
+			}
+			return s.reconcileExcerptPass(ctx, schedule)
+		},
 	})
 }
 
-// reconcileExcerptTick is one tick of the reconciliation - the stale marking its first
-// referenceExcerptStaleWindow after started does, and one batch - and returns how long to wait
-// before the next: referenceExcerptStep while a full batch says drift remains, the interval once
-// none does.
-func (s *Service) reconcileExcerptTick(ctx context.Context, started time.Time) time.Duration {
-	if time.Since(started) < referenceExcerptStaleWindow {
-		if marked, err := refs.MarkStaleExcerpts(ctx, s.store.Pool); err != nil && ctx.Err() == nil {
+// markStaleExcerpts marks owed the excerpts older than their document's latest version
+// (refs.MarkStaleExcerpts) and reports whether it did so without error.
+func (s *Service) markStaleExcerpts(ctx context.Context) bool {
+	marked, err := refs.MarkStaleExcerpts(ctx, s.store.Pool)
+	if err != nil {
+		if ctx.Err() == nil {
 			slog.Error("dispatch: mark stale reference excerpts", "error", err)
-		} else if marked > 0 {
-			slog.Info("dispatch: marked stale reference excerpts owed", "mentions", marked)
 		}
+		return false
 	}
-	wait := ReferenceExcerptReconcileInterval
-	documents, full, err := s.ReconcileReferenceExcerpts(ctx)
-	switch {
-	case ctx.Err() != nil:
-		return wait
-	case err != nil:
-		slog.Error("dispatch: reconcile reference excerpts", "error", err)
-	case full:
-		wait = referenceExcerptStep
+	if marked > 0 {
+		slog.Info("dispatch: marked stale reference excerpts owed", "mentions", marked)
 	}
+	return true
+}
+
+// reconcileExcerptPass is one pass of the reconciliation's batch, and returns when the loop next
+// needs to run with no wake: now while a full batch leaves documents it can still record, else the
+// earliest due time of a document it deferred, else never. A pass whose own read failed asks again
+// after schedule.retryBase.
+func (s *Service) reconcileExcerptPass(ctx context.Context, schedule excerptSchedule) time.Time {
+	documents, full, err := s.reconcileReferenceExcerpts(ctx, schedule.retryBase)
 	if documents > 0 {
 		slog.Info("dispatch: reconciled reference excerpts", "documents", documents)
 	}
-	return wait
+	switch {
+	case ctx.Err() != nil:
+		return time.Time{}
+	case err != nil:
+		slog.Error("dispatch: reconcile reference excerpts", "error", err)
+		return time.Now().Add(schedule.retryBase)
+	case full:
+		return time.Now()
+	}
+	next, err := refs.NextExcerptRetry(ctx, s.store.Pool)
+	if err != nil {
+		if ctx.Err() != nil {
+			return time.Time{}
+		}
+		slog.Error("dispatch: reconcile reference excerpts", "error", err)
+		return time.Now().Add(schedule.retryBase)
+	}
+	return next
 }
 
-// ReconcileReferenceExcerpts runs one tick: it reads each document of one batch of drift as the
-// caller sees it (TextWithBlocks), with no transaction or connection held, and stores its
-// mentions' excerpts at the version the drift named. A document whose stored history does not
-// load or whose tree is outside the schema has no block to show, so its mentions are stored with
-// none and keep the document's name until its next version. A document it cannot read or record
-// for any other reason is logged and skipped for this tick, its mentions left owed, so one
-// document never holds back the rest of its batch; documents counts the ones recorded, and full
-// reports a batch that was full.
+// ReconcileReferenceExcerpts runs one batch of the reconciliation at the server's pace
+// (reconcileReferenceExcerpts).
 func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int, full bool, err error) {
+	return s.reconcileReferenceExcerpts(ctx, referenceExcerptSchedule.retryBase)
+}
+
+// reconcileReferenceExcerpts reads each document of one batch of drift as the caller sees it
+// (TextWithBlocks), with no transaction or connection held, and stores its mentions' excerpts at
+// the version the drift named. A document whose stored history does not load or whose tree is
+// outside the schema has no block to show, so its mentions are stored with none and keep the
+// document's name until its next version. A document it cannot read or record for any other
+// reason is logged and deferred (refs.DeferExcerpts, retryBase after its first failure), its
+// mentions left owed, so one document never holds back the rest of its batch nor the batches
+// after it; a recorded document's backoff row is deleted. documents counts the ones recorded, and
+// full reports a full batch at least one of whose documents left the drift a batch reads - recorded
+// or deferred - so the next batch reads documents this one did not.
+func (s *Service) reconcileReferenceExcerpts(ctx context.Context, retryBase time.Duration) (documents int, full bool, err error) {
 	drifted, err := refs.DriftedExcerpts(ctx, s.store.Pool, referenceExcerptBatch)
 	if err != nil {
 		return 0, false, err
+	}
+	moved := 0
+	deferDocument := func(document refs.ExcerptDrift) {
+		if err := refs.DeferExcerpts(ctx, s.store.Pool, document.FromID, document.Version, retryBase, referenceExcerptRetryCeiling); err != nil {
+			if ctx.Err() == nil {
+				slog.Error("dispatch: reference excerpt reconciliation could not defer a document; the next batch reads it again",
+					"artifact", document.FromID, "error", err)
+			}
+			return
+		}
+		moved++
 	}
 	for _, document := range drifted {
 		var excerpts map[refs.Target]model.GraphExcerpt
@@ -194,8 +328,9 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 			slog.Warn("dispatch: reference excerpt reconciliation cannot read the document; its mentions keep the document's name",
 				"artifact", document.FromID, "error", err)
 		case err != nil:
-			slog.Error("dispatch: reference excerpt reconciliation skipped a document it could not read",
+			slog.Error("dispatch: reference excerpt reconciliation deferred a document it could not read",
 				"artifact", document.FromID, "error", err)
+			deferDocument(document)
 			continue
 		default:
 			excerpts = refs.MentionExcerpts(markdown, blocks, text.ExtractAt(markdown, s.serverURL))
@@ -206,11 +341,22 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 			if ctx.Err() != nil {
 				return documents, false, ctx.Err()
 			}
-			slog.Error("dispatch: reference excerpt reconciliation skipped a document it could not record",
+			slog.Error("dispatch: reference excerpt reconciliation deferred a document it could not record",
 				"artifact", document.FromID, "error", err)
+			deferDocument(document)
 			continue
 		}
 		documents++
+		moved++
+		if document.BackedOff {
+			// A row left behind only costs the next batch its exclusion check: the version
+			// recorded here owes nothing, and NextExcerptRetry drops rows of documents that owe
+			// nothing.
+			if err := refs.ClearExcerptBackoff(ctx, s.store.Pool, document.FromID); err != nil && ctx.Err() == nil {
+				slog.Error("dispatch: reference excerpt reconciliation could not clear a document's backoff",
+					"artifact", document.FromID, "error", err)
+			}
+		}
 	}
-	return documents, len(drifted) == referenceExcerptBatch, nil
+	return documents, len(drifted) == referenceExcerptBatch && moved > 0, nil
 }

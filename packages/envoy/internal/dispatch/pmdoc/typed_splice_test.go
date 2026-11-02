@@ -25,7 +25,7 @@ func TestSpliceKeepsAnAskItsReplacementDoesNotFit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := Splice(doc, r, with)
+	got, err := splice(doc, r, with)
 
 	if err != nil {
 		t.Fatalf("Splice() error = %v", err)
@@ -74,7 +74,7 @@ func TestSpliceRewritesATypedBlockAReplacementOfItsTypeCovers(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			got, err := Splice(doc, r, with)
+			got, err := splice(doc, r, with)
 
 			if err != nil {
 				t.Fatalf("Splice() error = %v", err)
@@ -121,7 +121,7 @@ func TestSpliceKeepsATypedBlockAReplacementOfItsTypeUnderAnotherIDLandsIn(t *tes
 				t.Fatal(err)
 			}
 
-			got, err := Splice(doc, r, with)
+			got, err := splice(doc, r, with)
 
 			if err != nil {
 				t.Fatalf("Splice() error = %v", err)

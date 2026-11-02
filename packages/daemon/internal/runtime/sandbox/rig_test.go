@@ -41,6 +41,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 const (
@@ -168,6 +169,7 @@ type fakeStore struct {
 	running   map[string]runningClaim
 	homes     map[string]string
 	unretired map[claim.Token]bool
+	claims    []supervise.Claim
 }
 
 // runningClaim is a claim of an issue that runs a process (token:state), in tree.
@@ -184,6 +186,11 @@ func (s *fakeStore) ClaimUnretired(_ context.Context, token claim.Token) (bool, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.unretired[token], nil
+}
+func (s *fakeStore) Claims(context.Context) ([]supervise.Claim, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.claims), nil
 }
 
 // admit records token's claim as stored and unretired, as the supervisor writes it before its

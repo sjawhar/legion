@@ -30,7 +30,7 @@ import (
 
 // lockEffect is a lock a function's own statements, or the functions it calls, take in the
 // transaction they run in: a project's copy lock (docs.lockProjectCopies), a
-// doc_settlements_pending row, or the events' commit-order lock an event append takes.
+// doc_settlements_pending row, or the event owner's row an event append locks.
 type lockEffect uint8
 
 const (
@@ -58,8 +58,9 @@ var ownTransactionFunctions = []string{
 // TestCopyLockComesBeforeEveryPendingRowAndEvent enforces the order the copy lock's deadlock
 // freedom rests on (docs.lockProjectCopies): no transaction takes a project's copy lock after it
 // has written a doc_settlements_pending row or appended an event. A holder of the copy lock goes
-// on to take other documents' pending rows and the events' commit-order lock, so a transaction
-// waiting on the copy lock while holding either could close a cycle with it.
+// on to take other documents' pending rows and to append events, each of which locks its event
+// owner's row (events.Broker.Append), so a transaction waiting on the copy lock while holding a
+// pending row, or an owner row an append of its own took, could close a cycle with it.
 //
 // It type-checks the Dispatch server's packages of this module from source, the packages they
 // import from their export data (go list -export), and finds each lock from the SQL that takes
@@ -368,33 +369,45 @@ func buildCopyLockGraph() (*lockGraph, error) {
 	return graph, nil
 }
 
-// addFile registers every function, method and function literal source declares.
+// addFile registers every function, method and function literal source declares, including the
+// literals in package-level declarations (var decode = func(...) {...}), which a call through the
+// variable runs like any other stored function.
 func (g *lockGraph) addFile(source moduleSource) {
 	pkg := source.file.Name.Name
 	for _, declared := range source.file.Decls {
-		decl, ok := declared.(*ast.FuncDecl)
-		if !ok || decl.Body == nil {
-			continue
-		}
-		object, ok := g.info.Defs[decl.Name].(*types.Func)
-		if !ok {
-			continue
-		}
-		fn := &lockFunction{name: functionName(object), pkg: pkg, body: decl.Body, source: source}
-		g.add(fn)
-		g.named[fn.name] = fn
-		g.declared[object] = fn
-		ast.Inspect(decl.Body, func(node ast.Node) bool {
-			if lit, ok := node.(*ast.FuncLit); ok {
-				g.add(&lockFunction{
-					name: fmt.Sprintf("the function literal at %s in %s", g.line(source, lit), fn.name),
-					pkg:  pkg, body: lit.Body, source: source,
-				})
-				g.literals[lit] = g.functions[len(g.functions)-1]
+		switch decl := declared.(type) {
+		case *ast.GenDecl:
+			g.addLiterals(source, pkg, decl, "package "+pkg)
+		case *ast.FuncDecl:
+			if decl.Body == nil {
+				continue
 			}
-			return true
-		})
+			object, ok := g.info.Defs[decl.Name].(*types.Func)
+			if !ok {
+				continue
+			}
+			fn := &lockFunction{name: functionName(object), pkg: pkg, body: decl.Body, source: source}
+			g.add(fn)
+			g.named[fn.name] = fn
+			g.declared[object] = fn
+			g.addLiterals(source, pkg, decl.Body, fn.name)
+		}
 	}
+}
+
+// addLiterals registers every function literal inside node, naming each after where it is.
+func (g *lockGraph) addLiterals(source moduleSource, pkg string, node ast.Node, where string) {
+	ast.Inspect(node, func(node ast.Node) bool {
+		if lit, ok := node.(*ast.FuncLit); ok {
+			fn := &lockFunction{
+				name: fmt.Sprintf("the function literal at %s in %s", g.line(source, lit), where),
+				pkg:  pkg, body: lit.Body, source: source,
+			}
+			g.add(fn)
+			g.literals[lit] = fn
+		}
+		return true
+	})
 }
 
 func (g *lockGraph) add(fn *lockFunction) {
@@ -480,7 +493,7 @@ func (g *lockGraph) addStored(source moduleSource) {
 func (g *lockGraph) functionValue(value ast.Expr) []*lockFunction {
 	switch v := ast.Unparen(value).(type) {
 	case *ast.FuncLit:
-		return []*lockFunction{g.literals[v]}
+		return g.literal(v)
 	case *ast.Ident:
 		if fn, ok := g.info.Uses[v].(*types.Func); ok {
 			return g.funcTargets(fn)
@@ -493,6 +506,16 @@ func (g *lockGraph) functionValue(value ast.Expr) []*lockFunction {
 		} else if fn, ok := g.info.Uses[v.Sel].(*types.Func); ok {
 			return g.funcTargets(fn)
 		}
+	}
+	return nil
+}
+
+// literal is the body lit runs. addFile registers every literal in the module's files, so none
+// should be missing; one that is (a declaration shape addFile does not walk) yields nothing rather
+// than a nil function the reach fixpoint would dereference.
+func (g *lockGraph) literal(lit *ast.FuncLit) []*lockFunction {
+	if fn, ok := g.literals[lit]; ok {
+		return []*lockFunction{fn}
 	}
 	return nil
 }
@@ -591,7 +614,7 @@ func (g *lockGraph) callees(call *ast.CallExpr) []*lockFunction {
 	}
 	switch f := fun.(type) {
 	case *ast.FuncLit:
-		callees = append(callees, g.literals[f])
+		callees = append(callees, g.literal(f)...)
 	case *ast.Ident:
 		switch object := g.info.Uses[f].(type) {
 		case *types.Func:

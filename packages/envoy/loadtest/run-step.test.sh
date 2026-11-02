@@ -14,7 +14,9 @@
 #
 # Asserts that: (a) a second run-step.sh is refused while a run-step.sh holds the root; (b) a
 # run-series.sh is refused while a run-step.sh holds it; (c) a run-step.sh is refused while a
-# run-series.sh holds it; (d) once the first run has exited, a new run on the root is not refused.
+# run-series.sh holds it; (d) once the first run has exited, a new run on the root is not refused;
+# (e) a --replay step refuses --events, a --dispatch-commit that names no commit, and a missing
+# LOADTEST_REPLAY_ISSUE, before its build.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +59,7 @@ chmod +x "${fake_bin_dir}/go" "${fake_bin_dir}/uv"
 readonly src="${temporary_dir}/src"
 mkdir -p "${src}/packages/envoy/cmd/dispatch" "${src}/packages/envoy/internal/dispatch/store/migrations"
 : >"${src}/packages/envoy/internal/dispatch/store/migrations/0001_init.up.sql"
+git init -q "$src"
 
 export PATH="${fake_bin_dir}:${PATH}"
 export LOADTEST_SRC="$src"
@@ -141,3 +144,25 @@ if ! grep -q '^third go ' "$calls_file"; then
   exit 1
 fi
 printf 'PASS: a run on LOADTEST_ROOT after the first run exited is not refused\n'
+
+# expect_refused_before_build WHAT PATTERN CMD...: CMD, on a free root, exits non-zero with PATTERN
+# in its output and never reaches its build.
+expect_refused_before_build() {
+  local what=$1 pattern=$2
+  shift 2
+  : >"$calls_file"
+  local rc=0
+  LOADTEST_ROOT="${temporary_dir}/root-c" LOADTEST_TEST_RUN=fourth "$@" >"${temporary_dir}/fourth-output" 2>&1 || rc=$?
+  if ((rc == 0)) || grep -q '^fourth go ' "$calls_file" || ! grep -qF -- "$pattern" "${temporary_dir}/fourth-output"; then
+    cat "${temporary_dir}/fourth-output" >&2
+    printf 'FAIL: %s was not refused before its build with "%s" (exit %d)\n' "$what" "$pattern" "$rc" >&2
+    exit 1
+  fi
+  printf 'PASS: %s is refused before its build\n' "$what"
+}
+expect_refused_before_build "a --replay step with --events" "--events is not a replay flag" \
+  bash "$run_step" replay-step --replay --events 1
+expect_refused_before_build "a --replay step with --dispatch-commit deadbeef" "--dispatch-commit 'deadbeef' names no commit" \
+  bash "$run_step" replay-step --replay --dispatch-commit deadbeef
+expect_refused_before_build "a --replay step without LOADTEST_REPLAY_ISSUE" "LOADTEST_REPLAY_ISSUE is required" \
+  env -u LOADTEST_REPLAY_ISSUE bash "$run_step" replay-step --replay

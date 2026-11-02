@@ -11,19 +11,20 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// A settlement waits for its room's appends to land before it reads the room, and a shutdown's
-// settlement waits a bounded time for its document's lock. Neither wait is the settlement's own
-// work, so what each costs is the question here: a wait that polls costs the process a wake-up
-// every millisecond for as long as the room's appends lag, and a lock wait that polls costs the
-// database a statement every millisecond.
+// Shutdown's drain waits for each room's appends to land before it settles the room, and a
+// shutdown's settlement waits a bounded time for its document's lock. Neither wait is the
+// settlement's own work, so what each costs is the question here: a wait that polls costs the
+// process a wake-up every millisecond for as long as the room's appends lag, and a lock wait that
+// polls costs the database a statement every millisecond. (A timer's settlement waits for no
+// append: it stores the room's unstored updates itself, Ledger.flushThrough.)
 
-// A room's append held for half a second while its settlement falls due: the settlement waits for
-// it and versions the document once it lands. Its waits wake when the append lands, not every
-// millisecond of the half second, and the settlement starts promptly once the append commits. The
-// promptness is read between the append's commit (afterAppendCommit) and the settlement's start
-// (beforeSettleStart), in process: a bound on the version's write would also time the settlement's
-// own database work, which says nothing about how it is woken.
-func TestALaggingRoomsSettlementWakesOnceWhenItsAppendsLand(t *testing.T) {
+// A room's append held for half a second while Shutdown drains the room: the drain waits for it
+// (waitForDurableAppends) and settles the document once it lands. Its wait wakes when the append
+// lands, not every millisecond of the half second, and the drain's settlement starts promptly once
+// the append commits. The promptness is read between the append's commit (afterAppendCommit) and
+// the settlement's start (beforeSettleStart), in process: a bound on the version's write would
+// also time the settlement's own database work, which says nothing about how it is woken.
+func TestShutdownsDrainWakesOnceWhenARoomsHeldAppendLands(t *testing.T) {
 	const held = 500 * time.Millisecond
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
@@ -55,7 +56,8 @@ func TestALaggingRoomsSettlementWakesOnceWhenItsAppendsLand(t *testing.T) {
 	versioned, _, _ := latestDocumentVersion(t, database, artifactID)
 	observer := storetest.SecondProcess(t, database)
 
-	service.settle = 20 * time.Millisecond
+	// No timer's settlement runs before the drain's.
+	service.settle = 30 * time.Minute
 	counting.Store(true)
 	appends.armed.Store(true)
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
@@ -64,16 +66,24 @@ func TestALaggingRoomsSettlementWakesOnceWhenItsAppendsLand(t *testing.T) {
 	case <-time.After(roomWait(t)):
 		t.Fatal("the room's append never reached the store")
 	}
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelShutdown()
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- service.Shutdown(shutdownCtx) }()
 	time.Sleep(held)
 	appends.let()
-	waitFor(t, roomWait(t), "the settlement to version the edit", func() bool {
-		number, _, _ := latestDocumentVersion(t, observer, artifactID)
-		return number > versioned
-	})
+	select {
+	case err := <-shutdown:
+		if err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+	case <-time.After(roomWait(t)):
+		t.Fatal("Shutdown never returned once the room's append was let go")
+	}
 	counting.Store(false)
 
 	if got := wakes.Load(); got > 3 {
-		t.Errorf("the settlement woke %d times while its room's append was held for %s, want at most 3", got, held)
+		t.Errorf("the drain woke %d times while its room's append was held for %s, want at most 3", got, held)
 	}
 	switch {
 	case committed.Load() == 0:
@@ -82,11 +92,12 @@ func TestALaggingRoomsSettlementWakesOnceWhenItsAppendsLand(t *testing.T) {
 		t.Errorf("no settlement started after the held append committed")
 	default:
 		if after := time.Duration(started.Load() - committed.Load()); after > 50*time.Millisecond {
-			t.Errorf("the settlement started %s after its room's append committed, want within 50ms", after.Round(time.Millisecond))
+			t.Errorf("the drain's settlement started %s after its room's append committed, want within 50ms", after.Round(time.Millisecond))
 		}
 	}
-	if _, markdown, _ := latestDocumentVersion(t, observer, artifactID); markdown != "after\n" {
-		t.Errorf("the settlement versioned %q, want the held edit", markdown)
+	number, markdown, _ := latestDocumentVersion(t, observer, artifactID)
+	if number <= versioned || markdown != "after\n" {
+		t.Errorf("the drain versioned %q as version %d, want the held edit after version %d", markdown, number, versioned)
 	}
 }
 
@@ -96,7 +107,7 @@ func TestALaggingRoomsSettlementWakesOnceWhenItsAppendsLand(t *testing.T) {
 func TestShutdownsSettlementLockWaitIsOneStatement(t *testing.T) {
 	database := storetest.Open(t)
 	tracer := &statementTracer{}
-	traced := storetest.Traced(t, database, tracer)
+	traced := storetest.TracedStore(t, database, tracer)
 	observer := storetest.SecondProcess(t, database)
 	artifactID := createDocument(t, database, "before")
 	service := newShutdownTestService(t, traced, nil)

@@ -4,6 +4,8 @@ import {
   assistantText,
   LAST_MESSAGE_LIMIT,
   phaseStallEntryFrom,
+  REMINDER,
+  stepPhaseStall,
 } from "./phase-stall";
 
 const assistant = (...content: unknown[]) => ({ role: "assistant", content });
@@ -71,5 +73,41 @@ test("a record's last message reads back no longer than the notice quotes", () =
     state: "open",
     count: 1,
     reported: false,
+  });
+});
+
+// A worker whose turn ends while its own background job runs is not stalled: that job's
+// result starts the next turn, and a reminder in between would be telling a working worker that
+// it has done nothing. It buys the same quiet wait a WAITING line does, which is what bounds it:
+// a job that never finishes is a wait the host's waiting delay ends.
+test("a settle with the worker's own background work running earns no reminder", () => {
+  expect(
+    stepPhaseStall(
+      { state: "open", count: 2 },
+      { kind: "settle", lastAssistantText: "Started the build.", backgroundWork: true }
+    )
+  ).toEqual({ state: { state: "waiting", count: 2 } });
+});
+
+test("a settle with no background work left running is reminded as it always was", () => {
+  for (const backgroundWork of [false, undefined]) {
+    expect(
+      stepPhaseStall(
+        { state: "open", count: 2 },
+        { kind: "settle", lastAssistantText: "Started the build.", backgroundWork }
+      )
+    ).toEqual({ state: { state: "open", count: 2 }, reminder: REMINDER });
+  }
+});
+
+test("background work reopens nothing: a closed phase settles closed, and the wait ends on a reminder", () => {
+  expect(
+    stepPhaseStall(
+      { state: "closed", count: 0 },
+      { kind: "settle", lastAssistantText: "Done.", backgroundWork: true }
+    )
+  ).toEqual({ state: { state: "closed", count: 0 } });
+  expect(stepPhaseStall({ state: "waiting", count: 2 }, { kind: "reminded" })).toEqual({
+    state: { state: "open", count: 3 },
   });
 });

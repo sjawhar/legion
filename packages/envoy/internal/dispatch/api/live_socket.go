@@ -434,28 +434,34 @@ func decodeSocketClientFrame(data []byte, frame any) error {
 	return decoder.Decode(frame)
 }
 
-// disconnectLiveSockets closes every open GET /ws/live socket with 1012, as a restart does, so a
-// test can drive the page's reconnect, its resume and its refresh of what the socket does not
-// keep live. Test-only: mounted only under Deps.TestHooksEnabled.
+// disconnectLiveSockets closes every open GET /ws/live socket on every process with 1012, as a
+// restart does, so a test can drive the page's reconnect, its resume and its refresh of what the
+// socket does not keep live, and answers once every process has (runTestHookEverywhere).
+// Test-only: mounted only under Deps.TestHooksEnabled.
 func (s *server) disconnectLiveSockets(w http.ResponseWriter, r *http.Request) {
-	s.shutLiveSockets(w, r, gws.CloseServiceRestart, "")
+	s.shutLiveSockets(w, r, hookDisconnectSockets)
 }
 
-// rotateLiveSockets closes every open GET /ws/live socket with 4001 (max age), as its age does, so
-// a test can drive the page's quiet reopen without waiting half an hour. Test-only: mounted only
-// under Deps.TestHooksEnabled.
+// rotateLiveSockets closes every open GET /ws/live socket on every process with 4001 (max age),
+// as its age does, so a test can drive the page's quiet reopen without waiting half an hour, and
+// answers once every process has. Test-only: mounted only under Deps.TestHooksEnabled.
 func (s *server) rotateLiveSockets(w http.ResponseWriter, r *http.Request) {
-	s.shutLiveSockets(w, r, contracts.LiveSocketMaxAgeClose, liveSocketMaxAgeReason)
+	s.shutLiveSockets(w, r, hookRotateSockets)
 }
 
-func (s *server) shutLiveSockets(w http.ResponseWriter, r *http.Request, code int, reason string) {
+func (s *server) shutLiveSockets(w http.ResponseWriter, r *http.Request, hook string) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
+	s.runTestHookEverywhere(w, r, testHookCall{Hook: hook})
+}
+
+// shutAllLiveSockets is the local half of those hooks: every socket this process holds, closed
+// with code and reason.
+func (s *server) shutAllLiveSockets(code int, reason string) {
 	for _, socket := range s.liveSockets.all() {
 		socket.shutWith(code, reason)
 	}
-	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // liveSocketSet is every open GET /ws/live socket: the test hooks close them, and a test waits for

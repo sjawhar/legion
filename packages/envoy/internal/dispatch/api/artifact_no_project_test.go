@@ -100,8 +100,8 @@ func TestArtifactReadsServeARowWithNoProject(t *testing.T) {
 	wantNoProject("loadArtifact of the conversation's file", read, err, photoID)
 	read, err = s.loadArtifactByRefKey(ctx, database.Pool, photoRefKey)
 	wantNoProject("loadArtifactByRefKey of the conversation's file", read, err, photoID)
-	read, err = s.findArtifactByName(ctx, database.Pool, artifactTarget{Session: conversationSession}, "photo.png")
-	wantNoProject("findArtifactByName in the conversation", read, err, photoID)
+	read, err = s.findArtifactByNameOrSlug(ctx, database.Pool, artifactTarget{Session: conversationSession}, "photo.png")
+	wantNoProject("findArtifactByNameOrSlug in the conversation", read, err, photoID)
 
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestArtifactReadsServeARowWithNoProject(t *testing.T) {
 	} else if anchor.Project != "" {
 		t.Errorf("loadAskAnchorArtifact project = %q, want none", anchor.Project)
 	}
-	if payload, err := s.commentEventPayload(ctx, tx, model.Comment{ArtifactID: &photoID}, "", commentEventThread{}, model.ReferenceChanges{}); err != nil {
+	if payload, err := s.commentEventPayload(ctx, tx, &model.Comment{ArtifactID: &photoID}, "", commentEventThread{}, model.ReferenceChanges{}); err != nil {
 		t.Errorf("commentEventPayload on the file: %v", err)
 	} else if payload.ProjectKey != "" || payload.ArtifactSlug != "photo-png" {
 		t.Errorf("commentEventPayload on the file = project %q slug %q, want no project and the slug", payload.ProjectKey, payload.ArtifactSlug)

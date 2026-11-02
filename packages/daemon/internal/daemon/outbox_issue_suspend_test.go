@@ -520,8 +520,8 @@ func (s issueLaunchSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.S
 // PVC request from the restricted daemon; the root's Sandbox stays Running. A child parked in
 // backlog keeps its claims suspended with their sessions, and its Sandbox goes the same way,
 // since the pod it ran in, and the disk with it, go either way. The done child set back to todo
-// launches fresh: a new Sandbox is created, and since the issue records no session, nothing is
-// expected of the disk its new pod brings.
+// launches fresh because its resume path was cleared, while its session id stays as reaping
+// evidence until the volume is gone.
 func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -665,8 +665,8 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	if _, touched := api.deleted(rootSandbox); touched || api.pvcRequests != 0 {
 		t.Fatalf("the child's close deleted the root's Sandbox (%t) or sent %d PVC requests, want neither", touched, api.pvcRequests)
 	}
-	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != "" || got.SessionFile != "" || got.Locator != nil {
-		t.Fatalf("done child's planner after the close = %+v, want retired with no session and no locator", got)
+	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != planner.Session || got.SessionFile != "" || got.Locator != nil {
+		t.Fatalf("done child's planner after the close = %+v, want retired with session evidence, no resume path, and no locator", got)
 	}
 	if got := storedClaim(architect.Token); got.State != supervise.StateWorking || got.Session != "saved-architect" {
 		t.Fatalf("root architect after the child's close = %+v, want it working with its session", got)

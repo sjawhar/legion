@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // MarkKind identifies the Proof or Dispatch mark type written into a document tree.
@@ -88,12 +89,13 @@ type Anchored struct {
 
 // MarkQuote marks one matching quote and returns what the new mark anchors to.
 func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
-	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
-		tree, err := startTree(current, doc)
+		valid, err := startTree(current, doc)
 		if err != nil {
 			return err
 		}
+		tree := valid.Node()
 
 		var markErr error
 		transact(func(txn *crdt.Transaction) {
@@ -144,7 +146,10 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 
 // VerifyMark returns what a browser-written mark anchors to, now or after its next document
 // update. It subscribes to the room's updates inside the Apply that loads and holds the room: a
-// room looked up again once that Apply returned can have been evicted in between.
+// room looked up again once that Apply returned can have been evicted in between. The wait ends
+// with one last read rather than on the subscription alone, so a mark written into a room
+// instance that replaced the subscribed one - which another process's eviction can leave behind -
+// is still found.
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
 	updates := make(chan struct{}, 1)
 	var unsubscribe func()
@@ -168,6 +173,7 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 
 	timer := time.NewTimer(s.markWait)
 	defer timer.Stop()
+	final := false
 	for {
 		tree, err := s.docTree(ctx, artifactID)
 		if err != nil {
@@ -180,11 +186,14 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 		if !errors.Is(err, ErrAnchorMissing) {
 			return Anchored{}, err
 		}
+		if final {
+			return Anchored{}, ErrAnchorMissing
+		}
 
 		select {
 		case <-updates:
 		case <-timer.C:
-			return Anchored{}, ErrAnchorMissing
+			final = true
 		case <-ctx.Done():
 			return Anchored{}, ctx.Err()
 		}
@@ -229,14 +238,15 @@ func (s *Service) RejectSuggestion(ctx context.Context, artifactID, id string, a
 }
 
 func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor, accept bool) error {
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		// Read before the Yjs transaction opens: the state vector takes the document lock.
 		since := authoredClock(ctx, artifactID, doc)
-		tree, err := startTree(current, doc)
+		valid, err := startTree(current, doc)
 		if err != nil {
 			return err
 		}
+		tree := valid.Node()
 		range_, _, ok := pmdoc.FindMark(tree, string(MarkSuggestion), id)
 		if !ok {
 			return ErrAnchorOrphaned
@@ -315,34 +325,42 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 				return mark.Type == string(MarkSuggestion) && mark.Attrs["id"] == id
 			}))
 		}
-		next, err := pmdoc.Splice(tree, range_, replacement)
+		next, err := valid.Splice(range_, replacement)
 		if err != nil {
 			return acceptSpliceRefusal(err)
+		}
+		// Where the suggestion lies in the document the accept started from, which every refusal
+		// below reads against the tree it holds then (matchedBlocks).
+		found, err := matchedBlocks(valid, range_)
+		if err != nil {
+			return err
 		}
 		// The browser editor's table plugin pads a table the accept cut to its width, as it does
 		// after a reject, before anything reads the accept back, where the browser's accept writes
 		// the replacement where Splice does (padsLikeTheBrowser).
 		if padsLikeTheBrowser(tree, range_, at, inline) {
-			if next, err = padCutTables(tree, next, range_, budget); err != nil {
+			if next, err = padCutTables(next, found, budget); err != nil {
 				return acceptSpliceRefusal(err)
 			}
 		}
+		// The checks below read the blocks this accept changed, several of them the same blocks:
+		// each block is rendered and parsed once for all of them (blockReadBacks). A block the
+		// settlement rewrites (settleAccepted) is another node, and is read back again.
+		backs := blockReadBacks{}
 		if code {
-			if err := refuseAcceptedCodeThatReshapes(tree, next, range_, at, with); err != nil {
+			if err := refuseAcceptedCodeThatReshapes(valid, next, found, at, with, backs); err != nil {
 				return err
 			}
 		}
-		if next, err = settleAccepted(tree, next, range_, with); err != nil {
-			return err
-		}
-		if err := refuseCodePipeInTableCell(tree, next, range_, "replace_with", "replace_with", with, "reject the suggestion, or reply asking for text the cell can hold"); err != nil {
+		next = settleAccepted(valid, next, found, with)
+		if err := refuseCodePipeInTableCell(valid, next, found, "replace_with", "replace_with", with, "reject the suggestion, or reply asking for text the cell can hold"); err != nil {
 			return err
 		}
 		if !insideAsk(at) {
-			if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
+			if err := refuseUnreadableAccept(valid, next, found, range_, at, with, replacement, backs); err != nil {
 				return err
 			}
-			if err := refuseReshapedAccept(tree, next, range_, at, with, replacement); err != nil {
+			if err := refuseReshapedAccept(valid, next, found, range_, at, with, replacement, backs); err != nil {
 				return err
 			}
 		}
@@ -469,7 +487,7 @@ func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifac
 				rows.Close()
 				return nil, fmt.Errorf("scan %s anchor: %w", target.table, err)
 			}
-			if err := json.Unmarshal(encoded, &mark.anchor); err != nil {
+			if err := model.DecodeAnchor(encoded, &mark.anchor); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("decode %s anchor: %w", target.table, err)
 			}
@@ -515,9 +533,9 @@ type refreshedAnchors struct {
 //
 // Every changed anchor is found before any is written, and then all of them are written
 // together: one update of each table, one reload of the refreshed asks and one of the refreshed
-// comments, and one AppendAll of their events. Once the first event is appended the transaction
-// holds the commit-order lock every event writer on the database waits for (events.Broker), so
-// the round trips spent under it stay the same however many anchors changed.
+// comments, and one AppendAll of their events. The transaction holds its owner's row lock, which
+// every event writer of that owner waits for (events.Broker), so the round trips spent under it
+// stay the same however many anchors changed.
 func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID string, tree *pmdoc.Node, actor model.Actor) error {
 	anchors, err := s.openAnchoredMarks(ctx, tx, artifactID)
 	if err != nil {
@@ -632,7 +650,7 @@ func loadAnchorRefreshedAsks(ctx context.Context, tx pgx.Tx, ids []string) (map[
 			aa.project_key, aa.slug, aa.name, aa.is_primary
 		from asks a
 		left join artifacts ba on ba.id = a.block_artifact_id
-		left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+		left join artifacts aa on aa.id = `+store.CastableUUID(`a.anchor->>'artifact_id'`)+`
 		where a.id = any($1::uuid[])
 	`, ids)
 	if err != nil {
@@ -728,7 +746,7 @@ func loadAnchorRefreshedComments(ctx context.Context, tx pgx.Tx, ids []string) (
 		select c.id::text, c.issue_key, c.artifact_id::text, c.author, c.body, c.anchor, c.reply_to::text, c.ask_id::text, c.turn, c.resolved, c.resolved_by, c.resolved_at, c.edited_at, c.suggestion, c.created_at,
 			aa.name, coalesce(aa.project_key, ''), aa.slug
 		from comments c
-		left join artifacts aa on aa.id = (c.anchor->>'artifact_id')::uuid
+		left join artifacts aa on aa.id = `+store.CastableUUID(`c.anchor->>'artifact_id'`)+`
 		where c.id = any($1::uuid[])
 	`, ids)
 	if err != nil {
@@ -754,7 +772,7 @@ func loadAnchorRefreshedComments(ctx context.Context, tx pgx.Tx, ids []string) (
 		}
 		if len(anchor) > 0 {
 			value := model.Anchor{}
-			if err := json.Unmarshal(anchor, &value); err != nil {
+			if err := model.DecodeAnchor(anchor, &value); err != nil {
 				return nil, nil, fmt.Errorf("decode refreshed comment %q anchor: %w", id, err)
 			}
 			comment.Anchor = &value
@@ -861,27 +879,45 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, ids []
 	return nil
 }
 
-// recordedMarkRefs is every mark an ask or comment row anchored on artifactID records. Each
-// predicate compares the expression of the table's index, asks_anchor_artifact or
-// comments_anchor_artifact (migration 0032), so the read is an index scan, and keeps the text
-// comparison so it returns exactly the rows that comparison alone would. Only the ask-block insert
-// sets block_artifact_id, and it writes no anchor, so an anchored ask's coalesce is its anchor's
-// artifact_id. The uuid casts cannot fail: both indexes evaluate the same casts on every row, so
-// a row whose artifact_id does not cast could not have been written.
+// recordedMarkTarget is one table a document's recorded marks live in: its name, the SQL
+// expression that reads an anchor's artifact_id as a uuid there, and the anchor index that
+// carries exactly that expression. The expression differs per table because the index does: an
+// ask's is store.CanonicalUUID's guarded cast, written out in migration 0148, a comment's the
+// plain cast of comments_anchor_artifact (0032).
+type recordedMarkTarget struct {
+	table      string
+	artifactID string
+	index      string
+}
+
+// recordedMarkTargets are the tables recordedMarkRefs reads, in the order it reads them.
+var recordedMarkTargets = []recordedMarkTarget{
+	{table: "asks", artifactID: store.CanonicalUUID(`anchor->>'artifact_id'`), index: "asks_anchor_artifact_id"},
+	{table: "comments", artifactID: `(anchor->>'artifact_id')::uuid`, index: "comments_anchor_artifact"},
+}
+
+// recordedMarksQuery is the statement that lists the anchor and mark type of every row of
+// target's table whose anchor names the artifact $1. It compares target's uuid expression, the
+// one that table's anchor index carries, so the read is an index scan. It keeps the text
+// comparison beside the uuid one, so it returns exactly the rows that comparison alone would: a
+// row an index guard leaves out, whose artifact_id is not a lower-case document id, is a row the
+// text comparison never matched either, since the artifact ids the server passes are lower-case.
+func recordedMarksQuery(target recordedMarkTarget) string {
+	return fmt.Sprintf(`
+		select anchor, %s
+		from %s
+		where anchor is not null and anchor->>'artifact_id' = $1 and %s = $1::uuid
+	`, commentMarkType(target.table), target.table, target.artifactID)
+}
+
+// recordedMarkRefs is every mark an ask or comment row anchored on artifactID records, read by the
+// anchor's artifact alone whatever an ask's block_artifact_id holds: an ask that also names an ask
+// block on another document keeps its mark on its anchor's document, as refreshAnchors and the
+// other anchor readers read it.
 func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
 	recorded := make(map[pmdoc.MarkRef]struct{})
-	for _, target := range []struct {
-		table   string
-		indexed string
-	}{
-		{table: "asks", indexed: `coalesce(block_artifact_id, (anchor->>'artifact_id')::uuid)`},
-		{table: "comments", indexed: `(anchor->>'artifact_id')::uuid`},
-	} {
-		rows, err := s.queryFrom(ctx).Query(ctx, fmt.Sprintf(`
-			select anchor, %s
-			from %s
-			where anchor is not null and anchor->>'artifact_id' = $1 and %s = $1::uuid
-		`, commentMarkType(target.table), target.table, target.indexed), artifactID)
+	for _, target := range recordedMarkTargets {
+		rows, err := s.queryFrom(ctx).Query(ctx, recordedMarksQuery(target), artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
 		}
@@ -893,7 +929,7 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 				return nil, fmt.Errorf("scan recorded %s mark: %w", target.table, err)
 			}
 			var anchor model.Anchor
-			if err := json.Unmarshal(encoded, &anchor); err != nil {
+			if err := model.DecodeAnchor(encoded, &anchor); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("decode recorded %s mark: %w", target.table, err)
 			}
@@ -910,6 +946,17 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 	return recorded, nil
 }
 
+// sweepUnrecordedMarks removes every ask, comment or suggestion mark of this tree that no row
+// records and that has been unrecorded for unrecordedMarkTTL, counted from the first settlement
+// that saw it: the provisional mark a composer the reader abandoned left behind.
+//
+// A mark whose author still has a browser on the room is the composer still open in front of
+// somebody, whose Send would be refused as a missing anchor were the mark taken from under it, so
+// it is kept and counted from this sweep instead. Once that browser has gone the mark ages from
+// the author's last presence (state.departed), not from the sweep that last saw them: the sweeps
+// of a quiet document are a TTL apart, so a drop a second before one - an idle reconnect - would
+// otherwise lose the mark a second after it rather than a TTL after it. A tab that closes or goes
+// offline therefore loses its stray mark one TTL later, as every other unrecorded mark does.
 func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	recordedRefs, err := s.recordedMarkRefs(context.Background(), room)
 	if err != nil {
@@ -917,38 +964,57 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 		return
 	}
 	now := s.now()
+	marks := pmdoc.ListMarks(tree)
 	seen := make(map[pmdoc.MarkRef]struct{})
 	var expired []pmdoc.MarkRef
 	var next time.Duration
-	for _, mark := range pmdoc.ListMarks(tree) {
+	state := s.lockState(room)
+	// With nothing unrecorded, every mark here is seen for the first time and its author cannot
+	// change the answer, so the settlement of a room with no stray mark - the steady state - builds
+	// no set and concatenates no reference.
+	var authors map[string]struct{}
+	if len(state.unrecorded) > 0 {
+		authors = connectedMarkAuthors(state.connected)
+	}
+	for _, mark := range marks {
 		if mark.Type != string(MarkAsk) && mark.Type != string(MarkComment) && mark.Type != string(MarkSuggestion) {
 			continue
 		}
-		seen[mark] = struct{}{}
-		if _, found := recordedRefs[mark]; found {
-			state := s.lockState(room)
-			delete(state.unrecorded, mark)
-			s.unlockState(room, state)
+		seen[mark.MarkRef] = struct{}{}
+		if _, found := recordedRefs[mark.MarkRef]; found {
+			delete(state.unrecorded, mark.MarkRef)
 			continue
 		}
-		state := s.lockState(room)
-		firstSeen, found := state.unrecorded[mark]
-		if !found {
+		firstSeen, seenBefore := state.unrecorded[mark.MarkRef]
+		_, writing := authors[mark.By]
+		if writing || !seenBefore {
 			firstSeen = now
-			state.unrecorded[mark] = firstSeen
+			state.unrecorded[mark.MarkRef] = firstSeen
 		}
-		age := now.Sub(firstSeen)
+		since := firstSeen
+		// A mark written while its author was already away ages from its own first sighting: the
+		// later of the two is when it was last anybody's open composer. A mark with no author
+		// matches no departure, as it matches no connected browser.
+		if left, away := state.departed[mark.By]; away && left.After(since) {
+			since = left
+		}
+		age := now.Sub(since)
 		if age >= s.unrecordedMarkTTL {
-			expired = append(expired, mark)
+			expired = append(expired, mark.MarkRef)
 		} else if wait := s.unrecordedMarkTTL - age; next == 0 || wait < next {
 			next = wait
 		}
-		s.unlockState(room, state)
 	}
-	state := s.lockState(room)
 	for mark := range state.unrecorded {
 		if _, found := seen[mark]; !found {
 			delete(state.unrecorded, mark)
+		}
+	}
+	// A departure a TTL old answers nothing this sweep has not already decided: every mark of that
+	// author is at least that old too, so the first sighting alone expires it from here on.
+	for author, left := range state.departed {
+		if now.Sub(left) >= s.unrecordedMarkTTL {
+			delete(state.departed, author)
 		}
 	}
 	if next > 0 {
@@ -961,6 +1027,55 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	if err := s.unmarkExpired(room, expired); err != nil {
 		slog.Error("dispatch: sweep unrecorded marks", "room", room, "error", err)
 	}
+}
+
+// connectedMarkAuthors is every spelling of a mark's `by` attribute that names a user with a
+// browser on the room: the bare login a browser's own mark carries, and the user:<login> of a
+// mark the server wrote (ActorRef). It is nil when no such browser is there, which answers every
+// mark the same way. An actor with no id names nobody, so a mark with no author matches nothing
+// here. Its caller holds state.mu.
+func connectedMarkAuthors(connected map[uint64]model.Actor) map[string]struct{} {
+	var authors map[string]struct{}
+	for _, actor := range connected {
+		if actor.Kind != "user" || actor.ID == "" {
+			continue
+		}
+		if authors == nil {
+			authors = make(map[string]struct{}, 2*len(connected))
+		}
+		authors[actor.ID] = struct{}{}
+		authors[ActorRef(actor)] = struct{}{}
+	}
+	return authors
+}
+
+// recordMarkAuthorDeparture records in state that actor's last browser left the room at now, from
+// when an unrecorded mark of theirs ages (sweepUnrecordedMarks). Another browser of the same
+// actor still on the room leaves nothing to record: the composer is still open in front of them.
+// Both spellings of a mark's `by` are recorded, the two connectedMarkAuthors answers, so the
+// sweep reads a departure with the one lookup it already makes. Its caller holds state.mu.
+func recordMarkAuthorDeparture(state *roomState, actor model.Actor, now time.Time) {
+	if actor.Kind != "user" || actor.ID == "" {
+		return
+	}
+	for _, other := range state.connected {
+		if other.Kind == actor.Kind && other.ID == actor.ID {
+			return
+		}
+	}
+	state.departed[actor.ID] = now
+	state.departed[ActorRef(actor)] = now
+}
+
+// forgetMarkAuthorDeparture takes actor's departure off state: a browser of theirs is on the room
+// again, so their marks are open composers once more and age from no earlier absence. Its caller
+// holds state.mu.
+func forgetMarkAuthorDeparture(state *roomState, actor model.Actor) {
+	if actor.Kind != "user" || actor.ID == "" {
+		return
+	}
+	delete(state.departed, actor.ID)
+	delete(state.departed, ActorRef(actor))
 }
 
 // unmarkExpired removes from room's live document each of expired that it still holds.

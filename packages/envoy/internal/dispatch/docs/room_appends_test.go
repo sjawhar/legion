@@ -201,7 +201,7 @@ func TestQueuedBrowserUpdatesOfOneRoomCommitInOneTransactionOffTheSharedPool(t *
 	ctx := context.Background()
 	database := storetest.Open(t)
 	tracer := &statementTracer{}
-	traced := storetest.Traced(t, database, tracer)
+	traced := storetest.TracedStore(t, database, tracer)
 	// The test's own reads and its hold of the document's lock go through a store of their own,
 	// so the traced store's shared pool counts the room's acquisitions alone.
 	observer := storetest.SecondProcess(t, database)
@@ -527,8 +527,8 @@ func TestAGateRefusalOrFailedCommitStoresNothingOfTheBatchAndEachUpdateEndsOnce(
 			for index := range updates {
 				_, updates[index] = peerEdit(t, live, appendBlocks(t, fmt.Sprintf("Queued %d.\n", index)))
 				credits[index] = service.creditContentChange(artifactID, nil, &instance.hold)
-				service.recordUpdateClass(artifactID, updates[index],
-					documentUpdateClass{contentChanged: true, durable: true, credit: credits[index], cursor: &instance.cursor})
+				service.queueUpdateClass(artifactID, updates[index],
+					documentUpdateClass{seq: uint64(index + 1), contentChanged: true, durable: true, credit: credits[index], cursor: &instance.cursor}, false)
 			}
 			failed := service.room(artifactID)
 			adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
@@ -594,9 +594,11 @@ func TestAGateRefusalOrFailedCommitStoresNothingOfTheBatchAndEachUpdateEndsOnce(
 // A room's queue holds more than one room's updates at times: a published live write's update,
 // already durable, which the room's persistence must skip by its suppression slot, and an update a
 // retired instance of the room made, gated on that instance and not the resident one. Two peers
-// type around both, while the first peer's append is held so the rest queue behind it. Every
-// update is stored once and the live write's never a second time, and the stored history decodes
-// with nothing left pending, every time over many rounds (run it with -race).
+// type around both, while the first peer's append is held so the rest queue behind it. The live
+// write stores the room's unstored updates through the point it read the room before its own
+// version (Ledger.flushThrough), the two typed before it among them, so the held append finds them
+// stored. Every update is stored once and the live write's never a second time, and the stored
+// history decodes with nothing left pending, every time over many rounds (run it with -race).
 func TestABatchStopsAtASuppressedUpdateAndAtAnotherRoomInstance(t *testing.T) {
 	// Each round's edits grow the document's history, so a round costs more than the one before:
 	// under -race 150 rounds run in about 57 s and 200 in about 110 s.
@@ -646,12 +648,32 @@ func TestABatchStopsAtASuppressedUpdateAndAtAnotherRoomInstance(t *testing.T) {
 			t.Fatalf("round %d: the live write: %v", round, err)
 		}
 		liveRows := storedHead(t, database, artifactID) - before
+		storedNow := func() crdt.StateVector {
+			t.Helper()
+			loaded, err := NewPgVersioned(database).Load(ctx, artifactID)
+			if err != nil {
+				t.Fatalf("round %d: load the stored document: %v", round, err)
+			}
+			stored := newDocumentCopy()
+			if err := crdt.ApplyUpdateV1(stored, loaded.Update, nil); err != nil {
+				t.Fatalf("round %d: decode the stored document: %v", round, err)
+			}
+			return stored.StateVector()
+		}
+		afterLive := storedNow()
+		for index, peer := range []*crdt.Doc{first, second} {
+			for client, clock := range peer.StateVector() {
+				if afterLive[client] < clock {
+					t.Fatalf("round %d: the live write did not store update %d, typed before it, ahead of its own version", round, index)
+				}
+			}
+		}
 		third := typeInRoom(t, service, artifactID, 3, carol, step("Carol", round))
 		// A retired instance's update: made on the room's document, recorded for an instance
 		// that is not the resident one, as one ygo's stranded persistence hands on.
 		retiredPeer, retiredUpdate := peerEdit(t, live, step("Retired", round))
 		retired := &roomCursor{}
-		service.recordUpdateClass(artifactID, retiredUpdate, documentUpdateClass{contentChanged: true, durable: true, cursor: retired})
+		service.queueUpdateClass(artifactID, retiredUpdate, documentUpdateClass{seq: 1, contentChanged: true, durable: true, cursor: retired}, false)
 		fourth := typeInRoom(t, service, artifactID, 1, alice, step("Alice", 2*round+1))
 		gate.let()
 
@@ -672,8 +694,9 @@ func TestABatchStopsAtASuppressedUpdateAndAtAnotherRoomInstance(t *testing.T) {
 		if failure := service.roomFailure(artifactID); failure != nil {
 			t.Fatalf("round %d: the room failed: %v", round, failure)
 		}
-		if got, want := storedHead(t, database, artifactID)-before, liveRows+5; got != want {
-			t.Fatalf("round %d: %d rows were stored, want %d: the live write's %d and one for each of the five other updates", round, got, want, liveRows)
+		// The live write's rows hold the first two updates; one row each follows for the other three.
+		if got, want := storedHead(t, database, artifactID)-before, liveRows+3; got != want {
+			t.Fatalf("round %d: %d rows were stored, want %d: the live write's %d, which hold the two updates typed before it, and one for each of the three other updates", round, got, want, liveRows)
 		}
 		var duplicated int
 		if err := database.Pool.QueryRow(ctx, `
@@ -716,49 +739,86 @@ func TestABatchStopsAtASuppressedUpdateAndAtAnotherRoomInstance(t *testing.T) {
 }
 
 // countingBurstStore holds the room's appends against gates as burstStore does, and keeps how many
-// updates each append of the room was handed, in the order the appends reached it.
+// updates each append of the room stored, in the order the appends reached it.
 type countingBurstStore struct {
 	burstStore
 	counted sync.Mutex
-	handed  []int
+	order   []*int
+}
+
+// arrive records an append of the room reaching the store, before it is held, and returns where
+// its count of stored updates goes.
+func (s *countingBurstStore) arrive(room string) *int {
+	if room != s.room {
+		return new(int)
+	}
+	stored := new(int)
+	s.counted.Lock()
+	s.order = append(s.order, stored)
+	s.counted.Unlock()
+	return stored
+}
+
+func (s *countingBurstStore) stored() []int {
+	s.counted.Lock()
+	defer s.counted.Unlock()
+	counts := make([]int, len(s.order))
+	for index, stored := range s.order {
+		counts[index] = *stored
+	}
+	return counts
+}
+
+func (s *countingBurstStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	stored := s.arrive(room)
+	before := len(flush.versions)
+	version, err := s.burstStore.AppendRoomFlush(ctx, room, flush, through, credit)
+	s.counted.Lock()
+	*stored = len(flush.versions) - before
+	s.counted.Unlock()
+	return version, err
 }
 
 func (s *countingBurstStore) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
-	if room == s.room {
+	stored := s.arrive(room)
+	version, err := s.burstStore.AppendUpdatesWithCredit(ctx, room, updates)
+	if err == nil {
 		s.counted.Lock()
-		s.handed = append(s.handed, len(updates))
+		*stored = len(updates)
 		s.counted.Unlock()
 	}
-	return s.burstStore.AppendUpdatesWithCredit(ctx, room, updates)
+	return version, err
 }
 
 // Two calls of one room instance can run at the same time, one storing its update with the update
 // recorded after it as a batch, the other storing that later update alone, as a call that finds a
 // suppression slot of the room queued does. ygo serialises its calls for one room instance, but
-// what the store holds must not rest on that: the later update is stored once whichever append
-// takes the document's lock first. The two updates are recorded and handed to the room's
-// persistence here as the room's own observer and ygo's worker do, and the store holds each append
-// as it arrives, so the test decides the order. The batch taken first and committing first stores
-// both, and the lone update's append then finds its update stored and stores nothing. The lone
-// update committing first, the batch finds its member gone with that call and stores its own
-// alone. The lone update's call taken first, the batch stops before the update another call has
-// taken. Each way every update is stored once, and the room's record ends every count it held.
+// what the store holds must not rest on that: each update is stored once, and in the order the
+// room committed them, whichever append takes the document's lock first. The two updates are
+// recorded and handed to the room's persistence here as the room's own observer and ygo's worker
+// do, and the store holds each append as it arrives, so the test decides the order. An append
+// stores the room's unstored updates through its position in commit order (Service.flushThrough):
+// the batch's append, taken first, stores both when it commits first, and the lone update's append
+// committing first stores both too, the batch's update ahead of its own, so the other append then
+// finds nothing left to store. The lone update's call taken first, the batch's position stops
+// before the update that call has taken, and each append stores one. Each way every update is
+// stored once, in commit order, and the room's record ends every count it held.
 func TestALoneUpdateAndABatchHoldingItStoreItOnce(t *testing.T) {
 	cases := []struct {
 		name string
 		// loneFirst makes the lone update's call before the batch's, which is otherwise first.
 		loneFirst bool
 		// let is the order the held appends are let go in, each an index of the order the appends
-		// reached the store; handed is how many updates each append was handed, in that order of
+		// reached the store; stores is how many updates each append stored, in that order of
 		// arrival; stored is which update, as an index of updates, is at each version after the
 		// head.
 		let    []int
-		handed []int
+		stores []int
 		stored []int
 	}{
-		{name: "the batch commits first while the lone update waits", let: []int{0, 1}, handed: []int{2, 1}, stored: []int{0, 1}},
-		{name: "the lone update commits first while the batch waits", let: []int{1, 0}, handed: []int{2, 1}, stored: []int{1, 0}},
-		{name: "the lone update's call is taken before the batch", loneFirst: true, let: []int{1, 0}, handed: []int{1, 1}, stored: []int{0, 1}},
+		{name: "the batch commits first while the lone update waits", let: []int{0, 1}, stores: []int{2, 0}, stored: []int{0, 1}},
+		{name: "the lone update commits first while the batch waits", let: []int{1, 0}, stores: []int{0, 2}, stored: []int{0, 1}},
+		{name: "the lone update's call is taken before the batch", loneFirst: true, let: []int{1, 0}, stores: []int{1, 1}, stored: []int{0, 1}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -791,7 +851,7 @@ func TestALoneUpdateAndABatchHoldingItStoreItOnce(t *testing.T) {
 			updates := make([][]byte, 2)
 			for index := range updates {
 				_, updates[index] = peerEdit(t, live, appendBlocks(t, fmt.Sprintf("Concurrent %d.\n", index)))
-				service.recordUpdateClass(artifactID, updates[index], documentUpdateClass{contentChanged: true, durable: true, cursor: retired})
+				service.queueUpdateClass(artifactID, updates[index], documentUpdateClass{seq: uint64(index + 1), contentChanged: true, durable: true, cursor: retired}, false)
 			}
 			record := service.room(artifactID)
 			adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
@@ -843,11 +903,8 @@ func TestALoneUpdateAndABatchHoldingItStoreItOnce(t *testing.T) {
 				}
 			}
 
-			appends.counted.Lock()
-			handed := slices.Clone(appends.handed)
-			appends.counted.Unlock()
-			if !slices.Equal(handed, test.handed) {
-				t.Errorf("the appends were handed %v updates, want %v", handed, test.handed)
+			if stores := appends.stored(); !slices.Equal(stores, test.stores) {
+				t.Errorf("the appends stored %v updates, want %v", stores, test.stores)
 			}
 			if failure := service.roomFailure(artifactID); failure != nil {
 				t.Fatalf("the room failed: %v", failure)

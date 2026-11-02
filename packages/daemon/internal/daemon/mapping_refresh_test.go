@@ -114,7 +114,7 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{Project: "LEGION", Repositories: heard, Logger: quietLogger(),
+	if w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{Project: "LEGION", Repositories: heard, Logger: quietLogger(),
 		AckWait: time.Second, NakDelay: 10 * time.Millisecond, PrepareRepository: w.prepareRepository, RepositoryMapping: w.mappingChange}); err != nil {
 		t.Fatal(err)
 	}
@@ -924,7 +924,7 @@ func TestAnUnreadEventIsAcknowledgedSoTheBootAdmitsRootsOnServedRepositories(t *
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(run, w.pool, engine, admission) }()
+	go func() { done <- w.consumers.Run(run, engine, admission) }()
 	polled := make(chan struct{})
 	go func() { w.pollHoldRelease(run); close(polled) }()
 	t.Cleanup(func() { cancel(); <-done; <-polled })
@@ -1346,7 +1346,7 @@ func TestARecoveryWhileTheConsumerIsBehindAdmitsOnceItCatchesUp(t *testing.T) {
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(run, w.pool, engine, admission) }()
+	go func() { done <- w.consumers.Run(run, engine, admission) }()
 	polled := make(chan struct{})
 	go func() { w.pollHoldRelease(run); close(polled) }()
 	t.Cleanup(func() { cancel(); <-done; <-polled })
@@ -1659,7 +1659,7 @@ func (h *heldRecovery) behind(t *testing.T, key string) {
 func (h *heldRecovery) consume() {
 	run, cancel := context.WithCancel(context.Background())
 	h.cancel, h.done = cancel, make(chan error, 1)
-	go func() { h.done <- h.w.consumers.Run(run, h.w.pool, h.w.handlers...) }()
+	go func() { h.done <- h.w.consumers.Run(run, h.w.handlers...) }()
 }
 
 func (h *heldRecovery) pause() {

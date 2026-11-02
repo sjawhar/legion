@@ -125,11 +125,12 @@ docker:
   so an intermediate stage (a Go build stage, say) hits only when none of its inputs changed. This
   image's `build` stage takes the `LEGION_COMMIT` build argument (the commit sha) into its
   `go build -ldflags` step (`packages/envoy/docker/Dockerfile`), so every new commit reruns the
-  `build` stage and the `web` stage it copies from. A cache would help only a re-run at the same
-  commit (measured 1.6–2.0 minutes per leg) while adding about 137 MB of Actions-cache entries per
-  `main` run (about 1.6 GB with `mode=max`) to an Actions cache already past GitHub's 10 GB limit;
-  uncached, the legs take 4.2–6.9 minutes each, under the 8-minute target. So this workflow keeps
-  no build cache.
+  `build` stage and the `web` stage it copies from. A `mode=min` cache would help only a re-run at
+  the same commit (measured 1.6–2.0 minutes per leg) while adding about 137 MB of Actions-cache
+  entries per `main` run (about 1.6 GB with `mode=max`) to an Actions cache already past GitHub's
+  10 GB limit; uncached, the legs take 4.2–5.3 minutes each, well under the 8-minute target
+  (docs/solutions/github/measure-a-build-cache-by-what-a-new-commit-invalidates-and-a-hit-by-same-run-job-reruns-pr2297.md
+  measured both). So this workflow keeps no build cache.
 - `docker/setup-buildx-action` stays on every leg: the publish needs the `docker-container`
   builder it creates, because the default `docker` driver without the containerd image store
   cannot export the BuildKit provenance attestation or push by digest. Its
