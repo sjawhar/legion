@@ -843,11 +843,12 @@ const sessionInterestReadTimeout = 1 * time.Second
 // all. A claims view that is not complete (store.ErrRoleViewNotReady: still scanning, refilling a
 // recreated bucket, or its watcher ended) is returned alone, as a read that did not answer, never
 // as a session holding no roles. A session the interest registry holds no key for keeps its empty
-// topics: a session that registered and subscribed to nothing is not an error here. The other
-// answers about the record (interestReadAnswered) are returned with the session's info, its topics
-// empty, so the caller can still show the session and name what the read answered. Every other
-// error is a read that did not answer and is returned alone: a caller answers it as the
-// bus-unavailable 503, never as a session with no topics or roles.
+// topics: a session that registered and subscribed to nothing is not an error here, and its row
+// carries topics as the empty list, never null. The other answers about the record
+// (interestReadAnswered) are returned with the session's info, its topics the empty list, so the
+// caller can still show the session and name what the read answered. Every other error is a read
+// that did not answer and is returned alone: a caller answers it as the bus-unavailable 503,
+// never as a row.
 func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID string, entry session.SessionEntry) (sessionInfo, error) {
 	roles, err := registry.RolesHeldBy(sessionID)
 	if err != nil {
@@ -862,6 +863,7 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 		Title:          entry.Title,
 		Capabilities:   append([]string{}, entry.Capabilities...),
 		SelfSubscribed: entry.SelfSubscribed,
+		Topics:         []string{},
 		Roles:          roles,
 		UpdatedAt:      entry.UpdatedAt,
 		LastSeen:       entry.UpdatedAt,
@@ -879,7 +881,7 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 	case err != nil:
 		return sessionInfo{}, err
 	}
-	info.Topics = interest.Topics
+	info.Topics = append([]string{}, interest.Topics...)
 	return info, nil
 }
 

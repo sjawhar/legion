@@ -1,0 +1,32 @@
+{
+  "comment": "One row of GET /v1/sessions, and the whole body of GET /v1/registry/<session_id>, for a live Envoy session with no interest record, no role claim and no capability. packages/envoy/cmd/listener/api_test.go builds the session entry from after_this_change and compares the listener's raw row with it; packages/envoy-client/src/__tests__/transport.test.ts serves both rows to listSessions.",
+  "captured_at_commit": "0642a37abdaaf47efc20ed2c8b126a2cd4c527d9",
+  "after_this_change": {
+    "session_id": "ses_infra742_no_interests",
+    "machine_id": "envoy-fixture",
+    "host": "envoy-fixture",
+    "dir": "/work/infra-742-fixture",
+    "port": 0,
+    "title": "INFRA-742 fixture session",
+    "capabilities": [],
+    "self_subscribed": true,
+    "topics": [],
+    "roles": [],
+    "updated_at": 0,
+    "last_seen": 0
+  },
+  "before_this_change": {
+    "session_id": "ses_infra742_no_interests",
+    "machine_id": "envoy-fixture",
+    "host": "envoy-fixture",
+    "dir": "/work/infra-742-fixture",
+    "port": 0,
+    "title": "INFRA-742 fixture session",
+    "capabilities": [],
+    "self_subscribed": true,
+    "topics": null,
+    "roles": [],
+    "updated_at": 0,
+    "last_seen": 0
+  }
+}
