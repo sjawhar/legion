@@ -131,7 +131,10 @@ func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *R
 	if err != nil || len(flush.versions) == 0 {
 		return 0, err
 	}
-	return flush.versions[len(flush.versions)-1], nil
+	last := flush.versions[len(flush.versions)-1]
+	// Noted once the document's locks are gone: the note waits on nothing the append holds.
+	p.noted(room, int64(last))
+	return last, nil
 }
 
 // AppendUpdatesWithCredit validates updates, each alone, and stores them in one transaction, the
@@ -144,11 +147,17 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 		return 0, fmt.Errorf("append document updates: no update to append")
 	}
 	for _, update := range updates {
-		if err := validateUpdate(update.Update); err != nil {
+		if err := validateUpdate(update.Update, p.maxPendingItems); err != nil {
 			return 0, err
 		}
 	}
-	return p.appendRoomTx(ctx, room, nil, 0, nil, updates)
+	first, err := p.appendRoomTx(ctx, room, nil, 0, nil, updates)
+	if err != nil || first == 0 {
+		return first, err
+	}
+	// Noted once the document's locks are gone, as a batch's last version is (AppendRoomFlush).
+	p.noted(room, int64(first)+int64(len(updates))-1)
+	return first, nil
 }
 
 // appendRoomTx is the transaction a room's updates are stored in: it holds the room's in-process
@@ -286,7 +295,6 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 	state.dropDrainedShadowLocked()
 	flush.service.unlockState(room, state)
 	flush.service.appendFigures.committed(len(updates))
-	flush.service.noteStoredUpdates(room, int64(last), gate.oldest())
 	return first, nil
 }
 
@@ -368,12 +376,6 @@ func (s *Service) warmRoomAppends() {
 		}
 	}()
 }
-
-// noteStoredUpdates is told of each committed append of room's browser updates, after its commit
-// and before it releases the document's lock: head is the last version it stored, the room's head
-// now, and oldest the least version the room stored when its gate read the head, 0 for none. It is
-// the room loading work's hook for the room's stored history and keeps nothing yet.
-func (s *Service) noteStoredUpdates(room string, head, oldest int64) {}
 
 // roomAppendBatchSizes are the upper bounds of the batch-size histogram's buckets: 1, 2, 3-4, 5-8,
 // and so on to 129-256, roomAppendBatchUpdates.

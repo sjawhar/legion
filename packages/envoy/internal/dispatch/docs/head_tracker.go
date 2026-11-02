@@ -323,8 +323,7 @@ func (t *headTracker) invalidate(room string) {
 // entry whether or not anything holds the document, so a token taken meanwhile is untrusted.
 // Every content-changing writer of this process calls it: a room's batch of browser updates
 // (appendRoomTx: AppendRoomFlush, AppendUpdatesWithCredit), an append in a caller's transaction
-// (appendUpdatesTx), RebuildTx,
-// PruneAfter and Delete. Nil for a store no Service was built on.
+// (appendUpdatesTx), RebuildTx, PruneAfter and Delete. Nil for a store no Service was built on.
 func (t *headTracker) beginOwnWrite(room string) *ownWrite {
 	if t == nil {
 		return nil

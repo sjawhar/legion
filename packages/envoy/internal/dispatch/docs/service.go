@@ -83,7 +83,7 @@ type Deps struct {
 // its update observer classified: in one transaction, on a connection of the room-appends pool and
 // under the document's advisory lock, it stores every update of the room instance through the
 // commit position the room's batch runs through that no writer has stored yet, in the room's
-// commit order (flushThrough), each with the class and the in-flight credit the observer recorded
+// commit order (flushRun), each with the class and the in-flight credit the observer recorded
 // for it (UpdateCredit, taken and landed under that lock). AppendUpdatesWithCredit stores updates
 // of a room the same way, from the updates it is handed rather than the room's queue, which is
 // what the room's persistence does with an update no class was recorded for.
@@ -91,15 +91,19 @@ type Deps struct {
 // (flushThrough). Document writes that join an API transaction use
 // AppendUpdateTx, classifying the update the way the room's update observer
 // classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
-// transaction, through the same persistence boundary as its preflight load. Head is the version
-// Load would fold up to now, which says whether a state loaded earlier is still the stored one.
+// transaction, through the same persistence boundary as its preflight load. Load, ygo's, is a
+// room's load. Head is the version Load would fold up to now, which says whether a state loaded
+// earlier is still the stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
 // caches its rendering by (coldRead). setProcess hands the store the Service's process id
 // (Service.ProcessID), which every content-changing write's head notification names
 // (documentHeadNotice), and the Service's head tracker, which every such write reports itself to
 // (headTracker.beginOwnWrite); a store that wraps a PgVersioned by embedding it passes both on
-// with no code of its own.
+// with no code of its own. compactRoom is the compaction every path Dispatch compacts a
+// document on runs (a room's close, the compaction queue, the compaction sweep), under the tail
+// rule; Compact, ygo's, is the keep-N rule only. pgVersioned is the PgVersioned the store is or
+// wraps, which New hands the Service's note of each append and load (noteStoredUpdates).
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error)
@@ -111,6 +115,8 @@ type VersionedStore interface {
 	DocumentStamp(ctx context.Context, room string) (DocumentStamp, error)
 	LoadDocument(ctx context.Context, room string) (LoadedDocument, error)
 	setProcess(id string, heads *headTracker)
+	compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error)
+	pgVersioned() *PgVersioned
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -134,6 +140,12 @@ type Service struct {
 	unrecordedMarkTTL time.Duration
 	// editNoticeQuiet is Deps.EditNoticeQuiet, with its default applied.
 	editNoticeQuiet time.Duration
+	// maxPendingItems is the pending queue the service's rooms decode their stored state under
+	// (Server.MaxPendingItems, which New sets from it and ygo reads as each room loads) and the
+	// queue the check a room's load is compared with takes (validateUpdate). New sets it to
+	// maxUpdateItems, whose comment states the rule; a test lowers it, and the server's, before
+	// any room opens (shrinkPendingItems).
+	maxPendingItems int
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
@@ -289,6 +301,10 @@ type Service struct {
 	// to ygo. Nil outside tests; tests use it to hold two cold sockets of one room until both have
 	// offered theirs, and to watch what becomes of each one's state.
 	afterSocketPreload func(room string, loaded *persistence.LoadResult)
+	// bootstrapping runs as a room's load hook decodes state, the stored state its load read, into
+	// the room's document (bootstrapLoadedState). Nil outside tests; tests use it to count the
+	// decodes a room's load makes and to see which state each decodes.
+	bootstrapping func(room string, state []byte)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
@@ -347,7 +363,7 @@ type Service struct {
 	// the document (keepInstance). roomLoads holds what each room's load records between its read
 	// of the store (servicePersistenceAdapter.LoadDoc) and the instance the hook ygo calls next on
 	// the same goroutine starts (onLoadDocument): the head that read saw, the state it read, which
-	// that hook applies to the room's document (applyLoadedState), and every version this process
+	// that hook decodes into the room's document (bootstrapLoadedState), and every version this process
 	// appended while the load ran, which reaches no instance of its own (roomLoad).
 	instances sync.Map
 	roomLoads sync.Map
@@ -379,6 +395,10 @@ type Service struct {
 	// warmingAppends is set while warmRoomAppends opens a connection of the room-appends pool, so
 	// rooms that load together open one, not one each.
 	warmingAppends atomic.Bool
+	// compactions is the queue of the documents this service compacts, whose worker New starts,
+	// Shutdown stops and Quiesce pauses (compactionQueue). Every committed append and every load
+	// notes its room there; noteStoredUpdates names them.
+	compactions *compactionQueue
 }
 
 type artifactOwner struct {
@@ -726,7 +746,14 @@ func New(deps Deps) *Service {
 		reads:             newDocumentReads(readBudget),
 		roomCap:           roomCap,
 		connectionCap:     connectionCap,
+		maxPendingItems:   maxUpdateItems,
 	}
+	service.compactions = startCompactionQueue(service.compactionStep)
+	// The store tells the queue of every append it commits and every load it reads; a store that
+	// wraps a PgVersioned - a test's, to fail or hold one of its calls - tells it through the one
+	// it wraps.
+	note := service.noteStoredUpdates
+	persist.pgVersioned().noteStored.Store(&note)
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
 	srv.HocuspocusFraming = true
@@ -736,13 +763,12 @@ func New(deps Deps) *Service {
 	// update's call takes the room's queued updates with it into one transaction, a row each
 	// (room_appends.go), so the suppression slots still match one update apiece.
 	srv.PersistCoalesceWindow = -1
-	srv.CompactEvery = 200
-	// The rooms decode under maxUpdateItems, the queue every decode of document bytes takes (see
-	// maxUpdateItems). It is also the most a room's peers can park in it, about ten times ygo's
-	// default; bounding what one peer's update can do to a room is LEGION-487. ygo's check of each
-	// update the service broadcasts (Server.BroadcastUpdate) takes no pending queue: the room has
-	// already applied the update (reearth/ygo#268, in the pinned fork).
-	srv.MaxPendingItems = maxUpdateItems
+	// The rooms decode under the service's own cap (Service.maxPendingItems; see maxUpdateItems),
+	// which ygo reads as each room loads. It is also the most a room's peers can park in it, about
+	// ten times ygo's default; bounding what one peer's update can do to a room is LEGION-487.
+	// ygo's check of each update the service broadcasts (Server.BroadcastUpdate) takes no pending
+	// queue: the room has already applied the update (reearth/ygo#268, in the pinned fork).
+	srv.MaxPendingItems = service.maxPendingItems
 	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
 	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an
 	// Apply on a room no peer is in returns (reearth/ygo#269, in the pinned fork). Eager eviction,
@@ -945,7 +971,14 @@ const ShutdownDrainBudget = 9 * time.Second
 // resumption (RunSettlementResumption). For each document that owed a settlement Shutdown logs
 // whether it settled or was left to resume; once the caller's deadline has passed it cannot read
 // that back, and its error names those documents.
+//
+// The compaction queue takes no note and starts no compaction once Shutdown begins, and drops the
+// documents it held, which a later process compacts. A compaction already running finishes within
+// ctx, and is cancelled once ctx ends; either way Shutdown returns only after the queue's worker
+// has, so nothing of it outlives the store's pools, which its caller closes next.
 func (s *Service) Shutdown(ctx context.Context) error {
+	s.compactions.shutDown()
+	defer s.compactions.awaitStopped(ctx)
 	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, and
 	// whether an editor was connected.
 	type loadedRoom struct {
@@ -1113,8 +1146,12 @@ func settlementsUnconfirmed(cause error, owed map[string]bool, rooms []string) e
 // Nothing in production calls it. It exists so the browser-test harness can truncate its
 // database between scenarios with every document the previous scenario had open already
 // written: a settlement still running would write to tables the truncate has just emptied, or
-// wait on the truncate's locks and fail once it commits.
+// wait on the truncate's locks and fail once it commits. The compaction queue is held for the
+// same reason: it takes no note while Quiesce runs, Quiesce waits for a compaction already
+// running and drops the documents the queue held, and the queue takes notes again once Quiesce
+// returns.
 func (s *Service) Quiesce(ctx context.Context) error {
+	defer s.compactions.pause(ctx)()
 	s.quiescing.Store(true)
 	defer s.quiescing.Store(false)
 	s.stopAllSettleTimers()
@@ -2131,11 +2168,14 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 // live write's commit takes in its own (Ledger.takeRoomCursors): a writer queued on that lock
 // takes it the instant the commit drops it, and must find the cursor at the head. advanced
 // reports whether it took any in, for a caller whose commit fails to fail the room, which cannot
-// tell then whether it holds what its cursor says (Ledger.fail).
+// tell then whether it holds what its cursor says (Ledger.fail). Once the commit has released the
+// room's state, the last version it appended is noted to the compaction queue
+// (noteStoredUpdates).
 func (s *Service) commitSettlement(ctx context.Context, tx pgx.Tx, ledger *Ledger, room string, committed authorCapture, ended func(error)) (advanced bool, err error) {
 	captures := []roomCapture{{room: room, capture: committed}}
+	var appended []persistence.Version
 	if flush := ledger.flushFor(room); flush != nil {
-		appended := flush.appended(nil)
+		appended = flush.appended(nil)
 		advanceRoomCursorThrough(flush.cursor, appended)
 		advanced = len(appended) > 0
 		captures = append(captures, flushCapture(flush))
@@ -2144,7 +2184,13 @@ func (s *Service) commitSettlement(ctx context.Context, tx pgx.Tx, ledger *Ledge
 	if s.beforeSettleCommit != nil {
 		s.beforeSettleCommit(room)
 	}
-	return advanced, s.commitConsuming(ctx, tx, captures, ended)
+	if err := s.commitConsuming(ctx, tx, captures, ended); err != nil {
+		return advanced, err
+	}
+	if advanced {
+		s.noteStoredUpdates(room, int64(appended[len(appended)-1]))
+	}
+	return advanced, nil
 }
 
 // reloadRoomBehindHead answers a settlement the gate refused (refusal, ErrRoomBehindHead): live, the

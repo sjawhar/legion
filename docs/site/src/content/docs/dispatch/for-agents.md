@@ -292,6 +292,7 @@ dispatch://KEY
 dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>
 dispatch://KEY/ask/<id>
+dispatch://KEY/ask/<id>#b-<part>[@v<N>]
 dispatch://KEY/comment/<id>
 dispatch://KEY/comment/<id>#b-<block>[@v<N>]
 dispatch://KEY/message/<id>
@@ -309,8 +310,14 @@ splits it in the dashboard (a split block's id stays with the part holding its s
 `@v<N>` pins it to revision N of the comment, so `dispatch read` shows the text it had then and
 whether it has changed or been removed since. A message never changes, so its blocks take no pin.
 
+An ask is made of parts the same way: its question, each of its options and its answer.
+`#b-<part>` names one, and `@v<N>` pins it to a revision of the ask's parts. `dispatch read` of
+the ask prints the reference of each option and of its answer, with whatever points at that part
+under it, so you can cite the option a decision turns on rather than the whole ask.
+
 To answer one block rather than the whole item, pass its reference to
-`dispatch comment --reply-to` or `dispatch message --in-reply-to`. Dispatch records the reply as
+`dispatch comment --reply-to` or `dispatch message --in-reply-to`, and a part of an ask to
+`dispatch comment --reply-to-ask`. Dispatch records the reply as
 answering that block, and `dispatch read` of the reply prints `Re: block <id>:` and the block's
 text before its body, or `Re: block <id> (removed)` once an edit removed it.
 
@@ -326,7 +333,12 @@ carries an `Idempotency-Key` header of its own, and the command asks again under
 attempt fails on the way, gets no answer for 20 seconds while none of its body is going out,
 Dispatch answers 5xx, 408 or 429, or Dispatch is still running an earlier attempt
 (`409 KEY_IN_FLIGHT`): at most five attempts, the last starting within 30 seconds of the first, and
-the whole command within 60. It asks again only of a Dispatch that judges the key: one whose answer
+the whole command within 60. Once an attempt got no answer for 20 seconds or was told
+`409 KEY_IN_FLIGHT`, Dispatch may still be running the write, and it finishes it whatever the
+command does, so the command keeps asking every 3 seconds or less (longer only when Dispatch's
+`Retry-After` asks), starting no ask in the last 5 seconds of its 60, to collect the answer; an
+upload of a megabyte or more, whose every ask sends the whole file again, keeps the five attempts.
+It asks again only of a Dispatch that judges the key: one whose answer
 carried the key back, or whose `/healthz` said `idempotency_keys: true` in the last five minutes,
 whatever its status; any other would make a repeated write twice. Dispatch makes the write once per
 key and answers a repeat with the first answer, so the command never makes a write twice. When the

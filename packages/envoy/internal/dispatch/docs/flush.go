@@ -96,7 +96,8 @@ func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) b
 	return seq != point.seq
 }
 
-// RoomFlush is what one transaction's flushThrough calls stored of one room instance, the one
+// RoomFlush is what one transaction stored of one room instance - a joined transaction's
+// flushThrough calls, or a room's own batch (appendRoomTx, through flushRun) - the one
 // cursor names: the classes, in commit order, with the version each was appended at, the class it
 // was stored with (changed) and the credit its append took (credits; storedClasses). repairs are
 // the versions of the repairs a settlement wrote into the instance and stored between its flushes
@@ -140,8 +141,9 @@ func (f *RoomFlush) appended(own []persistence.Version) []persistence.Version {
 
 // heldThrough is the durable version the flushed instance holds every update through as the
 // flush's transaction sees it: the instance's cursor with the versions the transaction has
-// appended for it folded in (appended), which gates each next append of the flush
-// (appendingCursor).
+// appended for it folded in (appended). The transaction's appends' gate reads it (appendingCursor,
+// and appendRoomTx for a room's own batch), and so does its fork read's judgment of the room
+// (roomBehindHead), each through transactionCursor where the transaction carries a ledger.
 func (f *RoomFlush) heldThrough() int64 {
 	return foldAppended(f.cursor.heldThrough(), f.appended(nil))
 }

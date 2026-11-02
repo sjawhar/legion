@@ -50,8 +50,9 @@ type roomInstance struct {
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
-	// state is the durable state the load read, which the room's load takes before anything that
-	// can refuse it (takeLoadedState) and applies itself (applyLoadedState) rather than ygo.
+	// state is the durable state the load read (read), until the room's load hook takes it
+	// (takeState, takeLoadedState) and decodes it itself (bootstrapLoadedState) rather than ygo:
+	// nil once taken, and for a load that read an empty history.
 	state []byte
 	// appended are the versions took recorded before the instance existed, folded into its cursor
 	// when it does (start). instance is that instance, which took advances directly from then on.
@@ -114,6 +115,16 @@ func (load *roomLoad) takeLoaded() (size int, tree *pmdoc.Node) {
 	size, tree = load.size, load.tree
 	load.tree = nil
 	return size, tree
+}
+
+// takeLoadedState is the state room's load read (servicePersistenceAdapter.LoadDoc), taken off its
+// record (roomLoad.takeState): nil for a room ygo loads without that read, and for an empty
+// history.
+func (s *Service) takeLoadedState(room string) []byte {
+	if loading, ok := s.roomLoads.Load(room); ok {
+		return loading.(*roomLoad).takeState()
+	}
+	return nil
 }
 
 // took records version, which this process has made durable for the room while its load runs: on
@@ -426,12 +437,21 @@ func appendingCursor(ctx context.Context, room string, flush *RoomFlush) documen
 		return flush
 	}
 	if cursor := roomCursorFrom(ctx); cursor != nil {
-		if flush := ledgerFrom(ctx).flushFor(room); flush != nil && flush.cursor == cursor {
-			return flush
-		}
-		return cursor
+		return transactionCursor(ctx, room, cursor)
 	}
 	return nil
+}
+
+// transactionCursor is cursor, a room instance's, as the transaction ctx carries sees it: the
+// flush that transaction keeps for room when it flushed that very instance (Ledger.flushFor), whose
+// heldThrough folds in the versions the transaction has stored of the instance and not yet
+// committed, else cursor itself. Both a transaction's appends (appendingCursor) and its fork read
+// (roomBehindHead) compare this against the head they read under the document's lock.
+func transactionCursor(ctx context.Context, room string, cursor *roomCursor) documentCursor {
+	if flush := ledgerFrom(ctx).flushFor(room); flush != nil && flush.cursor == cursor {
+		return flush
+	}
+	return cursor
 }
 
 // appendingThrough is appendingCursor's version, read now, or ungatedAppend when no cursor gates

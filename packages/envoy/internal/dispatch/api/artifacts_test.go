@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -539,6 +540,113 @@ func TestMissingIssueDocumentRouteListsItsSlugsAndNames(t *testing.T) {
 	}
 }
 
+// TestMissingDocumentOnABusyOwnerNamesTheClosestAndCountsTheRest holds the hint for an owner with
+// more documents than it lists: the documents whose slug or filename is nearest the missing
+// reference come first, the newest fill the rest, and the hint says how many the owner holds and
+// which route lists them all.
+func TestMissingDocumentOnABusyOwnerNamesTheClosestAndCountsTheRest(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	names := []string{"prediction-P1.md"}
+	for index := range 10 {
+		names = append(names, fmt.Sprintf("notes-%d.md", index))
+	}
+	for _, name := range names {
+		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+			"name": name, "content": "# " + name + "\n",
+		}, "alice")
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create %s: status=%d body=%s", name, created.Code, created.Body.String())
+		}
+	}
+	for index := range 11 {
+		createProjectDocument(t, handler, "TEST", fmt.Sprintf("runbook-%d.md", index), "# Runbook\n")
+	}
+
+	newest := func(prefix string, from, to int) string {
+		var labels []string
+		for index := from; index >= to; index-- {
+			labels = append(labels, fmt.Sprintf("%s-%d-md (%s-%d.md)", prefix, index, prefix, index))
+		}
+		return strings.Join(labels, ", ")
+	}
+	for _, test := range []struct {
+		target string
+		want   string
+	}{
+		{
+			target: "/api/v1/issues/" + issue.Key + "/artifacts/prediction-P1-md",
+			want: `document "prediction-P1-md" not found by slug; this issue's 12 documents include: ` +
+				"prediction-p1-md (prediction-P1.md), " + newest("notes", 9, 3) +
+				"; GET /api/v1/issues/" + issue.Key + "/artifacts lists them all",
+		},
+		{
+			target: "/api/v1/projects/TEST/artifacts/Runbook-2-md",
+			want: `document "Runbook-2-md" not found by slug; this project's 11 documents include: ` +
+				"runbook-2-md (runbook-2.md), " + newest("runbook", 9, 3) +
+				"; GET /api/v1/projects/TEST/artifacts?unlinked=true lists them all",
+		},
+	} {
+		response := dispatchRequest(t, handler, http.MethodGet, test.target, nil, "alice")
+		raw := response.Body.String()
+		body := decodeBody[struct {
+			Error string `json:"error"`
+		}](t, response)
+		if response.Code != http.StatusNotFound || body.Error != test.want {
+			t.Fatalf("missing document %s: status=%d body=%s\nwant 404 %q", test.target, response.Code, raw, test.want)
+		}
+	}
+}
+
+// TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII holds the ranking envoy-client's
+// documentsNearest repeats (its test of the same cases): a name holding the reference ranks by
+// how much longer it is, so an old short match is not lost behind newer long ones, and only ASCII
+// letters fold, so İ is not i in either ranker.
+func TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII(t *testing.T) {
+	documents := func(names ...string) []model.Artifact {
+		var out []model.Artifact
+		for _, name := range names {
+			out = append(out, model.Artifact{Slug: strings.ReplaceAll(name, ".", "-"), Name: name})
+		}
+		return out
+	}
+	for _, test := range []struct {
+		reference string
+		documents []model.Artifact
+		want      []string
+	}{
+		{
+			reference: "Plan",
+			documents: documents("plan.md", "plan-alpha-archive.md", "plan-beta-archive.md", "plan-gamma-archive.md",
+				"plan-delta-archive.md", "plan-omega-archive.md", "plan-kappa-archive.md", "plan-sigma-archive.md", "plan-theta-archive.md"),
+			want: []string{"plan.md", "plan-beta-archive.md", "plan-theta-archive.md", "plan-sigma-archive.md", "plan-kappa-archive.md",
+				"plan-omega-archive.md", "plan-delta-archive.md", "plan-gamma-archive.md", "plan-alpha-archive.md"},
+		},
+		{
+			// Only the filename holds "plan.", and the slug is far: the slug's capped distance
+			// must not tie the old match with the newer, longer ones.
+			reference: "Plan.",
+			documents: documents("plan.v1.md", "plan.alpha-archive.md", "plan.beta-archive.md", "plan.gamma-archive.md",
+				"plan.delta-archive.md", "plan.omega-archive.md", "plan.kappa-archive.md", "plan.sigma-archive.md", "plan.theta-archive.md"),
+			want: []string{"plan.v1.md", "plan.beta-archive.md", "plan.theta-archive.md", "plan.sigma-archive.md", "plan.kappa-archive.md",
+				"plan.omega-archive.md", "plan.delta-archive.md", "plan.gamma-archive.md", "plan.alpha-archive.md"},
+		},
+		{
+			reference: "İİİİ-md",
+			documents: documents("iiii.md", "notes-0.md", "notes-1.md", "notes-2.md", "notes-3.md", "notes-4.md", "notes-5.md", "notes-6.md", "notes-7.md"),
+			want:      []string{"notes-7.md", "notes-6.md", "notes-5.md", "notes-4.md", "notes-3.md", "notes-2.md", "notes-1.md", "notes-0.md", "iiii.md"},
+		},
+	} {
+		var got []string
+		for _, document := range documentsNearest(test.reference, test.documents) {
+			got = append(got, document.Name)
+		}
+		if strings.Join(got, ",") != strings.Join(test.want, ",") {
+			t.Errorf("documentsNearest(%q) = %v, want %v", test.reference, got, test.want)
+		}
+	}
+}
+
 func TestDocumentRoutesRejectAmbiguousFilenameWithSlugChoices(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createArtifactIssue(t, handler)
@@ -692,6 +800,81 @@ func TestAnUploadNamedAfterAnArtifactsSlugOfAnotherKindIsRefused(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("issue holds %d report-md artifacts, want 1", count)
+	}
+}
+
+// An upload refused for its name, its kind or its owner writes no object to the file store: the
+// object is written before the upload's transaction opens, and an object no version names is one
+// nothing ever deletes.
+func TestARefusedFileUploadLeavesNoObjectInTheFileStore(t *testing.T) {
+	issueUploads := func(issue model.Issue) string { return "/api/v1/issues/" + issue.Key + "/artifacts" }
+	for _, test := range []struct {
+		name    string
+		before  func(t *testing.T, handler http.Handler, issue model.Issue)
+		path    func(issue model.Issue) string
+		upload  string
+		content []byte
+		mime    string
+		status  int
+		code    string
+		objects int
+	}{
+		{
+			name: "a file under a document's slug",
+			before: func(t *testing.T, handler http.Handler, issue model.Issue) {
+				if response := dispatchRequest(t, handler, http.MethodPost, issueUploads(issue), map[string]string{"name": "report.md", "content": "# Report\n"}, "alice"); response.Code != http.StatusCreated {
+					t.Fatalf("create report.md: status=%d body=%s", response.Code, response.Body.String())
+				}
+			},
+			path:   issueUploads,
+			upload: "report-md", content: []byte("report"), mime: "application/octet-stream",
+			status: http.StatusBadRequest, code: "ARTIFACT_KIND_MISMATCH",
+		},
+		{
+			name: "a file under an image's name",
+			before: func(t *testing.T, handler http.Handler, issue model.Issue) {
+				if response := multipartRequest(t, handler, issueUploads(issue), map[string]string{"name": "shot.png"}, "shot.png", "image/png", pngBytes("first"), "alice"); response.Code != http.StatusCreated {
+					t.Fatalf("upload shot.png: status=%d body=%s", response.Code, response.Body.String())
+				}
+			},
+			path:   issueUploads,
+			upload: "shot.png", content: []byte("not a picture"), mime: "application/octet-stream",
+			status: http.StatusBadRequest, code: "ARTIFACT_KIND_MISMATCH", objects: 1,
+		},
+		{
+			name:   "a new name past its bound",
+			path:   issueUploads,
+			upload: strings.Repeat("n", maxNewArtifactKeyBytes+1), content: pngBytes("long"), mime: "image/png",
+			status: http.StatusBadRequest, code: "INVALID_ARTIFACT",
+		},
+		{
+			name:   "a new reference key past its bound",
+			path:   issueUploads,
+			upload: strings.Repeat("k", maxNewArtifactKeyBytes), content: pngBytes("key"), mime: "image/png",
+			status: http.StatusBadRequest, code: "INVALID_ARTIFACT",
+		},
+		{
+			name:   "a project that does not exist",
+			path:   func(model.Issue) string { return "/api/v1/projects/NOPE/artifacts" },
+			upload: "shot.png", content: pngBytes("nowhere"), mime: "image/png",
+			status: http.StatusNotFound,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			files := filestest.NewMemory()
+			handler, _, _ := newTestServer(t, testServerOptions{files: files})
+			issue := createArtifactIssue(t, handler)
+			if test.before != nil {
+				test.before(t, handler, issue)
+			}
+			response := multipartRequest(t, handler, test.path(issue), map[string]string{"name": test.upload}, "upload", test.mime, test.content, "alice")
+			if response.Code != test.status || !strings.Contains(response.Body.String(), `"code":"`+test.code) {
+				t.Fatalf("refused upload: status=%d body=%s, want %d %s", response.Code, response.Body.String(), test.status, test.code)
+			}
+			if got := files.Len(); got != test.objects {
+				t.Fatalf("the file store holds %d objects after a refused upload, want %d", got, test.objects)
+			}
+		})
 	}
 }
 

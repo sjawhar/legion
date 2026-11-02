@@ -8,7 +8,7 @@ body: |-
   (`application_name=dispatch-room-appends`; document loads' connections are `dispatch-rooms`). A
   keystroke waits at most 50 ms after the room took it for the keystrokes after it, and a
   settlement or a shutdown waiting on the room waits out none of those 50 ms. A server holds up to
-  100 connections to Postgres, from 92: 64 + 13 + 8 + 4 + 1 + 2 + 2 + 1 + 5
+  102 connections to Postgres, from 94: 64 + 13 + 8 + 4 + 2 + 1 + 2 + 2 + 1 + 5
   (`store.ConnectionsPerProcess`).
 
   Every write that changes a document's content also notifies `dispatch_doc_head` with the

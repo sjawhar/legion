@@ -797,7 +797,7 @@ func (s *countingBurstStore) AppendUpdatesWithCredit(ctx context.Context, room s
 // room committed them, whichever append takes the document's lock first. The two updates are
 // recorded and handed to the room's persistence here as the room's own observer and ygo's worker
 // do, and the store holds each append as it arrives, so the test decides the order. An append
-// stores the room's unstored updates through its position in commit order (Service.flushThrough):
+// stores the room's unstored updates through its position in commit order (Service.flushRun):
 // the batch's append, taken first, stores both when it commits first, and the lone update's append
 // committing first stores both too, the batch's update ahead of its own, so the other append then
 // finds nothing left to store. The lone update's call taken first, the batch's position stops
@@ -975,9 +975,28 @@ func TestAWriteAfterItsTransactionStoredTheRoomsLingeringUpdateForksTheRoom(t *t
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	const markID = "00000000-0000-4000-8000-000000000605"
+	held := storedHead(t, database, artifactID)
+	cursor := service.cursorOf(service.srv.GetDoc(artifactID))
+	if cursor == nil || cursor.heldThrough() != held {
+		t.Fatalf("the room's cursor does not stand at the stored head %d before the snapshot", held)
+	}
 	err := joinedWrite(service, func(ctx context.Context) error {
 		if _, err := service.SnapshotVersion(ctx, artifactID, alice); err != nil {
 			return fmt.Errorf("snapshot the document: %w", err)
+		}
+		// What the write below meets: the snapshot stored the browser's held update in this
+		// transaction, and the room's cursor has not moved over it, since that happens only when
+		// the transaction commits. Without both, the write would fork the room either way.
+		tx, _ := txFromContext(ctx)
+		var head int64
+		if err := tx.QueryRow(ctx, `select coalesce(max(version), 0) from doc_updates where artifact_id = $1`, artifactID).Scan(&head); err != nil {
+			return fmt.Errorf("read the transaction's head: %w", err)
+		}
+		if head <= held {
+			return fmt.Errorf("the snapshot stored nothing of the room's held update: the transaction's head is %d, the stored head was %d", head, held)
+		}
+		if through := cursor.heldThrough(); through != held {
+			return fmt.Errorf("the room's cursor stands at %d inside the transaction, want %d: the snapshot's versions are not committed", through, held)
 		}
 		if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: markID, By: alice}, "Browser words.", nil); err != nil {
 			return fmt.Errorf("mark the browser's words after the snapshot stored them: %w", err)

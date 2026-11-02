@@ -33,10 +33,9 @@ const (
 const ungatedAppend int64 = -1
 
 // appendGateStatement is the gate's one read: the room's greatest stored version, the head an
-// append's versions follow, and its least, the oldest version the room still stores, 0 each for a
-// room with none.
+// append's versions follow, 0 for a room with none.
 const appendGateStatement = `
-	select coalesce(max(version), 0), coalesce(min(version), 0) from doc_updates where artifact_id = $1
+	select coalesce(max(version), 0) from doc_updates where artifact_id = $1
 `
 
 // appendGate is the gate of one append transaction: its read, queued into the caller's batch
@@ -56,10 +55,9 @@ type appendGate struct {
 	room string
 	kind appendKind
 	// read is set once the read has run and scanned; err is its failure.
-	read     bool
-	err      error
-	latest   int64
-	earliest int64
+	read   bool
+	err    error
+	latest int64
 }
 
 // queueAppendGate queues the gate's read of room into b, the caller's batch, for an append of
@@ -87,7 +85,7 @@ func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind
 
 // scan reads the gate's row.
 func (g *appendGate) scan(row pgx.Row) error {
-	if err := row.Scan(&g.latest, &g.earliest); err != nil {
+	if err := row.Scan(&g.latest); err != nil {
 		g.err = fmt.Errorf("read latest document update: %w", err)
 		return g.err
 	}
@@ -112,12 +110,6 @@ func (g *appendGate) head(through int64) (int64, error) {
 		return 0, err
 	}
 	return g.latest, nil
-}
-
-// oldest is the least version the room stored when the gate read it, 0 for none: with the head
-// and the versions the transaction appends, what a committed batch hands noteStoredUpdates.
-func (g *appendGate) oldest() int64 {
-	return g.earliest
 }
 
 // appendUpdateTxClass appends one update inside tx under the gate: a run of one
@@ -156,7 +148,7 @@ func (p *PgVersioned) appendUpdatesTx(ctx context.Context, tx pgx.Tx, room strin
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return 0, err
 	}
-	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
+	if _, err := p.recoverPruneTx(ctx, tx, room); err != nil {
 		return 0, err
 	}
 	wrote := p.heads.ownWriteIn(tx, room)
@@ -192,6 +184,8 @@ const appendUpdatesStatement = `
 		insert into doc_updates (artifact_id, version, update, content_changed)
 		select $3::uuid, version, update, content_changed
 		from unnest($4::bigint[], $5::bytea[], $6::boolean[]) as appended(version, update, content_changed)
+	), owed as (
+		insert into doc_compaction_owed (artifact_id) select $3::uuid where $7 on conflict do nothing
 	)
 	` + notifyDocumentHeadStatement
 
@@ -241,8 +235,11 @@ func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpd
 		return nil, 0, err
 	}
 	statements := []writeStatement{{
-		sql:  appendUpdatesStatement,
-		args: []any{room, notice, room, versions, contents, classes},
+		sql: appendUpdatesStatement,
+		// The document is named in doc_compaction_owed, the documents the compaction sweep reads
+		// (compactionCandidates), once a row the run appends is not the document's first: a
+		// first row has nothing to fold into, and a document already named stays as it is.
+		args: []any{room, notice, room, versions, contents, classes, head > 0 || len(updates) > 1},
 		what: "append document update",
 	}, owedStatement}
 	if len(authors) > 0 {

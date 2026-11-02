@@ -427,7 +427,8 @@ func (s *Service) rebuildFork(ctx context.Context, write *liveWrite) (*crdt.Doc,
 // every durable writer of the document takes it before it appends: no append of this process or
 // another lands between this read and the transaction's commit, so the head read here is the one
 // every append of the transaction meets, and the room's cursor beside it is exact - a writer of
-// this process advances it inside that lock, after the commit that raised the head. The lock
+// this process advances it inside that lock, after the commit that raised the head, and what this
+// transaction stored of the room itself is folded in (roomBehindHead, transactionCursor). The lock
 // assigns the transaction no transaction id (pg_advisory_xact_lock). Only the room's own durable
 // writers wait for it - its persistence, a settlement - never a browser's keystroke, which the
 // room applies without it.
@@ -456,15 +457,16 @@ func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 
 // roomBehindHead reports whether live, the room resident for a document, stands behind head, the
 // document's durable head read under its advisory lock (lockedHead): an update the other process
-// appended that this room never took. Under that lock no write of this process sits between its
-// commit and its cursor advance, so a difference is the answer, not a reader landing in that
-// window. A room that kept no cursor is not judged behind: nothing says it is.
+// appended that this room never took. Under that lock no other write of this process sits between
+// its commit and its cursor advance, so a difference from the cursor this transaction sees (below)
+// is the answer, not a reader landing in that window. A room that kept no cursor is not judged
+// behind: nothing says it is.
 //
 // The head counts what this transaction has stored of the room itself and not yet committed: the
 // run an earlier operation of it flushed (Ledger.flushThrough - a version's capture, a snapshot)
 // is the room's own, advancing the instance's cursor only at the commit. So the cursor compared is
-// the one the transaction sees, with its flush's versions folded in (RoomFlush.heldThrough), as
-// its appends' gate compares it (appendingCursor). Compared bare, a room whose update a batch
+// the one the transaction sees, with its flush's versions folded in (transactionCursor,
+// RoomFlush.heldThrough), as its appends' gate compares it (appendingCursor). Compared bare, a room whose update a batch
 // still lingered over when the transaction's snapshot stored it reads as behind, and the write
 // forks the committed store, which holds neither that update nor anything after it.
 //
@@ -481,10 +483,7 @@ func (s *Service) roomBehindHead(ctx context.Context, room string, live *crdt.Do
 	if cursor == nil {
 		return false
 	}
-	if flush := ledgerFrom(ctx).flushFor(room); flush != nil && flush.cursor == cursor {
-		return flush.heldThrough() != head
-	}
-	return cursor.heldThrough() != head
+	return transactionCursor(ctx, room, cursor).heldThrough() != head
 }
 
 // warmFork is readFork's fork of live, the room resident for write's document: the room as of an
@@ -582,13 +581,16 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 	return fork, nil
 }
 
-// buildFork is a write's fork of state, an encoded document state, whose items client authors.
+// buildFork is a write's fork of state, an encoded document state, whose items client authors:
+// the stored history a cold write read (coldFork, rebuildFork) or the state of the room a warm
+// one forks (warmFork). It decodes through decodeStoredState, so a refusal of a stored history
+// reads as a room's load of the same history would log it.
 func buildFork(client crdt.ClientID, state []byte) (*crdt.Doc, error) {
 	fork := newDocumentCopy(crdt.WithClientID(client))
 	if len(state) == 0 {
 		return fork, nil
 	}
-	if err := crdt.ApplyUpdateV1(fork, state, nil); err != nil {
+	if err := decodeStoredState(fork, state); err != nil {
 		return nil, err
 	}
 	return fork, nil
