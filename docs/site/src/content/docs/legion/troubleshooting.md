@@ -643,7 +643,8 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   read the repository's collaborators, so until it can, no review but the review App's decides a
   round.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
-  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and the
+  anything above the reviewer's approved head but a commit under `docs/solutions/`, which retro
+  no longer writes, and the
   removal of files under `.legion/` that `legion handoffs import` commits
   (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
   is not built on the approved one, GitHub does not know the approved head, or GitHub's compare

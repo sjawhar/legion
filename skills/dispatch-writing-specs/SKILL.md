@@ -1,13 +1,13 @@
 ---
 name: dispatch-writing-specs
-description: "Use in a session with Dispatch before you write or change a spec, and before an ask, comment or message a person reads. It replaces superpowers' brainstorming there."
+description: "Use in a session with Dispatch before you write or change a spec, ask, comment or message a person reads. It replaces superpowers' brainstorming there."
 ---
 
 # Writing specs
 
 ## The aim
 
-Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec (`skill://legion-worker`).
+Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes none (`skill://legion-worker`).
 
 ## The outline
 
@@ -18,30 +18,31 @@ Part | Content
 `Summary` | The change in the reader's own terms, at most 100 words
 `Problem` | What goes wrong, for whom, with counts
 `Goals and non-goals` | What is in and out of scope
-`Requirements` | `**R1.**` on, each naming its source (`From:`)
+`Requirements` | one `:::requirement` block each, `**R1.**` on, naming its source (`From:`)
 `Design` | How it meets them; a value and its reason for each limit, size and time
 `Decisions` | Your own choices
-`Acceptance` | `**A1.**` on, each naming the requirements it tests
 
-Another agent can build and check the work from the spec alone. A small change gets a few sentences per part, no matrix. Split a large design into child issues.
+The checks live in the issue's `verification.md`, one `:::check` block each: `serves` (the requirements), `surface` (`browser`, `cli`, `api`), `run`, `when` (`before_merge`, `after_merge`, `default_branch`) and `negative_control`. `dispatch result` records what one saw; `dispatch results` prints each with its latest result.
+
+Another agent builds the work from the spec and checks it from those blocks. A small change gets a few sentences per part. Split a large design into children.
 
 ## Rules for the text
 
 For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
-- Write about the current design, never the person or how people reached it. Never quote people or upload their words.
+- Write about the current design, never the person or how people reached it; never quote people or upload their words.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
-- A sentence that cites a gate passing (a test, review, check or proof) also says what the pass does not show: "The tests pass; they catch a wrong verdict, not a proof of a contradiction."
+- A sentence that cites a gate passing (a test, review or check) also says what the pass does not show.
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
-- Explain each name or term a new reader may not know. Say in a clause what each issue you name does for this reader.
-- In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
+- Explain each name or term a new reader may not know, and what each issue you name does.
+- In an ask, comment or message, name a requirement or check by what it is, never its number.
 
 ## Questions
 
-- Name the concrete case first: which machines, files, sessions or people, and the numbers. Then ask the choice in those terms, never "Which option?": a reader cannot work back from a general question to the case.
+- Name the concrete case first: which machines, files, sessions or people, and the numbers. Ask the choice in those terms, never "Which option?".
 - Propose an answer to each point, numbers included, with a reason.
 - A choice inside what the person asked for, or one their messages favour, is settled: decide it.
 - Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.
@@ -49,8 +50,8 @@ For each spec, ask, comment and message:
 
 ## Each version
 
-1. After a person's answer, comment or edit, rewrite what it touches; delete what it contradicts. Never narrate an edit or what used to be here; versions and comments hold the history. Reply in a comment's thread.
-2. Before each spec write, paste the whole spec, never a path, into a fresh subagent's assignment. It lists gaps, conflicts, uncheckable requirements, unclear text, and missing or needless questions. Fix or record each.
+1. After a person's answer, comment or edit, rewrite what it touches; delete what it contradicts. Never narrate an edit; versions and comments hold the history. Reply in a comment's thread.
+2. Before each spec write, paste the whole spec, never a path, into a fresh subagent's assignment: it lists gaps, conflicts, unclear text and needless or missing questions. Fix or record each.
 3. Before each approval request, `wait` for a read-only fact check: `task(agent="scout")`.
 4. Name each version with `dispatch doc-edit --summary`.
 
@@ -63,13 +64,13 @@ For each spec, ask, comment and message:
 
 ## Old specs
 
-At your next edit, rewrite a spec outside the outline whole, in one version. Move its ask blocks with `doc-edit`'s `move`. Kept text follows the text rules: restate each retelling, quotation or unlinked attribution as design, or cut it.
+At your next edit, rewrite a spec outside the outline whole, in one version, moving its ask blocks with `doc-edit`'s `move`. Restate each retelling, quotation or unlinked attribution as design, or cut it.
 
 ## Approval
 
-- Request approval once, when each ask block is answered or waived, each claim is checked, and this version is unapproved. Unbuilt acceptance checks never delay it.
-- After approval, version only a change to scope, acceptance, cost, risk or a person's decision, all at once. Put other fixes in the plan or a comment.
+- Request approval of the spec and the Verification document together (`request-approval --include-verification`), once each ask block is answered or waived, each claim checked, and this version unapproved. A check with no result never delays it.
+- After approval, version only a change to scope, a check, cost, risk or a person's decision, all at once. Other fixes go in the plan or a comment.
 
 ## The plan
 
-Write the plan with `writing-plans` as the issue's `plan.md`, not a repository file.
+Write the plan with `writing-plans` as the issue's `plan.md`, not a repository file. Each task is a `:::plan_task` block with `serves` (the requirements) and `needs` (the tasks before it).

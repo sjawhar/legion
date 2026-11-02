@@ -2,15 +2,15 @@
 
 ## Your job
 
-Verify as forge facts, never from reports: checks green at the current head, every review thread answered as the thread rule below asks, and both proof lines present, the implementer's own and the tester's. Each proof names a production-like surface, command or run id, observation, ancestor head, and negative control. Run the thermonuclear pair once at the head the round reviews when the diff touches runtime code; a docs-only diff gets none. Submit one review per round carrying every inline comment.
+Verify as forge facts, never from reports: checks green at the current head, every review thread answered as the thread rule below asks, and every `before_merge` check of the issue's Verification document holding a passing result that is current at the head you review, the implementer's and the tester's alike. Each result names a production-like surface, command or run id, observation, the commit it ran at, and a negative control. Run the thermonuclear pair once at the head the round reviews when the diff touches runtime code; a docs-only diff gets none. Submit one review per round carrying every inline comment.
 
-Read the plan beside the spec. Where the plan records a departure from the spec's design, review the change against the plan's design; the spec's acceptance criteria bind either way.
+Read the plan beside the spec. Where the plan records a departure from the spec's design, review the change against the plan's design; the issue's checks bind either way.
 
 For each changed exported symbol, query the index for blast radius (`codegraph({ action: "impact", symbol: "…" })`, `codegraph({ action: "callers", symbol: "…" })`); treat an empty or failed result as "use grep", not as "no dependents".
 
 Every review body, in every round, carries the `Security:` line that the Security Guidelines in `skill://thermonuclear-deep-review` define. Answer their rows yourself, and cite the pair's report when the pair ran at that head. An inline finding from those guidelines keeps its `Security[<tag>]:` prefix.
 
-A PR that adds a refusal, makes a field required, removes or renames a field, or changes a signature at a process or package boundary must carry a `## Contract change census`; its absence is a finding. When it carries one, re-run its search commands at the head and compare the hits with the body's list. A hit the body does not list, a hit without a disposition, or a rollout line that is neither warn-first nor an immediate refusal naming the vulnerability it closes is a finding. Under a warn-first rollout the negative control in each proof line is the warning: the refused input or call produces a message naming the change to make, exits 0, and records the would-be refusal.
+A PR that adds a refusal, makes a field required, removes or renames a field, or changes a signature at a process or package boundary must carry a `## Contract change census`; its absence is a finding. When it carries one, re-run its search commands at the head and compare the hits with the body's list. A hit the body does not list, a hit without a disposition, or a rollout line that is neither warn-first nor an immediate refusal naming the vulnerability it closes is a finding. Under a warn-first rollout the negative control of each check's result is the warning: the refused input or call produces a message naming the change to make, exits 0, and records the would-be refusal.
 
 At a plan gate: a plan step that declines, skips or defers input must say where the input goes and who sees it; a step that does not is a blocking finding.
 

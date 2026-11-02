@@ -247,6 +247,40 @@ func TestNoComposedPromptSaysLegionRefusesAMergeOverACheck(t *testing.T) {
 	}
 }
 
+// What a phase proved is a result recorded against a `check` block of the issue's Verification
+// document (`dispatch result`), and the pull request body carries one line per check. No composed
+// prompt — any phase worker's, and the architect's in both its shapes — still teaches the two
+// lines the body carried before, the six-field `proof` array a handoff carried, or the
+// `Production:` line the production check wrote, which is now an `after_merge` result a closed
+// issue takes. The two line names are built from their role rather than written out, so a search
+// of the repository for either finds the texts that teach it and not this test.
+func TestNoComposedPromptTeachesAnE2ELineOrAProofArray(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	retired := []string{"`proof` array", "`Production:` line",
+		"pending deploy of", "the production-like proof", "the implementer's proof"}
+	for _, role := range []string{"implementer", "tester"} {
+		retired = append(retired, fmt.Sprintf("E2E (%s)", role))
+	}
+	for _, tc := range []struct {
+		role   claim.Role
+		isRoot bool
+	}{
+		{claim.RolePlanner, false}, {claim.RoleImplementer, false}, {claim.RoleTester, false},
+		{claim.RoleReviewer, false}, {claim.RoleMerger, false},
+		{claim.RoleArchitect, true}, {claim.RoleArchitect, false},
+	} {
+		text := composedText(t, composer, tc.role, tc.isRoot)
+		for _, phrase := range retired {
+			if strings.Contains(text, phrase) {
+				t.Errorf("the composed %s prompt (root %t) still says %q", tc.role, tc.isRoot, phrase)
+			}
+		}
+	}
+}
+
 // A state directory outlives the daemon binary that wrote its prompt snapshot, so a boot of a newer
 // daemon finds the older daemon's words there. A part whose content is not the running binary's is
 // rewritten, shared or the daemon's own: a prompt that contradicts the daemon's own behaviour (who
