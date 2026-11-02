@@ -18,15 +18,15 @@
 // literal grammar below, and refuses no call by reading any other: a call in another form runs as
 // written. For each literal call it lets run it mints one single-use marker
 // (`@legion/envoy-client/askgate-marker`), keyed by the argv the CLI will receive and, behind a
-// review or a deliberate pass, bound to the digest of the dry run's arguments and to the sha256 of
-// each file the argv names, as the gate read it for the review. The CLI posts a
-// gated write in a session whose record a live Oh My Pi process keeps (envoy.ts writes it) only
-// when it consumes such a marker, so a write sent in any other form, from a pipe, a script,
-// `python3 -c`, an eval cell's process or anything else, is refused when it runs. The CLI's check
-// does not cover a direct HTTP request to Dispatch, an older or a different CLI, or a same-user
-// process that removes the record or a marker, acts as another session id or state directory, or
-// otherwise goes around the CLI. Precision comes first: the gate must not refuse a call that holds
-// no Dispatch write, since a false refusal in block mode stops real work.
+// review or a deliberate pass (a rebuttal, a breaker trip), bound to the digest of the dry run's
+// arguments and to the sha256 of each file the argv names, as the gate read it for the review. The
+// CLI posts a gated write in a session whose record a live Oh My Pi process keeps (envoy.ts writes
+// it) only when it consumes such a marker, so a write sent in any other form, from a pipe, a
+// script, `python3 -c`, an eval cell's process or anything else, is refused when it runs. The
+// CLI's check does not cover a direct HTTP request to Dispatch, an older or a different CLI, or a
+// same-user process that removes the record or a marker, acts as another session id or state
+// directory, or otherwise goes around the CLI. Precision comes first: the gate must not refuse a
+// call that holds no Dispatch write, since a false refusal in block mode stops real work.
 //
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
@@ -65,8 +65,9 @@
 //     not reviewed. An upload given with `--path` prints the path, not the text. Every file whose
 //     text the write posts, that path and each `--<field>-file`, is read in place before the
 //     model is asked, and the call runs as written. The model reviews those bytes (an upload's
-//     as `content`), and the marker binds the sha256 of each file in argv order. The CLI reads
-//     each file again before it posts and refuses one whose bytes changed since the review (a
+//     as `content`), and the marker binds the sha256 of each file in argv order (behind a review,
+//     a rebuttal or a breaker trip; `UNREVIEWED_OUTCOMES` bind none). The CLI reads each file
+//     again before it posts and refuses one whose bytes changed since the gate read them (a
 //     call earlier in the same message can change it: Oh My Pi runs every `tool_call` hook of a
 //     message before any call of it runs), and an upload sends the bytes the CLI read for that
 //     check. An `--image` file is no part of that: the model reads its path and not its bytes.
@@ -165,7 +166,9 @@
 //   - no-model-role / skipped: neither `@askgate` (modelRoles.askgate) nor `@default` resolves, or
 //     the session's primary model is on another provider than the gate's. Nothing is rendered or
 //     sent. With no model role the call is refused in both modes, naming the roles to set; it never
-//     counts toward the halt, since a halt would let the writes out. Another provider lets it run.
+//     counts toward the halt, since a halt would let the writes out. Another provider lets it run,
+//     with an argv-only marker, as a halt does: no review stands behind its bytes, so the CLI
+//     checks no file of it.
 //   - verdict: `@askgate` is asked once, else `@default`, raced against the deadline. A model
 //     that answers with an error (a provider 404 or 5xx) hands the request to the next model of
 //     the role's retry.fallbackChains, as omp resolves it for the role in use (`fallbackModels`),
@@ -352,8 +355,11 @@ const RECOMMENDED_CEILING_MS = 120_000;
 const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
 /**
- * The outcomes of a call the gate let through without a verdict, the gate's own failure or a stop
- * it took: no review stands behind the bytes, so the command the agent wrote runs as written.
+ * The outcomes of a call the gate let through without a verdict and without deciding on its
+ * arguments: the gate's own failure, a stop it took, its halt, or a session whose model is on
+ * another provider. No review stands behind the bytes, so the command the agent wrote runs as
+ * written, and its marker binds the argv alone: a file an earlier call of the same message changes
+ * still posts, since there is no reviewed copy for it to differ from.
  */
 const UNREVIEWED_OUTCOMES: ReadonlyArray<GateEntry["outcome"]> = [
   "error",
@@ -361,6 +367,8 @@ const UNREVIEWED_OUTCOMES: ReadonlyArray<GateEntry["outcome"]> = [
   "no-verdict",
   "abandoned",
   "shutdown",
+  "halted",
+  "skipped",
 ];
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 const GATE_ARGS_MAX_BYTES = 64 * 1024;
@@ -3666,10 +3674,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         }
       }
       // A review, or a pass the gate took over the dry run's arguments (a rebuttal, a breaker
-      // trip, a halt, another provider), binds those arguments and the files' digests; a call no
-      // verdict stands behind is argv-only. The mint reads the command the handler finally
-      // returns, the override comment put back, whose argv is what bash hands the CLI. A call
-      // this entry already refused mints nothing: no command of it runs.
+      // trip), binds those arguments and the files' digests; a call no verdict stands behind (a
+      // halt and another provider among them) is argv-only. The mint reads the command the
+      // handler finally returns, the override comment put back, whose argv is what bash hands the
+      // CLI. A call this entry already refused mints nothing: no command of it runs.
       let minted: ToolCallResult;
       if (refusal === undefined && mints && mintSkipped === undefined) {
         const { outcome } = decision.fields;

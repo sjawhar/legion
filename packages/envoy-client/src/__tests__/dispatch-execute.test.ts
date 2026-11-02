@@ -8446,6 +8446,161 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  test("on a busy issue names the closest documents first, counts the rest and names the read that lists them", async () => {
+    // 12 artifacts, oldest first as Dispatch lists them: the spec, the uploaded prediction, then
+    // ten notes. The reference differs from the prediction's slug in letter case alone.
+    const artifacts = [
+      { id: "artifact-42", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+      {
+        id: "a-p",
+        slug: "prediction-p1-md",
+        name: "prediction-P1.md",
+        kind: "file",
+        primary: false,
+      },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        id: `a-${index}`,
+        slug: `notes-${index}-md`,
+        name: `notes-${index}.md`,
+        kind: "doc",
+        primary: false,
+      })),
+    ];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-1234") {
+        return response({ key: "DSP-1234", primary_artifact_id: "artifact-42", artifacts });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+    const notes = [9, 8, 7, 6, 5, 4, 3].map((n) => `notes-${n}-md (notes-${n}.md)`).join(", ");
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "DSP-1234", artifact: "prediction-P1-md" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `document "prediction-P1-md" not found by slug; this issue's 12 documents and files include: ` +
+        `prediction-p1-md (prediction-P1.md), ${notes}; dispatch read --issue DSP-1234 lists them all`
+    );
+  });
+
+  // The cases of Dispatch's TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII: a name
+  // holding the reference ranks by how much longer it is, and only ASCII letters fold.
+  test.each([
+    [
+      "Plan",
+      [
+        "plan.md",
+        ...["alpha", "beta", "gamma", "delta", "omega", "kappa", "sigma", "theta"].map(
+          (n) => `plan-${n}-archive.md`
+        ),
+      ],
+      [
+        "plan.md",
+        "plan-beta-archive.md",
+        "plan-theta-archive.md",
+        "plan-sigma-archive.md",
+        "plan-kappa-archive.md",
+        "plan-omega-archive.md",
+        "plan-delta-archive.md",
+        "plan-gamma-archive.md",
+      ],
+    ],
+    [
+      "Plan.",
+      [
+        "plan.v1.md",
+        ...["alpha", "beta", "gamma", "delta", "omega", "kappa", "sigma", "theta"].map(
+          (n) => `plan.${n}-archive.md`
+        ),
+      ],
+      [
+        "plan.v1.md",
+        ...["beta", "theta", "sigma", "kappa", "omega", "delta", "gamma"].map(
+          (n) => `plan.${n}-archive.md`
+        ),
+      ],
+    ],
+    [
+      "İİİİ-md",
+      ["iiii.md", ...[0, 1, 2, 3, 4, 5, 6, 7].map((n) => `notes-${n}.md`)],
+      [7, 6, 5, 4, 3, 2, 1, 0].map((n) => `notes-${n}.md`),
+    ],
+  ])("ranks %s as Dispatch does", async (reference, names, shown) => {
+    const slug = (name: string) => name.replaceAll(".", "-");
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-7") {
+        return response({
+          key: "DSP-7",
+          primary_artifact_id: "none",
+          artifacts: names.map((name) => ({
+            id: name,
+            slug: slug(name),
+            name,
+            kind: "doc",
+            primary: false,
+          })),
+        });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "DSP-7", artifact: reference },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `this issue's 9 documents include: ${shown.map((name) => `${slug(name)} (${name})`).join(", ")}; dispatch read`
+    );
+  });
+
+  test("a project read with no document lists the project's documents", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(`${target.pathname}${target.search}`);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") {
+        return response([
+          { id: "r-1", slug: "runbook-md", name: "runbook.md", kind: "doc", primary: false },
+          { id: "r-2", slug: "chart-png", name: "chart.png", kind: "image", primary: false },
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { project: "CORE" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      "Project: CORE\nDocuments:\n- runbook-md (runbook.md, doc)\n- chart-png (chart.png, image)"
+    );
+    expect(result.details).toEqual({ project: "CORE" });
+    expect(requests).toEqual(["/api/v1/projects/CORE/artifacts?unlinked=true"]);
+  });
+
   test.each([
     [
       "dispatch_artifact",
@@ -9557,28 +9712,110 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
-  test("reports a moved approval ask's derived turn instead of the replying agent's turn", async () => {
+  test("a reply on a moved approval request says why it still waits on the agent and how to hand it back", async () => {
     const askID = "01234567-0000-4000-8000-000000000045";
+    const requests: Array<{ method: string; pathname: string }> = [];
+    const approvalAsk = (artifact: { primary: boolean; issue: string | null }) => ({
+      ask: {
+        id: askID,
+        issue_key: artifact.issue,
+        kind: "approval",
+        question: "Approve spec.md at version 36?",
+        state: "open",
+        waiting_on: "agent",
+        approval: {
+          artifact_id: "artifact-7",
+          name: "spec.md",
+          version: 37,
+          requested_version: 36,
+        },
+        approval_artifact: {
+          project: "DSP",
+          slug: "spec",
+          name: "spec.md",
+          primary: artifact.primary,
+        },
+      },
+      replies: [],
+      edits: [],
+      answers: [],
+      followers: [],
+    });
+    const run = async (artifact: { primary: boolean; issue: string | null }) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-42", body: "The revision is ready.", reply_to_ask: askID },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (async (url: RequestInfo | URL, init?: RequestInit) => {
+          const target = new URL(String(url));
+          requests.push({ method: init?.method ?? "GET", pathname: target.pathname });
+          if (target.pathname === `/api/v1/asks/${askID}`) return response(approvalAsk(artifact));
+          return response({
+            id: "comment-3",
+            issue_key: "DSP-42",
+            ask_id: askID,
+            turn: "human",
+            ask_waiting_on: "agent",
+          });
+        }) as unknown as typeof fetch,
+        subscriptions: async () => ["notifications.dispatch.issue.DSP-42.>"],
+      });
+
+    const result = await run({ primary: true, issue: "DSP-42" });
+    expect(result.text).toBe(
+      [
+        `Replied on ask ${askID} (comment comment-3; ask now waiting on agent). ` +
+          "You follow this ask: its answer and replies reach you directly.",
+        "The reply did not hand the ask to the human: it is the approval request for spec.md at " +
+          "version 36, and spec.md is now version 37. No reply hands a moved approval request " +
+          "back. Once the human has agreed to every point in version 37, run: " +
+          "dispatch request-approval --issue DSP-42 --summary '<what changed since version 36>'",
+      ].join("\n")
+    );
+    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
+    expect(requests).toEqual([
+      { method: "POST", pathname: "/api/v1/issues/DSP-42/comments" },
+      { method: "GET", pathname: `/api/v1/asks/${askID}` },
+    ]);
+
+    expect((await run({ primary: false, issue: "DSP-42" })).text).toContain(
+      "run: dispatch request-approval --issue DSP-42 --artifact artifact-7 --summary"
+    );
+    expect((await run({ primary: false, issue: null })).text).toContain(
+      "run: dispatch request-approval --project DSP --artifact artifact-7 --summary"
+    );
+  });
+
+  test("a progress note on an approval request reads no ask", async () => {
+    const askID = "01234567-0000-4000-8000-000000000046";
+    const requests: string[] = [];
     const result = await executeDispatchTool({
       tool: "dispatch_comment",
-      args: { issue: "DSP-42", body: "The revision is ready.", reply_to_ask: askID },
+      args: { issue: "DSP-42", body: "Revising.", reply_to_ask: askID, turn: "agent" },
       cwd: "/workspace",
       host: "omp",
       config,
       env: {},
       exec: repoExec("owner/repo"),
-      fetchImpl: (async () =>
-        response({
-          id: "comment-3",
+      fetchImpl: (async (url: RequestInfo | URL) => {
+        requests.push(new URL(String(url)).pathname);
+        return response({
+          id: "comment-4",
           issue_key: "DSP-42",
           ask_id: askID,
-          turn: "human",
+          turn: "agent",
           ask_waiting_on: "agent",
-        })) as unknown as typeof fetch,
+        });
+      }) as unknown as typeof fetch,
+      subscriptions: async () => ["notifications.dispatch.issue.DSP-42.>"],
     });
 
-    expect(result.text).toContain("ask now waiting on agent");
-    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
+    expect(result.text).not.toContain("request-approval");
+    expect(requests).toEqual(["/api/v1/issues/DSP-42/comments"]);
   });
 
   test("rejects a comment turn without reply_to_ask before calling the server", async () => {
@@ -10712,6 +10949,16 @@ describe("executeDispatchTool", () => {
             { url: "https://github.com/owner/repo/pull/7", kind: "github_pr" },
             { url: "https://example.com/runs/3" },
           ],
+          artifacts: [
+            { id: "artifact-42", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+            {
+              id: "artifact-43",
+              slug: "chart-png",
+              name: "chart.png",
+              kind: "image",
+              primary: false,
+            },
+          ],
           open_asks: [],
           progress: { tasks: { done: 1, total: 4 }, children: null },
           last_seq: 0,
@@ -10817,7 +11064,12 @@ describe("executeDispatchTool", () => {
     // The pull request a person linked is on the read, as on the issue page; the reference graph
     // at the end carries none of it.
     expect(result.text).toContain(
-      "Progress: tasks 1/4\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nOpen asks:"
+      "Progress: tasks 1/4\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nDocuments:"
+    );
+    // Every artifact the issue holds, by slug, filename and kind, which a missing document's hint
+    // names this read for.
+    expect(result.text).toContain(
+      "Documents:\n- spec (spec.md, doc)\n- chart-png (chart.png, image)\nOpen asks:"
     );
     expect(
       result.text.endsWith(

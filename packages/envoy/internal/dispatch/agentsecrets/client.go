@@ -144,11 +144,6 @@ func (c *Client) Pending(ctx context.Context, approver string) (json.RawMessage,
 	return c.do(ctx, http.MethodGet, "/v1/pending?"+query.Encode(), nil)
 }
 
-// Record returns one credential request by id.
-func (c *Client) Record(ctx context.Context, recordID string) (json.RawMessage, error) {
-	return c.do(ctx, http.MethodGet, "/v1/credential-requests/"+url.PathEscape(recordID), nil)
-}
-
 // Decision is every approve, deny and revoke body Dispatch sends: Approver is the deciding
 // human's canonical login as Dispatch's session resolved it, and Code, for a machine login, is the
 // typed confirmation code the human entered.

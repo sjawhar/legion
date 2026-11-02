@@ -239,6 +239,8 @@ RULES = {
         Read(f"{DAEMON}/cmd/legion/testdata/gh-help/**", "internal/runtime/tmux/tmux_real_test.go:1822")],
     f"{DAEMON}/internal/stream/integration_test.go": [legion_build("internal/stream/integration_test.go:130 go build .../daemon/cmd/legion")],
     f"{DAEMON}/internal/runtime/workerbin/workerbin_test.go": reads((f"{DAEMON}/docker/gh", "internal/runtime/workerbin/workerbin_test.go:58")),
+    f"{DAEMON}/internal/testpg/file_copy_test.go": reads(
+        (f"{DAEMON}/**", "internal/testpg/file_copy_test.go:22 walks every .go file under packages/daemon (../..)")),
     # --- envoy
     f"{ENVOY}/cmd/broker-refgen/auth_test.go": [
         Read(f"{ENVOY}/{d}/*", "cmd/broker-refgen/auth_test.go:14 readAPI(repo root) parses it") for d in BROKER_REFGEN_DIRS],
@@ -291,6 +293,8 @@ RULES = {
         run(ENVOY, ["./..."], "internal/testnats/nats_test.go:708-709 go list -f ... ./... in packages/envoy", mode="build"),
         *[Read(g, "internal/testnats/nats_test.go:741-747 walks every .go file under packages/envoy but infra, node_modules, testdata")
           for g in envoy_top_level_but_infra()]],
+    f"{ENVOY}/internal/testpg/file_copy_test.go": reads(
+        (f"{ENVOY}/**", "internal/testpg/file_copy_test.go:22 walks every .go file under packages/envoy (../.., infra included)")),
     # --- envoy-infra
     f"{INFRA}/core/permissions_live_test.go": [
         run(ENVOY, ["./cmd/dispatch", "./cmd/listener"], "infra/core/permissions_live_test.go's buildEnvoyCommand go build . in ../../cmd/<dispatch|listener> (root go.work)", mode="build")],

@@ -36645,6 +36645,25 @@ function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false)
     message: alwaysRequireArtifact ? "Exactly one of issue and project is required; artifact or ref must name the document." : "Exactly one of issue and project is required; with project, artifact names the document."
   };
 }
+var ARTIFACT_OWNER_AND_SOURCE_RULE = "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.";
+var CONTENT_IS_MARKDOWN = "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
+var PATH_KEEPS_BYTES = "path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged";
+var ARTIFACT_CONTENT_NAME_RULE = `${CONTENT_IS_MARKDOWN}, so with content the name ends in .md or .markdown or has no extension; upload any other file (.jsonl, .tsv, .json, .txt) with ${PATH_KEEPS_BYTES}.`;
+var NAME_EXTENSION = /\.([^\s.]+)$/u;
+var MARKDOWN_EXTENSION = /^(md|markdown)$/i;
+var artifactOwner = documentOwnerValidation(false);
+function artifactProblem(value) {
+  const input = value;
+  if (!artifactOwner.check(value) || typeof input.path === "string" === (typeof input.content === "string")) {
+    return ARTIFACT_OWNER_AND_SOURCE_RULE;
+  }
+  if (typeof input.content !== "string" || typeof input.name !== "string")
+    return;
+  const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
+  if (extension === undefined || MARKDOWN_EXTENSION.test(extension))
+    return;
+  return `${CONTENT_IS_MARKDOWN}, and ${JSON.stringify(input.name)} is not a Markdown name. Upload the file under the same name with ${PATH_KEEPS_BYTES}; content takes a name ending in .md or .markdown or with no extension.`;
+}
 var documentEditOwner = documentOwnerValidation(true);
 var documentEditValidation = {
   check: (value) => {
@@ -36692,7 +36711,7 @@ var messageValidation = {
   },
   message: "issue is required unless in_reply_to names a message delivered to this session, which is the one message with no issue."
 };
-var readOwner = documentOwnerValidation(true);
+var readOwner = documentOwnerValidation(false);
 var readValidation = {
   check: (value) => {
     const input = value;
@@ -36700,7 +36719,7 @@ var readValidation = {
       return readOwner.check(value);
     return input.issue === undefined && input.project === undefined && input.artifact === undefined && input.ref === undefined;
   },
-  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`
+  message: "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " + "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it."
 };
 var ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"];
 function componentsArgument(z) {
@@ -36959,7 +36978,7 @@ var dispatchToolSpecs = [
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
       reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
-      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
+      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'. human does not " + "apply to an approval request a newer version moved: it stays with you until dispatch " + "request-approval hands it back at the current version.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: commentValidation
@@ -37065,27 +37084,25 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + `${ARTIFACT_CONTENT_NAME_RULE} ` + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key for an unlinked document.").optional(),
       name: z.string().describe("Artifact filename shown in Dispatch."),
       path: z.string().describe("Local path to the file to upload.").optional(),
-      content: z.string().describe("Inline text to store as a Markdown document; a CR LF or a lone carriage return in it is stored as a line feed.").optional(),
+      content: z.string().describe("Inline text to store as a Markdown document, under a name ending in .md or .markdown or with no extension; a CR LF or a lone carriage return in it is stored as a line feed.").optional(),
       summary: z.string().describe("Optional version summary.").optional()
     }),
     validation: {
-      check: (value) => {
-        const input = value;
-        return documentOwnerValidation(false).check(value) && typeof input.path === "string" !== (typeof input.content === "string");
-      },
-      message: "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document."
+      check: (value) => artifactProblem(value) === undefined,
+      message: `${ARTIFACT_OWNER_AND_SOURCE_RULE} ${ARTIFACT_CONTENT_NAME_RULE}`,
+      refusal: (value) => artifactProblem(value) ?? ARTIFACT_OWNER_AND_SOURCE_RULE
     }
   },
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -38828,22 +38845,25 @@ class DispatchWriteUnsettledError extends Error {
   last;
   attempts;
   name = "DispatchWriteUnsettledError";
-  constructor(last, attempts, unanswered) {
+  constructor(last, attempts, unanswered, keyed = false) {
     let answer;
     let why = "an earlier attempt of the write may have reached Dispatch";
     if (last instanceof DispatchGatewayError) {
       answer = last.answer;
+    } else if (last instanceof DispatchServiceError && last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+      answer = last.code;
+      why = "Dispatch was still running an earlier attempt of the write";
     } else if (last instanceof DispatchServiceError) {
       answer = `${last.code}: ${last.message}`;
-      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
-        why = "Dispatch was still running an earlier attempt of the write";
-      }
     } else {
       answer = unanswered ?? last.message;
       why = "an attempt of the write may have reached Dispatch";
     }
     const tried = attempts === 1 ? "its only attempt" : `the last of ${attempts} attempts`;
-    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect: check whether ` + "it did before retrying it.", { cause: last });
+    const next = keyed ? ". Dispatch finishes an attempt it received whatever this command does, so read the " + "write back before you send it again: a new command sends it under a new key." : ": check whether it did before retrying it.";
+    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect${next}`, {
+      cause: last
+    });
     this.last = last;
     this.attempts = attempts;
   }
@@ -38878,7 +38898,9 @@ function requestSignal(signal) {
 var DISPATCH_WRITE_RETRY = {
   pausesMs: [1000, 2000, 4000, 8000],
   withinMs: 30000,
-  silenceMs: 20000
+  silenceMs: 20000,
+  inFlightPauseMs: 3000,
+  inFlightWithinMs: 55000
 };
 function pauseFor(ms, signal) {
   const { promise, resolve, reject } = Promise.withResolvers();
@@ -38973,7 +38995,7 @@ var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
 async function writeAnswer(response, key) {
   const echoed = keyEchoed(response, key);
   if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
-    return { response, again: false, reached: false, echoed, unjudged: false };
+    return { response, again: false, reached: false, running: false, echoed, unjudged: false };
   }
   const { status } = response;
   const text = await response.text();
@@ -38986,6 +39008,7 @@ async function writeAnswer(response, key) {
     }
   }
   const again = retriesUnderKey(status, shape.code);
+  const running = again && status === 409;
   return {
     response: new Response(text, {
       status,
@@ -38993,7 +39016,8 @@ async function writeAnswer(response, key) {
       headers: response.headers
     }),
     again,
-    reached: status >= 500 || again && status === 409,
+    reached: status >= 500 || running,
+    running,
     echoed,
     unjudged: !echoed && typeof shape.error === "string"
   };
@@ -39086,12 +39110,14 @@ class DispatchClient {
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
+  #madeAt;
   constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.writeRetry = writeRetry;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+    this.#madeAt = this.#now();
   }
   async issue(input) {
     const answer = await this.#jsonAnswer("POST", ["api", "v1", "issues"], input);
@@ -39495,10 +39521,16 @@ class DispatchClient {
     }
     const key = callerKey ?? crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
-    const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
+    const { pausesMs, withinMs, silenceMs, inFlightPauseMs, inFlightWithinMs } = this.writeRetry;
+    const pause = this.writeRetry.pause ?? pauseFor;
     const request = `${method} ${url}`;
     const started = this.#now();
+    const bodyBytes = body === undefined ? 0 : typeof body.content === "string" ? Buffer.byteLength(body.content) : body.content.byteLength;
+    const upload = bodyBytes >= STREAMED_BODY_MIN;
+    const lastAsk = this.#madeAt + inFlightWithinMs;
     let reached = false;
+    let running = false;
+    let sawKeyedLayer = false;
     for (let attempt = 1;; attempt++) {
       let answer;
       let thrown;
@@ -39509,33 +39541,42 @@ class DispatchClient {
         if (!answer.again)
           return answer.response;
         reached ||= answer.reached;
+        running ||= answer.running && !upload;
+        sawKeyedLayer ||= answer.echoed;
       } catch (error) {
         const name = error instanceof Error || error instanceof DOMException ? error.name : "";
         if (!(error instanceof WriteAttemptSilent) && (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")) {
-          throw this.#ended(error, request, attempt, true);
+          throw this.#ended(error, request, attempt, true, sawKeyedLayer);
         }
         thrown = error;
         reached = true;
+        running ||= error instanceof WriteAttemptSilent && !upload;
       }
-      const scheduled = pausesMs[attempt - 1];
+      const scheduled = running ? Math.min(pausesMs[attempt - 1] ?? inFlightPauseMs, inFlightPauseMs) : pausesMs[attempt - 1];
       const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
-      const inTime = scheduled !== undefined && this.#now() - started + wait <= withinMs;
-      if (!inTime || !(answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false))) {
+      const latest = Math.min(started + (running ? inFlightWithinMs : withinMs), lastAsk);
+      let again = scheduled !== undefined && this.#now() + wait <= latest;
+      if (again) {
+        again = answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false);
+        sawKeyedLayer ||= again;
+        again &&= this.#now() + wait <= latest;
+      }
+      if (again) {
+        try {
+          await pause(wait, this.#signal);
+        } catch (error) {
+          throw this.#ended(error, request, attempt, reached, sawKeyedLayer);
+        }
+        again = this.#now() <= latest;
+      }
+      if (!again) {
         if (answer !== undefined) {
-          return this.#unsettled(method, url, answer.response, reached, attempt);
+          return this.#unsettled(method, url, answer.response, reached, attempt, sawKeyedLayer);
         }
         if (thrown instanceof WriteAttemptSilent) {
-          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`);
+          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`, sawKeyedLayer);
         }
         throw thrown;
-      }
-      await answer?.response.body?.cancel().catch(() => {
-        return;
-      });
-      try {
-        await pause(wait, this.#signal);
-      } catch (error) {
-        throw this.#ended(error, request, attempt, reached);
       }
     }
   }
@@ -39568,12 +39609,12 @@ class DispatchClient {
       clearTimeout(timer);
     }
   }
-  #ended(error, request, attempts, mayHaveReached) {
+  #ended(error, request, attempts, mayHaveReached, keyed) {
     const reason = this.#signal.aborted ? this.#signal.reason : error;
     const timedOut = (reason instanceof Error || reason instanceof DOMException) && reason.name === "TimeoutError";
     if (!timedOut || !mayHaveReached || !(error instanceof Error))
       return error;
-    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`);
+    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`, keyed);
   }
   async#runsKeyedLayer(unjudged) {
     const origin = this.#baseUrl;
@@ -39607,12 +39648,12 @@ class DispatchClient {
       return false;
     }
   }
-  async#unsettled(method, url, response, reached, attempts) {
+  async#unsettled(method, url, response, reached, attempts, keyed) {
     const refusal = await this.#response(method, url, response).catch((error) => error);
     if (reached && refusal instanceof DispatchServiceError) {
       const landedAlone = refusal instanceof DispatchGatewayError ? refusal.mayHaveReachedDispatch : refusal.status >= 500;
       if (!landedAlone)
-        throw new DispatchWriteUnsettledError(refusal, attempts);
+        throw new DispatchWriteUnsettledError(refusal, attempts, undefined, keyed);
     }
     throw refusal;
   }
@@ -43152,7 +43193,7 @@ function consumeMarker(stores, argv, args, files, now) {
   if (changed !== undefined)
     return {
       ok: false,
-      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      why: `a file this write posts changed after AskGate read it (\`${changed.flag} ${changed.operand}\`)`,
       changed
     };
   return {
@@ -43476,7 +43517,9 @@ async function textWithPictures(tool, text, pictures, limit, owner, upload, acto
       uploaded = await upload({ name: picture.name, file: picture.file, actor });
     } catch (error) {
       const earlier = addresses.length === 0 ? "" : `; the pictures before it are uploaded (${addresses.join(", ")})`;
-      throw new Error(`images: ${picture.path} was not uploaded: ${messageFor(error)}. Nothing was posted${earlier}.`);
+      const refused = error instanceof DispatchGatewayError ? !error.mayHaveReachedDispatch : error instanceof DispatchServiceError && error.status < 500;
+      const outcome = refused ? "was not uploaded" : "may or may not have been uploaded";
+      throw new Error(`images: ${picture.path} ${outcome}: ${messageFor(error).replace(/\.$/, "")}. Nothing ` + `was posted${earlier}.`);
     }
     const address = `dispatch://${owner}/artifact/${uploaded.artifact.slug}@v${uploaded.version.number}`;
     addresses.push(address);
@@ -44995,7 +45038,7 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
     const artifacts = routed === undefined ? unlinked : [routed, ...unlinked.filter((candidate) => candidate.id !== routed.id)];
     return {
       owner,
-      artifact: artifactByReference(artifacts, artifactReference, "project", canonical)
+      artifact: artifactByReference(artifacts, artifactReference, owner, canonical)
     };
   }
   const issue = await client.getIssue(owner.issue);
@@ -45003,10 +45046,13 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
   if (artifactReference === undefined || artifactReference === "spec") {
     artifact = issue.artifacts.find((candidate) => candidate.primary || candidate.id === issue.primary_artifact_id);
   } else {
-    artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
+    artifact = artifactByReference(issue.artifacts, artifactReference, { kind: "issue", issue: issue.key }, canonical);
   }
   if (!artifact) {
-    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue"));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, {
+      kind: "issue",
+      issue: issue.key
+    }));
   }
   return { owner, issue, artifact };
 }
@@ -45027,14 +45073,84 @@ async function documentTargets(client, resolution) {
 }
 var documentHintLimit = 8;
 function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
+  const scope = owner.kind;
+  const busy = !ambiguous && documents.length > documentHintLimit;
+  const hints = (busy ? documentsNearest(reference, documents) : documents).slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
+  if (busy) {
+    const read = owner.kind === "issue" ? `dispatch read --issue ${owner.issue}` : `dispatch read --project ${owner.project}`;
+    const counted = documents.every((document) => (document.kind ?? "doc") === "doc") ? "documents" : "documents and files";
+    return `document "${reference}" not found by slug; this ${scope}'s ${documents.length} ${counted} include: ${list}; ${read} lists them all`;
+  }
+  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${scope}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${scope}'s documents: ${list}`;
+}
+function documentsNearest(reference, documents) {
+  return documents.map((document, index) => ({
+    document,
+    index,
+    ...documentCloseness(reference, document.slug, document.name)
+  })).sort((a, b) => {
+    if (a.near !== b.near)
+      return a.near ? -1 : 1;
+    if (a.near && a.distance !== b.distance)
+      return a.distance - b.distance;
+    return b.index - a.index;
+  }).map(({ document }) => document);
+}
+function documentListLines(documents) {
+  return documents.length === 0 ? ["- none"] : documents.map((document) => `- ${document.slug} (${document.name}, ${document.kind})`);
+}
+function documentCloseness(reference, slug, name) {
+  const wanted = [...reference.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+  const limit = Math.max(2, Math.floor(wanted.length / 3));
+  let distance = Number.POSITIVE_INFINITY;
+  for (const candidate of [slug, name]) {
+    const label = [...candidate.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+    let edits = boundedEditDistance(wanted, label, limit);
+    if (wanted.length >= 4 && label.join("").includes(wanted.join("")) || label.length >= 4 && wanted.join("").includes(label.join(""))) {
+      edits = Math.abs(label.length - wanted.length);
+    } else if (edits > limit) {
+      continue;
+    }
+    distance = Math.min(distance, edits);
+  }
+  return distance === Number.POSITIVE_INFINITY ? { distance: limit + 1, near: false } : { distance, near: true };
+}
+function boundedEditDistance(a, b, limit) {
+  if (Math.abs(a.length - b.length) > limit)
+    return limit + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  let current = new Array(b.length + 1).fill(0);
+  for (let i = 1;i <= a.length; i++) {
+    current[0] = i;
+    let smallest = i;
+    for (let j = 1;j <= b.length; j++) {
+      const substitution = previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1);
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, substitution);
+      smallest = Math.min(smallest, current[j]);
+    }
+    if (smallest > limit)
+      return limit + 1;
+    [previous, current] = [current, previous];
+  }
+  return Math.min(previous[b.length], limit + 1);
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
   const hints = asks.slice(0, askHintLimit).map((ask) => `${ask.id.slice(0, 8)}\u2026 ${textHead(ask.question)}`);
   return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
+}
+async function movedApprovalLine(client, askID) {
+  const ask = (await client.getAsk(askID).catch(() => {
+    return;
+  }))?.ask;
+  const approval = ask?.approval;
+  if (ask?.kind !== "approval" || approval === undefined)
+    return;
+  if (approval.requested_version >= approval.version)
+    return;
+  const owner = ask.issue_key === null ? `--project ${ask.approval_artifact?.project ?? "<project>"} --artifact ${approval.artifact_id}` : ask.approval_artifact?.primary === true ? `--issue ${ask.issue_key}` : `--issue ${ask.issue_key} --artifact ${approval.artifact_id}`;
+  return `The reply did not hand the ask to the human: it is the approval request for ${approval.name} ` + `at version ${approval.requested_version}, and ${approval.name} is now version ${approval.version}. ` + "No reply hands a moved approval request back. Once the human has agreed to every point in " + `version ${approval.version}, run: dispatch request-approval ${owner} --summary ` + `'<what changed since version ${approval.requested_version}>'`;
 }
 async function invalidReplyToAskProblem(client, owner, resolved) {
   if (owner.kind === "issue") {
@@ -45192,6 +45308,8 @@ function issueSummary(issue, events, references, graph, linkBase, titles) {
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
     "External links:",
     ...issue.external_links.length === 0 ? ["- none"] : issue.external_links.map((link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`),
+    "Documents:",
+    ...documentListLines(issue.artifacts ?? []),
     "Open asks:",
     ...asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`),
     "References:",
@@ -46440,9 +46558,11 @@ async function executeDispatchTool(input) {
       });
       if (replyToAsk !== undefined) {
         const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
+        const moved = requestedTurn !== "agent" && comment.ask_waiting_on === "agent" ? await movedApprovalLine(client, replyToAsk) : undefined;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
+            ...moved === undefined ? [] : [moved],
             ...adviceLines
           ].join(`
 `),
@@ -46911,6 +47031,19 @@ ${handoff.body}`,
             ...ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
             block: incoming.node.block_id ?? ref.block
           }
+        };
+      }
+      const projectOwner = documentOwner();
+      if (projectOwner.kind === "project" && optionalString(args, "artifact") === undefined) {
+        const documents = await client.listProjectArtifacts(projectOwner.project, true);
+        return {
+          text: [
+            `Project: ${projectOwner.project}`,
+            "Documents:",
+            ...documentListLines(documents)
+          ].join(`
+`),
+          details: { project: projectOwner.project }
         };
       }
       const documentReference = optionalString(args, "artifact");

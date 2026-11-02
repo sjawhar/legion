@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+    The `dispatch` CLI's refusal of a file that changed after AskGate read it says "read" rather
+    than "reviewed", and tells the agent to send the call again in a later message than the one
+    that changes the file.
+time: 2026-11-02T12:33:26.987852Z
+custom:
+    Issue: pr2677

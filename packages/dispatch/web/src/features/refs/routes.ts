@@ -936,9 +936,16 @@ export function routeHasMargin(pathname: string, search = ""): boolean {
   );
 }
 
-/** Whether this route is the Inbox page itself, the one place a peek at it has nothing to add. */
+/** Whether this route is the Inbox page itself, the one place a peek at it has nothing to add.
+ *  `app.tsx` renders `InboxPage` at `/credentials/*` as well, for an address kept from before
+ *  Dispatch's credential record page was deleted, and ranks `/credentials/machine`, a page of its
+ *  own, above that splat, as this does. */
 export function routeIsInbox(pathname: string): boolean {
-  return pathname === "/";
+  return (
+    pathname === "/" ||
+    (matchPath("/credentials/*", pathname) !== null &&
+      matchPath("/credentials/machine", pathname) === null)
+  );
 }
 
 /** The signed-in person's answers and ask replies (`AnswersPage`), linked from the Inbox page. */

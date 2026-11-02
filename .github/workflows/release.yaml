@@ -518,8 +518,9 @@ jobs:
   # "$GITHUB_SHA"` and `git clean -ffdx`, in its hand-over check), so every bump commit is one
   # commit on that commit: `release-push.sh tag` commits on HEAD, `tagged` finds a tag only on HEAD
   # or a child of it, and `push-main` refuses a HEAD more than one commit ahead of main. Two
-  # packages' bump commits change different package.json files, so when one lands on main first
-  # the other's `push-main` rebase onto it has nothing to resolve.
+  # packages' bump commits change different package.json files and different workspace entries
+  # of bun.lock, so when one lands on main first the other's `push-main` rebase onto it has
+  # nothing to resolve.
   publish:
     needs: [pi_envoy_build, pi_legion_build, legion_build]
     if: always() && github.ref == 'refs/heads/main'
@@ -591,8 +592,8 @@ jobs:
           tag=$(.github/scripts/release-push.sh handed pi-envoy-v "$VERSION" "$RUNNER_TEMP/pi-envoy-tarball" "$stem.tgz")
           { echo "tag=$tag"; echo "stem=$stem"; } >> "$GITHUB_OUTPUT"
 
-      # The committed manifest takes the version "pi-envoy: Commit and tag" commits; the tarball
-      # carries it already.
+      # The committed manifest takes the version "pi-envoy: Commit and tag" commits, which sets
+      # bun.lock's workspace entry to it too; the tarball carries it already.
       - name: "pi-envoy: Set release version"
         id: pi_envoy_set_version
         if: ${{ !cancelled() && steps.pi_envoy_handed.outcome == 'success' }}
