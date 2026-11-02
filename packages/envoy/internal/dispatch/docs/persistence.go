@@ -217,8 +217,9 @@ func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *R
 		}
 		state := flush.state
 		state.mu.Lock()
-		state.dropDrainedShadowLocked()
+		dropped := state.dropDrainedShadowLocked()
 		flush.service.unlockState(room, state)
+		dropped.release()
 		return nil
 	})
 	if err != nil || len(flush.versions) == 0 {

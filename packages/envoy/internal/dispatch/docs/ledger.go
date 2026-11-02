@@ -362,13 +362,14 @@ func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roo
 	}
 	err := tx.Commit(ctx)
 	var unlanded []*UpdateCredit
+	var dropped []*roomShadow
 	if err == nil {
 		for _, written := range captures {
 			written.capture.consumeLocked()
 			if written.flush != nil {
 				unlanded = append(unlanded, written.flush.markStored(holds)...)
 				if state := written.capture.state; state != nil {
-					state.dropDrainedShadowLocked()
+					dropped = append(dropped, state.dropDrainedShadowLocked())
 				}
 			}
 			if written.shadow != nil {
@@ -381,6 +382,11 @@ func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roo
 	}
 	for _, held := range locked {
 		s.unlockState(held.room, held.capture.state)
+	}
+	// Each shadow the commit dropped lets go of its document here, holding no state lock
+	// (roomShadow.release).
+	for _, shadow := range dropped {
+		shadow.release()
 	}
 	for _, credit := range unlanded {
 		credit.landed()

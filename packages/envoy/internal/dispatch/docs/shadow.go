@@ -27,7 +27,8 @@ import (
 // (roomState.shadow); doc and what follows it by the shadow's own mu, which is taken holding no
 // other lock: never under a state's mu or a replica's. A state holds one shadow, freed once no
 // provisional class is left (dropDrainedShadowLocked), when the write's publish ends without
-// reaching the instance (closeShadow), or when the room fails (failRoomLocked).
+// reaching the instance (closeShadow), or when the room fails (failRoomLocked). A shadow freed
+// by either of the first two lets go of its document, which nothing measures again (release).
 type roomShadow struct {
 	// cursor names the room instance whose classes the shadow measures. A cold write
 	// (coldFork) whose room was still loading at its commit names the load instead, whose
@@ -147,18 +148,39 @@ func (state *roomState) recordRepairLocked(class documentUpdateClass) {
 }
 
 // dropDrainedShadowLocked frees state's shadow once its window is closed and no provisional class
-// is left unstored. The caller holds state.mu.
-func (state *roomState) dropDrainedShadowLocked() {
+// is left unstored, and returns the shadow it dropped, for the caller to let go of its document
+// once it holds no state lock (release). The caller holds state.mu.
+func (state *roomState) dropDrainedShadowLocked() *roomShadow {
 	window := state.shadowWindowLocked()
 	if window.shadow == nil || window.until == 0 {
-		return
+		return nil
 	}
 	for _, class := range state.updateClasses {
 		if class.durable && !class.stored.Load() && window.provisional(class.cursor, class.seq) {
-			return
+			return nil
 		}
 	}
 	state.shadow = nil
+	return window.shadow
+}
+
+// release lets go of a dropped shadow's document and its rendering: the fork the write that left
+// the shadow was made on, which nothing measures a class on again. Dropped, a shadow is reachable
+// only through the origin of the room transaction that applied the write's last update
+// (liveWriteOrigin.shadow), and ygo keeps the last subscription an update observer unsubscribes
+// in the backing array of the room document's observer slice (crdt.Doc.OnUpdate, which shifts the
+// slice down over the removed entry) - so the publish's own capturing observer (applyCaptured)
+// left the room holding the whole fork, a second copy of a heavy document for a write that has
+// long since answered (liveWrite.releaseFork says why that matters), until the next publish took
+// that slot. The caller holds no state lock: a shadow's mu is taken holding no other (roomShadow).
+// A nil shadow releases nothing.
+func (sh *roomShadow) release() {
+	if sh == nil {
+		return
+	}
+	sh.mu.Lock()
+	sh.doc, sh.markdown = nil, nil
+	sh.mu.Unlock()
 }
 
 // reachShadow closes shadow's window at seq, the commit position the drain of room's instance
@@ -170,16 +192,20 @@ func (s *Service) reachShadow(room string, shadow *roomShadow, cursor *roomCurso
 	if state == nil {
 		return
 	}
+	// Deferred before the unlock below, so it runs after it: a shadow this drops lets go of its
+	// document holding no state lock.
+	var dropped *roomShadow
+	defer func() { dropped.release() }()
 	defer s.unlockState(room, state)
 	if state.shadow != shadow {
 		return
 	}
 	if shadow.cursorLocked() != cursor {
-		state.shadow = nil
+		state.shadow, dropped = nil, shadow
 		return
 	}
 	shadow.until = seq
-	state.dropDrainedShadowLocked()
+	dropped = state.dropDrainedShadowLocked()
 }
 
 // closeShadow ends write's shadow once its publish has returned: a window the publish never closed
@@ -193,10 +219,12 @@ func (s *Service) closeShadow(write *liveWrite) {
 	write.shadow = nil
 	state := write.state
 	state.mu.Lock()
+	var dropped *roomShadow
 	if state.shadow == shadow && shadow.until == 0 {
-		state.shadow = nil
+		state.shadow, dropped = nil, shadow
 	}
 	s.unlockState(write.artifactID, state)
+	dropped.release()
 }
 
 // storedClass is the class a flushed update is stored with, and the credit its append takes

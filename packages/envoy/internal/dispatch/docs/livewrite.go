@@ -498,11 +498,11 @@ func (s *Service) roomBehindHead(live *crdt.Doc, head int64) bool {
 // It records on write what that read found of the room replica (replicaRead): the replica's epoch
 // and foreign count at the position it copied (forkRead), and the replica's rendering of that very
 // state as the fork's (forkMarkdown), nil when the replica rendered none - it is outside the
-// schema, or it holds no state at all and the copy was taken from the room itself. Both are read
-// under the replica's lock, with the copy and after the drain that brought the replica to the
-// position, so the rendering is the fork's: the fork is that copy, the read is the transaction's
-// first (forkLive), and no write of the transaction has moved it. A replica that still stands at
-// the epoch and the foreign count has consumed, since the read, only published live writes'
+// schema, or the copy taken from the room itself could not start it. Both are read under the
+// replica's lock, with the copy and after the drain that brought the replica to the position, so
+// the rendering is the fork's: the fork is that copy, the read is the transaction's first
+// (forkLive), and no write of the transaction has moved it. A replica that still stands at the
+// epoch and the foreign count has consumed, since the read, only published live writes'
 // commits (renderedReplica.standsAt), which under the writer slot are this write's own published
 // updates, so the room's update observer may take this write's operations' renderings in place of
 // rendering the room after them (publishedRendering, renderedReplica.changedBy). A foreign commit
