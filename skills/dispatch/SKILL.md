@@ -67,6 +67,7 @@ Link each item you name:
 ```text
 dispatch://KEY
 dispatch://KEY/spec
+dispatch://KEY/spec#b-<block>[@vN]
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
 dispatch://KEY/comment/<id>
