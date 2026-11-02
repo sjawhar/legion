@@ -115,8 +115,8 @@ func periodBoundary(due time.Time, period time.Duration) time.Time {
 // the period read, the record of the pass, the unlock that gives the lease back, and the close of a
 // connection whose unlock failed. None runs on the pass's context. pgx ends a connection when the
 // context of its statement in flight is cancelled, and a lease connection ended that way cannot run
-// the unlock: the lease goes only when Postgres ends that session. Exclusive checks the pass's
-// context between statements instead.
+// the unlock: the lease goes only when Postgres ends that session. Exclusive reads the pass's
+// context after the take and after the period read instead, and starts no pass once it has ended.
 //
 // A context that cannot be cancelled must still have a deadline. On a half-open connection, one
 // whose network path has gone away without an RST, a send draws neither an answer nor an error, so
@@ -125,13 +125,15 @@ func periodBoundary(due time.Time, period time.Duration) time.Time {
 // destroy a connection that may still hold the session lease never run, leaving the lease with a
 // session this process can no longer reach.
 //
-// Five seconds is far longer than any of these calls takes on a connection that works, and that is
-// the point: it has to exceed a slow round trip, not a slow query. The take and the unlock touch
-// Postgres's in-memory lock table and no relation; the period read and the record each touch one
-// row of duty_passes by its primary key (lease, migration 0115); and the close is a Terminate
-// message and a socket close. It is the same five seconds pglisten.DefaultPingTimeout gives the
-// keepalive ping and the close of a connection that listener gives up on
-// (internal/pglisten/listener.go), chosen there against this same half-open connection.
+// Five seconds is each call's whole budget, a wait behind another session's lock included. On a
+// connection that works, the take and the unlock answer at once, since they touch Postgres's
+// in-memory lock table and no relation; the period read and the record touch one row of
+// duty_passes by its primary key (lease, migration 0115) and wait only behind a lock another
+// session holds on it; and the close is a Terminate message and a socket close. It is the same five
+// seconds pglisten.DefaultPingTimeout gives the keepalive ping and the close of a connection that
+// listener gives up on (internal/pglisten/listener.go), chosen there against this same half-open
+// connection. A call that reaches the bound fails, and a lease whose unlock fails is given back by
+// closing its connection (freeLeaseOn).
 const leaseCallTimeout = 5 * time.Second
 
 // leaseCall is the context of one statement on the lease's own connection (leaseCallTimeout).
@@ -165,9 +167,9 @@ var errLeaseNotHeld = errors.New("the unlock reports this session did not hold t
 // on a connection of its own with pg_try_advisory_lock: a lease the database reports held elsewhere
 // is a skip and not a queue, because the other process is running that very pass and waiting for it
 // would only run the same work again, late. The lease's own statements run under leaseCall, never
-// ctx, so a shutdown ends no statement on that connection. A shutdown before the pass starts starts
-// no pass. The pass is called on ctx, and the lease is given back when it returns, however it
-// returns.
+// ctx, so a shutdown ends no statement on that connection. A shutdown that Exclusive sees after the
+// take or after the period read starts no pass; one that comes later is the pass's own to see. The
+// pass is called on ctx, and the lease is given back when it returns, however it returns.
 //
 // Everything the period decides happens under the lease: the record is read after the lease is
 // taken and written before it is given back, so the two processes' passes are ordered by the one
@@ -208,6 +210,11 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 	// Deferred, so a pass that panics gives its lease back on the way out rather than holding it
 	// for as long as the connection lives.
 	defer freeLeaseOn(conn, name)
+	// Shutdown came while the lease was being taken: the period read would only delay giving the
+	// lease back.
+	if ctx.Err() != nil {
+		return false
+	}
 	readCtx, cancelRead := leaseCall()
 	boundary, served, err := periodServed(readCtx, conn, name, due, period)
 	cancelRead()

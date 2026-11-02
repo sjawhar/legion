@@ -212,9 +212,9 @@ func TestExclusiveLeavesThePeriodUnservedWhenShutdownCutsThePassShort(t *testing
 
 // A shutdown can arrive while the gate reads the loop's last pass on the lease's own connection.
 // That read must not end the connection, or the unlock after it runs on a closed connection. The
-// stopped gate starts no pass, gives the lease back with its unlock, and returns the connection to
-// the lease pool. A first gate leaves the period read prepared on that connection, as a running
-// process's earlier ticks do.
+// read keeps waiting after the cancel, and once it answers the stopped gate starts no pass, gives
+// the lease back with its unlock, and returns the connection to the lease pool. A first gate
+// leaves the period read prepared on that connection, as a running process's earlier ticks do.
 func TestExclusiveFreesTheLeaseWhenShutdownInterruptsThePeriodRead(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
@@ -243,10 +243,20 @@ func TestExclusiveFreesTheLeaseWhenShutdownInterruptsThePeriodRead(t *testing.T)
 	go func() {
 		answered <- Exclusive(stopping, leases, name, time.Now(), time.Hour, func(context.Context) { passRan = true })
 	}()
-	if waiting := storetest.WaitForLockWaiters(t, holder, 1, 10*time.Second); waiting < 1 {
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, 4*time.Second); waiting < 1 {
 		t.Fatal("the gate's period read never queued behind duty_passes")
 	}
 	stop()
+	// A read on the pass's context would end at the cancel: pgx sets the socket's deadline to now,
+	// and the gate returns within milliseconds while duty_passes is still held.
+	select {
+	case <-answered:
+		t.Fatalf("the gate returned while its period read still waited on duty_passes: the cancel ended the read\n%s", logs.String())
+	case <-time.After(500 * time.Millisecond):
+	}
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, time.Second); waiting < 1 {
+		t.Fatal("the gate's period read stopped waiting on duty_passes at the cancel")
+	}
 	if err := holder.Rollback(ctx); err != nil {
 		t.Fatalf("release duty_passes: %v", err)
 	}
@@ -269,9 +279,19 @@ func TestExclusiveFreesTheLeaseWhenShutdownInterruptsThePeriodRead(t *testing.T)
 		t.Fatalf("lease pool after the stopped gate: total %d, idle %d; want its connection returned",
 			stat.TotalConns(), stat.IdleConns())
 	}
-	ran := false
-	if !Exclusive(ctx, leases, name, time.Now(), time.Hour, func(context.Context) { ran = true }) || !ran {
-		t.Fatal("the next gate could not take the lease the stopped gate gave back")
+	// From a connection of another pool: the lease connection's own session would take a lock it
+	// still held, since a session-level advisory lock is reentrant.
+	other, err := database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire a connection of the shared pool: %v", err)
+	}
+	defer other.Release()
+	var taken bool
+	if err := other.QueryRow(ctx, takeLease, leaseNamespace, name).Scan(&taken); err != nil || !taken {
+		t.Fatalf("another session could not take the lease the stopped gate gave back: taken %t, error %v", taken, err)
+	}
+	if _, err := other.Exec(ctx, freeLease, leaseNamespace, name); err != nil {
+		t.Fatalf("give back the lease another session took: %v", err)
 	}
 }
 
