@@ -69,7 +69,7 @@ export type AskThreadQuery = UseQueryResult<AskRead, Error>;
 
 /**
  * The reply form under an answered ask. It posts to the ask's issue, or to its document for a
- * project-document ask, then invalidates the shared thread so the reply shows first. Its draft is
+ * project-document ask, then invalidates the shared thread so the reply shows last. Its draft is
  * the ask's (`reply-drafts.ts`), and its send is the ask's too: while any composer's reply to this
  * ask is out, every composer for it, including one mounted since, shows the draft disabled. A file
  * pasted or dropped into the field uploads to `uploadOwner` and its text joins the draft.
@@ -190,10 +190,11 @@ export interface AskThreadProps {
 
 /**
  * The reply thread under a question: every comment that replies directly to
- * the ask (Comment.ask_id) plus their own reply chains, newest first. The newest two replies stay
- * visible; a card-local control reveals the remaining older replies. Answered asks keep a plain
- * reply composer; open asks reserve their single composer for answering or asking back, and a
- * resolved ask keeps its history without a composer.
+ * the ask (Comment.ask_id) plus their own reply chains, oldest first, so the newest reply is the one
+ * nearest the box a reader answers in. The newest two replies stay visible; a card-local control
+ * above them unfolds the earlier replies in place. Answered asks keep a plain reply composer; open
+ * asks reserve their single composer for answering or asking back, and a resolved ask keeps its
+ * history without a composer.
  */
 export function AskThread({
   ask,
@@ -209,14 +210,14 @@ export function AskThread({
   const replies = thread.data?.replies ?? [];
   const [showAllReplies, setShowAllReplies] = useState<boolean>();
   const hiddenReplyCount = Math.max(replies.length - 2, 0);
-  const recentReplies = replies.slice(-2).reverse();
+  const recentReplies = replies.slice(-2);
   const newestReply = replies.at(-1);
   const older = replies.slice(0, -2);
   // A link to a reply older than the two the card keeps visible seeds the control open, so the
   // reply it names is on screen rather than behind a control the reader must find. Seeding, not
   // overriding: once the reader uses the control, their choice wins.
   const showAll = showAllReplies ?? older.some((comment) => comment.id === currentReplyId);
-  const olderReplies = showAll ? [...older].reverse() : [];
+  const olderReplies = showAll ? older : [];
 
   return (
     <section
@@ -224,18 +225,6 @@ export function AskThread({
       className={embedded ? "space-y-3" : `mt-4 space-y-3 border-t pt-4 ${borderDefault}`}
       data-testid={`thread-${ask.id}`}
     >
-      {recentReplies.length === 0 ? null : (
-        <ul className="space-y-2">
-          {recentReplies.map((comment) => (
-            <AskReply
-              comment={comment}
-              current={comment.id === currentReplyId}
-              key={comment.id}
-              markRef={comment === newestReply ? markNewest : undefined}
-            />
-          ))}
-        </ul>
-      )}
       {hiddenReplyCount === 0 ? null : (
         <button
           aria-controls={olderRepliesId}
@@ -246,15 +235,34 @@ export function AskThread({
         >
           {showAll
             ? "Show fewer replies"
-            : `Show ${hiddenReplyCount} more ${hiddenReplyCount === 1 ? "reply" : "replies"}`}
+            : `Show ${hiddenReplyCount} earlier ${hiddenReplyCount === 1 ? "reply" : "replies"}`}
         </button>
       )}
-      {olderReplies.length === 0 ? null : (
-        <ul className="space-y-2" id={olderRepliesId}>
-          {olderReplies.map((comment) => (
-            <AskReply comment={comment} current={comment.id === currentReplyId} key={comment.id} />
-          ))}
-        </ul>
+      {replies.length === 0 ? null : (
+        // One spacing for both lists, so an unfolded thread reads as one run of replies.
+        <div className="space-y-2">
+          {olderReplies.length === 0 ? null : (
+            <ul className="space-y-2" id={olderRepliesId}>
+              {olderReplies.map((comment) => (
+                <AskReply
+                  comment={comment}
+                  current={comment.id === currentReplyId}
+                  key={comment.id}
+                />
+              ))}
+            </ul>
+          )}
+          <ul className="space-y-2">
+            {recentReplies.map((comment) => (
+              <AskReply
+                comment={comment}
+                current={comment.id === currentReplyId}
+                key={comment.id}
+                markRef={comment === newestReply ? markNewest : undefined}
+              />
+            ))}
+          </ul>
+        </div>
       )}
       {showComposer && ask.state === "answered" ? (
         <AskReplyComposer ask={ask} createReply={reply} uploadOwner={uploadOwner} />

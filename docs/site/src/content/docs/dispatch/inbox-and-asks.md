@@ -206,12 +206,13 @@ offers **Ask back instead** and **Answer with it anyway**.
 
 ### Reply thread
 
-Replies appear newest first. The two newest replies stay visible. When there are older replies,
-choose **Show N more replies** to reveal them below the newest pair; choose **Show fewer replies**
-to collapse the thread again. After an ask is answered, write a follow-up in **Reply**; in the
-Conversation tab and in document decisions, choose **Write a reply** first. A new reply appears at
-the top of the thread, and a reply you are still typing survives if its card remounts elsewhere,
-such as switching margin tabs away and back.
+Replies read oldest to newest, so the newest reply is the one nearest the box you answer or reply
+in. The two newest replies stay visible. When there are earlier replies, choose
+**Show N earlier replies** above the newest pair to unfold them in place, oldest first; choose
+**Show fewer replies** to fold them again. After an ask is answered, write a follow-up in
+**Reply**; in the Conversation tab and in document decisions, choose **Write a reply** first. A new
+reply appears at the bottom of the thread, and a reply you are still typing survives if its card
+remounts elsewhere, such as switching margin tabs away and back.
 
 ### Approvals
 

@@ -129,12 +129,12 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
   }
 });
 
-test("an ask thread shows its newest two replies, expands older replies, and puts a fresh reply first", async ({
+test("an ask thread reads oldest to newest, folds earlier replies above the newest two, and puts a fresh reply last", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Newest replies" });
-  const ask = await createAsk(issue.key, { question: "Which reply should lead?" }, session);
+  const issue = await createIssue({ project: "CORE", title: "Oldest replies first" });
+  const ask = await createAsk(issue.key, { question: "Which reply comes last?" }, session);
   const replies = await Promise.all(
     ["Oldest reply", "Older reply", "Middle reply", "Newer reply", "Newest reply"].map((body) =>
       createComment(issue.key, { ask_id: ask.id, body }, session)
@@ -161,10 +161,14 @@ test("an ask thread shows its newest two replies, expands older replies, and put
     const thread = card.getByRole("region", { name: "Replies" });
     const replyBodies = () => thread.locator("li > div > .dispatch-markdown").allTextContents();
 
-    await expect.poll(replyBodies).toEqual(["Newest reply", "Newer reply"]);
+    await expect.poll(replyBodies).toEqual(["Newer reply", "Newest reply"]);
     await expect(card.getByText("Middle reply", { exact: true })).toHaveCount(0);
-    const showMore = card.getByRole("button", { name: "Show 3 more replies" });
-    await expect(showMore).toHaveAttribute("aria-expanded", "false");
+    const showEarlier = card.getByRole("button", { name: "Show 3 earlier replies" });
+    await expect(showEarlier).toHaveAttribute("aria-expanded", "false");
+    // The control sits above the two replies shown, where the earlier ones unfold.
+    const showEarlierBox = await showEarlier.boundingBox();
+    const newerBox = await card.getByText("Newer reply", { exact: true }).boundingBox();
+    expect(showEarlierBox?.y).toBeLessThan(newerBox?.y ?? 0);
     const before = testInfo.outputPath(`ask-thread-before-${testInfo.project.name}.png`);
     await page.screenshot({ path: before, fullPage: true });
     await testInfo.attach(`ask thread before (${testInfo.project.name})`, {
@@ -172,18 +176,18 @@ test("an ask thread shows its newest two replies, expands older replies, and put
       path: before,
     });
 
-    await showMore.click();
+    await showEarlier.click();
     await expect
       .poll(replyBodies)
-      .toEqual(["Newest reply", "Newer reply", "Middle reply", "Older reply", "Oldest reply"]);
+      .toEqual(["Oldest reply", "Older reply", "Middle reply", "Newer reply", "Newest reply"]);
     const showFewer = card.getByRole("button", { name: "Show fewer replies" });
     await expect(showFewer).toHaveAttribute("aria-expanded", "true");
     await showFewer.click();
-    await expect.poll(replyBodies).toEqual(["Newest reply", "Newer reply"]);
+    await expect.poll(replyBodies).toEqual(["Newer reply", "Newest reply"]);
 
     await card.getByLabel("Your answer").fill("Fresh reply");
     await card.getByRole("button", { name: "Ask back" }).click();
-    await expect.poll(replyBodies).toEqual(["Fresh reply", "Newest reply"]);
+    await expect.poll(replyBodies).toEqual(["Newest reply", "Fresh reply"]);
     const after = testInfo.outputPath(`ask-thread-after-${testInfo.project.name}.png`);
     await page.screenshot({ path: after, fullPage: true });
     await testInfo.attach(`ask thread after (${testInfo.project.name})`, {
