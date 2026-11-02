@@ -127,6 +127,8 @@ func defaultsFor(port int) Config {
 		},
 		Linger:               72 * time.Hour,
 		ProductionCheckBound: 336 * time.Hour,
+		PodUpdateRetask:      time.Hour,
+		PodUpdateNotice:      4 * time.Hour,
 		ReviewRoundCap:       3,
 		MaxFixAttempts:       3,
 		ControllerLaunch:     ControllerLaunchOperator,

@@ -401,7 +401,7 @@ func TestClaimsSpawnPostsTheClaimWithTheOperatorBearer(t *testing.T) {
 	if spawns := d.runtime.CallsOf("Spawn"); len(spawns) != 1 || spawns[0].Spec.Claim != architectClaim {
 		t.Fatalf("spawns = %+v, want one launch of %s", spawns, architectClaim)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0 - -\n"; out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
 }
@@ -454,7 +454,7 @@ func TestClaimsDeliverPostsTheTask(t *testing.T) {
 	if answered.Pending == nil || answered.Pending.Task != "Review the plan." {
 		t.Fatalf("the daemon answered pending %+v, want the task queued", answered.Pending)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0 - -\n"; out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
 }
@@ -474,9 +474,9 @@ func TestClaimsSuspendResumeAndStopDriveTheClaim(t *testing.T) {
 		action, method, want string
 		claim                legionclaim.Token
 	}{
-		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1 " + thisBinarysContract + "\n", architectClaim},
-		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2 " + thisBinarysContract + "\n", architectClaim},
-		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1 0\n", workerClaim},
+		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1 " + thisBinarysContract + " - -\n", architectClaim},
+		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2 " + thisBinarysContract + " - -\n", architectClaim},
+		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1 0 - -\n", workerClaim},
 	} {
 		out := d.succeed(append(append([]string{step.action}, d.reach()...), "--claim", string(step.claim))...)
 
@@ -528,7 +528,7 @@ func TestClaimsRetryPostsToTheClaimsRetryRoute(t *testing.T) {
 	if len(seen.body) != 0 {
 		t.Fatalf("retry sent a body %q, want none", seen.body)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0 - -\n"; out != want {
 		t.Fatalf("retry stdout = %q, want %q", out, want)
 	}
 	if spawns := d.runtime.CallsOf("Spawn"); len(spawns) != 4 {
@@ -567,7 +567,7 @@ func TestClaimsForgetSessionPostsToTheClaimRoute(t *testing.T) {
 	if sent.Session != session {
 		t.Fatalf("forget-session sent %+v, want %s", sent, session)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 failed 3 " + thisBinarysContract + "\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 failed 3 " + thisBinarysContract + " - -\n"; out != want {
 		t.Fatalf("forget-session stdout = %q, want %q", out, want)
 	}
 }
@@ -597,7 +597,7 @@ func TestClaimsRetryFailedRetriesEveryFailedClaim(t *testing.T) {
 	if want := []string{"GET /legion/v1/operator/claims", "POST /legion/v1/operator/claims/" + string(architectClaim) + "/retry"}; !slices.Equal(asked, want) {
 		t.Fatalf("retry --failed asked %q, want %q", asked, want)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0 - -\n"; out != want {
 		t.Fatalf("retry --failed stdout = %q, want %q", out, want)
 	}
 
@@ -617,8 +617,9 @@ func TestClaimsRetryFailedRetriesEveryFailedClaim(t *testing.T) {
 	}
 }
 
-// list prints one line per claim — token, role, issue, state, generation, plugin contract — in the
-// daemon's token order, and --json prints the daemon's answer byte for byte.
+// list prints one line per claim — token, role, issue, state, generation, plugin contract, the
+// update round the claim is in and the head its worker reported when it answered, each `-` when
+// there is none — in the daemon's token order, and --json prints the daemon's answer byte for byte.
 func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	d := newOperatorDaemon(t)
 	d.succeed(d.spawnArgs()...)
@@ -630,8 +631,8 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	out := d.succeed(append([]string{"list"}, d.reach()...)...)
 
 	wantOperatorRequest(t, d.lastOperatorRequest(), http.MethodGet, "/legion/v1/operator/claims")
-	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1 " + thisBinarysContract + "\n" +
-		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1 0\n"
+	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1 " + thisBinarysContract + " - -\n" +
+		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1 0 - -\n"
 	if out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
@@ -639,6 +640,38 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	out = d.succeed(append([]string{"list", "--json"}, d.reach()...)...)
 	if answer := d.lastOperatorRequest().answer; out != string(answer) {
 		t.Fatalf("list --json printed %q, want the daemon's answer %q verbatim", out, answer)
+	}
+}
+
+// The head a worker reports when it answers an update round is an agent's own string, which
+// nothing verifies (api.OperatorClaim.UpdateHead), and two listings print it: one row per claim in
+// `legion claims list`, and the open-rounds line of `legion state`. A newline in it would forge a
+// row of either — a claim that is not there, a round nobody opened — so each prints it quoted.
+func TestAWorkerReportedHeadIsPrintedQuoted(t *testing.T) {
+	const forged = "c0ffee\nlegion-legion-legion-299-tester tester LEGION-299 ready 1 0 - -"
+	const round = "pod:0f3c8d21-5b47-4e90-9a16-2c7d5e8b40af"
+
+	var line bytes.Buffer
+	writeClaimLine(&line, api.OperatorClaim{
+		Token: architectClaim, Tree: "LEGION-208", Issue: "LEGION-208", Role: "architect",
+		Generation: 1, State: "ready", UpdateRound: round, UpdateHead: forged,
+	})
+	if rows := strings.Count(line.String(), "\n"); rows != 1 {
+		t.Errorf("one claim printed %d rows: %q", rows, line.String())
+	}
+	if !strings.Contains(line.String(), strconv.Quote(forged)) {
+		t.Errorf("the claim line is %q, want the head quoted as %s", line.String(), strconv.Quote(forged))
+	}
+
+	summary := roundsSummary(map[string]api.Issue{"LEGION-208": {
+		Key:       "LEGION-208",
+		Architect: &api.ClaimView{State: "ready", UpdateRound: round, UpdateHead: forged},
+	}})
+	if strings.Contains(summary, "\n") {
+		t.Errorf("the open-rounds line is %q, want one line", summary)
+	}
+	if !strings.Contains(summary, strconv.Quote(forged)) {
+		t.Errorf("the open-rounds line is %q, want the head quoted as %s", summary, strconv.Quote(forged))
 	}
 }
 

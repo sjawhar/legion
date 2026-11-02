@@ -35,6 +35,9 @@ export interface LegionToolRuntime {
   /** The commit a completion of `phase` by `role` reports (`findHandoffCommit` with the pane's
    * environment): throws naming the remedy when the handoff is not committed and pushed. */
   readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>
+  /** The head of `legion/<issue>@origin` a `ready_for_update` signal reports
+   * (`findPushedBranchHead` with the pane's environment): `""` when the branch is not there. */
+  readonly branchHead: () => Promise<string>
 }
 
 /** Runs one call of the `legion` tool and answers its JSON result; a refusal throws its reason.
@@ -56,6 +59,7 @@ export async function executeLegionTool(
       daemon: runtime.daemon,
       claim,
       handoffCommit: runtime.handoffCommit,
+      branchHead: runtime.branchHead,
       ...(signal === undefined ? {} : { restart: { signal } }),
     },
     input,

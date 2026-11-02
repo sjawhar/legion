@@ -368,7 +368,7 @@ func TestTheBootReconciliationWarnsOfEachPodRunningAnotherImage(t *testing.T) {
 	}
 	for _, loc := range []runtime.Locator{issue, controller} {
 		want := "sandbox runtime: " + loc.Sandbox.Name + " runs image " + testImage + ", the configured image is " + nextImage +
-			"; its agents call this daemon as the older release until the pod is relaunched"
+			"; its agents call this daemon as the older release until its update round replaces the pod"
 		if !strings.Contains(logs.String(), want) || warnings(loc.Sandbox.Name) != 1 {
 			t.Errorf("the boot reconciliation logged %q, want one warning %q", logs.String(), want)
 		}
@@ -398,18 +398,30 @@ func TestTheBootReconciliationWarnsOfEachPodRunningAnotherImage(t *testing.T) {
 		return connected && state.Child != nil
 	})
 	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
-	newIssue, err := r2.Resume(g.ctx, &issue, spec)
+	kept, err := r2.Resume(g.ctx, &issue, spec)
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
+	if kept.Sandbox.PodUID != issue.Sandbox.PodUID {
+		t.Fatalf("Resume replaced the pod %s running the older image, which its update round replaces", issue.Sandbox.PodUID)
+	}
+	// The round over, the pod is replaced and the next launch makes one on the configured image.
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}, stillDue); err != nil {
+		t.Fatalf("ReplacePod: %v", err)
+	}
+	spec.Generation, spec.BootToken = 3, "boot-g3"
+	newIssue, err := r2.Resume(g.ctx, &kept, spec)
+	if err != nil {
+		t.Fatalf("Resume after the round: %v", err)
+	}
 	if newIssue.Sandbox.PodUID == issue.Sandbox.PodUID {
-		t.Fatalf("Resume kept the pod %s running the older image", issue.Sandbox.PodUID)
+		t.Fatalf("the round kept the pod %s running the older image", issue.Sandbox.PodUID)
 	}
 	known[0].Locator = &newIssue
 	if err := r2.ReconcileOrphans(g.ctx, known, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if warnings(issue.Sandbox.Name) != 1 || warnings(controller.Sandbox.Name) != 2 {
-		t.Errorf("after the issue pod's relaunch the sweep logged %q, want the controller's pod warned of again and the issue's not", logs.String())
+		t.Errorf("after the issue pod's replacement the sweep logged %q, want the controller's pod warned of again and the issue's not", logs.String())
 	}
 }

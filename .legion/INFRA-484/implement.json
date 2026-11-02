@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-484",
+  "completed": "2026-11-01T22:15:21Z",
+  "previousHandoff": "dde2d2374c2860510e485a8338592be5daf8d2a6",
+  "round": 16,
+  "head": "9ed584e160a041ff0d6ebbad4556d1e27d53b280",
+  "codeHead": "e52370d408b7a8a1bec4828d24d10db5ff7fad4e",
+  "answers": "Test round 15's one failure: CI run 41340112838's required `test` lane failed TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld at podupdate_test.go:1693 with the pod replaced 0 times. No production code is changed this round.",
+  "proof": [
+    {
+      "criterion": "The assertion the tester caught no longer asks its question of one particular sweep. completePodUpdate reads the group live and through the deciding mask (roundGroup), so a claim whose machine is still settling a decision at that read counts as not having answered and the replacement is simply made by the next sweep, with nothing lost and the round still open. The nine assertions that a replacement happened now sweep until it has, within testwait's bound, and then assert the count exactly; the assertions that a replacement has not happened still read the count once, since no deferral can turn nothing-yet into a replacement.",
+      "surface": "The daemon's own sweep over a real PostgreSQL with real claim machines, which is the surface these tests already drive, run at the repetition CI's own concurrency made the race visible at. The server for these runs is one this role started for itself (legion-testpg on 127.0.0.1:5455 under /legion/scratch/tmp/pg-impl-r16), so no sibling role of the pod shares it.",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5455/postgres?sslmode=disable go test ./internal/daemon/ -timeout 50m -count=100 -run 'TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld|TestPodUpdateHoldsTheReplacementWhileAClaimIsWorking|TestPodUpdateResumesAnOpenRoundAfterARestart|TestPodUpdateTellsTheControllerWhenTheReplacementKeepsFailing|TestPodUpdateDoesNotCutATurnThatStartsWhileTheReplacementWaits|TestPodUpdateReplacesThePodWhenTheDriftClearsUnderAnOpenRound|TestPodUpdateIgnoresARetiredClaimsLeftoverRound|TestStalePluginLeavesAClaudeWorkerAloneUnderKubernetesAndRelaunchesItUnderTmux|TestPodUpdateEndsTheRoundOnceTheRoleStartedIntoTheKeptPodAnswers'",
+      "observed": "ok github.com/sjawhar/legion/daemon/internal/daemon 628.747s — nine tests at -count=100, 900 runs, 0 failures. The same selection at -count=1 after the forward merge: ok (24.8 s). The whole pod-update family at the same head: 35 PASS, 0 FAIL.",
+      "headSha": "9ed584e160a041ff0d6ebbad4556d1e27d53b280",
+      "negativeControl": "The run that proves the wait is load-bearing is CI's own: at b4dff46a, with the assertion reading the count once after a single tick, run 41340112838's `test` job (124948261291) failed `--- FAIL: TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld` / `podupdate_test.go:1693: the pod was replaced 0 times once every worker of the issue answered, want once`, while every other lane of that run concluded success. The deferral the wait absorbs is the one completePodUpdate takes when waitingClaims(live) is non-empty: the same nine assertions without awaitReplacement are exactly the code that run failed on."
+    },
+    {
+      "criterion": "No failure of the full Go suite is this branch's.",
+      "surface": "The whole daemon module's test suite on the role's own PostgreSQL.",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5455/postgres?sslmode=disable go test -timeout 55m ./internal/... ./cmd/...",
+      "observed": "Eleven named failures, in cmd/legion, internal/admit, internal/daemon, internal/intake, internal/launcher, internal/natsauth, internal/runtime/tmux, internal/testnats, internal/workflow and internal/workspace. Ten are the baseline the tester recorded at b4dff46a, which it showed reproduce on a fresh main clone at 7285fd05. The eleventh, TestFetchKeepsAFeedAfterGitGC in internal/workspace, passes on its own re-run (ok, 266.5 s), so it is a load flake rather than a failure of the change. This round's working-copy diff is one file, packages/daemon/internal/daemon/podupdate_test.go, which is in none of those packages but internal/daemon, whose failure is the docker one below.",
+      "headSha": "9ed584e160a041ff0d6ebbad4556d1e27d53b280",
+      "negativeControl": "internal/workspace re-run alone: ok (266.5 s), which is what distinguishes the eleventh failure from the ten."
+    },
+    {
+      "criterion": "The forward merge against main f0fe8da8, which GitHub reported CONFLICTING, resolves to a union of both rules and leaves the branch's changed-file set as it was.",
+      "surface": "The merged tree built and tested, with the sandbox package — where both sides' tests live — run whole.",
+      "command": "cd packages/daemon && gofmt -l ./internal/ && go build ./... && go vet -tags e2e ./... && LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5455/postgres?sslmode=disable go test -timeout 30m -count=1 ./internal/runtime/sandbox/; and cd /legion/workspaces/sjawhar/legion/infra-484 && bun scripts/semantic-line-breaks.ts docs/kubernetes.md",
+      "observed": "gofmt prints nothing; build ok; vet clean; ok github.com/sjawhar/legion/daemon/internal/runtime/sandbox 203.592s, so main's accountDrift tests and this branch's roundCovers tests pass together on the resolved `replace`; semantic-line-breaks exits 0. Changed-file set 135 before and 135 after, none left and none joined; fingerprint d7f7515da0e27fc4b160abde0febfa9fe384dcb4e91f5166fff9c2186cfc8d1a to 48ab9788ae2c751daa994120899597a9ca49006965a0e0c179266adad46793c2, which moves because the four conflicted files were resolved. GitHub reports the pull request MERGEABLE again.",
+      "headSha": "9ed584e160a041ff0d6ebbad4556d1e27d53b280",
+      "negativeControl": "Before the merge GitHub reported the pull request CONFLICTING with mergeStateStatus DIRTY; after it, MERGEABLE. And the resolution is not a merge artefact that quietly drops main's rule: accountDrifted is kept unconditional in `replace`, which is what internal/runtime/sandbox's own tests at this head demand."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/daemon/podupdate_test.go: the new rig helper awaitReplacement(n, what), and the nine assertions that a replacement happened wired to it. No production code.",
+    "The forward merge against main f0fe8da8 resolved four conflicts: packages/daemon/internal/runtime/sandbox/relaunch.go (code and its doc comment), sandbox.go (doc comment), one_container_test.go (doc comment) and docs/kubernetes.md (four prose conflicts)."
+  ],
+  "theNineSitesForTheTester": [
+    "podupdate_test.go, TestPodUpdateHoldsTheReplacementWhileAClaimIsWorking — awaitReplacement(1, \"once the turn ended\")",
+    "podupdate_test.go, TestPodUpdateEndsTheRoundOnceTheRoleStartedIntoTheKeptPodAnswers — awaitReplacement(1, \"once every worker answered\")",
+    "podupdate_test.go, TestPodUpdateReplacesThePodWhenTheDriftClearsUnderAnOpenRound — awaitReplacement(1, \"once the drift had gone away: the one replacement the round was opened for\")",
+    "podupdate_test.go, TestPodUpdateResumesAnOpenRoundAfterARestart — next.awaitReplacement(1, \"by the daemon that resumed the round\")",
+    "podupdate_test.go, TestPodUpdateIgnoresARetiredClaimsLeftoverRound — awaitReplacement(1, \"once the live worker answered\")",
+    "podupdate_test.go, TestPodUpdateTellsTheControllerWhenTheReplacementKeepsFailing — awaitReplacement(1, \"for the one attempt that failed\"); here ReplacePod is scripted to fail, and the helper stops at the first recorded attempt, so it still asserts the one attempt the test is about",
+    "podupdate_test.go, TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld — awaitReplacement(1, \"once every worker of the issue answered\"); this is the site CI caught, at what was podupdate_test.go:1693",
+    "podupdate_test.go, TestPodUpdateDoesNotCutATurnThatStartsWhileTheReplacementWaits — awaitReplacement(1, \"once the worker answered again\")",
+    "podupdate_test.go, the Claude Code round test — awaitReplacement(1, \"once the Claude Code worker's turn ended\")"
+  ],
+  "trickyParts": [
+    "The tester named one site; the same shape is at nine. Each is a state change, one rig.tick(), then an immediate len(rig.replacements()) != 1 with no wait, and each asks the same question of the same deferral. The architect approved wiring all of them in this commit rather than the one CI happened to catch (Envoy, 2026-11-01T20:26:49Z), after I reported the list.",
+    "Every assertion that a replacement has NOT happened is left reading the count once, as the architect directed: a deferral cannot turn nothing-yet into a spurious replacement, so those are sound as they stand. The subtest table at podupdate_test.go's end-under-test case is left alone too: it already awaits the round ending before it reads the count.",
+    "awaitReplacement sweeps rather than merely polling, because in this rig a sweep happens only when the test calls tick(): the production rule is that the next sweep makes the replacement, so waiting without sweeping would wait for ever. It checks the count before its first tick, so a test whose replacement already happened at its own tick does no extra sweep, and it stops at the first poll that reaches n, so it never overshoots. The rig's clock is held, so the extra sweeps re-task nobody and trip no notice bound.",
+    "The round's forward merge is main's accountDrift meeting this branch's update round. The resolved `replace` keeps accountDrifted unconditional and leaves the image term deleted: a ServiceAccount is fixed for a pod's life, PodDrift does not read it, and no stale-plugin install can move it, so a launch is the only thing that replaces such a pod, where an issue pod's image drift is the round's. internal/runtime/sandbox passing whole is what proves the union, since both sides' tests are in it."
+  ],
+  "deviations": [
+    "The architect asked for the daemon package to run inside the full suite with 0 failures. It cannot in this pod: internal/daemon's test binary aborts on the first test that starts a NATS testcontainer, and this pod has no docker. Fifteen such tests were enumerated by skipping them one at a time before I stopped; they are spread across daemon_test.go, blockers_scratch_dispatch_test.go, notice_exceptions_test.go, outbox_scratch_dispatch_test.go and person_handover_scratch_dispatch_test.go and the helpers they share. What is run instead, and quoted above: the nine touched tests at -count=100 (900 runs, 0 failures), the whole pod-update family at -count=1 (35 PASS), and the full ./internal/... ./cmd/... suite with its failure set accounted for test by test.",
+    "CI at the code head had not concluded when this phase completed: run 41356135250 was still pending at 22:15Z, seconds after the push. The reviewer reads the head's checks itself before it approves."
+  ],
+  "openQuestions": [
+    "sjawhar/legion#2539 (INFRA-714) adds the changelog fold for packages/daemon. The architect's instruction of 2026-11-01T19:14Z stands: whichever of #2538 and #2539 merges second restores this change's two daemon entries as packages/daemon/.changes/unreleased/pr2538-<slug>.yaml, taken from this branch's history, where commits 5eb1a70a26ac and c865e10861eb carry their text. If #2538 merges second, the implementer does it at that forward merge."
+  ],
+  "discoveredComplexity": [
+    "The `permission denied to terminate process (SQLSTATE 42501)` that the previous round's handoff put down to a sibling role sharing the pod's PostgreSQL is not that. It reproduces on a server with no other role on it at all: isolatedOutboxPool's teardown runs `drop database … with (force)`, which terminates the backends still connected to that database, and legion_test is not a superuser and holds no pg_signal_backend, so Postgres refuses. Granting pg_signal_backend to legion_test on this role's own throwaway server made 900 runs green where the same selection had failed in teardown on both the pod's shared server and the ungranted private one. It is a teardown failure and never an assertion, and CI's own PostgreSQL does not show it. The previous round's discoveredComplexity entry is corrected by this one.",
+    "Three suites still cannot run in this pod, for the environment and not for the change: internal/runtime/tmux's TestNewRefusesLaunchersItCannotRun (tmux is not installed), every test that starts a NATS testcontainer (no docker), and pi-legion's judge-omp rig (each judge runs in a container)."
+  ]
+}

@@ -1,0 +1,46 @@
+{
+ "schemaVersion": 1,
+ "phase": "test",
+ "issue": "INFRA-484",
+ "completed": "2026-11-01T22:40:00Z",
+ "round": 16,
+ "codeHead": "9ed584e160a041ff0d6ebbad4556d1e27d53b280",
+ "previousHandoff": "b6a1b09731cc2e42246db64069d544c4358e9808",
+ "forwardMerge": "9ed584e1 is the third forward merge of main, resolving one conflict in internal/runtime/sandbox: main's accountDrift (#2620, replace a pod whose ServiceAccount differs) unioned with the branch's update round. Four files were resolved (docs/kubernetes.md, one_container_test.go, relaunch.go, sandbox.go). The architect named this round the full round; the branch-own diff changed, so I ran a full round.",
+ "implementerProof": {
+  "verdict": "verified",
+  "how": "The round-15 flaky assertion is fixed and the fix is test-only: the de-flake commit e52370d4 touches only packages/daemon/internal/daemon/podupdate_test.go. The implementer reports nine replacement assertions routed through a new awaitReplacement(n, what) helper; I confirmed all nine (lines 573, 709, 744, 1051, 1130, 1372, 1711, 1773, 1847) call awaitReplacement(1, ...). The helper sweeps (r.tick()) until len(replacements()) >= n within testwait's bound, then asserts len(calls) != n -- so it waits for the deferral with a bound and still asserts exactly one, not >=1. The 'not yet replaced' assertions still read rig.replacements() once and require == 0, which no deferral can turn into a replacement. I re-ran the forward-merge union in internal/runtime/sandbox whole and it is green, so main's accountDrift tests and the branch's roundCovers/update-round tests pass together on the resolved replace."
+ },
+ "failures": [],
+ "proof": [
+  {
+   "criterion": "The nine 'replaced once' assertions wait with a bound and still assert exactly one; the round-ended-gated replacement case, which is not one of the nine, is robust too.",
+   "surface": "The daemon's sweep over a real PostgreSQL with real claim machines, at CI-level repetition and CPU load.",
+   "command": "cd packages/daemon && go test ./internal/daemon -run 'TestPodUpdateTellsItsWorkerNothingHoweverTheRoundEnds$' -count=100 -timeout 20m, under 6x background CPU load; and the implementer's own -count=100 over the nine awaitReplacement tests (900 runs).",
+   "observed": "ok, 100/100 for TestPodUpdateTellsItsWorkerNothingHoweverTheRoundEnds under load (287.8 s). This test's 'the round replaced the pod' case expects replacements:1 and is gated by awaitClaim(round ended), which polls without sweeping -- so I checked whether its single end tick could defer the replacement and hang. It does not: the worker is fully quiesced (the test awaits Pending==nil, so the turn and its result have settled) before the asserting tick, so no machine is deciding and the replacement is made in that tick. The implementer's nine-test -count=100 (900 runs, 0 failures) covers the awaitReplacement sites.",
+   "headSha": "9ed584e160a041ff0d6ebbad4556d1e27d53b280",
+   "negativeControl": "The wait is load-bearing by CI's own red: run 41340112838 at b4dff46a (the pre-fix head) failed only on TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld, podupdate_test.go:1693 'replaced 0 times ... want once', the single-tick form of one of the nine. The fix routes exactly that assertion through awaitReplacement."
+  },
+  {
+   "criterion": "The forward-merge union keeps both main's accountDrift and the branch's update round, and the branch's changed-file set is unchanged by the merge.",
+   "surface": "The resolved relaunch.go read directly, and the whole internal/runtime/sandbox package (where both sides' tests live) run against the fake dynamic client.",
+   "command": "read relaunch.go's replace expression; cd packages/daemon && go test ./internal/runtime/sandbox -count=1; and the branch-own file-set diff (fork_point(main@origin|head)->head) at b4dff46a and at 9ed584e1.",
+   "observed": "relaunch.go:169 is `replace := !live || accountDrifted || migrate || movedInPod(...) || (!installing && !roundCovers(l.kind) && len(shapeDrift) > 0)`. accountDrifted (main's #2620) is unconditional -- a ServiceAccount drift replaces whatever the kind and whatever the install, which the comment explains (the account is fixed for the pod's life, so no install or round can move it). !roundCovers gates the shape-drift replacement -- a round-covered pod's shape drift waits for the round, the branch's rule. movedInPod stays always the launch's. The whole sandbox package is ok (198.6 s), so both sides' tests pass together. Branch-own path set identical across the merge: 135 before (b4dff46a) and 135 after (9ed584e1), none left and none joined.",
+   "headSha": "9ed584e160a041ff0d6ebbad4556d1e27d53b280",
+   "negativeControl": "The sandbox package being green on the resolved replace is the control that the union dropped neither rule: a resolution that lost accountDrifted would redden main's #2620 tests, and one that lost the roundCovers gate would redden the branch's own roundCovers tests; neither reddens."
+  },
+  {
+   "criterion": "No failure of the full Go suite is this branch's.",
+   "surface": "The whole daemon module's suite at the merge head and a fresh main clone.",
+   "command": "cd packages/daemon && go test ./internal/... ./cmd/... -count=1 -timeout 35m at 9ed584e1.",
+   "observed": "Eleven failures: the ten baseline that reproduce on a pure-main clone at 7285fd05 (recorded round 15), plus TestFetchKeepsAFeedAfterGitGC in internal/workspace, the load-sensitive one that passes in isolation (ok ~4.8s, established round 14). This round's only working-copy diff before the handoff is the test file, which is in internal/daemon, not internal/workspace. gofmt/go build/go vet -tags e2e clean; biome 0; pi-shared 102, pi-legion 561, claude-envoy 304, contracts 406 -- 0 fail.",
+   "headSha": "9ed584e160a041ff0d6ebbad4556d1e27d53b280",
+   "negativeControl": "The baseline ten reproduce on main at 7285fd05 (round 15's control), so none is the branch's; the eleventh passes on its own re-run, which is what tells a load flake from a failure."
+  }
+ ],
+ "notes": [
+  "Scope: the architect directed my other results stand, so I re-verified only the de-flake (nine awaitReplacement sites + the round-ended-gated case), the forward-merge union, the file-set and CI, plus a full Go/TS regression because the merge changed production code in internal/runtime/sandbox. The round-6 deletions, the six behaviour reverts and the migration ordering were verified in round 15 and the merge does not touch them.",
+  "CI: run 41356135250 at the merge head 9ed584e1 was queued at 22:14Z and had not concluded by 22:33Z (repo-wide backlog), so I record its id rather than judge it. The previous run 41340112838 at b4dff46a failed only on the flaky test this round fixes; every other lane of that run concluded success.",
+  "AC8 and the pod-update-fleet checkpoint stay unreachable from this pod (kubectl -n legion auth can-i get sandboxes answers no); the live acceptance is the implementer's production check on the first image roll after the release."
+ ]
+}

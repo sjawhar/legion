@@ -67,6 +67,27 @@ type CapabilityRow struct {
 	Detail string `json:"detail"`
 }
 
+// ReadyForUpdateRequest is the worker's answer to the update task: it has pushed everything it
+// wants kept, and the process holding this claim may now be replaced. The daemon opens an update
+// round over a pod whose configuration has drifted, and over a claim whose plugin is behind the
+// daemon's contract, tasks every claim of the round to push and answer here, and replaces the
+// process only once every claim of the round has answered — so nothing unpushed dies with a disk
+// the replacement deletes. `Round` is the round the worker answers for, as the task it read named
+// it: an answer counts only for the round whose task the worker has in front of it, so the daemon
+// refuses one that names any other round (supervise.ErrForeignUpdateRound). `Head` is the commit
+// the worker reports as the head of its issue branch at `origin`, empty when the branch is not
+// there (a planner before its first push). The daemon records the worker's word and verifies
+// nothing, exactly as `api.HandoffCompleteRequest.Commit` is the worker's report of the commit it
+// completed at.
+type ReadyForUpdateRequest struct {
+	ClaimToken Token  `json:"claimToken"`
+	SessionID  string `json:"sessionId"`
+	Secret     string `json:"secret"`
+	Generation uint64 `json:"generation"`
+	Round      string `json:"round"`
+	Head       string `json:"head,omitempty"`
+}
+
 // ExitRequest is the agent reporting its own end, with the reason it ended. An exit the daemon
 // did not ask for is still a fact about the claim, which is why the reason travels with it.
 type ExitRequest struct {

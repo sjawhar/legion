@@ -175,6 +175,8 @@ test("registers once the transcript exists, claims the claim token's role soft, 
   expect(remembered).toEqual([String(registered["claimToken"])])
   expect(claim.capability()).toEqual({
     sessionID: SESSION,
+    claimToken: String(registered["claimToken"]),
+    generation: Number(registered["generation"]),
     tree: String(registered["tree"]),
     issue: String(registered["issue"]),
     role: registered["role"] as never,

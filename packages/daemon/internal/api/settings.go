@@ -67,8 +67,15 @@ type Settings struct {
 	GitHubApps *GitHubAppsSettings `json:"github_apps,omitempty"`
 	// LingerHours and ProductionCheckHours are `linger_hours` and `production_check_hours` as the
 	// file takes them, decimal numbers of hours.
-	LingerHours          float64                 `json:"linger_hours"`
-	ProductionCheckHours float64                 `json:"production_check_hours"`
+	LingerHours          float64 `json:"linger_hours"`
+	ProductionCheckHours float64 `json:"production_check_hours"`
+	// PodUpdateRetaskHours and PodUpdateNoticeHours are `pod_update_retask_hours` and
+	// `pod_update_notice_hours`, decimal numbers of hours as the two above are: how long an open
+	// update round waits before it asks a worker again, and how long after the round opened the
+	// controller is told it is stalled. They are decimals so a live proof and the production
+	// check can drive each bound inside one run.
+	PodUpdateRetaskHours float64                 `json:"pod_update_retask_hours"`
+	PodUpdateNoticeHours float64                 `json:"pod_update_notice_hours"`
 	ReviewRoundCap       int                     `json:"review_round_cap"`
 	MaxFixAttempts       int                     `json:"max_fix_attempts"`
 	Controller           config.ControllerLaunch `json:"controller"`
@@ -268,6 +275,8 @@ func SettingsOf(cfg config.Config) Settings {
 		Gates:                                   GatesSettings{Design: cfg.Gates.Design},
 		LingerHours:                             cfg.Linger.Hours(),
 		ProductionCheckHours:                    cfg.ProductionCheckBound.Hours(),
+		PodUpdateRetaskHours:                    cfg.PodUpdateRetask.Hours(),
+		PodUpdateNoticeHours:                    cfg.PodUpdateNotice.Hours(),
 		ReviewRoundCap:                          cfg.ReviewRoundCap,
 		MaxFixAttempts:                          cfg.MaxFixAttempts,
 		Controller:                              cfg.ControllerLaunch,

@@ -153,11 +153,13 @@ func TestNewRefusesRoleOverlaysNoRoleCouldCarry(t *testing.T) {
 // Adding a role's overlay to a running deployment — the operator's volume and mount holding it, and
 // role_config_files naming it — leaves every issue pod created before without that mount, while the
 // role's next generation is started with the file in its PI_CONFIG_FILES, on which its Oh My Pi
-// would refuse to start. So the role is reported StaleAddress, its detail naming the file and the
-// volume the pod lacks, and its relaunch replaces the issue pod; the new pod mounts the volume,
-// holds nothing a pod created now is not handed, and a sibling the key does not name resumes into
-// that same new pod.
-func TestAddingARoleOverlaysMountReplacesAnIssuePodMadeWithoutIt(t *testing.T) {
+// would refuse to start. The pod has drifted, and a drifted pod is replaced by its update round
+// and never under the roles working in it: the role is reported Alive, PodDrift names the file and
+// the volume the pod lacks, and its relaunch keeps the pod. Once the round has ended and
+// ReplacePod has ended the pod, the next launch makes one that mounts the volume, holds nothing a
+// pod created now is not handed and has drifted from nothing, and a sibling the key does not name
+// resumes into that same new pod.
+func TestAddingARoleOverlaysMountDriftsAnIssuePodMadeWithoutIt(t *testing.T) {
 	g := newRig(t, nil)
 	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)
 	testerLoc, reviewerLoc := g.spawn(tester), g.spawn(reviewer)
@@ -177,30 +179,47 @@ func TestAddingARoleOverlaysMountReplacesAnIssuePodMadeWithoutIt(t *testing.T) {
 		return connected && state.Child != nil
 	})
 	obs := readopt(t, g.ctx, r2, testerLoc)[0]
-	if obs.Kind != runtime.StaleAddress || obs.Locator != testerLoc {
-		t.Fatalf("%s at %+v, want StaleAddress at the recorded locator: %s", obs.Kind, obs.Locator, obs.Detail)
+	if obs.Kind != runtime.Alive || obs.Locator != testerLoc {
+		t.Fatalf("%s at %+v, want the tester alive at its recorded locator until its round ends: %s", obs.Kind, obs.Locator, obs.Detail)
 	}
-	if want := (movedAddress{"role_config_files.tester " + file, "(unset)", "volume operator-roles from ConfigMap legion-operator-roles items []"}).String(); !strings.Contains(obs.Detail, want) {
-		t.Errorf("detail %q lacks %q", obs.Detail, want)
+	want := (movedAddress{"role_config_files.tester " + file, "(unset)", "volume operator-roles from ConfigMap legion-operator-roles items []"}).String()
+	drifted := driftOf(t, g.ctx, r2, testerLoc)
+	if !slices.Contains(drifted, want) {
+		t.Errorf("PodDrift = %q, want %q among it", drifted, want)
 	}
 
 	tester.Generation, tester.BootToken, tester.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
-	newTester, err := r2.Resume(g.ctx, &testerLoc, tester)
+	kept, err := r2.Resume(g.ctx, &testerLoc, tester)
 	if err != nil {
 		t.Fatalf("Resume the tester: %v", err)
 	}
+	if kept.Sandbox.PodUID != testerLoc.Sandbox.PodUID {
+		t.Fatalf("Resume replaced the pod %s, which the tester's own update round replaces", testerLoc.Sandbox.PodUID)
+	}
+
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}, stillDue); err != nil {
+		t.Fatalf("ReplacePod: %v", err)
+	}
+	tester.Generation, tester.BootToken = 3, "boot-tester-g3"
+	newTester, err := r2.Resume(g.ctx, &kept, tester)
+	if err != nil {
+		t.Fatalf("Resume the tester after its round: %v", err)
+	}
 	if newTester.Sandbox.PodUID == testerLoc.Sandbox.PodUID {
-		t.Fatalf("Resume kept the pod %s, which does not mount the tester's overlay %s", testerLoc.Sandbox.PodUID, file)
+		t.Fatalf("the round kept the pod %s, which does not mount the tester's overlay %s", testerLoc.Sandbox.PodUID, file)
 	}
 	pod := g.pod(testerLoc.Sandbox.Name)
 	if held := heldInPod(r2, pod, claim.Roles); len(held) > 0 {
 		t.Fatalf("the replaced pod holds %+v, which a pod created now is not handed", held)
 	}
+	if drifted := driftOf(t, g.ctx, r2, newTester); len(drifted) > 0 {
+		t.Fatalf("the replaced pod has drifted: %q", drifted)
+	}
 	if !slices.ContainsFunc(containerNamed(t, pod.Spec, workerContainer).VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == roles.Name }) {
 		t.Errorf("the replaced pod does not mount %s", roles.Name)
 	}
 	if got := startEnv(lastStart(t, g, workerToken))["PI_CONFIG_FILES"]; !strings.HasSuffix(got, file) {
-		t.Errorf("the tester's generation 2 PI_CONFIG_FILES = %q, want it to end with %s", got, file)
+		t.Errorf("the tester's generation 3 PI_CONFIG_FILES = %q, want it to end with %s", got, file)
 	}
 
 	reviewer.Generation, reviewer.BootToken, reviewer.ResumeSessionFile = 2, "boot-reviewer-g2", resumeSession
@@ -243,7 +262,7 @@ func TestMovingARoleOverlaysMountPathIsAMove(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r1, r2 := runtimeWithOptions(t, tc.before), runtimeWithOptions(t, tc.after)
 			for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
-				pod := &corev1.Pod{Spec: podOf(t, r1, spec)}
+				pod := podOf(t, r1, spec)
 				got, moved := r2.movedRoleOverlays(pod, spec.Role)
 				if tc.moved == "" && moved {
 					t.Errorf("%s: moved %s, want no move", spec.Role, got)
@@ -269,12 +288,13 @@ func runtimeWithOptions(t *testing.T, change func(*Options)) *Runtime {
 	return r
 }
 
-// A pod that lacks the mount of any named role's file is a move for every role of it, as a broker
-// enrollment is: the tester whose own file the pod holds, and the architect the key does not name,
-// read the implementer's missing mount too, so the pod is replaced at the boot's re-adoption of
-// whichever role runs, not at the implementer's later launch. The controller's pod is its own: an
-// issue role's missing mount is no move for it.
-func TestAMissingRoleOverlayMountMovesEveryRoleOfThePod(t *testing.T) {
+// A pod that lacks the mount of any named role's file has drifted for every role of it, as a
+// broker enrollment has: the tester whose own file the pod holds, and the architect the key does
+// not name, read the implementer's missing mount too, so one update round over the whole pod
+// replaces it for all of them, rather than the implementer's later launch replacing it under the
+// roles working in it. The controller's pod is its own: an issue role's missing mount is no drift
+// for it.
+func TestAMissingRoleOverlayMountIsDriftForEveryRoleOfThePod(t *testing.T) {
 	vol := func(name string) corev1.Volume {
 		return corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}
 	}
@@ -292,12 +312,12 @@ func TestAMissingRoleOverlayMountMovesEveryRoleOfThePod(t *testing.T) {
 	pod := &corev1.Pod{Spec: podOf(t, before, workerSpec(t))}
 	want := (movedAddress{"role_config_files.implementer /etc/y/implementer.yml", "(unset)", "volume roles-y from ConfigMap roles-y items []"}).String()
 	for _, role := range []claim.Role{claim.RoleTester, claim.RoleArchitect, claim.RoleImplementer} {
-		moved := after.movedInPod(pod, role)
+		moved := after.driftedInPod(pod, role)
 		if !slices.ContainsFunc(moved, func(m movedAddress) bool { return m.String() == want }) {
 			t.Errorf("the %s's pod holds %+v, want %s among it", role, moved, want)
 		}
 	}
-	controller := &corev1.Pod{Spec: podOf(t, before, controllerSpec(t))}
+	controller := podOf(t, before, controllerSpec(t))
 	if got, moved := after.movedRoleOverlays(controller, claim.RoleController); moved {
 		t.Errorf("the controller's pod moved for an issue role's mount: %+v", got)
 	}
@@ -325,7 +345,7 @@ func TestADroppedMountThatHidTheFileIsAMove(t *testing.T) {
 		o.RoleConfigFiles = files
 	})
 	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
-		pod := &corev1.Pod{Spec: podOf(t, before, spec)}
+		pod := podOf(t, before, spec)
 		if got, moved := after.movedRoleOverlays(pod, spec.Role); !moved || got.where != "role_config_files."+string(spec.Role)+" "+file {
 			t.Errorf("%s: moved %v %+v, want a move of its file under the dropped mount", spec.Role, moved, got)
 		}

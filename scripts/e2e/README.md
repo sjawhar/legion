@@ -1373,7 +1373,10 @@ Each item below names an input and its default, then what it means.
 
   a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-role-init`'s relaunch;
   the harness refuses any other name at `identity`, before it creates anything.
-  `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls.
+  `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls
+  — `STAGE4A_FROM=pod-update` launches that checkpoint's own issue pod and runs the update round in it, and `STAGE4A_FROM=pod-update-fleet` launches both of its issue pods and runs a round in each, as every other entry point does for its own claims.
+  A run that reaches `cache-lost-volume`, `pod-update` or `pod-update-fleet`, entered there or before it, pushes that checkpoint's own branch to the run's repository
+  — one per issue, so two for `pod-update-fleet` — and deletes each again when the run ends.
   The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof
 
 - `STAGE4A_EVIDENCE_DIR` — a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX`
@@ -1724,6 +1727,37 @@ Each item below names a check, then what it does and what it requires.
   The pod that went took its disk with it, so the new pod's is a claim of its own
   — the same name, owned by the new pod, a new uid — and the marker on it holds the resumed incarnation alone, never the replaced one.
   Both roles are then suspended, the new pod kept
+
+- `pod-update`
+
+  an update round over a live issue pod (INFRA-484), on an issue of its own, `S4A-<n>` with `<n>` the FNV-1a hash of the run's project and this checkpoint's name, whose architect and implementer run in that issue's one pod.
+  `PodDrift` of the pod their launch just made names nothing, for both of them.
+  The operator then patches that Sandbox's pod template (`kubectl patch sandbox <name> --type=json`), replacing the configuration it records its pod was built from (`legion.dev/pod-shape`) with the same shape at a disk a gibibyte larger
+  — what no running pod can be changed to carry — and `PodDrift` then names `disk <recorded>, now <configured>` and nothing else, for both workers: the reason the round is opened on.
+  Both are tasked, and while only the architect has answered the pod is not replaced:
+  over a settle window nothing in it is observed ending, the pod keeps its uid and stays Running, its Sandbox stays `Running`, and both processes probe `Alive`.
+  Each worker answers as its own agent in the pod, never as the harness:
+  it commits the work it holds in the issue's workspace, pushes it to `legion/S4A-<n>` through the clone's own `legion git-credential` helper, and reports that branch's head, which `git ls-remote` as the same App names on GitHub (the branch is deleted when the run ends, and only while it still names what that push put there).
+  With both answers in, `ReplacePod` ends the round:
+  each worker's process is observed at its recorded locator as `Gone` or `NotRecordedProcess` with `Displaced` set
+  — and never `Gone` without it between its task and its answer, the turn no round may cut — and each resumes from the session the table holds into the one new pod, which reads no drift, where `git ls-remote` as the architect's own App still names the branch at the head the implementer reported: the pushed work outlived the pod that held it.
+  Both roles are then suspended, the new pod kept
+
+- `pod-update-fleet`
+
+  one pod-template change drifting every pod of two issues at once (INFRA-419), each issue on a run key of its own (`S4A-<n>`, the FNV-1a hash of the run's project and that checkpoint's name) with an architect and a worker in its own pod.
+  Both Sandboxes record the one configuration this runtime builds an issue pod from, and `PodDrift` of both pods names nothing before the change.
+  The operator then patches that one moved shape onto both Sandboxes (`legion.dev/pod-shape` at a disk a gibibyte larger, `kubectl patch sandbox <name> --type=json` for each), and `PodDrift` then names `disk <recorded>, now <configured>` and nothing else for all four workers: one change, every pod.
+  Each issue's pod is still a round of its own.
+  The second issue's two workers answer — each as its own agent in its pod, committing and pushing its work to its own issue's branch through the clone's own `legion git-credential` helper and reporting that branch's head
+  — and `ReplacePod` ends that issue's round: its two processes are observed at their recorded locators as `Gone` or `NotRecordedProcess` with `Displaced` set and resume from the session table into its one new pod, which reads no drift.
+  The first issue's pod is untouched by that:
+  over a settle window nothing in it is observed ending, it keeps its uid and stays Running with its Sandbox `Running`, and both its workers probe `Alive`, its own two having answered nothing.
+  They then answer, its pod is replaced in turn into a second new pod, and no worker of either issue — each issue's architect, a root's own claim, among them — was ever observed `Gone` or `NotRecordedProcess` without `Displaced` between its task and its answer: no round cut a turn.
+  Each issue's branch still names the head its last worker reported, read as that role's own App from the new pod.
+  What a round leaves in an issue's record — a completion it accepts, a park or a wait on a person it never writes — is the daemon's half and `internal/daemon`'s own round tests hold it;
+  this checkpoint is the runtime's.
+  The four roles are then suspended, the two new pods kept
 
 - `previous-layout`
 

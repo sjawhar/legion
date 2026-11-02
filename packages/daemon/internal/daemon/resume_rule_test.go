@@ -449,7 +449,8 @@ func TestReadmissionWaitsForTheOperatorToResumeTheClaimsItSuspended(t *testing.T
 // seedWorkflowTree records root as an admitted tree of project in the store at dsn — the issue, its
 // admission slot and its tree's lifecycle, as admission leaves a root it promoted — and each of
 // claims, bound to that lifecycle as the daemon binds a claim it admits, its pending delivery
-// written too when it carries one (AdmitClaim alone writes only the claim row).
+// written too when it carries one (AdmitClaim alone writes only the claim row). Each tree takes
+// the next free slot, so a test may seed more than one running tree.
 func seedWorkflowTree(t *testing.T, dsn, project string, root record.Issue, claims ...supervise.Claim) {
 	t.Helper()
 	ctx := context.Background()
@@ -463,7 +464,19 @@ func seedWorkflowTree(t *testing.T, dsn, project string, root record.Issue, clai
 		if err := records.PutIssue(ctx, tx, root); err != nil {
 			return err
 		}
-		return records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: 0, AdmittedAt: time.Now()})
+		taken, err := records.Slots(ctx, tx)
+		if err != nil {
+			return err
+		}
+		// Above every slot the store holds, so a second tree seeded here takes a free one whatever
+		// the first left.
+		index := 0
+		for _, slot := range taken {
+			if slot.Index >= index {
+				index = slot.Index + 1
+			}
+		}
+		return records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: index, AdmittedAt: time.Now()})
 	}); err != nil {
 		t.Fatalf("record the tree of %s: %v", root.Key, err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // newStaleHarness is a harness with its log captured so a test can read the Warn line a
@@ -30,6 +32,81 @@ func newStaleHarness(t *testing.T) (*harness, *bytes.Buffer) {
 		Log: slog.New(slog.NewJSONHandler(logs, nil)),
 	}).Handler
 	return h, logs
+}
+
+// newNoInstallHarness is a harness whose daemon knows which claims a launch installs no plugin
+// for (Options.NoPluginInstall, the daemon's noPluginInstall over its configured backends),
+// relaunchable like newStaleHarness's so the rest of the stale-caller rule still applies.
+func newNoInstallHarness(t *testing.T, noInstall func(supervise.Claim) bool) *harness {
+	t.Helper()
+	h := newHarness(t)
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Pool: h.store.Pool(), Record: record.NewStore(), Releaser: h.runtime, Trees: h.store,
+		PromptAgents: testPromptAgents, PluginRelaunchable: true, NoPluginInstall: noInstall,
+		State: fakeSource{}, StateTransactions: &fakeStateTransactions{tx: &fakeTx{}},
+		Log: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}).Handler
+	return h
+}
+
+// A claim whose launch installs no plugin is served on the contract it speaks, with no update
+// round open: a Claude Code role's plugin is its pod image's own claude-envoy, so no relaunch of
+// this daemon moves its contract — the stale-plugin lane posts it nothing and its registration
+// stands — and the refusal's own sentence, that the daemon is relaunching this process onto the
+// current plugin, would never come true. Refused instead, such a worker would lose its ready,
+// its grants and everything a grant bears from the daemon's boot until a round over its pod,
+// which a release that changes no image never opens.
+//
+// The claim a launch does install a plugin for is the control: the same contract, the same
+// window, and the 409 the stale-caller rule has always answered.
+func TestAClaimWhoseLaunchInstallsNoPluginIsServedOnItsOldContract(t *testing.T) {
+	claudeRole := claim.RoleImplementer
+	h := newNoInstallHarness(t, func(c supervise.Claim) bool { return c.Role == claudeRole })
+	stale := DaemonAPIVersion - 1
+
+	for _, tc := range []struct {
+		role   claim.Role
+		issue  string
+		served bool
+	}{
+		{role: claudeRole, issue: "LEGION-208", served: true},
+		{role: claim.RoleTester, issue: "LEGION-209"},
+	} {
+		t.Run(string(tc.role), func(t *testing.T) {
+			token, boot := h.launch(tc.issue, tc.role)
+			session := "ses_" + string(tc.role)
+			current := h.registerContract(boot, session, DaemonAPIVersion, true)
+			h.makeStale(t, token, session, current.Secret, stale)
+			if c := h.stored(token); c.UpdateRound != "" {
+				t.Fatalf("%s is in round %q: this case proves nothing, since an open round serves a stale claim already", tc.role, c.UpdateRound)
+			}
+
+			ready := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+				ClaimToken: token, SessionID: session, Secret: current.Secret, Generation: current.Generation,
+			}, nil)
+			grants := h.request(http.MethodPost, "/legion/v1/grants", GrantRequest{
+				SessionID: session, Secret: current.Secret, Tree: tc.issue, Issue: tc.issue,
+			}, nil)
+
+			if !tc.served {
+				wantRefusal(t, ready, http.StatusConflict, claim.StalePluginContract(stale, DaemonAPIVersion).Message)
+				wantFailure(t, grants, http.StatusConflict, "STALE_PLUGIN_CONTRACT")
+				return
+			}
+			if ready.Code != http.StatusNoContent {
+				t.Fatalf("ready from a claim no install can carry = %d, want 204; body %s", ready.Code, ready.Body)
+			}
+			if grants.Code != http.StatusOK {
+				t.Fatalf("grants for a claim no install can carry = %d, want 200; body %s", grants.Code, grants.Body)
+			}
+			var grant GrantResponse
+			decodeInto(t, grants, &grant)
+			if grant.GrantID == "" {
+				t.Fatalf("the grant %+v carries no handle", grant)
+			}
+		})
+	}
 }
 
 // A claim whose last registration the daemon relaunched for this contract — the stale-registration

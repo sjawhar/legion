@@ -145,10 +145,14 @@ func TestRunRelaunchesAClaimOnAnotherPluginContractAtBootChargingNothing(t *test
 // A boot relaunch the launch path itself refuses — a tree lifecycle cleanup already reserved, here
 // — leaves the claim exactly as it found it: refreshPlugin's own checkLaunch runs before the Warn,
 // the PluginRelaunchFor mark, and the turn's interruption, so the refused attempt changes nothing,
-// its confirmed pending delivery included, and logs no relaunching line while the refusal lasts.
-// The orphan sweep is the one periodic pass that already reads every claim, so once the refusal
+// the task waiting for it included, and logs no relaunching line while the refusal lasts. The
+// orphan sweep is the one periodic pass that already reads every claim, so once the refusal
 // clears the claim relaunches at the next sweep without a restart. A current claim seeded beside
 // it is never touched.
+//
+// The stale claim is seeded idle, not working: a claim in a turn is not relaunched at all until
+// that turn ends (supervise's refreshPlugin), so the launch path would never be asked and this
+// test would be waiting on a refusal nothing makes.
 func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	cfg := testConfig(t)
@@ -170,9 +174,9 @@ func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *test
 	seedWorkflowTree(t, cfg.PostgresDSN, project,
 		record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: cfg.Project, Tree: root, Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
 		supervise.Claim{Token: stale, Project: project, Tree: root, Issue: root, Role: claim.RoleImplementer,
-			Generation: 1, State: supervise.StateWorking, Session: "ses_implementer", SessionFile: sessionFile,
+			Generation: 1, State: supervise.StateIdle, Session: "ses_implementer", SessionFile: sessionFile,
 			PluginContract: 0, Locator: pluginTestLocator(stale),
-			Pending: &supervise.Delivery{ID: "outbox:1", Task: "implement the plan", Generation: 1, Phase: phase.Implementing, ConfirmedAt: time.Now().Add(-time.Minute)},
+			Pending: &supervise.Delivery{ID: "outbox:1", Task: "implement the plan", Generation: 1, Phase: phase.Implementing, QueuedAt: time.Now().Add(-time.Minute)},
 		},
 		supervise.Claim{Token: current, Project: project, Tree: root, Issue: root, Role: claim.RoleArchitect,
 			Generation: 1, State: supervise.StateReady, Session: "ses_architect", SessionFile: filepath.Join(cfg.StateDir, "architect.jsonl"),
@@ -198,11 +202,11 @@ func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *test
 	testwait.Eventually(t, "the launch gate asked more than once while refusing "+string(stale), func() bool {
 		return asked.Load() > 1
 	})
-	if c := storedClaim(t, cfg, stale); c.PluginRelaunchFor != 0 || c.State != supervise.StateWorking || c.Generation != 1 {
-		t.Fatalf("the stale claim after the refused boot relaunch = %+v, want it exactly as it was: working at generation 1, no relaunch marked", c)
+	if c := storedClaim(t, cfg, stale); c.PluginRelaunchFor != 0 || c.State != supervise.StateIdle || c.Generation != 1 {
+		t.Fatalf("the stale claim after the refused boot relaunch = %+v, want it exactly as it was: idle at generation 1, no relaunch marked", c)
 	}
-	if p := storedClaim(t, cfg, stale).Pending; p == nil || p.ConfirmedAt.IsZero() || p.Interrupted {
-		t.Fatalf("pending after the refused relaunch = %+v, want the confirmed delivery untouched", p)
+	if p := storedClaim(t, cfg, stale).Pending; p == nil || p.ID != "outbox:1" || p.Interrupted {
+		t.Fatalf("pending after the refused relaunch = %+v, want the waiting task untouched", p)
 	}
 	if lines := loggedLines(t, logs.String(), "relaunching it onto the current plugin"); len(lines) != 0 {
 		t.Fatalf("logs %s carry a relaunching line while the refusal lasted, want none", logs.String())
@@ -223,8 +227,8 @@ func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *test
 	if c := storedClaim(t, cfg, stale); c.PluginRelaunchFor != api.DaemonAPIVersion {
 		t.Fatalf("PluginRelaunchFor after the sweep's relaunch = %d, want %d", c.PluginRelaunchFor, api.DaemonAPIVersion)
 	}
-	if p := storedClaim(t, cfg, stale).Pending; p == nil || !p.Interrupted || !p.ConfirmedAt.IsZero() {
-		t.Fatalf("pending after the sweep's relaunch = %+v, want the task taken back, unconfirmed and interrupted", p)
+	if p := storedClaim(t, cfg, stale).Pending; p == nil || p.ID != "outbox:1" || p.Interrupted {
+		t.Fatalf("pending after the sweep's relaunch = %+v, want the task still waiting for the process the relaunch starts", p)
 	}
 	testwait.Eventually(t, "the sweep-triggered relaunch line", func() bool {
 		return len(loggedLines(t, logs.String(), `"trigger":"sweep"`)) > 0
@@ -327,10 +331,13 @@ func TestBootLeavesALaunchingClaimToItsRegistration(t *testing.T) {
 }
 
 // A stale claim found working with a suspension held for its turn (the workflow asked to suspend
-// it, and the machine is waiting for the turn to end) is suspended instead of relaunched when the
-// boot pass reaches it: nothing is left to hold the suspension for, so it ends there, charged
-// nothing, rather than launch a pod only to suspend it on the hold's own retry.
-func TestBootSuspendsAStaleClaimWhoseSuspensionIsHeld(t *testing.T) {
+// it, and the machine is waiting for the turn to end) is left running by the boot pass, and the
+// turn's end runs that suspension rather than a relaunch: the process the relaunch would have
+// replaced is stopped there anyway, charged nothing, and no pod is launched only to be suspended
+// on the hold's own retry. The boot pass must not cut the turn to get there — a worker below the
+// contract that introduced ready_for_update cannot be asked to push first, so what it had not
+// pushed would go with the turn (supervise's holdStaleRelaunch).
+func TestBootSuspendsAStaleClaimWhoseSuspensionIsHeldAtItsTurnsEnd(t *testing.T) {
 	sup, rt := newPluginSupervisor(t, 24, true)
 	project, _ := claim.ProjectToken("legion")
 	token, _ := claim.NewToken(project, "LEGION-1", claim.RoleImplementer)
@@ -354,6 +361,16 @@ func TestBootSuspendsAStaleClaimWhoseSuspensionIsHeld(t *testing.T) {
 	s := &supervision{log: quietLogger(), supervisor: sup, claims: []supervise.Claim{c}, plan: plan{pluginRelaunchable: true}}
 
 	s.refreshStalePlugins(s.claims, "boot")
+
+	m.Wait()
+	if held := m.Claim(); held.State != supervise.StateWorking {
+		t.Fatalf("the claim after the boot pass = %s, want it left %s: its turn is not the boot pass's to cut",
+			held.State, supervise.StateWorking)
+	}
+
+	if err := m.Handle(context.Background(), supervise.StreamTurnEnd{Claim: token}); err != nil {
+		t.Fatalf("the turn ended: %v", err)
+	}
 
 	testwait.Eventually(t, "the held suspension to end the stale claim", func() bool {
 		return m.Claim().State == supervise.StateSuspended

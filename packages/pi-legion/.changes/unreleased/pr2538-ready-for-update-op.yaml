@@ -1,0 +1,12 @@
+kind: Added
+body: |-
+  The `legion` tool's `ready_for_update` operation, for a phase worker and for an architect: it
+  answers the daemon's update task on the issue's pod. The plugin reads the head of
+  `legion/<issue>@origin` with the pane's own jj and sends it with the answer, and leaves it out
+  when the branch is not on the remote. The operation ends no phase, and the turn it answered in
+  is not continued by a phase reminder: after the answer the worker waits, and no reminder
+  follows, because the daemon is what wakes it. The daemon replaces the pod only once every
+  worker of that pod has answered, and holds the worker's next task until its process comes back
+  on the new pod in the same session, where its workspace is provisioned afresh from the issue's
+  pushed branch.
+  `legion.daemonApiVersion` is 45.
