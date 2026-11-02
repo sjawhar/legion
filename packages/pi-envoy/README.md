@@ -313,7 +313,12 @@ reviews these calls:
 Every other Dispatch command is outside the gate, and its text posts unreviewed: among them
 `dispatch issue-update --reason`, `dispatch resolve-ask --reason` and `dispatch suggest`.
 
-The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name
+The gate reads the arguments from the command's own `--dry-run`. The dry run sends nothing and
+contacts no Dispatch server, so a slow one most likely means a busy machine. The reads, the dry
+run and the `cd`'s `pwd -P` probe, take at most half the call's deadline: the first run of each
+is cut at 20 s, or sooner when that half ends sooner, and a run cut there is run once more with
+what is left of that half (25 s at the 90 s default), when at least 2 s of it is left. The
+review keeps the other half. An upload that reads its name
 from a file (`--name-file`) is decided from the name the dry run prints. `--path-file` is refused:
 its content names a file the gate does not read before Dispatch opens it. An upload whose name or
 path holds an expansion (`"$NAME"`) is outside the form the gate reads. The gate reads each file
@@ -558,7 +563,7 @@ why. The note reaches a headless session too:
 | Outcome | What happened |
 | --- | --- |
 | `timeout` | the review did not answer within its deadline |
-| `error` | the review failed: a model error, a handler exception, or a dry run that failed |
+| `error` | the review failed: a model error, a handler exception, or a dry run that failed; a dry run that timed out twice, or once with no time left to run it again, gets a note that the machine was busy and that the agent should read back what the write posted |
 | `no-verdict` | the model answered with no verdict the gate could read |
 | `halted` | three calls in a row reached no verdict, and the gate is paused for the session |
 | `skipped` | the session's main model is on another provider than the gate's |
