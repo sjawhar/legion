@@ -980,3 +980,76 @@ func TestTwoPodsReceiveConnectionLostWhileItsReconnectHooksHangHandsOverWithin15
 	t.Logf("%s took the lease %s after the second cut, with %s's rewatch hanging; %d messages after it", b.instance,
 		taken.Round(time.Millisecond), a.instance, len(messages))
 }
+
+// A message the active pod's relay pushed as its links dropped is not pushed again when the links
+// come back. The relay's push of the message is in flight to the session's port when the pod's
+// session-consumer connection and the lease connection, which carries the delivery ledger, both
+// drop; the port then takes the push (204), but neither the ledger's record of it nor the
+// consumer's acknowledgement can reach the server. The session-consumer connection comes back
+// first, as one of a pod's connections always does after an outage that took them all, and the
+// relay restarts its consumer at the ack floor at once, so the server gives it the message again;
+// the lease connection follows a moment later, well inside the lease's validity, so the pod keeps
+// the lease and the relay throughout. The session must take the message exactly once: the pod
+// knows it delivered it, and the ledger answers again within a second. At 7db8d09c the restart
+// meets the ledger before the lease connection is back, the ledger call fails at once
+// (`nats: outbound buffer limit exceeded`), and the relay pushes the message a second time. That
+// is TestTwoPodsShortDropKeepsTheActivePod's occasional "evt-mp-0020 ... prompted 2 times" (4 of
+// 100 runs at 7db8d09c, 0 of 50 at bd369c08 and 0 of 50 with the relay's restart waiting its
+// first retry), forced into one order (INFRA-557 tester's round 24).
+func TestTwoPodsARelayedPushTheLinksDroppedUnderIsNotPushedAgainWhenTheyComeBack(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b")
+	mpWaitStandby(t, b, 30*time.Second)
+	serving := mpStartServingPort(t)
+	const sessionID = "ses_mp_relay_drop_once"
+	a.registerPort(t, serving, sessionID)
+	publisher := mpConnectPublisher(t, uri)
+	warm := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
+
+	arrived, release := serving.gate(sessionID)
+	t.Cleanup(release)
+	m := publisher.mustPublish(t, sessionID)
+	select {
+	case <-arrived:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("%s never pushed %s to the session's port", a.instance, m.event)
+	}
+
+	leaseConnection := "envoy-listener-lease " + a.instance
+	healSessions := a.lanes.drop(mpSessionConsumerConnection)
+	healLease := a.lanes.drop(leaseConnection)
+	t.Cleanup(func() { healSessions(); healLease() })
+	disconnected := func(name string) bool {
+		return mpLineWith(a.Output.String(), "envoy nats disconnected", `name=`+name) != "" ||
+			mpLineWith(a.Output.String(), "envoy nats disconnected", `name="`+name+`"`) != ""
+	}
+	mpEventually(t, 5*time.Second, a.instance+" to read both connections dropped", func() bool {
+		return disconnected(mpSessionConsumerConnection) && disconnected(leaseConnection)
+	})
+	release()
+	time.Sleep(200 * time.Millisecond) // the push answered 204; its record and ack fail
+	reconnects := strings.Count(a.Output.String(), "envoy nats reconnected name="+mpSessionConsumerConnection)
+	healSessions()
+	mpEventually(t, 5*time.Second, a.instance+"'s session-consumer connection to reconnect", func() bool {
+		return strings.Count(a.Output.String(), "envoy nats reconnected name="+mpSessionConsumerConnection) > reconnects
+	})
+	time.Sleep(300 * time.Millisecond)
+	healLease()
+	mpEventually(t, 5*time.Second, a.instance+"'s lease connection to reconnect", func() bool {
+		return mpLineWith(a.Output.String(), "envoy nats reconnected", `name="`+leaseConnection+`"`) != ""
+	})
+
+	after := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{m, after}, 30*time.Second)
+	time.Sleep(mpQuiet)
+	if !a.active() {
+		_, body := a.health()
+		t.Fatalf("%s lost the lease over the drop, so the row did not keep one relayer: %v", a.instance, body)
+	}
+	serving.requireOnce(t, []mpMessage{warm, m, after})
+	serving.requireOrder(t, []mpMessage{warm, m, after})
+}

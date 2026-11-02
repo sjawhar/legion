@@ -424,6 +424,24 @@ func (l *mpLaneLink) forward(data []byte, drop string) []byte {
 	}
 }
 
+// drop closes every connection the pod holds under name and every one it opens under that name
+// from its CONNECT frame on, as a server that went away does: the pod reads each close at once
+// and reconnects, and its reconnects land only once the returned func heals the name. The pod's
+// other connections are untouched.
+func (r *mpLaneRelay) drop(name string) (heal func()) {
+	heal = r.cut(name)
+	r.mu.Lock()
+	links := slices.Clone(r.links)
+	r.mu.Unlock()
+	for _, link := range links {
+		if link.lane() == name {
+			_ = link.client.Close()
+			_ = link.server.Close()
+		}
+	}
+	return heal
+}
+
 // gate is the open gate of a cut connection name, nil while connections under that name pass.
 func (r *mpLaneRelay) gate(name string) chan struct{} {
 	if name == "" {
@@ -695,9 +713,12 @@ type mpServingPort struct {
 	port    int
 	journal *mpJournal
 
-	mu         sync.Mutex
-	prompts    map[string][]mpPrompt
-	holds      map[string]chan struct{}
+	mu      sync.Mutex
+	prompts map[string][]mpPrompt
+	holds   map[string]chan struct{}
+	// gates holds, per session, the next prompt until its release closes, then answers it 204
+	// (gate).
+	gates      map[string]mpPortGate
 	failing    map[string]bool
 	failed     map[string]int
 	unexpected []string
@@ -706,7 +727,7 @@ type mpServingPort struct {
 
 func mpStartServingPort(t *testing.T) *mpServingPort {
 	t.Helper()
-	serving := &mpServingPort{journal: mpJournalOf(t), prompts: map[string][]mpPrompt{}, holds: map[string]chan struct{}{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
+	serving := &mpServingPort{journal: mpJournalOf(t), prompts: map[string][]mpPrompt{}, holds: map[string]chan struct{}{}, gates: map[string]mpPortGate{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
 	server := httptest.NewServer(http.HandlerFunc(serving.serve))
 	t.Cleanup(server.Close)
 	// Runs before server.Close, which waits for every held prompt to return.
@@ -752,11 +773,21 @@ func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	held, hold := s.holds[sessionID]
 	delete(s.holds, sessionID)
+	gate, gated := s.gates[sessionID]
+	delete(s.gates, sessionID)
 	failing := s.failing[sessionID]
 	if failing && !hold {
 		s.failed[sessionID]++
 	}
 	s.mu.Unlock()
+	if gated {
+		close(gate.arrived)
+		select {
+		case <-gate.release:
+		case <-s.stopping:
+			return
+		}
+	}
 	if hold {
 		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: time.Now(), answer: mpPromptHeld})
 		close(held)
@@ -777,6 +808,24 @@ func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
 	s.prompts[sessionID] = append(s.prompts[sessionID], mpPrompt{event: event, at: taken})
 	s.mu.Unlock()
 	s.journal.receipt(mpReceipt{session: sessionID, event: event, at: taken, answer: mpPromptTaken})
+}
+
+// mpPortGate is one gated prompt: arrived closes when it reaches the port, and the port answers it
+// once release closes.
+type mpPortGate struct {
+	arrived chan struct{}
+	release chan struct{}
+}
+
+// gate holds the next prompt to sessionID until release runs, then answers it 204 and records it
+// taken, as a session that took a moment to accept it. The returned channel closes when that
+// prompt arrives.
+func (s *mpServingPort) gate(sessionID string) (arrived <-chan struct{}, release func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g := mpPortGate{arrived: make(chan struct{}), release: make(chan struct{})}
+	s.gates[sessionID] = g
+	return g.arrived, sync.OnceFunc(func() { close(g.release) })
 }
 
 // hold holds the next prompt to sessionID: the serving port never answers it, until the listener
