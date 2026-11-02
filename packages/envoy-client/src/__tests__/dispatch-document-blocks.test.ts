@@ -95,6 +95,7 @@ describe("readDocumentBlocks", () => {
     expect(await readDocumentBlocks(client, { issue: "DSP-1", artifact: "spec" }, context)).toEqual(
       {
         name: "spec.md",
+        slug: "spec",
         blocks: [
           { id: "h-1", text: "# Café" },
           { id: "p-1", text: "Über den Fluss." },
@@ -224,13 +225,14 @@ describe("readDocumentBlocks", () => {
     });
   }
 
-  // The server finds an upload's document by its exact name, and doc-edit reads `spec` as the
-  // issue's primary document: the name tells the caller the two differ.
-  test("an upload named spec reads the primary document, and names it by its own name", async () => {
+  // The server finds an upload's document by its exact name or its exact slug, and doc-edit reads
+  // `spec` as the issue's primary document, whose slug it is: the name and the slug tell the caller
+  // which of the two the reference matched.
+  test("an upload named spec reads the primary document, and names it by its own name and slug", async () => {
     const { fetchImpl } = dispatch();
     const client = new DispatchClient(SERVER, "token", fetchImpl);
     const read = await readDocumentBlocks(client, { issue: "DSP-1", artifact: "spec" }, context);
-    expect(read === "not-found" ? read : read.name).toBe("spec.md");
+    expect(read === "not-found" ? read : [read.name, read.slug]).toEqual(["spec.md", "spec"]);
   });
 
   test("a project document, by the project route's slug", async () => {
@@ -245,7 +247,7 @@ describe("readDocumentBlocks", () => {
     const client = new DispatchClient(SERVER, "token", fetchImpl);
     expect(
       await readDocumentBlocks(client, { ref: "dispatch://CORE/artifact/notes" }, context)
-    ).toEqual({ name: "notes.md", blocks: [{ id: "b-1", text: "The brief." }] });
+    ).toEqual({ name: "notes.md", slug: "notes", blocks: [{ id: "b-1", text: "The brief." }] });
     expect(requests[0]).toBe("/api/v1/projects/CORE/artifacts/notes");
   });
 
