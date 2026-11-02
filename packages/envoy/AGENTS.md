@@ -2638,11 +2638,16 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A write of content equal to the stored record is skipped while that record is younger than `session.KnownSessionRefreshAge` (10 minutes), so a session's 90-second heartbeat costs one write per refresh age however many listeners serve the session;
   the comparison reads the stored record, as `store.Registry.UpsertWithin`'s does for an interest row, so the throttle holds across every listener.
   The bucket is in `bus.ListenerBuckets()`, so envoy-infra grants it to the listener, to the host user a host's sessions share and to Dispatch (`packages/envoy/infra/core/permissions.go`, and `packages/envoy/infra/README.md` for what that widens).
-  A listener whose NATS user may not open the bucket logs one line naming it and runs without it:
+
+- Opening that bucket is its own question, because the listener that cannot is the one production runs between this change's image pin and the grant release.
+  A listener whose NATS user may not open it logs one line naming it and runs without it:
   every read then answers as an empty store does, every write does nothing, and the publish route answers no counts at all (`session.KnownSessions.Opened`).
   That listener does not wait for the bucket at its start and does not give it up for the life of the process.
   One open attempt is bounded at `knownBucketOpenWait` (2 seconds) rather than the 10-second JetStream `MaxWait` the other stores take, because a denied JetStream request is dropped by the server rather than refused, so the attempt costs its whole wait and the start blocks on it before `/v1` opens; by then the stream and the four other buckets have been answered over the same API, so two seconds is far past a healthy remote leader.
-  A failed attempt is retried in the background, first after a second and doubling to a five-minute cap, so the grant release that follows the listener's image pin is picked up without a restart, and the open logs one line when it succeeds.
+  A failed attempt is retried in the background, first after a second and doubling to a five-minute cap, so the grant release that follows the listener's image pin is picked up without a restart.
+  An attempt that opens the bucket then waits for the watcher's first pass before the store reports the bucket open, and logs that one line after it, because a bucket is opened in one request and read in a pass over every key it holds:
+  between the two the store answers for no session the bucket knows, so a send would be refused `404 no live session` for a session Envoy does know and a publish would count its recipients low, which are the two failures this store exists to remove.
+  The listener's start gates the same hazard with `WaitForCacheReady` before it opens `/v1`; nothing gates the attempt that opens the bucket later, so the store holds that line itself (`session.KnownSessions.Opened`, which reports the bucket open and its cache filled, never the first alone).
   Once the bucket is open its handle is opened again on the ordinary wait, so only the attempt a start waits on is shortened.
 
 - `store.Open` snapshots the revision of every stored claim (`roleRevisions`, `internal/store/kv.go`) so a restored claim keeps its grace only while the bucket still holds the revision the restart read.

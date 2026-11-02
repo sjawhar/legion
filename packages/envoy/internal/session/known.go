@@ -287,9 +287,16 @@ func (s *KnownSessions) startWatch(kv bus.KeyValue) {
 
 // reopenUntilStopped attempts the bucket again, waiting retryFirst and then twice the wait before
 // it up to retryMax, until an attempt opens it or the store is stopped. Each attempt runs on the
-// connection the store holds now, which a Rewatch may have replaced. The one line it logs is the
-// success: the failure was logged when the store opened, and a line per attempt would be one a
-// minute for the life of a listener whose grant never arrives.
+// connection the store holds now, which a Rewatch may have replaced.
+//
+// An attempt that opens the bucket is not the end of it: the watcher it installs fills the
+// records in the background, and until it has, the store holds a cache that answers for none of
+// the sessions the bucket knows. So this waits for that first pass before it reports anything,
+// which is what keeps Opened false over an unfilled cache - the listener's start gates exactly
+// this hazard with WaitForCacheReady before it opens /v1, and nothing gates the attempt that
+// opens the bucket later. The one line it logs is that success, after the wait, so the line
+// means what it says: the failure was logged when the store opened, and a line per attempt would
+// be one every five minutes for the life of a listener whose grant never arrives.
 func (s *KnownSessions) reopenUntilStopped() {
 	for wait := s.retryFirst; ; wait = min(2*wait, s.retryMax) {
 		timer := time.NewTimer(wait)
@@ -306,11 +313,36 @@ func (s *KnownSessions) reopenUntilStopped() {
 		if err != nil {
 			continue
 		}
+		s.startWatch(kv)
+		watcher := s.watch()
+		if watcher == nil {
+			// The store stopped while this attempt ran, so startWatch installed nothing.
+			return
+		}
+		if err := watcher.WaitReady(s.untilStopped()); err != nil {
+			// The store stopped, or the watch ended before it had delivered the bucket. Opened
+			// stays false, which leaves a publish's count out rather than answering it from a
+			// cache that holds nothing.
+			return
+		}
 		s.logger().Info("the known-session bucket is open; this listener writes and reads the 30-day records from now on",
 			slog.String("bucket", bus.KnownSessionBucket))
-		s.startWatch(kv)
 		return
 	}
+}
+
+// untilStopped is a context that ends when the store does, for a background wait that must not
+// outlive a shutdown. Its goroutine ends with either.
+func (s *KnownSessions) untilStopped() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-s.stopped:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx
 }
 
 // watch is the store's watcher, or nil while its bucket is not open. A nil store has none either,
@@ -324,14 +356,22 @@ func (s *KnownSessions) watch() *kvwatch.Watcher {
 	return s.watcher
 }
 
-// Opened reports whether the store's bucket is open, so its answers are the bucket's. A store
-// whose NATS user may not open the bucket answers false until an attempt of its own opens it,
-// and a nil store for good; both answer no record and write nothing meanwhile. A caller whose
-// own answer would mean something narrower than it names then - a publish's recipient count,
-// which these records are half of - leaves that answer out instead of sending the live sessions
-// alone (cmd/listener/recipients.go).
+// Opened reports whether the store's bucket is open and its cache holds what the bucket held,
+// so its answers are the bucket's. A store whose NATS user may not open the bucket answers false
+// until an attempt of its own opens it and the watcher's first pass has filled the records, and
+// a nil store for good; both answer no record and write nothing meanwhile. A caller whose own
+// answer would mean something narrower than it names then - a publish's recipient count, which
+// these records are half of - leaves that answer out instead of sending the live sessions alone
+// (cmd/listener/recipients.go).
+//
+// The readiness is half of this on purpose. A bucket is opened in one request and read in a
+// pass over every key it holds, and between the two the store answers for no session the bucket
+// knows: a send would be refused `404 no live session` for a session Envoy does know, and a
+// publish would count its recipients low, which are the two failures this store exists to
+// remove.
 func (s *KnownSessions) Opened() bool {
-	return s.watch() != nil
+	watcher := s.watch()
+	return watcher != nil && watcher.Ready()
 }
 
 // logger is the logger WithKnownSessionLogger set, or the default one.
