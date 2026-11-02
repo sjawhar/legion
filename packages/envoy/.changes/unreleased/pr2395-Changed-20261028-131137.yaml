@@ -1,0 +1,58 @@
+kind: Changed
+body: |-
+    Dispatch's events outbox publishes from one process at a time. Every process runs it, and only
+    the one holding the publisher hold `dispatch-outbox` (a row of the new `duty_holds`, renewed
+    every 2 s, lapsing 6 s after its last renewal) reads and sends events. A holder that stops sends
+    nothing more, records what NATS already answered, releases the rest of its batch and then the
+    hold, and the other process takes it at once; a graceful stop of `envoy-dispatch` waits for that
+    before it closes the database pool, for at most `outboxStopBudget`. One that is killed is
+    replaced when its hold lapses; one whose NATS stays down for 3 s, or whose failed sends meet a
+    connection that does not answer a probe, gives the hold up; and one frozen past its deadline
+    sends nothing when it resumes: each batch sends through `bus.Client.WindowUntil`, a window that
+    writes nothing at or past the hold's deadline and answers such a send `bus.ErrWindowDeadline`,
+    so a send still waiting for a connection when the deadline passes is never written. `/healthz`
+    reports `outbox_publisher`, `true` on the process that publishes now and `false` on the other
+    and with NATS disabled; it never decides `ok`. Each issue's, document's and project's events
+    reach each destination in order, one send in flight per destination: an event
+    that has not reached a session or the owner's topic family holds back that destination's later
+    events of its owner, and nothing else. One owner never waits on another: the holder reads and
+    publishes up to four batches side by side, each taking only owners no other batch holds, and
+    settles and records an owner as soon as that owner's own sends are answered, so an event
+    waiting out a role holder's five-second receipt delays no other issue's events; the batches
+    run one statement at a time, so the hold's renewal never queues behind them. A role route is
+    no longer published on
+    `notifications.role.<role>`: Dispatch resolves the holder as the listener does and forwards the
+    event to the holder's own subject, publishing it only once the holder's receipt arrives (for a
+    holder with a serving port, the stream's acknowledgement of the stored copy). The listener's role
+    lane's forward (`bus.Client.RequestCoreTo`) carries a `Nats-Msg-Id` of its dedupe key and subject
+    (`bus.ForwardMsgID`) when the original envelope's key names its event
+    (`contracts.DedupeKeyNamesTheUpstreamEvent`, asked of the key without
+    `contracts.RoleForwardDedupePrefix`), so a forward sent again until its receipt arrives is stored
+    once per message and recipient; one under a key its caller chose carries its `event_id` and
+    subject instead, since two distinct envelopes can share that key, and the stream stores each. A
+    send NATS does not acknowledge on a live connection is now backed off with its attempt counted
+    and the error kept in
+    `events.publish_error`, where it was resent at every scan. When a comment-recipient,
+    primary-document-author or document-credit read fails, only the events that asked for it back
+    off, and the owner's later events wait for that event's retry before reaching any agent or role
+    the failed event may still reach; one unreadable credit list no longer stops the outbox. Nothing
+    scans on a period any more: a LISTEN on new events and on the hold's release, the process's own
+    commits, a NATS reconnect and a timer to the earliest due retry wake it. Each process uses one
+    more Postgres connection (the outbox's pool is two, so its hold's renewal never waits behind a
+    batch) and holds one more LISTEN connection: 92 connections per process at its ceiling, from 90
+    (`store.ConnectionsPerProcess`). Migrations `20261101143201_duty_holds` (a new table) and
+    `20261101143203_outbox_claim` (three partial indexes on `events`, `events.publish_error`, and the drop of
+    `events_unpublished` and `events_unpublished_ready`) apply at boot. `outbox_claim` builds its indexes
+    first, holding writes to `events` while they run (1.1 s on a million rows), and only then adds
+    the column and drops the two old indexes, whose `ACCESS EXCLUSIVE` lock makes reads of `events`
+    wait for those last milliseconds and the commit. A process of the release before this one takes
+    no hold and goes on publishing beside the holder while a rolling update runs both, so deploy this
+    release by replacing the running server (`strategy: Recreate`) to keep every issue's
+    notifications in order across the deploy. The outbox publish-failure counter
+    (`envoy_dispatch_outbox_publish_failures_total`) gains two reasons for a role forward:
+    `holder`, a forward its holder's resolution held pending with nothing sent, and `unanswered`,
+    a forward NATS took that the role's holder sent no receipt for. A denied role forward is
+    counted `denied` and names its own subject.
+time: 2026-10-28T13:11:37.592238351Z
+custom:
+    Issue: pr2395

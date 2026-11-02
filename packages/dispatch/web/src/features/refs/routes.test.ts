@@ -218,12 +218,11 @@ test("a pin past what a number holds exactly is written back digit for digit, as
   ).toBeUndefined();
 });
 
-test("a block names nothing on a versioned document, an ask, an issue or a malformed pin", () => {
+test("a block names nothing on a versioned document, an issue or a malformed pin", () => {
   for (const reference of [
     "dispatch://CORE-1/artifact/notes-md@v2#b-p1",
-    "dispatch://CORE/artifact/handbook-md/ask/a1#b-p1",
+    "dispatch://CORE/artifact/handbook-md@v2/ask/a1#b-p1",
     "dispatch://CORE-1#b-p1",
-    "dispatch://CORE-1/ask/a1#b-p1",
     "dispatch://CORE-1/spec#b-p1@v",
     "dispatch://CORE-1/spec#b-p1@v0",
     "dispatch://CORE-1/spec#b-p1@v01",
@@ -255,7 +254,9 @@ test("a block names nothing on a versioned document, an ask, an issue or a malfo
     key: "CORE-1",
     kind: "ask",
   });
+  // An ask's own page names the part its fragment lands on.
   expect(referenceRouteFromHref("/issues/CORE-1/asks/a1#b-p1", origin)).toEqual({
+    block: { id: "p1" },
     id: "a1",
     key: "CORE-1",
     kind: "ask",
@@ -394,6 +395,73 @@ test("a block of a comment or a message is named under its item, as the server r
     id: comment,
     key: "CORE-1",
     kind: "comment",
+  });
+});
+
+// A part of an ask - its question, one of its options or its answer - is named under the ask, by
+// a `dispatch://` reference or the ask's own page, and its target id is `ask/<ask id>#<part id>`:
+// a part can be pinned to a revision of the ask's parts, and opens the live ask at the part. A
+// document page's `?ask=` names the ask whatever its fragment, which is the document's.
+test("a part of an ask is named under the ask, as the server reads it", () => {
+  const origin = "https://dispatch.test";
+  const ask = "22222222-2222-4222-8222-222222222222";
+  const askBlock: DispatchReferenceRoute = {
+    block: { id: "b3" },
+    id: ask,
+    key: "CORE-1",
+    kind: "ask",
+  };
+  const askReference = `dispatch://CORE-1/ask/${ask}#b-b3`;
+  expect(parseDispatchReference(askReference)).toEqual(askBlock);
+  expect(referenceRouteFromHref(`/issues/CORE-1/asks/${ask}#b-b3`, origin)).toEqual(askBlock);
+  expect(buildDispatchReference(askBlock)).toBe(askReference);
+  expect(buildReferencePath(askBlock)).toBe(`/issues/CORE-1/asks/${ask}#b-b3`);
+  expect(referenceTargetKind(askBlock)).toBe("block");
+  expect(shortForm(askBlock)).toBe("CORE-1 ask block");
+
+  const pinned = parseDispatchReference(`${askReference}@v2`);
+  expect(pinned).toEqual({ ...askBlock, block: { id: "b3", pin: "2" } });
+  if (pinned === undefined) throw new Error("the pinned ask part did not parse");
+  expect(buildDispatchReference(pinned)).toBe(`${askReference}@v2`);
+  expect(buildReferencePath(pinned)).toBe(`/issues/CORE-1/asks/${ask}#b-b3`);
+  expect(shortForm(pinned)).toBe("CORE-1 ask block v2");
+
+  const projectBlock: DispatchReferenceRoute = {
+    block: { id: "b3" },
+    item: { id: ask, kind: "ask" },
+    kind: "document",
+    project: "CORE",
+    slug: "handbook-md",
+  };
+  const projectReference = `dispatch://CORE/artifact/handbook-md/ask/${ask}#b-b3`;
+  expect(parseDispatchReference(projectReference)).toEqual(projectBlock);
+  expect(parseDispatchReference(`${projectReference}@v2`)).toEqual({
+    ...projectBlock,
+    block: { id: "b3", pin: "2" },
+  });
+  expect(shortForm(projectBlock)).toBe("CORE/handbook-md ask block");
+  // Its link opens the ask on its document's page, with no fragment that would name a block of
+  // the document.
+  expect(buildReferencePath(projectBlock)).toBe(`/projects/CORE/documents/handbook-md?ask=${ask}`);
+  // A document page's `?ask=` names the ask, never a part of it, at any version of the document.
+  for (const read of [referenceRouteFromHref, nodeRouteFromHref]) {
+    expect(read(`/issues/CORE-1/spec?v=2&ask=${ask}#b-b3`, origin)).toEqual({
+      id: ask,
+      key: "CORE-1",
+      kind: "ask",
+    });
+    expect(read(`/projects/CORE/documents/handbook-md?ask=${ask}#b-b3`, origin)).toEqual({
+      item: { id: ask, kind: "ask" },
+      kind: "document",
+      project: "CORE",
+      slug: "handbook-md",
+    });
+  }
+  // A page's raw `@` is no pin: the page names the ask.
+  expect(referenceRouteFromHref(`/issues/CORE-1/asks/${ask}#b-b3@v2`, origin)).toEqual({
+    id: ask,
+    key: "CORE-1",
+    kind: "ask",
   });
 });
 

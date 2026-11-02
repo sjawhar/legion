@@ -43,8 +43,10 @@ jj -R "$LEGION_WORKSPACE" log --no-graph -r 'latest((::@- ~ ::trunk()) & files(r
 ```
 
 and described in the prompt as "the commit that carried this role's previous handoff of this
-phase". Every Legion retro ends by removing `.legion/<issue>/`, and a round after a retro writes
-the handoff again, so the query's newest match is retro's **removal** commit. Measured on this
+phase". Every Legion retro then ended by removing `.legion/<issue>/`, and a round after a retro
+wrote the handoff again, so the query's newest match was retro's **removal** commit. Since
+sjawhar/legion#2354 a handoff is a record on the Dispatch issue, not a file, and retro removes
+nothing. Measured on this
 pull request: the revset answered `ec7c7ad0`, the commit that deleted the directory, for both
 `implement.json` and `test.json`.
 

@@ -15,6 +15,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -415,8 +416,9 @@ func (s *server) storeArtifact(
 ) {
 	checksum := sha256.Sum256(input.content)
 	sha := hex.EncodeToString(checksum[:])
-	// A file's object is written before the transaction opens (putUploadedFile, artifact_files.go).
-	if !s.putUploadedFile(w, r, kind, sha, input) {
+	// A file's object is written before the transaction opens, once the refusals the transaction
+	// would make have been made (putUploadedFile, artifact_files.go).
+	if !s.putUploadedFile(w, r, kind, sha, input, target) {
 		return
 	}
 	tx, err := s.begin(r.Context())
@@ -451,10 +453,14 @@ func (s *server) storeArtifact(
 			return
 		}
 		project = &loaded.Key
+		if err := lockProjectArtifacts(r.Context(), tx, loaded.Key); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	var artifact model.Artifact
 	var created bool
-	artifact, err = s.findArtifactByName(r.Context(), tx, target, input.name)
+	artifact, err = s.findArtifactByNameOrSlug(r.Context(), tx, target, input.name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
 		if refusal := newArtifactNameRefusal(input.name); refusal != nil {
@@ -488,7 +494,7 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	} else if artifact.Kind != kind {
-		writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
+		s.writeHandlerError(w, artifactKindMismatch(input.name, artifact, kind))
 		return
 	}
 	// A project document's owner row is the artifact itself, and until here this transaction
@@ -1289,19 +1295,142 @@ func (s *server) loadDocumentReferences(ctx context.Context, q queryer, target a
 	return documents, nil
 }
 
+// documentReferenceError refuses a reference that names none of the owner's documents. An owner
+// with more documents than the hint lists (documentHintLimit) is named with its count, the
+// documents nearest the reference first (documentsNearest), and the route that lists them all.
 func documentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {
 	scope := "this project's"
+	everyDocument := "/api/v1/projects/" + target.Project + "/artifacts?unlinked=true"
 	if target.IssueKey != nil {
 		scope = "this issue's"
+		everyDocument = "/api/v1/issues/" + *target.IssueKey + "/artifacts"
+	}
+	if len(documents) <= documentHintLimit {
+		return errorf(
+			http.StatusNotFound,
+			"ARTIFACT_NOT_FOUND",
+			`document %q not found by slug; %s documents: %s`,
+			reference,
+			scope,
+			documentReferenceLabels(documents),
+		)
 	}
 	return errorf(
 		http.StatusNotFound,
 		"ARTIFACT_NOT_FOUND",
-		`document %q not found by slug; %s documents: %s`,
+		`document %q not found by slug; %s %d documents include: %s; GET %s lists them all`,
 		reference,
 		scope,
-		documentReferenceLabels(documents),
+		len(documents),
+		documentReferenceLabels(documentsNearest(reference, documents)),
+		everyDocument,
 	)
+}
+
+// documentsNearest orders documents, given oldest first, for a hint about reference: those whose
+// slug or filename is close to it (documentCloseness) first, nearest first, then every other one,
+// each group newest first. envoy-client's documentsNearest orders an issue's documents by the
+// same rule for the hint the dispatch command gives.
+func documentsNearest(reference string, documents []model.Artifact) []model.Artifact {
+	type ranked struct {
+		document model.Artifact
+		index    int
+		distance int
+		near     bool
+	}
+	rankedDocuments := make([]ranked, len(documents))
+	for index, document := range documents {
+		distance, near := documentCloseness(reference, document.Slug, document.Name)
+		rankedDocuments[index] = ranked{document: document, index: index, distance: distance, near: near}
+	}
+	slices.SortStableFunc(rankedDocuments, func(a, b ranked) int {
+		if a.near != b.near {
+			if a.near {
+				return -1
+			}
+			return 1
+		}
+		if a.near && a.distance != b.distance {
+			return a.distance - b.distance
+		}
+		return b.index - a.index
+	})
+	ordered := make([]model.Artifact, len(rankedDocuments))
+	for index, document := range rankedDocuments {
+		ordered[index] = document.document
+	}
+	return ordered
+}
+
+// documentCloseness compares a reference with a document's slug and filename, ASCII letter case
+// ignored: the smaller edit distance of the two, and whether the document is close to it - within
+// a third of the reference's length (at least 2 edits), or one holding the other where the one held
+// is at least 4 characters long, whose distance is then exactly their difference in length. A
+// spelling more than limit edits away gives no distance (boundedEditDistance knows only that it is
+// past limit), so it never ties a document that is close through its other spelling. Only ASCII
+// letters are folded because Go and JavaScript lowercase other letters differently, and
+// envoy-client's documentCloseness must rank alike.
+func documentCloseness(reference, slug, name string) (int, bool) {
+	wanted := []rune(asciiLower(reference))
+	limit := max(2, len(wanted)/3)
+	distance := -1
+	for _, candidate := range []string{slug, name} {
+		label := []rune(asciiLower(candidate))
+		edits := boundedEditDistance(wanted, label, limit)
+		if (len(wanted) >= 4 && strings.Contains(string(label), string(wanted))) ||
+			(len(label) >= 4 && strings.Contains(string(wanted), string(label))) {
+			edits = max(len(label)-len(wanted), len(wanted)-len(label))
+		} else if edits > limit {
+			continue
+		}
+		if distance < 0 || edits < distance {
+			distance = edits
+		}
+	}
+	if distance < 0 {
+		return limit + 1, false
+	}
+	return distance, true
+}
+
+// asciiLower lowercases the ASCII letters of text and leaves every other character as it is.
+func asciiLower(text string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, text)
+}
+
+// boundedEditDistance is the Levenshtein distance between a and b in characters, or limit+1 once
+// it is known to be more than limit.
+func boundedEditDistance(a, b []rune, limit int) int {
+	if len(a)-len(b) > limit || len(b)-len(a) > limit {
+		return limit + 1
+	}
+	previous := make([]int, len(b)+1)
+	current := make([]int, len(b)+1)
+	for j := range previous {
+		previous[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		current[0] = i
+		smallest := current[0]
+		for j := 1; j <= len(b); j++ {
+			substitution := previous[j-1]
+			if a[i-1] != b[j-1] {
+				substitution++
+			}
+			current[j] = min(previous[j]+1, current[j-1]+1, substitution)
+			smallest = min(smallest, current[j])
+		}
+		if smallest > limit {
+			return limit + 1
+		}
+		previous, current = current, previous
+	}
+	return min(previous[len(b)], limit+1)
 }
 
 func ambiguousDocumentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {
@@ -1392,21 +1521,25 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 // artifactOwnerKey is the owner part of ref_key (artifactTarget.refPrefix), which the 0071
 // trigger fills ref_key from, so a lookup by owner compares what ref_key was built from. Its
 // session arm, 'agent/' || session_id, has a second reader: an agent's conversation's lookups
-// (agentArtifactByNameSQL, agentArtifactSlugTakenSQL in agent_artifacts.go) compare session_id
+// (agentArtifactByNameOrSlugSQL, agentArtifactSlugTakenSQL in agent_artifacts.go) compare session_id
 // itself, so a change to ref_key's owner part changes both.
 const artifactOwnerKey = `coalesce(issue_key, project_key, 'agent/' || session_id)`
 
-// artifactByNameSQL and artifactSlugTakenSQL are an upload's two lookups by owner, $1 the owner
-// key and $2 the name or the slug; an agent's conversation runs its own pair
-// (artifactTarget.ownerLookup).
+// artifactByNameOrSlugSQL and artifactSlugTakenSQL are an upload's two lookups by owner, $1 the
+// owner key and $2 the name or the slug; an agent's conversation runs its own pair
+// (artifactTarget.ownerLookup). An upload's name finds the artifact whose name or slug it is, so a
+// name that is one artifact's slug is that artifact's next version rather than a second artifact
+// the same reference would also name. An owner that already holds two such artifacts (one whose
+// slug and another whose name it is, which uploads stored before this lookup read slugs) gets the
+// one whose slug it is, the one a read by that reference resolves to (resolveDocumentReference).
 const (
-	artifactByNameSQL    = `select ` + artifactColumns + ` from artifacts where ` + artifactOwnerKey + ` = $1 and name = $2`
+	artifactByNameOrSlugSQL = `select ` + artifactColumns + ` from artifacts where ` + artifactOwnerKey +
+		` = $1 and $2 in (name, slug) order by slug = $2 desc limit 1`
 	artifactSlugTakenSQL = `select exists(select 1 from artifacts where ` + artifactOwnerKey + ` = $1 and slug = $2)`
 )
 
-func (s *server) findArtifactByName(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
-	query, owner := target.ownerLookup(artifactByNameSQL, agentArtifactByNameSQL)
-	artifact, err := scanArtifact(q.QueryRow(ctx, query, owner, name))
+func (s *server) findArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
+	artifact, err := lookupArtifactByNameOrSlug(ctx, q, target, name)
 	if err != nil {
 		return model.Artifact{}, err
 	}
@@ -1416,6 +1549,12 @@ func (s *server) findArtifactByName(ctx context.Context, q queryer, target artif
 	}
 	artifact.Versions = versions
 	return artifact, nil
+}
+
+// lookupArtifactByNameOrSlug reads the artifact name finds under target's owner, without its versions.
+func lookupArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
+	query, owner := target.ownerLookup(artifactByNameOrSlugSQL, agentArtifactByNameOrSlugSQL)
+	return scanArtifact(q.QueryRow(ctx, query, owner, name))
 }
 
 // versionColumns is the column list a version read selects over artifact_versions aliased v, in
@@ -1532,6 +1671,14 @@ func documentRole(target artifactTarget, kind, slug string) *string {
 	return nil
 }
 
+// artifactKindMismatch is the 400 refusing an upload under name, of kind, as the next version of
+// artifact, the one the name or slug finds, whose kind is another.
+func artifactKindMismatch(name string, artifact model.Artifact, kind string) error {
+	return errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH",
+		"%q names artifact %s (%s), whose kind is %s; this upload's kind is %s, so it cannot be its next version: give it another name",
+		name, artifact.Slug, artifact.Name, artifact.Kind, kind)
+}
+
 // newArtifactNameRefusal is the 400 refusing a new artifact's name past maxNewArtifactKeyBytes,
 // or nil. An upload naming an artifact that already exists is never held to it.
 func newArtifactNameRefusal(name string) error {
@@ -1554,6 +1701,19 @@ func newArtifactKeyRefusal(target artifactTarget, slug string) error {
 	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
 		"the reference key `%s/<slug>` this name gives a new artifact is %d bytes, past the %d bytes a new artifact's reference key may hold; give it a shorter name",
 		target.refPrefix(), key, maxNewArtifactKeyBytes)
+}
+
+// lockProjectArtifacts serialises one project's own uploads (its documents, not its issues') for
+// the rest of tx, as lockAgentArtifacts does a conversation's. A project's upload otherwise locks
+// no row before it looks its artifact up by name or slug and takes a new slug, so two uploads at
+// once - `plan.md` and `plan-md` - could each miss the other and leave two documents that one
+// reference names. Only these uploads take the lock, and they take it before any row or room, so
+// it joins no lock cycle.
+func lockProjectArtifacts(ctx context.Context, tx pgx.Tx, project string) error {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('project-artifacts:' || $1))`, project); err != nil {
+		return fmt.Errorf("lock the project's documents: %w", err)
+	}
+	return nil
 }
 
 func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifactTarget, name string) (string, error) {

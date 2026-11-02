@@ -25,7 +25,7 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 ```
 
 - In Legion, fix a clear defect in code your tree uses, hand others to the controller, and ask about decisions (`skill://legion-worker/references/findings.md`).
-- An open ask is the request. Do not repeat it in each message.
+- An open ask is the request; never repeat it in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
 - Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
 - When an answer's option and text disagree, the text wins.
@@ -69,6 +69,7 @@ dispatch://KEY
 dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
+dispatch://KEY/ask/<id>#b-<part>[@vN]
 dispatch://KEY/comment/<id>
 dispatch://KEY/comment/<id>#b-<block>[@vN]
 dispatch://KEY/message/<id>
@@ -78,9 +79,9 @@ dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id, filename or local path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL: the command takes a prefix, a person's link does not.
+A bare id, filename or path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL: the command takes a prefix, a person's link does not.
 
 ## Setup and the HTTP API
 
-- Use a personal token from Dispatch **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
+- Use a personal token from **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
 - `GET /api/v1` lists every route; never guess one. Branch on an error's `code`, not its text.

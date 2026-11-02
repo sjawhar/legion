@@ -130,7 +130,7 @@ interface KeyedRun {
  *
  * An upload of a name it already holds stores a new version of that same document, which the
  * reader reads in place of every version before it, so the upload's text **replaces** what the
- * document held (`findArtifactByName`, `packages/envoy/internal/dispatch/api/artifacts.go`).
+ * document held (`findArtifactByNameOrSlug`, `packages/envoy/internal/dispatch/api/artifacts.go`).
  *
  * A write under an `Idempotency-Key` is one intent, run once (`keyedWrites`,
  * `packages/envoy/internal/dispatch/api/request_keys.go`): a repeat while the first run lives is

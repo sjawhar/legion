@@ -290,9 +290,9 @@ func TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent(t *testing.T) {
 			})
 			seedMentionDelivery(t, database, commentID, "session-claimant", "pending")
 			publisher := &recordingPublisher{}
-			deps := Deps{Store: database, Publisher: publisher}
+			outbox := holding(t, Deps{Store: database, Publisher: publisher})
 
-			scan(ctx, deps)
+			outbox.scan(ctx, unfenced{})
 			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, []string{issueTopic}) {
 				t.Fatalf("topics while the mention is pending = %#v, want the issue topic alone", got)
 			}
@@ -318,7 +318,7 @@ func TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent(t *testing.T) {
 			if _, err := database.Pool.Exec(ctx, `update events set next_attempt_at = null where id = $1`, event.ID); err != nil {
 				t.Fatalf("make the event due: %v", err)
 			}
-			scan(ctx, deps)
+			outbox.scan(ctx, unfenced{})
 			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("topics after the mention was %s = %#v, want %#v", tc.settled, got, tc.want)
 			}
@@ -385,7 +385,7 @@ func TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere(t *testing.T) {
 			publisher := &countingPublisher{failTopics: tc.failTopics}
 
 			before := time.Now()
-			scan(ctx, Deps{Store: database, Publisher: publisher})
+			holding(t, withHeldRoles(Deps{Store: database, Publisher: publisher})).scan(ctx, unfenced{})
 			after := time.Now()
 			if got := publisher.attempted(); !reflect.DeepEqual(got, []string{issueTopic, roleTopic, authorTopic}) {
 				t.Fatalf("topics sent = %#v, want every destination but the held-back claimant copy", got)
@@ -447,10 +447,12 @@ func TestARetryReachesTheClaimantTheScanReads(t *testing.T) {
 					ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "Ship it.",
 				}},
 			})
-			// The first attempt fails at the issue topic, before any session is reached.
-			publisher := &recordingPublisher{failTopic: issueTopic}
-			deps := Deps{Store: database, Publisher: publisher}
-			scan(ctx, deps)
+			// The first attempt fails at the old claimant's topic, so it reaches no session: every
+			// destination of a batch is sent side by side (sendChains), so a failed issue topic
+			// would not keep the claimant's copy back.
+			publisher := &recordingPublisher{failTopic: "notifications.agent.session-old"}
+			outbox := holding(t, Deps{Store: database, Publisher: publisher})
+			outbox.scan(ctx, unfenced{})
 			if attempts, _ := nextAttempt(t, database, event.ID); attempts != 1 {
 				t.Fatalf("attempt_count = %d after the failed attempt, want 1", attempts)
 			}
@@ -460,7 +462,7 @@ func TestARetryReachesTheClaimantTheScanReads(t *testing.T) {
 			if _, err := database.Pool.Exec(ctx, `update events set next_attempt_at = null where id = $1`, event.ID); err != nil {
 				t.Fatalf("make the retry due: %v", err)
 			}
-			scan(ctx, deps)
+			outbox.scan(ctx, unfenced{})
 			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("topics of the retry = %#v, want %#v", got, tc.want)
 			}
