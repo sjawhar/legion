@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-839",
+  "round": 12,
+  "verdict": "pass",
+  "codeHead": "617076138951c62cc9ef8c61962cec3e48ab8429",
+  "prHead": "28cecc7b0481f9d77088bad3721f98f5b10c39b1",
+  "base": "main",
+  "headNote": "The PR head moved to 28cecc7b0481 while I tested, the daemon's own `legion handoffs import` commit (legion-v19, #2354): its whole diff vs my tested code head 617076138951 is the removal of .legion/INFRA-839/implement.json. `gh api compare/617076138951...28cecc7b0481` returns zero changed files - the two trees are byte-identical - so every result below, taken against 617076138951, holds at 28cecc7b0481 unchanged. This is the bare-gates-only case of the forward-merge fingerprint rule; the full round below was run because this is the first round at this code, not a re-test.",
+  "previousHandoff": "042872680b843e26c18ebeef354f0ae8e0b4148e",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's own command (cd packages/envoy && go test -p 1 -count=1 ./internal/dispatch/outbox ./cmd/listener ./internal/bus) on a superuser Postgres of my own on the issue volume (port 5434), which removes the teardown ambiguity the implementer flagged: the implementer could only reach PASS-then-teardown-fail on ./internal/dispatch/outbox because the pod's legion_test login is not a superuser (permission denied to terminate process, SQLSTATE 42501). On my superuser login the whole package completes clean: ok internal/dispatch/outbox 338.349s, ok cmd/listener 830.614s, ok internal/bus 376.589s, exit 0, zero '--- FAIL' lines. I also drove the implementer's acceptance-1 surface independently on a real stack (Dispatch + listener + NATS, see proof[0]), rather than only re-running its test. #2395's multiprocess suite and the race lane, which the implementer ran, I re-ran and confirmed (proof[3])."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Acceptance 1 on the real stack: Dispatch's outbox keeps a role route no live holder can take and the next holder gets each copy once, in per-issue order, carrying kept_at - both the unclaimed-role and lapsed-holder branches, through Dispatch's own outbox.",
+      "surface": "A real stack I drove independently: envoy-dispatch + envoy-listener + natsd binaries (built at the code head) on one NATS and the superuser Postgres, driven through Dispatch's HTTP API (POST /api/v1/issues/{key}/comments), with a real session process that subscribes with a serving port and claims the role (POST /v1/roles/set). e2e-local.sh drives only the listener's own keep; this rig puts Dispatch's outbox in the loop, which is this round's new code.",
+      "command": "bash $TMPDIR/tester/live.sh (kept in scratch): A=two issues (TT-1, TT-2) both routed to one unheld role, three comments each interleaved; B=a throwaway holder claims roleB then its registration is DELETEd, a comment is posted (outbox resolves lapsed->released->kept), the main session then claims roleB.",
+      "observed": "A PASS: 6 copies on notifications.envoy.kept.role.<role> before any claim, 0 delivered before the claim; after the claim issue 1 delivered at prompt lines 1,3,5 and issue 2 at 2,4,6 (interleaved, each issue strictly in order); 6 kept-lane copies total = exactly once; all 6 agent-subject forwards carry kept_at (stamped at forward time: the stored kept-lane copy has kept_at:null, the forward has kept_at:1793602381164). B PASS: 1 copy kept for roleB while its holder's registration was gone, lapseB-c1 delivered to the next holder exactly once carrying kept_at.",
+      "headSha": "617076138951c62cc9ef8c61962cec3e48ab8429 (tree-identical to PR head 28cecc7b0481)",
+      "negativeControl": "Within the same rig: 0 copies were delivered to the session before it claimed the role (the kept lane holds them, nothing reaches a holder until the claim). e2e-local's keep-false control (proof[4]) is the input-refusal control: an unheld role answered 404 with nothing stored."
+    },
+    {
+      "criterion": "Acceptance 2: each new keep test is red when the keep is reverted, while the two unchanged-behaviour tests stay green.",
+      "surface": "A scratch git clone at the code head with keptOrSkipped reverted to always return a skip (the pre-#2588 behaviour: an unheld role reached, nothing sent), built and run on the superuser Postgres.",
+      "command": "revert keptOrSkipped to `return &roleForward{skip: skipped}`; go test -p 1 -count=1 -run '<the six outbox keep tests>' ./internal/dispatch/outbox",
+      "observed": "Exactly the four keep tests go red: TestARoleRouteToAnUnheldRoleIsKeptForTheRolesNextHolder, TestAKeptRoleRouteRetriedAfterALostAcknowledgementIsKeptOnce, TestAKeptRoleRouteWhoseKeepFailedStaysPendingAndIsKeptOnTheRetry, TestAKeptRoleRouteIsPublishedOnTheRolesKeptLaneUnderTheKeptMsgID. The two tests of unchanged behaviour stayed green and were absent from the FAIL list: TestARoleRouteWhoseClaimTheGraceRetainedErrsWithNothingKept (grace-retained still errs) and TestARoleTokenNoClaimCanNameIsSkippedWithNothingKept (an invalid token still skips). That is the precise expected signature of the move.",
+      "headSha": "617076138951c62cc9ef8c61962cec3e48ab8429",
+      "negativeControl": "The two unchanged-behaviour tests staying green under the same revert is the control: it shows the revert reverts only the keep, not the skip/error branches."
+    },
+    {
+      "criterion": "Acceptance 2, the three deliberate test changes (#2395's own tests): the ordinary counts still fail on a lost or reordered message, and the kept counts fail on a missing copy - i.e. the split assertions are live, not weakened to always-pass.",
+      "surface": "The same scratch clone (keep restored), with faults injected at each assertion's read boundary, since #2395's outbox cannot be made to lose a specific message on demand. TestABacklogPublishedAcrossANATSOutageKeepsItsOrder run once per fault on the superuser Postgres.",
+      "command": "inject into assertStreamInOrderPerDestination / assertKeptLaneInOrder and run TestABacklogPublishedAcrossANATSOutageKeepsItsOrder.",
+      "observed": "Ordinary lost message: 'the stream holds 29 messages on the destinations the events were sent to, want 30' (count fires). Ordinary reorder (swap two ids in one family): 'notifications.agent.agent-1 holds event 2 after event 4: [4 2 6 8 10 12 14 16 18 20]' (firstDescent fires). Kept missing copy: 'notifications.envoy.kept.role.reviewer holds 19 copies, want 20, one per event routed to the role' (kept count fires). All three changed assertions catch the fault the architect named.",
+      "headSha": "617076138951c62cc9ef8c61962cec3e48ab8429",
+      "negativeControl": "Each test passes with no fault injected (the backlog test is green at this head in the suite run of proof[3]); the Fatalf fires only with the injected fault, so the assertion is not vacuous."
+    },
+    {
+      "criterion": "Acceptance 4: the suites green; #2395's guarantees intact under the two merges.",
+      "surface": "The repository's own suites at the code head, on the superuser Postgres; CGO race lane; #2395's multiprocess suite; INFRA-594's live delivery proof with real OMP + Claude sessions.",
+      "command": "go test -p 1 -count=1 ./internal/dispatch/outbox ./cmd/listener ./internal/bus ; go test -tags multiprocess -count=1 -timeout 60m ./cmd/dispatch ; CGO_ENABLED=1 go test -race -timeout 40m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/... ; bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "Suites: ok outbox 338.349s, ok cmd/listener 830.614s, ok bus 376.589s, 0 FAIL. Multiprocess (#2395's own): ok cmd/dispatch 2196.208s, 0 FAIL (CI's -timeout 20m is too short in this pod, so -timeout 60m). Race lane: exit 0, 0 '--- FAIL'/DATA RACE across delivery, store, bus, cmd/listener, store, session, kvwatch (bus 504s, cmd/listener 1237s). e2e-local.sh: exit 0, both kept windows delivered exactly once carrying kept_at, keep-false control 404 nothing stored. INFRA-594 session-delivery proof: PASS (every event once, the issue in order) with real OMP + Claude sessions, role listener-publish and role core-publish each delivered once - #2395's guarantee survives the merge.",
+      "headSha": "617076138951c62cc9ef8c61962cec3e48ab8429",
+      "negativeControl": "proof[2]'s injected faults show the suite's order/count assertions are live; the multiprocess suite is #2395's own black-box load suite, so its pass is the direct check that nothing of #2395 was lost in the 45 conflict blocks."
+    },
+    {
+      "criterion": "Acceptance 3: the file set is this pull request's own - 83 non-.legion/non-docs files against main, no changelog fragment of INFRA-590's or any fold-consumed one, learnings appended not re-added.",
+      "surface": "gh pr view 2588 --json files and jj diff against fork_point(main@origin | @).",
+      "command": "gh pr view 2588 --json files; jj diff --from 'fork_point(main@origin | @)' --to @ --name-only; jj file show -r main@origin <each docs/solutions file>.",
+      "observed": "Before the import commit: 90 files = 1 .legion/ + 6 docs/solutions + 83. All 9 changelog fragments are pr2588-* (none pr2395/INFRA-590). The 6 docs/solutions: 3 new pr2588 learnings + 3 appends to pages already on main (pr2397, INFRA-113, LEGION-668) - each exists on main and the PR appends (two with 0 deletions; INFRA-113's 3 deletions are a 'twice'->'three times' rewrite, not a loss). The only production (non-test) .go changes are the whole kept-lane feature across listener/bus/contracts/outbox/roles/store/daemon-notify. After the import commit the .legion/ file is gone (handoff is a Dispatch record now), which the architect confirmed is only a handoff-path change that retro removes and READY's compare allows.",
+      "headSha": "617076138951c62cc9ef8c61962cec3e48ab8429",
+      "negativeControl": "The implementer's own file-set check caught 20 fold-consumed fragments on the branch's previous merge; this round's check found none re-added, which is what makes the 83 meaningful."
+    }
+  ],
+  "ci": {
+    "head": "28cecc7b0481f9d77088bad3721f98f5b10c39b1",
+    "run": "41405924105",
+    "state": "in_progress when last read 2026-11-02T07:29Z (1 lane success, rest queued, 0 failures); read, not waited on. The run at the tree-identical code head 617076138951 (41398183240) was cancelled by the import push, not failed. ci-ok at 28cecc7b is the lane the reviewer reads at the head it reviews.",
+    "note": "A queued/running lane is read as running; I never re-run a CI lane as evidence. The worker-image/build failure seen on the cancelled 617076138951 run was on a superseded run and is an image-infra lane, not this change's code."
+  },
+  "environment": "Superuser Postgres 17 + pgvector stood up rootless on the issue volume at port 5434 (the pod's legion_test at 5433 is non-superuser, which is what broke the implementer's outbox teardown). Memory capped throughout (GOMEMLIMIT=12GiB, GOMAXPROCS=4); named-job sampler peak 5.05 GiB of 19 over ~75 min. Leftover check: no rig/proof processes left (the proof's own trap SIGKILLed its sessions); only my own session and the reusable test Postgres remain."
+}
