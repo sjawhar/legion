@@ -51,6 +51,239 @@ export function presenceReplyBody(sessionID: string, clientInstanceID: string | 
   });
 }
 
+/**
+ * How long the flush that shows whether the server accepted the presence subscription is waited
+ * for. NATS refuses a subscription asynchronously, so only a flush tells acceptance from refusal;
+ * a flush that does not settle in this time leaves the declaration off the registration, and the
+ * next pass, heartbeat or reconnect asks again. A stalled connection must never hold a pass here.
+ */
+export const PRESENCE_FLUSH_TIMEOUT_MS = 5_000;
+
+/** A request on a presence subject, as a NATS client yields it. */
+export interface PresenceRequest {
+  /** The inbox the listener waits on; a message published here with none asks nothing. */
+  readonly reply?: string | undefined;
+}
+
+/**
+ * The presence subscription, which nats.js's `Subscription` and claude-envoy's
+ * `ChannelTopicSubscription` both are.
+ */
+export interface PresenceSubscription extends AsyncIterable<PresenceRequest> {
+  unsubscribe(): void;
+  /** Whether the server refused it, or the connection it was opened on has gone. */
+  isClosed(): boolean;
+}
+
+/** The connection a presence subscription is opened on. */
+export interface PresenceConnection {
+  subscribe(subject: string): PresenceSubscription;
+}
+
+/** What the responder tells its host about; each host words these and places them its own way. */
+export type PresenceNotice =
+  | { readonly kind: "answer-failed"; readonly sessionID: string; readonly error: unknown }
+  | { readonly kind: "ended"; readonly sessionID: string; readonly error: unknown }
+  | { readonly kind: "refused"; readonly sessionID: string; readonly subject: string };
+
+export interface PresenceResponderOptions {
+  /**
+   * Opens the connection the subscription is made on. A host that acquires its connection per
+   * pass passes that acquisition here, and may override it on a single `follow` or `refresh`.
+   */
+  readonly connect: () => Promise<PresenceConnection>;
+  /**
+   * Flushes this session's connection, which is what gives the server its chance to refuse the
+   * subscription before a registration declares it; `undefined` when the host holds no
+   * connection, which leaves the declaration where it stands rather than reading a verdict off
+   * a connection that has gone.
+   */
+  readonly flush: () => Promise<void> | undefined;
+  /** Publishes the answer on a request's reply inbox (core NATS, no reply expected). */
+  readonly publish: (reply: string, answer: Uint8Array) => void;
+  /** Encodes the answer; it is built once, when the subscription opens. */
+  readonly encode: (body: string) => Uint8Array;
+  /** This process's client instance id, read when the subscription opens. */
+  readonly clientInstanceID: () => string | undefined;
+  /** Says what happened to the subscription; the host words it. */
+  readonly notice: (notice: PresenceNotice) => void;
+  /** How long a verdict waits for the flush; {@link PRESENCE_FLUSH_TIMEOUT_MS} by default. */
+  readonly flushTimeoutMs?: number;
+}
+
+/**
+ * One session's answer to the listener's connection check: the subscription on its own presence
+ * subject, the loop that answers every request from memory, and whether a registration may
+ * declare the check.
+ */
+export interface PresenceResponder {
+  /**
+   * Opens `sessionID`'s presence subject, unless it is open already. A change of session id
+   * moves the subscription: the id this session has left is unsubscribed, so a check of it is
+   * answered by nobody, and the new one is open before the registration that follows declares
+   * it. A host that flushes for itself calls this and then `confirm`.
+   */
+  follow(sessionID: string, connect?: () => Promise<PresenceConnection>): Promise<void>;
+  /**
+   * Reads the server's verdict after a flush the caller has just made: nats.js closes a
+   * subscription the server refused, so one still open after a flush is one the server accepted,
+   * and nothing else is.
+   */
+  confirm(sessionID: string): void;
+  /**
+   * Follows, flushes, and reads the verdict, and reports whether the declaration changed - the
+   * one thing a host registers again for.
+   */
+  refresh(sessionID: string, connect?: () => Promise<PresenceConnection>): Promise<boolean>;
+  /** Whether a registration of `sessionID` may declare the check. */
+  declares(sessionID: string): boolean;
+  /**
+   * The session id the subscription is open for, or was last asked to open for; empty before
+   * the first `follow` and after `close`. A host that only reads the server's verdict again -
+   * on a reconnect - asks for this one rather than for an id it has not subscribed yet.
+   */
+  following(): string;
+  /** Drops the subscription: nothing of this session answers the check afterwards. */
+  close(): void;
+}
+
+/** Whether `flushing` settled within `ms`, a rejection counting as not flushed. */
+async function flushedInTime(flushing: Promise<void>, ms: number): Promise<boolean> {
+  const expiry = Promise.withResolvers<boolean>();
+  const timer = setTimeout(() => {
+    expiry.resolve(false);
+  }, ms);
+  try {
+    return await Promise.race([
+      flushing.then(
+        () => true,
+        () => false
+      ),
+      expiry.promise,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The presence responder both plugins run, over the little of NATS it needs. A session that
+ * declares a check it cannot answer reads connected to every sender for as long as its registry
+ * entry lives, while nothing of it is listening - the defect the check exists to fix - so the
+ * declaration waits for a flush that shows the server accepted the subscription, and the
+ * refusal is said once rather than once per pass.
+ */
+export function createPresenceResponder(options: PresenceResponderOptions): PresenceResponder {
+  const flushTimeout = options.flushTimeoutMs ?? PRESENCE_FLUSH_TIMEOUT_MS;
+  /** The session id the subscription is open for, or was last asked to open for. */
+  let followed = "";
+  let subscription: PresenceSubscription | undefined;
+  let declared = false;
+  /** Said once per refusal, not once per pass: a grant that never arrives would otherwise warn
+   *  on every heartbeat for the session's life. */
+  let refusalTold = false;
+
+  /**
+   * Answers every request at once, with this session's id and this process's client instance id
+   * (`presenceReply`, packages/envoy/cmd/listener/presence.go). The answer is built before the
+   * first request and nothing here awaits anything: the listener waits one second, so a plugin
+   * that is alive but slow reads as stopped, and the whole point of the check is that a
+   * connected plugin answers from memory.
+   */
+  const answer = async (sessionID: string, open: PresenceSubscription): Promise<void> => {
+    const body = options.encode(presenceReplyBody(sessionID, options.clientInstanceID()));
+    try {
+      for await (const request of open) {
+        if (request.reply === undefined || request.reply === "") continue;
+        try {
+          options.publish(request.reply, body);
+        } catch (error) {
+          options.notice({ kind: "answer-failed", sessionID, error });
+        }
+      }
+    } catch (error) {
+      // nats.js closes a subscription the server refused and throws the refusal out of the
+      // iterator; a dropped connection ends it too. Either way this session answers nothing
+      // until it is subscribed again, so it declares nothing either.
+      options.notice({ kind: "ended", sessionID, error });
+    }
+    if (subscription !== open) return;
+    subscription = undefined;
+    declared = false;
+  };
+
+  /** Records the verdict, and says a refusal once. */
+  const declare = (sessionID: string, accepted: boolean): void => {
+    declared = accepted;
+    if (accepted) {
+      refusalTold = false;
+      return;
+    }
+    if (refusalTold) return;
+    refusalTold = true;
+    options.notice({ kind: "refused", sessionID, subject: presenceSubject(sessionID) });
+  };
+
+  const follow = async (
+    sessionID: string,
+    connect: () => Promise<PresenceConnection> = options.connect
+  ): Promise<void> => {
+    if (followed === sessionID && subscription !== undefined && !subscription.isClosed()) return;
+    subscription?.unsubscribe();
+    subscription = undefined;
+    declared = false;
+    followed = sessionID;
+    const connection = await connect();
+    // A pass this one outran has moved the subscription on; its own call opens the new id.
+    if (followed !== sessionID) return;
+    const open = connection.subscribe(presenceSubject(sessionID));
+    subscription = open;
+    void answer(sessionID, open);
+  };
+
+  const confirm = (sessionID: string): void => {
+    const open = subscription;
+    if (open === undefined) {
+      // Nothing is subscribed, so nothing was refused: there is no verdict to say, only no
+      // check to declare.
+      declared = false;
+      return;
+    }
+    declare(sessionID, followed === sessionID && !open.isClosed());
+  };
+
+  const verdict = async (sessionID: string): Promise<void> => {
+    const open = subscription;
+    if (open === undefined) return;
+    const flushing = options.flush();
+    if (flushing === undefined) return;
+    const flushed = await flushedInTime(flushing, flushTimeout);
+    // The subscription moved while the flush was out: it is the new one's own call that reads
+    // the server's verdict on it.
+    if (subscription !== open || followed !== sessionID) return;
+    declare(sessionID, flushed && !open.isClosed());
+  };
+
+  return {
+    follow,
+    confirm,
+    refresh: async (sessionID, connect) => {
+      const before = declared;
+      await follow(sessionID, connect);
+      await verdict(sessionID);
+      return declared !== before;
+    },
+    declares: (sessionID) => declared && followed === sessionID,
+    following: () => followed,
+    close: () => {
+      subscription?.unsubscribe();
+      subscription = undefined;
+      followed = "";
+      declared = false;
+    },
+  };
+}
+
 /** The headers of a relay frame. */
 export const RelayHeader = {
   /** The subject the stream stored the message on. */

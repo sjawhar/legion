@@ -5,14 +5,11 @@ import (
 	"testing"
 )
 
-// matcherKeys is the sorted keys, each once, that m matches topic with.
+// matcherKeys is the sorted keys m visits for topic, every visit recorded: Match drops the
+// repeats itself, so a key visited twice shows up twice here and fails the comparison.
 func matcherKeys(m *TopicMatcher, topic string) []string {
 	keys := []string{}
-	m.Match(topic, func(key string) {
-		if !slices.Contains(keys, key) {
-			keys = append(keys, key)
-		}
-	})
+	m.Match(topic, func(key string) { keys = append(keys, key) })
 	slices.Sort(keys)
 	return keys
 }
@@ -43,7 +40,7 @@ func TestTopicMatcherMatchesLiteralStarAndRestPatterns(t *testing.T) {
 }
 
 // A key's second Set replaces its topics: the topics it no longer carries match it no more, and
-// a key visited by two of its own patterns is still one key to a caller that drops repeats.
+// a key two of its own patterns match is visited once, Match having dropped the repeat.
 func TestTopicMatcherReplacesAKeysTopics(t *testing.T) {
 	m := NewTopicMatcher()
 	m.Set("ses_moving", []string{"notifications.team.alpha", "notifications.team.>"})

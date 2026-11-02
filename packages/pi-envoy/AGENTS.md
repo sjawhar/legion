@@ -345,12 +345,14 @@ once with `{"session_id": …, "client_instance_id": …}` (`presenceReply` in
 `packages/envoy/cmd/listener/presence.go`), built before the first request and awaiting nothing:
 the listener waits one second, so a plugin that is alive but slow reads as stopped. A registration
 sends `presence: true` only after a flush came back on a subscription nats.js has not closed
-(`confirmPresence`), since a NATS server refuses a subscription asynchronously and a session that
-declares a check it cannot answer reads connected to every sender while nothing of it is there; a
-refused subscription declares nothing and costs the session nothing else. The pass that opens the
-session's agent subject opens this one (`watchPresence`), so a change of session id moves it and
-the id left behind is answered by nobody, and every nats.js `reconnect` reads the verdict again
-(`recheckPresence`, which registers when it changed).
+(`createPresenceResponder`'s `confirm` in `@legion/envoy-client/consumer-delivery`, which holds
+this machine for both hosts), since a NATS server refuses a subscription asynchronously and a
+session that declares a check it cannot answer reads connected to every sender while nothing of
+it is there; a refused subscription declares nothing, says so once, and costs the session nothing
+else. The pass that opens the session's agent subject opens this one (the responder's `follow`),
+so a change of session id moves it and the id left behind is answered by nobody, and every
+nats.js `reconnect` reads the verdict again (`recheckPresence`, over the responder's `refresh`,
+which registers when it changed).
 
 ## Consumer delivery
 

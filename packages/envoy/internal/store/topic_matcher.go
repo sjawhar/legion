@@ -34,9 +34,16 @@ func (m *TopicMatcher) Remove(key string) {
 	m.index.remove(key)
 }
 
-// Match calls visit with each key whose topics match topic; a key with several matching topics is
-// visited once per matching topic, so a caller that counts keys drops the repeats (Registry's
-// matchLocked does the same).
+// Match calls visit with each key whose topics match topic, once per key. The index underneath
+// visits a key once per matching topic, and the repeats are dropped here, so a caller that counts
+// keys needs no set of its own (Registry.matchLocked keeps one over its own walk of that index).
 func (m *TopicMatcher) Match(topic string, visit func(key string)) {
-	m.index.matchAll(topic, visit)
+	seen := map[string]struct{}{}
+	m.index.matchAll(topic, func(key string) {
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		visit(key)
+	})
 }

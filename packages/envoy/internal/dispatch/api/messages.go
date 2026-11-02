@@ -391,15 +391,14 @@ func (s *server) createStoredMessage(
 		// (sendHeldMessageOn) among them - means the message's delivery is under way there: the
 		// message is stored, so it is answered with the attempts as that sender has left them.
 		//
-		// A request that asked for a connected session refuses a stopped one here rather than
-		// queueing for it (createMessageInput.ConnectedOnly): the model and effort switch, whose
-		// line applies to the session that runs it and would otherwise be applied at an unknown
-		// later time. Every other send queues.
-		connected := queueIfStopped
-		if input.ConnectedOnly {
-			connected = refuseIfStopped
-		}
-		attempt, err := s.deliverMessageResuming(sending, message, delivery, actor, &thread, 1, connected)
+		// createMessageInput.ConnectedOnly is the send's connectedOnly (refuseIfStopped): a
+		// request that asked for a connected session refuses a stopped one here rather than
+		// queueing for it - the model and effort switch, whose line applies to the session
+		// that runs it and would otherwise be applied at an unknown later time. Every other
+		// send queues.
+		attempt, err := s.deliverMessageResuming(
+			sending, message, delivery, actor, &thread, 1, input.ConnectedOnly,
+		)
 		switch {
 		case errors.Is(err, errAttemptNotPending):
 			deliveries, err := s.loadMessageDeliveries(sending, s.deps.Store.Pool, []string{message.ID})

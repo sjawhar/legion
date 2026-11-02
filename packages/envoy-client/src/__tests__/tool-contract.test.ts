@@ -131,11 +131,10 @@ describe("envoyToolSpecs", () => {
     const publish = envoyToolSpecs.find((spec) => spec.name === "envoy_publish");
 
     expect(send?.description).toContain(
-      "The answer says what the target was when Envoy stored the message: connected means it is running, stopped means it is not."
+      "The answer says what the target was when Envoy stored the message: connected means it is running, stopped means it is not and Envoy keeps the message 72 hours, so it arrives if that session runs again in that time."
     );
-    expect(send?.description).toContain(
-      "Queued means Envoy keeps the message 72 hours, so it arrives if that session runs again in that time."
-    );
+    // `state` is only ever connected or stopped, so nothing tells the model to look for a third.
+    expect(send?.description).not.toContain("Queued means");
     expect(publish?.description).toContain(
       "recipients is every session other than you that the message goes to, one that is stopped and gets it when it runs again within 72 hours included, and recipients_connected is how many of those are running now"
     );

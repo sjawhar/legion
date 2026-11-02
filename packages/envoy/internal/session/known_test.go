@@ -66,11 +66,6 @@ func TestKnownSessionsAnswerByIDAndByTopic(t *testing.T) {
 	if got := matchedIDs(known, "notifications.team.other"); len(got) != 0 {
 		t.Errorf("Match of an unfollowed topic = %v, want none", got)
 	}
-	seen := 0
-	known.Each(func(KnownSession) { seen++ })
-	if seen != 1 || known.Count() != 1 {
-		t.Errorf("Each visited %d and Count = %d, want one record each", seen, known.Count())
-	}
 }
 
 // TouchWithin moves a record's last_seen and keeps its content; a session the store knows nothing
@@ -105,8 +100,8 @@ func TestKnownSessionsTouchKeepsTheRecordAndMovesLastSeen(t *testing.T) {
 	}
 }
 
-// A record whose last_seen is past the 30-day retention answers as no record, by id, by topic and
-// in a walk, before the sweep has run; the sweep then gives its memory back.
+// A record whose last_seen is past the 30-day retention answers as no record, by id and by topic,
+// before the sweep has run; the sweep then gives its memory back.
 func TestKnownSessionsAnswerNoRecordPastTheRetention(t *testing.T) {
 	clock := time.Now()
 	known := openKnown(t, func() time.Time { return clock })
@@ -122,10 +117,6 @@ func TestKnownSessionsAnswerNoRecordPastTheRetention(t *testing.T) {
 	}
 	if got := matchedIDs(known, "notifications.team.deploy-squad"); len(got) != 0 {
 		t.Errorf("Match answered %v for a record older than the retention", got)
-	}
-	known.Each(func(record KnownSession) { t.Errorf("Each visited %q, a record older than the retention", record.SessionID) })
-	if known.Count() != 0 {
-		t.Errorf("Count = %d, want none", known.Count())
 	}
 	known.mu.RLock()
 	held := len(known.records)
@@ -143,7 +134,7 @@ func TestKnownSessionsAnswerNoRecordPastTheRetention(t *testing.T) {
 }
 
 // Every method is safe on a nil store, the listener that could not open the bucket: no record, no
-// match, no walk, and writes that do nothing.
+// match, and writes that do nothing.
 func TestNilKnownSessionsAnswersNothingAndPanicsNowhere(t *testing.T) {
 	var known *KnownSessions
 	if record, ok := known.Get("ses_any"); ok || record.SessionID != "" {
@@ -152,21 +143,14 @@ func TestNilKnownSessionsAnswersNothingAndPanicsNowhere(t *testing.T) {
 	if got := known.Match("notifications.team.deploy-squad"); len(got) != 0 {
 		t.Errorf("Match on a nil store = %v, want none", got)
 	}
-	known.Each(func(record KnownSession) { t.Errorf("Each on a nil store visited %#v", record) })
-	if known.Count() != 0 {
-		t.Errorf("Count on a nil store = %d, want 0", known.Count())
-	}
+	known.MatchEach("notifications.team.deploy-squad", func(record KnownSession) {
+		t.Errorf("MatchEach on a nil store visited %#v", record)
+	})
 	if err := known.RecordWithin(context.Background(), KnownSession{SessionID: "ses_any"}); err != nil {
 		t.Errorf("RecordWithin on a nil store = %v, want nil", err)
 	}
 	if err := known.TouchWithin(context.Background(), "ses_any"); err != nil {
 		t.Errorf("TouchWithin on a nil store = %v, want nil", err)
-	}
-	if err := known.Ping(); err != nil {
-		t.Errorf("Ping on a nil store = %v, want nil", err)
-	}
-	if err := known.WatchErr(); err != nil {
-		t.Errorf("WatchErr on a nil store = %v, want nil", err)
 	}
 	if err := known.Rewatch(nil); err != nil {
 		t.Errorf("Rewatch on a nil store = %v, want nil", err)
@@ -222,8 +206,11 @@ func TestKnownSessionsMemoryForAHundredThousandRecords(t *testing.T) {
 	held := after.HeapAlloc - before.HeapAlloc
 	runtime.KeepAlive(known)
 
-	if known.Count() != knownSessionMemoryRecords {
-		t.Fatalf("the store holds %d records, want %d", known.Count(), knownSessionMemoryRecords)
+	known.mu.RLock()
+	stored := len(known.records)
+	known.mu.RUnlock()
+	if stored != knownSessionMemoryRecords {
+		t.Fatalf("the store holds %d records, want %d", stored, knownSessionMemoryRecords)
 	}
 	if got := matchedIDs(known, "notifications.team.squad-3"); len(got) != knownSessionMemoryRecords/10 {
 		t.Fatalf("the team topic matched %d records, want %d", len(got), knownSessionMemoryRecords/10)

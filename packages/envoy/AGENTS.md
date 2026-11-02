@@ -3332,7 +3332,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   A topic the stream captures goes through JetStream and is answered `200` with the envelope once the stream stored it;
   a session that missed it live reads it back through `/v1/replay`.
   Its sender stamp's read and its publish share the same 3.5 s `sendRequestBudget` from the request's own context that a send's read and publish do, and a publish the bus did not serve is the `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`.
-  A `200` from either non-role branch — a topic the stream captures, and an ad-hoc topic — carries `recipients` and `recipients_connected` (`recipientsFor`, `cmd/listener/recipients.go`).
+  A `200` from either non-role branch — a topic the stream captures, and an ad-hoc topic — carries `recipients` and `recipients_connected` (`recipientCounts`, `cmd/listener/recipients.go`).
   `recipients` counts every session other than the sender that the topic is for, each session once:
   the known-session records whose stored topics match the topic, one per session that registered in the last 30 days, together with the interest rows that match it on any machine, since a session that registered through an older listener has a row and no record.
   `recipients_connected` counts how many of those sessions the session registry still holds an entry for, and it is the number a reader acts on:

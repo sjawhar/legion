@@ -73,7 +73,7 @@ const query = `
 	), mentioned as (
 		select cd.comment_id::text as id
 		from comment_deliveries cd
-		where cd.session_id = $1 and cd.state in ('sent', 'queued') and cd.created_at >= $2 - interval '1 hour'
+		where cd.session_id = $1 and cd.state in ` + model.DeliveryTakenStates + ` and cd.created_at >= $2 - interval '1 hour'
 	), answer_ids as (
 		select distinct id from reached where type = 'ask.answered'
 	), answer_events as materialized (
@@ -93,7 +93,7 @@ const query = `
 		union
 		select md.message_id::text
 		from message_deliveries md
-		where md.session_id = $1 and md.state in ('sent', 'queued')
+		where md.session_id = $1 and md.state in ` + model.DeliveryTakenStates + `
 		  and md.created_at >= $2 - interval '1 hour'
 	)
 	select 'answer' as kind, a.id::text as id, (a.answer->>'at')::timestamptz as at,

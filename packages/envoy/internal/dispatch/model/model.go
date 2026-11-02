@@ -1296,6 +1296,29 @@ const DeliveryClaimLapse = time.Minute
 // seconds, for SQL that compares a delivery's claimed_at or created_at against now().
 var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
 
+// The four states a delivery attempt row and its receipt carry (migration 20261102020650),
+// which CommentDelivery.State and MessageDelivery.State document. `pending` is the row a claim
+// transaction commits before its send; `sent` and `queued` are both "the listener took it", and
+// `failed` is everything else. They differ in one thing: a sent message is with a running
+// session now, and a queued one waits in that session's own consumer until it runs again,
+// within the 72 hours the stream keeps it. Every reader that asks whether the listener took a
+// message counts the two alike - the outbox publishes no second copy of a comment
+// (outbox.mentionDeliveryQuery), the delivery sweep resumes neither and settles neither failed
+// (api.owedMessageAttempt, api.owedCommentAttempt), the session's answers list holds both
+// (sessionanswers.query), and the session may accept either as its own turn (api.acceptDelivery).
+const (
+	DeliveryStatePending = "pending"
+	DeliveryStateSent    = "sent"
+	DeliveryStateQueued  = "queued"
+	DeliveryStateFailed  = "failed"
+)
+
+// DeliveryTakenStates is the two states that mean the listener took the message, as the SQL list
+// an `in` test over a comment_deliveries or message_deliveries state column takes, so the three
+// queries that ask it (outbox.mentionDeliveryQuery, sessionanswers.query twice) read one
+// definition rather than each spelling the pair.
+const DeliveryTakenStates = "('" + DeliveryStateSent + "', '" + DeliveryStateQueued + "')"
+
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {
 	CommentID  string  `json:"comment_id"`
@@ -1331,8 +1354,10 @@ type CommentDeliveryEventPayload struct {
 	Attempt   int     `json:"attempt"`
 	Delivery  string  `json:"delivery"`
 	SessionID *string `json:"session_id"`
-	// State is the attempt row's own, which the dashboard renders verbatim: "pending", "sent",
-	// "queued" or "failed" (CommentDelivery.State).
+	// State is how the attempt settled, which the dashboard renders verbatim: "sent", "queued"
+	// or "failed" (CommentDelivery.State). A receipt carries no "pending": the sender that
+	// appends it settles the row in the statement that appends it (contracts'
+	// SettledDeliveryState, and deliveryOutcome, which never answers pending).
 	State string `json:"state"`
 	// Duplicate reports that the stream already held this message: an earlier attempt landed, so
 	// this one is a repeat the mentioned session is not handed again.
@@ -1655,8 +1680,10 @@ type MessageDeliveryEventPayload struct {
 	SessionID string `json:"session_id"`
 	Target    string `json:"target"`
 	Title     string `json:"title"`
-	// State is the attempt row's own, which the dashboard renders verbatim: "pending", "sent",
-	// "queued" or "failed" (MessageDelivery.State).
+	// State is how the attempt settled, which the dashboard renders verbatim: "sent", "queued"
+	// or "failed" (MessageDelivery.State). A receipt carries no "pending": the sender that
+	// appends it settles the row in the statement that appends it (contracts'
+	// SettledDeliveryState, and deliveryOutcome, which never answers pending).
 	State string `json:"state"`
 	// Duplicate reports that the stream already held this message, so the recipient gained
 	// nothing from this attempt. Absent means false.

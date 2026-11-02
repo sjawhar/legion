@@ -478,7 +478,7 @@ func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string) (
 // gives a sender (internal/dispatch/api), so it no longer holds the outbox's copy back.
 var mentionDeliveryQuery = `
 	select comment_id::text, session_id,
-	       bool_or(state in ('sent', 'queued')),
+	       bool_or(state in ` + model.DeliveryTakenStates + `),
 	       bool_or(state = 'pending' and coalesce(claimed_at, created_at) >= now() - ` + model.DeliveryClaimLapseInterval + `)
 	from comment_deliveries
 	where comment_id = any($1::text[]::uuid[]) and session_id is not null

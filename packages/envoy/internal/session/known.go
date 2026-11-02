@@ -38,7 +38,7 @@ const KnownSessionRefreshAge = 10 * time.Minute
 // few thousand at most, each with a 5-minute deadline a read must not overshoot, while this store
 // holds up to ~100,000 records whose deadline is 30 days away and whose only reader is a publish
 // count. 100,000 armed timers would cost more than the records do; a read filters a record past
-// its deadline out on its own (Get, Match, Each), so the pass is only there to give the memory
+// its deadline out on its own (Get, MatchEach), so the pass is only there to give the memory
 // back, and an hour's delay in doing that changes no answer.
 const knownSessionSweepInterval = time.Hour
 
@@ -102,10 +102,10 @@ func WithKnownSessionClock(now func() time.Time) KnownSessionsOption {
 // KnownSessions is a cache-backed view of the envoy_known_sessions bucket: every session that
 // registered through any listener within KnownSessionRetention, keyed by session id. A long-lived
 // watcher (kvwatch) keeps the records in memory with a subject index of their topics
-// (store.TopicMatcher), so every read - one record by id, the whole set, or the records whose
-// topics match a published topic - answers from memory and makes no JetStream call. A publish
-// counts its recipients per request against up to ~100,000 records, which neither a per-key Get
-// nor a linear scan can serve.
+// (store.TopicMatcher), so every read - one record by id, or the records whose topics match a
+// published topic - answers from memory and makes no JetStream call. A publish counts its
+// recipients per request against up to ~100,000 records, which neither a per-key Get nor a
+// linear scan can serve.
 //
 // A nil *KnownSessions is the degraded listener: one whose NATS user may not open the bucket
 // starts without the store and keeps running, so every method here is safe on a nil receiver and
@@ -192,65 +192,32 @@ func (s *KnownSessions) Get(sessionID string) (KnownSession, bool) {
 	return held.record, true
 }
 
-// Match returns, once each and sorted by session id, the records whose topics match topic
-// (routing.Match's rules), looked up in the store's subject index. A record past the retention is
-// left out, as Get leaves it out.
-func (s *KnownSessions) Match(topic string) []KnownSession {
-	out := []KnownSession{}
-	if s == nil {
-		return out
-	}
-	cutoff := s.cutoff()
-	s.mu.RLock()
-	var seen map[string]struct{}
-	s.topics.Match(topic, func(key string) {
-		if _, dup := seen[key]; dup {
-			return
-		}
-		if seen == nil {
-			seen = map[string]struct{}{}
-		}
-		seen[key] = struct{}{}
-		if held, ok := s.records[key]; ok && held.record.LastSeen >= cutoff {
-			out = append(out, held.record)
-		}
-	})
-	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
-	return out
-}
-
-// Each calls visit with every record the store holds that has not aged out, in no order. visit
-// runs under the store's read lock, so it must not call back into the store or block.
-func (s *KnownSessions) Each(visit func(KnownSession)) {
+// MatchEach calls visit with each record whose topics match topic (routing.Match's rules), once
+// per record and in no order, looked up in the store's subject index. A record past the retention
+// is left out, as Get leaves it out. visit runs under the store's read lock, so it must not call
+// back into the store or block. A publish's recipient count reads the store this way: it holds a
+// set of the session ids it has counted either way, and the list and the sort Match makes are
+// work it would throw away.
+func (s *KnownSessions) MatchEach(topic string, visit func(KnownSession)) {
 	if s == nil {
 		return
 	}
 	cutoff := s.cutoff()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, held := range s.records {
-		if held.record.LastSeen >= cutoff {
+	s.topics.Match(topic, func(key string) {
+		if held, ok := s.records[key]; ok && held.record.LastSeen >= cutoff {
 			visit(held.record)
 		}
-	}
+	})
 }
 
-// Count is how many records the store holds that have not aged out.
-func (s *KnownSessions) Count() int {
-	if s == nil {
-		return 0
-	}
-	cutoff := s.cutoff()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	live := 0
-	for _, held := range s.records {
-		if held.record.LastSeen >= cutoff {
-			live++
-		}
-	}
-	return live
+// Match returns the records MatchEach visits for topic, once each and sorted by session id.
+func (s *KnownSessions) Match(topic string) []KnownSession {
+	out := []KnownSession{}
+	s.MatchEach(topic, func(record KnownSession) { out = append(out, record) })
+	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
+	return out
 }
 
 // RecordWithin writes record, stamped with the store's clock, its bucket write waiting no longer
@@ -323,18 +290,6 @@ func (s *KnownSessions) TouchWithin(ctx context.Context, sessionID string) error
 	return s.RecordWithin(ctx, held)
 }
 
-// Ping reports whether the bucket is reachable and the cache watcher still runs
-// (kvwatch.Watcher.Check), in one round trip.
-func (s *KnownSessions) Ping() error {
-	if s == nil {
-		return nil
-	}
-	if err := s.watcher.Check(); err != nil {
-		return err
-	}
-	return s.watcher.Err()
-}
-
 // Rewatch moves the cache's watcher and the handle the store writes through to conn
 // (kvwatch.Watcher.Rewatch), after a reconnect.
 func (s *KnownSessions) Rewatch(conn *nats.Conn) error {
@@ -342,14 +297,6 @@ func (s *KnownSessions) Rewatch(conn *nats.Conn) error {
 		return nil
 	}
 	return s.watcher.Rewatch(conn)
-}
-
-// WatchErr is the cache watcher's terminal error, or nil while it runs.
-func (s *KnownSessions) WatchErr() error {
-	if s == nil {
-		return nil
-	}
-	return s.watcher.Err()
 }
 
 // WaitForCacheReady blocks until the watcher has delivered every existing record, or until ctx is

@@ -74,7 +74,7 @@ type sendResponse struct {
 }
 
 // publishResponse is the answer to a publish. Recipients and RecipientsConnected are the counts
-// recipientsFor made just before the message was published: how many sessions other than the
+// recipientCounts made just before the message was published: how many sessions other than the
 // sender follow the topic, and how many of those hold a session entry now. They are pointers so
 // that a count of zero is carried rather than omitted - "no other session subscribes" is the
 // answer that matters most - and nil, left out, where there is no count to give: a listener with
@@ -610,8 +610,11 @@ const senderStampReadTimeout = 1 * time.Second
 // not answer earns the 503 that asks the sender to try the same route again. A target that cannot
 // take the payload's delivery mode (deliveryModeVerdict for a session with an entry,
 // stoppedDeliveryModeVerdict for one with only a record) is the 403 naming it. Every one of those
-// answers is written through record, so this route's one line per request is written with it; the
-// presence check writes a line of its own beside it when it was asked.
+// answers is written through record, so this route's one line per request is written with it. The
+// presence check writes a line of its own beside it for a plugin that answered, for a grant that
+// denied the ask and for a reply that could not be read or named another session; the two answers
+// that make a target stopped in the ordinary way, no responder and nothing within the second,
+// write none.
 func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record := &requestRecord{logger: logger, line: "listener send", laneKey: "target_session"}
@@ -675,20 +678,26 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		target, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, roles.Registered)
 		live := err == nil
 		var stopped session.KnownSession
-		switch {
-		case live:
-		case errors.Is(err, nats.ErrKeyNotFound):
-			var known bool
-			if stopped, known = d.known.Get(targetSession); !known {
-				record.refuse(w, http.StatusNotFound, outcomeNoLiveSession, fmt.Sprintf("no live session %s", targetSession))
+		if err != nil {
+			switch {
+			case errors.Is(err, nats.ErrKeyNotFound):
+				var known bool
+				if stopped, known = d.known.Get(targetSession); !known {
+					record.refuse(w, http.StatusNotFound, outcomeNoLiveSession, fmt.Sprintf("no live session %s", targetSession))
+					return
+				}
+			default:
+				record.refuseBusUnavailable(w, err)
 				return
 			}
-		default:
-			record.refuseBusUnavailable(w, err)
-			return
 		}
-		verdict := deliveryModeVerdict(targetSession, target, item.Payload)
-		if !live {
+		// A target with an entry is judged by the entry, one with only a record by the record:
+		// the two carry different words for the same capabilities, and only one of them is the
+		// target's.
+		var verdict forwardVerdict
+		if live {
+			verdict = deliveryModeVerdict(targetSession, target, item.Payload)
+		} else {
 			verdict = stoppedDeliveryModeVerdict(targetSession, stopped, item.Payload)
 		}
 		if verdict.refusal != "" {
@@ -772,10 +781,17 @@ func deleteSessionHandler(sessions *session.SessionRegistry, known *session.Know
 		defer cancel()
 		// Whether the delete removes an entry is read before it runs: Delete is idempotent and
 		// EntryDeleted counts a key that was already absent, so neither answer tells a stop from
-		// a repeat of one. A session this listener never held is left alone, with no write.
+		// a repeat of one. A session this listener never held is left alone, with no write. The
+		// read is of this listener's session cache, whose only error is a key it does not hold
+		// (session.SessionRegistry.Get), and that cache trails the bucket: a session registered
+		// through another listener, or one this cache has not caught up with since its
+		// connection came back, reads here as one this listener never held and is left alone
+		// too. That is deliberate - the record of such a session is the owning listener's to
+		// move on, and one nobody moves on ages out of the 30 days on its own, which no delivery
+		// depends on.
 		_, entryErr := sessions.Get(sessionID)
 		held := entryErr == nil
-		stopped := func() {
+		recordStop := func() {
 			if !held {
 				return
 			}
@@ -789,7 +805,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry, known *session.Know
 				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
 			}
-			stopped()
+			recordStop()
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -800,7 +816,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry, known *session.Know
 		}
 		switch outcome {
 		case session.EntryDeleted:
-			stopped()
+			recordStop()
 			writeJSON(w, http.StatusOK, deleteSessionResponse{Deleted: true})
 		case session.EntryKeptForAnotherInstance:
 			writeJSON(w, http.StatusOK, deleteSessionResponse{
@@ -925,8 +941,11 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			return
 		}
 		// The counts are of the moment the message is published, and are read from memory alone
-		// (recipientsFor), so taking them here costs the publish below nothing.
-		recipients, connected := recipientCounts(d, item.Topic, item.SourceSession)
+		// (recipientCounts), so taking them here costs the publish below nothing. This branch
+		// forwards to no one, so the one walk of the interest index the count reads is made for
+		// the count alone, and only where there is a count to make.
+		recipients, connected := recipientCounts(d, item.Topic, item.SourceSession,
+			func() []store.Interest { return d.registry.MatchAll(item.Topic) })
 		// The sender stamp's read and the publish take this one deadline, derived from the
 		// caller's own context, so this route too answers a bus it cannot reach rather than
 		// spending the caller's attempt.

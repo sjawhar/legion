@@ -1,4 +1,5 @@
 import {
+  DELIVERY_DUPLICATE_WINDOW_MS,
   EnvelopeSchema,
   type SchemaApi,
   type SchemaNode,
@@ -14,16 +15,15 @@ const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
 
 /**
- * How long the notification stream keeps a message a session has not read (the stream's max age,
- * `packages/envoy/internal/bus/stream.go`), which is how long a message for a stopped session
- * waits for it. The tool descriptions and the queued confirmation line read it from here, so the
- * three say one number.
+ * How long the notification stream keeps a message a session has not read, which is how long a
+ * message for a stopped session waits for it: the stream takes its own max age from this number
+ * (`packages/envoy/internal/bus/stream.go`), so the four say one number.
  */
-const STORED_MESSAGE_HOURS = 72;
+const STORED_MESSAGE_HOURS = DELIVERY_DUPLICATE_WINDOW_MS / (60 * 60 * 1000);
 
 const SEND_STATES =
   "The answer says what the target was when Envoy stored the message: connected means it is " +
-  "running, stopped means it is not. Queued means Envoy keeps the message " +
+  "running, stopped means it is not and Envoy keeps the message " +
   `${STORED_MESSAGE_HOURS} hours, so it arrives if that session runs again in that time.`;
 
 const PUBLISH_COUNTS =

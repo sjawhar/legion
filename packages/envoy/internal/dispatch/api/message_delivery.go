@@ -223,7 +223,7 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "ACCEPT_NOT_REQUESTED_BY_AUTHOR", http.StatusConflict,
 			fmt.Sprintf("attempt %d was requested by someone other than the person who wrote the message", number))
 		return
-	case state != deliveryStatePending && state != deliveryStateSent && state != deliveryStateQueued:
+	case state != model.DeliveryStatePending && state != model.DeliveryStateSent && state != model.DeliveryStateQueued:
 		// Dispatch told the person this attempt failed, and they may already have sent the message
 		// another way; a frame naming it is not the delivery they were shown. A queued attempt is
 		// not one of those: the listener took it, and the session accepting it now is the session
@@ -765,7 +765,7 @@ func (s *server) deliverMessageResuming(
 	key := message.ID + ":" + pending.resolved.Delivery
 	takeover := s.newTakeoverRetry()
 	var outcome sendOutcome
-	lastFailure, err := takeover.retry(ctx,
+	_, err = takeover.retry(ctx,
 		func() string {
 			// The attempt row's own flag, not this call's: a resumed attempt asks for what the
 			// send that opened it asked for, so the delivery sweep and every repeat refuse a
@@ -786,9 +786,6 @@ func (s *server) deliverMessageResuming(
 	if err != nil {
 		return model.MessageDelivery{}, err
 	}
-	// retry answers the last try's failure, which is outcome.failure for every try it made; a
-	// renew that reported the attempt no longer this sender's ends the tries without one.
-	outcome.failure = lastFailure
 	return s.completeMessageDelivery(ctx, message, actor, pending, outcome)
 }
 

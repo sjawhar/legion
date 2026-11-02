@@ -29,8 +29,7 @@ import {
   type ConsumerDelivery,
   type ConsumerFrame,
   createConsumerDelivery,
-  presenceReplyBody,
-  presenceSubject,
+  createPresenceResponder,
   registeredWithoutRelay,
 } from "@legion/envoy-client/consumer-delivery";
 import {
@@ -266,13 +265,6 @@ function liveSessionSettings(live: LiveAgentSession | undefined): AgentStreamSet
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
-/**
- * How long the flush that shows whether the server accepted the presence subscription is waited
- * for. NATS refuses a subscription asynchronously, so only a flush tells acceptance from refusal;
- * a flush that does not settle in this time leaves the declaration off the registration, and the
- * next pass or reconnect asks again. A stalled connection must never hold a pass here.
- */
-const PRESENCE_FLUSH_TIMEOUT_MS = 5_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
 /** The most BTW event ids an instance remembers, so a failure notice naming one stays inert. */
@@ -2282,129 +2274,36 @@ export default function envoyExtension(pi: PiApi): void {
     void pumpAgentStreamControl(subscription, session);
   };
 
-  // This session's presence subscription and the id it was opened for, held outside
-  // `subscriptions` as the agent-stream control subject above is: the listener's connection
-  // check is no registered interest, so nothing that lists, unregisters or recovers this
-  // session's topics may ever see it, and no registration carries it as a topic.
-  let presence: Subscription | undefined;
-  let presenceSession = "";
-  // Whether a flush showed the server accepted that subscription. Only then does a registration
-  // declare the check: a session that declares one it cannot answer reads connected to every
-  // sender for as long as its registry entry lives, while nothing of it is listening — the
-  // defect the check exists to fix.
-  let presenceAccepted = false;
-  // Said once per refusal, not once per pass: a grant that never arrives would otherwise warn
-  // on every heartbeat for the session's life.
-  let presenceRefusalLogged = false;
-
-  /**
-   * Answers every request on the presence subject at once, with this session's id and this
-   * instance's client instance id (`presenceReply`, packages/envoy/cmd/listener/presence.go).
-   * The answer is built before the first request and nothing here awaits anything: the listener
-   * waits one second, so a plugin that is alive but slow reads as stopped and the whole point of
-   * the check is that a connected plugin answers from memory.
-   */
-  const pumpPresence = async (subscription: Subscription, session: string): Promise<void> => {
-    const answer = codec.encode(presenceReplyBody(session, registrationState.clientInstanceID));
-    try {
-      for await (const message of subscription) {
-        // A request carries a reply inbox; anything published here without one asks nothing.
-        if (message.reply === undefined || message.reply === "") continue;
-        try {
-          connection?.publish(message.reply, answer);
-        } catch (error) {
-          logger.warn("envoy: could not answer a presence check", {
-            error: messageFor(error),
-            sessionID: session,
-          });
-        }
+  // This session's answer to the listener's connection check, held outside `subscriptions` as
+  // the agent-stream control subject above is: the check is no registered interest, so nothing
+  // that lists, unregisters or recovers this session's topics may ever see its subscription,
+  // and no registration carries it as a topic. The machine itself is shared with claude-envoy
+  // (`createPresenceResponder`); this is its plumbing into the extension's connection and log.
+  const presence = createPresenceResponder({
+    connect: () => ensureConnection(),
+    // The connection of the moment: with none there is no verdict to read, and the next pass
+    // or reconnect subscribes and asks again.
+    flush: () => connection?.flush(),
+    // Answered on the current connection, as every other publish of this extension is.
+    publish: (reply, answer) => connection?.publish(reply, answer),
+    encode: (body) => codec.encode(body),
+    clientInstanceID: () => registrationState.clientInstanceID,
+    notice: (notice) => {
+      if (notice.kind === "refused") {
+        logger.warn(
+          "envoy: the NATS server did not accept this session's presence subscription; its registration declares no connection check",
+          { sessionID: notice.sessionID, subject: notice.subject }
+        );
+        return;
       }
-    } catch (error) {
-      // nats.js closes a subscription the server refused and throws the refusal out of the
-      // iterator; a dropped connection ends it too. Either way this session answers nothing
-      // until a later pass or reconnect subscribes again, so it declares nothing either.
-      logger.warn("envoy: the presence subscription ended", {
-        error: messageFor(error),
-        sessionID: session,
-      });
-    }
-    if (presence !== subscription) return;
-    presence = undefined;
-    presenceAccepted = false;
-  };
-
-  /**
-   * Whether `connected` flushed within {@link PRESENCE_FLUSH_TIMEOUT_MS}. The flush is what gives
-   * the server its chance to refuse the subscription before the registration declares it.
-   */
-  const flushedInTime = async (connected: NatsConnection): Promise<boolean> => {
-    const expiry = Promise.withResolvers<boolean>();
-    const timer = setTimeout(() => expiry.resolve(false), PRESENCE_FLUSH_TIMEOUT_MS);
-    try {
-      return await Promise.race([
-        connected.flush().then(
-          () => true,
-          () => false
-        ),
-        expiry.promise,
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
-  };
-
-  /**
-   * Reads the server's verdict on the presence subscription: a flush, then the subscription
-   * itself. NATS refuses a subscription asynchronously and nats.js closes the one it refused
-   * (`Subscriptions.handleError`), so a flush that comes back on a live subscription is the
-   * server's acceptance, and nothing else is.
-   */
-  const confirmPresence = async (session: string): Promise<void> => {
-    const subscription = presence;
-    const connected = connection;
-    if (subscription === undefined || connected === undefined) return;
-    const flushed = await flushedInTime(connected);
-    if (presence !== subscription || presenceSession !== session) return;
-    presenceAccepted = flushed && !subscription.isClosed();
-    if (presenceAccepted) {
-      presenceRefusalLogged = false;
-      return;
-    }
-    if (presenceRefusalLogged) return;
-    presenceRefusalLogged = true;
-    logger.warn(
-      "envoy: the NATS server did not accept this session's presence subscription; its registration declares no connection check",
-      { sessionID: session, subject: presenceSubject(session) }
-    );
-  };
-
-  /**
-   * Opens session `session`'s presence subject on this session's own connection, unless it is
-   * open already, and reads whether the server accepted it. A change of session id moves the
-   * subscription: the id this session has left is unsubscribed, so a check of it is answered by
-   * nobody, and the new one is open before the pass's registration declares it.
-   */
-  const watchPresence = async (
-    session: string,
-    connect: () => Promise<NatsConnection> = ensureConnection
-  ): Promise<void> => {
-    if (presenceSession === session && presence !== undefined) {
-      await confirmPresence(session);
-      return;
-    }
-    presence?.unsubscribe();
-    presence = undefined;
-    presenceAccepted = false;
-    presenceSession = session;
-    // A queued task connects through its handle, as the agent-stream control subject does: an
-    // acquisition its task outran refuses there and this call throws out of the task.
-    const connected = await connect();
-    if (presenceSession !== session) return;
-    const subscription = connected.subscribe(presenceSubject(session));
-    presence = subscription;
-    void pumpPresence(subscription, session);
-    await confirmPresence(session);
-  };
+      logger.warn(
+        notice.kind === "answer-failed"
+          ? "envoy: could not answer a presence check"
+          : "envoy: the presence subscription ended",
+        { error: messageFor(notice.error), sessionID: notice.sessionID }
+      );
+    },
+  });
 
   /**
    * nats.js re-subscribes by itself once it reconnects, and the server may answer differently
@@ -2412,11 +2311,11 @@ export default function envoyExtension(pi: PiApi): void {
    * registers when the verdict changed, so the listener learns whether the check is answered now.
    */
   const recheckPresence = (): void => {
-    const session = presenceSession;
+    const session = presence.following();
     if (shuttingDown || session === "" || session !== sessionID) return;
-    const before = presenceAccepted;
-    void watchPresence(session)
-      .then(() => (presenceAccepted === before ? undefined : registerSession()))
+    void presence
+      .refresh(session)
+      .then((changed) => (changed ? registerSession() : undefined))
       .catch(() => undefined);
   };
 
@@ -2552,7 +2451,7 @@ export default function envoyExtension(pi: PiApi): void {
   // (`delivery`: the relay's epoch and resume point), the relay taking the topics it carries as
   // followed first; its answer says whether the listener relays them. `presence` declares that
   // this session answers the listener's connection check, and is sent only once a flush showed
-  // the server accepted the subscription that answers it (`confirmPresence`): a declaration a
+  // the server accepted the subscription that answers it (`presence.declares`): a declaration a
   // session cannot answer is worse than none, since every send to it would read connected.
   const registrationInput = (asking: Relay | undefined): RegistrationInput => {
     const own = agentSubject(sessionID);
@@ -2580,7 +2479,7 @@ export default function envoyExtension(pi: PiApi): void {
           : DELIVERY_CAPABILITIES,
       driving: false,
       selfSubscribed: true,
-      ...(presenceAccepted && presenceSession === sessionID ? { presence: true } : {}),
+      ...(presence.declares(sessionID) ? { presence: true } : {}),
       plugin: { name: packageName, version: packageVersion },
       ...(asking === undefined ? {} : { delivery: asking.delivery.registration() }),
     };
@@ -2939,7 +2838,7 @@ export default function envoyExtension(pi: PiApi): void {
         // The listener's connection check, on this session's own connection and outside its
         // registered topics. A change of session id moves it here, so the id left behind is
         // answered by nobody, and the registration below declares it when it was accepted.
-        await watchPresence(host, handle.connect);
+        await presence.refresh(host, handle.connect);
         if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
           await recoverRegisteredInterests(handle);
         }
@@ -3399,6 +3298,9 @@ export default function envoyExtension(pi: PiApi): void {
       awaitingRetry.clear();
       agentStreamControl = undefined;
       agentStreamControlSession = "";
+      // The drain above ended the presence subscription with the connection; this drops the
+      // responder's hold on it, as the agent-stream control subject above is dropped.
+      presence.close();
       // This process serves the session no longer, so what it was shown goes with it: the id this
       // instance registered, and the host's live one, which a task subagent's tool calls carried
       // (its instance never ran restoreLocalSessionState, so its `sessionID` stayed empty).

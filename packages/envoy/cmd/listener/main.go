@@ -940,6 +940,22 @@ func main() {
 			slog.String("bucket", bus.KnownSessionBucket), slog.String("error", knownErr.Error()))
 	}
 
+	// The store's watcher fills the records in the background, so wait for its first scan before
+	// serving, as the two gates above do. Until it has delivered them this listener knows no
+	// stopped session: a send to one is the 404 this store exists to stop answering, GET
+	// /v1/registry/<id>?include_stopped=1 is that 404 too, and a publish's recipient count is
+	// sent low while the store is open, so the number means less than it names.
+	//
+	// Bounded at 30s, as its neighbour is, and it fails open: the store answers from whatever the
+	// watcher has delivered, and the warn below says the cache may be partly filled. Nothing here
+	// stops a start. A nil store, the listener that could not open the bucket, waits for nothing.
+	knownCacheReadyCtx, knownCacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := known.WaitForCacheReady(knownCacheReadyCtx); err != nil {
+		logger.Warn("known-session cache warm-up did not complete; the store serves from a partly filled cache, so a stopped session may read as unknown and a publish's recipient count low",
+			slog.String("bucket", bus.KnownSessionBucket), slog.String("error", err.Error()))
+	}
+	knownCacheReadyCancel()
+
 	// KV watchers are not bus subscriptions, so recreate them after every
 	// recovered NATS connection, and end them in the drain before the connection's own.
 	caches := listenerCaches(registry, sessions, ciStore)

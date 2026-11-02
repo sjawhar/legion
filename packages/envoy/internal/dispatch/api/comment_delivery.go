@@ -514,9 +514,8 @@ func (s *server) deliverResolvedCommentMention(
 	key := stored.ID + ":" + target.Target + ":" + target.Delivery
 	var outcome sendOutcome
 	send := func() string {
-		// A comment mention is never the model and effort switch, so it never asks for a
-		// connected target: a mention of a stopped session is queued for it.
-		outcome = s.sendResolvedDelivery(ctx, target, stored.Body, key, nil, frame, false)
+		// A comment mention is never the model and effort switch.
+		outcome = s.sendResolvedDelivery(ctx, target, stored.Body, key, nil, frame, queueIfStopped)
 		return outcome.failure
 	}
 	if decided && claimed.pending.SessionID == nil {
@@ -524,7 +523,7 @@ func (s *server) deliverResolvedCommentMention(
 		// error is this attempt's outcome, with nothing to try again.
 		send()
 	} else {
-		lastFailure, err := takeover.retry(ctx, send, func() (bool, error) {
+		_, err = takeover.retry(ctx, send, func() (bool, error) {
 			// A pinned row is rechecked; with no session pinned yet the recipient is still the
 			// mention's target, resolved afresh rather than sent the resolve error the row holds.
 			var pinned *model.CommentDelivery
@@ -540,9 +539,6 @@ func (s *server) deliverResolvedCommentMention(
 		if err != nil {
 			return model.CommentDelivery{}, err
 		}
-		// retry answers the last try's failure, which is outcome.failure for every try it made;
-		// a renew that reported the attempt no longer this sender's ends the tries without one.
-		outcome.failure = lastFailure
 	}
 	return s.completeCommentDelivery(ctx, stored, recorded, actor, held, outcome)
 }

@@ -244,10 +244,12 @@ above says how to run it).
   (`presenceReply` in `packages/envoy/cmd/listener/presence.go`), built before the first request
   and awaiting nothing: the listener waits one second, so a plugin that is alive but slow reads
   as stopped. A registration sends `presence: true` only after a flush came back on a
-  subscription nats.js has not closed (`confirmPresence`), since a NATS server refuses a
-  subscription asynchronously and a session that declares a check it cannot answer reads
-  connected to every sender while nothing of it is there. A refused subscription declares
-  nothing and costs the session nothing else. The subscription moves with the id on a `/clear`
+  subscription nats.js has not closed (`createPresenceResponder`'s `confirm` in
+  `@legion/envoy-client/consumer-delivery`, which holds this machine for both hosts), since a
+  NATS server refuses a subscription asynchronously and a session that declares a check it
+  cannot answer reads connected to every sender while nothing of it is there. A refused
+  subscription declares nothing, says so once, and costs the session nothing else.
+  The subscription moves with the id on a `/clear`
   handoff, so the id left behind is answered by nobody, is read again on each nats.js
   `reconnect` (`refreshPresence`, which registers when the verdict changed), and is dropped at
   shutdown.

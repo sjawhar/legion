@@ -228,6 +228,8 @@ func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 		// The live list carries each session's topics, which nothing reads from this answer:
 		// Dispatch keeps every row of it in its route roster row (api/issue_route_status.go)
 		// and serves it from GET /api/v1/agents, and neither holds a session's subscriptions.
+		// This line is the only thing that keeps them out of that answer, whose row embeds
+		// this struct (api.agentResponse): dropping it leaks every session's subscriptions.
 		sessions[index].Topics = nil
 	}
 	return sessions, nil

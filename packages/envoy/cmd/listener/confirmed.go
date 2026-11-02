@@ -422,14 +422,15 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 	send.timedOut(lastForward)
 }
 
-// topicRecipients lists the sessions an ad-hoc topic send confirms the message with: every session
-// whose registered interests match the topic on any machine (store.Registry.MatchAll), whose
-// session entry is live and self-subscribed, other than the sender. A self-subscribed session holds
-// its own NATS connection and answers a receipt on its agent subject; a session served on a port
-// does not, and keeps the live lane's delivery.
-func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
+// topicRecipients lists the sessions an ad-hoc topic send confirms the message with, out of rows,
+// the interest rows whose topics match the topic on any machine (store.Registry.MatchAll): the
+// ones whose session entry is live and self-subscribed, other than the sender. A self-subscribed
+// session holds its own NATS connection and answers a receipt on its agent subject; a session
+// served on a port does not, and keeps the live lane's delivery. It is a narrower thing than the
+// answer's recipient count (recipientCounts), which counts every session the topic is for.
+func topicRecipients(d *listenerDeps, item contracts.Envelope, rows []store.Interest) []string {
 	var recipients []string
-	for _, interest := range d.registry.MatchAll(item.Topic) {
+	for _, interest := range rows {
 		if interest.SessionID == item.SourceSession {
 			continue
 		}
@@ -502,16 +503,19 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 // publish NATS refuses however often it is sent (forwardRefused) is the sender's input or the
 // grant's, answered as requestRecord.refuseBusUnavailable maps it. Every answer goes through
 // record, the route's one line per request, under the outcome it answers.
-// Its 200 carries the recipient counts the publish was made against (recipientsFor): how many
+// Its 200 carries the recipient counts the publish was made against (recipientCounts): how many
 // sessions other than the sender the topic is for, and how many of those are connected. The 504s
 // carry neither, since each already names the sessions it is about.
 func sendToTopic(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, arrived time.Time) {
-	recipients := topicRecipients(d, item)
+	// One walk of the interest index serves both readers below: it visits every machine's subject
+	// tree, dedupes and sorts, and the two ask the same topic of it in the same request.
+	rows := d.registry.MatchAll(item.Topic)
+	recipients := topicRecipients(d, item, rows)
 	// The answer's counts are of the moment the message is published, and are read from memory
-	// alone (recipientsFor), so taking them here costs the publish below nothing. They count every
-	// session the topic is for, which is more than recipients above: that list is the sessions
-	// this send waits for a receipt from, and the 504 body's own lists stay as they are.
-	counted, connectedCount := recipientCounts(d, item.Topic, item.SourceSession)
+	// alone (recipientCounts), so taking them here costs the publish below nothing. They count
+	// every session the topic is for, which is more than recipients above: that list is the
+	// sessions this send waits for a receipt from, and the 504 body's own lists stay as they are.
+	following, connected := recipientCounts(d, item.Topic, item.SourceSession, func() []store.Interest { return rows })
 	settle := func(outcome sendOutcome, delivered []string, undelivered []undeliveredRecipient, attrs ...slog.Attr) {
 		switch outcome {
 		case sendPublishFailed, sendFailed:
@@ -592,6 +596,6 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, record *requestReco
 		settle(sendNotConfirmed, delivered, undelivered)
 		return
 	}
-	record.accept(w, publishResponse{Envelope: item, Recipients: counted, RecipientsConnected: connectedCount})
+	record.accept(w, publishResponse{Envelope: item, Recipients: following, RecipientsConnected: connected})
 	settle(sendDelivered, delivered, undelivered)
 }

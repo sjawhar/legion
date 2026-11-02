@@ -364,22 +364,6 @@ type attemptClaim struct {
 	claimedAt time.Time
 }
 
-// The four states an attempt row and its receipt carry (migration 20261102020650). `pending` is
-// the row a claim transaction commits before its send; `sent` and `queued` are both "the
-// listener took it", and `failed` is everything else. They differ in one thing: a sent message
-// is with a running session now, and a queued one waits in that session's own consumer until it
-// runs again, within the 72 hours the stream keeps it. Every reader that asks whether the
-// listener took a message counts the two alike - the outbox publishes no second copy of a
-// comment (outbox.mentionDeliveryQuery), the delivery sweep resumes neither and settles neither
-// failed (owedMessageAttempt, owedCommentAttempt), the session's answers list holds both
-// (sessionanswers.query), and the session may accept either as its own turn (acceptDelivery).
-const (
-	deliveryStatePending = "pending"
-	deliveryStateSent    = "sent"
-	deliveryStateQueued  = "queued"
-	deliveryStateFailed  = "failed"
-)
-
 // deliveryOutcome maps what a send reported to the state and error an attempt row records.
 // queued is the listener's own word for the target it stored the message for: a session it knows
 // and that is not running (dispatchenvoy.SessionStateStopped on the send's answer). The send's
@@ -389,11 +373,11 @@ const (
 func deliveryOutcome(deliveryError string, queued bool) (string, *string) {
 	switch {
 	case deliveryError != "":
-		return deliveryStateFailed, &deliveryError
+		return model.DeliveryStateFailed, &deliveryError
 	case queued:
-		return deliveryStateQueued, nil
+		return model.DeliveryStateQueued, nil
 	}
-	return deliveryStateSent, nil
+	return model.DeliveryStateSent, nil
 }
 
 // receiptError renders an attempt row's nullable error as the string a receipt payload carries.

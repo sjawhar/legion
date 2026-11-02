@@ -13,14 +13,14 @@ import (
 )
 
 type agentResponse struct {
+	// The Agents page's row is a live session's. envoy.Session's two fields for the stopped
+	// answer stay out of it because the live list carries no state and Client.Sessions drops
+	// the topics it carries, both `omitempty`; a field of this struct tagged `json:"-"` would
+	// not suppress them, since encoding/json skips such a field while collecting fields and it
+	// never competes with the embedded one.
 	envoy.Session
-	// The Agents page's row is a live session's: it exposes no topics, and the listener's live
-	// list carries no state, so envoy.Session's two fields for the stopped answer are hidden
-	// here rather than left to what that answer happens to hold.
-	Topics       []string `json:"-"`
-	State        string   `json:"-"`
-	OpenAsks     int      `json:"open_asks"`
-	LastActivity *string  `json:"last_activity"`
+	OpenAsks     int     `json:"open_asks"`
+	LastActivity *string `json:"last_activity"`
 }
 
 func (s *server) agentOpenAskCounts(ctx context.Context, sessionIDs []string) (map[string]int, error) {

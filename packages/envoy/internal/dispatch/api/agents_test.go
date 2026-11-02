@@ -54,6 +54,13 @@ func TestAgentsListsLiveSessionsNewestFirstForHumans(t *testing.T) {
 	if _, leaked := rows[2]["topics"]; leaked {
 		t.Fatal("topics must not be exposed")
 	}
+	// The two fields of envoy.Session that only the stopped answer carries: the live list sends
+	// no state, and Sessions drops the topics it does send, so neither reaches this row.
+	for index := range rows {
+		if _, leaked := rows[index]["state"]; leaked {
+			t.Fatalf("state must not be exposed: %v", rows[index])
+		}
+	}
 	if rows[0]["capabilities"] == nil || rows[0]["roles"] == nil {
 		t.Fatalf("missing slices must encode as []: %v", rows[0])
 	}
