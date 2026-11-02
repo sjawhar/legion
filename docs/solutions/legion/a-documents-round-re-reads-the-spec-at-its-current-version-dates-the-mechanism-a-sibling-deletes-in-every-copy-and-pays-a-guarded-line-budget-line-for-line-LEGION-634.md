@@ -29,8 +29,8 @@ budgets a skill body and a prompt fragment are held to.
 - **Read the spec at its current version when a round starts, not the plan alone.** The plan
   handoff was written against the spec of its day; the architect can revise the spec after
   planning (here from version 1 to 2, folding in the planner's departures and adding a wording
-  constraint), and the plan document on Dispatch is revised with it. A round that reads only
-  `plan.json` implements the old version's constraints.
+  constraint), and the plan document on Dispatch is revised with it. A round that reads only the
+  plan handoff implements the old version's constraints.
 - **Name today's mechanism as what the sibling issue deletes, never as the standing rule, in every
   copy of the sentence.** "Today such a command runs on the per-call grant …; LEGION-631 replaces
   that grant with the role's mounted token file" survives the sibling's merge; "its bash runs
