@@ -20,10 +20,6 @@ import (
 // that has not answered by then is left to finish on its own.
 const readTimeout = 2 * time.Second
 
-// defaultSessionTTL is the session bucket's liveness window when its status does not say, the
-// window session.OpenSessionRegistry creates the bucket with.
-const defaultSessionTTL = 5 * time.Minute
-
 // JetStream is the client Buckets reads through: its JetStream context on the current connection
 // (bus.Client.JS) and that connection itself (bus.Client.Connection), which a bucket handle's
 // watch side is opened on (bus.OpenKeyValue).
@@ -34,28 +30,39 @@ type JetStream interface {
 
 // Buckets is a ClaimStore and a SessionLookup that read the role bucket and the session bucket
 // themselves, one direct read per call, with no watcher and no cache: what Dispatch's outbox
-// resolves a role-routed event's holder through. Its session read is the bucket read the
-// listener's liveSessionEntry falls back to (session.SessionRegistry.Refresh). Each bucket is
-// opened on the client's connection at its first read, and again once the client has replaced that
-// connection. A missing role bucket holds no claim; a missing session bucket is a read that fails,
-// since it says nothing of whether a holder is there.
+// resolves a role-routed event's holder through. Each bucket is opened on the client's connection
+// at its first read, and again once the client has replaced that connection. A missing role
+// bucket holds no claim; a missing session bucket is a read that fails, since it says nothing of
+// whether a holder is there.
+//
+// It writes nothing: a role's claim is the listener's to release, and only once its holder is
+// gone (the package comment states the rule). The Windows it carries are what a holder's record
+// is judged by, and they are the only measure of a holder here: how long the session bucket keeps
+// a record is a storage window and no verdict on the session, so a record the bucket still holds
+// past its maximum age is judged by its own last registration, as every other reader judges one.
 type Buckets struct {
+	Windows
+
 	client JetStream
 
 	mu       sync.Mutex
 	js       nats.JetStreamContext
 	roles    *bus.KeyValue
 	sessions *bus.KeyValue
-	ttl      time.Duration
 }
 
-// NewBuckets returns Buckets reading through client.
-func NewBuckets(client JetStream) *Buckets {
-	return &Buckets{client: client, ttl: defaultSessionTTL}
+// NewBuckets returns Buckets reading through client and judging a holder's record by the first of
+// windows, or by the package's own windows when none is given (Windows).
+func NewBuckets(client JetStream, windows ...Windows) *Buckets {
+	buckets := &Buckets{client: client}
+	if len(windows) > 0 {
+		buckets.Windows = windows[0]
+	}
+	return buckets
 }
 
 // bucket returns the handle of bucket on the client's current connection, opening it when it is
-// not open on that connection yet. Opening the session bucket reads its TTL.
+// not open on that connection yet.
 func (b *Buckets) bucket(name string) (bus.KeyValue, error) {
 	js := b.client.JS()
 	b.mu.Lock()
@@ -74,11 +81,6 @@ func (b *Buckets) bucket(name string) (bus.KeyValue, error) {
 	if err != nil {
 		return bus.KeyValue{}, err
 	}
-	if name == bus.SessionBucket {
-		if status, err := kv.Status(); err == nil && status.TTL() > 0 {
-			b.ttl = status.TTL()
-		}
-	}
 	*handle = &kv
 	return kv, nil
 }
@@ -95,84 +97,35 @@ func within[T any](ctx context.Context, what string, read func() (T, error)) (T,
 	return value, err
 }
 
-// claimEntry reads role's claim and its bucket entry within ctx: a zero claim and a nil entry when
-// there is none.
-func (b *Buckets) claimEntry(ctx context.Context, role string) (store.RoleClaim, nats.KeyValueEntry, error) {
-	type read struct {
-		claim store.RoleClaim
-		entry nats.KeyValueEntry
-	}
-	got, err := within(ctx, "read role "+role+"'s claim", func() (read, error) {
+// RoleClaim reads role's claim from the role bucket within ctx, decoded as store.Registry decodes
+// one (store.DecodeRoleClaim): a zero claim without an error when there is no role bucket and
+// when the bucket holds no claim for the role.
+func (b *Buckets) RoleClaim(ctx context.Context, role string) (store.RoleClaim, error) {
+	return within(ctx, "read role "+role+"'s claim", func() (store.RoleClaim, error) {
 		kv, err := b.bucket(bus.RoleClaimBucket)
 		if errors.Is(err, nats.ErrBucketNotFound) {
-			return read{}, nil
+			return store.RoleClaim{}, nil
 		}
 		if err != nil {
-			return read{}, err
+			return store.RoleClaim{}, err
 		}
 		entry, err := kv.Get(role)
 		if errors.Is(err, nats.ErrKeyNotFound) {
-			return read{}, nil
+			return store.RoleClaim{}, nil
 		}
 		if err != nil {
-			return read{}, err
+			return store.RoleClaim{}, err
 		}
-		claim, err := store.DecodeRoleClaim(entry.Value())
-		if err != nil {
-			return read{}, err
-		}
-		return read{claim: claim, entry: entry}, nil
+		return store.DecodeRoleClaim(entry.Value())
 	})
-	return got.claim, got.entry, err
 }
 
-// RoleClaim reads role's claim from the role bucket within ctx, decoded as store.Registry decodes
-// one (store.DecodeRoleClaim).
-func (b *Buckets) RoleClaim(ctx context.Context, role string) (store.RoleClaim, error) {
-	claim, _, err := b.claimEntry(ctx, role)
-	return claim, err
-}
-
-// ReleaseExpiredRoleClaim deletes role's claim while sessionID still holds it, conditioned on the
-// revision it read, as store.Registry.ReleaseExpiredRoleClaim does: Released when the delete
-// landed, Missing when the claim was already gone, Superseded when another session holds it or a
-// write beat the delete. It keeps no claim back: Dispatch restores no claims when it starts, so
-// none of them has the grace a listener gives the claims it restored, and sessionTTL is not read.
-func (b *Buckets) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, _ time.Duration) (store.ExpiredRoleClaimRelease, error) {
-	claim, entry, err := b.claimEntry(ctx, role)
-	if err != nil {
-		return store.ExpiredRoleClaimRetained, err
-	}
-	if entry == nil {
-		return store.ExpiredRoleClaimMissing, nil
-	}
-	if claim.HolderSessionID != sessionID {
-		return store.ExpiredRoleClaimSuperseded, nil
-	}
-	_, err = within(ctx, "release role "+role+"'s claim", func() (struct{}, error) {
-		kv, err := b.bucket(bus.RoleClaimBucket)
-		if err != nil {
-			return struct{}{}, err
-		}
-		return struct{}{}, kv.Delete(role, nats.LastRevision(entry.Revision()))
-	})
-	switch {
-	case err == nil:
-		return store.ExpiredRoleClaimReleased, nil
-	case errors.Is(err, nats.ErrKeyNotFound):
-		return store.ExpiredRoleClaimMissing, nil
-	case errors.Is(err, nats.ErrKeyExists):
-		return store.ExpiredRoleClaimSuperseded, nil
-	default:
-		return store.ExpiredRoleClaimRetained, err
-	}
-}
-
-// Holder reads sessionID's entry from the session bucket, as session.SessionRegistry.Refresh
-// reads it: a key the bucket does not hold, one no read may name (bus.ErrRefused), a value that
-// does not decode, an entry older than the bucket's TTL and an entry live refuses are all
-// nats.ErrKeyNotFound.
-func (b *Buckets) Holder(ctx context.Context, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+// Holder reads sessionID's record from the session bucket, whatever state that record is in:
+// judging it is Windows.EntryState's, so a record the bucket still holds past its maximum age is
+// answered here and judged by its own last registration. A key the bucket does not hold, one no
+// read may name (bus.ErrRefused) and a value that does not decode are nats.ErrKeyNotFound: no
+// record stands for the session. Any other error is a read that did not answer.
+func (b *Buckets) Holder(ctx context.Context, sessionID string) (session.SessionEntry, error) {
 	entry, err := within(ctx, "read session "+sessionID, func() (nats.KeyValueEntry, error) {
 		kv, err := b.bucket(bus.SessionBucket)
 		if err != nil {
@@ -190,18 +143,10 @@ func (b *Buckets) Holder(ctx context.Context, sessionID string, live func(sessio
 	if err := json.Unmarshal(entry.Value(), &holder); err != nil {
 		return session.SessionEntry{}, fmt.Errorf("%w: session %s does not decode: %w", nats.ErrKeyNotFound, sessionID, err)
 	}
-	if ttl := b.TTL(); ttl > 0 && time.Since(entry.Created()) > ttl {
-		return session.SessionEntry{}, fmt.Errorf("%w: session %s expired", nats.ErrKeyNotFound, sessionID)
-	}
-	if !live(holder) {
-		return session.SessionEntry{}, nats.ErrKeyNotFound
-	}
 	return holder, nil
 }
 
-// TTL is the session bucket's liveness window, read when the bucket was opened.
-func (b *Buckets) TTL() time.Duration {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.ttl
-}
+// LastSeen is 0 for every session: Dispatch reads the session bucket and keeps no memory of a
+// record that has gone, so a holder whose record the bucket no longer holds is one nothing here
+// can date (Resolution.LastSeen says what a caller makes of that).
+func (b *Buckets) LastSeen(string) int64 { return 0 }

@@ -1,8 +1,9 @@
-// Role-holder resolution: reading a role's claim and its holder's session through to the bucket,
-// judging that holder's state, deciding whether a soft claim takes the role from the holder it
-// found, and the 404 that names a role whose holder is not answering. No resolution here releases
-// a claim: a holder that stopped answering keeps its role until the role reaper finds it gone
-// (session.Gone), which is the one place a claim is taken away.
+// The role paths' reads of a session: the record a role-holder resolution judges its holder by
+// (roleHolderSessions, the session side of internal/roles' one resolution), the reads a soft
+// claim weighs the holder it found by, and the 404 that names a role whose holder is not
+// answering. Nothing here, and nothing in internal/roles, releases a claim: a holder that
+// stopped answering keeps its role until the role reaper finds it gone (session.Gone), which is
+// the one place a claim is taken away.
 
 package main
 
@@ -14,82 +15,37 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
-	"github.com/sjawhar/envoy/internal/store"
 )
 
-type roleClaimResolver interface {
-	RoleClaim(ctx context.Context, role string) (store.RoleClaim, error)
-}
+// roleHolderSessions is the session side of a role-holder resolution (roles.SessionLookup): this
+// listener's session registry, which judges a record on its own windows (EntryState) and
+// remembers a departed session's last registration (LastSeen) already, with the one read a
+// resolution adds.
+type roleHolderSessions struct{ *session.SessionRegistry }
 
-// readRoleClaim reads role's claim for a resolution (resolveRoleHolderFrom). A resolution given a
-// firstHolder reads it from there — the registry's watched copy of the role bucket
-// (store.Registry.CachedRoleHolder), which costs no round trip, so a role message the lane
-// forwards reads no bucket. A route, which answers a caller within its own deadline, passes no
-// firstHolder and reads the bucket itself. The copy names a holder, not a whole claim, and the
-// resolution reads nothing else from it.
-func readRoleClaim(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), role string) (store.RoleClaim, error) {
-	if firstHolder == nil {
-		return registry.RoleClaim(ctx, role)
+// Holder is the claim holder's record for a resolution, whatever state that record is in: the
+// cached one while it reads live, and otherwise the session bucket itself (Refresh), because the
+// cache follows the bucket through a watcher and so trails it - a session another listener
+// registered a moment ago, or one this listener has not re-read since its bus connection came
+// back, is in the bucket before it is here, and a holder that re-registered while its cached
+// record stood stalled must be found. The bucket read is bounded by roleHolderReadTimeout within
+// ctx, as every role path's session read is, so a route answers inside the budget its own caller
+// holds.
+//
+// nats.ErrKeyNotFound is the registry's word that no record stands, a key no session can register
+// under among them (session.SessionRegistry.Refresh, bus.ErrRefused); the resolution reads it as
+// a holder with nothing to date it, and takes nothing from it either way. Any other error is a
+// read that did not answer.
+func (s roleHolderSessions) Holder(ctx context.Context, sessionID string) (session.SessionEntry, error) {
+	if entry, state := s.Lookup(sessionID); state == session.Live {
+		return entry, nil
 	}
-	holder, err := firstHolder(role)
-	if err != nil {
-		return store.RoleClaim{}, err
-	}
-	return store.RoleClaim{HolderSessionID: holder}, nil
+	readCtx, cancel := context.WithTimeout(ctx, roleHolderReadTimeout)
+	defer cancel()
+	return s.Refresh(readCtx, sessionID)
 }
-
-type roleHolderState string
-
-const (
-	roleHolderLive      roleHolderState = "live"
-	roleHolderUnclaimed roleHolderState = "unclaimed"
-	roleHolderLapsed    roleHolderState = "holder_lapsed"
-)
-
-// roleHolderResult is one resolution of a role's holder (resolveRoleHolder). holder names the
-// claim's holder whenever one was read, and holderState the state that holder's record puts it
-// in (session.StateOf), on the two outcomes a record was read on; entry is set only for
-// roleHolderLive; lastSeen and lastSeenAvailable only for roleHolderLapsed.
-type roleHolderResult struct {
-	state             roleHolderState
-	holder            string
-	holderState       session.State
-	entry             session.SessionEntry
-	lastSeen          int64
-	lastSeenAvailable bool
-}
-
-// roleHolderStep names the read a role-holder resolution failed at, so a caller that reports the
-// failure in its own words (the role lane's log lines) can tell which read it was.
-type roleHolderStep uint8
-
-const (
-	// roleHolderClaimRead: the role claim could not be read, or the resolution's context ended
-	// before the read began.
-	roleHolderClaimRead roleHolderStep = iota
-	// roleHolderSessionRead: the holder's session entry could not be read.
-	roleHolderSessionRead
-)
-
-// roleHolderFailure is the error of a resolution that did not resolve. Its message is what an
-// HTTP route names in its answer, so it names the step; cause is the read's own error, which the
-// role lane logs under a line of its own per step. It unwraps to cause, so a route still tells
-// store.ErrMalformedRoleClaim and a refused or oversized read (writeBusUnavailable) by the read's
-// own error.
-type roleHolderFailure struct {
-	step  roleHolderStep
-	cause error
-}
-
-func (f *roleHolderFailure) Error() string {
-	if f.step == roleHolderSessionRead {
-		return "read role holder session: " + f.cause.Error()
-	}
-	return f.cause.Error()
-}
-
-func (f *roleHolderFailure) Unwrap() error { return f.cause }
 
 // roleHolderError is the 404 of a role with no live holder. HolderState says which of the three
 // states the claim's holder is in, so a caller can tell a holder that is merely unresponsive -
@@ -98,35 +54,35 @@ func (f *roleHolderFailure) Unwrap() error { return f.cause }
 // state, so a caller that used to read this answer as "the role is free now" is told plainly that
 // the claim still stands.
 type roleHolderError struct {
-	Error         string          `json:"error"`
-	Reason        roleHolderState `json:"reason"`
-	Holder        string          `json:"holder,omitempty"`
-	HolderState   session.State   `json:"holder_state,omitempty"`
-	LastSeen      *int64          `json:"last_seen,omitempty"`
-	ClaimReleased *bool           `json:"claim_released,omitempty"`
+	Error         string        `json:"error"`
+	Reason        roles.State   `json:"reason"`
+	Holder        string        `json:"holder,omitempty"`
+	HolderState   session.State `json:"holder_state,omitempty"`
+	LastSeen      *int64        `json:"last_seen,omitempty"`
+	ClaimReleased *bool         `json:"claim_released,omitempty"`
 }
 
-func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
+func writeRoleHolderError(w http.ResponseWriter, role string, result roles.Resolution) {
 	response := roleHolderError{
-		Reason: result.state,
+		Reason: result.State,
 	}
-	switch result.state {
-	case roleHolderUnclaimed:
+	switch result.State {
+	case roles.Unclaimed:
 		response.Error = fmt.Sprintf("no holder for role %s", role)
-	case roleHolderLapsed:
-		response.Holder = result.holder
-		response.HolderState = result.holderState
+	case roles.Lapsed:
+		response.Holder = result.Holder
+		response.HolderState = result.HolderState
 		lastSeen := " (last seen unavailable)"
-		if result.lastSeenAvailable {
-			response.LastSeen = &result.lastSeen
-			lastSeen = fmt.Sprintf(" (last seen %d)", result.lastSeen)
+		if result.LastSeen != 0 {
+			response.LastSeen = &result.LastSeen
+			lastSeen = fmt.Sprintf(" (last seen %d)", result.LastSeen)
 		}
 		claimReleased := false
 		response.ClaimReleased = &claimReleased
 		response.Error = fmt.Sprintf(
 			"role %s holder %s lapsed; claim retained%s",
 			role,
-			result.holder,
+			result.Holder,
 			lastSeen,
 		)
 	}
@@ -146,18 +102,19 @@ func writeRoleClaimUnreadable(w http.ResponseWriter, role string, err error) int
 }
 
 // liveSessionEntry is sessionID's record and the state that record puts its session in, for a
-// decision that turns on whether that session is still answering: a role-holder resolution, a
-// soft claim, the reapers, a session lookup, a session-addressed send and an agent delivery.
-// accept is the caller's rule about that state.
+// decision that turns on whether that session is still answering: a soft claim, the reapers, a
+// session lookup, a session-addressed send and an agent delivery. accept is the caller's rule
+// about that state.
 //
 // A caller that may act on a session which merely stopped answering passes notGone: the send
 // route, whose message is stored for such a session; the agent delivery path; both reapers
-// (sessionMayBeLive); and GET /v1/registry/<id> asked with include=unresponsive. The three that
+// (sessionMayBeLive); and GET /v1/registry/<id> asked with include=unresponsive. The two that
 // may act only on a session answering now pass sessionIsLive: that same lookup asked without
-// include, a role-holder resolution (resolveRoleHolderFrom), and a soft claim weighing the
-// holder it found (roleSupersessionVerdict). No push to a session's serving port reads this
-// function at all: the push paths read session.SessionRegistry.Get, whose answer follows the
-// bucket's maximum age alone.
+// include, and a soft claim weighing the holder it found (roleSupersessionVerdict). A
+// role-holder resolution reads its holder through roleHolderSessions.Holder instead, which asks
+// the same two reads in the same order and leaves the judgement to internal/roles. No push to a
+// session's serving port reads this function at all: the push paths read
+// session.SessionRegistry.Get, whose answer follows the bucket's maximum age alone.
 //
 // The cache answers when it holds a record accept takes (session.SessionRegistry.Lookup, which
 // judges the record's own age and never its membership of the cache); otherwise the session is
@@ -311,81 +268,19 @@ func roleSupersessionVerdict(ctx context.Context, sessions *session.SessionRegis
 func notGone(state session.State) bool { return state != session.Gone }
 
 // sessionIsLive is the state test of the decisions that may act only on a session that is
-// answering now, because each of them waits for that session to answer or moves its role: a
-// role-holder resolution, which reaches a holder only while it can answer a forward's receipt
-// (resolveRoleHolderFrom, for the lookup route, the publish route and the role lane); a soft
+// answering now, because each of them waits for that session to answer or moves its role: a soft
 // claim weighing the holder it found and the predecessor it was given (roleSupersessionVerdict);
 // a role send's test of whether its first resolution's holder still needs resolving again
 // (sendToRole); and GET /v1/registry/<id> asked without include=unresponsive, which answers for
-// the live sessions alone. None of them is a push to a serving port: those read
-// session.SessionRegistry.Get, which judges nothing but the bucket's maximum age.
+// the live sessions alone. A role-holder resolution asks the same question of its holder, and
+// asks it of internal/roles, which reads the holder's state itself (roles.ResolveHolder):
+// a role reaches its holder only while that holder can answer a forward's receipt. None of them
+// is a push to a serving port: those read session.SessionRegistry.Get, which judges nothing but
+// the bucket's maximum age.
 func sessionIsLive(state session.State) bool { return state == session.Live }
 
 // roleHolderReadTimeout bounds each of the role paths' session-bucket reads, well inside the
 // listener's 10 s HTTP write timeout (main.go) and the 10 s JetStream MaxWait the read would
-// otherwise wait out. A route's resolveRoleHolder read is bounded by its caller's context as well,
-// and so ends at the earlier of the two.
+// otherwise wait out. A resolution's read (roleHolderSessions.Holder) is bounded by its caller's
+// context as well, and so ends at the earlier of the two.
 const roleHolderReadTimeout = 2 * time.Second
-
-// resolveRoleHolder resolves role's current holder inside ctx: the claim's holder, live when that
-// holder's own record reads live (liveSessionEntry with sessionIsLive). A holder whose record
-// does not has lapsed, and its claim is left exactly as it is - this resolution writes nothing to
-// the role bucket, so a stalled holder's claim and its claimed_at outlive any number of lookups,
-// and only the role reaper, finding the holder gone, ever releases one.
-//
-// Live is the rule for every caller, and the one rule: a role reaches its holder only while that
-// holder is answering, and a holder past the live window answers neither a forward's receipt nor
-// anything else. What changed is what that costs the holder - nothing. The lookup and the publish
-// route report it lapsed with its state and its claim intact, and role delivery fails the one
-// attempt and leaves the claim for the holder to come back to, where both used to release it.
-//
-// Every bus call it makes waits no longer than ctx: the claim read, which store.Registry bounds by
-// ctx, and the holder's session read through liveSessionEntry, which also keeps
-// roleHolderReadTimeout as its own cap. A route passes its request's own context, bounded by its
-// budget, so a bus that does not answer is reported to the caller within its attempt rather than
-// after it; role delivery passes context.Background().
-//
-// An error is a *roleHolderFailure naming the read that failed; with it the result still names
-// the claim's holder when one was read, so the role lane's log line and the publish route's 504
-// can name it. It unwraps to the read's own error: an ended ctx, wrapped naming the call that did
-// not answer, which a route answers as a bus that did not answer; or store.ErrMalformedRoleClaim,
-// a claim record that cannot be read (writeRoleClaimUnreadable).
-//
-// It reads the claim from registry itself. Role delivery, whose read of a claim is the registry's
-// watched copy of the role bucket, resolves through resolveRoleHolderFrom instead.
-func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
-	return resolveRoleHolderFrom(ctx, registry, nil, sessions, role)
-}
-
-// resolveRoleHolderFrom is resolveRoleHolder reading its claim through readRoleClaim, so a
-// resolution given a firstHolder spends no bucket round trip on it. One resolution is one claim
-// read: a resolution never retries, because a holder that stopped answering keeps its claim and
-// so there is no release of one for a later read to see past.
-func resolveRoleHolderFrom(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
-	if err := ctx.Err(); err != nil {
-		return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: fmt.Errorf("resolve role %s's holder: %w", role, err)}
-	}
-	claim, err := readRoleClaim(ctx, registry, firstHolder, role)
-	if err != nil {
-		return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: err}
-	}
-	holder := claim.HolderSessionID
-	if holder == "" {
-		return roleHolderResult{state: roleHolderUnclaimed}, nil
-	}
-	entry, state, err := liveSessionEntry(ctx, sessions, holder, roleHolderReadTimeout, sessionIsLive)
-	if err == nil {
-		return roleHolderResult{state: roleHolderLive, holder: holder, holderState: state, entry: entry}, nil
-	}
-	if !errors.Is(err, nats.ErrKeyNotFound) {
-		return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderSessionRead, cause: err}
-	}
-	lastSeen := lastSeenOf(sessions, holder, entry)
-	return roleHolderResult{
-		state:             roleHolderLapsed,
-		holder:            holder,
-		holderState:       state,
-		lastSeen:          lastSeen,
-		lastSeenAvailable: lastSeen != 0,
-	}, nil
-}

@@ -13,115 +13,142 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// claims is a ClaimStore in memory: holders read in turn on each RoleClaim (the last one repeats),
-// releases answered in turn on each ReleaseExpiredRoleClaim, after onRelease when it is set.
+// claims is a ClaimStore in memory: holder is the claim every read answers, readErr fails every
+// read, and reads counts them. It has no release and no write of any kind, as the interface it
+// implements has none.
 type claims struct {
-	holders   []string
-	readErr   error
-	releases  []store.ExpiredRoleClaimRelease
-	release   error
-	onRelease func()
-	reads     int
-	released  []string
+	holder  string
+	readErr error
+	reads   int
 }
 
 func (c *claims) RoleClaim(context.Context, string) (store.RoleClaim, error) {
+	c.reads++
 	if c.readErr != nil {
 		return store.RoleClaim{}, c.readErr
 	}
-	holder := c.holders[min(c.reads, len(c.holders)-1)]
-	c.reads++
-	return store.RoleClaim{HolderSessionID: holder}, nil
+	return store.RoleClaim{HolderSessionID: c.holder}, nil
 }
 
-func (c *claims) ReleaseExpiredRoleClaim(_ context.Context, _, sessionID string, _ time.Duration) (store.ExpiredRoleClaimRelease, error) {
-	c.released = append(c.released, sessionID)
-	if c.onRelease != nil {
-		c.onRelease()
-	}
-	if c.release != nil {
-		return store.ExpiredRoleClaimRetained, c.release
-	}
-	answer := c.releases[0]
-	c.releases = c.releases[1:]
-	return answer, nil
-}
-
-// sessions is a SessionLookup in memory: entries are the registered sessions, readErr fails every
-// read.
+// sessions is a SessionLookup in memory: entries are the records it holds, remembered what it can
+// still say of a session whose record has gone, and readErr fails every read. It judges a record
+// through the windows it carries, as Buckets does.
 type sessions struct {
-	entries map[string]session.SessionEntry
-	readErr error
+	roles.Windows
+	entries    map[string]session.SessionEntry
+	remembered map[string]int64
+	readErr    error
 }
 
-func (s sessions) Holder(_ context.Context, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+func (s sessions) Holder(_ context.Context, sessionID string) (session.SessionEntry, error) {
 	if s.readErr != nil {
 		return session.SessionEntry{}, s.readErr
 	}
 	entry, ok := s.entries[sessionID]
-	if !ok || !live(entry) {
+	if !ok {
 		return session.SessionEntry{}, nats.ErrKeyNotFound
 	}
 	return entry, nil
 }
 
-func (sessions) TTL() time.Duration { return time.Minute }
+func (s sessions) LastSeen(sessionID string) int64 { return s.remembered[sessionID] }
 
-func anyEntry(session.SessionEntry) bool { return true }
+// registered is a record last written age ago.
+func registered(age time.Duration) session.SessionEntry {
+	return session.SessionEntry{Title: "holder", UpdatedAt: time.Now().Add(-age).UnixMilli()}
+}
 
-func TestResolveHolderReadsEachState(t *testing.T) {
-	live := sessions{entries: map[string]session.SessionEntry{"ses_live": {Title: "live"}}}
+// A resolution says what it found and takes nothing: a holder past the live window and one past
+// the gone horizon are both lapsed, each named with the state its own record puts it in and the
+// registration that dates it, and the claim is read once and never written. That is the whole of
+// dispatch://INFRA-392's R4 for every caller of this package: an unresponsive session keeps the
+// role it claimed, and so does a gone one until the role-claim reaper takes it.
+func TestResolveHolderReadsEachStateAndTakesNothing(t *testing.T) {
+	live := registered(time.Minute)
+	stalled := registered(session.LiveWindow + time.Minute)
+	dead := registered(session.GoneHorizon + time.Minute)
+	held := sessions{
+		entries:    map[string]session.SessionEntry{"ses_live": live, "ses_stalled": stalled, "ses_dead": dead},
+		remembered: map[string]int64{"ses_departed": 1_700_000_000_000},
+	}
 	for _, tc := range []struct {
-		name     string
-		claims   *claims
-		want     roles.State
-		holder   string
-		release  store.ExpiredRoleClaimRelease
-		released []string
+		name        string
+		holder      string
+		want        roles.State
+		holderState session.State
+		lastSeen    int64
 	}{
-		{"a live holder", &claims{holders: []string{"ses_live"}}, roles.Live, "ses_live", 0, nil},
-		{"no claim", &claims{holders: []string{""}}, roles.Unclaimed, "", 0, nil},
-		{"a gone holder, released", &claims{holders: []string{"ses_gone"}, releases: []store.ExpiredRoleClaimRelease{store.ExpiredRoleClaimReleased}},
-			roles.Lapsed, "ses_gone", store.ExpiredRoleClaimReleased, []string{"ses_gone"}},
-		{"a gone holder whose claim was already gone", &claims{holders: []string{"ses_gone"}, releases: []store.ExpiredRoleClaimRelease{store.ExpiredRoleClaimMissing}},
-			roles.Lapsed, "ses_gone", store.ExpiredRoleClaimMissing, []string{"ses_gone"}},
-		{"a gone holder whose claim was kept", &claims{holders: []string{"ses_gone"}, releases: []store.ExpiredRoleClaimRelease{store.ExpiredRoleClaimRetained}},
-			roles.Lapsed, "ses_gone", store.ExpiredRoleClaimRetained, []string{"ses_gone"}},
-		{"a gone holder superseded by a live one", &claims{holders: []string{"ses_gone", "ses_live"}, releases: []store.ExpiredRoleClaimRelease{store.ExpiredRoleClaimSuperseded}},
-			roles.Live, "ses_live", 0, []string{"ses_gone"}},
-		{"a claim superseded on every attempt", &claims{holders: []string{"ses_gone", "ses_other"},
-			releases: []store.ExpiredRoleClaimRelease{store.ExpiredRoleClaimSuperseded, store.ExpiredRoleClaimSuperseded}},
-			roles.Churned, "", 0, []string{"ses_gone", "ses_other"}},
+		{"a live holder", "ses_live", roles.Live, session.Live, live.UpdatedAt},
+		{"no claim", "", roles.Unclaimed, "", 0},
+		{"a holder past the live window", "ses_stalled", roles.Lapsed, session.Unresponsive, stalled.UpdatedAt},
+		{"a holder past the gone horizon", "ses_dead", roles.Lapsed, session.Gone, dead.UpdatedAt},
+		{"a holder whose record has gone, still remembered", "ses_departed", roles.Lapsed, session.Gone, 1_700_000_000_000},
+		{"a holder nothing dates", "ses_never", roles.Lapsed, session.Gone, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resolution, err := roles.ResolveHolder(context.Background(), tc.claims, live, "reviewer", anyEntry)
+			claimed := &claims{holder: tc.holder}
+			resolution, err := roles.ResolveHolder(context.Background(), claimed, held, "reviewer")
 			if err != nil {
 				t.Fatalf("resolve: %v", err)
 			}
-			if resolution.State != tc.want || resolution.Holder != tc.holder || resolution.Release != tc.release {
-				t.Fatalf("resolution %+v, want state %d holder %q release %d", resolution, tc.want, tc.holder, tc.release)
+			if resolution.State != tc.want || resolution.Holder != tc.holder ||
+				resolution.HolderState != tc.holderState || resolution.LastSeen != tc.lastSeen {
+				t.Fatalf("resolution %+v, want state %s of holder %q, holder state %q, last seen %d",
+					resolution, tc.want, tc.holder, tc.holderState, tc.lastSeen)
 			}
-			if tc.want == roles.Live && resolution.Entry.Title != "live" {
-				t.Fatalf("the live holder's entry is %+v", resolution.Entry)
+			if tc.want == roles.Live && resolution.Entry.Title != "holder" {
+				t.Fatalf("the live holder's entry is %+v, want the record the lookup holds", resolution.Entry)
 			}
-			if len(tc.claims.released) != len(tc.released) {
-				t.Fatalf("released %v, want %v", tc.claims.released, tc.released)
+			if claimed.reads != 1 {
+				t.Fatalf("the claim was read %d times, want once: a resolution rereads nothing, having released nothing", claimed.reads)
 			}
 		})
 	}
 }
 
-// live decides the holder: one it refuses is released as one that is gone.
-func TestResolveHolderReleasesAHolderLiveRefuses(t *testing.T) {
-	held := &claims{holders: []string{"ses_live"}, releases: []store.ExpiredRoleClaimRelease{store.ExpiredRoleClaimReleased}}
-	registered := sessions{entries: map[string]session.SessionEntry{"ses_live": {}}}
-	resolution, err := roles.ResolveHolder(context.Background(), held, registered, "reviewer", func(session.SessionEntry) bool { return false })
-	if err != nil || resolution.State != roles.Lapsed || len(held.released) != 1 {
-		t.Fatalf("resolution %+v, %v, released %v: want the refused holder's claim released", resolution, err, held.released)
+// The windows the lookup runs with decide the holder's state, and nothing compiled into this
+// package does: the same record reads live under one live window and unresponsive under a shorter
+// one, which is how a listener started with ENVOY_SESSION_LIVE_WINDOW and Dispatch's buckets each
+// judge their own holders.
+func TestResolveHolderJudgesTheHolderOnTheWindowsItIsGiven(t *testing.T) {
+	entry := registered(10 * time.Minute)
+	for _, tc := range []struct {
+		name    string
+		windows roles.Windows
+		want    roles.State
+	}{
+		{"a live window the holder is inside", roles.Windows{Live: time.Hour, Horizon: 2 * time.Hour}, roles.Live},
+		{"a live window the holder is past", roles.Windows{Live: time.Minute, Horizon: time.Hour}, roles.Lapsed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			held := sessions{Windows: tc.windows, entries: map[string]session.SessionEntry{"ses_holder": entry}}
+			resolution, err := roles.ResolveHolder(context.Background(), &claims{holder: "ses_holder"}, held, "reviewer")
+			if err != nil || resolution.State != tc.want {
+				t.Fatalf("resolution %+v, %v; want %s", resolution, err, tc.want)
+			}
+		})
 	}
 }
 
-// A read that fails names its step, and the holder once the claim named one.
+// A resolution given a firstHolder reads the claim from it and the claim store not at all, which
+// is how the role lane spends no bucket round trip on a message it forwards.
+func TestResolveHolderFromReadsTheClaimItIsGiven(t *testing.T) {
+	claimed := &claims{holder: "ses_other"}
+	held := sessions{entries: map[string]session.SessionEntry{"ses_cached": registered(time.Second)}}
+	resolution, err := roles.ResolveHolderFrom(context.Background(), claimed, func(string) (string, error) {
+		return "ses_cached", nil
+	}, held, "reviewer")
+	if err != nil || resolution.State != roles.Live || resolution.Holder != "ses_cached" {
+		t.Fatalf("resolution %+v, %v; want the cached holder read live", resolution, err)
+	}
+	if claimed.reads != 0 {
+		t.Fatalf("the claim store was read %d times, want not at all", claimed.reads)
+	}
+}
+
+// A read that fails names its step, and the holder once the claim named one, so the role lane
+// logs the read that failed and a route answers it. Nothing is decided about the holder: a
+// session read that did not answer is no verdict on the session.
 func TestResolveHolderNamesTheStepThatFailed(t *testing.T) {
 	failure := errors.New("no answer")
 	for _, tc := range []struct {
@@ -130,34 +157,40 @@ func TestResolveHolderNamesTheStepThatFailed(t *testing.T) {
 		sessions sessions
 		step     roles.Step
 		holder   string
+		message  string
 	}{
-		{"the claim", &claims{readErr: failure}, sessions{}, roles.ClaimRead, ""},
-		{"the session", &claims{holders: []string{"ses_holder"}}, sessions{readErr: failure}, roles.SessionRead, "ses_holder"},
-		{"the release", &claims{holders: []string{"ses_gone"}, release: failure}, sessions{}, roles.Release, "ses_gone"},
+		{"the claim", &claims{readErr: failure}, sessions{}, roles.ClaimRead, "", "no answer"},
+		{"the session", &claims{holder: "ses_holder"}, sessions{readErr: failure}, roles.SessionRead, "ses_holder", "read role holder session: no answer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resolution, err := roles.ResolveHolder(context.Background(), tc.claims, tc.sessions, "reviewer", anyEntry)
+			resolution, err := roles.ResolveHolder(context.Background(), tc.claims, tc.sessions, "reviewer")
 			readErr, ok := errors.AsType[*roles.ReadError](err)
 			if !ok || readErr.Step != tc.step || readErr.Holder != tc.holder || !errors.Is(err, failure) || resolution.Holder != tc.holder {
-				t.Fatalf("resolve returned %+v, %v; want a read error at %s about %q wrapping the failure", resolution, err, tc.step, tc.holder)
+				t.Fatalf("resolve returned %+v, %v; want a read error at step %d about %q wrapping the failure", resolution, err, tc.step, tc.holder)
+			}
+			if err.Error() != tc.message {
+				t.Fatalf("the error reads %q, want %q: a route answers this message", err.Error(), tc.message)
+			}
+			if resolution.State == roles.Lapsed || resolution.HolderState != "" {
+				t.Fatalf("resolution %+v: a read that did not answer says nothing about the holder", resolution)
 			}
 		})
 	}
 }
 
-// No attempt starts once the context has ended: a release that loses to a fresh claim while the
-// context ends reads the claim no second time, and the answer is the context's error, naming the
-// role, rather than a read error or a resolution.
-func TestResolveHolderStartsNoAttemptOnceTheContextEnded(t *testing.T) {
+// No read starts once the context has ended: the answer is the context's error, naming the role,
+// as the read of the claim that did not happen.
+func TestResolveHolderStartsNoReadOnceTheContextEnded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	raced := &claims{holders: []string{"ses_gone", "ses_live"}, releases: []store.ExpiredRoleClaimRelease{store.ExpiredRoleClaimSuperseded}, onRelease: cancel}
-	live := sessions{entries: map[string]session.SessionEntry{"ses_live": {}}}
-	resolution, err := roles.ResolveHolder(ctx, raced, live, "reviewer", anyEntry)
-	if _, isReadErr := errors.AsType[*roles.ReadError](err); isReadErr || !errors.Is(err, context.Canceled) || err.Error() != "resolve role reviewer's holder: context canceled" {
+	cancel()
+	claimed := &claims{holder: "ses_holder"}
+	resolution, err := roles.ResolveHolder(ctx, claimed, sessions{}, "reviewer")
+	readErr, ok := errors.AsType[*roles.ReadError](err)
+	if !ok || readErr.Step != roles.ClaimRead || !errors.Is(err, context.Canceled) ||
+		err.Error() != "resolve role reviewer's holder: context canceled" {
 		t.Fatalf("resolve under a context that ended returned %+v, %v; want the context's error naming the role", resolution, err)
 	}
-	if raced.reads != 1 {
-		t.Fatalf("the claim was read %d times, want once: an attempt started after the context ended", raced.reads)
+	if claimed.reads != 0 {
+		t.Fatalf("the claim was read %d times, want not at all", claimed.reads)
 	}
 }

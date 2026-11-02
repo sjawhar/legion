@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -422,29 +423,30 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 }
 
 // resolveCoreRoleHolder resolves the current live holder for a role-lane delivery
-// (resolveRoleHolderFrom with sessionIsLive), applying the terminal no_holder/delivery_failed
+// (roles.ResolveHolderFrom), applying the terminal no_holder/delivery_failed
 // outcome itself and reporting ok=false when there is nobody to deliver to. An unclaimed role is
 // no_holder; a holder that is not answering and every failed read are delivery_failed, each under
-// a log line that names which it was. Role delivery answers no caller, so it resolves under
-// context.Background(): the holder's session read keeps roleHolderReadTimeout (liveSessionEntry's
-// bound) as its own cap. Its claim read is the registry's watched copy of the role bucket
-// (store.Registry.CachedRoleHolder, passed as the resolution's firstHolder), so a role message
-// costs no bucket round trip.
+// a log line that names which it was. A holder that is not answering keeps its claim through all
+// of them: the lane takes nothing from it. Role delivery answers no caller, so it resolves under
+// context.Background(): the holder's session read keeps roleHolderReadTimeout
+// (roleHolderSessions.Holder's bound) as its own cap. Its claim read is the registry's watched
+// copy of the role bucket (store.Registry.CachedRoleHolder, passed as the resolution's
+// firstHolder), so a role message costs no bucket round trip.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
-	resolved, err := resolveRoleHolderFrom(context.Background(), cfg.registry, cfg.registry.CachedRoleHolder, cfg.sessions, role)
-	sessionID := resolved.holder
-	// Every error resolveRoleHolderFrom returns is a *roleHolderFailure naming the read that failed.
+	resolved, err := roles.ResolveHolderFrom(context.Background(), cfg.registry, cfg.registry.CachedRoleHolder, roleHolderSessions{cfg.sessions}, role)
+	sessionID := resolved.Holder
+	// Every error the resolution returns is a *roles.ReadError naming the read that failed.
 	// One that is not would still be a read that failed, so it is logged as the claim read with
 	// its own error rather than left without a step to branch on.
-	var failure *roleHolderFailure
+	var failure *roles.ReadError
 	if err != nil && !errors.As(err, &failure) {
-		failure = &roleHolderFailure{step: roleHolderClaimRead, cause: err}
+		failure = &roles.ReadError{Step: roles.ClaimRead, Err: err}
 	}
 	if err == nil {
-		switch resolved.state {
-		case roleHolderLive:
-			return sessionID, resolved.entry, true
-		case roleHolderUnclaimed:
+		switch resolved.State {
+		case roles.Live:
+			return sessionID, resolved.Entry, true
+		case roles.Unclaimed:
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				metricStatus: "skipped",
 				log: func(logger *logging.Logger) {
@@ -464,23 +466,23 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 		}
 		return "", session.SessionEntry{}, false
 	}
-	switch failure.step {
-	case roleHolderClaimRead:
+	switch failure.Step {
+	case roles.ClaimRead:
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			metricStatus: "failed",
 			log: func(logger *logging.Logger) {
-				logger.Error("listener role holder lookup failed", slog.String("role", role), slog.String("error", failure.cause.Error()))
+				logger.Error("listener role holder lookup failed", slog.String("role", role), slog.String("error", failure.Err.Error()))
 			},
 			exceptionReason: "delivery_failed",
 		})
-	case roleHolderSessionRead:
+	case roles.SessionRead:
 		// The holder's record could not be read, so nothing is known about its state and nothing
 		// is taken from it.
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
 			log: func(logger *logging.Logger) {
-				logger.Error("listener role holder session lookup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", failure.cause.Error()))
+				logger.Error("listener role holder session lookup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", failure.Err.Error()))
 			},
 			exceptionReason: "delivery_failed",
 		})

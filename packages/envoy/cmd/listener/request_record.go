@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 )
 
 // requestOutcome is what became of one inbound send or publish, in the fixed vocabulary those two
@@ -144,13 +145,13 @@ func (rec *requestRecord) refuseRoleClaimUnreadable(w http.ResponseWriter, role 
 // refuseRoleHolder answers the publish route's two role-holder refusals. A lapsed holder is the
 // session the claim named, which the answer's own body names as well, so the record carries it;
 // an unclaimed role has no holder to carry.
-func (rec *requestRecord) refuseRoleHolder(w http.ResponseWriter, role string, result roleHolderResult) {
+func (rec *requestRecord) refuseRoleHolder(w http.ResponseWriter, role string, result roles.Resolution) {
 	writeRoleHolderError(w, role, result)
 	outcome := outcomeRoleUnclaimed
-	if result.state == roleHolderLapsed {
+	if result.State == roles.Lapsed {
 		outcome = outcomeRoleLapsed
 	}
-	rec.holder = result.holder
+	rec.holder = result.Holder
 	rec.write(http.StatusNotFound, outcome)
 }
 

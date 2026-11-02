@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -102,8 +103,8 @@ const (
 	// sendSkipped is a role send from the role's own holder, the role lane's echo skip.
 	sendSkipped sendOutcome = "skipped"
 	// sendUnclaimed and sendHolderLapsed are a role send with no live claim, answered 404.
-	sendUnclaimed    sendOutcome = sendOutcome(roleHolderUnclaimed)
-	sendHolderLapsed sendOutcome = sendOutcome(roleHolderLapsed)
+	sendUnclaimed    sendOutcome = sendOutcome(roles.Unclaimed)
+	sendHolderLapsed sendOutcome = sendOutcome(roles.Lapsed)
 	// sendReceiptTimeout is a recipient whose last forward reached the server and drew no receipt.
 	sendReceiptTimeout sendOutcome = "receipt_timeout"
 	// sendDeliveryFailed is a recipient that no forward was shown to reach: none live to forward
@@ -250,10 +251,10 @@ func (s *roleSend) delivered(outcome sendOutcome) {
 // noHolder answers writeRoleHolderError's 404 (unclaimed or holder_lapsed) for a role with no live
 // claim, which the Legion daemon reads as notify.ErrNoHolder, recorded role_unclaimed or
 // role_lapsed. The role lane counts an unclaimed role skipped and a lapsed holder failed.
-func (s *roleSend) noHolder(result roleHolderResult) {
+func (s *roleSend) noHolder(result roles.Resolution) {
 	s.record.refuseRoleHolder(s.w, s.role, result)
 	outcome := sendHolderLapsed
-	if result.state == roleHolderUnclaimed {
+	if result.State == roles.Unclaimed {
 		outcome = sendUnclaimed
 	}
 	s.settle(outcome)
@@ -336,7 +337,7 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 }
 
 // sendToRole delivers a role message through the publish route, answering through record. The
-// first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with sessionIsLive),
+// first resolution reads the holder as an HTTP lookup does (roles.ResolveHolder),
 // within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and gives that route's
 // answers: 404 unclaimed or holder_lapsed, and for a resolution that failed the lookup's 503 or
 // 500 (unresolved). The first attempt forwards to that holder without reading the claim again;
@@ -353,20 +354,20 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
 	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived}
 	firstCtx, cancelFirst := context.WithDeadline(ctx, arrived.Add(sendRequestBudget))
-	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role)
+	first, err := roles.ResolveHolder(firstCtx, d.registry, roleHolderSessions{d.sessions}, role)
 	cancelFirst()
 	if err != nil {
 		send.unresolved(err)
 		return
 	}
-	if first.state != roleHolderLive {
+	if first.State != roles.Live {
 		send.noHolder(first)
 		return
 	}
-	send.holder = first.holder
-	send.holderState = first.holderState
+	send.holder = first.Holder
+	send.holderState = first.HolderState
 	send.item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
-	if send.settledBeforeForward(first.entry) {
+	if send.settledBeforeForward(first.Entry) {
 		return
 	}
 	checked := send.holder
@@ -375,27 +376,27 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 	var lastForward error
 	resolved := first
 	for pass := 0; ; pass++ {
-		if pass > 0 || !sessionIsLive(first.holderState) {
-			resolved, err = resolveRoleHolder(ctx, d.registry, d.sessions, role)
+		if pass > 0 || !sessionIsLive(first.HolderState) {
+			resolved, err = roles.ResolveHolder(ctx, d.registry, roleHolderSessions{d.sessions}, role)
 			if err != nil && ctx.Err() != nil {
 				// The window ended under the resolution: what it read says nothing more.
 				break
 			}
 		}
-		if resolved.holder != "" {
-			send.holder = resolved.holder
-			send.holderState = resolved.holderState
+		if resolved.Holder != "" {
+			send.holder = resolved.Holder
+			send.holderState = resolved.HolderState
 		}
 		switch {
 		case err != nil:
 			// Retried below, as every resolution not answered here is.
-		case resolved.state == roleHolderUnclaimed:
+		case resolved.State == roles.Unclaimed:
 			send.noHolder(resolved)
 			return
-		case resolved.state == roleHolderLive:
+		case resolved.State == roles.Live:
 			if send.holder != checked {
 				checked = send.holder
-				if send.settledBeforeForward(resolved.entry) {
+				if send.settledBeforeForward(resolved.Entry) {
 					return
 				}
 			}
@@ -409,7 +410,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 			// The forward carries the same Nats-Msg-Id on every attempt, so the stream, which
 			// captures agent subjects, keeps one copy of it per message and recipient however
 			// many attempts this send makes.
-			err := d.forwardAndWait(subject, forwarded, bus.ForwardMsgID(forwarded.DedupeKey, subject), window, roleForwardStoredOnly(resolved.entry))
+			err := d.forwardAndWait(subject, forwarded, bus.ForwardMsgID(forwarded.DedupeKey, subject), window, roleForwardStoredOnly(resolved.Entry))
 			if err == nil {
 				d.confirm(item.DedupeKey, send.holder)
 				send.delivered(sendDelivered)

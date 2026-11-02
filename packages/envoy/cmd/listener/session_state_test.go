@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -200,7 +201,7 @@ func TestLookupsAndAReaperPassLeaveAStalledHoldersRoleClaimExactlyAsItWas(t *tes
 		if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
 			t.Fatalf("decode lookup %d's answer %s: %v", attempt, recorder.Body.String(), err)
 		}
-		if answer.Reason != roleHolderLapsed || answer.Holder != holder || answer.HolderState != session.Unresponsive {
+		if answer.Reason != roles.Lapsed || answer.Holder != holder || answer.HolderState != session.Unresponsive {
 			t.Fatalf("lookup %d answered %+v, want holder_lapsed naming %s as unresponsive", attempt, answer, holder)
 		}
 		if answer.ClaimReleased == nil || *answer.ClaimReleased {

@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -515,8 +516,8 @@ func senderStamp(ctx context.Context, registry *store.Registry, sessions *sessio
 		sender.Machine = interest.MachineID
 		sender.Cwd = interest.Dir
 	}
-	if roles, err := registry.RolesHeldBy(sourceSession); err == nil {
-		sender.Roles = roles
+	if held, err := registry.RolesHeldBy(sourceSession); err == nil {
+		sender.Roles = held
 	}
 	if entry, err := sessions.Get(sourceSession); err == nil {
 		sender.Title = entry.Title
@@ -986,11 +987,11 @@ const sessionInterestReadTimeout = 1 * time.Second
 // error is a read that did not answer and is returned alone: a caller answers it as the
 // bus-unavailable 503, never as a session with no topics or roles.
 func sessionInfoFor(ctx context.Context, registry *store.Registry, entry session.ListEntry) (sessionInfo, error) {
-	roles, err := registry.RolesHeldBy(entry.SessionID)
+	held, err := registry.RolesHeldBy(entry.SessionID)
 	if err != nil {
 		return sessionInfo{}, err
 	}
-	info := sessionInfoWith(entry, roles)
+	info := sessionInfoWith(entry, held)
 	readCtx, cancel := context.WithTimeout(ctx, sessionInterestReadTimeout)
 	defer cancel()
 	interest, err := registry.Get(readCtx, entry.SessionID)
@@ -1011,7 +1012,7 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, entry session
 // entry's state is what its last registration says about the session, which every row carries so
 // that a caller reading a list, or one session's answer, can tell a session that is answering
 // from one that has stopped without comparing timestamps itself.
-func sessionInfoWith(entry session.ListEntry, roles []string) sessionInfo {
+func sessionInfoWith(entry session.ListEntry, held []string) sessionInfo {
 	return sessionInfo{
 		SessionID:      entry.SessionID,
 		State:          entry.State,
@@ -1022,7 +1023,7 @@ func sessionInfoWith(entry session.ListEntry, roles []string) sessionInfo {
 		Title:          entry.Title,
 		Capabilities:   append([]string{}, entry.Capabilities...),
 		SelfSubscribed: entry.SelfSubscribed,
-		Roles:          roles,
+		Roles:          held,
 		UpdatedAt:      entry.UpdatedAt,
 		LastSeen:       entry.UpdatedAt,
 		Plugin:         entry.Plugin,
@@ -1066,14 +1067,14 @@ func writeInterestRecordUnreadable(w http.ResponseWriter, sessionID string, err 
 // every other answer's are (sessionInfoFor); the list reads them for every row in one pass
 // (store.Registry.RolesBySession), and a claims view that cannot answer refuses that pass, as a
 // read that did not answer, before any row is built.
-func listedSessionInfo(registry *store.Registry, entry session.ListEntry, roles []string) sessionInfo {
-	if roles == nil {
+func listedSessionInfo(registry *store.Registry, entry session.ListEntry, held []string) sessionInfo {
+	if held == nil {
 		// A session no claim names is absent from that pass's map, and its row says "no roles"
 		// with an empty list, as a per-session read does; a null there would be a changed answer
 		// for every session that holds no role.
-		roles = []string{}
+		held = []string{}
 	}
-	info := sessionInfoWith(entry, roles)
+	info := sessionInfoWith(entry, held)
 	if interest, found := registry.Cached(entry.SessionID); found {
 		info.Topics = interest.Topics
 	}
@@ -1151,7 +1152,7 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		roles, err := registry.RolesBySession()
+		held, err := registry.RolesBySession()
 		if err != nil {
 			writeBusUnavailable(w, err)
 			return
@@ -1163,7 +1164,7 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			if !strings.Contains(entry.Dir, dirFilter) || !strings.Contains(entry.Title, titleFilter) {
 				continue
 			}
-			result = append(result, listedSessionInfo(registry, entry, roles[entry.SessionID]))
+			result = append(result, listedSessionInfo(registry, entry, held[entry.SessionID]))
 		}
 		writeJSON(w, http.StatusOK, result)
 	}
@@ -1494,8 +1495,8 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 }
 
 // roleGetHandler answers GET /v1/roles/<role> with the role's live holder, its holder_state and
-// its last_seen. It resolves the holder
-// (resolveRoleHolder with sessionIsLive) within sendRequestBudget of the request's own context, as
+// its last_seen. It resolves the holder (roles.ResolveHolder, the one resolution)
+// within sendRequestBudget of the request's own context, as
 // a role send's first resolution through the publish route does, so a bus that does not answer is
 // reported inside the caller's attempt. A holder past the live window is the 404
 // writeRoleHolderError writes, naming its state and saying it released nothing: the role cannot
@@ -1520,7 +1521,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		result, err := resolveRoleHolder(ctx, d.registry, d.sessions, role)
+		result, err := roles.ResolveHolder(ctx, d.registry, roleHolderSessions{d.sessions}, role)
 		if errors.Is(err, store.ErrMalformedRoleClaim) {
 			writeRoleClaimUnreadable(w, role, err)
 			return
@@ -1529,7 +1530,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 			writeBusUnavailable(w, err)
 			return
 		}
-		if result.state != roleHolderLive {
+		if result.State != roles.Live {
 			writeRoleHolderError(w, role, result)
 			return
 		}
@@ -1539,14 +1540,14 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		// every role answer rather than inferring the state from the status code.
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"role":         role,
-			"holder":       result.holder,
-			"holder_state": result.holderState,
-			"title":        result.entry.Title,
-			"dir":          result.entry.Dir,
-			"machine_id":   result.entry.MachineID,
-			"host":         result.entry.HostOrMachine(),
-			"capabilities": append([]string{}, result.entry.Capabilities...),
-			"last_seen":    result.entry.UpdatedAt,
+			"holder":       result.Holder,
+			"holder_state": result.HolderState,
+			"title":        result.Entry.Title,
+			"dir":          result.Entry.Dir,
+			"machine_id":   result.Entry.MachineID,
+			"host":         result.Entry.HostOrMachine(),
+			"capabilities": append([]string{}, result.Entry.Capabilities...),
+			"last_seen":    result.Entry.UpdatedAt,
 		})
 	}
 }

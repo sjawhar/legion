@@ -91,9 +91,9 @@ type Deps struct {
 	// exits at boot if the lease pool cannot be opened.
 	Leases duty.Leases
 	// RoleClaims and Sessions are where a role route's holder is resolved (roles.ResolveHolder,
-	// resolveRoleHolders): role claims read from the role bucket, released there when their holder
-	// is gone, and holders read from the session bucket. cmd/dispatch passes one roles.Buckets for
-	// both, reading on Publisher's connection.
+	// resolveRoleHolders): role claims read from the role bucket and holders read from the
+	// session bucket, neither of which the resolution writes to. cmd/dispatch passes one
+	// roles.Buckets for both, reading on Publisher's connection.
 	RoleClaims roles.ClaimStore
 	Sessions   roles.SessionLookup
 	// PublishFailures counts a destination of a publish attempt that did not reach it, by

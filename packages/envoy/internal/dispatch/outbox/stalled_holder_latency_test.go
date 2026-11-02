@@ -12,11 +12,11 @@ import (
 // chain: another issue's event, routed to a holder that answers, reaches that holder at once
 // rather than when the silent holder's receipt wait runs out.
 //
-// A session that died holding a role stays registered and fresh for up to
-// session.ClaimStaleAfter, and each retry of its issue's event waits the whole roleReceiptTimeout
+// A session that died holding a role stays registered and reads live for up to
+// session.LiveWindow, and each retry of its issue's event waits the whole roleReceiptTimeout
 // for a receipt that never comes. If no other send can start while that wait runs, every event
 // Dispatch commits during it - on every issue, to every session - reaches its reader up to 5 s
-// late, and again at each retry of the stuck event, until the holder goes stale. The tester's
+// late, and again at each retry of the stuck event, until the holder stops reading live. The tester's
 // live run at fd93819c measured that: with two issues routed to a holder
 // that never answers, 24 of 30 comments on a third issue reached their answering holder more
 // than 1 s late (median 2.8 s, max 5.0 s), against 3 of 30 on main's build.
