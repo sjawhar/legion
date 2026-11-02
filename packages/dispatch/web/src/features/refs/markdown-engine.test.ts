@@ -1,14 +1,18 @@
-import { expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import manifest from "../../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
-import { renderWithEngine } from "./markdown-engine";
+import { type MarkdownRendering, renderWithEngine, warmMarkdownRenderer } from "./markdown-engine";
+import { markdownWorkerThreshold } from "./markdown-worker-threshold";
+import { flushTasks, installFakeParseWorker, restoreParseWorker } from "./parse-worker-fixture";
 
 /** Renders `markdown` through the shared engine as a surface would, and answers the parsed
  *  document, or `undefined` where the engine answered nothing for it. */
 function parsedThroughSharedEngine(markdown: string): Promise<ProseMirrorNode | undefined> {
   const { promise, resolve } = Promise.withResolvers<ProseMirrorNode | undefined>();
-  renderWithEngine((engine) => resolve(engine?.parse(markdown)));
+  renderWithEngine(markdown, "space", ({ engine }) => {
+    resolve(engine?.parse(markdown));
+  });
   return promise;
 }
 
@@ -65,4 +69,62 @@ test("a parse the engine refuses leaves the next parses of unrelated text intact
   expect(await parseThroughSharedEngine("שלום **עולם** and مرحبا `code`")).toBe(
     "שלום עולם and مرحبا code"
   );
+});
+
+// The boundary the browser rows measure (`e2e/heavy-bodies.e2e.ts`, whose two shortest rows sit
+// one character under it): a body of exactly `markdownWorkerThreshold` characters is parsed
+// where every body always was, on the page's own thread, and one character more is parsed in the
+// worker (sjawhar/legion#2519).
+describe("the parse worker's threshold", () => {
+  afterEach(restoreParseWorker);
+
+  test("a body of exactly the threshold parses on the page, one character more in the worker", async () => {
+    await warmMarkdownRenderer();
+    const worker = installFakeParseWorker();
+    // One paragraph of one word, so each body is exactly as long as the count under test.
+    const atThreshold = "x".repeat(markdownWorkerThreshold);
+    const overThreshold = "x".repeat(markdownWorkerThreshold + 1);
+
+    const onThePage: MarkdownRendering[] = [];
+    const cancelOnThePage = renderWithEngine(atThreshold, "space", (rendering) => {
+      onThePage.push(rendering);
+    });
+    try {
+      // The engine is loaded, so this body is answered in the caller's own commit, parsed, the
+      // way every body was before the worker: nothing about it is pending.
+      expect(onThePage).toHaveLength(1);
+      expect(onThePage[0].pending).toBe(false);
+      expect(onThePage[0].engine).toBeDefined();
+      expect(onThePage[0].parsed?.textContent).toBe(atThreshold);
+      await flushTasks();
+      expect(worker.created).toBe(0);
+      expect(worker.requests).toHaveLength(0);
+    } finally {
+      cancelOnThePage();
+    }
+
+    const inTheWorker: MarkdownRendering[] = [];
+    const cancelInTheWorker = renderWithEngine(overThreshold, "space", (rendering) => {
+      inTheWorker.push(rendering);
+    });
+    try {
+      // One character more, and the body is answered at once as pending, with no document: the
+      // literal text is what a surface paints until the worker answers.
+      expect(inTheWorker).toHaveLength(1);
+      expect(inTheWorker[0].pending).toBe(true);
+      expect(inTheWorker[0].parsed).toBeUndefined();
+      expect(inTheWorker[0].engine).toBeDefined();
+      await worker.answer(0);
+      await flushTasks();
+      expect(worker.created).toBe(1);
+      expect(worker.requests).toHaveLength(1);
+      expect(worker.requests[0].markdown).toBe(overThreshold);
+      const answered = inTheWorker.at(-1) as MarkdownRendering;
+      expect(inTheWorker.length).toBeGreaterThan(1);
+      expect(answered.pending).toBe(false);
+      expect(answered.parsed?.textContent).toBe(overThreshold);
+    } finally {
+      cancelInTheWorker();
+    }
+  });
 });
