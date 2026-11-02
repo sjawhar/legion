@@ -62,11 +62,6 @@ type servicePersistenceAdapter struct {
 
 // LoadDoc reads the durable state a room loads and hands ygo none of it: the state goes on the
 // load's record (roomLoad.read), and the room's own load hook decodes it (bootstrapLoadedState,
-// whose comment states how). ygo, given no bytes, decodes nothing itself. A preload
-// (takePreload), which the socket's admission check decoded, goes on the record as a read would.
-//
-// LoadDoc reads the durable state a room loads and hands ygo none of it: the state goes on the
-// load's record (roomLoad.read), and the room's own load hook decodes it (bootstrapLoadedState,
 // whose comment states how), because ygo's own apply runs the format cleanup a remote apply runs
 // and the room's stored history already holds every cleanup the room made. A preload
 // (takePreload), which the socket's admission check decoded, goes on the record as a read would.
@@ -549,9 +544,9 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 // load read (servicePersistenceAdapter.LoadDoc) into doc (bootstrapLoadedState), and a state that
 // does not decode fails the room and drops the load's record (failRoomLoad) with the decode's
 // error, which it returns to ygo, so the room is not published and its next access loads it
-// afresh. Then it records what the room
-// starts from: its issue's state, the settlement it owes, its ask blocks, its replica and its
-// instance, and the update observer that classifies and credits every update the room commits.
+// afresh. Then it records what the room starts from: its issue's state, the settlement it owes,
+// its ask blocks, its replica and its instance, and the update observer that classifies and
+// credits every update the room commits.
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) (err error) {
 	// A refusal of this hook is, but for one, this service's own answer to the load - the
 	// document is being rebuilt, the room has already failed, the store did not answer - and not

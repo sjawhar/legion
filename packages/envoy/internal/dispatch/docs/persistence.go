@@ -945,12 +945,12 @@ func updateItems(update []byte) (uint64, bool) {
 }
 
 // itemCapRefusal is the one way this package names an update too large to store: its header
-// declares items, more than maxItems, the cap the decode that judged it ran under (maxUpdateItems,
-// what one document update may hold, in production; see itemCapError). Both refusals of
-// such an update say it with this - the store's own, before anything is written
-// (refuseUpdateItemCap), and ygo's, answered for an update the server encoded (itemCapError) -
-// and TestTheStoreJudgesAnUpdateByItsHeader reads it back from here rather than writing the
-// sentence again (sjawhar/legion#2519).
+// declares items, more than maxItems, the cap it was judged against (maxUpdateItems, what one
+// document update may hold, in production; see itemCapError). Every refusal of such an update says
+// it with this - the store's own, before anything is written (refuseUpdateItemCap), a stored
+// history's, before a room decodes it (loadableHistory), and ygo's, answered for a rebuilt seed
+// the server encoded (itemCapError) - and TestTheStoreJudgesAnUpdateByItsHeader reads it back from
+// here rather than writing the sentence again (sjawhar/legion#2519).
 func itemCapRefusal(items uint64, maxItems int) error {
 	return fmt.Errorf("%w: its %d items exceed the %d one document update can hold", ErrDocumentTooLarge, items, maxItems)
 }
@@ -958,11 +958,10 @@ func itemCapRefusal(items uint64, maxItems int) error {
 // itemCapError is ygo's refusal err of update, an update the server encoded itself, named as the
 // write too large to store it is when update's header declares more than maxItems items: ygo
 // refuses such an update with the same error it gives a malformed one, and a seed or a replace
-// over the cap is the caller's document to shrink, answered 413 CAP_EXCEEDED (LEGION-465). The
-// caller passes the cap the decode that refused update ran under - maxUpdateItems for an update
-// decoded alone (AppendUpdateTx), the store's own queue for a rebuilt seed (RebuildTx) - so the
-// decode and the judgement of its failure cannot disagree; both are maxUpdateItems in production.
-// Any other refusal of a server-encoded update is a fault, and is err unchanged.
+// over the cap is the caller's document to shrink, answered 413 CAP_EXCEEDED (LEGION-465). Its one
+// caller, RebuildTx, passes the cap the decode that refused the seed ran under, the store's own
+// queue, so the decode and the judgement of its failure cannot disagree; it is maxUpdateItems in
+// production. Any other refusal of a server-encoded update is a fault, and is err unchanged.
 func itemCapError(update []byte, maxItems int, err error) error {
 	if items, ok := updateItems(update); ok && items > uint64(maxItems) {
 		return fmt.Errorf("%w (%v)", itemCapRefusal(items, maxItems), err)
@@ -977,9 +976,7 @@ func itemCapError(update []byte, maxItems int, err error) error {
 // client a server-encoded update is written by. An update of several clients declares no single
 // count, and one whose header does not read is no update at all: both are decoded to be judged,
 // and ygo's own refusal of such an update stands as it is - the cap is a count this header never
-// declared, so no decode of one of them ever reached it (itemCapError). A stored history a room is
-// about to take is judged by its header alone (loadableHistory), since the room's own load decodes
-// it next.
+// declared, so no decode of one of them ever reached it (itemCapError).
 func refuseUpdateItemCap(update []byte) error {
 	items, named := updateItems(update)
 	if !named {

@@ -464,7 +464,7 @@ func main() {
 	// The events outbox publishes under a hold of its own rather than such a lease
 	// (outbox.Outbox): it renews duty.Hold "dispatch-outbox" on its own pool every two seconds, so
 	// one process publishes at a time and the other takes over within seconds of a holder that
-	// stops, dies or loses NATS. Its daily document compaction is leased like the loops above.
+	// stops, dies or loses NATS.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
