@@ -33,23 +33,24 @@ type roomInstance struct {
 // loadedState is what one room load read of the store and made of it, kept on the load's record
 // from the read until the room's load takes it (roomLoad.read, roomLoad.take).
 type loadedState struct {
-	// state is the durable state the load read. The room's load applies it to the room's document
-	// itself (applyLoadedState), ygo being handed no bytes to apply it with its format cleanup on.
+	// state is the durable state the load read. The room's load hook decodes it into the room's
+	// document itself (bootstrapLoadedState), ygo being handed no bytes to decode with its format
+	// cleanup on.
 	state []byte
-	// decoded is that state's one decode of the load's own (decodeStoredState): its scans are the
+	// decoded is that state's one decode of the load's own (decodeStoredCopy): its scans are the
 	// room's scan total at its load, which onLoadDocument hands the room's scan budget (roomScans),
-	// and its copy becomes the room's replica (keepReplica). The room's own apply of the same bytes
-	// decodes them as this decode did, with the format cleanup off and the pending queue lifted
-	// (applyLoadedState), so the room holds item for item what the copy holds.
+	// and its copy becomes the room's replica (keepReplica). The room's own decode of the same
+	// bytes runs as this decode did, with the format cleanup off and under the same pending cap
+	// (bootstrapLoadedState), so the room holds item for item what the copy holds.
 	decoded decodedState
 	// grant is the load's part of the copy-heap bound (copyGrant), which covers LoadDoc's read -
-	// its fold of a history of several updates, covered inside the read's transaction (fold) - and
-	// its decode, and the room's own apply of the state after it; after a socket's admission, whose
-	// own grant covered its read and decode (loadTree), it covers that apply alone. LoadDoc's
-	// covers wait without deadline, ygo handing it no context, and hold no part of the bound while
-	// they wait. Whoever takes the record gives the grant back: onLoadDocument, once its apply has
-	// returned, and the room's next load, which replaces a record ygo never handed to that hook
-	// (beginRoomLoad).
+	// its fold of a history of several updates, covered where the rows are read (foldRead) - and
+	// its decode, and the room's own decode of the state after it; after a socket's admission,
+	// whose own grant covered its read and decode (loadTree), it covers that decode alone.
+	// LoadDoc's covers wait without deadline, ygo handing it no context, and hold no part of the
+	// bound while they wait. Whoever takes the record gives the grant back: onLoadDocument, once
+	// its decode has returned, and the room's next load, which replaces a record ygo never handed
+	// to that hook (beginRoomLoad).
 	grant *heapGrant
 }
 
@@ -66,10 +67,11 @@ type loadedState struct {
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
-	// loaded is what this load read of the store and made of it, which the room's load takes
-	// before anything that can refuse the room (takeLoadedState), so the record, which stays
-	// until the room's document is collected (keepInstance), holds neither the state nor the
-	// replica's copy for as long as that document lives.
+	// loaded is what this load read of the store and made of it, which the room's load hook takes
+	// before anything that can refuse the room (takeLoadedState) and decodes itself
+	// (bootstrapLoadedState) rather than ygo, so the record, which stays until the room's
+	// document is collected (keepInstance), holds neither the state nor the replica's copy for as
+	// long as that document lives. Empty once taken, and for a load that read an empty history.
 	loaded loadedState
 	// appended are the versions took recorded before the instance existed, folded into its cursor
 	// when it does (start). instance is that instance, which took advances directly from then on.
@@ -94,9 +96,9 @@ func (s *Service) beginRoomLoad(room string) *roomLoad {
 }
 
 // read records what the load's read of the store saw: the head, the version the room it loads
-// holds every update through, the state through that head, which the room's load applies itself
-// (applyLoadedState), the decode of that state it made of its own, and the grant that covers that
-// decode and that apply after it.
+// holds every update through, the state through that head, which the room's load hook decodes
+// itself (bootstrapLoadedState), the decode of that state it made of its own, and the grant that
+// covers that decode and the room's own after it.
 func (load *roomLoad) read(head persistence.Version, state []byte, decoded decodedState, grant *heapGrant) {
 	load.mu.Lock()
 	defer load.mu.Unlock()

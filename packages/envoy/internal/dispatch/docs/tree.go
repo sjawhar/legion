@@ -341,24 +341,33 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	return snapshot, nil
 }
 
-// newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
-// a room this server holds, the document's stored history (a room load's copy, decodeStoredState,
-// which becomes the room's replica; rescan; and the fold of its stored updates and its read-back,
-// stateThrough), or one update the store decodes alone: a browser's, which no document here
+// newDocumentCopy is newCappedDocumentCopy at maxUpdateItems, for a decode that runs for no
+// instance with a cap of its own below it: a snapshot or a write's fork of a room this server
+// holds, a room load's copy of its stored history, which becomes the room's replica
+// (decodeStoredCopy), or one update the store decodes alone - a browser's, which no document here
 // encoded (appendUpdate), and one whose header names no single client's item count
-// (refuseUpdateItemCap). Its pending queue is maxUpdateItems, the queue every decode of document
-// bytes takes (see maxUpdateItems).
-//
-// It replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each remote
-// apply that changes formatted text with a commit of its own: every update a copy applies is one
-// the room committed, and every cleanup the room made is already among them (the room's own
-// repairs and sweeps are local commits, which never clean up; a write's publish and a browser's
-// update reach the room as remote applies, and the cleanup either makes is stored), so a copy
-// that cleaned up would hold a state the room never held. A write's fork commits its own writes
-// locally, which never clean up. The room's load applies its stored state the same way
-// (applyLoadedState), so the room and the copy its load decoded hold the same state.
+// (refuseUpdateItemCap).
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems), crdt.WithFormatCleanup(false))...)
+	return newCappedDocumentCopy(maxUpdateItems, options...)
+}
+
+// newCappedDocumentCopy builds every copy that replays a document's stored or room updates, and
+// is the one place a copy is built: at the pending queue of the instance the decode runs for -
+// PgVersioned.maxPendingItems or Service.maxPendingItems, both maxUpdateItems in production and
+// lowered only by a test (shrinkPendingItems) - so a copy decodes what that instance decodes and
+// no more, and refuses what it would refuse. See maxUpdateItems for what those caps hold.
+//
+// Every copy replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each
+// remote apply that changes formatted text with a commit of its own: every update a copy applies
+// is one the room committed, and every cleanup the room made is already among them (the room's own
+// repairs and sweeps are local commits, which never clean up; a write's publish and a browser's
+// update reach the room as remote applies, and the cleanup either makes is stored), so a copy that
+// cleaned up would hold a state the room never held - and a compaction that folded such a copy
+// would store it. A write's fork commits its own writes locally, which never clean up. The room's
+// load decodes its stored state the same way (bootstrapLoadedState), so the room and the copy its
+// load decoded hold the same state.
+func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc {
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxPending), crdt.WithFormatCleanup(false))...)
 }
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
@@ -406,7 +415,7 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // update, so such an update still logs and counts as changed.
 //
 // The replica starts from the copy the room's load decoded of the stored state (keepReplica,
-// decodeStoredState), which is the room as the log's first transaction finds it, so a room holds
+// decodeStoredCopy), which is the room as the log's first transaction finds it, so a room holds
 // its replica from its load on and its first transaction decodes nothing. One that cannot follow
 // the log starts again from the state the log records as of just before the room's next commit
 // (recover, start).
@@ -1109,7 +1118,7 @@ func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 // nothing observes takes no log.
 //
 // decoded is the replica's copy: the one decode of the stored state the room's load made of its
-// own (decodeStoredState), from the bytes ygo decoded into live, which the replica takes as its
+// own (decodeStoredCopy), from the bytes the load hook decoded into live, which the replica takes as its
 // own, so no other document - live, another room's, or another replica's - shares it, and the
 // room's first transaction decodes nothing more (observe). Nil, a test's or a load whose own
 // decode failed, leaves the replica to start from the log's first base (start).

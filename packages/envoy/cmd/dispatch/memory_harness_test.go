@@ -472,6 +472,30 @@ func (p *memoryServer) tracePeaks(t *testing.T, from, to time.Time) podPeak {
 	return peak
 }
 
+// peakRuns is how many fresh servers peaksAboveIdle measures a request on.
+const peakRuns = 3
+
+// peaksAboveIdle runs during on runs fresh servers, each started for it and stopped after, and
+// returns each server's peak above idle. One run's peak is the memory the request holds plus the
+// garbage the collector had not yet reclaimed when the peak came, and how much garbage that is
+// depends on when the collector ran: one cold edit and settlement of the heaviest two-column table
+// peaked from 190 to 263 MiB above idle over five runs on one machine, while in two runs traced
+// with GODEBUG=gctrace=1 the heap it held live after each collection never passed about 130 MiB.
+// That garbage only adds to a peak, so the least of several runs is the nearest to what the
+// request holds, though it still carries some garbage and the runtime's own memory beside the live
+// heap. A change that makes the request hold more raises every run, and fails a test that holds
+// the least run to a bound once it lifts that run past the bound.
+func (h *memoryHarness) peaksAboveIdle(t *testing.T, runs int, during func(server *memoryServer)) []int64 {
+	t.Helper()
+	peaks := make([]int64, runs)
+	for index := range peaks {
+		server := h.start(t)
+		peaks[index] = server.peakAboveIdle(t, func() { during(server) })
+		server.stop(t)
+	}
+	return peaks
+}
+
 type response struct {
 	status int
 	body   []byte

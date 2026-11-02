@@ -44,7 +44,7 @@ func moveAgain(by [3]bool, late bool, again string) []runFact {
 		head string
 	}{
 		{record.ClassifiedPush{SHA: "h1", Before: "h0", ByReviewApp: by[0]}, "h1"},
-		{record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true, ByReviewApp: by[1]}, "h0"},
+		{record.ClassifiedPush{SHA: "h0", Before: "h1", ByReviewApp: by[1]}, "h0"},
 		{record.ClassifiedPush{SHA: again, Before: "h0", ByReviewApp: by[2]}, again},
 	} {
 		settle := settles(s.head, int64(i+2), "ci")
@@ -101,7 +101,7 @@ func TestAMoveMadeAgainIsJudgedByThePushThatMadeItAgain(t *testing.T) {
 // and opens a head run, which the review App's pushes replay whenever they arrive: the review App's
 // planned red, counted nothing, in every order, as on main.
 func TestARepeatStandsOnlyForTheMoveItsSynchronizeNames(t *testing.T) {
-	code, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}
+	code, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1"}
 	tests, onto := record.ClassifiedPush{SHA: "hx", Before: "h0", ByReviewApp: true}, record.ClassifiedPush{SHA: "h1", Before: "hx", ByReviewApp: true}
 	const want = `fix=3 counted="h0" planned=true sendsBack=false run=false`
 	for _, start := range []struct {
@@ -132,7 +132,7 @@ func TestARepeatStandsOnlyForTheMoveItsSynchronizeNames(t *testing.T) {
 // arrival naming none waits for a push, as if its push were lost, where the same arrival naming
 // its move h0..h1 takes the repeat and closes.
 func TestAnArrivalThatNamesNoMoveTakesNoRepeat(t *testing.T) {
-	first, back, again := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}, record.ClassifiedPush{SHA: "h1", Before: "h0"}
+	first, back, again := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1"}, record.ClassifiedPush{SHA: "h1", Before: "h0"}
 	start := []runFact{pushed(first), arrivesFrom("h0", "h1"), settles("h1", 2, "ci"), pushed(back), arrivesFrom("h1", "h0"), settles("h0", 3, "ci"), pushed(again)}
 	if named := delivered(t, redAtH0(), append(append([]runFact{}, start...), arrivesFrom("h0", "h1"))...); named.Run != nil {
 		t.Errorf("h1 arriving by the move h0..h1: the run is open (%d steps), want the repeat taken for its push", len(named.Run.Steps))
@@ -152,7 +152,7 @@ func TestAnArrivalThatNamesNoMoveTakesNoRepeat(t *testing.T) {
 // implementer's push, so the run closes, judged as for a fresh commit h1b, with the pushes
 // delivered before the head or after it.
 func TestARepeatCompletesTheMovesASynchronizeSkipped(t *testing.T) {
-	first, back := record.ClassifiedPush{SHA: "h1", Before: "h0", ByReviewApp: true}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}
+	first, back := record.ClassifiedPush{SHA: "h1", Before: "h0", ByReviewApp: true}, record.ClassifiedPush{SHA: "h0", Before: "h1"}
 	history := func(again string, late bool) []runFact {
 		redo, on := record.ClassifiedPush{SHA: again, Before: "h0", ByReviewApp: true}, record.ClassifiedPush{SHA: "h2", Before: again}
 		facts := []runFact{pushed(first), arrivesFrom("h0", "h1"), settles("h1", 2, "ci"), pushed(back), arrivesFrom("h1", "h0"), settles("h0", 3, "ci")}
@@ -177,7 +177,7 @@ func TestAMoveMadeAgainInsideAHeadRun(t *testing.T) {
 	start := record.PullRequest{HeadSHA: "c0", CheckedHead: "c0", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
 	opening := record.ClassifiedPush{SHA: "h0", Before: "c0", ByReviewApp: true}
-	first, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}
+	first, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1"}
 	history := func(again string) []runFact {
 		redo := record.ClassifiedPush{SHA: again, Before: "h0", ByReviewApp: true}
 		return []runFact{arrivesFrom("c0", "h0"), settles("h0", 2, "ci"), pushed(first), arrivesFrom("h0", "h1"), settles("h1", 3, "ci"),
@@ -210,7 +210,7 @@ func TestTheSameMoveMadeThreeTimesInAHeadRun(t *testing.T) {
 		facts := []runFact{arrivesFrom("c0", "h0"), settles("h0", 2, "ci")}
 		id := int64(3)
 		for i, h := range heads {
-			there, back := record.ClassifiedPush{SHA: h, Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: h, Forced: true}
+			there, back := record.ClassifiedPush{SHA: h, Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: h}
 			facts = append(facts, pushed(there), arrivesFrom("h0", h), settles(h, id, "ci"))
 			id++
 			if i < 2 {
@@ -287,7 +287,7 @@ func TestAPushTheRecordLetsGoIsLetGoByItsHeadRun(t *testing.T) {
 	for i := 1; i <= maxWaitingPushes; i++ {
 		facts = append(facts, pushed(record.ClassifiedPush{SHA: fmt.Sprintf("w%d", i), Before: fmt.Sprintf("w%d", i-1)}))
 	}
-	facts = append(facts, pushed(record.ClassifiedPush{SHA: "h1", Before: "h2", Forced: true}), arrivesFrom("h2", "h1"), settles("h1", 4, "ci"), arrivesFrom("h1", "x"))
+	facts = append(facts, pushed(record.ClassifiedPush{SHA: "h1", Before: "h2"}), arrivesFrom("h2", "h1"), settles("h1", 4, "ci"), arrivesFrom("h1", "x"))
 	const want = `fix=5 counted="x" planned=false sendsBack=false`
 	for _, tc := range []struct {
 		name  string
@@ -345,8 +345,8 @@ func TestAHeadRunHoldsNoMorePushesThanTheRecordsBound(t *testing.T) {
 // fresh commit h1b.
 func TestAMoveMadeByAChainAndMadeAgainByAPush(t *testing.T) {
 	tests, onto := record.ClassifiedPush{SHA: "hx", Before: "h0", ByReviewApp: true}, record.ClassifiedPush{SHA: "h1", Before: "hx", ByReviewApp: true}
-	backByApp := record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true, ByReviewApp: true}
-	back := record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}
+	backByApp := record.ClassifiedPush{SHA: "h0", Before: "h1", ByReviewApp: true}
+	back := record.ClassifiedPush{SHA: "h0", Before: "h1"}
 	for _, late := range []bool{false, true} {
 		tail := func(push record.ClassifiedPush, id int64) []runFact {
 			if late {

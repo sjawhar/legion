@@ -13,10 +13,11 @@ import (
 
 // The copy-heap bound holds what the pod's full-state decodes hold live beside their product at
 // once. These decodes of a document's whole state - a room's load (its fold of a history of
-// several updates, the copy LoadDoc or a socket's admission decodes, ygo's decode into the room),
-// a write's fork from the store (coldFork) or a rebuilt fork of a room (warmFork), the fold of a
-// cold read, a version read or a compaction (fold), the replica's build from a base
-// (renderedReplica.start), the measurer's copy for a server write (structsAfter) and a rebuild's
+// several updates, the copy LoadDoc or a socket's admission decodes, the load hook's decode into
+// the room, bootstrapLoadedState), a write's fork from the store (coldFork) or a rebuilt fork of
+// a room (warmFork), the fold of a cold read, a version read or a compaction (foldRead), the
+// replica's build from a base (renderedReplica.start), the measurer's copy for a server write
+// (structsAfter) and a rebuild's
 // decodes (its check of a resident room and of the stored history, nearACap, rebuildSource,
 // RebuildTx) - each hold copyHeapWeight of their encoded state out of
 // copyHeapBound while they decode. What each leaves behind is its owner's: a room's two copies are
@@ -110,17 +111,19 @@ func storedCountWeight(markdown, row int64) int64 {
 // The copy-heap bound cannot deadlock, because a holder of any part of it waits for nothing
 // another holder or a waiter can hold: between its cover and its release it decodes, renders,
 // counts or reads the rows of the transaction it already holds, takes no lock held across a wait,
-// takes no pooled connection - a fold covers its grant inside the transaction it already holds, a
-// count of a stored version opens its own transaction and weighs itself in it before it covers
-// (countStoredVersion), and a room's load gives its grant back before onLoadDocument reads the
-// store - runs no update observer, since ygo decodes a loading room's state before the room
-// registers any and no holder commits on a resident room, and acquires no second grant: a decode
-// under a context carrying a grant covers itself on that one (withCopyGrant), so a room load's
-// fold, its decode and ygo's decode share the load's, and a grant that must grow gives back what
+// takes no pooled connection - a fold covers its grant holding its own transaction's connection
+// alone, or, once that transaction has ended, none (foldRead), a count of a stored version opens
+// its own transaction and weighs itself in it before it covers (countStoredVersion), and a room's
+// load gives its grant back before onLoadDocument reads the store - runs no update observer,
+// since ygo decodes nothing of a loading room's state and no holder commits on a resident room,
+// and acquires no second grant: a decode under a context carrying a grant covers itself on that
+// one (withCopyGrant), so a room load's fold, its copy's decode and the load hook's decode into
+// the room share the load's, and a grant that must grow gives back what
 // it holds before it waits for the whole weight (heapGrant.cover). A waiter may hold anything - a
 // write's transaction, its owner row and advisory lock, a compaction's advisory lock and
 // connection, a connection of the rooms pool or of the shared pool, which is what a count holds
-// while it waits, the measurer's turn, a replica's lock, a loading room's ready barrier - since
+// while it waits, a slot of a buffered fold (foldSlots), the measurer's turn, a replica's lock, a
+// loading room's ready barrier - since
 // no holder waits for any of them, and so every holder finishes and gives its part back. A waiter
 // whose request ends returns its context's error holding nothing. An admission waiting for
 // another admission's count of the same version holds no part of the bound either
@@ -283,7 +286,7 @@ func holdCopy(ctx context.Context, bytes int) (func(), error) {
 type loadedHistory struct {
 	// loaded is what the read returned: the history's bytes and the version they stand at.
 	loaded persistence.LoadResult
-	// decoded is the decode of those bytes, as a room's load decodes them (decodeStoredState),
+	// decoded is the decode of those bytes, as a room's load decodes them (decodeStoredCopy),
 	// and nothing where refused is not nil. Its doc is nil for an empty history, which decodes
 	// into nothing.
 	decoded decodedState
@@ -299,7 +302,8 @@ type loadedHistory struct {
 // its own, which it gives back before it returns, so no caller releases a grant by hand
 // (withCopyGrant). It is the one way the service reads a history it decodes - a socket's
 // admission (loadTree), a room's load (loadDecoded) and a rebuild's source (rebuildSource) - so
-// that no new way out of one of them can leave a grant held.
+// that no new way out of one of them can leave a grant held. It decodes under maxPending, the
+// pending queue the rooms of the service that reads decode under (Service.maxPendingItems).
 //
 // copies is how many copies of the history its caller holds live at once, which the grant is
 // weighed for: one for a caller that keeps the decode alone, two for one that decodes the state
@@ -307,11 +311,11 @@ type loadedHistory struct {
 // the grant is covered and before anything is decoded (loadableHistory), for a history no decode
 // should be paid for.
 //
-// The read's fold, when the history holds several updates, covers the grant inside the read's
-// transaction (fold), and the decode covers it for the state the read returned. The error is the
+// The read's fold, when the history holds several updates, covers the grant where it reads them
+// (foldRead), and the decode covers it for the state the read returned. The error is the
 // read's, the refusal's or the grant's, a wait ctx ended included, and leaves nothing decoded;
 // ygo's refusal of the bytes themselves is the history's refused.
-func loadDecodedHistory(ctx context.Context, load VersionedStore, artifactID string, copies int, refuse func(update []byte) error) (loadedHistory, error) {
+func loadDecodedHistory(ctx context.Context, load VersionedStore, artifactID string, copies, maxPending int, refuse func(update []byte) error) (loadedHistory, error) {
 	ctx, grant, done := withCopyGrant(ctx)
 	defer done()
 	loaded, err := load.Load(ctx, artifactID)
@@ -324,7 +328,7 @@ func loadDecodedHistory(ctx context.Context, load VersionedStore, artifactID str
 	if err != nil {
 		return loadedHistory{}, err
 	}
-	decoded, refused := decodeStoredState(loaded.Update)
+	decoded, refused := decodeStoredCopy(loaded.Update, maxPending)
 	return loadedHistory{loaded: loaded, decoded: decoded, refused: refused}, nil
 }
 

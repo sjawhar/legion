@@ -276,8 +276,9 @@ func measureCopyPaths(t *testing.T, state []byte, atCap bool) {
 		}},
 		// The cold read loaded no room, so the history it folded is still the two updates.
 		{"compaction's fold of the history", func() {}, history, func() any {
-			if folded, err := service.persistence.Compact(ctx, artifactID, compactKeep); err != nil || folded != 1 {
-				t.Fatalf("compaction folded %d updates (%v), want 1", folded, err)
+			folded, err := service.persistence.compactRoom(ctx, artifactID, tailRule, true)
+			if err != nil || folded.deleted != 1 {
+				t.Fatalf("compaction folded %d updates (%v), want 1", folded.deleted, err)
 			}
 			return nil
 		}},

@@ -208,11 +208,11 @@ func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *test
 	}
 }
 
-// decodedHistory is update decoded as a room's load decodes it (decodeStoredState), the document
+// decodedHistory is update decoded as a room's load decodes it (decodeStoredCopy), the document
 // alone, failing t where ygo refuses it: what these tests read of a stored history.
 func decodedHistory(t *testing.T, update []byte) *crdt.Doc {
 	t.Helper()
-	decoded, err := decodeStoredState(update)
+	decoded, err := decodeStoredCopy(update, maxUpdateItems)
 	if err != nil {
 		t.Fatal(err)
 	}

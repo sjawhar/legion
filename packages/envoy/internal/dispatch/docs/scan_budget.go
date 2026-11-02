@@ -258,13 +258,13 @@ func (r *roomScans) figures() (used, left int64) {
 // pending queue (newDocumentCopy) - and returns how many items that decode's conflict scans
 // passed, ygo's count of them over every transaction the apply commits (decodeCountingScans),
 // with ygo's refusal of update if it refused it. The room's own load decodes the same bytes into
-// a document of its own the same way (provider/websocket/server.go:1765-1773), so the count is
-// what that load scanned.
+// its own document the same way, under the same cap (bootstrapLoadedState), so the count is what
+// that load scanned.
 func rescan(update []byte) (uint64, error) {
 	return decodeCountingScans(newDocumentCopy(), update)
 }
 
-// decodedState is a stored state decoded as a room decodes it (decodeStoredState): doc, the copy
+// decodedState is a stored state decoded as a room decodes it (decodeStoredCopy): doc, the copy
 // it decoded into, and scans, what that decode's conflict scans passed, the room's scan total at
 // its load (roomScans.rescanned). doc is nil for an empty state, which decodes into nothing.
 type decodedState struct {
@@ -272,17 +272,19 @@ type decodedState struct {
 	scans uint64
 }
 
-// decodeStoredState is rescan keeping the copy it decoded: the one decode of the stored state a
-// room's load makes of its own, shared by the socket admission's schema check (loadTree), the
-// room's scan count (LoadDoc) and the room's replica, which takes the copy as its own
-// (keepReplica). The scans are counted over the transactions that decode the copy, so they are the
-// copy's. A state that does not decode leaves no copy: what a refused decode left in its document
-// is no state the store holds.
-func decodeStoredState(update []byte) (decodedState, error) {
+// decodeStoredCopy is rescan keeping the copy it decoded: the one decode of the stored state a
+// room's load makes beside the room's own (bootstrapLoadedState), shared by the socket
+// admission's schema check (loadTree), the room's scan count (LoadDoc) and the room's replica,
+// which takes the copy as its own (keepReplica). It decodes under maxPending, the pending queue
+// the room it is made for decodes under (Service.maxPendingItems), so a history this refuses is
+// one that room would refuse too. The scans are counted over the transactions that decode the
+// copy, so they are the copy's. A state that does not decode leaves no copy: what a refused
+// decode left in its document is no state the store holds.
+func decodeStoredCopy(update []byte, maxPending int) (decodedState, error) {
 	if len(update) == 0 {
 		return decodedState{}, nil
 	}
-	doc := newDocumentCopy()
+	doc := newCappedDocumentCopy(maxPending)
 	scans, err := decodeCountingScans(doc, update)
 	if err != nil {
 		return decodedState{scans: scans}, err
@@ -309,6 +311,6 @@ func decodeCountingScans(doc *crdt.Doc, update []byte) (uint64, error) {
 	var scanned int
 	stop := doc.OnAfterTransaction(func(txn *crdt.Transaction) { scanned += txn.IntegrateScanned() })
 	defer stop()
-	err := crdt.ApplyUpdateV1(doc, update, nil)
+	err := decodeStoredState(doc, update)
 	return uint64(scanned), err
 }

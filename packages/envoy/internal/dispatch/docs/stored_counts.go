@@ -209,18 +209,18 @@ func weighStoredCount(ctx context.Context, tx pgx.Tx, room string, number int64)
 }
 
 // storedStructs is the structs room's stored history holds, as a room's load would read it: every
-// stored update through head, read one row at a time in the count's snapshot (eachUpdateThrough,
-// as a load's fold reads them), each walked as a room's own state is (walkUpdate, fromRoom), which
-// reads the update's headers and the lengths of its contents, decodes nothing and allocates
-// nothing per struct, its structs summed. A compacted history is one update, the state a closed
-// room's compaction encoded from its decode (compactKeep), whose count is the state's own as its
-// room's load counts it (countRoomStructs), but for the splits that parked structs can still
-// cause. A history with updates appended since its last compaction counts each update's structs as
-// stored: a run typed one transaction at a time is a struct for each keystroke here, where a
-// decode merges what it can (squashRuns), and the splits a delete range makes are not here. Either
-// way the room's load replaces the reservation with the count of the room it decoded
-// (chargeLoadedRoom). An update the walk refuses would fail the room's load; it counts what the
-// walk read before refusing.
+// stored update through head, the rows a load's fold folds (foldRead), read one row at a time in
+// the count's snapshot here however that fold reads them (eachUpdateThrough), each walked as a
+// room's own state is (walkUpdate, fromRoom), which reads the
+// update's headers and the lengths of its contents, decodes nothing and allocates nothing per
+// struct, its structs summed. A compacted history is one update, the state a compaction encoded
+// from its fold (compactRoom, tailRule), whose count is the state's own as its room's load counts
+// it (countRoomStructs), but for the splits that parked structs can still cause. A history with
+// updates appended since its last compaction counts each update's structs as stored: a run typed
+// one transaction at a time is a struct for each keystroke here, where a decode merges what it
+// can (squashRuns), and the splits a delete range makes are not here. Either way the room's load
+// replaces the reservation with the count of the room it decoded (chargeLoadedRoom). An update
+// the walk refuses would fail the room's load; it counts what the walk read before refusing.
 func storedStructs(ctx context.Context, tx pgx.Tx, room string, head persistence.Version) (int64, error) {
 	var structs uint64
 	if err := eachUpdateThrough(ctx, tx, room, head, func(update []byte) error {

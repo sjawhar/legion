@@ -283,7 +283,7 @@ func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
 // a second of scans more, the architect's rule for the total: the run of a million keystrokes and
 // the same run once three frames scanned it whole (keystrokeRunStates), whose state re-scans
 // 1,000,002 distinct items, the whole of roomScanTotal, each decoded as a room's load decodes its
-// stored state (decodeStoredState) at GOMAXPROCS=1 (measureLoad). The scanned copy takes at most
+// stored state (decodeStoredCopy) at GOMAXPROCS=1 (measureLoad). The scanned copy takes at most
 // 1.5 s more than the unscanned one, and allocates at most twice bytesOfAScanMark more for each
 // item its scans pass, which is what ygo keeps a mark for (crdt/item.go:126-158). Set
 // DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 11 s here. Run on 2026-10-30: the scanned copy
@@ -298,7 +298,7 @@ func TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans(t 
 	copyOf := func(state []byte) (loadCost, uint64) {
 		var scans uint64
 		cost := measureLoad(t, func() any {
-			decoded, err := decodeStoredState(state)
+			decoded, err := decodeStoredCopy(state, maxUpdateItems)
 			if err != nil {
 				t.Fatal(err)
 			}

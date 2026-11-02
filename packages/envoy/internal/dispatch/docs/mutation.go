@@ -968,7 +968,7 @@ func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node,
 	if err != nil || held {
 		return tree, nil, err
 	}
-	history, err := loadDecodedHistory(ctx, s.persistence, artifactID, 1, nil)
+	history, err := loadDecodedHistory(ctx, s.persistence, artifactID, 1, s.maxPendingItems, nil)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err

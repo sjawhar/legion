@@ -65,9 +65,11 @@ first push tracks it), then `legion gh -- pr create` with a conventional title t
 issue (`refactor(cli): … (LEGION-34 fast-follow)`), `Dispatch: <KEY>` in the body, a link to the
 parent PR, and the READY-format Verification block — `Threads: none`, `Thermo` left for the
 reviewer, the `E2E (implementer)` line written by the implementer when the pull request opens and
-the `E2E (tester)` line by the tester, `Fast-follow: none`, `Chain: not stacked`. The handoff file
-goes on this new branch; the phase lifecycle (tester, reviewer, `.legion/` deletion, approval by
-SHA, retro, merger) runs on it exactly as on the parent.
+the `E2E (tester)` line by the tester, `Fast-follow: none`, `Chain: not stacked`. The phase
+lifecycle (tester, reviewer, approval by SHA, retro, merger) runs on this branch exactly as on
+the parent, and each phase writes its handoff as a record on the Dispatch issue. Before
+sjawhar/legion#2354 the handoff file went on the new branch, and the lifecycle also carried the
+`.legion/` deletion.
 
 ## Registering with the merge queue at open
 
@@ -80,10 +82,12 @@ reach it — carrying `repo#number`, the head sha, a one-line scope, the propose
 refactor with no behaviour change), and what it conflicts with** (name the directory and say
 "nothing open touches it" when that is so). READY later carries the full packet — CI at head,
 threads, pair, proof — as the merger role already states. The organizer arms a watcher on the head
-from that message, so send a one-line follow-up when the head moves for a reason other than code
-(a handoff commit): `#1006 head moved 0b75bf14 → d703e534 (handoff commit only; code head
-unchanged; still T4, no conflicts)`. If a repository skill states an at-open form, use it; none
-did on this repository, so ask the organizer once, non-blocking, and state the default you will
+from that message, so send a one-line follow-up when the head moves for a reason other than the
+code under review (a retro's `docs/solutions/` commit): `#1006 head moved 0b75bf14 → d703e534
+(docs only; code head unchanged; still T4, no conflicts)`. Before sjawhar/legion#2354 a handoff
+commit moved the head the same way, and that line read `handoff commit only`. If a repository
+skill states an at-open form, use it; none did on this repository, so ask the organizer once,
+non-blocking, and state the default you will
 use if no answer arrives before the PR exists.
 
 ## A fast-follow has no fast-follow

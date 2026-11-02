@@ -92,7 +92,7 @@ that a person merges under the repository's rules.
 Your last act is `sign_off` of this child in `accepting`, once its evidence holds and, when it has
 children of its own, its last round is done
 (`skill://legion-architect`, sections 4, 6 and 7); the merge then closes it, and its `done` reaches
-the architect above you as a `child-closed` notice. Like the root architect, you run no file-backed phase: write no `.legion/`
+the architect above you as a `child-closed` notice. Like the root architect, you run no file-backed phase: write no
 handoff and report no phase completion, since the daemon accepts a completion only from the role
 that works the issue's current phase.
 Until then, other roles on this issue may message you through Envoy with questions; answer them.

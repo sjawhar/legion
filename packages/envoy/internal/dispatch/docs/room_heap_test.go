@@ -23,7 +23,7 @@ import (
 // measurement replaced it. This measures the room itself: the live
 // document beside the rendered replica its update observer keeps while the room is resident
 // (keepReplica, renderedReplica.observe), which every room holds from its load on - the replica is
-// the copy the load decoded of the stored state (decodeStoredState) - whether it is only read or
+// the copy the load decoded of the stored state (decodeStoredCopy) - whether it is only read or
 // has taken an update since. Each measures about two copies, the budget's roomCopies.
 //
 // Both are weighed against the room's rendering, the markdown its stored version holds. A byte of
@@ -357,7 +357,7 @@ func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoo
 	if err != nil {
 		t.Fatalf("render the loaded room: %v", err)
 	}
-	decoded, err := decodeStoredState(state)
+	decoded, err := decodeStoredCopy(state, maxUpdateItems)
 	if err != nil {
 		t.Fatalf("decode the stored state's copy: %v", err)
 	}
@@ -546,7 +546,7 @@ func heldByResidentRoom(t *testing.T, state []byte, edited bool) int64 {
 }
 
 // buildResidentRoom loads state as a room's load decodes it twice, into the room's document and
-// into the copy the load keeps as the replica (newDocumentCopy, decodeStoredState, keepReplica),
+// into the copy the load keeps as the replica (newDocumentCopy, decodeStoredCopy, keepReplica),
 // and, for a room that has had an update, takes the replica as the room's observer moves it
 // through that update instead: one drain of the room's update log, which copies the document from
 // the log's base and renders it (observedReplica), a replica holding the same state.
@@ -558,7 +558,7 @@ func buildResidentRoom(t *testing.T, state []byte, edited bool) *residentRoom {
 	}
 	room := &residentRoom{service: calibratedService(), live: live}
 	if !edited {
-		decoded, err := decodeStoredState(state)
+		decoded, err := decodeStoredCopy(state, maxUpdateItems)
 		if err != nil {
 			t.Fatalf("decode the stored state's copy: %v", err)
 		}

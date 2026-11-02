@@ -329,18 +329,18 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.Doc, string, map[crdt.ClientID]uint64, error) {
 	ctx, _, done := withCopyGrant(ctx)
 	defer done()
-	read, err := loadDecodedHistory(ctx, s.persistence, artifactID, 2, nil)
+	read, err := loadDecodedHistory(ctx, s.persistence, artifactID, 2, s.maxPendingItems, nil)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
 	}
 	if read.refused != nil {
 		return nil, read.refused.Error(), undecodableHistoryClients(read.loaded.Update), nil
 	}
-	// An empty history decodes into no document at all (decodeStoredState); what a rebuild of it
+	// An empty history decodes into no document at all (decodeStoredCopy); what a rebuild of it
 	// starts from is the empty document a room's load of it would hold.
 	history := read.decoded.doc
 	if history == nil {
-		history = newDocumentCopy()
+		history = newCappedDocumentCopy(s.maxPendingItems)
 	}
 	why, near, err := nearACap(ctx, history)
 	if err != nil {

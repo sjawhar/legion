@@ -129,7 +129,7 @@ import (
 // structs and before the walk weighs the group's count against maxUpdateItems, so a walk refused
 // for that count, or for anything in the group's structs, has shown it the header of the group it
 // was refused in.
-func walkUpdate(update []byte, source updateSource, visit updateVisitor) (updateTally, error) {
+func walkUpdate(update []byte, source updateWriter, visit updateVisitor) (updateTally, error) {
 	w := updateWalker{buf: update, source: source}
 	var tally updateTally
 	tally.clients = w.uint()
@@ -196,7 +196,7 @@ func walkUpdate(update []byte, source updateSource, visit updateVisitor) (update
 // found it (updateTally.deletesAt), handing visit each range as walkUpdate does, and refuses what
 // that walk would. It is for a second look at the delete set of an update already walked, which
 // need not read its structs again.
-func walkDeleteSet(update []byte, at int, source updateSource, visit updateVisitor) error {
+func walkDeleteSet(update []byte, at int, source updateWriter, visit updateVisitor) error {
 	w := updateWalker{buf: update, pos: at, source: source}
 	var tally updateTally
 	w.deleteSet(&tally, visit)
@@ -245,13 +245,13 @@ func (w *updateWalker) deleteSet(tally *updateTally, visit updateVisitor) {
 	}
 }
 
-// updateSource is who wrote the update a walk reads, which decides whether what the Proof editor
+// updateWriter is who wrote the update a walk reads, which decides whether what the Proof editor
 // never sends is refused.
-type updateSource uint8
+type updateWriter uint8
 
 const (
 	// fromPeer is an update a browser sent, refused when it carries what the editor never sends.
-	fromPeer updateSource = iota
+	fromPeer updateWriter = iota
 	// fromRoom is a room's own encoded state, of which only what ygo cannot decode is refused.
 	fromRoom
 )
@@ -456,7 +456,7 @@ func (r *updateRefusal) Unwrap() error { return r.rule }
 type updateWalker struct {
 	buf     []byte
 	pos     int
-	source  updateSource
+	source  updateWriter
 	refusal *updateRefusal
 	// shape is where the content readers count what they read, the shape of the struct being
 	// walked (contentShape). walkStruct clears it before it reads a struct's content and copies

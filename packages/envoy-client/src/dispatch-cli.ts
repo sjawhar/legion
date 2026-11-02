@@ -65,9 +65,9 @@ const HOSTS = ["omp", "claude"] as const satisfies readonly DispatchHost[];
  *  the CLI adds counted (`fitOutput`). */
 const CLAUDE_OUTPUT_MAX = 25_000;
 
-/** Why a file that changed after AskGate's review is refused or posts unreviewed. */
+/** Why a file that changed after AskGate read it is refused or posts unreviewed. */
 const SAME_MESSAGE =
-  "AskGate reviews the calls of a message before any of them runs, so it did not review that change.";
+  "AskGate reads the files of a message's calls before any of them runs, so it did not see that change.";
 
 /** What the CLI prints when the call reached Dispatch but its local record could not be written. */
 const STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
@@ -177,11 +177,12 @@ export function fitOutput(
  * One `dispatch` command: parses `argv` into a Dispatch tool's arguments, runs that tool once as
  * the host session the environment names, and prints what the model reads. The host plugin sets
  * `DISPATCH_HOST`, `ENVOY_CONFIG_FILE` (the envoy.json it chose) and the session's id in the
- * agent's shell (`CLAUDE_CODE_SESSION_ID` under Claude Code, `DISPATCH_SESSION_ID` elsewhere); an
- * empty variable counts as unset. With `DISPATCH_HOST` unset, `CLAUDE_CODE_CHILD_SESSION=1`, which
- * Claude Code sets in every Bash and hook process it runs, is host `claude`: a Claude Code
- * subagent's Bash can lack what the bridge's `SessionStart` hook writes to `CLAUDE_ENV_FILE`
- * (anthropics/claude-code#46696).
+ * agent's shell (`CLAUDE_CODE_SESSION_ID` under Claude Code, where claude-envoy's QA override
+ * `ENVOY_SESSION_ID` wins over it as it does on the session's claim; `DISPATCH_SESSION_ID`
+ * elsewhere); an empty variable counts as unset. With `DISPATCH_HOST` unset,
+ * `CLAUDE_CODE_CHILD_SESSION=1`, which Claude Code sets in every Bash and hook process it runs, is
+ * host `claude`: a Claude Code subagent's Bash can lack what the bridge's `SessionStart` hook
+ * writes to `CLAUDE_ENV_FILE` (anthropics/claude-code#46696).
  *
  * The envoy.json it reads is the one its session's plugin chose: with `DISPATCH_HOST` set, the file
  * `ENVOY_CONFIG_FILE` names (each plugin sets the two together), else its host's own rule
@@ -206,6 +207,9 @@ export async function runDispatchCli(
   // The host need not be known for the session to be: a Python `subprocess.run(["dispatch", …])`
   // inherits the session id without `DISPATCH_HOST`. A ledger that cannot be written changes
   // nothing here: the refusal is already printed, and the caller is exiting.
+  // Under Claude Code the session is the one claude-envoy registers and claims under: its QA
+  // override ENVOY_SESSION_ID, else CLAUDE_CODE_SESSION_ID (`claudeSessionId` in claude-envoy).
+  const claudeSession = env.ENVOY_SESSION_ID ?? env.CLAUDE_CODE_SESSION_ID;
   const refuse = (
     text: string,
     code: number,
@@ -213,7 +217,7 @@ export async function runDispatchCli(
     askgate?: ResultInput["askgate"]
   ): number => {
     print(text);
-    const sessionId = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
+    const sessionId = claudeSession ?? env.DISPATCH_SESSION_ID;
     if (sessionId !== undefined) {
       try {
         appendResult(sessionDirectory(env, sessionId), {
@@ -259,8 +263,10 @@ export async function runDispatchCli(
       parsed.tool
     );
   }
-  const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
-  const sessionId = env[sessionVariable];
+  const [sessionId, sessionVariable] =
+    host === "claude"
+      ? [claudeSession, "ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID"]
+      : [env.DISPATCH_SESSION_ID, "DISPATCH_SESSION_ID"];
   if (sessionId === undefined) {
     return refuse(
       `dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`,
@@ -376,7 +382,7 @@ export async function runDispatchCli(
           return refuse(
             spent.changed === undefined
               ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.`
-              : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`,
+              : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message than the one that changes the file.`,
             REFUSED,
             parsed.tool,
             { mode: "block", why: spent.why, asksCarried }

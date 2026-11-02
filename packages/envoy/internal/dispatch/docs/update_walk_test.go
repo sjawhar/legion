@@ -855,7 +855,7 @@ func (r *walkRecord) walkedDelete(client, clock, length uint64) {
 	r.deletes = append(r.deletes, walkedRange{client, clock, length})
 }
 
-func walkRecorded(update []byte, source updateSource) (walkRecord, updateTally, error) {
+func walkRecorded(update []byte, source updateWriter) (walkRecord, updateTally, error) {
 	var record walkRecord
 	tally, err := walkUpdate(update, source, &record)
 	return record, tally, err

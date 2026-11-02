@@ -606,8 +606,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 
 // RecordKind reads a credential-request record's own kind ("agent_secret" or
 // "launcher_credential") — the one column api.decideRecord needs before it knows which service's
-// ApplyDecision a record id belongs to, and api.readRecord needs to decide what an already-read
-// detail means. pgx.ErrNoRows means no such record.
+// ApplyDecision a record id belongs to. pgx.ErrNoRows means no such record.
 func (m *Machine) RecordKind(ctx context.Context, recordID string) (string, error) {
 	var kind string
 	err := m.Store.Pool.QueryRow(ctx, `select kind from credential_requests where id=$1`, recordID).Scan(&kind)

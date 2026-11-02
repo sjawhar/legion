@@ -126,8 +126,9 @@ func DatabaseURL(t testing.TB) string {
 	// create database cannot run inside one. The drop forces the connections a test left behind
 	// (a listener that outlived its own cleanup, a pool closing) off the database, because a
 	// database one connection still holds cannot be dropped, and a leaked one would otherwise
-	// leave a database behind that no later run can clean up either.
-	admin(t, raw, "create database "+name)
+	// leave a database behind that no later run can clean up either. The database is a file copy
+	// of template1 (docs/testing.md, "A database a Go test creates").
+	admin(t, raw, "create database "+name+" strategy file_copy")
 	t.Cleanup(func() { admin(t, raw, "drop database "+name+" with (force)") })
 
 	parsed, err := url.Parse(raw)
