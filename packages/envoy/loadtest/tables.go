@@ -20,6 +20,12 @@ type stepData struct {
 	name string
 	sum  summary
 	meta *metaFile
+	// cgroup is the directory's cgroup.json (loadgen cgroup-merge), nil without one.
+	cgroup *cgroupFile
+	// failed is set when the directory holds step-failed.json, and failedKinds are its reasons'
+	// kinds.
+	failed      bool
+	failedKinds []string
 }
 
 func runTables(args []string) error {
@@ -81,13 +87,26 @@ func readStep(dir string) (stepData, error) {
 	if st.sum.Config.Step != "" {
 		st.name = st.sum.Config.Step
 	}
-	if b, err := os.ReadFile(filepath.Join(dir, "meta.json")); err == nil {
-		var m metaFile
-		if json.Unmarshal(b, &m) == nil {
-			st.meta = &m
-		}
+	st.meta = readMetaFile(dir)
+	if st.cgroup, err = readCgroupFile(dir); err != nil {
+		return st, err
 	}
+	st.failedKinds, st.failed = readFailedKinds(dir)
 	return st, nil
+}
+
+// readMetaFile is the step directory's meta.json, nil when the directory holds none or it is not
+// readable as one.
+func readMetaFile(dir string) *metaFile {
+	b, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		return nil
+	}
+	var m metaFile
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	return &m
 }
 
 // num formats x with d decimals and thousands separators.
@@ -113,6 +132,14 @@ func num(x float64, d int) string {
 	return b.String()
 }
 
+// numPtr is num of *p, "-" for nil.
+func numPtr(p *float64, d int) string {
+	if p == nil {
+		return "-"
+	}
+	return num(*p, d)
+}
+
 // pair renders "a / b" of a stat, or "-" when it holds no values.
 func pair(s stat, a, b func(stat) float64, d int) string {
 	if s.N == 0 {
@@ -126,16 +153,20 @@ func p99(s stat) float64  { return s.P99 }
 func smax(s stat) float64 { return s.Max }
 
 // label is the step's name in a table row, marked "(<names> exited)" when a stack process exited
-// during the step.
+// during the step, and failedMark when its directory holds step-failed.json.
 func (s stepData) label() string {
-	if len(s.sum.StackExits) == 0 {
-		return s.name
+	label := s.name
+	if len(s.sum.StackExits) > 0 {
+		names := make([]string, len(s.sum.StackExits))
+		for i, x := range s.sum.StackExits {
+			names[i] = x.Name
+		}
+		label += " (" + strings.Join(names, ", ") + " exited)"
 	}
-	names := make([]string, len(s.sum.StackExits))
-	for i, x := range s.sum.StackExits {
-		names[i] = x.Name
+	if s.failed {
+		label += " " + failedMark(s.failedKinds)
 	}
-	return s.name + " (" + strings.Join(names, ", ") + " exited)"
+	return label
 }
 
 // withFailedReads is label, marked "(1 failed read)" or "(<n> failed reads)" when n reads failed.
@@ -266,6 +297,7 @@ func eventsTable(md *markdown, steps []stepData) {
 	if exited {
 		md.line("\n(<process> exited): that stack process exited during the step (summary.json `stack_exits`), so the step failed and its row, in every table here, does not measure the load.")
 	}
+	failedNote(md, slices.ContainsFunc(steps, func(s stepData) bool { return s.failed }))
 	commitsUnreadNote(md, unread, "the committed events/s, the delivery latencies from arrival and from commit, and the issue-topic receipts", "show")
 }
 
@@ -297,61 +329,110 @@ func kindsTable(md *markdown, steps []stepData) {
 
 func resourcesTable(md *markdown, steps []stepData) {
 	md.line("\n## Resources\n")
-	md.header("step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
-		"box busy", "box busy before", "Dispatch RSS max MiB", "heap in use MiB p50 / max", "goroutines p50 / max",
+	// The working-set column exists only when a step holds cgroup.json.
+	withCgroup := slices.ContainsFunc(steps, func(s stepData) bool { return s.cgroup != nil })
+	columns := []string{"step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
+		"box busy", "box busy before", "Dispatch RSS max MiB"}
+	if withCgroup {
+		columns = append(columns, cgroupWorkingSetH)
+	}
+	md.header(append(columns, "heap live MiB p50 / max", "goroutines p50 / max",
 		"goroutines waiting for a pool connection p50 / max", "Postgres connections max", "connections waiting on a lock p50",
-		"Dispatch CPU-s per operation")
-	marked, unread := false, false
+		"Dispatch CPU-s per operation")...)
+	marked, unread, cgFailed, cgUnmeasured, memStats := false, false, false, false, false
 	for _, s := range steps {
 		unread = unread || s.sum.Events.commitsUnread()
 		busyBefore := "-"
 		if s.meta != nil && s.meta.BoxBusyBefore != nil {
 			busyBefore = num(100**s.meta.BoxBusyBefore, 0) + "%"
 		}
+		label := s.commitsLabel()
+		// With no sampler window every cell is "-" but box busy before, which is meta.json's
+		// reading, not the sampler's, and the cells that cgroup.json gives.
+		dispatch, pgCores, listener, nats, loadgen, proxy, busy, rss := "-", "-", "-", "-", "-", "-", "-", "-"
+		heap, goroutines, pool, pgMax, lockWait, perOp := "-", "-", "-", "-", "-", "-"
 		r := s.sum.Resources
-		if r == nil {
-			// No sampler window: every cell is "-" but box busy before, which is meta.json's
-			// reading, not the sampler's.
-			md.row(s.commitsLabel(), "-", "-", "-", "-", "-", "-", "-", busyBefore, "-", "-", "-", "-", "-", "-", "-")
-			continue
-		}
-		marked = marked || r.failedReads() > 0
-		cores := func(name string, d int) string {
-			v, ok := r.CPUCoresMean[name]
-			if !ok {
-				return "-"
+		if r != nil {
+			marked = marked || r.failedReads() > 0
+			label = withFailedReads(label, r.failedReads())
+			cores := func(name string, d int) string {
+				v, ok := r.CPUCoresMean[name]
+				if !ok {
+					return "-"
+				}
+				return num(v, d)
 			}
-			return num(v, d)
+			if v, ok := r.CPUCoresMean["dispatch"]; ok {
+				dispatch = num(v, 2) + " / " + num(r.CPUCoresPeak5s["dispatch"], 2)
+			}
+			pgCores, listener, nats, loadgen, proxy = cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2)
+			busy = num(100*r.SysBusyFrac, 0) + "%"
+			if v, ok := r.RSSMiBMax["dispatch"]; ok {
+				rss = num(v, 0)
+			}
+			goroutines, pool = pair(r.Goroutines, p50, smax, 0), pair(r.PoolAcquireGoroutines, p50, smax, 0)
+			var old bool
+			heap, old = heapCell(r)
+			memStats = memStats || old
+			if r.DispatchCPUSPerOp != nil {
+				perOp = num(*r.DispatchCPUSPerOp, 4)
+			}
+			if st, ok := r.PGConnsByState["active|Lock"]; ok {
+				lockWait = num(st.P50, 0)
+			} else if r.PGConnsTotal.N > 0 {
+				lockWait = "0"
+			}
+			if r.PGConnsTotal.N > 0 {
+				pgMax = num(r.PGConnsTotal.Max, 0)
+			}
 		}
-		dispatch := "-"
-		if v, ok := r.CPUCoresMean["dispatch"]; ok {
-			dispatch = num(v, 2) + " / " + num(r.CPUCoresPeak5s["dispatch"], 2)
+		workingSet := "-"
+		if s.cgroup != nil {
+			c := s.cgroup.resources()
+			dispatch, pgCores, listener, nats, loadgen, workingSet = c.dispatch, c.postgres, c.listener, c.nats, c.loadgen, c.workingSet
+			// The operations are the ones summary.json's figure counts: committed events and sent
+			// requests, unknown when the commit rows were not read.
+			ops := s.sum.Events.Committed + s.sum.Requests.Sent
+			if (r == nil || r.DispatchCPUSPerOp == nil) && c.dispatchCPUS != nil && !s.sum.Events.commitsUnread() && ops > 0 {
+				perOp = num(*c.dispatchCPUS/float64(ops), 4)
+			}
+			cgFailed = cgFailed || c.failed
+			cgUnmeasured = cgUnmeasured || len(c.unmeasured) > 0
+			if m := c.mark(); m != "" {
+				label += " " + m
+			}
 		}
-		rss := "-"
-		if v, ok := r.RSSMiBMax["dispatch"]; ok {
-			rss = num(v, 0)
+		cells := []string{label, dispatch, pgCores, listener, nats, loadgen, proxy, busy, busyBefore, rss}
+		if withCgroup {
+			cells = append(cells, workingSet)
 		}
-		perOp := "-"
-		if r.DispatchCPUSPerOp != nil {
-			perOp = num(*r.DispatchCPUSPerOp, 4)
-		}
-		lockWait := "-"
-		if st, ok := r.PGConnsByState["active|Lock"]; ok {
-			lockWait = num(st.P50, 0)
-		} else if r.PGConnsTotal.N > 0 {
-			lockWait = "0"
-		}
-		pgMax := "-"
-		if r.PGConnsTotal.N > 0 {
-			pgMax = num(r.PGConnsTotal.Max, 0)
-		}
-		md.row(withFailedReads(s.commitsLabel(), r.failedReads()), dispatch, cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2),
-			num(100*r.SysBusyFrac, 0)+"%", busyBefore, rss, pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0),
-			pair(r.PoolAcquireGoroutines, p50, smax, 0), pgMax, lockWait, perOp)
+		md.row(append(cells, heap, goroutines, pool, pgMax, lockWait, perOp)...)
 	}
 	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity (a failed connect included) and of Dispatch's goroutine and heap profiles",
 		"`resources.pg_read_errors` and `resources.pprof_read_errors`")
+	md.line("\nheap live: the in-use bytes of Dispatch's heap profile (`/debug/pprof/heap`), every 15 s: a sampled estimate of the live heap, not runtime.MemStats HeapInuse.")
+	if memStats {
+		md.line("\n%s: the step ran before the sampler read the heap profile, so its heap cell is runtime.MemStats HeapInuse from `/debug/pprof/heap?debug=1` (summary.json `resources.heap_inuse_mib`), a different metric that is not comparable with a heap live cell.", memStatsHeapMark)
+	}
 	commitsUnreadNote(md, unread, "the Dispatch CPU-s per operation (its operations count the committed writes)", "shows")
+	cgroupNotes(md, withCgroup, cgFailed, cgUnmeasured)
+}
+
+// memStatsHeapMark follows the heap cell of an older run's step, whose summary.json holds
+// runtime.MemStats HeapInuse in place of the heap profile's in-use bytes.
+const memStatsHeapMark = "(MemStats HeapInuse, older run)"
+
+// heapCell is the Resources table's heap cell, p50 / max: the heap profile's in-use MiB, or, for
+// an older run's summary (old), its MemStats HeapInuse followed by memStatsHeapMark.
+func heapCell(r *resourcesSummary) (cell string, old bool) {
+	if r.MemStatsHeapInuseMiB == nil {
+		return pair(r.HeapLiveMiB, p50, smax, 0), false
+	}
+	cell = pair(*r.MemStatsHeapInuseMiB, p50, smax, 0)
+	if cell == "-" {
+		return cell, false
+	}
+	return cell + " " + memStatsHeapMark, true
 }
 
 // sessionDeliveryTable is how the sessions took their messages (core subscriptions or the
@@ -460,17 +541,49 @@ func commitOrderLockTable(md *markdown, steps []stepData) {
 	failedReadsNote(md, marked, "the probe's connect or read of pg_locks", "`commit_order_lock.errors`")
 }
 
+// liveTransport is the dashboard stream the step's streams ran on, from summary.json's
+// config.dashboard (probeDashboard). A step of a run that wrote live.transport instead (ws, sse
+// or none) is read from that field; a step of a run from before either has neither, and every
+// one of those followed the live socket.
+func (s stepData) liveTransport() string {
+	if s.sum.Config.Dashboard != "" {
+		return s.sum.Config.Dashboard
+	}
+	// An older run of this branch wrote live.transport instead: sse for the SSE endpoint, under
+	// the name dashboardSSE carries; ws for the live socket; and none for a step with -live 0,
+	// which opened no stream and reads here as the live socket, as a step with neither field does.
+	if s.sum.Live.Transport == dashboardSSE {
+		return dashboardSSE
+	}
+	return dashboardLive
+}
+
 func liveTable(md *markdown, steps []stepData) {
 	md.line("\n## Delivery from sending, and live socket frames\n")
-	md.line("NATS: every issue-topic receipt of a primary event. Live: the event frames of the dashboard live sockets that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
-	md.header("step", "NATS delivery ms from sent p50 / p99", "live frame ms from created_at p50 / p99",
-		"live frame ms from write response p50 / p99", "live frames", "live order violations")
+	md.line("NATS: every issue-topic receipt of a primary event. Live: the event frames of the dashboard streams that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
+	columns := []string{"step", "NATS delivery ms from sent p50 / p99", "live frame ms from created_at p50 / p99",
+		"live frame ms from write response p50 / p99", "live frames", "live order violations"}
+	// The transport is a column only where it is worth one: every step on the dashboard live
+	// socket is the table as it was.
+	named := slices.ContainsFunc(steps, func(s stepData) bool { return s.liveTransport() != dashboardLive })
+	if named {
+		columns = append(columns, "transport")
+	}
+	md.header(columns...)
 	unread := false
 	for _, s := range steps {
 		live, e := s.sum.Live, s.sum.Events
 		unread = unread || e.commitsUnread()
-		md.row(s.commitsLabel(), pair(e.DeliveryMsFromSent, p50, p99, 0), pair(live.FrameMsFromCreatedAt, p50, p99, 0),
-			pair(live.FrameMsFromWriteResponse, p50, p99, 0), num(float64(live.Frames), 0), num(float64(live.OrderViolations), 0))
+		cells := []string{s.commitsLabel(), pair(e.DeliveryMsFromSent, p50, p99, 0), pair(live.FrameMsFromCreatedAt, p50, p99, 0),
+			pair(live.FrameMsFromWriteResponse, p50, p99, 0), num(float64(live.Frames), 0), num(float64(live.OrderViolations), 0)}
+		if named {
+			cells = append(cells, s.liveTransport())
+		}
+		md.row(cells...)
+	}
+	if named {
+		md.line("\ntransport: how the step's dashboard streams followed the event feed. `%s`: the dashboard live socket, `GET /ws/live`. `%s`: the SSE endpoint `GET /api/v1/events`, which a Dispatch that serves no such socket is followed on instead. A step whose summary.json has no `config.dashboard` is read from the older `live.transport` (`sse` there is this `%s`, `ws` and `none` are `%s`), and a step with neither field reads `%s`.",
+			dashboardLive, dashboardSSE, dashboardSSE, dashboardLive, dashboardLive)
 	}
 	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the live frame latencies from write response (both take only committed writes' primary events)", "show")
 }

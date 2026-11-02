@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-598",
+  "completed": "2026-11-02T00:30:10Z",
+  "round": 9,
+  "reviewedCodeHead": "ce1289aa9d1ca2c00cb97aca8d4562a9763652af",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "roundShape": "Full round over fix 83986ea7 (runtime), two merges of main and the fragment renames ce1289aa. Merge fe522a73 resolved six conflicts by hand (README.md, common.sh, main.go, run.go, sample.go, stack.sh); merge db84a8ba is clean (remerge diff empty).",
+  "mergeResolutions": "Checked each of fe522a73's six against both parents: README rows and main.go's subcommand list and switch carry both sides (seed-finish, cgroup-merge, curves, codepaths with main's backlog and restart-report); run.go keeps -copy-meta and main's -session-delivery; sample.go's comment carries main's /jsz and pull spy with the PR's readHeaps; common.sh takes main's migration-check wording and keeps the PR's replay paragraph; stack.sh drops main's inline request_keys delete, vacuum and trigger, which loadgen seed-finish already runs above it (seedfinish.go:25-32, 109-118), keeps main's migrations list and seed.meta.json fields, and uses SEED_COUNTS_SQL, which holds the same ten counts main wrote inline (common.sh:362-372).",
+  "fragments": "pr2462-Added-20261028-123000.yaml and pr2462-Added-20261029-210000.yaml follow fragmentFileFormat's custom-Issue form and name no Dispatch issue.",
+  "ci": "Required set ci-ok and pr-title. At CI head ce1289aa: CI run 41344621548 attempt 2 (one re-run of main's daemon flake, per the architect) success; ci-ok success at 23:47:29Z, pr-title success, lint, typecheck, test and envoy-go success. Compare ce1289aa...534d3b48 lists 2 files, both under .legion/INFRA-598/. envoy-go job 125004360738: run-step.test.sh step success; cluster.test.sh step success, 56 PASS, 0 FAIL.",
+  "roundEightFindings": "All four fixed and accepted on their threads: one lock read per poll with runner_term right after a 0 (four callers checked), the act's TERM kept, the fragment, one trap function.",
+  "thermonuclear": "deep-review: CHANGES at ce1289aa (High: runner_wait unbounded once the runner cannot be exec'd, reproduced with a stubbed harness, ends with status 1 at b467bd82; ran cluster.test.sh 56/0 and (dd) red against b467bd82's cluster.sh). code-quality: CHANGES at ce1289aa (read only: the same unbounded wait, the guard ladder written three times, the two trap modes).",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/loadtest/cluster/cluster.sh:1718", "description": "Past its deadline, runner_wait has no bound when the runner pod can no longer be exec'd (OOM, eviction, activeDeadlineSeconds 43200, deleted): a failing runner_term retries every 15 s for ever, and after the SIGKILL the loop only polls .rc for ever. The step shell blocks, pg_disk_watch_stop never runs, and the heartbeat keeps the namespace lock alive. Round 8 ended the wait with status 1 there. The comment at 1700-1705 says RUNNER_STOP_GRACE_SECONDS bounds it."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/cluster/cluster.sh:1394", "description": "A TERM between the stopped check and pg_disk_watch_trap's reinstall is held only until the next poll's act; one trap for the whole function (set stopped, kill the nap) removes the swap."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/cluster/cluster.sh:1648", "description": "The guard ladder (0/1/2, then runner_term, then retry) is written three times and runner_term is safe only by convention; one runner_stop NAME [SIGNAL] that returns the answer."}
+  ]
+}

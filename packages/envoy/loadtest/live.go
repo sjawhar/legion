@@ -158,9 +158,15 @@ func liveSocketURL(dispatch string) (string, error) {
 	return "", fmt.Errorf("the Dispatch URL %s is neither http:// nor https://", redactURL(dispatch))
 }
 
-// liveSummary times the dashboard live socket frames that arrived in the window.
+// liveSummary times the dashboard streams' event frames that arrived in the window, on either
+// dashboard stream (probeDashboard).
 type liveSummary struct {
 	Frames int `json:"live_frames"`
+	// Transport is how a step of an older run's streams followed the event feed: ws, sse or
+	// none. Only a summary.json written before the dashboard probe moved to config.dashboard
+	// holds one; this harness reads it (liveTransport) and never writes it, so a summary.json
+	// this build writes carries no transport key at all (omitempty), never an empty one.
+	Transport string `json:"transport,omitempty"`
 	// OrderViolations counts frames whose event id is not above the previous frame's on the same
 	// connection.
 	OrderViolations int `json:"live_order_violations"`

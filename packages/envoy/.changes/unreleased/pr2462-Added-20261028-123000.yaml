@@ -1,0 +1,33 @@
+kind: Added
+body: |-
+    `packages/envoy/loadtest/cluster/cluster.sh all --namespace <ns> --storage-class <class>
+    --dispatch-commit <sha> --pg-major <n> --production-repo <owner/repo> --profile quick|full` runs
+    the Dispatch load test on a full-size copy of Dispatch in a Kubernetes namespace, from a Legion
+    worker pod. It refuses a commit with no published envoy image (naming the newest first-parent
+    ancestor that has one) and a Postgres major other than production's, before it creates
+    anything, and refuses while the ConfigMap `dispatch-loadtest-lock` names another run; the lock's
+    heartbeat and the cgroup sampler run only while a command of the run is alive or a hold
+    (`all --keep --keep-for`, `cluster.sh hold`) holds it, so a killed run's lock goes stale, and
+    `up` then names the holder's issue to confirm with before the `down` that clears it. Only the PID
+    namespace that ran `up` drives a run. It stands
+    up Postgres at the 16-vCPU Cloud SQL tier's size on a `--pg-volume` data volume (default 100Gi),
+    Dispatch at production's pod size, the
+    listener, a three-pod NATS JetStream hub and a runner pod; seeds it; resets it before each step;
+    runs 1x to 10x, the reads-only control, the hour at 10x and 1x on a 4-vCPU Postgres; samples
+    every container's cgroup every 5 s; marks a step failed when a container restarts, loadgen
+    exits non-zero, the sampler has a gap over 30 s, or the Postgres data volume has less than 15%
+    free before the step's load or while it runs, which sends no load or stops it before Postgres
+    fills the volume; and tears the copy down on any exit unless
+    `--keep`. Profile full adds the refinement: `loadgen curves` names each knee and a factor that
+    narrows its bracket, and each such factor runs as one more step until none is left.
+    `cluster.sh collect` writes, with the steps in the order they ran, the cross-step `TABLES.md`,
+    `CURVES.md`, `curves.csv`, `KNEES.md`, `TREND.md` and each step's `CODEPATHS.md`, and packs each
+    phase's raw outputs and the results as zstd tar parts that `--upload-issue` sends to a Dispatch
+    issue.
+    `loadgen` gains `seed-finish` (the post-seed steps that `stack.sh seed` now calls too),
+    `cgroup-merge`, `curves` and `codepaths`, and `meta.json` gains `pg_clock` and `copy`.
+    `packages/envoy/loadtest/README.md`, under "Running on a cluster copy", lists the rights, the
+    lock, the quota and the tools it needs, every output file, and the differences from production.
+time: 2026-10-28T12:30:00.000000000Z
+custom:
+    Issue: pr2462

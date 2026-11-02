@@ -197,8 +197,6 @@ stack_set() {
 
 set_pid() { stack_set '.pids[$n] = $p' --arg n "$1" --argjson p "$2"; }
 
-random_hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
-
 # write_stack_json writes stack.json on the first setup, with this root's ports (stack_ports: the
 # defaults that follow LOADTEST_ROOT, each one overridden by its LOADTEST_*_PORT). A later setup
 # keeps the ports the file records and moves only those whose variable this environment sets, so a
@@ -753,46 +751,14 @@ cmd_seed() {
   note "writing production-shaped references (about 23 min on 2 vCPU); log $LOGS/seed-refs.log"
   loadgen seed-refs 2>&1 | tee "$LOGS/seed-refs.log" >&2
 
-  note "waiting for the outbox to publish every seed event"
-  local deadline=$((SECONDS + 900)) pending
-  while :; do
-    pending=$(sql dispatch 'select count(*) from events where published_at is null')
-    [ "$pending" = 0 ] && break
-    ((SECONDS < deadline)) || die "the outbox still holds $pending unpublished events after 900 s; see $LOGS/dispatch-seed.log"
-    sleep 2
-  done
-  # Dispatch's block-index backfill (internal/dispatch/docs/block_index.go, migrations 0121-0126)
-  # indexes 20 owed documents a tick in the background. A seed that still owes it would hand every
-  # step about 100 s of that backfill, inside its window; production in steady state owes none.
-  # The tables do not exist in a build older than 0121, which owes nothing; Postgres resolves every
-  # table a statement names before it runs, so the existence check is its own query.
-  if [ "$(sql dispatch "select to_regclass('public.document_block_versions') is not null and to_regclass('public.block_grammar_owed') is not null")" = t ]; then
-    note "waiting for Dispatch's block-index backfill to finish"
-    deadline=$((SECONDS + 900))
-    while :; do
-      pending=$(sql dispatch 'select (select count(*) from document_block_versions where version is null) + (select count(*) from block_grammar_owed)')
-      [ "$pending" = 0 ] && break
-      ((SECONDS < deadline)) || die "Dispatch still owes $pending block-index entries after 900 s; see $LOGS/dispatch-seed.log"
-      sleep 2
-    done
-  fi
+  # loadgen seed-finish (seedfinish.go), while Dispatch still runs: it waits until the outbox has
+  # published every seed event, then until Dispatch's block-index backfill owes nothing (each wait
+  # at most 15 min), deletes the idempotency keys of the reference writes, runs vacuum analyze and
+  # installs the commit-time trigger. It reaches Postgres directly, not through the latency proxy.
+  loadgen seed-finish -pg "postgres://postgres@127.0.0.1:$(port postgres)/dispatch?sslmode=disable" ||
+    die "loadgen seed-finish failed; see $LOGS/dispatch-seed.log"
   stop_one dispatch
   trap - EXIT
-
-  # seed-refs writes under idempotency keys, so Dispatch keeps one request_keys row per write. They
-  # protect retries during the seed only. Left in the template, Dispatch's sweep of keys older than
-  # a day (24 h) would delete them inside the window of every step on a seed older than that, and
-  # not on a younger one. A build older than migration 0137 has no such table.
-  if [ "$(sql dispatch "select to_regclass('public.request_keys') is not null")" = t ]; then
-    note "deleting the seed's idempotency keys (request_keys)"
-    sql dispatch 'delete from request_keys' >/dev/null
-    [ "$(sql dispatch 'select count(*) from request_keys')" = 0 ] ||
-      die "request_keys still holds rows after the delete; the template would carry them"
-  fi
-  note "vacuum analyze"
-  sql dispatch 'vacuum analyze' >/dev/null
-  note "installing the commit-time trigger (loadtest.event_commits)"
-  loadgen trigger-sql | psql_db dispatch >/dev/null
 
   # migrations is every version the seed has applied, and migration the highest of them. A build is
   # compared against the set (common.sh, seed_migration_check): a migration whose version is below
@@ -800,17 +766,7 @@ cmd_seed() {
   local migration migrations counts
   migration=$(sql dispatch 'select max(version) from schema_migrations')
   migrations=$(sql dispatch "select coalesce(json_agg(version order by version), '[]'::json) from schema_migrations")
-  counts=$(sql dispatch "select json_build_object(
-      'projects', (select count(*) from projects),
-      'issues', (select count(*) from issues),
-      'comments', (select count(*) from comments),
-      'artifacts', (select count(*) from artifacts),
-      'artifact_versions', (select count(*) from artifact_versions),
-      'ref_targets', (select count(*) from artifacts where name like 'ref-target-%'),
-      'ref_target_versions', (select count(*) from artifact_versions v join artifacts a on a.id = v.artifact_id where a.name like 'ref-target-%'),
-      'ref_sources', (select count(*) from artifacts where name = 'references.md'),
-      'artifact_refs', (select count(*) from refs where to_kind = 'artifact'),
-      'events', (select count(*) from events))")
+  counts=$(sql dispatch "$SEED_COUNTS_SQL")
   # The seed is made by the Dispatch in $BIN, which is the checkout's build only when setup ran
   # without LOADTEST_DISPATCH_COMMIT, so the record names both: build_commit is the checkout's,
   # dispatch_commit and dispatch_build the binary's.
@@ -846,7 +802,6 @@ cmd_reset() {
   start_listener
   start_dispatch "$log"
 }
-
 
 cmd_stop() {
   [ -f "$STACK" ] || return 0

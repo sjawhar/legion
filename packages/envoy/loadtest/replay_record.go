@@ -82,8 +82,9 @@ type replayBaseDocs struct {
 type replayRecord struct {
 	Inputs  replayInputs `json:"inputs"`
 	WindowS float64      `json:"window_s"`
-	// CPUSource is "proc" (Dispatch's /proc/<pid>/stat), or "none" when no pid was readable
-	// (-allow-foreign); the CPU fields are null then.
+	// CPUSource is "proc" (Dispatch's /proc/<pid>/stat), "cgroup" (loadgen cgroup-merge filled the
+	// CPU fields from the cluster sampler's cgroup reads), or "none" when no pid was readable
+	// (-allow-foreign) and no cgroup read filled them; the CPU fields are null then.
 	CPUSource                  string   `json:"cpu_source"`
 	DispatchCPUS               *float64 `json:"dispatch_cpu_s"`
 	CoresFullRate              *float64 `json:"cores_full_rate"`

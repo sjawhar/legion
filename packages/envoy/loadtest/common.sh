@@ -50,6 +50,11 @@
 # migration the seed holds is refused with exit 1, and one that holds migrations the seed lacks is
 # noted. Then it sets BUILD to `stack.sh build-info` ("<commit> <dirty>"). run-step.sh calls it
 # before a step that is not part of a series; run-series.sh calls it once, before its first step.
+#
+# The replay's inputs (README.md, The replay): stack.sh replay-get and cluster.sh replay-prepare
+# both download and verify the manifest's parts with replay_fetch_parts and replay_get_bundle
+# below. The manifest names no issue; LOADTEST_REPLAY_ISSUE names the one the parts are file
+# artifacts of, and nothing is read or downloaded without it.
 
 die() {
   printf '%s: %s\n' "${0##*/}" "$*" >&2
@@ -346,4 +351,129 @@ prepare_stack() {
   fi
   seed_migration_check "$ROOT/seed.meta.json" "$build_versions" "$build_what" "$only_highest"
   BUILD=$("$stack" build-info)
+}
+
+# random_hex N: N random bytes in hex.
+random_hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
+
+# SEED_COUNTS_SQL: the seed's counts that seed.meta.json records, one JSON object, the same for
+# stack.sh seed and cluster.sh seed, so the record tells a seed with the reference documents
+# (loadgen seed-refs) from one without them.
+SEED_COUNTS_SQL="select json_build_object(
+  'projects', (select count(*) from projects),
+  'issues', (select count(*) from issues),
+  'comments', (select count(*) from comments),
+  'artifacts', (select count(*) from artifacts),
+  'artifact_versions', (select count(*) from artifact_versions),
+  'ref_targets', (select count(*) from artifacts where name like 'ref-target-%'),
+  'ref_target_versions', (select count(*) from artifact_versions v join artifacts a on a.id = v.artifact_id where a.name like 'ref-target-%'),
+  'ref_sources', (select count(*) from artifacts where name = 'references.md'),
+  'artifact_refs', (select count(*) from refs where to_kind = 'artifact'),
+  'events', (select count(*) from events))"
+export SEED_COUNTS_SQL
+
+# ---- the replay's inputs ------------------------------------------------------------------------------
+
+# replay_download OUT ISSUE SLUG VERSION: one version of a Dispatch file artifact into OUT, with
+# the caller's DISPATCH_URL and the bearer token in DISPATCH_TOKEN_FILE. The scripts run in the
+# caller's environment (stack.sh starts only its stack processes under env -i), and the token
+# reaches curl on its standard input, never on a command line or in the script's output.
+replay_download() {
+  [ -n "${DISPATCH_URL:-}" ] || die "DISPATCH_URL is not set: set it and DISPATCH_TOKEN_FILE to download the replay's parts, or pass --from-dir"
+  [ -r "${DISPATCH_TOKEN_FILE:-}" ] || die "DISPATCH_TOKEN_FILE does not name a readable file: set it to download the replay's parts, or pass --from-dir"
+  local token
+  token=$(<"$DISPATCH_TOKEN_FILE")
+  token=${token//[$'\r\n\t ']/}
+  note "downloading dispatch://$2/artifact/$3 version $4"
+  printf 'Authorization: Bearer %s\n' "$token" |
+    curl -q -fsSL --retry 3 --max-time 900 -H @- -o "$1" "${DISPATCH_URL%/}/api/v1/issues/$2/artifacts/$3/versions/$4"
+}
+
+# replay_fetch_part ENTRY ISSUE FROM_DIR PARTS_DIR: put a manifest part (its JSON) at
+# PARTS_DIR/<file>: kept when its sha256 matches, else copied from FROM_DIR (when not empty) or
+# downloaded, and refused, deleted, when its sha256 differs from the manifest's.
+replay_fetch_part() {
+  local entry=$1 issue=$2 from_dir=$3 parts_dir=$4 file slug version want
+  file=$(jq -er .file <<<"$entry")
+  slug=$(jq -er .slug <<<"$entry")
+  version=$(jq -er .version <<<"$entry")
+  want=$(jq -er .sha256 <<<"$entry")
+  [[ $file =~ ^[A-Za-z0-9._-]+$ ]] || die "the manifest's part file '$file' is not a plain file name"
+  local dst=$parts_dir/$file
+  if [ -f "$dst" ] && [ "$(sha256_of "$dst")" = "$want" ]; then
+    note "part $file: kept (sha256 matches)"
+    return 0
+  fi
+  local tmp=$dst.tmp
+  rm -f -- "$tmp"
+  if [ -n "$from_dir" ]; then
+    [ -f "$from_dir/$file" ] || die "part $file: not in --from-dir $from_dir"
+    cp -- "$from_dir/$file" "$tmp"
+  elif ! replay_download "$tmp" "$issue" "$slug" "$version"; then
+    rm -f -- "$tmp"
+    die "part $file: the download of dispatch://$issue/artifact/$slug version $version failed"
+  fi
+  local got
+  got=$(sha256_of "$tmp")
+  if [ "$got" != "$want" ]; then
+    rm -f -- "$tmp" "$dst"
+    die "part $file: sha256 $got, the manifest says $want; deleted it"
+  fi
+  mv -f -- "$tmp" "$dst"
+  note "part $file: $(stat -c %s -- "$dst") bytes, sha256 matches"
+}
+
+# replay_fetch_parts MANIFEST WHICH PARTS_DIR FROM_DIR: every part of the manifest's WHICH (bundle
+# or seed) at PARTS_DIR/<file> (replay_fetch_part), then the joined parts' sha256 against WHICH's
+# tar_zst_sha256 (bundle) or dump_sha256 (seed). The parts' paths, in order, go into REPLAY_PARTS.
+# The parts are file artifacts of the issue LOADTEST_REPLAY_ISSUE names, which is required.
+replay_fetch_parts() {
+  local manifest=$1 which=$2 parts_dir=$3 from_dir=$4 key issue entry want got
+  case $which in
+    bundle) key=tar_zst_sha256 ;;
+    seed) key=dump_sha256 ;;
+    *) die "replay_fetch_parts: no part list $which" ;;
+  esac
+  # The manifest names no issue: the operator names it, and nothing is read or downloaded without
+  # it (stack.sh replay-get, cluster.sh replay-prepare).
+  [ -n "${LOADTEST_REPLAY_ISSUE:-}" ] ||
+    die "LOADTEST_REPLAY_ISSUE is not set: set it to the issue the replay's parts are file artifacts of (the manifest names none)"
+  issue=$LOADTEST_REPLAY_ISSUE
+  mkdir -p -- "$parts_dir"
+  REPLAY_PARTS=()
+  while IFS= read -r entry; do
+    replay_fetch_part "$entry" "$issue" "$from_dir" "$parts_dir"
+    REPLAY_PARTS+=("$parts_dir/$(jq -r .file <<<"$entry")")
+  done < <(jq -c --arg w "$which" '.[$w].parts[]' "$manifest")
+  ((${#REPLAY_PARTS[@]} > 0)) || die "$manifest lists no $which parts"
+  want=$(jq -er --arg w "$which" --arg k "$key" '.[$w][$k]' "$manifest")
+  got=$(joined_sha256 "${REPLAY_PARTS[@]}")
+  [ "$got" = "$want" ] || die "the joined $which parts' sha256 is $got, the manifest's $key $want"
+}
+
+# replay_get_bundle MANIFEST DIR FROM_DIR LOADGEN: the bundle's parts under DIR/parts
+# (replay_fetch_parts), unpacked with `LOADGEN replay-unpack` into DIR/bundle (not again while
+# DIR/bundle.unpacked.json names the same parts and the bundle's bundle.meta.json), then checked
+# file by file with `LOADGEN replay-verify-bundle`, whose line goes into REPLAY_BUNDLE_VERIFIED.
+# LOADGEN is the caller's command (a function) that runs its loadgen.
+replay_get_bundle() {
+  local manifest=$1 dir=$2 from_dir=$3 loadgen_cmd=$4 want
+  replay_fetch_parts "$manifest" bundle "$dir/parts" "$from_dir"
+  want=$(jq -er .bundle.tar_zst_sha256 "$manifest")
+  local bundle=$dir/bundle marker=$dir/bundle.unpacked.json meta=bundle.meta.json
+  if [ -f "$marker" ] && [ "$(jq -r .tar_zst_sha256 "$marker")" = "$want" ] && [ -f "$bundle/$meta" ] &&
+    [ "$(jq -r .bundle_meta_sha256 "$marker")" = "$(sha256_of "$bundle/$meta")" ]; then
+    note "bundle at $bundle is already unpacked from these parts; kept"
+  else
+    rm -f -- "$marker"
+    rm -rf -- "$bundle.tmp"
+    note "unpacking the bundle into $bundle"
+    "$loadgen_cmd" replay-unpack -out "$bundle.tmp" "${REPLAY_PARTS[@]}" || die "loadgen replay-unpack of the bundle's parts failed"
+    rm -rf -- "$bundle"
+    mv -- "$bundle.tmp" "$bundle"
+    jq -n --arg tar "$want" --arg meta "$(sha256_of "$bundle/$meta")" \
+      '{tar_zst_sha256: $tar, bundle_meta_sha256: $meta}' >"$marker"
+  fi
+  REPLAY_BUNDLE_VERIFIED=$("$loadgen_cmd" replay-verify-bundle -dir "$bundle") || die "the bundle at $bundle does not verify (above)"
+  note "bundle verified: $REPLAY_BUNDLE_VERIFIED"
 }

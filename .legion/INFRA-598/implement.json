@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-598",
+  "previousHandoff": "29136060ab71a58e389614bac72c2dbd458302d1",
+  "proof": [
+    {
+      "criterion": "CI red at 29136060 (ci-ok): the only failure was packages/daemon TestFetchKeepsAFeedAfterGitGC/killed_during_repack, outside this PR; its failed jobs re-run once with nothing changed",
+      "surface": "GitHub Actions run 41344621548 at code head ce1289aa",
+      "command": "gh run rerun 41344621548 --failed -R sjawhar/legion",
+      "observed": "attempt 1: test failed only on 'fetch_test.go:1129: git gc did not start writing a pack during its repack' (job 124967664574), every other package ok; attempt 2: test success 2026-11-01T23:29:24Z (job 125004321032), ci-ok success 2026-11-01T23:47:29Z (job 125015198795); PR MERGEABLE (state BLOCKED: review required)",
+      "headSha": "ce1289aa9d1c",
+      "negativeControl": "attempt 1 of the same run at the same head: test failure on that daemon test, ci-ok failure (job 125000093101)"
+    },
+    {
+      "criterion": "Review round 8: the disk watcher and the runner-job wait read the lock once per poll and stop the job on that answer; the wait ends only once the stopped job has an exit status; a TERM during the watcher's act is kept and pg_disk_watch_stop is bounded",
+      "surface": "cluster.sh under cluster.test.sh's fakes (FAKE_LOCK_GET_OK_TIMES, FAKE_LOCK_GET_FAIL_TIMES, FAKE_LOCK_GET_DELAY, FAKE_RC_UNTIL_KILL), case (dd)",
+      "command": "cd packages/envoy && (4 x 'while :; do :; done' &) && for n in 1 2 3: timeout 5400 bash loadtest/cluster/cluster.test.sh",
+      "observed": "at 83986ea7: 3 of 3 green under load, 56 PASS 0 FAIL each, ended 15:44:31, 16:23:48, 17:03:25Z (dispatch://INFRA-598/artifact/cluster-test-under-load-83986ea7-txt); at the merge fe522a73 (same loadtest tree as head ce1289aa): 3 of 3 green, 56 PASS 0 FAIL each, ended 18:07:43, 18:47:34, 19:30:42Z (dispatch://INFRA-598/artifact/cluster-test-under-load-fe522a73-txt); shellcheck of cluster.sh clean",
+      "headSha": "ce1289aa9d1c",
+      "negativeControl": "case (dd) against b467bd82's cluster.sh (scratch copy): 14 FAIL lines, among them 'the disk watcher stopped no runner job although its own read of the lock answered', 'the wait ended with status 1 at a deadline its own read of the lock answered', 'pg_disk_watch_stop did not return within 45 s: the TERM that landed inside the watcher's read of the lock was lost'"
+    },
+    {
+      "criterion": "Forward merge of main (GitHub reported CONFLICTING; #2633 fixes main's only red check): six conflicts in the 2-core harness resolved against both parents; the PR's file set is unchanged but for the fragment renames",
+      "surface": "the merged tree's Go and shell tests; GitHub mergeability; jj diff --name-only against the fork point",
+      "command": "cd packages/envoy && go test -p 1 -count=1 ./loadtest/... && bash loadtest/common.test.sh && bash loadtest/run-step.test.sh; gh pr view 2462 --json mergeable",
+      "observed": "go test ok (loadtest, loadtest/browsertype); common.test.sh and run-step.test.sh exit 0; MERGEABLE at ce1289aa; file set 56 paths before (83986ea7) and after (ce1289aa), differing only by INFRA-598-*.yaml -> pr2462-Added-*.yaml; fingerprints 025682c78ab0306e -> 41d9755edee445b2 (fe522a73, conflicts resolved) -> 41d9755edee445b2 (db84a8ba, clean) -> cefe12d85ac46fe4 (ce1289aa, renames); comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6563150133",
+      "headSha": "ce1289aa9d1c",
+      "negativeControl": "before the merge GitHub reported 83986ea7 CONFLICTING and ran no check on it (the tester's measurement, 18:52Z)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/loadtest/cluster/cluster.sh",
+    "packages/envoy/loadtest/cluster/cluster.test.sh",
+    "packages/envoy/loadtest/README.md",
+    "packages/envoy/.changes/unreleased/pr2462-Added-20261028-123000.yaml (renamed from INFRA-598-cluster-load-test.yaml)",
+    "packages/envoy/.changes/unreleased/pr2462-Added-20261029-210000.yaml (renamed from INFRA-598-stored-order-typing.yaml)",
+    "merge resolutions: packages/envoy/loadtest/{README.md,common.sh,main.go,run.go,sample.go,stack.sh}"
+  ],
+  "trickyParts": [
+    "runner_term has no guard of its own; it is listed as exempt and runs only right after its caller's copy_is_ours answered 0.",
+    "runner_wait no longer breaks at its TERM: it prints timeout once the job records an exit status, with one SIGKILL after RUNNER_STOP_GRACE_SECONDS; typing_stop's wait is therefore no longer bounded at 120 s.",
+    "pg_disk_watch_stop kills the watcher and the children of its act after PG_DISK_STOP_SECONDS (300), and notes it, naming the step."
+  ],
+  "deviations": [
+    "runner_stop's guard subject is 'the runner job NAME in the runner pod', so the existing (y)/(aa) assertions on 'the runner pod' hold unchanged.",
+    "The three loaded runs ran at the first merge fe522a73; the head adds the clean merge of #2633 (no loadtest file changed) and the fragment renames.",
+    "No code change this round: the red was a daemon test this PR does not touch (the architect's ruling, 22:45Z), cleared by one re-run of the failed jobs."
+  ],
+  "openQuestions": []
+}

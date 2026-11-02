@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-598",
+  "completed": "2026-11-02T00:05:23Z",
+  "round": 14,
+  "roundShape": "Confirmation round, as the architect set it. The code head is ce1289aa, byte for byte the tree this tester drove in round 13; the only commits above it are the two handoff-only ones (29136060, df969cb4), and the implementer changed no code this round, it re-ran the failed jobs of run 41344621548. So the real-surface work below was measured in round 13 at that same code head and is not repeated here; what round 14 adds is the shape check, the CI reading of the re-run and the mergeability. Round 13 itself ended without a handoff: the daemon took the phase back when ci-ok settled red on the daemon flake, before this tester could complete, which is why its evidence is recorded here and in dispatch://INFRA-598/artifact/round13-measurements-md.",
+  "previousHandoff": "805292052e867d0c249d364482dff61d02125732",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "The implementer's round-14 proof is a CI claim and a re-run, and I read both myself rather than taking its numbers. Run 41344621548 at code head ce1289aa, read with ?filter=all so both attempts answer: attempt 1 has `test` failure (job 124967664574) and `ci-ok` failure (job 125000093101); attempt 2 has `test` success (job 125004321032, completed 2026-11-01T23:29:24Z) and `ci-ok` success (job 125015198795, completed 2026-11-01T23:47:29Z); those are the only two jobs of the run that ever concluded other than success or skipped. Its round-13 claims I had already verified independently in round 13 (the three loaded runs, the (dd) control, the merge resolutions), with one correction recorded there and repeated below."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "Round 14, item 1. Nothing above the code head but .legion/INFRA-598/",
+      "surface": "The issue workspace and the pull request's own diff against main",
+      "command": "git diff --name-only ce1289aa9d1c df969cb46e0d; and round-shape.py v4 (dispatch://INFRA-598/artifact/round-shape-py) over the same pair (00:05Z)",
+      "observed": "`git diff --name-only` prints one path, `.legion/INFRA-598/implement.json`. round-shape reports `files in the diff: 52 -> 52`, appeared 0, gone 0, in both differing 0, `fingerprint unchanged`. Both commits above the code head end their message with `skip-checks: true`, which is why GitHub started no run for them and the code head's verdict is the one that counts.",
+      "negativeControl": "The same script over the pair that straddles the merges, 83986ea7 -> ce1289aa, reports 2 appeared, 2 gone and 2 differing in both, so an unchanged fingerprint here is a measurement rather than a script that cannot see change."
+    },
+    {
+      "criterion": "Round 14, item 2. ci-ok and every lane green at the code head, read on the re-run attempt",
+      "surface": "GitHub check runs at ce1289aa9d1c and the jobs of run 41344621548",
+      "command": "gh api repos/sjawhar/legion/commits/ce1289aa9d1c/check-runs --paginate; gh api 'repos/sjawhar/legion/actions/runs/41344621548/jobs?filter=all&per_page=100' --paginate (00:04Z)",
+      "observed": "39 check runs at the code head. Every one completed successful or skipped, `ci-ok` included (success, 2026-11-01T23:47:29Z), except `pr-title`, which carries one cancelled run beside its successful one, as it has on every head of this branch. `test` is success (2026-11-01T23:29:24Z). No lane is unread and none is still running.",
+      "negativeControl": "Attempt 1 of the same run at the same head: `test` failure on TestFetchKeepsAFeedAfterGitGC/killed_during_repack and `ci-ok` failure. That is the pair the re-run cleared, and it is also the evidence that the red was the daemon flake rather than this branch: the pull request changes 56 files and none is under packages/daemon; the lane was green on main at 0642a37a and at this branch's own b467bd82; and on this pod at this head `GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=3 -run TestFetchKeepsAFeedAfterGitGC ./internal/workspace/` printed `ok github.com/sjawhar/legion/daemon/internal/workspace 16.836s`."
+    },
+    {
+      "criterion": "Round 14, item 3. The pull request is mergeable",
+      "surface": "GitHub's own mergeability for #2462",
+      "command": "gh pr view 2462 --repo sjawhar/legion --json mergeable,mergeStateStatus,headRefOid (00:04Z)",
+      "observed": "head df969cb46e0d, `mergeable: MERGEABLE`, `mergeStateStatus: BLOCKED`, the block being the review this round feeds rather than a conflict or a check.",
+      "negativeControl": "The same read at 83986ea7 on 2026-11-01 at 18:52Z gave `CONFLICTING`/`DIRTY` with 0 check runs, which is what the two forward merges cleared."
+    },
+    {
+      "criterion": "Round 13 at this same code head, carried: the loaded suite, one run at a time, three runs",
+      "surface": "This worker pod, the hermetic suite under four busy loops on three CPUs (2026-11-01, 20:43Z to 22:40Z)",
+      "command": "$TMPDIR/t598/loop13.sh as named job loop13-infra-598: four spinner loops, then `timeout 2700 bash loadtest/cluster/cluster.test.sh` three times in turn",
+      "observed": "iter 1, 2 and 3 each green at 56 PASS / 0 FAIL, job exit 0 after 1 h 57 m. Beside them at the same head: `go test -p 1 -count=1 ./loadtest/` ok 23.095s, `common.test.sh` exit 0 with 10 PASS, `run-step.test.sh` exit 0 with 7 PASS.",
+      "negativeControl": "The same suite against b467bd82's cluster.sh in a scratch tree exits 1 after 55 PASS at `FAIL: the disk watcher stopped no runner job although its own read of the lock answered: a second read inside the stop failed and the step's load runs on` (dispatch://INFRA-598/artifact/round13-dd-control-txt)."
+    },
+    {
+      "criterion": "Round 13 at this same code head, carried: the watcher driven live on the full-size copy",
+      "surface": "GKE namespace loadtest, run lt-20261101t200446-8281 (Dispatch 9b92ac14, Postgres 18), with a kubectl wrapper first on PATH that can fail, slow or falsify a read",
+      "command": "cluster.sh step --namespace loadtest pollfail13 1 --duration 6m with the lock read failing for one poll while the volume reads 1% free; then cluster.sh step --namespace loadtest termact13c 1 --duration 9m with the lock read taking 70 s and a SIGTERM sent to the step shell inside that read",
+      "observed": "Drive A: `the disk watcher records nothing and stops no job at this poll; it reads the lock again at the next one`, then at the next poll `step pollfail13 failed: pg_disk of postgres: /var/lib/postgresql/copy is 97.9 GiB, 96.9 GiB used, 1.0 GiB free (0% of it), under the 15% (14.7 GiB) a step needs`, then `loadgen_exit: loadgen run ended with exit status 143`; no `giving no exit status` and no `could not send` line anywhere, so the wait ended on the job's own exit status. Drive B: the watcher's lock read began 20:30:22Z, the TERM was sent 20:30:29Z, step-failed.json (reasons [\"pg_disk\"]) was written 20:31:32Z and the step was gone 20:31:35Z, 66 s after the signal and well inside PG_DISK_STOP_SECONDS=300, with no kill line: the TERM was kept as a flag rather than cutting the act. Logs: dispatch://INFRA-598/artifact/round13-watcher-drives-txt.",
+      "negativeControl": "The polls of those same steps before any flag was set recorded the real volume and stopped nothing, and the clean step of round 12, run with no wrapper, wrote no pg_disk reason."
+    },
+    {
+      "criterion": "Round 13 at this same code head, carried: the two forward merges keep both parents",
+      "surface": "The merge base 6a4aa615, the two parents (83986ea7 and origin/main) and the merged tree at ce1289aa",
+      "command": "round-shape.py v4 over 805292052e86 -> 29136060ab71 and over 83986ea7 -> ce1289aa; then, for each of the six conflicted files, every non-blank line each parent added since the merge base looked for in the merged file",
+      "observed": "File set 52 -> 52 with 2 appeared and 2 gone, which are the two changelog fragments renamed to pr2462-* (the INFRA-598-* names gone, nothing main's fold had consumed re-added). Of the 1,004 lines this branch added and the 390 main added across README.md, common.sh, main.go, run.go, sample.go and stack.sh, the only ones not found verbatim in the merged tree are three lines that each side had rewritten and the resolution merged into one: two README table rows (`main.go`, carrying our `plan-docs` and main's `backlog`/`restart-report`; `common.sh`, carrying main's wording and our clause) and the sampler's doc sentence in sample.go. No content of either parent is lost. One correction of the implementer's report stands: it said only the two fragment renames differ across the merges, and README.md and sample.go differ too, for the reason just given.",
+      "negativeControl": "The script's appeared/gone branch fires on a real change: 32592e51 -> 83986ea7 reports `51 -> 52` with `+ packages/envoy/loadtest/live_test.go`."
+    }
+  ],
+  "notes": [
+    "Nothing was run on the cluster this round, as the architect asked. The loadtest namespace was released at the end of round 13 (`down` exit 0 at 20:38Z) and still answers `No resources found in loadtest namespace.` with the lock ConfigMap NotFound; no cluster.sh, cluster.test.sh, loadgen or loader process of this tester runs on the pod.",
+    "The pod was restarted onto the new worker image between the rounds and kept its uid, 30b95945-147a-4676-9caa-718846bbf657, with the issue volume and its $TMPDIR intact; every figure carried above was nonetheless already uploaded to Dispatch while round 13 ran, so none of it depends on that disk.",
+    "An empty commit of this tester's, 06ec6a62, was left in the workspace when round 13 ended; it carries nothing and was never pushed."
+  ]
+}

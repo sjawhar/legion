@@ -14,7 +14,7 @@
 --
 -- events: id bigserial, type text, payload jsonb
 -- (internal/dispatch/store/migrations/0001_init.up.sql).
--- stack.sh installs it after the seed's outbox has drained: loadgen trigger-sql | psql ...
+-- loadgen seed-finish installs it after the seed's outbox has drained; loadgen trigger-sql prints it.
 
 create schema if not exists loadtest;
 

@@ -1,0 +1,47 @@
+# runner.yaml: the pod loadgen runs in: 8 CPU / 16Gi, request = limit, with an emptyDir /work into
+# which cluster.sh copies a static loadgen, seed.json and each step's copy-meta file, and from
+# which it copies each step directory back, then removes it. loadgen runs detached inside it
+# through kubectl exec. A bare pod, so a crash is not hidden by a restart; activeDeadlineSeconds
+# ends it 12 hours after it starts. cluster.sh fills every placeholder from validated values.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: runner
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: dispatch-loadtest
+    dispatch-loadtest/run: __RUN_ID__
+    dispatch-loadtest/role: runner
+  annotations:
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Never
+  activeDeadlineSeconds: 43200
+  terminationGracePeriodSeconds: 5
+  containers:
+    - name: runner
+      image: __RUNNER_IMAGE__
+      command: [sleep, infinity]
+      workingDir: /work
+      env:
+        # loadgen's default root; under -allow-foreign it reads no stack.json from it.
+        - name: LOADTEST_ROOT
+          value: /work
+      resources:
+        requests:
+          cpu: "8"
+          memory: 16Gi
+          ephemeral-storage: 5Gi
+        limits:
+          cpu: "8"
+          memory: 16Gi
+          ephemeral-storage: 5Gi
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  volumes:
+    - name: work
+      emptyDir:
+        sizeLimit: 4Gi
