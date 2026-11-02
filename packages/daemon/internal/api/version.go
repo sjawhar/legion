@@ -489,9 +489,10 @@ package api
 // (`api.OperatorClaim`), which `packages/contracts/src/legion-api.ts` mirrors; a strict reader
 // before 46 refuses a state carrying either. `legion.yaml` gains `pod_update_retask_hours` and
 // `pod_update_notice_hours`, which the settings carry as the two numbers they are. A plugin
-// before 46 has no op to signal with, so its pod's round would never end, and a daemon before 46
-// answers that op's post a 404; the boot gate and `legion probe-image` refuse either pair. (This
-// branch took 43 while main's consumer lag was unmerged, then 44, then 45, and its store
+// before 46 has no op to signal with, so its worker answers by ending the turn the task started
+// (supervise.PodUpdateContract names this number), and a daemon before 46 answers that op's post
+// a 404; the boot gate and `legion probe-image` refuse either pair. (This branch took 43 while
+// main's consumer lag was unmerged, then 44, then 45, and its store
 // migration 0065; main landed the consumer lag at 43, the Claude Code background-task variable at
 // 44 and the handoff records at 45 first, with store migrations 0065, 0066 and 0067, so this
 // change takes the number above them. Its migration is named for the moment it was written,

@@ -522,8 +522,7 @@ var ErrForeignUpdateRound = errors.New("the answer names an update round this cl
 // than the one its round was opened over (Claim.leftPodRound). The answer says the round's work
 // is pushed, and the process that gives it never held that work: it came up in a pod the round
 // asks nothing of. It is refused rather than counted for a pod nobody pushed for. The refusal
-// adds the round the claim left, the round of the pod it came up in where the claim still
-// records a process, and what the worker does next.
+// adds the round the claim left and what the worker does next.
 var ErrLeftPodRound = errors.New("the answer comes from a process in another pod than the update round's own")
 
 // ErrRetryArchitectOnly is the operator's retry of a failed claim that is not an architect's: a
