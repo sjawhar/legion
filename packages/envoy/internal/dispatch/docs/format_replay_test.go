@@ -18,12 +18,11 @@ import (
 type browserOrigin struct{ _ byte }
 
 // Each copy of a room replays the room's own commits to the room's markdown: the replica its reads
-// walk, the fold of its stored history, and the room that loads that history again. ygo follows a
-// remote apply that changes formatted text with a cleanup commit of its own; the room runs none
-// for its own commits (a repair or a mark sweep in Server.Apply), so a copy that applied those
-// commits with the cleanup on deleted formatting the room kept, and *x*y read back as *xy*. The
-// room itself still cleans up after a browser's update, as Yjs does, and that cleanup is stored
-// with the rest of its history.
+// walk, the fold of its stored history, and the room that loads that history again. A copy applies
+// each of those commits with format cleanup off (newDocumentCopy), so it makes no cleanup commit of
+// its own. A browser now cleans the markers its local delete leaves before it sends the update, as
+// Yjs does (#350), so the room receives no formatting cleanup to make after these browser updates.
+// The room's stored history therefore contains only the commits its browser and its own Apply made.
 func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -54,8 +53,8 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 		roomCommit(func(txn *crdt.Transaction) { change(text, txn) })
 	})
 
-	// A browser's commits, the same edits in a paragraph of its own, each applied to the room as
-	// its sync applies a peer's update.
+	// A browser's commits, the same edits in a paragraph of its own, each cleaned locally before it
+	// reaches the room as its sync applies a peer's update.
 	browser := crdt.New()
 	if err := crdt.ApplyUpdateV1(browser, encodedRoom(t, service, artifactID), nil); err != nil {
 		t.Fatalf("open the document in the browser: %v", err)
@@ -95,8 +94,8 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	writeItalicLeavingMarkers(func(change func(*crdt.YXmlText, *crdt.Transaction)) {
 		browserCommit(func(txn *crdt.Transaction) { change(browserText, txn) })
 	})
-	if cleanups == 0 {
-		t.Fatal("the room made no cleanup commit after the browser's updates; it must clean up as Yjs does")
+	if cleanups != 0 {
+		t.Fatalf("the room made %d cleanup commit(s) after the browser's local cleanup, want none", cleanups)
 	}
 
 	want := roomMarkdown(t, service, artifactID)
@@ -114,7 +113,8 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	}
 
 	// The reloaded room loaded its history with the cleanup off and turned it back on once that
-	// apply returned (applyLoadedState), so it cleans up after a browser's update again.
+	// apply returned (applyLoadedState). The browser has already cleaned these local deletes, so
+	// the room still makes no cleanup commit.
 	cleanups = 0
 	browserCommit(func(txn *crdt.Transaction) {
 		paragraph := crdt.NewYXmlElement("paragraph")
@@ -125,8 +125,8 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	writeItalicLeavingMarkers(func(change func(*crdt.YXmlText, *crdt.Transaction)) {
 		browserCommit(func(txn *crdt.Transaction) { change(browserText, txn) })
 	})
-	if cleanups == 0 {
-		t.Fatal("the reloaded room made no cleanup commit after the browser's updates; its load left the cleanup off")
+	if cleanups != 0 {
+		t.Fatalf("the reloaded room made %d cleanup commit(s) after the browser's local cleanup, want none", cleanups)
 	}
 }
 
