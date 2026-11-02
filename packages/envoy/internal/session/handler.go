@@ -8,50 +8,36 @@ import (
 )
 
 // HandleAgentReason names why a delivery attempt did not land, for the one question the caller
-// cannot answer from Delivered alone: whether waiting could change the answer. The
-// three causes reach the caller as one undelivered result otherwise, and it would have to
-// re-derive them from the error text to tell them apart.
+// cannot answer from Delivered alone: whether waiting could change the answer. The two outcomes
+// reach the caller as one undelivered result otherwise, and it would have to re-derive them from
+// the error text to tell them apart.
 type HandleAgentReason uint8
 
 const (
-	// ReasonNone is every outcome that is none of the three causes below: a push that landed, a
-	// self-subscribed skip (the session reads the message off its own subscription), and a
-	// session another listener owns (ErrWrongMachine), which both paths answer as OwnedElsewhere:
-	// that listener delivers the message, so this one has no cause to report.
+	// ReasonNone is every outcome that is not the one below: a delivery that landed, a skip (the
+	// session reads the message off its own subscription, or its own consumer relays it), and a
+	// session another listener owns, which both paths answer as OwnedElsewhere: that listener
+	// delivers the message, so this one has no cause to report.
 	ReasonNone HandleAgentReason = iota
-	// ReasonNoSessionRecord is a session the resolution found no record of. A caller holding a
-	// record source that trails the store - or one whose read did not answer - may ask again.
+	// ReasonNoSessionRecord is a session the resolution found nothing to deliver through: no
+	// record of it at all, or a record that names no way the session receives a message
+	// (ErrNoSessionRecord). A caller holding a record source that trails the store - or one
+	// whose read did not answer - may ask again, and so may one that read a record naming
+	// neither way, which the session's next registration rewrites: the listener's delivery
+	// waits, deferring such a message for its whole retry window before it gives up
+	// (cmd/listener/unplaceable_delivery.go).
 	ReasonNoSessionRecord
-	// ReasonNoPushTarget is a session whose record exists and names nothing to push to: it
-	// registered before its server bound a serve port. That record is rewritten when the port
-	// is bound, so asking again is not asking the same question - a caller may wait the port
-	// out, and the listener's delivery does, deferring such a message for its whole retry
-	// window before it gives up (cmd/listener/unplaceable_delivery.go).
-	ReasonNoPushTarget
-	// ReasonPushFailed is a record that named a serve port the push did not land on: an
-	// unreachable peer, a session process restarting, a connection refused, or a server that
-	// answered with anything but 204. The attempt failed and cannot tell whether the session
-	// took the prompt, so a caller may ask again only at the cost of repeating it. The listener's
-	// delivery never reaches its unplaceable policy with it: on the durable path a serving-port
-	// session's push is its worker's, which pushes until the port accepts it
-	// (cmd/listener/serve_port_workers.go), and on the live and core lanes a failed push comes
-	// back through the interest path, which reports it delivery_failed and NAKs.
-	ReasonPushFailed
 )
 
-// reasonFor maps the delivery sentinels onto the reason the caller acts on. Every other error -
-// a refused push, an unreachable machine - is ReasonPushFailed: it is a failure of this attempt,
-// not a statement about the session's record, and a later attempt may well land. ErrWrongMachine
-// never reaches here: both call sites answer it as OwnedElsewhere before they map.
+// reasonFor maps the delivery sentinel onto the reason the caller acts on. ErrNoSessionRecord is
+// the only error a delivery returns, so the default stands for nothing a deployed listener
+// reaches: an error that is not that sentinel is no statement about the session's record, and
+// ReasonNone holds no retry open for it.
 func reasonFor(err error) HandleAgentReason {
-	switch {
-	case errors.Is(err, ErrNoSessionRecord):
+	if errors.Is(err, ErrNoSessionRecord) {
 		return ReasonNoSessionRecord
-	case errors.Is(err, ErrNoPushTarget):
-		return ReasonNoPushTarget
-	default:
-		return ReasonPushFailed
 	}
+	return ReasonNone
 }
 
 // HandleAgentResult captures the outcome of agent message handling.
@@ -59,21 +45,16 @@ type HandleAgentResult struct {
 	Delivered bool
 	Skipped   bool
 	// Relayed is set with Delivered and Skipped for a message the session's own consumer holds,
-	// which the relay of that consumer delivers (DeliveryResult.Relayed): the caller pushes
-	// nothing and records nothing about it, neither an attempt nor a dedupe key.
+	// which the relay of that consumer delivers (DeliveryResult.Relayed): the caller records
+	// nothing about it, neither an attempt nor a dedupe key.
 	Relayed bool
-	// Push is set by ResolveStoredAgentMessage for a serving-port session this listener owns, with its
-	// entry: the caller pushes the message to the session's port (Deliverer.Push). HandleAgentMessage
-	// makes that push itself, and never sets it.
-	Push  bool
-	Entry SessionEntry
-	// OwnedElsewhere reports a session another listener owns (see ErrWrongMachine). That listener
-	// reads the same inbox message from its own durable and delivers it, so this one acknowledges
-	// it with nothing to report: no delivery, no exception, no NAK.
+	// OwnedElsewhere reports a session whose stored subscription names another listener. That
+	// listener reads the same inbox message from its own durable and delivers it, so this one
+	// acknowledges it with nothing to report: no delivery, no exception, no NAK.
 	OwnedElsewhere bool
 	ShouldNAK      bool
 	Err            error
-	// Reason tells apart the three causes of an undelivered message that carries no error for
+	// Reason tells apart the two outcomes of an undelivered message that carries no error for
 	// the caller to act on: the registry path's undelivered result, which the listener's delivery
 	// retries or gives up on by this field alone. The NAKing interest path sets it too, but its
 	// result carries Err and ShouldNAK, and the listener answers that result by those before it
@@ -102,10 +83,8 @@ func HandleAgentMessage(
 }
 
 // ResolveStoredAgentMessage is HandleAgentMessage for the durable path's copy of a stored message
-// of stream sequence storedSeq, without the push to a serving port: a session it would push to
-// comes back with Push set and its entry, for the caller to push to. The sequence decides whether
-// a session on consumer delivery is already held this message by its own consumer
-// (Deliverer.Resolve).
+// of stream sequence storedSeq. The sequence decides whether a session on consumer delivery is
+// already held this message by its own consumer, which relays it (Deliverer.Resolve).
 func ResolveStoredAgentMessage(
 	item contracts.Envelope,
 	sessionID string,
@@ -133,9 +112,6 @@ func handleAgentMessage(
 	// Interest path: the stored subscription names this listener, which owns the session.
 	if interest != nil && interest.MachineID == machineID {
 		delivery, err := deliver(item, *interest, entry)
-		if errors.Is(err, ErrWrongMachine) {
-			return HandleAgentResult{OwnedElsewhere: true}
-		}
 		if err != nil {
 			return HandleAgentResult{ShouldNAK: true, Err: err, Reason: reasonFor(err)}
 		}
@@ -143,18 +119,16 @@ func handleAgentMessage(
 	}
 	// A stored subscription naming another listener makes the session that listener's, whatever
 	// listener the session last registered through: the stored MachineID is the one its topics
-	// are fanned out on (store.Registry.Match), so ownership reads the same on both paths.
+	// are fanned out on (store.Registry.Match), and that listener reads this message from its own
+	// durable too.
 	if interest != nil && interest.MachineID != "" {
 		return HandleAgentResult{OwnedElsewhere: true}
 	}
 
-	// No stored subscription names an owner, so the session registry entry does: an interest
-	// naming no machine leaves the decision to the entry's MachineID. The entry is the one the
-	// caller resolved, delivered through directly rather than read a second time.
+	// No stored subscription names an owner, so this listener answers for the session: there is
+	// nobody else the message can be left to. The entry is the one the caller resolved, delivered
+	// through directly rather than read a second time.
 	delivery, err := deliver(item, store.Interest{SessionID: sessionID}, entry)
-	if errors.Is(err, ErrWrongMachine) {
-		return HandleAgentResult{OwnedElsewhere: true}
-	}
 	if err != nil {
 		// Session not found or delivery failed without interest — don't NAK,
 		// another listener may own this session.
@@ -163,10 +137,7 @@ func handleAgentMessage(
 	return delivered(delivery)
 }
 
-// delivered is the result of a delivery that succeeded, or that Resolve left a push to the caller.
+// delivered is the result of a delivery that succeeded.
 func delivered(delivery DeliveryResult) HandleAgentResult {
-	if delivery.Push {
-		return HandleAgentResult{Push: true, Entry: delivery.Entry}
-	}
 	return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped, Relayed: delivery.Relayed}
 }
