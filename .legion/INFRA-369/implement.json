@@ -2,40 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-369",
-  "completed": "2026-11-01T23:21:05Z",
-  "round": "the red CI check at 3e4f9289 (the three Dispatch skills at exactly 2000 words), and the live-room gap the tester found: nothing drove Docs.SetBlockAttributes into the block-pointer validator, for any kind",
-  "previousHandoff": "3e4f92898bd32fa5dca556ae4586e8a2e6fcea57",
+  "completed": "2026-11-02T01:10:16Z",
+  "round": "the review at 420ab3d4: four findings, all fixed at code head a1f7ac3e - the live-room test's unchecked read, a copied live-write helper, the missing fourth ask shape in the shared block-pointer table, and one stale sentence about numbered migrations",
+  "previousHandoff": "c27127df39e176e8f6a8b488d82e2d9b833594f6",
   "proof": [
     {
-      "criterion": "The word guard the push went red on is green with margin, and nothing of the branch's reference form is given up to get there.",
-      "surface": "The guard itself, run in this pod against the staged skills partition it builds (packages/pi-envoy/src/skills-guard.test.ts, which counts every file of skills/dispatch, skills/dispatch-first and skills/dispatch-writing-specs as wc -w does, frontmatter included).",
-      "command": "find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; then cd packages/pi-envoy && bun test src/skills-guard.test.ts",
-      "observed": "1997 words, and the suite passes: 11 tests, 0 fail, 1 skip. Three words were cut from skills/dispatch/SKILL.md, each a redundancy and no instruction: 'local path' -> 'path', 'Do not repeat' -> 'never repeat', and 'from Dispatch **Settings -> Agent tokens**' -> 'from **Settings -> Agent tokens**' inside this skill's own setup section. The added reference line, dispatch://KEY/ask/<id>#b-<part>[@vN], stands: it is the address this issue exists to give.",
-      "headSha": "8105eb4fe5ddfbb4e25da8c3fa5a37ee1b7de30f",
-      "negativeControl": "The job log of CI run 41349059082, job pi-envoy 124976536702, at the previous head: 'Expected: < 2000, Received: 2000' at skills-guard.test.ts:98. main alone counts 1999, so the branch's one line is what crossed it."
+      "criterion": "The live-room test can no longer pass on a failed read: all three reads go through documentMarkdown, which fails on a status other than 200, so the per-row 'the room keeps nothing of a refused write' check compares two real renderings.",
+      "surface": "The Go server against the pod's own PostgreSQL (LEGION_TEST_PG_DSN), the test's own run, and the same run covering the helper that approval_carry_test.go now shares.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test ./internal/dispatch/api/ -run 'TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom|ApprovalCarr|Forged|BlockPointer|Pointer' -count=1 -timeout 40m",
+      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 25.070s. artifactMarkdown is deleted; the reads at block_pointers_test.go:221, :261 and :274 call documentMarkdown. setLiveBlockAttributes (approval_carry_test.go:591) now calls setBlockAttributes with its session actor and its t.Fatalf, so the Begin/Docs.Join/SetBlockAttributes/Commit sequence is stated once and that file loses 17 lines.",
+      "headSha": "a1f7ac3ef35703d2e8fc055720b65a2707b35921",
+      "negativeControl": "With the first read pointed at an artifact id that does not exist, the test fails at block_pointers_test.go:221 with 'read document text: status=404 body={\"code\":\"ARTIFACT_NOT_FOUND\",\"error\":\"artifact not found\"}'. Under the deleted helper that read decoded as \"\" and the row's comparison passed. Restored byte for byte before the commit."
     },
     {
-      "criterion": "The live room's own write meets both block-pointer refusals: a pointer at a block of a type the attribute's targets do not allow, and one naming a part of an ask.",
-      "surface": "The Go server's document service against PostgreSQL 17: Docs.SetBlockAttributes inside a Docs.Join transaction, which is the call the live room and the answer route make, with pmdoctest.BlockPointerSchema installed and a real indexed spec behind it.",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' go test ./internal/dispatch/api/ -run 'TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom' -count=1 -timeout 20m -v",
-      "observed": "PASS, four subtests: a pointer at a paragraph and at a callout are refused pmdoc.ErrBlockPointer naming the attribute, the target's type and the allowed type; a part of an ask, plain and pinned @v1, is refused as the value (pmdoc.ErrSchema, never docs.ErrDocSchema) with the message ending 'is a block of an ask: a block[] attribute points only at a block of a document'; after each refusal the room's markdown and checks.md's artifact, version count and block_refs are unchanged; and a pointer at an allowed requirement is accepted and reads back on the block as ':::claim{#c1 serves=\"dispatch://CORE-1/artifact/checks-md#b-r2\"}'.",
-      "headSha": "8105eb4fe5ddfbb4e25da8c3fa5a37ee1b7de30f",
-      "negativeControl": "Red-before, run by me after the worker reported it: with the ask arm of validateBlockPointerValues removed (pmdoc/schema.go:372) and everything else intact, both ask rows fail, reporting the generic 'is not a block reference as Dispatch writes one' in place of the sentence; restored byte for byte, and the diff then held the test file alone. Removing refuseBlockPointers (docs/mutation.go:377) turns the two type rows red."
+      "criterion": "The shared block-pointer table holds all four ask shapes, so Go and TypeScript cannot drift on a pinned project-document ask part.",
+      "surface": "The three suites that read the corpus: contracts' own table test, the Go copy pmdoc walks, and the editor's schema test.",
+      "command": "cd packages/contracts && bun -e '…regeneration recipe from dispatch-block-ref.test.ts…' && bun test; cd packages/proof-editor && bun test src/tests/block-schema.test.ts; cd packages/envoy && DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test ./internal/dispatch/pmdoc/ -run Pointer -count=1",
+      "observed": "contracts 411 tests, 0 fail, 3326 expect() calls (410 and 3323 before the row); the editor 19 pass; pmdoc ok. The row is dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b2@v1, refused with the sentence the other three carry, and the JSON copy was regenerated from contracts rather than edited.",
+      "headSha": "a1f7ac3ef35703d2e8fc055720b65a2707b35921",
+      "negativeControl": "contracts' own test compares the JSON copy with the TypeScript table, so a stale or hand-edited copy fails it; the row's expectation is a refusal, so a build that accepted the value fails all three suites."
     }
   ],
   "filesChanged": [
-    "skills/dispatch/SKILL.md - three redundant words cut, so the three Dispatch skills total 1997 of the guard's 2000",
-    "packages/envoy/internal/dispatch/api/block_pointers_test.go - TestSetBlockAttributesRefusesABlockPointerInTheLiveRoom, with setBlockAttributes (a Docs.Join transaction, as answerAsk's WriteBlock makes one) and artifactMarkdown (the room's current rendering)"
+    "packages/envoy/internal/dispatch/api/block_pointers_test.go - artifactMarkdown deleted, the three reads go through documentMarkdown, and setBlockAttributes' doc names setLiveBlockAttributes as the form that fails the test on a refusal",
+    "packages/envoy/internal/dispatch/api/approval_carry_test.go - setLiveBlockAttributes delegates to setBlockAttributes",
+    "packages/contracts/src/dispatch-block-ref.ts - the pinned project-document ask part row",
+    "packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json - regenerated from contracts with the recipe dispatch-block-ref.test.ts names",
+    "packages/envoy/internal/dispatch/store/ask_blocks_migrations_test.go - the constants' comment names the case that can still move beforeAskBlocks"
   ],
   "trickyParts": [
-    "The live write validates the same tree twice: pmdoc.SetBlockAttributes' own out.Validate() (retype.go:127) and pmdoc.Update's want.Validate() (update.go:22). Removing either alone leaves the test green, and removing both makes the room record the value and refuse its own document afterwards, which is a different behaviour. The test therefore asserts the refusal is the value's (pmdoc.ErrSchema and not docs.ErrDocSchema), and the red-before that isolates it removes the ask arm of validateBlockPointerValues rather than a validator call.",
-    "The test needs newTestServer rather than blockIndexHandler: refuseBlockPointers reads each target's type from the block index in the write's own transaction, so the document service under test must be the one the handlers write through (deps.Docs)."
+    "The reviewer's prose finding named askBlockTables as the constant a late migration moves. It is beforeAskBlocks: migrateThrough(beforeAskBlocks) is what brings a test database to the state just before the pair, so the case to name is a timestamped migration sorting between 161 and 20261101143211 merging later, and the constant it moves is beforeAskBlocks."
   ],
   "deviations": [
-    "The architect's acceptance asked for red-before by removing out.Validate() at pmdoc/retype.go:127. That cannot hold on this path, for the double validation above; the green result is recorded and the refusal is isolated two other ways instead, both red."
+    "The reviewer's non-defect judgement on the test table's `target` flag is kept: two assertion paths for two kinds of refusal, so the ask rows keep HasSuffix over the whole sentence rather than Contains.",
+    "The pod was replaced mid-round on the contract-44 image. The code commit a1f7ac3e was pushed before the restart and survived; this handoff is written again on the new pod, and every check above was re-run there against LEGION_TEST_PG_DSN rather than the scratch Postgres the old pod held."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "internal/dispatch/pmdoc needs more than a 10-minute deadline on this pod: it runs about 934 s and passes at 35m, and its differential tests shell out to Bun, so they fail with 'Cannot find module @legion/contracts' until bun install has linked the workspace."
+    "The new pod carries LEGION_TEST_PG_DSN (its own test PostgreSQL), so a Go test needing a database no longer needs a Postgres extracted onto the issue volume; DISPATCH_TEST_DATABASE_URL takes that value directly."
   ]
 }
