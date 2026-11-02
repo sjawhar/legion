@@ -1,0 +1,5 @@
+kind: Added
+body: A send answers whether its target session is connected or stopped, stores a message for a stopped session Envoy still knows instead of answering 404, and takes `connected_only` to refuse a stopped target rather than store for it. A publish answers how many sessions get the message and how many of those are running, `GET /v1/registry/<id>?include_stopped=1` answers a stopped session's record, and a listener whose NATS user cannot open the new `envoy_known_sessions` bucket logs one line and runs without the counts.
+time: 2026-11-02T08:27:50.533771962Z
+custom:
+    Issue: pr2643

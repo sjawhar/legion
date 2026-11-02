@@ -151,6 +151,22 @@ copies than `ENVOY_NATS_REPLICAS` with that update. This hub is one server, whic
 replica count above 1, so the programs that use it run with `ENVOY_NATS_REPLICAS` unset or 1 (the
 hub's own listener sets none), and at 1 neither sends a raise.
 
+The buckets those sets open are `envoy_interests`, `envoy_roles`, `envoy_sessions`,
+`envoy_known_sessions` and `envoy_ci_state`, with `envoy_webhook_redelivery` for
+`DispatchPermissions`. Every bucket `bus.ListenerBuckets()` names is granted to each of these
+users, so `envoy_known_sessions` widened the host and Dispatch grants when it was added there:
+any session on a host can write another session's known-session record. That is the same class
+of reach `envoy_sessions` already has, and dispatch://INFRA-840, which gives each session a NATS
+user of its own, is the place that narrows both.
+
+A session's presence subject, `notifications.envoy.presence.<session id>`, is where the
+listener's send route asks whether that session's plugin still holds a NATS connection. It needs
+no rule of its own in either direction, since `notifications.>` already covers the listener's
+publish of the probe and the session's subscribe. The narrowed session subscribe of
+sjawhar/legion#2603 must keep `notifications.envoy.presence.*` all the same: a session that may
+not subscribe to its own presence subject cannot answer the probe, and the listener then reads a
+live session as stopped.
+
 The sets of a user no session shares, `ListenerPermissions` and `ListenerHostPermissions`, alone
 hold the session consumers' calls on every consumer of the stream (`$JS.API.CONSUMER.CREATE`,
 `INFO`, `DELETE` and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, the create with a filter subject on

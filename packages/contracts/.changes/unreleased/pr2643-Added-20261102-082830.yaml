@@ -1,0 +1,5 @@
+kind: Added
+body: '`DeliveryAttemptState` is the one list of a delivery attempt''s four states and adds `queued`: the listener stored the message for a session it knows and that is not running, and every reader that asks whether the listener took the message counts `queued` as it counts `sent`. `CreateMessageInput` and `CreateAgentMessageInput` take `connected_only`, which asks that the message reach a session that is running now or not at all.'
+time: 2026-11-02T08:28:30.565164071Z
+custom:
+    Issue: pr2643

@@ -1,0 +1,5 @@
+kind: Added
+body: The channel server answers the listener's connection check on its session's presence subject, declares the check only once a flush shows the server accepted the subscription, and moves the subscription with the session id at a handoff. `envoy_send` says whether the target was connected or the message was queued for a stopped session, and `envoy_publish` says how many other sessions get the message.
+time: 2026-11-02T08:28:21.660279396Z
+custom:
+    Issue: pr2643
