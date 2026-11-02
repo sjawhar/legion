@@ -2,22 +2,37 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "previousHandoff": "a71947ddb981c8daf19be12045c47c8082f7aeae",
+  "previousHandoff": "5b31b3b7882744746ec35798def091e21065a2e4",
   "proof": [
     {
-      "criterion": "The devbox proof of A3/A4 runs with one GitHub App in both github_apps slots, the implement App 5341240 (the architect's task for this round)",
-      "surface": "scripts/e2e/parked-decision-devbox.sh's own rig and boot (start_listener, start_dispatch, write_legion_config, install-plugin-profile.sh, install-key-file-model-route.sh, the real `legion start`) in this issue's pod, with Postgres 18 and NATS 2.10 started locally, a scratch Dispatch project PDBOOT mapped to sjawhar/legion-smoke, and a stand-in mise for the pinned Oh My Pi build (the pod has no mise or tmux)",
-      "command": "script edit: require_app_inputs implement; write_github_apps implement; the implement entry copied to the review slot; check_github_apps implement. Then legion start --check-config --config work/legion.yaml; then start_kept daemon \u2026 legion start --config work/legion.yaml",
-      "observed": "GET /app proved the key: {\"implement\":\"legion-implementer[bot]\"}, both slots app_id \"5341240\". `legion start --check-config` printed 'Config OK: project=PDBOOT'. The real boot passed the plugin gate ('pi-legion speaks this daemon's contract and loads with pi-envoy', daemonApiVersion 44) and the store, config and dispatch stages, then exited: 'legion start: the review App names bot login \"legion-implementer[bot]\" and the implement App \"legion-implementer[bot]\"; the workflow needs two different Apps' (packages/daemon/internal/daemon/workflow.go:233, appLoginsAtBoot, called at workflow.go:294; workflow_test.go:90 asserts it). The daemon judges a push by its pusher against the review App's login, so one App cannot serve both roles. The architect ruled: no daemon change and no other App; the script stays as it is (two Apps) and the proof waits on a readable key for the review App 5341243.",
-      "headSha": "56b6404b40e1f916f90dbc3d110471bf49e69b59",
-      "negativeControl": "`legion start --check-config` accepts the one-App file (it runs no key command and reads no login), so it cannot show the refusal; only the real boot reaches appLoginsAtBoot, and the refusal names both logins."
+      "criterion": "Spec v5 A3: the proof no longer needs a session to park a waiting root; tree 5 checks that the daemon sets a session's park back, and foreign-park-stays covers the person-parked tree 4 (and the operator-parked tree 2)",
+      "surface": "scripts/e2e/parked-decision-devbox.sh trees-parked, foreign-park-stays, walk-on-start, verdict; reasserted_status against the devbox run's own log line",
+      "command": "bash -n; shellcheck v0.10.0 -x parked-decision-devbox.sh lib/install-key-file-model-route.sh lib/install-model-gateway.sh (from scripts/e2e); the command-word check (shfmt v3.10.0 --to-json lists every literal command word, bash resolves each after sourcing transcript, model-endpoint, rig, omp-home, workflow, leftovers and github-apps, the script's own functions counted); reasserted_status on a daemon.log fixture holding the run's line {\"msg\":\"workflow: a session wrote a lifecycle status; the daemon re-asserts its own\",\"issue\":\"PD93804605-4\",\"session\":\"stage3-architect-stand-in\",\"wrote\":\"backlog\",\"status\":\"in_progress\"}",
+      "observed": "bash -n passes on all four shell files; shellcheck exits 0 on the script and the key-file and gateway libs (install-box-login-route.sh keeps its existing SC2015 info at line 152, an A && B || fail whose C is meant). Command-word check: 126 words, unresolved only docker, mise and tmux, the devbox tools the prerequisites loop requires and this pod lacks. reasserted_status prints in_progress for PD93804605-4 (exit 0), and exits 4 printing nothing for an issue with no such line or for another session. Tree 5 now: the stand-in PATCHes backlog, then the run waits for that log line, for Dispatch to show the logged status written back by legion-daemon:<project> after the PATCH, and checks tree 5 still waits on its gate and is not parked; it gets no question, and foreign-park-stays, walk-on-start and verdict read trees 2 and 4 (and 1 to 4).",
+      "headSha": "418b43208e4a875ebf30fcf6eff0b26db6495bce",
+      "negativeControl": "reasserted_status with dispatch_agent_session set to another session, or for an issue the log does not name, exits 4: the check waits for the stand-in's own write on tree 5 and nothing else."
+    },
+    {
+      "criterion": "The key-file route calls the endpoint LEGION_E2E_MODEL_BASE_URL names; a fresh profile from lib/install-key-file-model-route.sh or lib/install-model-gateway.sh opens no Oh My Pi setup wizard",
+      "surface": "lib/install-key-file-model-route.sh run as the script runs it, with --base-url, into a fresh make_omp_home profile, then Oh My Pi 18.13.3 (/opt/omp/bin/omp) started in a pty (script -qfec) under that profile",
+      "command": "bash lib/install-key-file-model-route.sh --profile pd-wizard-<m> --home <home> --dest <dest> --key-dir <dir> --key-file <0600 placeholder> --base-url https://gateway.internal.example; HOME=<home> OMP_PROFILE=pd-wizard-<m> TERM=xterm-256color timeout 25 script -qfec /opt/omp/bin/omp <log>; bun test scripts/e2e/lib/install-key-file-model-route.test.ts install-model-gateway.test.ts install-box-login-route.test.ts model-endpoint.test.ts",
+      "observed": "models.yml baseUrl is https://gateway.internal.example. With the lib's config.yml (setupVersion: 2) the pane shows the splash and no 'Setup step'; the pinned build's CURRENT_SETUP_VERSION is 2 (read from the binary: `var n0 = 2`, scenes minVersion 1 and 2). The four lib test files pass, 48 tests. The script itself in this pod stops at prerequisites ('FAIL prerequisites: docker is required'): the pod has no docker, tmux or mise, so the rig cannot run here.",
+      "headSha": "418b43208e4a875ebf30fcf6eff0b26db6495bce",
+      "negativeControl": "The same profile with the setupVersion line removed: the pane shows 'Setup step', the wizard that held controller-up on sami-leanperf."
     }
   ],
-  "filesChanged": [],
+  "filesChanged": [
+    "scripts/e2e/parked-decision-devbox.sh",
+    "scripts/e2e/README.md",
+    "scripts/e2e/lib/install-key-file-model-route.sh",
+    "scripts/e2e/lib/install-model-gateway.sh",
+    "scripts/e2e/lib/install-box-login-route.sh"
+  ],
   "deviations": [
-    "No code change this round: the one-App edit was made, booted and reverted. scripts/e2e/parked-decision-devbox.sh is unchanged from d94e8bfd (code head 56b6404b)."
+    "install-box-login-route.sh also writes setupVersion: 2: it writes a fresh profile's config.yml the same way, so the same wizard would hold its panes.",
+    "The README's parked-decision checkpoint table became a list, as AGENTS.md's guide rule asks of a table whose rows hold more than one sentence; its words are unchanged except for tree 5 and the base URL. bun scripts/semantic-line-breaks.ts scripts/e2e/README.md now reports nothing (it reported 55 findings in this section before)."
   ],
   "openQuestions": [
-    "The A3/A4 devbox proof needs a key the proof can read for the review App 5341243 (GH_REVIEW_APP_PRIVATE_KEY_B64 is destroyed in the broker); the architect sends that request to the controller for the operator's approval. Acceptance also waits on the gateway grant."
+    "The full proof needs a devbox (docker, tmux, mise); the merge lane reruns it after review."
   ]
 }
