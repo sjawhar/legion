@@ -29,6 +29,7 @@ import {
   type ConsumerDelivery,
   type ConsumerFrame,
   createConsumerDelivery,
+  createPresenceResponder,
   registeredWithoutRelay,
 } from "@legion/envoy-client/consumer-delivery";
 import {
@@ -104,6 +105,7 @@ import {
   envoyToolSpecs,
   type MessageMetadataArguments,
   parseEnvoyToolArguments,
+  publishConfirmationText,
   sendConfirmationText,
   sessionsOnMachine,
   toMessageMetadata,
@@ -1009,8 +1011,10 @@ export default function envoyExtension(pi: PiApi): void {
   // nats.js resubscribes every subscription once it reconnects, but nothing published while it was
   // away is kept for it: each reconnect sweeps the stream for what this session missed, and, while
   // the relay subscription is open, begins a new epoch and registers it at once, so the listener
-  // restarts the session's relay at its ack floor (`renewRelayEpoch`). The reader ends with the
-  // connection, and stops acting once another connection replaced it.
+  // restarts the session's relay at its ack floor (`renewRelayEpoch`). The presence subscription
+  // is read again too: the server may refuse now what it accepted before, or accept what it
+  // refused (`recheckPresence`). The reader ends with the connection, and stops acting once
+  // another connection replaced it.
   const watchReconnects = async (watched: NatsConnection): Promise<void> => {
     try {
       for await (const status of watched.status()) {
@@ -1018,6 +1022,7 @@ export default function envoyExtension(pi: PiApi): void {
         if (status.type !== Events.Reconnect) continue;
         renewRelayEpoch();
         triggerReplay();
+        recheckPresence();
       }
     } catch (error) {
       logger.warn("envoy: the NATS connection's status reader failed", {
@@ -2269,6 +2274,51 @@ export default function envoyExtension(pi: PiApi): void {
     void pumpAgentStreamControl(subscription, session);
   };
 
+  // This session's answer to the listener's connection check, held outside `subscriptions` as
+  // the agent-stream control subject above is: the check is no registered interest, so nothing
+  // that lists, unregisters or recovers this session's topics may ever see its subscription,
+  // and no registration carries it as a topic. The machine itself is shared with claude-envoy
+  // (`createPresenceResponder`); this is its plumbing into the extension's connection and log.
+  const presence = createPresenceResponder({
+    connect: () => ensureConnection(),
+    // The connection of the moment: with none there is no verdict to read, and the next pass
+    // or reconnect subscribes and asks again.
+    flush: () => connection?.flush(),
+    // Answered on the current connection, as every other publish of this extension is.
+    publish: (reply, answer) => connection?.publish(reply, answer),
+    encode: (body) => codec.encode(body),
+    clientInstanceID: () => registrationState.clientInstanceID,
+    notice: (notice) => {
+      if (notice.kind === "refused") {
+        logger.warn(
+          "envoy: the NATS server did not accept this session's presence subscription; its registration declares no connection check",
+          { sessionID: notice.sessionID, subject: notice.subject }
+        );
+        return;
+      }
+      logger.warn(
+        notice.kind === "answer-failed"
+          ? "envoy: could not answer a presence check"
+          : "envoy: the presence subscription ended",
+        { error: messageFor(notice.error), sessionID: notice.sessionID }
+      );
+    },
+  });
+
+  /**
+   * nats.js re-subscribes by itself once it reconnects, and the server may answer differently
+   * this time; a subscription it refused is closed and gone, so it is opened again. The session
+   * registers when the verdict changed, so the listener learns whether the check is answered now.
+   */
+  const recheckPresence = (): void => {
+    const session = presence.following();
+    if (shuttingDown || session === "" || session !== sessionID) return;
+    void presence
+      .refresh(session)
+      .then((changed) => (changed ? registerSession() : undefined))
+      .catch(() => undefined);
+  };
+
   /** One of this session's messages, on its way to whoever has the session open, tagged with the
    *  Dispatch message a user message delivered when it matches a person's turn this extension sent
    *  in. Only the top-level instance publishes: a `task` subagent's instance never learns a session
@@ -2399,7 +2449,10 @@ export default function envoyExtension(pi: PiApi): void {
   // until a pass closes it, or a wildcard over them), which the listener refuses to store.
   // While the session's relay subject is open, the registration asks for consumer delivery
   // (`delivery`: the relay's epoch and resume point), the relay taking the topics it carries as
-  // followed first; its answer says whether the listener relays them.
+  // followed first; its answer says whether the listener relays them. `presence` declares that
+  // this session answers the listener's connection check, and is sent only once a flush showed
+  // the server accepted the subscription that answers it (`presence.declares`): a declaration a
+  // session cannot answer is worse than none, since every send to it would read connected.
   const registrationInput = (asking: Relay | undefined): RegistrationInput => {
     const own = agentSubject(sessionID);
     const topics = [
@@ -2426,6 +2479,7 @@ export default function envoyExtension(pi: PiApi): void {
           : DELIVERY_CAPABILITIES,
       driving: false,
       selfSubscribed: true,
+      ...(presence.declares(sessionID) ? { presence: true } : {}),
       plugin: { name: packageName, version: packageVersion },
       ...(asking === undefined ? {} : { delivery: asking.delivery.registration() }),
     };
@@ -2781,6 +2835,10 @@ export default function envoyExtension(pi: PiApi): void {
         // A viewer's replay request and its watch pings reach the session here. Opening it costs
         // one core subscription and publishes nothing: a session nobody opens stays silent.
         await watchAgentStream(host, handle.connect);
+        // The listener's connection check, on this session's own connection and outside its
+        // registered topics. A change of session id moves it here, so the id left behind is
+        // answered by nobody, and the registration below declares it when it was accepted.
+        await presence.refresh(host, handle.connect);
         if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
           await recoverRegisteredInterests(handle);
         }
@@ -3240,6 +3298,9 @@ export default function envoyExtension(pi: PiApi): void {
       awaitingRetry.clear();
       agentStreamControl = undefined;
       agentStreamControlSession = "";
+      // The drain above ended the presence subscription with the connection; this drops the
+      // responder's hold on it, as the agent-stream control subject above is dropped.
+      presence.close();
       // This process serves the session no longer, so what it was shown goes with it: the id this
       // instance registered, and the host's live one, which a task subagent's tool calls carried
       // (its instance never ran restoreLocalSessionState, so its `sessionID` stayed empty).
@@ -3902,10 +3963,14 @@ export default function envoyExtension(pi: PiApi): void {
             ...(typeof idempotencyKey === "string" ? { idempotencyKey } : {}),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
+          // The text says what the target was; the details say it in a field, with the moment a
+          // stopped one was last seen (`last_seen`, unix milliseconds) when the listener gave it.
           return toolSuccess(sendConfirmationText(result), {
             event_id: result.envelope.event_id,
             recipient: result.recipient,
             confirmed: result.confirmed,
+            state: result.state,
+            ...(result.lastSeen === undefined ? {} : { last_seen: result.lastSeen }),
           });
         }
         case EnvoyToolOperation.publish: {
@@ -3931,10 +3996,8 @@ export default function envoyExtension(pi: PiApi): void {
           // general rule. A direct envoy_send is unaffected: the agent-subject lane has no such
           // skip.
           const undelivered = source !== "" && result.holder === source && inSubagent;
-          const published =
-            result.holder === undefined
-              ? `published ${result.envelope.event_id}`
-              : `published ${result.envelope.event_id}; holder ${result.holder}`;
+          // One text for both hosts, counts and role holder alike (`publishConfirmationText`).
+          const published = publishConfirmationText(result);
           return toolSuccess(
             undelivered
               ? `${published}\nNot delivered: that holder is the session this subagent sends as, and the listener drops a message whose source session is its recipient, so the agent that spawned you did not receive it. Reach it with a write to its agent:// address instead.`
@@ -3943,6 +4006,10 @@ export default function envoyExtension(pi: PiApi): void {
               event_id: result.envelope.event_id,
               topic,
               ...(result.holder === undefined ? {} : { holder: result.holder }),
+              ...(result.recipients === undefined ? {} : { recipients: result.recipients }),
+              ...(result.recipientsConnected === undefined
+                ? {}
+                : { recipients_connected: result.recipientsConnected }),
               ...(undelivered ? { undelivered_echo: true } : {}),
             }
           );

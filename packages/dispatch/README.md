@@ -85,7 +85,10 @@ harness you started yourself. `AGENTS.md`'s end-to-end section states that
 rule in full — the accepted values and what a bad or duplicated port does. The
 harness starts `e2e/fake-envoy.ts` and that listener is the only Envoy the
 server ever talks to; tests seed its
-live sessions with `setLiveSessions` from `e2e/agents.ts`. It starts
+live sessions with `setLiveSessions` from `e2e/agents.ts`, stop one of them with
+`setSessionStopped` (the listener still knows it, so a send to it is stored and
+Dispatch records the attempt `queued`), and say what a send answers it was with
+`setSessionSendState`. It starts
 `e2e/fake-broker.ts` as the secrets broker, so the
 credential-request feature is on, and tests seed its pending requests with
 `setPendingCredentialRequests` from `e2e/fake-broker-helpers.ts`; an empty

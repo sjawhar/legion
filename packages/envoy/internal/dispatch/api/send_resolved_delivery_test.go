@@ -24,6 +24,7 @@ func TestSendResolvedDeliveryReportsNoEnvelopeWithAnyFailure(t *testing.T) {
 		wantEnvelope bool
 		wantDup      bool
 		wantFailure  bool
+		wantQueued   bool
 	}{
 		{name: "the target did not resolve", target: ResolvedMention{Target: "role:planner", Delivery: "steer", ResolveError: "no live holder for role planner"}, wantFailure: true},
 		{name: "no live session", target: ResolvedMention{Target: "session:s9", Delivery: "steer"}, wantFailure: true},
@@ -48,6 +49,11 @@ func TestSendResolvedDeliveryReportsNoEnvelopeWithAnyFailure(t *testing.T) {
 		{name: "the stream already held the send", target: live, answer: func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"event_id":"envelope-2","recipient":"s1","duplicate":true}`))
 		}, wantDup: true},
+		// A stopped target: the listener stored the message for the session and said so, so the
+		// send carries its envelope and the attempt it settles is queued, never failed.
+		{name: "the listener stored the send for a stopped session", target: live, answer: func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"event_id":"envelope-3","recipient":"s1","state":"stopped","last_seen":1700000000000}`))
+		}, wantEnvelope: true, wantQueued: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			url := "http://127.0.0.1:1"
@@ -57,10 +63,11 @@ func TestSendResolvedDeliveryReportsNoEnvelopeWithAnyFailure(t *testing.T) {
 				url = listener.URL
 			}
 			s := &server{deps: Deps{Envoy: envoy.New(url, envoy.WithTimeout(150*time.Millisecond))}}
-			envelopeID, duplicate, failure := s.sendResolvedDelivery(context.Background(), tc.target, "body", "m1:steer", nil, []byte(`{}`))
-			if (envelopeID != nil) != tc.wantEnvelope || duplicate != tc.wantDup || (failure != "") != tc.wantFailure {
-				t.Fatalf("sendResolvedDelivery = (envelope %v, duplicate %v, failure %q), want envelope %v, duplicate %v, failure %v",
-					envelopeID, duplicate, failure, tc.wantEnvelope, tc.wantDup, tc.wantFailure)
+			outcome := s.sendResolvedDelivery(context.Background(), tc.target, "body", "m1:steer", nil, []byte(`{}`), false)
+			if (outcome.envelopeID != nil) != tc.wantEnvelope || outcome.duplicate != tc.wantDup ||
+				outcome.queued != tc.wantQueued || (outcome.failure != "") != tc.wantFailure {
+				t.Fatalf("sendResolvedDelivery = %+v, want envelope %v, duplicate %v, queued %v, failure %v",
+					outcome, tc.wantEnvelope, tc.wantDup, tc.wantQueued, tc.wantFailure)
 			}
 		})
 	}

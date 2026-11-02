@@ -73,10 +73,15 @@ sent to the controller.
 ### When no controller takes it
 
 The controller topic is a live wake: a message published while no controller runs reaches nobody,
-and no controller reads it later. `envoy_publish`'s own answer tells you whether one took it. A
-publish to a role answers with its live `holder`. With no live controller it fails instead, with
-`no holder for role legion-<project>-controller` or a holder that lapsed, and the listener delivers
-nothing (`packages/envoy/cmd/listener`, the test "unheld role returns 404 without publishing").
+and no controller reads it later. `envoy_publish`'s own answer tells you whether one took it. The
+controller topic is a role topic, so its answer names the live `holder` and carries no recipient
+count: the listener forwards a role message to its holder alone. With no live controller the
+publish fails instead, with `no holder for role legion-<project>-controller` or a holder that
+lapsed, and the listener delivers nothing (`packages/envoy/cmd/listener`, the test "unheld role
+returns 404 without publishing"). Every other topic is counted rather than held by one session:
+its answer reads `published <id> to N other sessions (M running now)`, and
+`no other session subscribes to <topic>, so no other session gets it` is that count at zero, which
+means no session registered the topic and the message reached nobody.
 Then make the finding an ask, as [What the ask says](#what-the-ask-says) spells it, on the first
 of these that holds, so a person sees it and the controller finds it when it returns:
 

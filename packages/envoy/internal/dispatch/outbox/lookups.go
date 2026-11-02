@@ -37,7 +37,11 @@ type lookup interface {
 // listener does not know the session, the receipt times out, the handler is cancelled, the session
 // lacks the delivery mode - and a session whose mention failed has no copy but the outbox's.
 type mentionDeliveries struct {
-	// sent holds each session some attempt of a mention reached.
+	// sent holds each session the listener took some attempt of a mention for: handed to the
+	// running session (state 'sent'), or stored for one it knows that is not running and handed
+	// over when it runs again (state 'queued', api/envoy_resolve.go). A second copy from a
+	// session route would reach that session twice, under a key the listener cannot recognise as
+	// a repeat of the mention's, so both states hold the copy back for good.
 	sent map[string]struct{}
 	// pending holds each session no attempt reached yet whose send is still live: an attempt is
 	// pending and its claim, or its creation when no sender has claimed it yet, is younger than
@@ -474,7 +478,7 @@ func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string) (
 // gives a sender (internal/dispatch/api), so it no longer holds the outbox's copy back.
 var mentionDeliveryQuery = `
 	select comment_id::text, session_id,
-	       bool_or(state = 'sent'),
+	       bool_or(state in ` + model.DeliveryTakenStates + `),
 	       bool_or(state = 'pending' and coalesce(claimed_at, created_at) >= now() - ` + model.DeliveryClaimLapseInterval + `)
 	from comment_deliveries
 	where comment_id = any($1::text[]::uuid[]) and session_id is not null

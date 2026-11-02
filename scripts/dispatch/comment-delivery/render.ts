@@ -188,10 +188,14 @@ export function renderReport(
     "5. **Not delivered, with one cause.** Every pair has the status `not_received`. The report " +
       "gives the first cause that applies to a pair of the comment, in this order:",
     "   - `not-addressed:<rule>`: the pair was owed the comment, the outbox did not send it to " +
-      "the pair, and no delivery of a mention to the pair was sent or failed. The rule says why " +
-      "the pair was owed it: claimant, route, follower, asker or mention, joined with `+`.",
+      "the pair, and no delivery of a mention to the pair was sent, queued or failed. The rule " +
+      "says why the pair was owed it: claimant, route, follower, asker or mention, joined with " +
+      "`+`.",
     "   - `mention-failed:<error>`: Dispatch tried to deliver a mention, and its newest attempt " +
       "failed. The error is `session-not-live`, `receipt-timeout` or `other`.",
+    "   - `mention-queued`: the newest attempt of a mention to the pair is queued. The Envoy " +
+      "listener took the mention and stored it for the session, which was not running; the " +
+      "session reads it when it runs again.",
     "   - `not-running`: Dispatch sent the comment to the session, and the transcript store's " +
       "recorded start and end of the session's file do not include the time Dispatch published it.",
     "   - `running-no-row`: Dispatch sent the comment to the session within the store's recorded " +

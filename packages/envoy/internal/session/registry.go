@@ -28,6 +28,16 @@ type SessionEntry struct {
 	// process that merely has the session loaded from shared on-disk state.
 	Driving        bool `json:"driving,omitempty"`
 	SelfSubscribed bool `json:"self_subscribed,omitempty"`
+	// Presence reports that this session's plugin answers the listener's presence check on the
+	// session's presence subject (bus.PresenceSubject): a send to the session asks there whether
+	// a plugin of it still holds a NATS connection, and a reply naming the session is the answer
+	// that it does. It is a field of its own and deliberately not one of Capabilities, which is
+	// the closed list of targeted-delivery modes a session advertises (DELIVERY_CAPABILITIES in
+	// packages/contracts/src/dispatch-api.ts) and which Dispatch renders on its Agents page.
+	// Absent - an entry an older listener wrote, or one written for a plugin that does not answer
+	// the check - the send route asks nothing and counts the session connected for as long as it
+	// holds an entry, which is the answer every release gave before the check existed.
+	Presence bool `json:"presence,omitempty"`
 	// Host is the machine the client-reported `machineID()` (envoy-client's
 	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, and the
 	// address its owning listener reaches it at (Deliverer.hostFor), unless the session runs on

@@ -89,7 +89,7 @@ func (s *SessionConsumers) readStreamStates() {
 
 // readStreamState reads the stream's identity and sequences with one stream info.
 func (s *SessionConsumers) readStreamState(ctx context.Context) (sessionStreamState, error) {
-	reply, err := s.client.requestConfirmed(ctx, "$JS.API.STREAM.INFO."+Stream, nil)
+	reply, err := s.client.RequestCore(ctx, "$JS.API.STREAM.INFO."+Stream, nil)
 	if err != nil {
 		return sessionStreamState{}, err
 	}

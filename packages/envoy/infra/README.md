@@ -2842,8 +2842,13 @@ but the session consumers' is the base `HostPermissions` and `DispatchPermission
 It publishes to:
 
 - every notification topic, `notifications.>`: the subjects of the `ENVOY_NOTIFICATIONS` stream,
-  the role lanes, every exception lane, and the ad-hoc topics `/v1/messages/publish` sends over
-  core NATS (any `notifications.` topic the stream does not capture);
+  the role lanes, every exception lane, the presence subject of each session
+  (`notifications.envoy.presence.<session id>`, where the listener's send route asks whether that
+  session's plugin still holds a NATS connection), and the ad-hoc topics
+  `/v1/messages/publish` sends over core NATS (any `notifications.` topic the stream does not
+  capture). The presence subject needs no rule of its own in either direction: `notifications.>`
+  already covers the listener's publish of the probe here and the session's subscribe in
+  `SessionPermissions`;
 - the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its stored-message get
   `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, its durable consumer `listener-<m>`'s
   `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
@@ -2853,7 +2858,8 @@ It publishes to:
   delete nothing. `HostPermissions` and `DispatchPermissions` hold it through those same base
   entries; `SessionPermissions` does not, so a session holding that set alone reads what it missed
   only through the listener;
-- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
+- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions`,
+  `envoy_known_sessions` and
   `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
   bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
   watchers' consumer create and delete and their flow-control replies. The update is the raise a
@@ -2863,6 +2869,14 @@ It publishes to:
   `raise KV_<bucket>: ENVOY_NATS_REPLICAS=<n>: context deadline exceeded`;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
+
+Each bucket in that list is granted to every user built on this set: the listener's own, the host
+user a host's sessions share (`HostPermissions`) and Dispatch's. Adding `envoy_known_sessions` to
+`bus.ListenerBuckets()` therefore widened the host and Dispatch grants too, so any session on a
+host can write another session's known-session record. That is the same class of reach the
+session registry `envoy_sessions` already has, and dispatch://INFRA-840, which gives each session
+a NATS user of its own, is the place that narrows both; nothing here can, since one user serves
+every session on the host.
 
 It subscribes to `_INBOX.>`, and to the role lanes in the queue group every listener shares,
 `notifications.role.> envoy-roles`, so each role message is forwarded once whichever machine's
@@ -2890,11 +2904,17 @@ episode), and those sessions read on their own NATS subscriptions and catch up t
 `SessionPermissions()` is what any agent session needs, with `*` for the session id. It publishes
 to `_INBOX.>`, for the receipt a role delivery waits for and the replies to a session consumer's
 relay frames, and `agentstream.*.frames`, and subscribes to `notifications.>`, which holds its relay
-subject `notifications.envoy.deliver.<session id>`, and `agentstream.*.control`. It does not
+subject `notifications.envoy.deliver.<session id>` and its presence subject
+`notifications.envoy.presence.<session id>`, and `agentstream.*.control`. It does not
 subscribe to `_INBOX.>`, so a client holding this set alone may answer a request but not make one:
 sessions that share one user holding it, as a `gcp:NatsHub`'s `sessionUser` does, would otherwise
 each receive every other session's replies, so request/reply from such a session is refused by
 design. A host's user, holding `HostPermissions`, subscribes to `_INBOX.>` for its listener.
+
+The narrowed session subscribe of sjawhar/legion#2603 must keep
+`notifications.envoy.presence.*`: a session that may not subscribe to its own presence subject
+cannot answer the listener's connection check, and the listener then reads a live session as
+stopped.
 
 `HostPermissions(machineID)` is the grant of a host's one NATS user, which its listener and every
 session on the host share: in each direction the listener's base entries, the session consumers'

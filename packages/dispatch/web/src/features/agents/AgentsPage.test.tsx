@@ -2445,8 +2445,10 @@ test("a selected agent that came back is shown as not in the restored send, and 
   }
 });
 
-// The security review's minor: only a session an edit would bring in is "not in the refused send";
-// one the live plan still leaves out keeps the reason the live plan gives.
+// The security review's minor: only a session the live plan would include is "not in the refused
+// send"; one the mode still leaves out keeps the reason the mode gives. Since INFRA-626 a session
+// gone from the live list is one the live plan would include - it may be stopped rather than
+// ended, and the server decides - so an edit brings it back in.
 test("a restored send names a selected session it leaves out by the reason an edit would keep, unless it has come back", () => {
   const [planner, reviewer] = agents;
   const restored = {
@@ -2468,7 +2470,7 @@ test("a restored send names a selected session it leaves out by the reason an ed
     composedBroadcast(composition, live).plan.excluded.map((item) => item.reason);
 
   expect(reasons([planner, reviewer])).toEqual(["does not advertise BTW"]);
-  expect(reasons([planner])).toEqual(["no live session"]);
+  expect(reasons([planner])).toEqual(["not in the refused send; edit to include it"]);
   expect(reasons([planner, { ...reviewer, capabilities: ["aside", "btw"] }])).toEqual([
     "not in the refused send; edit to include it",
   ]);
@@ -2785,9 +2787,8 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
   ) => broadcastSendState(broadcastPlan(new Set(selected), live, delivery), delivery, body);
   const both = [planner.session_id, reviewer.session_id];
   const tail = ". Nothing is sent to them, and no other mode is substituted.";
-  // The line keeps each excluded session as an agent part, for `AgentName` to draw: by its
-  // registry title while it is listed, else by its ID.
-  const gone = (sessionId: string) => ({ sessionId, storedTitle: undefined });
+  // The line keeps each excluded session as an agent part, for `AgentName` to draw, by its
+  // registry title.
   const listed = (agent: Agent) => ({ sessionId: agent.session_id, storedTitle: agent.title });
   // Nobody reached: the label stops counting, and the Excluded line is the notice and the reason.
   const nobody = (line: AgentPart[]) => ({
@@ -2797,32 +2798,21 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
     refusalOnNotice: true,
   });
 
-  // Every selected session has left the registry: the line names each by its ID, and no mode
-  // would help.
-  expect(state(both, [], "btw")).toEqual(
-    nobody([
-      "Excluded: ",
-      gone(planner.session_id),
-      " (no live session)",
-      ", ",
-      gone(reviewer.session_id),
-      " (no live session)",
-      tail,
-    ])
-  );
-  // One gone, one without the mode: each with its own cause, then the mode that reaches the
-  // live one.
-  expect(state(both, [reviewer], "btw")).toEqual(
-    nobody([
-      "Excluded: ",
-      gone(planner.session_id),
-      " (no live session)",
-      ", ",
-      listed(reviewer),
-      " (does not advertise BTW)",
-      `${tail} Sending as Aside would reach 1 of them.`,
-    ])
-  );
+  // A selected session gone from the live list is still a recipient: Envoy may know it and it
+  // may simply be stopped, which the server decides and the sent broadcast names (INFRA-626).
+  expect(state(both, [], "btw")).toEqual({
+    label: "Send to 2",
+    notice: null,
+    refusal: null,
+    refusalOnNotice: false,
+  });
+  // One gone, one without the mode: only the mode excludes, and the gone one is reached.
+  expect(state(both, [reviewer], "btw")).toEqual({
+    label: "Send to 1",
+    notice: ["Excluded: ", listed(reviewer), " (does not advertise BTW)", tail],
+    refusal: null,
+    refusalOnNotice: false,
+  });
   // The hint picks the mode that reaches the most: Aside reaches both, BTW only the Planner.
   expect(state(both, agents, "steer").refusal?.at(-1)).toMatch(
     / Sending as Aside would reach 2 of them\.$/

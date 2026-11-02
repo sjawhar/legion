@@ -178,16 +178,19 @@ A pair is judged from its status in `receipts.tsv`:
 - `not_received`: not delivered, with the first cause that applies, in this order:
   1. `never-published`: Dispatch's outbox never published the comment's event.
   2. `not-addressed:<rule>`: the pair was owed the comment, the outbox did not send it to the
-     pair (`addressed` is `false`), and no delivery of a mention to the pair was sent or failed.
-     The rule says why the pair was owed it: `claimant`, `route`, `follower`, `asker` or
+     pair (`addressed` is `false`), and no delivery of a mention to the pair was sent, queued or
+     failed. The rule says why the pair was owed it: `claimant`, `route`, `follower`, `asker` or
      `mention`, joined with `+`.
   3. `mention-failed:<error>`: the newest attempt of a mention to the pair failed. The error is
      `session-not-live`, `receipt-timeout` or `other`.
-  4. `not-running`: the comment's `published_at` is not between the session's
+  4. `mention-queued`: the newest attempt of a mention to the pair is `queued`. The Envoy
+     listener took the mention and stored it for the session, which it knows and which was not
+     running; the session reads it when it runs again, within the 72 hours the stream keeps it.
+  5. `not-running`: the comment's `published_at` is not between the session's
      `target_started_at` and `target_ended_at`. These are the transcript store's recorded start
      and end of the session's transcript file, not the times that the session's process was up.
      An empty `target_ended_at` means that the store records no end for the file.
-  5. `running-no-row`: any other `not_received` pair. Dispatch sent the comment to the session
+  6. `running-no-row`: any other `not_received` pair. Dispatch sent the comment to the session
      within the store's recorded start and end of the session's file, and the transcript does
      not have it. The process can still have been down inside that span; the loss is in the last
      hop or in the plugin.

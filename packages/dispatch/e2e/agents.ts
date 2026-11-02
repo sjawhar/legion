@@ -89,6 +89,28 @@ export async function setSessionRecord(sessionID: string, record: SessionRecord)
   await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { record });
 }
 
+/** Stops a seeded session, or starts it again: the listener still knows it - a read that asks
+ *  for stopped sessions answers its record - and it is not running, so it is out of the live
+ *  list, a read that does not ask gets the 404, and a send to it is stored for it and answered
+ *  `stopped`, which Dispatch records as a queued attempt. */
+export async function setSessionStopped(sessionID: string, stopped: boolean): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", {
+    stopped,
+  });
+}
+
+/** What a send to this session answers it was, whatever a registry read of it shows: `stopped`
+ *  without stopping it is the session whose registry entry was still in place when Dispatch
+ *  resolved it and whose process had gone by the send. */
+export async function setSessionSendState(
+  sessionID: string,
+  sendState: "connected" | "stopped"
+): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", {
+    send_state: sendState,
+  });
+}
+
 export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   return (await fixtureRequest("/__fixture/sends", "GET")).json() as Promise<
     Record<string, unknown>[]

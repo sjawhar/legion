@@ -247,8 +247,10 @@ export function BroadcastSends({
  * delivery itself, so the row reads the broadcast again as the live feed reports each delivery
  * (`["broadcast"]`, which every recipient's delivery event refreshes): delivering while any
  * recipient's attempt is still pending, then delivered - or not, to a recipient whose attempt
- * failed, which the broadcast's own page retries. The broadcast is made either way; nothing here
- * is a write still unconfirmed.
+ * failed, which the broadcast's own page retries, or queued, for a recipient the listener knows
+ * and that is not running, which gets the message when it runs again (INFRA-626). A queued copy
+ * is counted on its own, because a message that waits is not a message delivered. The broadcast
+ * is made either way; nothing here is a write still unconfirmed.
  */
 function SentBroadcast({ created }: { created: BroadcastCreated }): ReactNode {
   const read = useQuery({
@@ -259,6 +261,7 @@ function SentBroadcast({ created }: { created: BroadcastCreated }): ReactNode {
   const states = read.recipients.map((recipient) => recipient.message.deliveries.at(-1)?.state);
   const delivering = states.filter((state) => state === "pending").length;
   const failed = states.filter((state) => state === "failed").length;
+  const queued = states.filter((state) => state === "queued").length;
   return (
     <>
       <Link
@@ -273,7 +276,9 @@ function SentBroadcast({ created }: { created: BroadcastCreated }): ReactNode {
         ? ` — delivering to ${agentCount(delivering)}…`
         : failed > 0
           ? ` — not delivered to ${agentCount(failed)}`
-          : " — delivered"}
+          : queued > 0
+            ? ` — queued for ${agentCount(queued)} not running`
+            : " — delivered"}
     </>
   );
 }

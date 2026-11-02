@@ -11,6 +11,7 @@ import {
   type ConsumerDeliverySnapshot,
   type ConsumerFrame,
   createConsumerDelivery,
+  createPresenceResponder,
 } from "@legion/envoy-client/consumer-delivery"
 import {
   createDeliveryDedupe,
@@ -52,6 +53,7 @@ import { postSlackReply } from "@legion/envoy-client/slack-post"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
+  publishConfirmationText,
   sendConfirmationText,
   sessionsOnMachine,
   type ToolArgumentsByOperation,
@@ -914,6 +916,52 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   })
 
   /**
+   * This session's answer to the listener's connection check, held here and not through the
+   * forwarder: the check is no registered interest, so its subscription must never reach
+   * `forwarder.topics()`, a registration's topic list or an unsubscribe. The machine is shared
+   * with pi-envoy (`createPresenceResponder`); this is its plumbing into this session's
+   * connection and stderr.
+   */
+  const presence = createPresenceResponder({
+    connect: async () => options.connection,
+    flush: () => options.connection.flush(),
+    publish: (reply, answer) => {
+      options.connection.publish(reply, answer)
+    },
+    encode: (body) => encoder.encode(body),
+    clientInstanceID: () => options.clientInstanceID,
+    notice: (notice) => {
+      if (notice.kind === "refused") {
+        process.stderr.write(
+          `envoy-channel: the NATS server did not accept the presence subscription of ${notice.sessionID} (${notice.subject}); its registration declares no connection check\n`,
+        )
+        return
+      }
+      const what =
+        notice.kind === "answer-failed"
+          ? `could not answer the presence check of ${notice.sessionID}`
+          : `the presence subscription of ${notice.sessionID} ended`
+      process.stderr.write(`envoy-channel: ${what} — ${messageFor(notice.error)}\n`)
+    },
+  })
+
+  /**
+   * nats.js re-subscribes by itself once it reconnects, and the server may answer differently
+   * this time; one it refused is closed and gone, so it is opened again. The session registers
+   * when the verdict changed, so the listener learns whether the check is answered now.
+   */
+  const refreshPresence = async (): Promise<void> => {
+    if (shuttingDown) return
+    const changed = await presence.refresh(identity.id)
+    if (!changed || shuttingDown) return
+    await serialized(register).catch((error: unknown) => {
+      process.stderr.write(
+        `envoy-channel: could not register the presence check again after a reconnect (${messageFor(error)}); the next heartbeat retries\n`,
+      )
+    })
+  }
+
+  /**
    * A human Dispatch subscription removal, best-effort: drops the topics, which the caller has
    * taken out of `userTopics`, and resolves once the replay state no longer follows them.
    */
@@ -1026,6 +1074,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
+      // Declares that this session answers the listener's connection check, and only once a
+      // flush showed the server accepted the subscription that answers it (`presence.declares`):
+      // a declaration a session cannot answer is worse than none, since every send to it would
+      // read connected while nothing of it is there.
+      ...(presence.declares(sessionID) ? { presence: true } : {}),
       clientInstanceID: options.clientInstanceID,
       plugin: { name: packageName, version: options.pluginVersion },
       ...(asking === undefined ? {} : { delivery: asking.delivery.registration() }),
@@ -1217,6 +1270,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     // handoff does not wait for it: a stuck notification would otherwise hold
     // every registry write queued behind this one. The drain never rejects.
     void forwarder.unfollow([previousSubject])
+    // The connection check moves with the id: the subject of the id this session has left is
+    // dropped, so a probe of it is answered by nobody, and the new one is subscribed before the
+    // flush and registration below, which is what lets that registration declare it.
+    await presence.follow(next)
     // The new id's replay state: none after a `/clear`, which starts afresh as a new session
     // does, so nothing published before it existed comes back. Until it is loaded, replay does
     // nothing, and the old id's sweep in flight writes nothing more. Loading it closes the old
@@ -1235,6 +1292,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         `envoy-channel: could not confirm the relay subscription of ${next} — ${messageFor(error)}\n`,
       )
     })
+    presence.confirm(next)
     await register()
     await transferRole()
     process.stderr.write(`envoy: session id changed ${previous} -> ${next}; re-registered\n`)
@@ -1377,6 +1435,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // The NATS subscription precedes registration so the listener never routes
   // a direct delivery to an advertised but deaf channel process.
   forwarder.follow(directSubject)
+  // The listener's connection check, on this same connection but outside the forwarder's
+  // topics: it is answered before anything advertises this session, and the flush below gives
+  // the server its chance to refuse it before the registration declares it.
+  await presence.follow(identity.id)
   for (const topic of remembered) {
     userTopics.add(topic)
     forwarder.follow(topic)
@@ -1390,6 +1452,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     )
   })
   await options.connection.flush()
+  presence.confirm(identity.id)
   await serialized(async () => {
     await register()
     // Best-effort, as the interests read above is, and for a sharper reason: registration has
@@ -1461,13 +1524,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
   // nats.js resubscribes by itself after a reconnect; what was published while it was away is in
   // the stream: the relay restarts at its ack floor on a new epoch's registration, and the core
-  // path's sweep reads it. The status events end when the connection closes.
+  // path's sweep reads it. The presence subscription is read again too, since the server may
+  // refuse now what it accepted before, or accept what it refused (`refreshPresence`). The
+  // status events end when the connection closes.
   void (async () => {
     try {
       for await (const status of options.connection.status()) {
         if (status.type !== "reconnect") continue
         renewRelayEpoch()
         triggerReplay()
+        void refreshPresence()
       }
     } catch (error) {
       process.stderr.write(
@@ -1489,6 +1555,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         fresh.push(topic)
       }
       await options.connection.flush()
+      presence.confirm(identity.id)
       await serialized(register)
       if (fresh.length > 0) {
         // A new follow's cursor starts where the stream ends at the next sweep: no history.
@@ -1525,6 +1592,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       // The relay's unanswered frames `nak`, so the listener sends them to whoever resumes.
       closeRelay()
+      // Nothing answers the check for a session that is going: a probe of it gets the
+      // no-responders the listener reads as stopped, rather than this process's last word.
+      presence.close()
       await forwarder.close()
       await serialized(() =>
         options.client.unregisterSession({
@@ -1570,22 +1640,38 @@ export async function executeEnvoyTool(
         ...(args.idempotency_key === undefined ? {} : { idempotencyKey: args.idempotency_key }),
         ...toMessageMetadata(args),
       })
+      // The text says what the target was when Envoy stored the message; the fields beside it
+      // say the same thing in a field, with the moment a stopped one was last seen (unix
+      // milliseconds) when the listener gave one.
       return {
         message: sendConfirmationText(result),
         event_id: result.envelope.event_id,
         recipient: result.recipient,
         confirmed: result.confirmed,
+        state: result.state,
+        ...(result.lastSeen === undefined ? {} : { last_seen: result.lastSeen }),
       }
     }
     case EnvoyToolOperation.publish: {
       const args = parseArguments(spec, input)
-      return runtime.client.publish({
+      const result = await runtime.client.publish({
         source: "agent",
         sourceSessionID: identity.id,
         topic: args.topic,
         message: args.message,
         ...toMessageMetadata(args),
       })
+      // One text for both hosts, counts and role holder alike (`publishConfirmationText`).
+      return {
+        message: publishConfirmationText(result),
+        event_id: result.envelope.event_id,
+        topic: result.envelope.topic,
+        ...(result.holder === undefined ? {} : { holder: result.holder }),
+        ...(result.recipients === undefined ? {} : { recipients: result.recipients }),
+        ...(result.recipientsConnected === undefined
+          ? {}
+          : { recipients_connected: result.recipientsConnected }),
+      }
     }
     case EnvoyToolOperation.subscribe: {
       const args = parseArguments(spec, input)

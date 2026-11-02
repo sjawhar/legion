@@ -47,7 +47,7 @@ func (c *Client) NextStoredMessage(ctx context.Context, subject string, seq uint
 	if err != nil {
 		return StoredMessage{}, err
 	}
-	reply, err := c.requestConfirmed(ctx, storedMessageAPI, request)
+	reply, err := c.RequestCore(ctx, storedMessageAPI, request)
 	if err != nil {
 		return StoredMessage{}, err
 	}
@@ -77,13 +77,31 @@ func (c *Client) NextStoredMessage(ctx context.Context, subject string, seq uint
 	}, nil
 }
 
-// requestConfirmed sends data to subject as a request and returns its one reply. The publish is
-// confirmed as RequestCoreTo's is (publishConfirmed), so a request the server refuses under the
+// RequestCore sends data to subject as a core NATS request and returns its one reply. The publish
+// is confirmed as RequestCoreTo's is (publishConfirmed), so a request the server refuses under the
 // connection's publish permissions returns ErrPublishDenied at once; a plain request would wait
 // out its whole deadline, since core NATS answers a denied publish to no one but the async error
 // callback. One publishConfirmed cannot confirm for another reason still waits for its reply, and
 // returns that reason if ctx ends first. A no-responders status reply is nats.ErrNoResponders.
-func (c *Client) requestConfirmed(ctx context.Context, subject string, data []byte) (*nats.Msg, error) {
+//
+// The wait is the caller's to bound: a ctx carrying a deadline ends the wait at it, and a ctx with
+// none waits storedMessageWait.
+//
+// The reply is taken over a channel subscription of this request's own, not conn.SubscribeSync:
+// that call sizes its channel at nats.Options.SubChanLen, 65,536 by default, so every request -
+// and the send route makes one per direct send to a session whose entry declares the presence
+// check - allocated and zeroed half a megabyte to hold the one reply it waits for. The channel
+// holds nats.RequestChanLen replies, as nats.go's own request does: a request has one reply, and
+// the slack is for the subject that draws a second (two processes of one session answering its
+// presence subject), which a one-slot channel would drop as a slow consumer and record on the
+// whole connection, failing another goroutine's publish as unconfirmed.
+//
+// The one error this shape cannot give is the connection's own: nats.go closes a sync
+// subscription's channel when the connection closes and leaves a channel subscription's open, so
+// a request whose connection is closed or drained under it waits out ctx and returns ctx's error,
+// where it returned nats.ErrConnectionClosed at once before. Every caller answers both the same
+// way, and the case is a shutdown race.
+func (c *Client) RequestCore(ctx context.Context, subject string, data []byte) (*nats.Msg, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, storedMessageWait)
@@ -94,26 +112,25 @@ func (c *Client) requestConfirmed(ctx context.Context, subject string, data []by
 	}
 	conn := c.currentConn()
 	inbox := conn.NewInbox()
-	replies, err := conn.SubscribeSync(inbox)
+	replies := make(chan *nats.Msg, nats.RequestChanLen)
+	subscription, err := conn.ChanSubscribe(inbox, replies)
 	if err != nil {
 		return nil, err
 	}
-	defer replies.Unsubscribe()
+	defer subscription.Unsubscribe()
 	err = c.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, conn.PublishMsg)
 	if err != nil && !errors.Is(err, ErrPublishUnconfirmed) {
 		return nil, err
 	}
-	reply, waitErr := replies.NextMsgWithContext(ctx)
-	if waitErr != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, cmp.Or(err, ctxErr)
+	select {
+	case reply := <-replies:
+		if len(reply.Data) == 0 && reply.Header.Get("Status") == "503" {
+			return nil, nats.ErrNoResponders
 		}
-		return nil, waitErr
+		return reply, nil
+	case <-ctx.Done():
+		return nil, cmp.Or(err, ctx.Err())
 	}
-	if len(reply.Data) == 0 && reply.Header.Get("Status") == "503" {
-		return nil, nats.ErrNoResponders
-	}
-	return reply, nil
 }
 
 // CheckFilterSubject refuses a subject a stored-message read cannot filter on: one NATS does not

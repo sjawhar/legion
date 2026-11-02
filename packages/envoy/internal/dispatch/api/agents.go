@@ -13,6 +13,11 @@ import (
 )
 
 type agentResponse struct {
+	// The Agents page's row is a live session's. envoy.Session's two fields for the stopped
+	// answer stay out of it because the live list carries no state and Client.Sessions drops
+	// the topics it carries, both `omitempty`; a field of this struct tagged `json:"-"` would
+	// not suppress them, since encoding/json skips such a field while collecting fields and it
+	// never competes with the embedded one.
 	envoy.Session
 	OpenAsks     int     `json:"open_asks"`
 	LastActivity *string `json:"last_activity"`

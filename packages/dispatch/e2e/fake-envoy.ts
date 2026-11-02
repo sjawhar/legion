@@ -21,6 +21,9 @@ interface SentMessage {
   readonly idempotency_key: string;
   readonly urgency: string;
   readonly expects_reply: string;
+  /** The sender asked for a session that is running now: a stopped target is refused rather
+   *  than stored for. Dispatch leaves it out of every send but the model and effort switch. */
+  readonly connected_only?: boolean;
 }
 
 /** A persisted interest row, served as seeded. `updated_at` is the row's own last write;
@@ -41,6 +44,25 @@ interface FakeInterest {
  *  ended. `unreadable` is the bucket read that did not answer at all. */
 type SessionRecord = "present" | "absent" | "unreadable";
 
+/** The two words the real listener gives for a session on a send's answer and on a registry read
+ *  that asked for stopped sessions too (`packages/envoy/cmd/listener/presence.go`): `connected`
+ *  is a session that is running, `stopped` one the listener knows and that is not running. A
+ *  message sent to a stopped session is stored for its own consumer, not refused. */
+type SessionState = "connected" | "stopped";
+
+/** The last heartbeat a stopped session's known-session record carries. Fixed, because nothing
+ *  about a stopped session is live: the record is what the listener kept after it ended. */
+const STOPPED_LAST_SEEN = 1762000000000;
+
+/** Whether a registry read asked for stopped sessions too, the real route's `include_stopped`
+ *  (`includeStoppedSessions` in `packages/envoy/cmd/listener/api.go`), which takes `1` and
+ *  `true`. Without it the route answers a stopped session exactly as it always has, with the
+ *  404 every reader that wants a running session reads. */
+function includeStopped(url: URL): boolean {
+  const asked = url.searchParams.get("include_stopped");
+  return asked === "1" || asked === "true";
+}
+
 /** Every piece of fixture state this listener holds. `PUT /__fixture/reset` replaces it whole, so
  *  a field added here is reset with the rest without being listed anywhere else. A session reseed
  *  replaces it whole too, so a handler reads its request body before it touches `state`: a write
@@ -52,9 +74,18 @@ interface FakeEnvoyState {
   /** What the session store holds per id; an id named by no entry here is `present`, the state
    *  a seeded session starts in. */
   readonly records: Map<string, SessionRecord>;
+  /** The ids the listener knows and that are not running: it holds a known-session record of
+   *  each and no registry entry, so a read asking for stopped sessions answers the record and
+   *  every other read answers the 404. */
+  readonly stoppedSessions: Set<string>;
+  /** What a send to a session answers it was, for the one case a registry read cannot show: a
+   *  session whose entry was still in place when Dispatch resolved it and whose process had gone
+   *  by the send. An id named by no entry here sends `stopped` while it is in
+   *  `stoppedSessions` and `connected` otherwise. */
+  readonly sendStates: Map<string, SessionState>;
   readonly sendStatuses: Map<string, 200 | 404>;
   /** How long a send to a session is held before it is answered, in milliseconds, as a listener
-   *  slow to take it would hold it; an id named by no entry here is answered at once. */
+   *  slow to take it would; an id named by no entry here is answered at once. */
   readonly sendDelays: Map<string, number>;
   interests: FakeInterest[];
   readonly sentMessages: SentMessage[];
@@ -71,9 +102,11 @@ function emptyState(): FakeEnvoyState {
     publishedKeys: new Set(),
     records: new Map(),
     sendDelays: new Map(),
+    sendStates: new Map(),
     sendStatuses: new Map(),
     sentMessages: [],
     sessions: [],
+    stoppedSessions: new Set(),
     unsubscribeCalls: [],
   };
 }
@@ -90,11 +123,40 @@ function asSeen(session: FakeSession, now: number): FakeSession {
   return { last_seen: now, ...session, host: session.host ?? session.machine_id };
 }
 
-/** Whether this listener names a session at all. The live set is the listener's in-memory cache,
- *  which a test drops a session from to model that cache refilling; a session whose record is
- *  `absent` has really ended, and then no answer may name it however the live set stands. */
+/** Whether this listener names a session as running. The live set is the listener's in-memory
+ *  cache, which a test drops a session from to model that cache refilling; a session whose
+ *  record is `absent` has really ended, and one the test stopped is known and not running, and
+ *  then no answer may name it as running however the live set stands. */
 function isLive(sessionID: string): boolean {
-  return state.liveSessions.has(sessionID) && state.records.get(sessionID) !== "absent";
+  return (
+    state.liveSessions.has(sessionID) &&
+    state.records.get(sessionID) !== "absent" &&
+    !state.stoppedSessions.has(sessionID)
+  );
+}
+
+/** What `GET /v1/registry/<id>?include_stopped=1` answers for a session the listener knows and
+ *  that is not running: the known-session record's own fields and nothing it does not hold. It
+ *  carries no port and no host, not even empty ones, because a session that is not running has
+ *  no address to be reached at (`stoppedSessionInfo` in `packages/envoy/cmd/listener/api.go`). */
+function stoppedBody(session: FakeSession): object {
+  return {
+    capabilities: session.capabilities ?? [],
+    last_seen: session.last_seen ?? STOPPED_LAST_SEEN,
+    session_id: session.session_id,
+    state: "stopped",
+    title: session.title,
+    topics: [],
+  };
+}
+
+/** What a send to this session answers it was: what the test said, else `stopped` for a session
+ *  the listener knows and that is not running, else `connected`. */
+function sendState(sessionID: string): SessionState {
+  return (
+    state.sendStates.get(sessionID) ??
+    (state.stoppedSessions.has(sessionID) ? "stopped" : "connected")
+  );
 }
 
 // FAKE_ENVOY_PORT, or with it unset port 0, so the OS chooses; the line at the end reports the
@@ -131,7 +193,8 @@ const server = Bun.serve({
     // cache behind `GET /v1/sessions` (packages/envoy/cmd/listener/api.go, sessionEntryHandler),
     // so a session the cache has dropped is still answered here - and answering it warms the
     // cache, which is why a hit adds the id back to the live set: the send that follows the read
-    // then finds it, as it does against the real listener.
+    // then finds it, as it does against the real listener. A stopped session is the one hit that
+    // does not: it is not running, and nothing a read does starts it.
     if (request.method === "GET" && url.pathname.startsWith("/v1/registry/")) {
       const sessionID = decodeURIComponent(url.pathname.slice("/v1/registry/".length));
       const record = state.records.get(sessionID) ?? "present";
@@ -145,6 +208,12 @@ const server = Bun.serve({
       if (record === "absent" || session === undefined) {
         return Response.json({ error: `no live session ${sessionID}` }, { status: 404 });
       }
+      if (state.stoppedSessions.has(sessionID)) {
+        if (!includeStopped(url)) {
+          return Response.json({ error: `no live session ${sessionID}` }, { status: 404 });
+        }
+        return Response.json(stoppedBody(session));
+      }
       state.liveSessions.add(sessionID);
       return Response.json(asSeen(session, Date.now()));
     }
@@ -154,15 +223,22 @@ const server = Bun.serve({
       const delay = state.sendDelays.get(message.target_session) ?? 0;
       if (delay > 0) await Bun.sleep(delay);
       const sendStatus = state.sendStatuses.get(message.target_session);
+      const stopped = sendState(message.target_session) === "stopped";
       if (
         sendStatus === 404 ||
-        !isLive(message.target_session) ||
-        !state.sessions.some((session) => session.session_id === message.target_session)
+        !state.sessions.some((session) => session.session_id === message.target_session) ||
+        (!stopped && !isLive(message.target_session))
       ) {
         return Response.json(
           { error: `no live session ${message.target_session}` },
           { status: 404 }
         );
+      }
+      // A send that asked for a running session is refused rather than stored, which is what
+      // Dispatch's model and effort switch asks for: a line that applied at an unknown later
+      // time is worse than none.
+      if (stopped && message.connected_only === true) {
+        return Response.json({ error: "the session is stopped" }, { status: 409 });
       }
       // The real listener publishes under a JetStream MsgId built from the idempotency key and
       // the recipient, so a repeat of a key the stream already holds is suppressed and answered
@@ -174,6 +250,9 @@ const server = Bun.serve({
         event_id: `envelope-${state.sentMessages.length}`,
         recipient: message.target_session,
         ...(duplicate ? { duplicate: true } : {}),
+        // The listener stored the message for a session that is not running, and hands it over
+        // when it runs again; Dispatch records that attempt queued.
+        ...(stopped ? { last_seen: STOPPED_LAST_SEEN, state: "stopped" } : {}),
       });
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/reset") {
@@ -201,7 +280,9 @@ const server = Bun.serve({
         live?: boolean;
         record?: SessionRecord;
         send_delay_ms?: number;
+        send_state?: SessionState;
         send_status?: 200 | 404;
+        stopped?: boolean;
       };
       if (!state.sessions.some((session) => session.session_id === sessionID)) {
         return Response.json({ error: `unknown fixture session ${sessionID}` }, { status: 404 });
@@ -237,12 +318,31 @@ const server = Bun.serve({
         // asks for the genuine absence gets both at once rather than having to say it twice.
         if (body.record === "absent") state.liveSessions.delete(sessionID);
       }
+      if (body.stopped !== undefined) {
+        if (body.stopped) state.stoppedSessions.add(sessionID);
+        else state.stoppedSessions.delete(sessionID);
+        // A session that is not running is out of the listener's in-memory list as well as
+        // out of its registry, so a test that stops one gets both at once.
+        if (body.stopped) state.liveSessions.delete(sessionID);
+        else state.liveSessions.add(sessionID);
+      }
+      if (body.send_state !== undefined) {
+        if (body.send_state !== "connected" && body.send_state !== "stopped") {
+          return Response.json(
+            { error: "send_state must be connected or stopped" },
+            { status: 400 }
+          );
+        }
+        state.sendStates.set(sessionID, body.send_state);
+      }
       return Response.json({
         live: state.liveSessions.has(sessionID),
         record: state.records.get(sessionID) ?? "present",
         send_delay_ms: state.sendDelays.get(sessionID) ?? 0,
+        send_state: sendState(sessionID),
         send_status: state.sendStatuses.get(sessionID) ?? 200,
         session_id: sessionID,
+        stopped: state.stoppedSessions.has(sessionID),
       });
     }
     if (request.method === "GET" && url.pathname === "/__fixture/sends") {

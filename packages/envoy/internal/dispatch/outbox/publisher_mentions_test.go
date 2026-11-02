@@ -272,6 +272,10 @@ func TestAScanDefersAClaimantCopyWhileItsMentionIsBeingSent(t *testing.T) {
 	}{
 		{settled: "failed", want: []string{issueTopic, claimantTopic}},
 		{settled: "sent", want: []string{issueTopic}},
+		// A queued mention is one the listener took and stores for a session that is not
+		// running: the claimant copy would reach that session a second time when it runs
+		// again, under a key the listener cannot recognise as a repeat of the mention's.
+		{settled: "queued", want: []string{issueTopic}},
 	} {
 		t.Run(tc.settled, func(t *testing.T) {
 			ctx := store.WithTransactionTracking(context.Background())

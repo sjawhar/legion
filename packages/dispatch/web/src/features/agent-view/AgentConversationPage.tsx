@@ -29,7 +29,7 @@ import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentRuntimeThread } from "./AgentRuntimeThread";
 import { sessionCommands, sessionSettingsView } from "./conversation";
 import { SessionSettings } from "./SessionSettings";
-import { type SwitchRequest, switchCommand, useSessionSwitch } from "./use-session-switch";
+import { type SwitchRequest, switchMessageInput, useSessionSwitch } from "./use-session-switch";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
 
 /** What the stream-status dot says about the relay connection (not whether the agent is
@@ -136,8 +136,7 @@ export function AgentConversationPage(): ReactNode {
       void queryClient.invalidateQueries({ queryKey: agentMessagesQuery(session).queryKey });
     },
     target: ({ session }) => `session:${session}`,
-    request: ({ request, session }) =>
-      agentMessageRequest(session, { body: switchCommand(request), delivery: "steer" }),
+    request: ({ request, session }) => agentMessageRequest(session, switchMessageInput(request)),
   });
   // Each message is a write of its own in the app's write store, held for its session rather than
   // this view, so every attempt carries its key and a refusal stays for Retry or Discard. The

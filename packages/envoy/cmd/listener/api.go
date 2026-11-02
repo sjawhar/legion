@@ -58,15 +58,33 @@ type messageBody struct {
 // dedupe key names the upstream event (contracts.DedupeKeyNamesTheUpstreamEvent), and Dispatch is
 // the one sender that uses it. Absent means false, which is what an older listener's answer reads
 // as.
+//
+// State is what the target was when the message was stored, sessionStateConnected or
+// sessionStateStopped, by the rules sendHandler states. LastSeen, in unix milliseconds, is when a
+// stopped target was last seen - its session entry's UpdatedAt where it still holds one, else its
+// known-session record's LastSeen - and is left out for a connected target, which is here now.
+// Recipient and Duplicate are untouched, so a client of an older release reads this body exactly
+// as it always did.
 type sendResponse struct {
 	contracts.Envelope
 	Recipient string `json:"recipient"`
 	Duplicate bool   `json:"duplicate,omitempty"`
+	State     string `json:"state"`
+	LastSeen  int64  `json:"last_seen,omitempty"`
 }
 
+// publishResponse is the answer to a publish. Recipients and RecipientsConnected are the counts
+// recipientCounts made just before the message was published: how many sessions other than the
+// sender follow the topic, and how many of those hold a session entry now. They are pointers so
+// that a count of zero is carried rather than omitted - "no other session subscribes" is the
+// answer that matters most - and nil, left out, where there is no count to give: a listener whose
+// known-session store cannot answer sends neither, as does a role topic, whose answer names its
+// holder. An older client reads neither field.
 type publishResponse struct {
 	contracts.Envelope
-	Holder string `json:"holder,omitempty"`
+	Holder              string `json:"holder,omitempty"`
+	Recipients          *int   `json:"recipients,omitempty"`
+	RecipientsConnected *int   `json:"recipients_connected,omitempty"`
 }
 
 type subscribeResponse struct {
@@ -492,6 +510,32 @@ func beforeForward(item contracts.Envelope, holder string, entry session.Session
 // message may be forwarded. sendHandler answers a refusal 403 with its text, recorded as
 // outcomeCapabilityRefused, as the publish route does through beforeForward.
 func deliveryModeVerdict(sessionID string, entry session.SessionEntry, payload string) forwardVerdict {
+	return deliveryModeVerdictFor(sessionID, entry.Title, entry.Capabilities, true, payload)
+}
+
+// stoppedDeliveryModeVerdict judges a send to sessionID, which the session registry holds no entry
+// for, by the known-session record it does have. The record's capabilities are the ones the
+// session last registered with, so a stopped session is judged by its own word exactly as a live
+// one is judged by its entry.
+//
+// A record carrying no capabilities at all is one whose plugin declared none: KnownSession has
+// stored Capabilities since its first write, so there is no record that predates the field. Such
+// a send is accepted here, where the live path refuses the same mode-carrying send to the same
+// plugin (deliveryModeVerdict passes advertised true), because the message is stored and judged
+// where it can be judged by the session that reads it: the resumed session declares what it
+// takes when it registers again, and that registration can declare the mode this send carries.
+// Refusing it here would turn a send to a resumable session into a 403 on the strength of a
+// field nobody filled in.
+func stoppedDeliveryModeVerdict(sessionID string, record session.KnownSession, payload string) forwardVerdict {
+	return deliveryModeVerdictFor(sessionID, record.Title, record.Capabilities, len(record.Capabilities) > 0, payload)
+}
+
+// deliveryModeVerdictFor is the judgement both of the above make: the payload's delivery mode is
+// unreadable, or advertised is set and capabilities do not carry that mode. An unreadable mode is
+// refused whatever the session is, since that refusal is about the payload and not about who it
+// is for; advertised is false only for a known-session record that carries no capability at all,
+// whose send is left to the session that reads it to judge (stoppedDeliveryModeVerdict).
+func deliveryModeVerdictFor(sessionID, title string, capabilities []string, advertised bool, payload string) forwardVerdict {
 	var framed *string
 	if payload != "" {
 		framed = &payload
@@ -501,22 +545,23 @@ func deliveryModeVerdict(sessionID string, entry session.SessionEntry, payload s
 	case err != nil:
 		return forwardVerdict{
 			kind:    forwardModeUnreadable,
-			refusal: fmt.Sprintf("session %s (%s) sent a delivery mode that cannot be read unambiguously", sessionID, entry.Title),
+			refusal: fmt.Sprintf("session %s (%s) sent a delivery mode that cannot be read unambiguously", sessionID, title),
 		}
-	case mode != "" && !hasCapability(entry.Capabilities, mode):
+	case advertised && mode != "" && !hasCapability(capabilities, mode):
 		return forwardVerdict{
 			kind:    forwardModeUnadvertised,
 			mode:    mode,
-			refusal: fmt.Sprintf("session %s (%s) does not advertise %s", sessionID, entry.Title, mode),
+			refusal: fmt.Sprintf("session %s (%s) does not advertise %s", sessionID, title, mode),
 		}
 	}
 	return forwardVerdict{kind: forwardAllowed}
 }
 
 // sendRequestBudget is the bus work a /v1 route does under the request's own context: the send
-// route's read of the target session, its read of the sender's interest record (senderStamp) and
-// its publish share it, and GET /v1/roles/<role> resolves its holder within it too. The publish
-// route spends it on the publish of a topic the stream captures, and a role send's first
+// route's read of the target session, its read of the sender's interest record (senderStamp), its
+// presence check of the target (presenceProbeTimeout) and its publish share it, and GET
+// /v1/roles/<role> resolves its holder within it too. The publish route spends it on the publish
+// of a topic the stream captures, and a role send's first
 // resolution of the role's holder (sendToRole, every attempt of that resolution) is answered within
 // it too; a role or ad-hoc topic send then runs on within publishDeliveryWindow (confirmed.go). GET
 // /v1/sessions, GET /v1/registry/<session_id> and GET /v1/interests/<session_id> read within it as
@@ -529,24 +574,50 @@ func deliveryModeVerdict(sessionID string, entry session.SessionEntry, payload s
 const sendRequestBudget = 3500 * time.Millisecond
 
 // sendSessionReadTimeout bounds the send route's read of the target session from the bucket, so a
-// bucket that does not answer still leaves most of sendRequestBudget (~2.5 s) to the sender stamp's
-// read (senderStampReadTimeout) and the publish. The role paths keep roleHolderReadTimeout as their
-// per-read cap instead.
+// bucket that does not answer still leaves most of sendRequestBudget (~2.5 s) to the second second
+// and the publish. The role paths keep roleHolderReadTimeout as their per-read cap instead.
+//
+// That second second carries two things, not one: the sender stamp's read
+// (senderStampReadTimeout) and, for a target whose entry declares the presence check, the probe of
+// it (presenceProbeTimeout). They run together rather than one after the other, each bounded at a
+// second, so the apportionment is still 1 s for the session read, 1 s for the stamp and the probe
+// between them, and 1.5 s for the publish, and sendRequestBudget is unchanged by the probe.
 const sendSessionReadTimeout = 1 * time.Second
 
 // senderStampReadTimeout bounds senderStamp's read of the sender's interest record from the bucket.
 // nats.go's KV read takes no context and waits out the JetStream MaxWait (10 s), and the stamp is
 // only enrichment, so on a bus that does not answer it gets no more of sendRequestBudget than the
 // send route's own read of its target (sendSessionReadTimeout): a send whose two reads both go
-// unanswered still leaves its publish 1.5 s, and the publish is what answers the named 503.
+// unanswered still leaves its publish 1.5 s, and the publish is what answers the named 503. The
+// presence probe shares this second with the stamp, on a goroutine of its own, so a send that
+// both stamps and probes spends one second on the pair rather than two.
 const senderStampReadTimeout = 1 * time.Second
 
-// sendHandler publishes a direct message only while the session store itself, not merely this
-// listener's cache of it, holds the target's entry: a 404 here is a sender's cue to route around
-// the pane, so only the store's word that the key is gone earns one, and a store or a bus that did
+// sendHandler publishes a direct message to a session Envoy knows, and tells its sender what that
+// session was when the message was stored. There are four answers, and which one a target gets
+// turns on two stores, the session registry (the entries of the sessions running now) and the
+// known-session store (every session that registered in the last 30 days, session.KnownSessions):
+//
+//   - An entry, and the plugin answered the presence check, or the entry declares no check, or
+//     this listener may not ask (probeSessionPresence): 200, sessionStateConnected.
+//   - An entry whose plugin did not answer, or no entry and a known-session record: 200,
+//     sessionStateStopped with the last_seen of whichever of the two the answer came from. The
+//     message is stored either way, and Envoy keeps it for 72 hours, so a session that resumes
+//     under the same id gets it from its own consumer.
+//   - Neither an entry nor a record: 404 "no live session <id>". The wording is load-bearing:
+//     Dispatch classifies a delivery failure on that prefix.
+//   - A stopped target whose request set connected_only: 409 with nothing stored.
+//
+// The entry is read from the session store itself and not merely from this listener's cache of
+// it: only the store's word that the key is gone can make a 404, and a store or a bus that did
 // not answer earns the 503 that asks the sender to try the same route again. A target that cannot
-// take the payload's delivery mode (deliveryModeVerdict) is the 403 naming it. Every one of those
-// answers is written through record, so this route's one line per request is written with it.
+// take the payload's delivery mode (deliveryModeVerdict for a session with an entry,
+// stoppedDeliveryModeVerdict for one with only a record) is the 403 naming it. Every one of those
+// answers is written through record, so this route's one line per request is written with it. The
+// presence check writes a line of its own beside it for a plugin that answered, for a grant that
+// denied the ask and for a reply that could not be read or named another session; the two answers
+// that make a target stopped in the ordinary way, no responder and nothing within the second,
+// write none.
 func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		record := &requestRecord{logger: logger, line: "listener send", laneKey: "target_session"}
@@ -564,6 +635,11 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		var request struct {
 			messageBody
 			TargetSession string `json:"target_session"`
+			// ConnectedOnly asks for a stopped target to be refused rather than written to:
+			// Dispatch's model and effort switch sets it, because a switch that applied at an
+			// unknown later time is worse for its sender than no switch at all. Absent, which is
+			// every other sender and every older client, nothing changes.
+			ConnectedOnly bool `json:"connected_only"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "invalid json")
@@ -598,21 +674,66 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		// still being refilled after a reconnect, so a miss is read through to the bucket itself.
 		// Only the bucket's own word for it (nats.ErrKeyNotFound, which Refresh also returns for a
 		// key no session can register under) is the 404 a sender routes around the pane on; a read
-		// that did not answer is the 503 below, which asks it to try again instead.
+		// that did not answer is the 503 below, which asks it to try again instead. A session the
+		// bucket holds no entry for is not gone to this route, though: the known-session store
+		// answers from memory whether Envoy knows it at all, and only a session neither store
+		// holds is the 404.
 		target, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, roles.Registered)
-		if errors.Is(err, nats.ErrKeyNotFound) {
-			record.refuse(w, http.StatusNotFound, outcomeNoLiveSession, fmt.Sprintf("no live session %s", targetSession))
-			return
-		}
+		live := err == nil
+		var stopped session.KnownSession
 		if err != nil {
-			record.refuseBusUnavailable(w, err)
-			return
+			switch {
+			case errors.Is(err, nats.ErrKeyNotFound):
+				var known bool
+				if stopped, known = d.known.Get(targetSession); !known {
+					record.refuse(w, http.StatusNotFound, outcomeNoLiveSession, fmt.Sprintf("no live session %s", targetSession))
+					return
+				}
+			default:
+				record.refuseBusUnavailable(w, err)
+				return
+			}
 		}
-		if verdict := deliveryModeVerdict(targetSession, target, item.Payload); verdict.refusal != "" {
+		// A target with an entry is judged by the entry, one with only a record by the record:
+		// the two carry different words for the same capabilities, and only one of them is the
+		// target's.
+		var verdict forwardVerdict
+		if live {
+			verdict = deliveryModeVerdict(targetSession, target, item.Payload)
+		} else {
+			verdict = stoppedDeliveryModeVerdict(targetSession, stopped, item.Payload)
+		}
+		if verdict.refusal != "" {
 			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, verdict.refusal)
 			return
 		}
+		// The presence check and the sender stamp are the one second of sendRequestBudget the two
+		// share (senderStampReadTimeout): the check runs on a goroutine of its own while this one
+		// stamps, so a send that does both still answers inside the budget. It is sent only for a
+		// target that has an entry and whose entry declares the check: a target with no entry is
+		// stopped with nobody asked, and one whose entry declares no check counts as connected
+		// while it holds that entry, which is what every release answered before the check
+		// existed and is what keeps an older plugin working.
+		presence := make(chan bool, 1)
+		if live && target.Presence {
+			go func() { presence <- probeSessionPresence(ctx, d.client, targetSession, logger) }()
+		} else {
+			presence <- live
+		}
 		item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
+		state, lastSeen := sessionStateConnected, int64(0)
+		if !<-presence {
+			// A target that still holds an entry was last seen when that entry was last written;
+			// one with only a record, when the record was.
+			state, lastSeen = sessionStateStopped, stopped.LastSeen
+			if live {
+				lastSeen = target.UpdatedAt
+			}
+		}
+		if request.ConnectedOnly && state == sessionStateStopped {
+			record.refuse(w, http.StatusConflict, outcomeSessionStopped, "the session is stopped")
+			return
+		}
 		duplicate, err := d.client.PublishReportingDuplicateWithin(ctx, item)
 		if err != nil {
 			record.refuseBusUnavailable(w, err)
@@ -620,6 +741,7 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		}
 		record.accept(w, sendResponse{
 			Envelope: item, Recipient: targetSession, Duplicate: duplicate,
+			State: state, LastSeen: lastSeen,
 		})
 	}
 }
@@ -640,7 +762,14 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 // no body, as this route always has. The delete runs within sendRequestBudget of the request's
 // own context, so one the bus does not answer is the bus-unavailable 503 with Retry-After: 1
 // inside the caller's attempt (writeStoreError).
-func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
+//
+// A delete that removed the entry moves the session's known-session record on, keeping its topics
+// (session.KnownSessions.TouchWithin): the session stopped cleanly, and a publish on a topic it
+// followed still counts it as a recipient, since Envoy keeps its messages for 72 hours and it can
+// resume under the same id. A delete that removed nothing leaves the record alone, and a known
+// store whose bucket this listener has not opened does nothing at all; neither outcome changes
+// this answer.
+func deleteSessionHandler(sessions *session.SessionRegistry, known *session.KnownSessions, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -654,11 +783,33 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 		instanceID := strings.TrimSpace(r.URL.Query().Get("client_instance_id"))
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
+		// Whether the delete removes an entry is read before it runs: Delete is idempotent and
+		// EntryDeleted counts a key that was already absent, so neither answer tells a stop from
+		// a repeat of one. A session this listener never held is left alone, with no write. The
+		// read is of this listener's session cache, whose only error is a key it does not hold
+		// (session.SessionRegistry.Get), and that cache trails the bucket: a session registered
+		// through another listener, or one this cache has not caught up with since its
+		// connection came back, reads here as one this listener never held and is left alone
+		// too. That is deliberate - the record of such a session is the owning listener's to
+		// move on, and one nobody moves on ages out of the 30 days on its own, which no delivery
+		// depends on.
+		_, entryErr := sessions.Get(sessionID)
+		held := entryErr == nil
+		recordStop := func() {
+			if !held {
+				return
+			}
+			if err := known.TouchWithin(ctx, sessionID); err != nil {
+				logger.Warn("known-session record not moved on at a clean stop",
+					slog.String("session_id", sessionID), slog.String("error", err.Error()))
+			}
+		}
 		if instanceID == "" {
 			if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
 			}
+			recordStop()
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -669,6 +820,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 		}
 		switch outcome {
 		case session.EntryDeleted:
+			recordStop()
 			writeJSON(w, http.StatusOK, deleteSessionResponse{Deleted: true})
 		case session.EntryKeptForAnotherInstance:
 			writeJSON(w, http.StatusOK, deleteSessionResponse{
@@ -747,6 +899,15 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
+		// A wildcard that covers a presence subject is held off it exactly as one that names it
+		// is (bus.ReachesPresenceSubject is an overlap test), so the reason names what the rule
+		// reads, the presence space the topic reaches, rather than a prefix the topic need not
+		// carry. Nothing legitimate is refused by that: a publish carries one subject to publish
+		// on, and no real publish names a wildcard.
+		if bus.ReachesPresenceSubject(request.Topic) {
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to a topic that reaches the presence space; "+bus.PresenceSubjectPrefix+" is the listener's own check of whether a session's plugin holds a NATS connection, not a topic to publish on")
+			return
+		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return
@@ -788,6 +949,12 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			sendToTopic(ctx, w, record, d, item, arrived)
 			return
 		}
+		// The counts are of the moment the message is published, and are read from memory alone
+		// (recipientCounts), so taking them here costs the publish below nothing. This branch
+		// forwards to no one, so the one walk of the interest index the count reads is made for
+		// the count alone, and only where there is a count to make.
+		recipients, connected := recipientCounts(d, item.Topic, item.SourceSession,
+			func() []store.Interest { return d.registry.MatchAll(item.Topic) })
 		// The sender stamp's read and the publish take this one deadline, derived from the
 		// caller's own context, so this route too answers a bus it cannot reach rather than
 		// spending the caller's attempt.
@@ -798,7 +965,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuseBusUnavailable(w, err)
 			return
 		}
-		record.accept(w, publishResponse{Envelope: item})
+		record.accept(w, publishResponse{Envelope: item, Recipients: recipients, RecipientsConnected: connected})
 	}
 }
 
@@ -823,10 +990,52 @@ type sessionInfo struct {
 	Roles          []string `json:"roles"`
 	UpdatedAt      int64    `json:"updated_at"`
 	LastSeen       int64    `json:"last_seen"`
+	// State is sessionStateConnected, and is sent only by the one request that asks for stopped
+	// sessions too, GET /v1/registry/<session_id>?include_stopped=1
+	// (includeStoppedSessions): that request's two answer shapes then agree on the one field
+	// Dispatch reads from this route. Every other answer leaves it out, so GET /v1/sessions and
+	// GET /v1/registry/<session_id> without the parameter send exactly the bytes they always
+	// have.
+	State string `json:"state,omitempty"`
 	// The plugin the session registered through and its build; absent for a session whose plugin
 	// predates the fields.
 	Plugin        string `json:"plugin,omitempty"`
 	PluginVersion string `json:"plugin_version,omitempty"`
+}
+
+// stoppedSessionInfo is what GET /v1/registry/<session_id>?include_stopped=1 answers for a session
+// the session registry holds no entry for and the known-session store holds a record of
+// (session.KnownSession): the record's own fields, and nothing it does not hold. It carries no
+// port and no host, not even empty ones, because the record holds neither and a session that is
+// not running has no address to be reached at - a caller that read an empty host as one would
+// dial nothing. A session that does hold an entry is answered sessionInfo with its own
+// state: "connected", so both shapes of this one request carry state and a reader of it needs no
+// second rule.
+type stoppedSessionInfo struct {
+	SessionID    string   `json:"session_id"`
+	State        string   `json:"state"`
+	LastSeen     int64    `json:"last_seen"`
+	Title        string   `json:"title"`
+	Capabilities []string `json:"capabilities"`
+	Topics       []string `json:"topics"`
+}
+
+// includeStoppedSessions reads the include_stopped query parameter of GET
+// /v1/registry/<session_id>: set, the route answers a session the known-session store knows and
+// the session registry holds no entry for, instead of the 404 it answers without the parameter.
+// "1" and "true" both set it, which are the two spellings this repository already gives a boolean
+// query parameter - `switch=1` on the secrets broker's approval page
+// (internal/broker/approval/page.go) and `unlinked=true` on Dispatch's project artifacts
+// (internal/dispatch/api/project_artifacts.go). Every other value leaves it unset, the parameter
+// absent among them, and none is refused: neither precedent refuses a value it does not know, and
+// a route that refused one here would turn a caller's typo into a failed liveness read.
+func includeStoppedSessions(r *http.Request) bool {
+	switch r.URL.Query().Get("include_stopped") {
+	case "1", "true":
+		return true
+	default:
+		return false
+	}
 }
 
 // sessionInterestReadTimeout bounds sessionInfoFor's read of one session's interest record from
@@ -976,6 +1185,14 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 // within sendRequestBudget — is a 503 to retry: never a session a caller may take for ended, nor
 // one with no topics or roles. An interest record this build cannot decode is the 500
 // writeInterestRecordUnreadable writes: the bus answered it.
+//
+// With include_stopped set (includeStoppedSessions), and only then, the route answers one more
+// kind of session: one the session registry holds no entry for and the known-session store holds
+// a record of answers 200 with stoppedSessionInfo, state "stopped", while a session that does
+// hold an entry answers its ordinary sessionInfo with state "connected". Without the parameter
+// this route answers exactly the bytes it always has, 404 for that stopped session among them,
+// which is what the Agents page, issue_claim.go's holder liveness and every other reader of it
+// still read; GET /v1/sessions stays live-only whatever this request asks for.
 func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -989,6 +1206,7 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
+		withStopped := includeStoppedSessions(r)
 		entry, err := liveSessionEntry(ctx, d.sessions, sessionID, roleHolderReadTimeout, roles.Registered)
 		switch {
 		case errors.Is(err, bus.ErrRefused):
@@ -999,7 +1217,20 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 			// refusal however often the same bytes are sent.
 			writeBusUnavailable(w, err)
 		case errors.Is(err, nats.ErrKeyNotFound):
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", sessionID))
+			// The known-session read is of memory alone, so it costs a 404 nothing.
+			stopped, known := d.known.Get(sessionID)
+			if !withStopped || !known {
+				writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", sessionID))
+				return
+			}
+			writeJSON(w, http.StatusOK, stoppedSessionInfo{
+				SessionID:    sessionID,
+				State:        sessionStateStopped,
+				LastSeen:     stopped.LastSeen,
+				Title:        stopped.Title,
+				Capabilities: append([]string{}, stopped.Capabilities...),
+				Topics:       append([]string{}, stopped.Topics...),
+			})
 		case err != nil:
 			// The 503, its Retry-After: 1 and the busUnansweredPrefix body are written in one
 			// place for every route that answers a bus that did not answer, so the string a
@@ -1008,6 +1239,9 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 			writeBusUnavailable(w, err)
 		default:
 			info, err := sessionInfoFor(ctx, d.registry, sessionID, entry)
+			if withStopped {
+				info.State = sessionStateConnected
+			}
 			switch {
 			case errors.Is(err, store.ErrMalformedInterest):
 				writeInterestRecordUnreadable(w, sessionID, err)
@@ -1475,6 +1709,15 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// open, a fork parent's agent subject and any topic its envoy_subscribe took included. The
 		// registry drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
 		// earlier build stored with one is cleaned by this registration.
+		// A topic reaching a session's presence subject is left out the same way, whichever
+		// session's it is and whether it names that subject or only covers it as a wildcard does
+		// (bus.ReachesPresenceSubject): a plugin subscribes to its own presence subject on its own
+		// NATS connection and never registers it as an interest, while a session registered on
+		// another session's presence subject would answer the listener's check for it and make a
+		// stopped session read connected, since every session shares one NATS user until
+		// dispatch://INFRA-840 gives each its own. The private-subject check runs first, so a broad
+		// wildcard - notifications.>, notifications.envoy.> - is named by the private subject it
+		// reaches rather than by the presence space it also covers.
 		warnings := make([]string, 0)
 		topics := make([]string, 0, len(body.Topics)+1)
 		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
@@ -1483,10 +1726,15 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 					topic, contracts.AgentSubject(body.SessionID)))
 				continue
 			}
+			if bus.ReachesPresenceSubject(topic) {
+				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a session's presence subject, which that session's own plugin subscribes to on its own NATS connection and no session registers as an interest",
+					topic))
+				continue
+			}
 			topics = append(topics, topic)
 		}
 		if len(warnings) > 0 {
-			logger.Warn("listener subscribe refused topics reaching private stream subjects",
+			logger.Warn("listener subscribe refused topics",
 				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
@@ -1522,6 +1770,24 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			if delivery.relayed() {
 				// The relay serves every registration answered consumer, so there is one to tell.
 				d.consumers.relay.registered(body.SessionID, epochChanged)
+			}
+		}
+		// The session is known for the next 30 days, with the topics just stored - the registered
+		// ones, which carry the team and other topics the consumer's filter drops. The record is
+		// written only when no consumer call failed (recorded): a registration whose Ensure was
+		// refused left the consumer's filter where it was, and a record claiming the topics that
+		// filter never took would count the session as a recipient of them. A failed write is this
+		// WARN and nothing else: the registration is answered whatever it did
+		// (session.KnownSessions).
+		if delivery.recorded() {
+			if err := d.known.RecordWithin(ctx, session.KnownSession{
+				SessionID:    body.SessionID,
+				Title:        body.Title,
+				Capabilities: body.Capabilities,
+				Topics:       item.Topics,
+			}); err != nil {
+				logger.Warn("listener known-session record not written",
+					slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 			}
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
@@ -1580,7 +1846,12 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
-		// A consumer-delivery session's consumer stops filtering on the topics just removed.
+		// The session now follows what is left of its topics: its known-session record says so,
+		// so a publish stops counting it as a recipient of the ones just removed, and its
+		// consumer, when the relay serves it one, stops filtering on them. The record is written
+		// within this route's budget and before the consumer call, which has a budget of its own:
+		// the count is what this change is for, and it must not wait on a consumer.
+		recordFollowedTopics(ctx, d, body.SessionID, logger)
 		d.consumers.refollow(r.Context(), d, body.SessionID)
 		removed := body.Topics
 		if removed == nil {
@@ -1592,11 +1863,15 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 
+	// A DELETE here removes every interest of a session, so its record is left naming none and a
+	// publish counts it for nothing, and its consumer is refollowed on what is left, as the
+	// unsubscribe route's are.
 	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry, d.sessions, func(ctx context.Context, sessionID string) {
+		recordFollowedTopics(ctx, d, sessionID, logger)
 		d.consumers.refollow(ctx, d, sessionID)
 	}))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
-	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
+	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions, d.known, logger))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(d, logger))
 	v1.HandleFunc("/v1/replay", replayHandler(d))

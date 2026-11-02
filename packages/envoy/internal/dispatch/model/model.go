@@ -1309,6 +1309,29 @@ const DeliveryClaimLapse = time.Minute
 // seconds, for SQL that compares a delivery's claimed_at or created_at against now().
 var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
 
+// The four states a delivery attempt row and its receipt carry (migration 20261102020650),
+// which CommentDelivery.State and MessageDelivery.State document. `pending` is the row a claim
+// transaction commits before its send; `sent` and `queued` are both "the listener took it", and
+// `failed` is everything else. They differ in one thing: a sent message is with a running
+// session now, and a queued one waits in that session's own consumer until it runs again,
+// within the 72 hours the stream keeps it. Every reader that asks whether the listener took a
+// message counts the two alike - the outbox publishes no second copy of a comment
+// (outbox.mentionDeliveryQuery), the delivery sweep resumes neither and settles neither failed
+// (api.owedMessageAttempt, api.owedCommentAttempt), the session's answers list holds both
+// (sessionanswers.query), and the session may accept either as its own turn (api.acceptDelivery).
+const (
+	DeliveryStatePending = "pending"
+	DeliveryStateSent    = "sent"
+	DeliveryStateQueued  = "queued"
+	DeliveryStateFailed  = "failed"
+)
+
+// DeliveryTakenStates is the two states that mean the listener took the message, as the SQL list
+// an `in` test over a comment_deliveries or message_deliveries state column takes, so the three
+// queries that ask it (outbox.mentionDeliveryQuery, sessionanswers.query twice) read one
+// definition rather than each spelling the pair.
+const DeliveryTakenStates = "('" + DeliveryStateSent + "', '" + DeliveryStateQueued + "')"
+
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {
 	CommentID  string  `json:"comment_id"`
@@ -1320,7 +1343,12 @@ type CommentDelivery struct {
 	// Duplicate reports that the stream already held this message when the attempt was sent: an
 	// earlier attempt landed, so this one is a repeat the recipient is not handed again
 	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil.
-	Duplicate    bool      `json:"duplicate"`
+	Duplicate bool `json:"duplicate"`
+	// State is "pending" before the send, then "sent" for a mention the listener handed to a
+	// running session, "queued" for one it stored for a session it knows that is not running
+	// and hands over when that session runs again, or "failed". A reader that asks whether the
+	// listener took the message counts "sent" and "queued" alike (api/envoy_resolve.go,
+	// deliveryOutcome).
 	State        string    `json:"state"`
 	Error        *string   `json:"error"`
 	ResolveError *string   `json:"resolve_error"`
@@ -1339,7 +1367,11 @@ type CommentDeliveryEventPayload struct {
 	Attempt   int     `json:"attempt"`
 	Delivery  string  `json:"delivery"`
 	SessionID *string `json:"session_id"`
-	State     string  `json:"state"`
+	// State is how the attempt settled, which the dashboard renders verbatim: "sent", "queued"
+	// or "failed" (CommentDelivery.State). A receipt carries no "pending": the sender that
+	// appends it settles the row in the statement that appends it (contracts'
+	// SettledDeliveryState, and deliveryOutcome, which never answers pending).
+	State string `json:"state"`
 	// Duplicate reports that the stream already held this message: an earlier attempt landed, so
 	// this one is a repeat the mentioned session is not handed again.
 	Duplicate bool    `json:"duplicate,omitempty"`
@@ -1586,7 +1618,12 @@ type MessageDelivery struct {
 	// earlier attempt landed, so this one is a repeat the recipient is not handed again
 	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil: the envelope
 	// this send minted is the one JetStream discarded.
-	Duplicate bool      `json:"duplicate"`
+	Duplicate bool `json:"duplicate"`
+	// State is "pending" before the send, then "sent" for a message the listener handed to a
+	// running session, "queued" for one it stored for a session it knows that is not running
+	// and hands over when that session runs again, or "failed". A reader that asks whether the
+	// listener took the message counts "sent" and "queued" alike (api/envoy_resolve.go,
+	// deliveryOutcome).
 	State     string    `json:"state"`
 	Error     *string   `json:"error"`
 	ReplyID   *string   `json:"reply_id"`
@@ -1600,6 +1637,15 @@ type MessageDelivery struct {
 	// session's own user turn. At most one attempt of a message is ever accepted.
 	AcceptedAt *time.Time `json:"accepted_at"`
 	AcceptedAs *string    `json:"accepted_as"`
+	// ConnectedOnly records that attempt 1's send asked for a session that is running now: the
+	// Agents page's model and effort switch, which must not be stored for a stopped session and
+	// applied at an unknown later time. It is not only what the send that opened this attempt
+	// asked for: a later attempt, opened by a person's Retry or by a mode change, is opened with
+	// the flag of the message's first attempt (api/message_delivery.go,
+	// insertMessageDeliveryAttempt). Every later send of an attempt - the delivery sweep's, a
+	// repeat under the request's key - reads it back and asks the same, so a sender that died
+	// before its settle cannot turn a switch into a queued message.
+	ConnectedOnly bool `json:"connected_only"`
 }
 
 // MessageEventPayload wraps a Message with the reply target's body preview (first 160
@@ -1650,7 +1696,11 @@ type MessageDeliveryEventPayload struct {
 	SessionID string `json:"session_id"`
 	Target    string `json:"target"`
 	Title     string `json:"title"`
-	State     string `json:"state"`
+	// State is how the attempt settled, which the dashboard renders verbatim: "sent", "queued"
+	// or "failed" (MessageDelivery.State). A receipt carries no "pending": the sender that
+	// appends it settles the row in the statement that appends it (contracts'
+	// SettledDeliveryState, and deliveryOutcome, which never answers pending).
+	State string `json:"state"`
 	// Duplicate reports that the stream already held this message, so the recipient gained
 	// nothing from this attempt. Absent means false.
 	Duplicate bool   `json:"duplicate,omitempty"`

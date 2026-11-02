@@ -1,9 +1,12 @@
 import {
   DELIVERY_CAPABILITIES,
   DELIVERY_DUPLICATE_WINDOW_MS,
+  type DeliveryAttemptState,
   type MessageDeliveryMode,
   RECEIPT_TIMEOUT_CAUSE,
 } from "@legion/contracts";
+
+import type { AgentPart } from "../refs/AgentName";
 
 /**
  * Each delivery mode as a person reads it, the one mapping every surface names a mode with: the
@@ -67,7 +70,7 @@ export function broadcastDelivery(
 
 /** The shape every delivery attempt shares, whatever its row type spells the fields. */
 export interface DeliveryOutcome {
-  readonly state: "pending" | "sent" | "failed";
+  readonly state: DeliveryAttemptState;
   /** ISO-8601, as both `MessageDelivery.created_at` and `CommentDelivery.created_at` carry it. */
   readonly createdAt: string;
   readonly duplicate?: boolean;
@@ -131,6 +134,10 @@ function insideDuplicateWindow(createdAt: string, now: number): boolean {
  * never handed it while the attempt reads as a duplicate. The dashboard cannot tell that session
  * from one whose host takes the Retry, so it points at a mode change, a new key, for both
  * (`answeredWithErrorGuidance`).
+ *
+ * A queued attempt needs no clause of its own: it is not `failed`. The listener took it and
+ * stored it for a session that is not running, so there is nothing to retry, and a Retry would
+ * store a second copy for the same session to read when it comes back.
  */
 export function isSafeRetry(attempt: DeliveryOutcome, now: number = Date.now()): boolean {
   return (
@@ -143,6 +150,24 @@ export function isSafeRetry(attempt: DeliveryOutcome, now: number = Date.now()):
 
 /** What a duplicate attempt reads as: an earlier attempt landed, so this one added nothing. */
 export const duplicateText = `Delivered by an earlier attempt, so not delivered again ${unlessRestarted}`;
+
+/** How long the notification stream keeps a message for a session that is not running, in whole
+ *  hours: the same window in which a repeat is recognised, since the stream's retention is what
+ *  decides both (`DELIVERY_DUPLICATE_WINDOW_MS`). */
+const QUEUED_HOURS = DELIVERY_DUPLICATE_WINDOW_MS / (60 * 60 * 1000);
+
+/** What a queued attempt reads as, on every surface that shows one: the listener took the
+ *  message for a session it knows and that is not running, and stores it until that session
+ *  runs again. It takes the place of the `Failed: no live session <id>` such a session used to
+ *  read as. `session` is the recipient as the surface draws it, so a card names it through
+ *  `AgentName` and a plain line names it as text. */
+export function queuedParts(session: AgentPart): AgentPart[] {
+  return [
+    "Queued: ",
+    session,
+    ` is stopped; it gets the message if it runs again within ${QUEUED_HOURS} hours`,
+  ];
+}
 
 /**
  * The guidance a failed attempt earns while a same-mode retry is still safe.

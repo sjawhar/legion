@@ -22,6 +22,7 @@ class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
     return {
       unsubscribe: () => undefined,
+      isClosed: () => false,
       async *[Symbol.asyncIterator](): AsyncGenerator<ChannelInboundMessage> {},
     }
   }

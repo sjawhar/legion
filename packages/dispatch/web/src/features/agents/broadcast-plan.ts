@@ -43,14 +43,19 @@ function sessionsById(agents: readonly Agent[]): Map<string, Agent> {
 }
 
 /** Why the live registry leaves a selected session out of a send in `delivery`, or undefined when
- *  it can take it. */
+ *  it can take it.
+ *
+ *  A session the live list does not hold is not one of them. Envoy may still know it and it may
+ *  simply not be running, and then the send is stored for it and reaches it when it runs again;
+ *  only the listener can tell that session from one it has never heard of, so the server
+ *  decides and the broadcast names what it left out (`no live session`). Excluding it here
+ *  would refuse to send to every session that is merely stopped. */
 function liveExclusion(
   sessionID: string,
   agent: Agent | undefined,
   delivery: MessageDeliveryMode
 ): BroadcastExclusionPlan | undefined {
-  if (agent === undefined) return { agent: undefined, reason: "no live session", sessionID };
-  if (!agent.capabilities.includes(delivery)) {
+  if (agent !== undefined && !agent.capabilities.includes(delivery)) {
     return { agent, reason: `does not advertise ${MODE_LABELS[delivery]}`, sessionID };
   }
   return undefined;
@@ -59,9 +64,10 @@ function liveExclusion(
 /**
  * What sending the current selection would do: the sessions it reaches, and the selected
  * sessions it leaves out. A session that does not advertise the chosen mode is excluded
- * rather than switched to another one - the mode is part of what the sender said - and a
- * selection kept across a session going away excludes it too, which is exactly the judgment
- * the server repeats against its own registry read when the send arrives.
+ * rather than switched to another one - the mode is part of what the sender said. A selection
+ * kept across a session leaving the live list still names it: Envoy may know it and it may
+ * simply be stopped, in which case the send is stored for it, and the server excludes it only
+ * when the listener has never heard of it (`liveExclusion`).
  */
 export function broadcastPlan(
   selected: ReadonlySet<string>,
@@ -79,18 +85,18 @@ export function broadcastPlan(
   return { excluded, recipients };
 }
 
-/** Why a selected session that has come back is left out of a restored send: it was not
- *  reachable when the refused send was pressed, so the request being re-sent does not name it. */
+/** Why a selected session that the refused send does not name is left out of it: it was not a
+ *  recipient when the send was pressed, so the request being re-sent does not ask for it. */
 const NOT_IN_RESTORED_SEND = "not in the refused send; edit to include it";
 
 /**
  * What re-sending a refused request word for word would do: it reaches exactly the sessions it
  * named, whatever the registry says now. A selected session the request does not name is
  * excluded, so the composer never shows as reached a session the request will not ask for: with
- * NOT_IN_RESTORED_SEND when it has come back since and an edit - which drops the restored request
- * for the live plan - would include it, and otherwise with the reason the live plan would give.
- * A named session that has left since is still a recipient here: the request asks for it, and the
- * server excludes it against its own registry and names it on the broadcast.
+ * NOT_IN_RESTORED_SEND, since an edit - which drops the restored request for the live plan -
+ * would include it, and with the mode's reason when the live plan would leave it out for that.
+ * A named session that has left since is still a recipient here: the request asks for it, and
+ * the server decides what became of it.
  */
 function restoredBroadcastPlan(
   restored: CreateBroadcastInput,

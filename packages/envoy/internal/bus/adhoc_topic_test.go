@@ -65,6 +65,28 @@ func TestEveryStreamSubjectIsALiteralPrefixAndWildcard(t *testing.T) {
 	}
 }
 
+// The presence subject (PresenceSubject) must stay a subject the stream does not carry, for as
+// long as presence is asked on it: sjawhar/legion#2603 narrows each session's NATS grant to the
+// subjects it needs, and that grant lets a session subscribe to its own presence subject under
+// notifications. because the prefix lies outside the stream. A stream subject that captured it
+// would also send every presence request through the stream and the live-topics lane, which
+// answers for every session on a machine rather than the one asked. This test is permanent: a new
+// stream subject that fails it is the subject to change, not the test. It walks streamCfg.Subjects,
+// the list the stream is built from, as the role-lane check does, so a subject that reaches the
+// stream by any other name is covered.
+func TestNoStreamSubjectCapturesThePresenceSubject(t *testing.T) {
+	for _, topic := range []string{PresenceSubject("ses_x"), PresenceSubjectPrefix + "a.b"} {
+		if StreamCaptures(topic) {
+			t.Errorf("the stream captures the presence subject %q", topic)
+		}
+	}
+	for _, subject := range streamCfg.Subjects {
+		if subjectsOverlap(subject, PresenceSubjectPrefix+">") {
+			t.Errorf("stream subject %q overlaps the presence prefix %s", subject, PresenceSubjectPrefix)
+		}
+	}
+}
+
 // An ad-hoc topic, one no stream subject captures, is published over core NATS: the publish
 // answers at once, a subscriber receives the envelope, and the stream retains nothing for it. Before
 // the fix the publish went to JetStream, which never answers it while a core subscriber holds the

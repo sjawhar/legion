@@ -78,10 +78,11 @@ test("sends Envoy messages through the shared transport", async () => {
     message: "ready",
   })
   expect(result).toEqual({
-    message: "sent evt-sent to ses_receiver",
+    message: "sent evt-sent to ses_receiver, which is connected",
     event_id: "evt-sent",
     recipient: "ses_receiver",
     confirmed: true,
+    state: "connected",
   })
 })
 
@@ -302,3 +303,90 @@ test("envoy_sessions filters by the machine a session runs on and by the listene
   expect(await listed("devbox")).toEqual(["ses_on_devbox"])
   expect(await listed("other")).toEqual([])
 })
+
+/** One envelope, as the listener echoes it back to a send or a publish. */
+function envelope(topic: string): Record<string, unknown> {
+  return {
+    event_id: "evt-text",
+    source: "agent",
+    source_event_id: "agent.ses_claude.evt-text",
+    source_session: "ses_claude",
+    topic,
+    dedupe_key: "dedupe-text",
+    issued_at: 1,
+    payload_summary: "message",
+    trace_id: "trace-text",
+  }
+}
+
+/** A runtime whose listener answers every send and publish with `answer`. */
+function runtimeAnswering(answer: Record<string, unknown>): ChannelToolRuntime {
+  return {
+    identity,
+    client: createEnvoyClient({
+      baseUrl: "http://envoy.test",
+      fetch: async () => Response.json(answer),
+    }),
+    session: sessionWith([]),
+  }
+}
+
+test("tells the model its message was queued, never sent, when the target is stopped", async () => {
+  const runtime = runtimeAnswering({
+    ...envelope("notifications.agent.ses_receiver"),
+    recipient: "ses_receiver",
+    state: "stopped",
+    last_seen: Date.UTC(2026, 10, 2, 9, 15, 0),
+  })
+
+  const result = await executeEnvoyTool(runtime, "envoy_send", {
+    session_id: "ses_receiver",
+    message: "ready",
+  })
+
+  const { message } = result as { readonly message: string }
+  expect(message).toMatch(/^queued \S+ for /)
+  expect(message).not.toContain("sent")
+  expect(result).toEqual({
+    message:
+      "queued evt-text for ses_receiver: the session is stopped (last seen 2026-11-02T09:15:00Z); if it runs again within 72 hours, it gets the message",
+    event_id: "evt-text",
+    recipient: "ses_receiver",
+    confirmed: true,
+    state: "stopped",
+    last_seen: Date.UTC(2026, 10, 2, 9, 15, 0),
+  })
+})
+
+for (const published of [
+  {
+    counts: { recipients: 0, recipients_connected: 0 },
+    label: "no other session subscribes",
+    pattern: /^published \S+; no other session subscribes to /,
+    text: "published evt-text; no other session subscribes to team.test, so no other session gets it",
+  },
+  {
+    counts: { recipients: 3, recipients_connected: 2 },
+    label: "three other sessions get it",
+    pattern: /^published \S+ to 3 other sessions/,
+    text: "published evt-text to 3 other sessions (2 running now)",
+  },
+  {
+    counts: {},
+    label: "a listener that counts nobody",
+    pattern: /^published \S+$/,
+    text: "published evt-text",
+  },
+]) {
+  test(`renders a publish the listener answered with ${published.label}`, async () => {
+    const runtime = runtimeAnswering({ ...envelope("team.test"), ...published.counts })
+
+    const result = (await executeEnvoyTool(runtime, "envoy_publish", {
+      topic: "team.test",
+      message: "broadcast",
+    })) as { readonly message: string }
+
+    expect(result.message).toMatch(published.pattern)
+    expect(result.message).toBe(published.text)
+  })
+}

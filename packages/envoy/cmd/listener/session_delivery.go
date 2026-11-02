@@ -92,6 +92,26 @@ func (o sessionDeliveryOutcome) relayed() bool {
 	return o.answer != nil && o.answer.Mode == deliveryModeConsumer
 }
 
+// recorded reports whether the registration may be written to the known-session store: nothing
+// about its consumer is unsettled. A registration that got its consumer (relayed), one that asked
+// for none and registered no port (the zero outcome), one that carried delivery without asking
+// (deliveryReasonNotRequested) and one whose session id names no consumer at all
+// (deliveryReasonInvalidSessionID) are each settled, and each is recorded. A consumer call that
+// failed is not: deliveryReasonConsumerError is a create or filter update that did not land, and
+// deliveryReasonNoGrant is the same call refused for want of a grant, or skipped during that
+// refusal's backoff. In both the consumer's filter is not the topics this registration stored, so
+// a record of those topics would claim what nothing filters.
+func (o sessionDeliveryOutcome) recorded() bool {
+	if o.answer == nil {
+		return true
+	}
+	switch o.answer.Reason {
+	case deliveryReasonConsumerError, deliveryReasonNoGrant:
+		return false
+	}
+	return true
+}
+
 // sessionRelay is what the relay of session consumers hears from registrations.
 type sessionRelay interface {
 	// registered reports a registration of sessionID that recorded consumer delivery on its entry.
@@ -286,6 +306,11 @@ func (m *sessionDelivery) granted() {
 // on the core path, or whose consumer is gone, is left alone, and its next registration sets the
 // filter. A failure is logged, not returned: the consumer then still delivers a topic the session
 // no longer follows, and the plugin drops a frame no followed topic matches.
+//
+// The session's known-session record is not this function's: it names the topics the session
+// follows, which an unsubscribe changes whatever the session's delivery mode, while this filter
+// names the ones its consumer carries. Each call site writes the record itself
+// (recordFollowedTopics).
 func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, sessionID string) {
 	if m == nil || m.consumers == nil {
 		return
@@ -307,6 +332,40 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	unlock()
 	if err != nil && !errors.Is(err, bus.ErrSessionConsumerNotFound) {
 		m.logger.Warn("session consumer filter update failed", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
+}
+
+// recordFollowedTopics brings sessionID's known-session record up to date with the topics its
+// stored interest row now holds, which is what a publish counts its recipients against
+// (session.KnownSessions): every route that changes a session's interests calls it, so a topic a
+// session has left stops being counted whether the session holds its own NATS connection or the
+// relay serves it a consumer. The record is about the topics the session follows, not about the
+// consumer's filter, so nothing here reads the entry's delivery mode and a listener with no
+// session-consumer connection writes it too; the filter is refollow's, beside this.
+//
+// The rest of the record is the session's entry, as the registration wrote it. A session the
+// registry holds no entry for writes nothing: it is stopped or gone, and a stop keeps the record
+// it had (deleteSessionHandler). A listener whose known-session bucket is not open writes nothing
+// either. A failed write is this WARN and nothing else: the route answers whatever the write did.
+func recordFollowedTopics(ctx context.Context, d *listenerDeps, sessionID string, logger *logging.Logger) {
+	entry, err := d.sessions.Get(sessionID)
+	if err != nil {
+		return
+	}
+	topics, err := storedInterestTopics(ctx, d.registry, sessionID)
+	if err != nil {
+		logger.Warn("known-session record left unchanged: the session's interests could not be read",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		return
+	}
+	if err := d.known.RecordWithin(ctx, session.KnownSession{
+		SessionID:    sessionID,
+		Title:        entry.Title,
+		Capabilities: entry.Capabilities,
+		Topics:       topics,
+	}); err != nil {
+		logger.Warn("known-session record not written after an interest change",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	}
 }
 

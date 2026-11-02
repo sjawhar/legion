@@ -38,6 +38,8 @@ interface Queue {
   waiter: PromiseWithResolvers<ChannelBrokerMessage | null> | undefined
   /** Set by unsubscribe: the iterator ends at its next pull, even when a message was mid-delivery. */
   closed: boolean
+  /** Set by a refusal: the iterator throws it, as nats.js throws a permissions violation. */
+  refusal: Error | undefined
 }
 
 export class FakeNats implements ChannelForwarderConnection {
@@ -51,10 +53,34 @@ export class FakeNats implements ChannelForwarderConnection {
 
   constructor(readonly calls: string[] = []) {}
 
+  /**
+   * Subjects this server refuses to subscribe. The refusal lands on the next flush, as a real
+   * one's does: a NATS server answers `-ERR 'Permissions Violation for Subscription to …'`
+   * asynchronously and the client reads it before that flush's PONG, which is why only a flush
+   * tells an accepted subscription from a refused one. nats.js then closes the refused
+   * subscription and throws the refusal out of its iterator (`Subscriptions.handleError`).
+   */
+  readonly refusedSubjects = new Set<string>()
+  /** Refusals waiting for the next flush. */
+  private readonly pendingRefusals: Array<() => void> = []
+
   subscribe(subject: string): ChannelTopicSubscription {
     this.calls.push(`nats.subscribe ${subject}`)
-    const queue: Queue = { subject, messages: [], waiter: undefined, closed: false }
+    const queue: Queue = {
+      subject,
+      messages: [],
+      waiter: undefined,
+      closed: false,
+      refusal: undefined,
+    }
     this.subscriptions.set(subject, queue)
+    if (this.refusedSubjects.has(subject)) {
+      this.pendingRefusals.push(() => {
+        queue.closed = true
+        queue.refusal = new Error(`'Permissions Violation for Subscription to "${subject}"'`)
+        queue.waiter?.resolve(null)
+      })
+    }
     return {
       unsubscribe: () => {
         this.calls.push(`nats.unsubscribe ${subject}`)
@@ -63,8 +89,10 @@ export class FakeNats implements ChannelForwarderConnection {
         queue.closed = true
         queue.waiter?.resolve(null)
       },
+      isClosed: () => queue.closed,
       async *[Symbol.asyncIterator]() {
         for (;;) {
+          if (queue.refusal !== undefined) throw queue.refusal
           if (queue.closed) return
           const message = queue.messages.shift()
           if (message !== undefined) {
@@ -75,6 +103,7 @@ export class FakeNats implements ChannelForwarderConnection {
           queue.waiter = waiter
           const next = await waiter.promise
           queue.waiter = undefined
+          if (queue.refusal !== undefined) throw queue.refusal
           if (next === null) return
           yield next
         }
@@ -91,6 +120,7 @@ export class FakeNats implements ChannelForwarderConnection {
   stallFlush = false
 
   flush(): Promise<void> {
+    for (const refuse of this.pendingRefusals.splice(0)) refuse()
     return this.stallFlush ? new Promise<void>(() => undefined) : Promise.resolve()
   }
 

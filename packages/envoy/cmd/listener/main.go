@@ -39,6 +39,13 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
+	// known is the store of every session that registered in the last 30 days
+	// (session.KnownSessions). A listener whose NATS user may not open its bucket holds a store
+	// that answers no record and writes none until an attempt of its own opens the bucket; nil
+	// here is a listener that could not build a JetStream context and a test that builds the
+	// handlers without a store. Every method of it is safe on a nil store, so no call site
+	// checks.
+	known *session.KnownSessions
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
 	// roleLane is the role lane's own client (bus.ConnectRoleLane), nil in a test that builds the
@@ -919,6 +926,47 @@ func main() {
 	}
 	sessionCacheReadyCancel()
 
+	// The known-session store answers which sessions registered in the last 30 days, whether or
+	// not they are registered now; no delivery depends on it, so it never stops a start. A
+	// listener whose NATS user may not open the bucket - its grant not yet applied, which is what
+	// production runs between this image and the grant - keeps the store, which answers no record
+	// and writes none until an attempt of its own opens the bucket, so the grant applied after
+	// this start is picked up with no restart. That attempt waits seconds, not the 10 the
+	// listener's other stores wait, so /v1 opens below as promptly as it does on a listener whose
+	// bucket opens (session.OpenKnownSessions). The store logs the bucket it could not open and
+	// the attempt that opened it; this line is the one failure that leaves no store at all, a
+	// connection that gives no JetStream context, which answers as an empty store does.
+	known, knownErr := session.OpenKnownSessions(
+		client.Conn,
+		session.WithKnownSessionReplicas(cfg.NATSReplicas),
+		session.WithKnownSessionLogger(logger.Slog()),
+	)
+	if knownErr != nil {
+		logger.Warn("the known-session store was not built; no session's 30-day record is written or read for the life of this listener",
+			slog.String("bucket", bus.KnownSessionBucket), slog.String("error", knownErr.Error()))
+	}
+
+	// The store's watcher fills the records in the background, so wait for a scan that delivered
+	// every one of them before serving, as the role claim gate above does
+	// (kvwatch.Watcher.WaitComplete, the state session.KnownSessions.Opened reads). Until that
+	// scan this listener knows no stopped session: a send to one is the 404 this store exists to
+	// stop answering, GET /v1/registry/<id>?include_stopped=1 is that 404 too, and a publish's
+	// recipient count would be sent low, so the number would mean less than it names.
+	//
+	// Bounded at 30s, as its neighbour is, and it fails open: the store answers from whatever the
+	// watcher has delivered, the counts stay out until Opened says the view is whole, and the
+	// warn below says the cache may be partly filled. Nothing here stops a start. A store whose
+	// bucket is not open, and a nil one, wait for nothing: neither has a cache to fill, and a
+	// start must not spend this budget on a bucket it may not open. A scan nats.go's idle timer
+	// ended is scanned again rather than waited out (session.KnownSessions.startWatch), so this
+	// gate ends on that rescan instead of spending the whole budget.
+	knownCacheReadyCtx, knownCacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := known.WaitForCacheReady(knownCacheReadyCtx); err != nil {
+		logger.Warn("known-session cache warm-up did not complete; the store serves from a partly filled cache, so a stopped session may read as unknown and a publish's recipient count low",
+			slog.String("bucket", bus.KnownSessionBucket), slog.String("error", err.Error()))
+	}
+	knownCacheReadyCancel()
+
 	// KV watchers are not bus subscriptions, so recreate them after every
 	// recovered NATS connection, and end them in the drain before the connection's own.
 	caches := listenerCaches(registry, sessions, ciStore)
@@ -928,6 +976,33 @@ func main() {
 	client.AddDrainHook(func(ctx context.Context) {
 		endListenerKVWatchers(ctx, caches)
 	})
+	// The known-session store keeps its own watcher the same way, outside listenerCaches: the
+	// self-health monitor must not restart a listener over a cache no delivery reads. Both hooks
+	// are safe on a store whose bucket is not open, which keeps the connection for its next
+	// attempt, and on no store at all.
+	//
+	// A failed Rewatch is logged and the hook answers nil, for the same reason the store is kept
+	// out of listenerCaches: an error here fails the whole hook run, which re-runs every hook on
+	// backoff, reports /healthz degraded after RepairGrace and writes the `envoy nats reconnect
+	// hooks have not succeeded` ERROR a metric filter alarms on - over a bucket whose grant was
+	// rolled back or which was deleted under its watcher, neither of which a delivery reads.
+	// What repairs it instead is the store itself: a move that failed is retried in the
+	// background on the store's own backoff until one succeeds, the store is stopped, or a later
+	// connection event's move makes it (session.KnownSessions.Rewatch, repairUntilStopped), and
+	// a bucket that never opened is attempted by the same repair (session.OpenKnownSessions).
+	// Nothing else would: this hook run counts the connection event as covered whatever the move
+	// did (internal/bus/recovery.go), so no hook runs again until the next event, which can be
+	// days away. Until a move lands, Opened answers false over a watcher that ended, so a
+	// publish's recipient count is left out rather than answered from a cache that stopped
+	// following the bucket.
+	client.AddReconnectHook(func(conn *nats.Conn) error {
+		if err := known.Rewatch(conn); err != nil {
+			logger.Warn("the known-session cache did not move to the recovered connection; the store retries the move on its own backoff, and this listener leaves a publish's recipient count out until one succeeds",
+				slog.String("bucket", bus.KnownSessionBucket), slog.String("error", err.Error()))
+		}
+		return nil
+	})
+	client.AddDrainHook(func(ctx context.Context) { known.EndWatch(ctx) })
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,
@@ -1073,6 +1148,7 @@ func main() {
 		consumers:  delivery,
 		registry:   registry,
 		sessions:   sessions,
+		known:      known,
 		ciStore:    ciStore,
 		caches:     caches,
 		consumer:   consumer,

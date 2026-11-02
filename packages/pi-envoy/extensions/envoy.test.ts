@@ -80,6 +80,9 @@ type MessageHeaders = { readonly get: (name: string) => string };
 
 type Subscription = {
   readonly unsubscribe: () => void;
+  /** nats.js's own `Subscription.isClosed()`: true for one the server refused, and after an
+   *  unsubscribe. */
+  readonly isClosed: () => boolean;
   readonly [Symbol.asyncIterator]: () => AsyncIterator<{
     readonly subject: string;
     readonly data: Uint8Array;
@@ -120,6 +123,16 @@ const natsState = {
   heldConnect: undefined as Promise<void> | undefined,
   drainHangs: false,
   drainStarted: false,
+  /** Subjects this server refuses to subscribe. The refusal lands on the next flush, as a real
+   *  one's does: a NATS server answers `-ERR 'Permissions Violation for Subscription to …'`
+   *  asynchronously, and the client reads it before that flush's PONG, which is why only a
+   *  flush tells an accepted subscription from a refused one. nats.js then closes the refused
+   *  subscription and throws the refusal out of its iterator (`Subscriptions.handleError`). */
+  refusedSubjects: new Set<string>(),
+  /** Refusals waiting for the next flush on any connection. */
+  pendingRefusals: [] as (() => void)[],
+  /** When set, every flush parks, as one on a stalled connection does. */
+  flushHangs: false,
   /** Each mocked connection's `status()` readers: a push hands every one of them the status, as
    *  nats.js reports a reconnect to every reader of the connection's status iterator. */
   statusReaders: [] as ((status: { readonly type: string; readonly data: unknown }) => void)[],
@@ -175,6 +188,13 @@ mock.module("nats", () => ({
       drain: async () => {
         natsState.drainStarted = true;
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
+      },
+      // A flush is where a server's asynchronous refusals land: it answers PONG only after the
+      // `-ERR` frames it already wrote, so a flush that comes back on a live subscription is
+      // the server's acceptance of it.
+      flush: async () => {
+        for (const refuse of natsState.pendingRefusals.splice(0)) refuse();
+        if (natsState.flushHangs) await Promise.withResolvers<never>().promise;
       },
       // An async iterable of the connection's status events, which a test feeds through
       // `pushNatsStatus`; it ends once the connection is closed.
@@ -266,6 +286,7 @@ mock.module("nats", () => ({
             // parked cannot observe that, and lets resubscribe bugs ship green.
             notify();
           },
+          isClosed: () => !active,
           [Symbol.asyncIterator]: () => ({
             next: async (): Promise<
               IteratorResult<{
@@ -288,6 +309,13 @@ mock.module("nats", () => ({
           }),
         };
         natsState.subscriptions.set(topic, subscription);
+        if (natsState.refusedSubjects.has(topic)) {
+          natsState.pendingRefusals.push(() => {
+            active = false;
+            failure = new Error(`'Permissions Violation for Subscription to "${topic}"'`);
+            notify();
+          });
+        }
         return subscription;
       },
     };
@@ -443,6 +471,9 @@ afterEach(async () => {
   natsState.realConnect = false;
   natsState.drainHangs = false;
   natsState.drainStarted = false;
+  natsState.refusedSubjects.clear();
+  natsState.pendingRefusals.length = 0;
+  natsState.flushHangs = false;
   natsState.statusReaders.length = 0;
   hostBuiltins.length = 0;
 });
@@ -2882,7 +2913,7 @@ describe("envoy OMP extension", () => {
         idempotency_key: "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80",
       });
     expect(sent?.content[0]?.text).toBe(
-      "sent evt_1 to ses_target (recipient unconfirmed by listener)"
+      "sent evt_1 to ses_target, which is connected (recipient unconfirmed by listener)"
     );
     expect(sent?.details).toMatchObject({
       event_id: "evt_1",
@@ -2909,6 +2940,8 @@ describe("envoy OMP extension", () => {
           title: "",
           driving: false,
           self_subscribed: true,
+          // The presence subscription was accepted, so the registration declares the check.
+          presence: true,
           // Minted once per extension instance and sent on every registration (R5).
           client_instance_id: expect.stringMatching(/^[0-9a-f]{32}$/),
           capabilities: ["aside", "steer"],
@@ -10615,6 +10648,8 @@ console.log(JSON.stringify(args));
         title: "",
         driving: false,
         self_subscribed: true,
+        // The presence subscription was accepted, so the registration declares the check.
+        presence: true,
         // Minted once per extension instance and sent on every registration (R5).
         client_instance_id: expect.stringMatching(/^[0-9a-f]{32}$/),
         capabilities: ["aside", "steer"],
@@ -18400,3 +18435,290 @@ for (const listenerGrant of ["current", "before-session-consumers"] as const) {
     }
   );
 }
+
+// The listener's connection check (INFRA-626). When someone sends to a session, the listener
+// makes one core NATS request on `notifications.envoy.presence.<session id>`, and that session's
+// own plugin answers it from its own connection: a reply naming the session is connected, no
+// reply and the no-responders status a server gives a subject nothing subscribes to are stopped.
+// NATS here is this file's mock, as it is for every other subscription this suite covers (the
+// real-server rows are the `envoyStackEnabled` ones above); the no-responders status itself is
+// the server's own behaviour, proved in packages/envoy.
+describe("the listener's presence check", () => {
+  const SESSION = "ses_presence";
+  const subjectFor = (session: string): string => `notifications.envoy.presence.${session}`;
+
+  /** Lets every promise and I/O callback queued so far run. */
+  async function settle(): Promise<void> {
+    for (let turn = 0; turn < 25; turn += 1) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setImmediate(resolve);
+      await promise;
+    }
+  }
+
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 2_000;
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await settle();
+    }
+  }
+
+  interface Registration {
+    readonly sessionID: string;
+    readonly presence?: boolean;
+    readonly clientInstanceID?: string;
+  }
+
+  /** Boots `SESSION` against a listener that echoes every registration and records each one. */
+  async function bootPresence(query: string) {
+    const registrations: Registration[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/replay") return emptyReplay(init);
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id: string;
+          readonly dir: string;
+          readonly topics: readonly string[];
+          readonly presence?: boolean;
+          readonly client_instance_id?: string;
+        };
+        registrations.push({
+          sessionID: body.session_id,
+          ...(body.presence === undefined ? {} : { presence: body.presence }),
+          ...(body.client_instance_id === undefined
+            ? {}
+            : { clientInstanceID: body.client_instance_id }),
+        });
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: body.dir,
+          topics: body.topics,
+        });
+      }
+      return response({});
+    }) as typeof fetch;
+    const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext(SESSION);
+    await fixture.handlers.get("session_start")?.({}, context);
+    await until(() => registrations.length > 0, "the first registration");
+    await settle();
+    let inboxes = 0;
+    return {
+      fixture,
+      registrations,
+      /** The registrations `session` sent, in order. */
+      registrationsFor: (session: string): readonly Registration[] =>
+        registrations.filter((registration) => registration.sessionID === session),
+      /** The presence subjects this process has ever subscribed, in order. */
+      presenceSubjects: (): readonly string[] =>
+        [...natsState.controls.keys()].filter((subject) =>
+          subject.startsWith("notifications.envoy.presence.")
+        ),
+      /** The listener asks `session`'s presence subject; answers what the plugin replied, if any. */
+      ask: async (session: string): Promise<unknown> => {
+        inboxes += 1;
+        const inbox = `_INBOX.presence.${inboxes}`;
+        natsState.controls.get(subjectFor(session))?.push("", inbox);
+        await settle();
+        const answered = natsState.published.find((published) => published.subject === inbox);
+        if (answered?.data === undefined) return undefined;
+        return JSON.parse(new TextDecoder().decode(answered.data));
+      },
+      switchTo: async (next: string): Promise<void> => {
+        await fixture.handlers.get("session_switch")?.({ reason: "new" }, sessionContext(next));
+        await settle();
+      },
+      stop: () => fixture.handlers.get("session_shutdown")?.({}, context),
+    };
+  }
+
+  test("subscribes exactly its own presence subject, answers it from memory, and declares the check", async () => {
+    const session = await bootPresence("presence-subscribes");
+
+    try {
+      // Every NATS subject this session holds: one presence subject, its own, so a plugin that
+      // subscribed to the wildcard or to another session's fails here.
+      expect([...natsState.controls.keys()].sort()).toEqual(
+        [
+          `agentstream.${SESSION}.control`,
+          `notifications.agent.${SESSION}`,
+          `notifications.envoy.deliver.${SESSION}`,
+          subjectFor(SESSION),
+        ].sort()
+      );
+      const first = session.registrations[0];
+      expect(first?.presence).toBe(true);
+      expect(first?.clientInstanceID).toMatch(/^[0-9a-f]{32}$/);
+      // The reply the listener decodes (`presenceReply`): this session, and the client instance
+      // that registered it.
+      expect(await session.ask(SESSION)).toEqual({
+        session_id: SESSION,
+        client_instance_id: first?.clientInstanceID,
+      });
+    } finally {
+      await session.stop();
+    }
+  });
+
+  test("declares no check when the server refuses the subscription, and registers all the same", async () => {
+    natsState.refusedSubjects.add(subjectFor(SESSION));
+    const session = await bootPresence("presence-refused");
+
+    try {
+      const first = session.registrations[0];
+      expect(first?.sessionID).toBe(SESSION);
+      // No declaration at all, so the listener keeps calling the session connected rather than
+      // probing a subject this plugin cannot answer on.
+      expect(first).not.toHaveProperty("presence");
+      expect(await session.ask(SESSION)).toBeUndefined();
+    } finally {
+      await session.stop();
+    }
+  });
+
+  test("moves the subscription when the session id changes: the new id answers and the old one does not", async () => {
+    const session = await bootPresence("presence-session-switch");
+    const next = "ses_presence_next";
+
+    try {
+      await session.switchTo(next);
+      await until(
+        () => session.registrationsFor(next).length > 0,
+        "a registration under the new session id"
+      );
+
+      expect(session.presenceSubjects()).toEqual([subjectFor(SESSION), subjectFor(next)]);
+      expect(natsState.controls.get(subjectFor(SESSION))?.active()).toBe(false);
+      expect(await session.ask(next)).toEqual({
+        session_id: next,
+        client_instance_id: session.registrations[0]?.clientInstanceID,
+      });
+      expect(await session.ask(SESSION)).toBeUndefined();
+      expect(session.registrationsFor(next).at(-1)?.presence).toBe(true);
+    } finally {
+      await session.stop();
+    }
+  });
+
+  test("answers nothing once its NATS subscription is gone, which is the no-responders a server then gives", async () => {
+    const session = await bootPresence("presence-connection-gone");
+
+    try {
+      expect(session.registrations[0]?.presence).toBe(true);
+      // The connection dropped: nats.js ends every subscription's iterator.
+      natsState.controls.get(subjectFor(SESSION))?.end();
+      await settle();
+
+      expect(await session.ask(SESSION)).toBeUndefined();
+    } finally {
+      await session.stop();
+    }
+  });
+
+  /** One envelope, as the listener echoes it back to a send or a publish. */
+  const envelope = (topic: string) => ({
+    event_id: "evt_text",
+    source: "agent",
+    source_event_id: "evt_text",
+    topic,
+    dedupe_key: "dedupe_text",
+    issued_at: 1,
+    payload_summary: "message",
+    trace_id: "trace_text",
+  });
+
+  /** Boots a session whose listener answers every send and publish with `answer`. */
+  async function bootTool(query: string, answer: unknown) {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/replay") return emptyReplay(init);
+      if (url.pathname === "/v1/interests/subscribe") {
+        return responseWithRegistration(input, init, {});
+      }
+      return response(answer);
+    }) as typeof fetch;
+    const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext(SESSION));
+    return fixture;
+  }
+
+  test("tells a model its message was queued, never sent, when the target is stopped", async () => {
+    const fixture = await bootTool("presence-text-send-stopped", {
+      ...envelope("notifications.agent.ses_target"),
+      recipient: "ses_target",
+      state: "stopped",
+      last_seen: Date.UTC(2026, 10, 2, 9, 15, 0),
+    });
+
+    const result = await fixture.tools
+      .find((tool) => tool.name === "envoy_send")
+      ?.execute("", { session_id: "ses_target", message: "direct" });
+
+    const text = result?.content[0]?.text ?? "";
+    expect(text).toMatch(/^queued \S+ for /);
+    expect(text).not.toContain("sent");
+    expect(text).toBe(
+      "queued evt_text for ses_target: the session is stopped (last seen 2026-11-02T09:15:00Z); if it runs again within 72 hours, it gets the message"
+    );
+    expect(result?.details).toMatchObject({
+      state: "stopped",
+      last_seen: Date.UTC(2026, 10, 2, 9, 15, 0),
+    });
+  });
+
+  test("says a connected target is connected", async () => {
+    const fixture = await bootTool("presence-text-send-connected", {
+      ...envelope("notifications.agent.ses_target"),
+      recipient: "ses_target",
+      state: "connected",
+    });
+
+    const result = await fixture.tools
+      .find((tool) => tool.name === "envoy_send")
+      ?.execute("", { session_id: "ses_target", message: "direct" });
+
+    expect(result?.content[0]?.text).toBe("sent evt_text to ses_target, which is connected");
+  });
+
+  for (const published of [
+    {
+      counts: { recipients: 0, recipients_connected: 0 },
+      label: "no other session subscribes",
+      pattern: /^published \S+; no other session subscribes to /,
+      text: "published evt_text; no other session subscribes to team.test, so no other session gets it",
+    },
+    {
+      counts: { recipients: 3, recipients_connected: 2 },
+      label: "three other sessions get it",
+      pattern: /^published \S+ to 3 other sessions/,
+      text: "published evt_text to 3 other sessions (2 running now)",
+    },
+    {
+      counts: {},
+      label: "a listener that counts nobody",
+      pattern: /^published \S+$/,
+      text: "published evt_text",
+    },
+  ]) {
+    test(`renders a publish the listener answered with ${published.label}`, async () => {
+      const fixture = await bootTool(
+        `presence-text-publish-${published.label.replaceAll(" ", "-")}`,
+        { ...envelope("team.test"), ...published.counts }
+      );
+
+      const result = await fixture.tools
+        .find((tool) => tool.name === "envoy_publish")
+        ?.execute("", { topic: "team.test", message: "broadcast" });
+
+      expect(result?.content[0]?.text).toMatch(published.pattern);
+      expect(result?.content[0]?.text).toBe(published.text);
+    });
+  }
+});

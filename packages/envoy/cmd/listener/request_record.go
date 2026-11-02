@@ -23,10 +23,14 @@ const (
 	outcomeInvalidRequest requestOutcome = "invalid_request"
 	outcomeTooLarge       requestOutcome = "too_large"
 	outcomeBusUnavailable requestOutcome = "bus_unavailable"
-	// outcomeNoLiveSession belongs to the send route alone: the store said the target's key is
-	// gone. outcomeCapabilityRefused is the send route's target, or the publish route's role
-	// holder (sendToRole), that is live but will not take this delivery mode.
+	// outcomeNoLiveSession belongs to the send route alone: neither store knows the target, so
+	// nothing of it is live and nothing of it is known. outcomeSessionStopped is that route's
+	// 409 for a connected_only send whose target is known and stopped: the sender asked to be
+	// told rather than have its message wait, and nothing was stored.
+	// outcomeCapabilityRefused is the send route's target, or the publish route's role
+	// holder (sendToRole), that will not take this delivery mode.
 	outcomeNoLiveSession     requestOutcome = "no_live_session"
+	outcomeSessionStopped    requestOutcome = "session_stopped"
 	outcomeCapabilityRefused requestOutcome = "capability_refused"
 	// outcomeRoleUnclaimed and outcomeRoleLapsed belong to the publish route alone. Both answer
 	// 404 and neither is outcomeNoLiveSession: the request named a role, not a session, and the
