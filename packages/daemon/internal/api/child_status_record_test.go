@@ -129,7 +129,7 @@ func TestParkChildParksTheRecordWithoutWaitingForItsDispatchEvent(t *testing.T) 
 	// The planner was mid-turn when its architect parked the child, and completes its plan before
 	// any Dispatch event of the park is delivered.
 	result, err := intake.ApplyFact(context.Background(), h.store.Pool(), "api", "planner-completed", intake.HandoffComplete{
-		Generation: 1, Issue: statusChild, Role: claim.RolePlanner, Claim: "planner-claim", Summary: "the plan", Commit: "c0ffee",
+		Generation: 1, Issue: statusChild, Role: claim.RolePlanner, Claim: "planner-claim", Summary: "the plan", HandoffRecord: "plan-1", HandoffVersion: 1,
 	}, handlers...)
 	if err != nil {
 		t.Fatalf("apply the planner's completion: %v", err)

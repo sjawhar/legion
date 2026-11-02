@@ -23,7 +23,7 @@
 // written once and appended to ever after: the create carries a header paragraph and no record,
 // and every record, the session's first included, is a fenced block appended through `docEdit`.
 // That is the one rule that keeps a record safe, because Dispatch stores an upload of a name it
-// already holds as a new version of that same document (`findArtifactByName`,
+// already holds as a new version of that same document (`findArtifactByNameOrSlug`,
 // `packages/envoy/internal/dispatch/api/artifacts.go`), which the reader reads in place of
 // everything the versions before it held: a second create would erase every record appended since
 // the first. The document's id is held in memory for the session; holding none — a process that

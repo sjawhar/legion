@@ -36,7 +36,11 @@ for everything the daemon generates.
 |---|---|---|
 | **Daemon-generated** (durable state, locks, secret files, per-pane sockets, launchers) | `config.stateDir` — `state_dir` in `legion.yaml` / `LEGION_STATE_DIR`, default `~/.legion/<project>` | `state.json`, `daemon.lock`, `secrets/`, `workers/<name>.sock`, `worker-bin/gh`, `bin/legion`, `deployment-instructions.md` |
 | **Daemon-generated** (learning feedback, logs) | `resolveLegionPaths(env, home).forLegion(legionId).legionStateDir` — `$XDG_STATE_HOME/legion/legions/<projectId>/` (`paths.ts`) | `learning-feedback.jsonl` |
-| **Worker-authored** (handoffs, plans, learnings) | `.legion/` in the workspace branch (tracked, intentional; deleted before merge) and `docs/solutions/` | `architect.json`, `plan.json` |
+| **Worker-authored** (learnings) | `docs/solutions/` in the workspace branch (tracked, intentional) | a solutions note |
+
+Before sjawhar/legion#2354 a worker also wrote its handoff and its plan under `.legion/` in the
+workspace branch, and the retro phase removed that directory before the merge. A handoff is now a
+record on the Dispatch issue, so a worker writes no handoff file into a tracked tree.
 
 ### Code Smell
 
