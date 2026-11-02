@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "previousHandoff": "7eb1f45abcf0ea1766ce5bdb2e1adcd3f07081db",
+  "previousHandoff": "29136060ab71a58e389614bac72c2dbd458302d1",
   "proof": [
+    {
+      "criterion": "CI red at 29136060 (ci-ok): the only failure was packages/daemon TestFetchKeepsAFeedAfterGitGC/killed_during_repack, outside this PR; its failed jobs re-run once with nothing changed",
+      "surface": "GitHub Actions run 41344621548 at code head ce1289aa",
+      "command": "gh run rerun 41344621548 --failed -R sjawhar/legion",
+      "observed": "attempt 1: test failed only on 'fetch_test.go:1129: git gc did not start writing a pack during its repack' (job 124967664574), every other package ok; attempt 2: test success 2026-11-01T23:29:24Z (job 125004321032), ci-ok success 2026-11-01T23:47:29Z (job 125015198795); PR MERGEABLE (state BLOCKED: review required)",
+      "headSha": "ce1289aa9d1c",
+      "negativeControl": "attempt 1 of the same run at the same head: test failure on that daemon test, ci-ok failure (job 125000093101)"
+    },
     {
       "criterion": "Review round 8: the disk watcher and the runner-job wait read the lock once per poll and stop the job on that answer; the wait ends only once the stopped job has an exit status; a TERM during the watcher's act is kept and pg_disk_watch_stop is bounded",
       "surface": "cluster.sh under cluster.test.sh's fakes (FAKE_LOCK_GET_OK_TIMES, FAKE_LOCK_GET_FAIL_TIMES, FAKE_LOCK_GET_DELAY, FAKE_RC_UNTIL_KILL), case (dd)",
@@ -36,7 +44,8 @@
   ],
   "deviations": [
     "runner_stop's guard subject is 'the runner job NAME in the runner pod', so the existing (y)/(aa) assertions on 'the runner pod' hold unchanged.",
-    "The three loaded runs ran at the first merge fe522a73; the head adds the clean merge of #2633 (no loadtest file changed) and the fragment renames."
+    "The three loaded runs ran at the first merge fe522a73; the head adds the clean merge of #2633 (no loadtest file changed) and the fragment renames.",
+    "No code change this round: the red was a daemon test this PR does not touch (the architect's ruling, 22:45Z), cleared by one re-run of the failed jobs."
   ],
   "openQuestions": []
 }
