@@ -201,11 +201,21 @@ uses the stack runs only with `LEGION_E2E_ENVOY_STACK=1`.
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
 accept optional `inReplyTo`, `supersedes`, `urgency`, `expectsReply`, and `expiresAt` metadata.
-Successful direct sends return both the envelope and listener-selected recipient; publishes return
-the envelope and an optional role holder. Network failures and 5xx responses retry once after
-250 ms. Listener error responses preserve their `error` and optional `expected` fields. The
-listener's bearer is the `token` the client is given (`envoySettings`); without one it sends no
-`Authorization` header.
+Successful direct sends return both the envelope and listener-selected recipient, and
+`duplicate` when the listener already held a send under that target and idempotency key;
+publishes return the envelope and an optional role holder. Network failures, timeouts (5 s an
+attempt, the answer's body included) and 5xx responses retry once after 250 ms, under the same
+idempotency key; a 4xx whose body does not arrive is still a refusal. A send any attempt of which
+got no answer, an unreadable 2xx or a 5xx throws `EnvoySendUnconfirmedError`, even when a later
+attempt was refused: the message may or may not have arrived. The error names its
+`idempotencyKey` and says in `resendSafe` whether the listener's dedupe key for it
+(`agent.<target>.<key>`) is one a repeat is recognised by (`MINTED_DEDUPE_KEY_PATTERN`); when it
+is, a resend under that key inside the 72-hour duplicate window is dropped as a repeat if the
+first copy arrived (`DELIVERY_DUPLICATE_WINDOW_MS` names the rare cases a recipient that restarted
+still sees it twice). A send
+refused with a 4xx on every attempt stays an `EnvoyApiError`. Listener error responses preserve their
+`error` and optional `expected` fields. The listener's bearer is the `token` the client is given
+(`envoySettings`); without one it sends no `Authorization` header.
 
 `subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
 `plugin_version` on every registration, and exposes listener warnings, including a topic that has
@@ -468,8 +478,20 @@ slow to finish is answered `409 KEY_IN_FLIGHT` and then replayed rather than wai
 whole deadline. Progress is the connection taking the body: a body of a megabyte or more goes out
 as a stream read 64 KiB at a time, with its `Content-Length`, and each read restarts the bound, so
 an upload on a slow line is never cut off while it is still going out; a smaller body leaves in
-one write. All of it sits inside the call's own 60 s deadline, so a Dispatch that is down holds a
-`dispatch` command, and the session waiting on it, no longer than that. The call's deadline and
+one write. Once an attempt was cut off for silence or answered `409 KEY_IN_FLIGHT`, Dispatch may
+still be running the write, and its keyed layer finishes that run whatever the client does, so the
+write keeps asking every 3 s at most (`inFlightPauseMs`; a longer `Retry-After` is still waited),
+with no attempt started more than 55 s after the first (`inFlightWithinMs`), until the run's stored
+answer comes back: a write that takes Dispatch 50 s, or two silent attempts in a row, still ends in
+its answer. An upload (a body of a megabyte or more) keeps the five-attempt schedule, since each
+repeat sends its whole body again. No attempt of any write starts more than 55 s after the client
+was made, since its 60 s deadline counts from there. The numbers come from the 3,612 `dispatch`
+write commands that succeeded between 2026-10-31 21:00Z and 2026-11-02 07:30Z, each timed whole
+(p50 1.8 s, p95 19.6 s, p99 45.5 s). All of it sits inside the call's own 60 s deadline, so a
+Dispatch that is down holds a `dispatch` command, and the session waiting on it, no longer than
+that. When the write ends with no definitive answer after this call saw the keyed layer judge
+it, the error says Dispatch finishes an attempt it received, and to read the write back before
+sending it again, since a new command sends it under a new key. The call's deadline and
 its cancellation end the write at once and are never retried. Any other answer - a 2xx, a replay,
 `422 KEY_REUSED`, another 4xx - is the answer, at once.
 
@@ -487,6 +509,17 @@ for those five minutes, so a rollback to a Dispatch without the layer is noticed
 bound. Dispatch's own refusal that carries no echo says its layer did not judge the request, so
 it sets the memory aside and `/healthz` decides afresh. The probe runs only after a write has
 already failed, so the ordinary path makes no request of its own.
+
+The `dispatch` command runs each call in a process of its own, so it carries that memory in its
+session's `state.json` (`keyedLayer`: each origin with the wall-clock time of its last sighting,
+`keyedLayerMemory`), and the next call of the session takes in every sighting still under five
+minutes old (`rememberKeyedLayer`). Without it every call would know nothing and ask `/healthz`,
+which the load that stalled the write can keep from answering within 5 s, and the write would be
+reported as perhaps taken effect rather than asked again. A sighting the file dates more than five
+minutes back, ahead of the clock, or not as a time is passed over. The wall clock is the one clock
+calls share, so a clock set back between two calls stretches the five minutes by as much, and two
+calls racing in one session can bring back a sighting one of them set aside, which still ends
+five minutes after the answer that showed it.
 
 A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
 `error`, is the error's message under its `code` (`HTTP_<status>` when the server set none), with
@@ -598,7 +631,8 @@ and a call it passed can still stop on either.
 
 `runDispatchCli` (`dispatch-cli.ts`) runs one call per process. The host plugin sets
 `DISPATCH_HOST` (`omp` or `claude`) and the session's id (`CLAUDE_CODE_SESSION_ID` under Claude
-Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
+Code, where claude-envoy's QA override `ENVOY_SESSION_ID` wins as it does on the
+session's claim; `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
 naming it, and an empty variable counts as unset. `DISPATCH_SESSION_TITLE`, or the session
 directory's `title` file, names the session on what it writes. It resolves Dispatch from the
 envoy.json its session's plugin chose (above): with Dispatch off it prints `dispatch: <notice>` for
@@ -616,10 +650,11 @@ ledger, the memory) could not be written, the result still prints, with one line
 `dispatch-session-state.ts` keeps one directory per session under `DISPATCH_STATE_DIR` (default
 `<XDG_STATE_HOME or ~/.local/state>/dispatch/sessions/<id>`): `state.json` carries what a
 long-lived host remembered across calls (the triage lines and pictures already shown, the asks
-whose follow notice was printed), and `results.jsonl` gets one line per call with the tool's
-`details` or its refusal, a refusal the CLI made before the call reached Dispatch included, which
-pi-envoy's run-end check reads; a line that is not JSON is named
-(file and line number) and skipped. Directories idle for 14 days are removed, at most once a day.
+whose follow notice was printed, which Dispatch lately showed it runs the keyed layer), and
+`results.jsonl` gets one line per call with the tool's `details` or its refusal, a refusal the CLI
+made before the call reached Dispatch included, which pi-envoy's run-end check reads; a line that
+is not JSON is named (file and line number) and skipped. Directories idle for 14 days are removed,
+at most once a day.
 
 `bun bin/stand-in-gateway.ts --status 502 --body html` serves one non-Dispatch answer (`html`,
 `empty`, `text` or `json`, from `src/stand-in-gateway.ts`) on `--port` (ephemeral by default) and
@@ -627,7 +662,7 @@ prints its URL, for proving what a command shows when a gateway, not Dispatch, a
 
 ## Command specs
 
-`@legion/contracts` `src/dispatch-tools.ts` is the single source for the twenty-three
+`@legion/contracts` `src/dispatch-tools.ts` is the single source for the twenty-five
 Dispatch specs behind the `dispatch` command: each one's name, description, field schemas
 and example. `dispatch-command.ts` derives the command and its flags from them, and no host
 adds aliases or descriptions of its own.

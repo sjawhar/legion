@@ -62,6 +62,8 @@ import type {
   EditCommentInput,
   Event,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   InboxRow,
   Issue,
   IssueAskRow,
@@ -1175,6 +1177,17 @@ export class DispatchApiClient {
     return this.json<MessageRead[]>(`/api/v1/issues/${pathSegment(key)}/messages`);
   }
 
+  /** `GET /api/v1/issues/{key}/handoffs`: every phase handoff of the issue, newest first, without
+   *  its body. */
+  listHandoffs(key: string): Promise<HandoffSummary[]> {
+    return this.json<HandoffSummary[]>(`/api/v1/issues/${pathSegment(key)}/handoffs`);
+  }
+
+  /** `GET /api/v1/handoffs/{id}`: one handoff with the body its session wrote. */
+  getHandoff(id: string): Promise<Handoff> {
+    return this.json<Handoff>(`/api/v1/handoffs/${pathSegment(id)}`);
+  }
+
   listArtifacts(key: string): Promise<Artifact[]> {
     return this.json<Artifact[]>(`/api/v1/issues/${pathSegment(key)}/artifacts`);
   }
@@ -1447,10 +1460,6 @@ export class DispatchApiClient {
     return this.json<CredentialPendingResponse | null>(
       pathWithQuery("/api/v1/credential-requests", { approver: "me" })
     );
-  }
-
-  getCredentialRecord(recordId: string): Promise<CredentialRecord> {
-    return this.json<CredentialRecord>(`/api/v1/credential-requests/${pathSegment(recordId)}`);
   }
 
   /** Approve a machine login as the signed-in viewer with the code the viewer typed: Dispatch

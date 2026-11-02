@@ -83,6 +83,10 @@ type statusRecorder struct {
 	// approved.
 	approvals map[string]dispatch.Approval
 	issues    map[string]dispatch.Issue
+	// handoffs is each Dispatch handoff record this fake knows, by id; handoffErr, when set, is
+	// every handoff read's answer instead, Dispatch's trouble.
+	handoffs   map[string]dispatch.Handoff
+	handoffErr error
 	// readFails names the issues whose detail read fails with the error given, as Dispatch's did
 	// for some children in a deployment; the listing still carries them unless listFails is set.
 	readFails map[string]error
@@ -172,6 +176,17 @@ func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatc
 		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version}, nil
 	}
 	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
+}
+
+func (r *statusRecorder) Handoff(_ context.Context, id string) (dispatch.Handoff, error) {
+	if r.handoffErr != nil {
+		return dispatch.Handoff{}, r.handoffErr
+	}
+	handoff, ok := r.handoffs[id]
+	if !ok {
+		return dispatch.Handoff{}, &dispatch.Error{Status: http.StatusNotFound, Code: "HANDOFF_NOT_FOUND", Message: "handoff not found"}
+	}
+	return handoff, nil
 }
 
 func (r *statusRecorder) BuildCommit(context.Context) (string, error) { return "", nil }

@@ -794,15 +794,21 @@ printf 'bus-down send: HTTP %s in %s seconds\n' "$bus_down_status" "$bus_down_se
 
 # The same refusal through the client a session actually sends with. It retries a >= 500 answer
 # once, after 250 ms (packages/envoy-client/src/transport.ts), so two refusals and one wait are
-# expected here; what has to hold is that the send ends in a named EnvoyApiError rather than in a
-# timeout, which is why this asserts what was thrown and never how long it took.
+# expected here; what has to hold is that the send ends in a named refusal rather than in a
+# timeout, which is why this asserts what was thrown and never how long it took. A 5xx may follow
+# a stored copy, so the client reports the send as not confirmed delivered, naming the key a resend
+# reuses, with the listener's 503 as its last answer.
 printf 'sending through the real client with the bus down\n'
 (
   cd "$repo_root/packages/envoy-client"
   E2E_LISTENER_URL="$listener_url" E2E_SESSION_ID="$session_id" \
     E2E_BUS_DOWN_CLIENT_FILE="$bus_down_client_file" bun -e '
       import { writeFileSync } from "node:fs";
-      import { createEnvoyClient, EnvoyApiError } from "@legion/envoy-client/transport";
+      import {
+        createEnvoyClient,
+        EnvoyApiError,
+        EnvoySendUnconfirmedError,
+      } from "@legion/envoy-client/transport";
 
       const baseUrl = process.env.E2E_LISTENER_URL;
       const sessionID = process.env.E2E_SESSION_ID;
@@ -821,15 +827,19 @@ printf 'sending through the real client with the bus down\n'
       } catch (error) {
         thrown = error;
       }
-      if (!(thrown instanceof EnvoyApiError)) {
+      if (!(thrown instanceof EnvoySendUnconfirmedError) || !(thrown.last instanceof EnvoyApiError)) {
         const what = thrown === undefined ? "nothing: the send was accepted" : String(thrown);
-        throw new Error(`the client threw ${what}, want an EnvoyApiError`);
+        throw new Error(`the client threw ${what}, want an EnvoySendUnconfirmedError after an EnvoyApiError`);
       }
+      const last = thrown.last;
       const prefix = "envoy: the message bus did not answer";
-      if (thrown.details.status !== 503 || !thrown.message.startsWith(prefix)) {
-        throw new Error(`the client threw ${thrown.details.status}: ${thrown.message}, want 503 opening with ${JSON.stringify(prefix)}`);
+      if (last.details.status !== 503 || !last.message.startsWith(prefix)) {
+        throw new Error(`the client threw ${last.details.status}: ${last.message}, want 503 opening with ${JSON.stringify(prefix)}`);
       }
-      const record = { name: thrown.name, status: thrown.details.status, message: thrown.message };
+      if (!thrown.resendSafe || !thrown.message.includes(`idempotency_key ${thrown.idempotencyKey} within`)) {
+        throw new Error(`the client error names no resend key: ${thrown.message}`);
+      }
+      const record = { name: thrown.name, status: last.details.status, message: thrown.message };
       writeFileSync(output, `${JSON.stringify(record, null, 2)}\n`);
       console.log(`client refusal: ${record.name} ${record.status} ${record.message}`);
     '
