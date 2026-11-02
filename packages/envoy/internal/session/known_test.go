@@ -282,6 +282,78 @@ func TestAKnownSessionStoreOpensItsDeniedBucketOnceTheGrantArrives(t *testing.T)
 	}
 }
 
+// A bucket opened after the start answers the records it already holds from the moment the store
+// reports it open. The store is what the send route reads to tell a session Envoy knows from one
+// it does not (cmd/listener/api.go, sendHandler) and what a publish counts its recipients
+// against, so a store that reports an open bucket over a cache no watcher has filled answers
+// `404 no live session` for a session the bucket knows and counts a publish's recipients low -
+// the two failures this change removes, arriving at the moment the grant lands. The listener's
+// start keeps that from happening by waiting on WaitForCacheReady before it opens /v1
+// (cmd/listener/main.go); nothing waits on the attempt that opens the bucket later, so the
+// store itself must not answer before its cache is filled.
+func TestABucketOpenedAfterTheStartAnswersTheRecordsItHolds(t *testing.T) {
+	seed, public := testnats.User(t)
+	grant := testnats.StartNkeyGranted(t, public, knownBucketGrant()...)
+	conn, err := testnats.ConnectSeed(t, grant.URL, seed)
+	if err != nil {
+		t.Fatalf("connect as the user whose grant carries the bucket: %v", err)
+	}
+	t.Cleanup(conn.Close)
+
+	// The records a listener started before the grant finds waiting for it. Enough of them that
+	// one watcher pass over the bucket is work: a cache filled before the store answers is the
+	// whole question, and a handful of records would be filled whether it waits or not.
+	const records = 2000
+	const topic = "notifications.team.late-open"
+	filling, err := OpenKnownSessions(conn, WithKnownSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the store that fills the bucket: %v", err)
+	}
+	for index := range records {
+		id := fmt.Sprintf("ses_late_open_%04d", index)
+		if err := filling.RecordWithin(context.Background(), KnownSession{SessionID: id, Topics: []string{topic}}); err != nil {
+			t.Fatalf("write the record of %s: %v", id, err)
+		}
+	}
+	if err := filling.WaitForCacheReady(context.Background()); err != nil {
+		t.Fatalf("the filling store's cache did not become ready: %v", err)
+	}
+	if held := len(matchedIDs(filling, topic)); held != records {
+		t.Fatalf("the bucket holds %d records, want the %d written: this test proves nothing about a cache filled before the store answers", held, records)
+	}
+	filling.StopWatch()
+
+	// The grant goes away, as it is away on every listener started before it is applied.
+	grant.Grant(t, "nothing.this.store.uses")
+	known, err := OpenKnownSessions(conn,
+		WithKnownSessionReplicas(1),
+		withKnownSessionRetry(100*time.Millisecond, 500*time.Millisecond))
+	if err != nil {
+		t.Fatalf("open the store over a bucket its user may not open: %v", err)
+	}
+	t.Cleanup(known.StopWatch)
+	if known.Opened() {
+		t.Fatal("the store reports its bucket open while its user may not open it")
+	}
+
+	grant.Grant(t, knownBucketGrant()...)
+	deadline := time.Now().Add(60 * time.Second)
+	for !known.Opened() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !known.Opened() {
+		t.Fatal("the store did not open the bucket within 60s of the grant")
+	}
+	if answered := len(matchedIDs(known, topic)); answered != records {
+		t.Fatalf("the store answered %d of the %d records the bucket holds at the moment it reported its bucket open; until its cache is filled a send to each of the other sessions is refused 404 no live session and a publish counts them for nothing",
+			answered, records)
+	}
+	last := fmt.Sprintf("ses_late_open_%04d", records-1)
+	if _, ok := known.Get(last); !ok {
+		t.Fatalf("the store answers no record for %s, the last the bucket was given, at the moment it reported its bucket open", last)
+	}
+}
+
 // knownSessionMemoryBound is what the records and the subject index of 100,000 sessions may cost
 // in memory. Each session here carries its agent subject, which no other session shares, and one
 // of ten team topics, which is the shape the store holds in production: one unique pattern per
