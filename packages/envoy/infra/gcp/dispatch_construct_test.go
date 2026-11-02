@@ -74,6 +74,16 @@ func constructDispatchWithProviders(t *testing.T, inputs map[string]property.Val
 	return m, response, err
 }
 
+// constructDispatchOnMocks constructs the component through the plugin's own Construct on mocks
+// the caller owns, so a test can set Mocks.Preview, which answers a create with no ID as a
+// preview does.
+func constructDispatchOnMocks(t *testing.T, m *pulumitest.Mocks, inputs map[string]property.Value, dryRun bool) (p.ConstructResponse, error) {
+	t.Helper()
+	return pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, map[tokens.Package]p.ProviderReference{
+		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom, "tailscale": dispatchConstructTailscale,
+	})
+}
+
 // Every Input may come from another resource: tailnetAuthKey typically is the consumer's
 // Tailscale auth key, and signInClientSecret its OAuth client's, each read from a secret store
 // the program declares. The component resolves every one of them and still renders what the

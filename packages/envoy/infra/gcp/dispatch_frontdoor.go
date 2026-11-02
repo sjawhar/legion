@@ -487,6 +487,14 @@ gate() {
 // changed only by a resource transform on the component or by a state edit
 // (`pulumi state unprotect <urn>`), and deleting a Dispatch would need one of the two.
 //
+// It carries no tags. Tailscale refuses a Service whose requested tags the OAuth client creating
+// it may not set ("requested tags ... are invalid or not permitted"), and the client a consumer
+// gives the tailscale provider needs only the services scope, so the tags are a refusal waiting
+// to happen and buy the Service nothing. The component's own tags input is untouched: the front
+// door's nodes still join the tailnet under it (tailnetServiceHost, which renders
+// --advertise-tags), which is what auto-approves them as this Service's hosts, and a tailnet
+// policy reaches the Service by its name, svc:<hostname>.
+//
 // It waits for the Cloud SQL instance because the front door waits for it in turn: switching the
 // instance's availability type updates it in place and restarts it, and the name must come back
 // only once that restart is over, not while the database is away.
@@ -495,7 +503,6 @@ func newDispatchTailscaleService(ctx *pulumi.Context, comp *Dispatch, s dispatch
 		Name:    pulumi.String(tailnetServiceName(s.hostname)),
 		Comment: pulumi.String("Dispatch, served at " + core.TailnetHostName(s.hostname, s.tailnetDNSName)),
 		Ports:   pulumi.StringArray{pulumi.String("tcp:443")},
-		Tags:    pulumi.ToStringArray(s.tags),
 	}, pulumi.Parent(comp), pulumi.Protect(s.deletionProtection), pulumi.DependsOn([]pulumi.Resource{instance}))
 }
 
