@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-771",
-  "previousHandoff": "fac9e5992069d9131b9d651c4c072ba0a9972900",
+  "previousHandoff": "e7707a119f1d16f54c8e98ad08c1c6f97c6a7543",
   "round": 5,
   "headReviewed": "166921ddbda3161e826d686b51183b29f66a2ecc",
   "codeHead": "f7fdb91f1d24",
@@ -16,9 +16,26 @@
   "ci": "Required on main: ci-ok, pr-title. The newest pull_request CI run is 41377460074 at f8905ed3, still queued at 03:51Z; GitHub has started no pull_request run for f7fdb91f or 166921dd (pushed about 03:27Z), whose message carries no skip-checks line, so no CI stands for the code head f7fdb91f. ci-ok unread. pr-title success at f8905ed3 (41377619022).",
   "thermonuclear": "Both run once at f7fdb91f over 7b9c47fb..f7fdb91f, with mutation runs: thermonuclear-deep-review CHANGES (1 medium, 2 minor), thermonuclear-code-quality CHANGES (1 important, 2 minor). Both found the same defect independently, from opposite directions.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/session_delivery.go:116-122; session_delivery_test.go (TestSessionConsumerKeepsAServingPortsConsumerWhenALaterPassIsRefused, f7fdb91f)", "description": "carrying returns the earlier pass's consumer when a serving-port pass is refused one. That consumer is filtered on an earlier plan while the loop ends on the later plan's row, so the entry is written as consumer delivery with a filter that disagrees with the row. Probes on scratch copies: row [agent, PRB-1, PRB-2] with filter [agent, PRB-1], so ConsumerHoldsStored makes the durable path and role lane skip PRB-2 while the consumer never holds it; and the tester's own scenario, row [agent, PORT-1] with filter [agent, PORT-1, PORT-2], relaying an unsubscribed topic. Without the branch the entry has no consumer delivery and the durable path pushes to the port, losing nothing. Delete the branch and its doc bullet, carry only the gap, and rewrite f7fdb91f's test to assert the refused serving-port pass answers no delivery and writes no consumer-delivery entry. Its comment that the relay stays is also false (session_relay.go onChange/wanted/apply cancels it)."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/session_delivery_test.go:467", "description": "The exhaustion test compares passes with registrationPlanAttempts, so it passes at 1, 2, 5 and 10 (mutation runs); assert the literal 3."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/session_delivery.go:109", "description": "Names subscribeHandler; the loop is registerSession."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/session_delivery.go:114-115; api.go:1535-1537, :1561", "description": "The doc says the answer must carry the gap, but a registration that creates the consumer with a gap and is then refused (503 on exhaustion, or a portless refusal on a later pass) leaves a consumer the next heartbeat finds with no gap, so the session is never told. Not new in this delta; narrow the claim or keep the gap somewhere a refused answer does not lose."}
-  ]
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/session_delivery.go:116-122; session_delivery_test.go (TestSessionConsumerKeepsAServingPortsConsumerWhenALaterPassIsRefused, f7fdb91f)",
+      "description": "carrying returns the earlier pass's consumer when a serving-port pass is refused one. That consumer is filtered on an earlier plan while the loop ends on the later plan's row, so the entry is written as consumer delivery with a filter that disagrees with the row. Probes on scratch copies: row [agent, PRB-1, PRB-2] with filter [agent, PRB-1], so ConsumerHoldsStored makes the durable path and role lane skip PRB-2 while the consumer never holds it; and the tester's own scenario, row [agent, PORT-1] with filter [agent, PORT-1, PORT-2], relaying an unsubscribed topic. Without the branch the entry has no consumer delivery and the durable path pushes to the port, losing nothing. Delete the branch and its doc bullet, carry only the gap, and rewrite f7fdb91f's test to assert the refused serving-port pass answers no delivery and writes no consumer-delivery entry. Its comment that the relay stays is also false (session_relay.go onChange/wanted/apply cancels it)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/session_delivery_test.go:467",
+      "description": "The exhaustion test compares passes with registrationPlanAttempts, so it passes at 1, 2, 5 and 10 (mutation runs); assert the literal 3."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/session_delivery.go:109",
+      "description": "Names subscribeHandler; the loop is registerSession."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/session_delivery.go:114-115; api.go:1535-1537, :1561",
+      "description": "The doc says the answer must carry the gap, but a registration that creates the consumer with a gap and is then refused (503 on exhaustion, or a portless refusal on a later pass) leaves a consumer the next heartbeat finds with no gap, so the session is never told. Not new in this delta; narrow the claim or keep the gap somewhere a refused answer does not lose."
+    }
+  ],
+  "assignment": "The daemon task for this round (head 166921dd) arrived after the round was reviewed at e7707a11 (review 5731931178, REQUEST_CHANGES); that completion was refused HANDOFF_STALE_ASSIGNMENT, recording nothing. Nothing changed on the branch since; this handoff and the confirming REQUEST_CHANGES at the head it makes carry the same findings for this assignment."
 }
