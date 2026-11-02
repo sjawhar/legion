@@ -100,6 +100,22 @@ func connectWithScope(t *testing.T, serverURL, artifactID, login, scope, text st
 	return peer
 }
 
+// storeConnectAppend puts the append a browser's connect made behind a keystroke of the browser's
+// own: it types typed over from and waits until the store holds it. A connect hands its room the
+// sync of the browser's own document, which the room appends as it does any other update of that
+// browser, and that append can still be on its way when connectWithScope has returned - it waits
+// for the browser to hold the room's text, not for the room to have stored what the browser sent,
+// so waitForLandedAppends may find nothing of it to wait for. The room takes one browser's updates
+// in the order its socket sent them and appends them in that order, so the connect's append is
+// stored once this keystroke is. Left in flight, it lands wherever the test has got to by then.
+func storeConnectAppend(t *testing.T, database *store.Store, peer *docstest.Peer, artifactID, from, typed string) {
+	t.Helper()
+	typeOver(t, peer, from, typed)
+	waitFor(t, roomWait(t), "what the browser sent on connecting to be stored", func() bool {
+		return strings.Contains(storedMarkdown(t, database, artifactID), typed)
+	})
+}
+
 // requireEnds fails unless peer's socket is closed by its room within roomWait.
 func requireEnds(t *testing.T, peer *docstest.Peer, what string) {
 	t.Helper()
@@ -285,19 +301,10 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHist
 	var failed atomic.Bool
 	taskA.beforeFailedEviction = func(string) { failed.Store(true) }
 	alice := connectWithScope(t, serverA.URL, artifactID, "alice", "read-write", "before\n")
-	// A browser's connect hands its room the sync of its own document, which the room appends as
-	// it does any other update of that browser, and that append can still be on its way when
-	// connectWithScope has returned: it waits for the browser to hold the room's text, not for
-	// the room to have stored what the browser sent, so waitForLandedAppends here may find
-	// nothing of it to wait for. Landing after the head is read, it takes the version the write
-	// below makes as task B (foldHistoryPastRoom writes at head + 1), which is then refused for
-	// a duplicate key. A keystroke of alice's own orders it away: the room takes one browser's
-	// updates in the order its socket sent them and appends them in that order, so the connect's
-	// append is stored once this keystroke is.
-	typeOver(t, alice, "before", "connected")
-	waitFor(t, roomWait(t), "what alice's browser sent on connecting to be stored", func() bool {
-		return strings.Contains(storedMarkdown(t, database, artifactID), "connected")
-	})
+	// Left in flight (storeConnectAppend), the connect's append lands after the head is read and
+	// takes the version the write below makes as task B (foldHistoryPastRoom writes at head + 1),
+	// which is then refused for a duplicate key.
+	storeConnectAppend(t, database, alice, artifactID, "before", "connected")
 	waitForLandedAppends(t, taskA, artifactID)
 	head := storedHead(t, database, artifactID)
 
@@ -391,19 +398,11 @@ func TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification(t *testing.
 	var failed atomic.Bool
 	service.beforeFailedEviction = func(string) { failed.Store(true) }
 	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
-	// A browser's connect hands its room the sync of its own document, which the room appends as
-	// it does any other update of that browser, and that append can still be on its way when
-	// connectWithScope has returned: it waits for the browser to hold the room's text, not for
-	// the room to have stored what the browser sent. Admitted while the issue was open and
-	// stored after the head is read below, it moves the head this test reads back as standing
-	// still; refused by the close instead, it closes the room before alice's keystroke, which
-	// then shows nothing. A keystroke of alice's own, typed and stored while the issue is still
-	// open, orders it away: the room takes one browser's updates in the order its socket sent
-	// them and appends them in that order, so the connect's append is stored once this one is.
-	typeOver(t, alice, "before", "connected")
-	waitFor(t, roomWait(t), "what alice's browser sent on connecting to be stored", func() bool {
-		return strings.Contains(storedMarkdown(t, database, artifactID), "connected")
-	})
+	// Left in flight (storeConnectAppend), the connect's append is admitted while the issue is
+	// open and stored after the head is read below, which moves the head this test reads back as
+	// standing still; refused by the close instead, it closes the room before alice's keystroke,
+	// which then shows nothing. The keystroke here is typed and stored while the issue is open.
+	storeConnectAppend(t, database, alice, artifactID, "before", "connected")
 
 	closedAgo := closeMargin + 30*time.Second
 	if _, err := database.Pool.Exec(context.Background(),

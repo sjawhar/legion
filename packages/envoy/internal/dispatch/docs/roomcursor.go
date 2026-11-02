@@ -239,8 +239,13 @@ type roomCursor struct {
 // must reach the instance the repair was written into and no other. Crediting a room load in
 // flight with the version would say a document holds an update it does not, so its catch-up would
 // skip the row and the first derived write rendered from it would be written over text this
-// process never saw. Such a room is behind the head and has to be: its catch-up reads the repair
-// from the store (TestARoomLoadingWhileAStampCommitsCatchesUpToIt).
+// process never saw. On this process no room loads across such an append: the writer holds the
+// document's advisory lock from before it reads the room's queue until it commits, and a failed
+// room's eviction compacts under that same lock, so the room that loads next reads the repair
+// from the store and is born at the head
+// (TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt). A room of the other process does
+// stand behind the head across such an append and recovers through its catch-up
+// (TestARoomBehindTheHeadKeepsWritingAndCatchesUp).
 //
 // A nil cursor is a document no room instance holds, whose writes no cursor gates.
 func advanceRoomCursor(cursor *roomCursor, version persistence.Version) {

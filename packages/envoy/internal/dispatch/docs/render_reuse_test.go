@@ -1189,8 +1189,7 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 }
 
 // E13. A committed warm write keeps no fork, rendering, update or published rendering: each goes
-// with the publish (finishLiveWrite). TestAColdWriteLoadsNoRoomUntilItCommits holds a cold write to
-// the same.
+// with the publish (finishLiveWrite). TestAColdWriteLoadsNoRoom holds a cold write to the same.
 func TestRenderReuseACommittedWriteKeepsNoRendering(t *testing.T) {
 	service, artifactID, sh := newWarmRenderReuseRoom(t)
 	m := sh.measure()

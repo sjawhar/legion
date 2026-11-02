@@ -3573,13 +3573,24 @@ func (p *dispatchPair) openStoredEditor(t *testing.T, process *dispatchProcess, 
 // test naming what was to be stored when it does not.
 func (p *dispatchPair) waitStoredPast(t *testing.T, artifactID string, head int64, within time.Duration, what string) {
 	t.Helper()
+	if err := p.storedPast(t, artifactID, head, within, what); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// storedPast is waitStoredPast for a caller with something of its own to report before the test
+// fails - the typists' row reports the room counters and each disconnect (keystroke) - so it
+// answers an error rather than failing the test where the head does not move.
+func (p *dispatchPair) storedPast(t *testing.T, artifactID string, head int64, within time.Duration, what string) error {
+	t.Helper()
 	deadline := time.Now().Add(within)
 	for storedHead(t, p, artifactID) <= head {
 		if time.Now().After(deadline) {
-			t.Fatalf("%s was not stored within %v: the document still stands at update %d", what, within, head)
+			return fmt.Errorf("%s was not stored within %v: the document still stands at update %d", what, within, head)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	return nil
 }
 
 // storedText renders the document the store holds: its updates folded in order, which is what
@@ -3801,7 +3812,9 @@ func (p *dispatchPair) keystroke(t *testing.T, artifactID string, typing *typist
 			// The room appends the state the tab sent on reconnecting, content or no content, so
 			// that append is waited for here: left in flight, it would pass the wait below on its
 			// own and the keystroke would be taken for stored.
-			p.waitStoredPast(t, artifactID, reconnected, 10*time.Second, typing.who+"'s reconnected tab's sync update")
+			if err := p.storedPast(t, artifactID, reconnected, 10*time.Second, typing.who+"'s reconnected tab's sync update"); err != nil {
+				return err
+			}
 		}
 		before := storedHead(t, p, artifactID)
 		if err := typeAtEnd(typing.editor, typing.text); err != nil {

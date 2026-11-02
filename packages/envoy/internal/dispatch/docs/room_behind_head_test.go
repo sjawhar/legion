@@ -1920,18 +1920,9 @@ func TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded(t *testin
 		}
 	}
 	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
-	// A browser's connect hands its room the sync of its own document, which the room appends as
-	// it does any other update of that browser, and that append can still be on its way when
-	// connectWithScope has returned: it waits for the browser to hold the room's text, not for
-	// the room to have stored what the browser sent, so waitForLandedAppends here may find
-	// nothing of it to wait for. Landing after the fold below, it is a second append admitted on
-	// the folded history, which is what this test counts. A keystroke of alice's own orders it
-	// away: the room takes one browser's updates in the order its socket sent them and appends
-	// them in that order, so the connect's append is stored once this keystroke is.
-	typeOver(t, alice, "before", "connected")
-	waitFor(t, roomWait(t), "what alice's browser sent on connecting to be stored", func() bool {
-		return strings.Contains(storedMarkdown(t, database, artifactID), "connected")
-	})
+	// Left in flight (storeConnectAppend), the connect's append lands after the fold below and is
+	// a second append admitted on the folded history, which is what this test counts.
+	storeConnectAppend(t, database, alice, artifactID, "before", "connected")
 	waitForLandedAppends(t, service, artifactID)
 	head := storedHead(t, database, artifactID)
 	room := service.srv.GetDoc(artifactID)

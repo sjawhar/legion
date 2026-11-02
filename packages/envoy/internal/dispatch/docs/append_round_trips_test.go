@@ -19,15 +19,18 @@ import (
 // A round trip is one exchange with Postgres: the client sends and waits for the server. It is
 // what a keystroke's store costs under the document's advisory lock, where every other writer of
 // the document waits, so the tests here count the trips of one store rather than its statements:
-// a batch is one trip whatever it queues (appendWrites), and a statement is one of its own.
+// a batch is one trip whatever it queues (appendWrites), a statement is one of its own, and so is
+// a prepare the connection's statement cache misses (TracePrepareStart).
 
 // roundTrip is one exchange the code under test made on one connection: the SQL it sent, the
-// arguments it sent with it, and whether it was a batch.
+// arguments it sent with it, whether it was a batch, and whether it was a prepare of that SQL
+// rather than a run of it.
 type roundTrip struct {
-	conn  *pgx.Conn
-	sql   []string
-	args  []any
-	batch bool
+	conn    *pgx.Conn
+	sql     []string
+	args    []any
+	batch   bool
+	prepare bool
 }
 
 // names reports whether the trip sent room as one of its arguments, which every statement of one
@@ -56,6 +59,20 @@ func (r *roundTripRecorder) TraceQueryStart(ctx context.Context, conn *pgx.Conn,
 }
 
 func (r *roundTripRecorder) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// TracePrepareStart records a prepare as the round trip it is. The pool runs pgx's default
+// statement cache, which prepares a statement the connection has not seen before the trip that
+// runs it, so a prepare inside a store under the room's lock is part of what that store costs.
+// pgx reports a prepare of a statement the connection already holds too, which sends nothing
+// (TracePrepareEndData.AlreadyPrepared); nothing here prepares by hand, and the cache prepares
+// only on a miss, so every prepare recorded is a trip. The query that triggers one is reported
+// first (TraceQueryStart), so the prepare is recorded just after it.
+func (r *roundTripRecorder) TracePrepareStart(ctx context.Context, conn *pgx.Conn, data pgx.TracePrepareStartData) context.Context {
+	r.record(roundTrip{conn: conn, sql: []string{data.SQL}, prepare: true})
+	return ctx
+}
+
+func (r *roundTripRecorder) TracePrepareEnd(context.Context, *pgx.Conn, pgx.TracePrepareEndData) {}
 
 func (r *roundTripRecorder) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceBatchStartData) context.Context {
 	trip := roundTrip{conn: conn, batch: true}
@@ -118,30 +135,18 @@ func (r *roundTripRecorder) roomLockRuns(room string) [][]roundTrip {
 	return runs
 }
 
-// beforeFirstAppend is the labels of the count round trips a connection made immediately before
-// the first one that appended an update of room: the batch of writes an append sends
-// (appendWrites), whose first statement inserts the row.
-func (r *roundTripRecorder) beforeFirstAppend(t *testing.T, room string, count int) []string {
-	t.Helper()
-	trips := r.recorded()
-	for index, trip := range trips {
-		if !trip.batch || !trip.names(room) || !strings.Contains(trip.sql[0], "insert into doc_updates") {
-			continue
+// prepares are the labels of the statements prepared since the last reset, each a round trip of
+// its own (TracePrepareStart). A measured store runs on a connection a warm-up store has already
+// used, so it should prepare nothing; one that does is reported rather than left out of the
+// count.
+func (r *roundTripRecorder) prepares() []string {
+	var prepared []string
+	for _, trip := range r.recorded() {
+		if trip.prepare {
+			prepared = append(prepared, roundTripLabel(trip))
 		}
-		var before []roundTrip
-		for _, earlier := range trips[:index] {
-			if earlier.conn == trip.conn {
-				before = append(before, earlier)
-			}
-		}
-		if len(before) < count {
-			t.Fatalf("the append of %s made only %d round trips before it on its connection, want at least %d: %v",
-				room, len(before), count, roundTripLabels(before))
-		}
-		return roundTripLabels(before[len(before)-count:])
 	}
-	t.Fatalf("no append of %s was recorded; the round trips were %v", room, roundTripLabels(trips))
-	return nil
+	return prepared
 }
 
 // roundTripLabels names each trip for an assertion's message: the statements one store runs are
@@ -159,19 +164,23 @@ func roundTripLabel(trip roundTrip) string {
 		return "the append's writes (one batch)"
 	}
 	sql := oneLineSQL(trip.sql[0])
+	label := sql
 	switch {
 	case sql == oneLineSQL(appendGateStatement):
-		return "the append gate read"
+		label = "the append gate read"
 	case strings.Contains(sql, "pg_advisory_lock(hashtext"):
-		return "pg_advisory_lock"
+		label = "pg_advisory_lock"
 	case strings.Contains(sql, "pg_advisory_unlock(hashtext"):
-		return "pg_advisory_unlock"
+		label = "pg_advisory_unlock"
 	case strings.Contains(sql, "pg_advisory_xact_lock(hashtext"):
-		return "pg_advisory_xact_lock"
+		label = "pg_advisory_xact_lock"
 	case strings.Contains(sql, "pg_try_advisory_lock(hashtext"):
-		return "pg_try_advisory_lock"
+		label = "pg_try_advisory_lock"
 	}
-	return sql
+	if trip.prepare {
+		return "a prepare of " + label
+	}
+	return label
 }
 
 func oneLineSQL(sql string) string {
@@ -207,7 +216,9 @@ func tracedRoomService(t *testing.T) (*Service, string, *roundTripRecorder) {
 // gate read, the one batch of writes the append owes, the commit and the unlock (AppendRoomFlush,
 // appendUpdateTxClass). The transaction-level lock is not among them: the session already holds
 // the document's lock on this very connection, so taking it again would grant what the session
-// has and cost a seventh trip - the one every other writer of the document waits out.
+// has and cost a seventh trip - the one every other writer of the document waits out. A prepare
+// is counted as the trip it is (TracePrepareStart), and the measured keystroke runs on a
+// connection the warm-up keystroke has already prepared every statement of, so it makes none.
 func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
 	service, artifactID, recorder := tracedRoomService(t)
 	// The first keystroke warms the room, the pool and the store's prepared statements; the
@@ -235,8 +246,9 @@ func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
 		t.Fatalf("a warm keystroke's store made %d round trips:\n\t%s\nwant %d:\n\t%s",
 			len(got), strings.Join(got, "\n\t"), len(want), strings.Join(want, "\n\t"))
 	}
-	if before := recorder.beforeFirstAppend(t, artifactID, 2); !slices.Equal(before, []string{"begin", "the append gate read"}) {
-		t.Fatalf("the keystroke's append followed %v, want its transaction and the gate read alone", before)
+	if prepares := recorder.prepares(); len(prepares) != 0 {
+		t.Errorf("the measured keystroke prepared %d statement(s), each a round trip of its own:\n\t%s",
+			len(prepares), strings.Join(prepares, "\n\t"))
 	}
 }
 

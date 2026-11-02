@@ -568,7 +568,7 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 		s.failRoom(write.artifactID, fmt.Errorf("decode live document: %w", err))
 		return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
-	// The zero point: no cursor, so no gate. The gate is about a room (refuseRoomBehindHead), and
+	// The zero point: no cursor, so no gate. The gate is about a room (gateAppend), and
 	// this write holds none. Its update is a Yjs update, which commutes with whatever its room
 	// takes before the publish, and the room that loads after its publish reads the store, which
 	// by then holds both. A private cursor at the head this read loaded would refuse the write
@@ -610,7 +610,7 @@ func (w *liveWrite) heldThrough() int64 {
 
 // withOwnAppends folds into base, the version the document a write is made on stands at, the
 // versions this transaction has appended itself - its own rows and the room updates it stored
-// ahead of them (storeRoomUpdatesAhead): they are in its fork, and in no room's cursor until the
+// ahead of them (Ledger.flushThrough): they are in its fork, and in no room's cursor until the
 // write commits, so every head read inside its transaction counts them and no cursor does. An
 // accept writes its text change and its margin projection as two appends of one transaction, so
 // without this the second would find the head one past the fork and be refused. The room updates

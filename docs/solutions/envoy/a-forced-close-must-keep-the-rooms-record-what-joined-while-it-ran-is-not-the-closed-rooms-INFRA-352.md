@@ -108,9 +108,9 @@ state.
   `TestAnIssueCloseEndsItsRoomsSettlementFailures`,
   `TestQuiesceDropsAnEditSourceRecordedWhileItClosesTheRooms`.
 
-`packages/envoy/internal/dispatch/docs/stale_room_test.go`:
+`packages/envoy/internal/dispatch/docs/room_behind_head_test.go`:
 
-- `TestACloseOfARoomBehindTheHeadIsNotRefusedByItsClosedIssue`.
+- `TestACloseOfAReplacedRoomIsNotRefusedByItsClosedIssue`.
 
 Mutation evidence (INFRA-352): restoring the old drop fails all seven rows of the two hand-over
 tests; a nil edit source, a late failure reset and a quiesce that keeps the source each fail their

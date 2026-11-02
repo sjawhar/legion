@@ -256,7 +256,7 @@ func requireStoreNeverTorn(t *testing.T, database *store.Store, artifactID, afte
 // A live write's warm fork holds its room's updates the store does not hold yet - a browser's
 // edit whose append is waiting, and the browser's next keystroke queued behind it - and the write's
 // own row, made on them, commits while they still wait. The write stores them first, in its own
-// transaction (storeRoomUpdatesAhead), so the history stored after every commit, the write's and
+// transaction (Ledger.flushThrough), so the history stored after every commit, the write's and
 // each held append's, loads with nothing pending; the held appends then find their updates stored
 // and store nothing twice, and the browser, not the agent, keeps the credit for them. Without that,
 // the store held the agent's row ahead of the updates it edits, which every reader of the store - a

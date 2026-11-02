@@ -82,13 +82,13 @@ room, or lifts the mark when it did not, and arms the settlement it owes either 
 
 ## Tests
 
-`packages/envoy/internal/dispatch/docs/stale_room_test.go`:
+`packages/envoy/internal/dispatch/docs/room_behind_head_test.go`:
 
-- `TestACloseOfARoomBehindTheHeadLeavesTheRoomThatReplacedIt`: retires and reloads the room after
+- `TestACloseOfAReplacedRoomLeavesTheRoomThatReplacedIt`: retires and reloads the room after
   the reservation and before the close; the replacement must stay open and writable.
-- `TestACloseOfARoomBehindTheHeadHoldsItAgainstTheIdleSweep`: the idle sweep must not retire the
+- `TestACloseOfAReplacedRoomHoldsItAgainstTheIdleSweep`: the idle sweep must not retire the
   room while the close holds it.
-- `TestAWriteOpeningWhileARoomBehindTheHeadClosesIsRefused`: a write that opens after the
+- `TestAWriteOpeningWhileAReplacedRoomClosesIsRefused`: a write that opens after the
   reservation is refused, and its retry is made and stored.
 
 Mutation evidence (INFRA-218): closing by name (`CloseRoom` after the check, mutation m1) fails
