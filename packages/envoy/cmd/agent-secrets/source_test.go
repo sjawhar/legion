@@ -416,9 +416,9 @@ func TestNoSessionLineNamesAHostOrAStoreID(t *testing.T) {
 }
 
 // approveURLOf is the approve_url fakeBroker answers a form with, and "" for a form that reaches
-// no pending request or one the fake broker answers as an older broker would. It reads the
-// fixtures rather than matching on text, so the exception covers the exact string the broker
-// returned and nothing that merely looks like it.
+// no pending request or one whose answer carries none. It reads the fixtures rather than matching
+// on text, so the exception covers the exact string the broker returned and nothing that merely
+// looks like it.
 func approveURLOf(args []string, brokerURL string) string {
 	for _, arg := range args {
 		p, ok := fakePending[arg]

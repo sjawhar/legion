@@ -271,7 +271,7 @@ describe("AskGate at the dispatch CLI", () => {
   // reads each file the argv names once before it posts, and a file that changed since the review
   // is refused with what to do, since its call is literal already.
   describe("a file the write posts", () => {
-    const CHANGED = "a file this write posts changed after AskGate reviewed it";
+    const CHANGED = "a file this write posts changed after AskGate read it";
     /** The marker the gate mints for `argv` once it reviewed `file`, which `flag` names. */
     const reviewed = async (argv: readonly string[], flag: string, file: string) =>
       mint(argv, await dryArgs(argv), Date.now(), [
@@ -309,7 +309,9 @@ describe("AskGate at the dispatch CLI", () => {
       expect(code).toBe(1);
       expect(stdout).toStartWith("dispatch comment was not called: AskGate is on for this session");
       expect(stdout).toContain(`${CHANGED} (\`--body-file ${note()}\`)`);
-      expect(stdout).toContain("Send the call again in a later message.");
+      expect(stdout).toContain(
+        "Send the call again in a later message than the one that changes the file."
+      );
       expect(stdout).not.toContain("literal words");
       expect(posts).toHaveLength(0);
       expect(existsSync(marker)).toBe(true);
@@ -338,7 +340,9 @@ describe("AskGate at the dispatch CLI", () => {
       const { code, stdout } = await run(upload(brief));
       expect(code).toBe(1);
       expect(stdout).toContain(`${CHANGED} (\`--path ${brief}\`)`);
-      expect(stdout).toContain("Send the call again in a later message.");
+      expect(stdout).toContain(
+        "Send the call again in a later message than the one that changes the file."
+      );
       expect(posts).toHaveLength(0);
     });
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"maps"
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
@@ -10,9 +11,17 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-// replyBlockInAskThread is the refusal of a reply in an ask's thread that names a block: an ask's
-// thread has no blocks to answer until INFRA-369 gives an ask's replies blocks of their own.
-const replyBlockInAskThread = "a reply in an ask's thread names no block yet"
+// replyBlockOwner is the kind of item the block a reply names belongs to, read from the node id
+// replies_to_block stores (refs.ParseItemBlockNode): `ask/<id>#<part>` is a part of an ask,
+// which a reply naming that ask names, and `comment/<id>#<block>` a block of the comment the
+// reply answers. A node id of no shape this build knows is read as a comment's, the kind every
+// reply written before ask parts named.
+func replyBlockOwner(nodeID string) refs.ItemKind {
+	if kind, _, _, ok := refs.ParseItemBlockNode(nodeID); ok {
+		return kind
+	}
+	return refs.ItemComment
+}
 
 // namedBlock is the block of its parent a reply names (reply_to_block, in_reply_to_block): the
 // node id replies_to_block stores, and the block's stored excerpt.
@@ -21,11 +30,13 @@ type namedBlock struct {
 	excerpt string
 }
 
-// replyBlockOf checks that blockID is a current block of item itemID, the comment or message a
-// reply answers, and returns it. The caller holds the item's owner row (when it has one) and the
-// item row; an item an older build wrote, or wrote after its last index, is indexed first, in the
-// caller's transaction (refs.IndexItemIfOwed), so the block named is one of the item's current
-// body. A block the item does not hold now answers 400 with code, naming field and the block.
+// replyBlockOf checks that blockID is a current block of item itemID — the comment or the
+// message a reply answers, or the ask a reply names, whose blocks are the parts of its question,
+// its options and its answer — and returns it. The caller holds the item's owner row (when it
+// has one) and the item row; an item an older build wrote, or wrote after its last index, is
+// indexed first, in the caller's transaction (refs.IndexItemIfOwed), so the block named is one
+// of the item's current body. A block the item does not hold now answers 400 with code, naming
+// field and the block.
 func (s *server) replyBlockOf(
 	ctx context.Context, tx pgx.Tx, kind refs.ItemKind, itemID, blockID, field, code string,
 ) (*namedBlock, error) {
@@ -60,18 +71,24 @@ func lockReplyParentMessage(ctx context.Context, tx pgx.Tx, id string) error {
 }
 
 // hydrateCommentReplyBlocks sets each comment's ReplyBlock, the block of its parent it answers
-// (null when it names none), in one query over every comment that names one (RepliesToBlock),
-// however many there are, and none when no comment does.
+// (null when it names none), in one query per kind of item the named blocks belong to: a reply
+// under an ask names a part of that ask, every other reply a block of the comment it answers
+// (replyBlockOwner), so a page of either costs one query and a page of both two.
 func hydrateCommentReplyBlocks(ctx context.Context, q queryer, comments ...*model.Comment) error {
-	ids := make([]string, 0, len(comments))
+	ids := map[refs.ItemKind][]string{}
 	for _, comment := range comments {
 		if comment.RepliesToBlock != nil {
-			ids = append(ids, comment.ID)
+			owner := replyBlockOwner(*comment.RepliesToBlock)
+			ids[owner] = append(ids[owner], comment.ID)
 		}
 	}
-	blocks, err := refs.ReplyBlocks(ctx, q, refs.ItemComment, ids)
-	if err != nil {
-		return err
+	blocks := make(map[string]*model.ReplyBlock, len(ids))
+	for owner, owned := range ids {
+		found, err := refs.ReplyBlocks(ctx, q, owner, owned)
+		if err != nil {
+			return err
+		}
+		maps.Copy(blocks, found)
 	}
 	for _, comment := range comments {
 		comment.ReplyBlock = blocks[comment.ID]

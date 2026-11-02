@@ -1068,7 +1068,8 @@ func migratedPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(admin.Close)
 	name := "legion_workflow_test_" + randomSuffix(t)
-	if _, err := admin.Exec(t.Context(), "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(t.Context(), "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create test database: %v", err)
 	}
 	t.Cleanup(func() {
