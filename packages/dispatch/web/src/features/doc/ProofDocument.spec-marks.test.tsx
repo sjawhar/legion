@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { screen, waitFor } from "@testing-library/react";
+import { cleanup, waitFor, within } from "@testing-library/react";
 
 import {
   answerTextReadsWithTheSeededText,
@@ -147,10 +147,11 @@ function stubReads(readVersion: number | null) {
 
 test("the Spec tab marks stale and changed blocks through the editor, names the changed sections, then records the version it shows", async () => {
   const reads = stubReads(2);
-  const { editors, sync } = renderProofDocument({
+  const { editors, sync, view } = renderProofDocument({
     document: spec,
     queryClient: createQueryClient(),
   });
+  const screen = within(view.container);
 
   try {
     await sync();
@@ -188,16 +189,18 @@ test("the Spec tab marks stale and changed blocks through the editor, names the 
       { blockId: "p-rollout", className: changedSinceReadMark },
     ]);
   } finally {
+    cleanup();
     reads.restore();
   }
 });
 
 test("with no read version the Spec tab shows no line and marks no changed block, and still records its read", async () => {
   const reads = stubReads(null);
-  const { editors, sync } = renderProofDocument({
+  const { editors, sync, view } = renderProofDocument({
     document: spec,
     queryClient: createQueryClient(),
   });
+  const screen = within(view.container);
 
   try {
     await sync();
@@ -214,6 +217,7 @@ test("with no read version the Spec tab shows no line and marks no changed block
     );
     expect(screen.queryByText(/Changed since you last read/)).toBeNull();
   } finally {
+    cleanup();
     reads.restore();
   }
 });
