@@ -162,8 +162,9 @@ func (c Claim) openRoundHoldsTask() bool {
 // An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
 // sent (Claim.leftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
 // that reads it would be asked to push work that died with the pod the round was opened over,
-// and it would refuse the answer the ask asks for. That drop and the phase check's are one
-// shape below, so neither leaves a mark armed for a delivery that is gone.
+// and it would refuse the answer the ask asks for. That drop and the phase check's are one shape
+// below, and both leave through the answer every drop of a delivery gives the mark armed for it
+// (answerAskFirstAfterDrop).
 func (m *Machine) sendPending(ctx context.Context) error {
 	// A claim holding a suspension is handed nothing (holdSuspension).
 	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
@@ -186,11 +187,12 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		return nil
 	}
 	// Every reason to drop the delivery rather than send it is decided here and leaves through
-	// the one exit below, because a dropped delivery leaves no mark armed for it: a drop that
-	// returned of its own would leave the question a restart armed for that delivery standing
-	// (askFirst), and the next task would be confirmed by whatever turn is running and retired
-	// unsent. Nothing here sends, so the ask of a round this claim's process has left is still
-	// dropped before the connection carries anything to the worker that cannot answer it.
+	// the one exit below, because a dropped delivery leaves no mark armed for it, here or at any
+	// other drop (answerAskFirstAfterDrop): a drop that returned of its own would leave the
+	// question a restart armed for that delivery standing (askFirst), and the next task would be
+	// confirmed by whatever turn is running and retired unsent. Nothing here sends, so the ask of
+	// a round this claim's process has left is still dropped before the connection carries
+	// anything to the worker that cannot answer it.
 	//
 	// holds is whether the delivery is still the claim's to send; the ask of a left round never
 	// is, and its issue's phase is not asked about, since the round's words are what it is.
@@ -214,13 +216,13 @@ func (m *Machine) sendPending(ctx context.Context) error {
 			return err
 		}
 	}
+	if !holds {
+		return m.answerAskFirstAfterDrop(ctx)
+	}
 	// The question a restart left — whether the turn the agent may be in is the pending
-	// delivery's — is asked once, here, whether or not that delivery survived the drops above.
-	// Left armed with nothing pending, it would make the next task the running turn's: confirmed,
-	// never prompted. Discarded, it leaves the claim ready while its agent works, and the next task
-	// is refused busy at every send until that turn ends. A turn of the agent's own moves the
-	// claim to working either way; it confirms the delivery only when there is still one to
-	// confirm, and a dropped task's successor waits for that turn to end.
+	// delivery's — is asked once, here. Left armed, it would make the next task the running
+	// turn's: confirmed, never prompted. A turn of the agent's own moves the claim to working and
+	// confirms the delivery the earlier daemon sent, which is the turn's own task.
 	// An agent that cannot say is taken as not streaming here: sending under the same id is what
 	// the shim's dedupe and the next agent_start make safe.
 	if m.askFirst {
@@ -230,19 +232,57 @@ func (m *Machine) sendPending(ctx context.Context) error {
 			// The turn is the agent's own word, not an agent_start this daemon read, so nothing
 			// here knows what it has already done (Machine.unseenTurn).
 			m.unseenTurn = true
-			if !holds {
-				m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
-				return m.persist(ctx)
-			}
 			m.log.Info("supervise: the agent is in a turn; confirming the delivery an earlier daemon sent", "delivery", p.ID)
 			return m.confirm(ctx)
 		}
 	}
-	if !holds {
-		return nil
-	}
 	m.startSend(conn, *p)
 	return nil
+}
+
+// answerAskFirstAfterDrop answers the question a restart armed for a delivery that is now gone
+// (askFirst), and every drop of a delivery runs it in the same step as the drop: sendPending's
+// two, and the three a round that is over makes through dropUpdateTask (leaveRound, endPodUpdate,
+// openPodUpdate's round switch). Left armed over nothing pending, the question would make the
+// claim's next task the running turn's — confirmed by a turn of another cause, never prompted,
+// and retired unsent by that turn's end — and the worker would never receive that task at all.
+//
+// It asks what a send would have asked, and confirms nothing: no delivery is left to confirm, so
+// an agent the ask finds in a turn only moves the claim to working, with the turn marked one this
+// daemon never saw begin (Machine.unseenTurn), and the claim written. The ask is worth making
+// with nothing pending because the claim's state is the daemon's record of whether its agent is
+// busy, and the drop does not make that record current: discarded instead, the claim stays ready
+// while its agent works, and the task that follows the dropped one is prompted into a busy agent
+// and refused at every send until that turn ends. The turn is nobody's task's either way, and the
+// next task waits for it to end.
+//
+// An agent that cannot say, and a claim whose shim is not connected, are taken as not streaming:
+// the mark goes all the same, since it is the dropped delivery's, and the busy refusal is what a
+// send into a turn this daemon could not read costs.
+//
+// Two claims are answered nothing. One that still holds a delivery is one no drop left empty: the
+// question is that delivery's, and sendPending asks it against that delivery. A working claim's
+// question is its turn's rather than its task's — no daemon ever sent the task a drop takes from a
+// claim that is not ready or idle — and askTurnOver and turnEnded answer it there, where an agent
+// that is not streaming ends the turn rather than leaving a working claim nobody watches.
+func (m *Machine) answerAskFirstAfterDrop(ctx context.Context) error {
+	if !m.askFirst || m.claim.Pending != nil {
+		return nil
+	}
+	if state := m.claim.State; state != StateReady && state != StateIdle {
+		return nil
+	}
+	m.askFirst = false
+	conn, ok := m.deps.Conns.Conn(m.claim.Token)
+	if !ok {
+		return nil
+	}
+	if streaming, _ := m.streaming(ctx, conn); !streaming {
+		return nil
+	}
+	m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
+	m.claim.State, m.unseenTurn = StateWorking, true
+	return m.persist(ctx)
 }
 
 // phaseHolds asks whether the issue is still in the phase and run this task was queued for. A delivery

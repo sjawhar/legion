@@ -145,14 +145,21 @@ func TestAStalePluginWithAHeldSuspensionSuspendsTheClaimAtItsTurnsEndChargingNot
 
 // refusableCheckLaunchStore wraps memStore's CheckLaunch so a test can make the launch path's
 // lifecycle recheck refuse on demand, the same way a reserved tree cleanup refuses a live launch.
+// passes is how many checks it lets through first, for a decision that checks the launch twice —
+// a round's end checks it before it changes anything and the launch itself checks it again — so a
+// test can reserve the cleanup between the two.
 type refusableCheckLaunchStore struct {
 	*memStore
 	refuse bool
+	passes int
 }
 
 func (s *refusableCheckLaunchStore) CheckLaunch(ctx context.Context, c Claim) error {
 	if s.refuse {
-		return treelifecycle.ErrCleanupReserved
+		if s.passes == 0 {
+			return treelifecycle.ErrCleanupReserved
+		}
+		s.passes--
 	}
 	return s.memStore.CheckLaunch(ctx, c)
 }

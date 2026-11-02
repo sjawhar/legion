@@ -1611,3 +1611,158 @@ func TestPodUpdateTheRoundsEndClearsTheRoundTheClaimLeft(t *testing.T) {
 		t.Fatalf("the claim in the round of its own pod = %+v, want its answer counted", c)
 	}
 }
+
+// The round's end drops the ask the worker never read, and the question a restart armed for that
+// ask goes with it. A daemon that comes back with the ask pending and unconfirmed marks it
+// askFirst — the agent may already be in the turn an earlier daemon's prompt started — and the
+// round's end lands before any sweep can ask, so the end is what drops the ask (leaveRound).
+// Left armed over nothing pending, that question would make the claim's next task the running
+// turn's: confirmed by a turn of another cause, never prompted, and retired unsent by that
+// turn's end, so the worker would never receive the task at all.
+func TestPodUpdateTheRoundsEndLeavesNoQuestionArmedForTheNextTask(t *testing.T) {
+	const task = "review the pull request"
+	h := updateHarness(t, PodUpdateContract)
+	h.inPod(testRoundPod)
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+
+	h.restart()
+	if !h.m.askFirst {
+		t.Fatal("the restored claim has nothing to ask its agent; this test needs the question a restart leaves open")
+	}
+
+	h.must(PodUpdateEnded{Claim: h.token, Round: testRound})
+
+	h.wantRound("")
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("pending = %+v, want the ask nothing read dropped with the round", p)
+	}
+
+	// A turn of another cause — an Envoy notice, a person's steer — is running, one this daemon
+	// never saw begin, and the workflow hands the claim the task of its next phase.
+	h.conn.SetStreaming(true)
+	h.must(RequestDeliver{Claim: h.token, Task: task})
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+
+	sent := h.wantPrompts(2)[1]
+	if sent.Message != task {
+		t.Errorf("the second prompt carried %q, want the next task %q", sent.Message, task)
+	}
+}
+
+// The same question, armed by a restart after the drop itself: the round's end dropped the ask
+// and the write of that drop failed, which leaves the store holding the round and its ask
+// exactly as a daemon that died between the two writes does. The restart restores both and marks
+// the ask askFirst, and the end the next sweep posts drops it for real.
+func TestPodUpdateARestartAfterAFailedDropLeavesNoQuestionArmedForTheNextTask(t *testing.T) {
+	const task = "review the pull request"
+	h := updateHarness(t, PodUpdateContract)
+	h.inPod(testRoundPod)
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+
+	h.store.fail("RetireDelivery", errBoom)
+	if err := h.handle(PodUpdateEnded{Claim: h.token, Round: testRound}); !errors.Is(err, errBoom) {
+		t.Fatalf("the round's end over a failing retirement returned %v, want the store's error", err)
+	}
+	h.store.fail("RetireDelivery", nil)
+
+	h.restart()
+	if !h.m.askFirst {
+		t.Fatal("the restored claim has nothing to ask its agent; this test needs the question a restart leaves open")
+	}
+
+	h.must(PodUpdateEnded{Claim: h.token, Round: testRound})
+
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("pending = %+v, want the ask nothing read dropped with the round", p)
+	}
+
+	h.conn.SetStreaming(true)
+	h.must(RequestDeliver{Claim: h.token, Task: task})
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+
+	sent := h.wantPrompts(2)[1]
+	if sent.Message != task {
+		t.Errorf("the second prompt carried %q, want the next task %q", sent.Message, task)
+	}
+}
+
+// A round that replaces another drops the old round's ask, and the question a restart armed for
+// that ask goes in the same step. The agent is in a turn of another cause here, so the answer
+// moves the claim to working and the new round's own ask waits for that turn: a question left
+// armed would make the new ask the turn's instead — confirmed by it, never prompted, and retired
+// by its end — and the round would wait out its re-task bound for a worker that was asked
+// nothing.
+func TestPodUpdateARoundThatReplacesAnotherLeavesNoQuestionArmedForItsOwnAsk(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.inPod(testRoundPod)
+	h.openUpdate(testRound, testReasons)
+	h.wantPrompts(1)
+
+	h.restart()
+	if !h.m.askFirst {
+		t.Fatal("the restored claim has nothing to ask its agent; this test needs the question a restart leaves open")
+	}
+
+	plugin := PluginRound(PodUpdateContract + 1)
+	h.conn.SetStreaming(true)
+	h.openUpdate(plugin, testReasons)
+
+	h.wantState(StateWorking)
+	h.wantRound(plugin)
+	p := h.pending()
+	if !asksRound(p.ID, plugin) || !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending during the turn of another cause = %+v, want the new round's ask unconfirmed", p)
+	}
+	h.wantPrompts(1)
+
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+
+	sent := h.wantPrompts(2)[1]
+	if !asksRound(sent.DeliveryID, plugin) {
+		t.Errorf("the second prompt carried %q, want an ask of the round that replaced the other, %q", sent.DeliveryID, plugin)
+	}
+}
+
+// A plugin round's end drops the ask before it replaces the process, and the launch that replaces
+// it can be refused: the lifecycle takes the end's own check and refuses the launch's recheck, a
+// cleanup reserved between the two. The claim is left exactly where it was, so the question a
+// restart armed for the dropped ask is still its own to answer, and the end answers it in the
+// step that dropped the ask rather than leaving it for a relaunch that never happened.
+func TestPodUpdateARefusedRelaunchLeavesNoQuestionArmedForTheNextTask(t *testing.T) {
+	const task = "review the pull request"
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+	round := PluginRound(PodUpdateContract + 1)
+	h.openUpdate(round, testReasons)
+	h.wantPrompts(1)
+	// The worker pushed its work and answered in a turn this daemon never saw, so its ask is
+	// still pending and unconfirmed when the daemon restarts.
+	h.signalUpdate("c0ffee")
+
+	h.restart()
+	if !h.m.askFirst {
+		t.Fatal("the restored claim has nothing to ask its agent; this test needs the question a restart leaves open")
+	}
+
+	h.m.deps.Store = &refusableCheckLaunchStore{memStore: h.store, refuse: true, passes: 1}
+	if err := h.handle(PodUpdateEnded{Claim: h.token, Round: round}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		t.Fatalf("the round's end whose relaunch the lifecycle refused returned %v, want the reservation's wait", err)
+	}
+
+	h.wantState(StateReady)
+	h.wantCalls("Resume", 0)
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("pending = %+v, want the ask nothing read dropped by the end", p)
+	}
+
+	h.conn.SetStreaming(true)
+	h.must(RequestDeliver{Claim: h.token, Task: task})
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+
+	sent := h.wantPrompts(2)[1]
+	if sent.Message != task {
+		t.Errorf("the second prompt carried %q, want the next task %q", sent.Message, task)
+	}
+}

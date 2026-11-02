@@ -1783,7 +1783,10 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 // filed against the round that replaced it: a plugin round's answer, which promises the pod and
 // the disk survive, can never end a pod round that deletes both. The switch clears the old
 // round's answer with the rest of its fields (clearUpdate) and asks the worker again under the
-// new round's own words, which name the new round's id.
+// new round's own words, which name the new round's id. The old round's ask goes with it
+// (dropUpdateTask), and the mark a restart armed for that ask goes in the same step
+// (answerAskFirstAfterDrop), so the new round's ask is prompted rather than taken for the work
+// of whatever turn is running.
 //
 // A claim that already holds a phase task is answered ErrDeliveryPending, which is a wait rather
 // than a fault: the update task must never displace the work in flight. The refusal is swallowed,
@@ -1802,6 +1805,9 @@ func openPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 		m.log.Info("supervise: an update round is open on this claim; its worker is asked to push its work and answer",
 			"round", open.Round, "reasons", open.Reasons)
 		if err := m.dropUpdateTask(ctx); err != nil {
+			return err
+		}
+		if err := m.answerAskFirstAfterDrop(ctx); err != nil {
 			return err
 		}
 		opened := now
@@ -2033,19 +2039,28 @@ func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.dropUpdateTask(ctx); err != nil {
 		return err
 	}
+	// The relaunch below ends the mark with the process it replaces, but a launch the lifecycle
+	// refuses leaves this claim where it is, and the ask it just dropped is gone either way.
+	if err := m.answerAskFirstAfterDrop(ctx); err != nil {
+		return err
+	}
 	m.clearUpdate()
 	m.claim.PluginRelaunchFor = m.deps.PluginContract
 	return m.replaceProcess(ctx, "the process on another plugin contract is replaced now that its worker has pushed its work")
 }
 
 // leaveRound is the round going from this claim with no process this machine replaces: the ask
-// nothing read goes (dropUpdateTask), every field the round wrote goes (clearUpdate), the claim
-// is written, and the task the round was holding back is sent. It is the whole of the round's end
+// nothing read goes (dropUpdateTask) with the mark a restart armed for it
+// (answerAskFirstAfterDrop), every field the round wrote goes (clearUpdate), the claim is
+// written, and the task the round was holding back is sent. It is the whole of the round's end
 // for a pod's round — whose pod is gone by the time that end is posted — and for a plugin round
 // the registration ended, which differ only in what they log. sendPending hands nothing to a
 // claim that is not ready or idle, so a failed or suspended claim is sent nothing by it.
 func (m *Machine) leaveRound(ctx context.Context) error {
 	if err := m.dropUpdateTask(ctx); err != nil {
+		return err
+	}
+	if err := m.answerAskFirstAfterDrop(ctx); err != nil {
 		return err
 	}
 	m.clearUpdate()
