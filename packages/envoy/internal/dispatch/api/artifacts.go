@@ -1414,8 +1414,7 @@ const (
 )
 
 func (s *server) findArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
-	query, owner := target.ownerLookup(artifactByNameOrSlugSQL, agentArtifactByNameOrSlugSQL)
-	artifact, err := scanArtifact(q.QueryRow(ctx, query, owner, name))
+	artifact, err := lookupArtifactByNameOrSlug(ctx, q, target, name)
 	if err != nil {
 		return model.Artifact{}, err
 	}
@@ -1425,6 +1424,12 @@ func (s *server) findArtifactByNameOrSlug(ctx context.Context, q queryer, target
 	}
 	artifact.Versions = versions
 	return artifact, nil
+}
+
+// lookupArtifactByNameOrSlug reads the artifact name finds under target's owner, without its versions.
+func lookupArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
+	query, owner := target.ownerLookup(artifactByNameOrSlugSQL, agentArtifactByNameOrSlugSQL)
+	return scanArtifact(q.QueryRow(ctx, query, owner, name))
 }
 
 // versionColumns is the column list a version read selects over artifact_versions aliased v, in

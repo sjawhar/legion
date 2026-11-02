@@ -61,8 +61,7 @@ func (s *server) refuseUploadBeforeItsObject(ctx context.Context, target artifac
 			return err
 		}
 	}
-	query, owner := target.ownerLookup(artifactByNameOrSlugSQL, agentArtifactByNameOrSlugSQL)
-	artifact, err := scanArtifact(pool.QueryRow(ctx, query, owner, name))
+	artifact, err := lookupArtifactByNameOrSlug(ctx, pool, target, name)
 	if err == nil {
 		if artifact.Kind != kind {
 			return artifactKindMismatch(name, artifact, kind)
