@@ -21,7 +21,7 @@ import (
 // cache. The tests here are about each holding no more, and for no longer, than the service needs.
 
 // A room's update observer records each update's class for the persistence that takes the same
-// update next (recordUpdateClass, consumeUpdateClass). ygo hands both the very slice it encoded at
+// update next (queueUpdateClass, consumeUpdateClass). ygo hands both the very slice it encoded at
 // the commit (sameUpdate), so the record keeps that slice rather than a copy of every update a
 // lagging room has queued, and it finds an update's class by the slice itself. Equal bytes are not
 // the same update - two commits that change nothing encode alike - so each of two such updates

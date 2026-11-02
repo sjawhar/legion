@@ -65,8 +65,8 @@ type appendGate struct {
 // queueAppendGate queues the gate's read of room into b, the caller's batch, for an append of
 // kind. The caller holds the document's advisory lock in the transaction b runs in, and once b has
 // run asks head with the cursor it reads then, under that lock. A batch of a room's browser
-// updates queues the read into the pipeline that takes the lock
-// (PgVersioned.AppendUpdatesWithCredit), so a cursor read before b ran would be read before the
+// updates queues the read into the pipeline that takes the lock (PgVersioned.AppendRoomFlush and
+// AppendUpdatesWithCredit, appendRoomTx), so a cursor read before b ran would be read before the
 // lock, and a writer that held the lock meanwhile - a settlement's repair, a live write - can have
 // advanced the room's cursor since.
 func queueAppendGate(b *pgx.Batch, room string, kind appendKind) *appendGate {
@@ -131,9 +131,11 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 // recorded for each, as one append of flush, the run the appending transaction stores of that room
 // instance (flushThrough). The room decoded each when it applied it, so none is decoded again.
 // flush is what gates the append: the instance's cursor with the versions this flush has appended
-// for it folded in, which is the only way an append of the room's own persistence worker reaches
-// the gate, since no ledger of its transaction names the document (appendingCursor). The version
-// returned is the first the run stored.
+// for it folded in, since a transaction that flushes a room it holds no write of (a settlement, a
+// version's capture, the block-id backfill) gates its flush appends by that flush
+// (appendingCursor). The room's own persistence worker reaches the gate another way, in its batch's
+// first pipeline (queueAppendGate, PgVersioned.AppendRoomFlush). The version returned is the
+// first the run stored.
 func (p *PgVersioned) AppendRoomUpdatesTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, updates []BrowserUpdate) (persistence.Version, error) {
 	last, err := p.appendUpdatesTx(ctx, tx, room, updates, appendBrowser, flush)
 	if err != nil {

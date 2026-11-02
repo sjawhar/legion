@@ -19,8 +19,9 @@ import (
 // log (renderedReplica.seq, documentUpdateClass.seq), and every durable writer of the room stores,
 // under the document's advisory lock and before an append of its own, every update of the
 // instance through the position it read the room at that no writer has stored yet (flushThrough).
-// The room's own persistence is one such writer, through its own update's position
-// (StoreUpdateContext), so the order ygo hands it updates in never decides the stored order.
+// The room's own persistence is one such writer, through the position its batch takes, its own
+// update's at least (roomBatchThrough, StoreUpdateContext), so the order ygo hands it updates in
+// never decides the stored order.
 
 // roomPoint is an exact position in one room instance's commits: cursor names the instance (its
 // roomCursor), and seq is the position of the last commit a read of it holds (readPoint). The zero

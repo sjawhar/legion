@@ -167,7 +167,7 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 // not to reach for a weaker level that would not hold.
 //
 // Order. A transaction that takes both an owner row and this lock takes the owner row first.
-// The durable writers - a room's batch of browser updates (AppendUpdatesWithCredit),
+// The durable writers - a room's batch of browser updates (AppendRoomFlush),
 // CaptureSnapshot, PruneAfter, and everything else reaching this through withRoomLock - take no
 // owner row at all, which is why order alone could never have been the whole rule: each holds a
 // session-level pg_advisory_lock on its own connection before it opens a transaction, so no row

@@ -17,6 +17,7 @@ import (
 
 // Two peers' updates reach the room's persistence in whatever order their read loops hand them
 // on, which need not be the order the room applied them in: ygo fires a transaction's update
+// observers after the transaction has released the document's lock, so one peer's update can be
 // handed to the room's worker while another's is still between the room's update observer, which
 // counts it as pending (queueUpdateClass), and ygo's persistence observer, which hands it to the
 // worker. Here the first peer's update is held between those two observers while the second

@@ -30,9 +30,10 @@ import (
 // classes queued after u that is durable work of the room instance u was made in (its cursor), is
 // not stored, and does not take the run past roomAppendBatchUpdates updates or roomAppendBatchBytes
 // bytes - u's own position at least. It hands that position to AppendRoomFlush, whose transaction
-// stores, through Service.flushThrough, every update of the instance recorded at a position through
-// it that no writer has stored yet, in the room's commit order, as one insert statement of one row
-// per update with its own content class and credit (appendWrites), and one pair of notifications.
+// stores every update of the instance recorded at a position through it that no writer has stored
+// yet (Service.flushRun, the run a transaction's Service.flushThrough stores too), in the room's
+// commit order, as one insert statement of one row per update with its own content class and
+// credit (appendWrites), and one pair of notifications.
 // The whole transaction is about three round trips under the document's lock, on a connection of
 // the room-appends pool.
 //
@@ -43,7 +44,7 @@ import (
 //     (RoomFlush.markStored). ygo's flush still means every update it held is durable.
 //   - Stored once. No class is stored by two transactions. A class is stored only by a transaction
 //     that holds the document's advisory lock and finds it, under the room's state lock, still
-//     queued and not stored (Service.flushThrough), and every such transaction marks what it
+//     queued and not stored (Service.flushRun), and every such transaction marks what it
 //     stored before it releases that lock, so a transaction that takes the lock next finds the
 //     marks. A class leaves the queue only with its own update's call (finishUpdateClass), so a
 //     call whose update another writer stored finds the mark and appends nothing.
@@ -115,7 +116,7 @@ type BrowserUpdate struct {
 // the whole flush its transaction runs: under the document's lock, in one transaction, it stores
 // every update of the room instance flush names through `through`, the last commit position of the
 // run its batch takes (roomBatchThrough), that no writer has stored yet, in the room's commit order
-// (Service.flushThrough). The update bytes are not passed: the room's queue holds them, with the
+// (Service.flushRun). The update bytes are not passed: the room's queue holds them, with the
 // class and the credit its update observer recorded for each (documentUpdateClass). An update
 // another writer has stored already appends nothing. Each version it appends advances the
 // instance's cursor inside the lock, and once the transaction has committed each class is marked
@@ -164,7 +165,7 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 //     before this, committed or not.
 //
 // What it stores is flush's run through `through`, read under the document's lock once the first
-// pipeline holds it (Service.flushThrough), or, for a nil flush, given, whose credits are held at
+// pipeline holds it (Service.flushRun), or, for a nil flush, given, whose credits are held at
 // their versions once the commit lands and land, committed or not, with credit's; first is then
 // the version given's first update took. A run that holds nothing commits nothing. Any database
 // error rolls back what is open and still releases the session lock, as lockRoom's does.

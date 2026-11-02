@@ -448,7 +448,7 @@ func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	if err != nil {
 		return nil, err
 	}
-	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(live, head) {
+	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(ctx, write.artifactID, live, head) {
 		return s.warmFork(write, live)
 	}
 	return s.coldFork(ctx, write, head)
@@ -460,6 +460,14 @@ func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // commit and its cursor advance, so a difference is the answer, not a reader landing in that
 // window. A room that kept no cursor is not judged behind: nothing says it is.
 //
+// The head counts what this transaction has stored of the room itself and not yet committed: the
+// run an earlier operation of it flushed (Ledger.flushThrough - a version's capture, a snapshot)
+// is the room's own, advancing the instance's cursor only at the commit. So the cursor compared is
+// the one the transaction sees, with its flush's versions folded in (RoomFlush.heldThrough), as
+// its appends' gate compares it (appendingCursor). Compared bare, a room whose update a batch
+// still lingered over when the transaction's snapshot stored it reads as behind, and the write
+// forks the committed store, which holds neither that update nor anything after it.
+//
 // Why a false verdict would matter. It sends the write down the cold path, which reads the stored
 // document - and the store of a room still writing is behind the room by whatever its persistence
 // worker has not appended yet. A version prefix of that need not be a state the document ever held:
@@ -468,9 +476,15 @@ func (s *Service) readFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // the head has no such store: nothing it still owes can become durable, because the gate refuses
 // its every append (refuseRoomBehindHead) until it is reloaded, so the stored document is the whole
 // of what this process can still write from.
-func (s *Service) roomBehindHead(live *crdt.Doc, head int64) bool {
+func (s *Service) roomBehindHead(ctx context.Context, room string, live *crdt.Doc, head int64) bool {
 	cursor := s.cursorOf(live)
-	return cursor != nil && cursor.heldThrough() != head
+	if cursor == nil {
+		return false
+	}
+	if flush := ledgerFrom(ctx).flushFor(room); flush != nil && flush.cursor == cursor {
+		return flush.heldThrough() != head
+	}
+	return cursor.heldThrough() != head
 }
 
 // warmFork is readFork's fork of live, the room resident for write's document: the room as of an
@@ -538,7 +552,7 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 		s.failRoom(write.artifactID, err)
 		return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
-	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(live, head) {
+	if live := s.srv.GetDoc(write.artifactID); live != nil && !s.roomBehindHead(ctx, write.artifactID, live, head) {
 		loaded.Update = nil
 		return s.warmFork(write, live)
 	}

@@ -987,7 +987,7 @@ one that deletes such a row or changes a key column, which is what the weaker le
 Nothing does either today; the check refuses it if something starts to, and that red is the prompt to revisit this rule, not to reach for a weaker level that would not hold.
 **Order:** a transaction that takes both an owner row and the room lock takes the owner row first.
 The durable writers take no owner row at all
-— a room's batch of browser updates (`AppendUpdatesWithCredit`, on a `store.Pool.RoomAppends` connection) and `CaptureSnapshot`, `PruneAfter`, `Compact` and `Delete` (through `withRoomLock`'s `lockRoom`, on a shared-pool connection) hold a session-level `pg_advisory_lock` on their own connection before they open a transaction, so no row lock can precede it there
+— a room's batch of browser updates (`AppendRoomFlush`, on a `store.Pool.RoomAppends` connection) and `CaptureSnapshot`, `PruneAfter`, `Compact` and `Delete` (through `withRoomLock`'s `lockRoom`, on a shared-pool connection) hold a session-level `pg_advisory_lock` on their own connection before they open a transaction, so no row lock can precede it there
 — which is why order alone could not be the whole rule;
 but a transaction that does take both, such as an upload appending its event after writing the document, deadlocks against a settlement if it takes them the other way round.
 

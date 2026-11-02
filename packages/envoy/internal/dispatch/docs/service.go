@@ -1126,7 +1126,7 @@ func (s *Service) Quiesce(ctx context.Context) error {
 		// A settlement whose timer already fired reads the generation it was armed with, so
 		// bumping it here ends that settlement before it opens a transaction.
 		state.roomGeneration = s.nextRoomGeneration()
-		s.dropSettlementLocked(state)
+		s.stopSettleTimer(state.settle)
 		// The closed room's settlement failures are not the next room's (see
 		// reserveRoomCloseLocked).
 		state.settleFailures = 0
@@ -1254,14 +1254,8 @@ func (s *Service) stopSettleTimer(timer *time.Timer) bool {
 // past its supersession check commits its own work, and the one its caller arms finds nothing new.
 // Its caller holds state.mu.
 func (s *Service) takeOverSettlementLocked(state *roomState) bool {
-	stopped := s.dropSettlementLocked(state)
+	stopped := s.stopSettleTimer(state.settle)
 	return stopped || s.isSettleTimerArmed(state.settle) || state.settling > 0
-}
-
-// dropSettlementLocked drops the settlement armed on state: it stops the room's armed timer
-// (stopSettleTimer), answering whether a timer was stopped. Its caller holds state.mu.
-func (s *Service) dropSettlementLocked(state *roomState) (stopped bool) {
-	return s.stopSettleTimer(state.settle)
 }
 
 // takeSettleTimer stops an armed settlement timer and hands its caller the settleWG count the timer
@@ -2731,7 +2725,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 				// reserveRoomCloseLocked): a record kept across the close and a reopen starts
 				// over.
 				state.settleFailures = 0
-				s.dropSettlementLocked(state)
+				s.stopSettleTimer(state.settle)
 				// Snapshot while the state is locked, then write after unlocking: settlement holds
 				// the document's advisory lock before it takes state.mu, so taking that lock here
 				// while holding the state would invert the lock order. The authors are already in
@@ -2868,7 +2862,7 @@ func (s *Service) invalidateForEviction(room string) *roomState {
 	if state != nil {
 		state.roomGeneration = s.nextRoomGeneration()
 		state.settleFailures = 0
-		s.dropSettlementLocked(state)
+		s.stopSettleTimer(state.settle)
 		s.unlockState(room, state)
 	}
 	return state
@@ -2929,7 +2923,7 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.failedDone = make(chan struct{})
 	done := state.failedDone
 	state.roomGeneration = s.nextRoomGeneration()
-	s.dropSettlementLocked(state)
+	s.stopSettleTimer(state.settle)
 	s.purgeSuppressedPersistence(room)
 	// The failed room's updates are dropped, or stored as their observer recorded them once
 	// handed over (handOverFailedRoomLocked): no class of it is measured on the shadow again.

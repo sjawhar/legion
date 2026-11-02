@@ -395,11 +395,11 @@ func roomCursorFrom(ctx context.Context) *roomCursor {
 // in when it flushed the room (a settlement's repairs, storeRepair). Nil is an append no cursor
 // gates.
 //
-// flush is passed by the appends of a flush alone (AppendRoomUpdateTx), and is the only way the
-// room's own persistence worker reaches its flush here: its transaction has no ledger, so the
-// cursor its context carries is the instance's alone, one version behind the head from the flush's
-// second append on. A joined transaction's flush appends pass it too (Service.flushThrough passes
-// flush to every append it makes), but the write branch comes first: a live write's own flush
+// flush is passed by the appends of a flush alone, and is the only way the room's own persistence
+// worker reaches its flush here: its batch (appendRoomTx) passes the flush to the gate it reads in
+// its first pipeline, since its transaction has no ledger. A joined transaction's flush appends
+// pass it too (Service.flushThrough passes flush to the one append of the run it makes,
+// AppendRoomUpdatesTx), but the write branch comes first: a live write's own flush
 // (Ledger.flushThrough, from recordLiveOperation) is decided by the write, whose heldThrough folds
 // the flushed versions in (withOwnAppends). The flush branch decides the flush appends of a
 // transaction that holds no write of the room: a settlement's, a version's, the block-id
