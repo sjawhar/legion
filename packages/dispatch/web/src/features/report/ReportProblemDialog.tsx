@@ -53,7 +53,14 @@ const createReport = (
 interface ReportPress {
   readonly input: ReportInput;
   readonly pictures: readonly File[];
+  /** Each picture by name, size and time, which tell two presses apart: a press after Stop trying
+   *  is sent again under its key only when it is the same report (`useKeyedWrite` compares
+   *  presses by their JSON, in which a File is `{}`). */
+  readonly pictureIds: readonly string[];
 }
+
+/** The 409s that mean the settings changed under an open dialog. */
+const SETTINGS_REFUSALS = new Set(["REPORTS_NOT_CONFIGURED", "REPORTS_AGENT_NOT_CONFIGURED"]);
 
 /** What the reporter is told about the agent once the report is filed with one asked: whether a
  *  session held its role, as the new issue's read says (`route_status`), once it has. */
@@ -103,11 +110,10 @@ export function ReportProblemDialog({
   const closeRef = useRef<HTMLButtonElement>(null);
   const settings = useQuery(reportSettingsQuery());
   const configured = settings.data?.project != null;
-  const dialog = useDialog<HTMLFormElement>({
-    initialFocusRef: configured ? fieldRef : closeRef,
-    onClose,
-    open: true,
-  });
+  const issueLinkRef = useRef<HTMLAnchorElement>(null);
+  // The box, which `useDialog` falls back from to the first control while it is not shown; one
+  // ref throughout, since a ref that changed would set the dialog up again.
+  const dialog = useDialog<HTMLFormElement>({ initialFocusRef: fieldRef, onClose, open: true });
   useCloseOnNavigation(true, onClose);
   // The dialog opens before it knows reports are set up, on Close; the box takes focus once it
   // shows, unless the reader has already moved focus elsewhere in the dialog.
@@ -128,6 +134,10 @@ export function ReportProblemDialog({
     ...issueQuery(filed?.key),
     enabled: filed !== null && filed.route !== null,
   });
+  // Send unmounts the box: focus moves to the new issue's link, so it stays inside the dialog.
+  useEffect(() => {
+    if (filed !== null) issueLinkRef.current?.focus();
+  }, [filed]);
   const submitGuard = useSubmitGuard();
   const mutation = useKeyedWrite({
     // The write store keeps one file with a write across a reload, so a report of one picture is
@@ -136,6 +146,11 @@ export function ReportProblemDialog({
     file: ({ pictures: sent }: ReportPress) => (sent.length === 1 ? sent[0] : undefined),
     inline: true,
     label: () => "Problem report",
+    onError: (error) => {
+      if (error instanceof ApiError && SETTINGS_REFUSALS.has(error.code ?? "")) {
+        void queryClient.invalidateQueries({ queryKey: reportSettingsQuery().queryKey });
+      }
+    },
     onSettled: () => submitGuard.release(),
     write: ({ input, pictures: sent }: ReportPress, bounds: WriteBounds) =>
       create(input, sent, bounds),
@@ -174,6 +189,9 @@ export function ReportProblemDialog({
     submitGuard.guard(() =>
       mutation.mutate({
         input: { ...context(), ask_agent: agentRoute !== null && askAgent, body },
+        pictureIds: pictures.map(
+          (picture) => `${picture.name}:${picture.size}:${picture.lastModified}`
+        ),
         pictures,
       })
     );
@@ -209,7 +227,11 @@ export function ReportProblemDialog({
       <div className="space-y-2" role="status">
         <p className={`text-sm ${textSecondaryOnSurface}`}>
           Reported as{" "}
-          <Link className={link} to={buildIssuePath({ key: filed.key, kind: "issue" })}>
+          <Link
+            className={link}
+            ref={issueLinkRef}
+            to={buildIssuePath({ key: filed.key, kind: "issue" })}
+          >
             {filed.key}
           </Link>
           . Thank you.
@@ -259,7 +281,11 @@ export function ReportProblemDialog({
               >
                 <span className="min-w-0 flex-1 truncate">{picture.name}</span>
                 <button
-                  aria-label={`Remove ${picture.name}`}
+                  aria-label={
+                    pictures.filter((other) => other.name === picture.name).length > 1
+                      ? `Remove ${picture.name}, picture ${index + 1}`
+                      : `Remove ${picture.name}`
+                  }
                   className={`min-h-11 rounded-lg px-2 text-sm ${textMutedOnSurface}`}
                   disabled={mutation.isPending}
                   onClick={() => setPictures((held) => held.filter((_, at) => at !== index))}

@@ -21,6 +21,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // A report is a person telling Dispatch's maintainers about a problem with Dispatch itself, from
@@ -254,24 +255,28 @@ func checkReportInput(input *reportInput) error {
 	if input.Page == "" {
 		return errorf(http.StatusBadRequest, "REPORT_INPUT", "page is required: the address of the page the problem is on")
 	}
-	for _, field := range []struct {
-		name  string
-		value string
-		limit int
-	}{
-		{"page", input.Page, maxReportPage},
-		{"page_build", input.PageBuild, maxReportPageBuild},
-		{"user_agent", input.UserAgent, maxReportUserAgent},
-	} {
-		if length := len16(field.value); length > field.limit {
-			return capExceededError(field.name, length, field.limit)
-		}
-	}
+	// The browser supplies these and the person cannot shorten them (a filtered page's address can
+	// be long), so one past its bound is cut rather than refusing the report.
+	input.Page = clipped(input.Page, maxReportPage)
+	input.PageBuild = clipped(input.PageBuild, maxReportPageBuild)
+	input.UserAgent = clipped(input.UserAgent, maxReportUserAgent)
 	if input.Viewport.Width <= 0 || input.Viewport.Height <= 0 ||
 		input.Viewport.Width > maxReportViewport || input.Viewport.Height > maxReportViewport {
 		return errorf(http.StatusBadRequest, "REPORT_INPUT", "viewport must give the window's width and height in pixels, each from 1 to %d", maxReportViewport)
 	}
 	return nil
+}
+
+// clipped is value cut to at most limit UTF-16 units, the last of them an ellipsis when it is cut.
+func clipped(value string, limit int) string {
+	if len16(value) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	for len16(string(runes))+1 > limit {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes) + "…"
 }
 
 // readReportPictures reads each picture part, refusing a file that is not a picture by its bytes
@@ -282,7 +287,8 @@ func readReportPictures(files []*multipart.FileHeader) ([]reportPicture, error) 
 		return nil, errorf(http.StatusBadRequest, "REPORT_INPUT", "a report takes at most %d pictures, not %d", maxReportPictures, len(files))
 	}
 	pictures := make([]reportPicture, 0, len(files))
-	taken := map[string]bool{}
+	// The issue's spec is spec.md: no picture takes its name.
+	taken := map[string]bool{"spec.md": true}
 	total := 0
 	for _, header := range files {
 		name := strings.TrimSpace(path.Base(strings.ReplaceAll(header.Filename, "\\", "/")))
@@ -406,7 +412,7 @@ func reportTitle(body string) string {
 // as Markdown.
 func reportSpec(key string, input reportInput, pictures []model.Artifact, commit string, reporter model.Actor, route *string) string {
 	var spec strings.Builder
-	spec.WriteString(strings.TrimSpace(input.Body))
+	spec.WriteString(closedMarkdown(strings.TrimSpace(input.Body)))
 	spec.WriteString("\n\n")
 	for _, picture := range pictures {
 		fmt.Fprintf(&spec, "![%s](dispatch://%s/artifact/%s@v%d)\n\n",
@@ -434,6 +440,41 @@ func reportSpec(key string, input reportInput, pictures []model.Artifact, commit
 	return spec.String()
 }
 
+// closedMarkdown is words as the spec holds them, with every block they open closed: the words
+// as Dispatch's own Markdown writer renders them (pmdoc), which ends a fenced code block left
+// open, so a pasted log with no closing fence does not swallow the pictures and the details
+// written after it. Words the document cannot hold - block HTML, a malformed decision block -
+// would refuse the whole report, so they are kept verbatim in a code block instead.
+func closedMarkdown(words string) string {
+	tree, err := pmdoc.Parse(words)
+	if err == nil {
+		err = pmdoc.AskContentError(tree)
+	}
+	var rendered string
+	if err == nil {
+		rendered, err = pmdoc.Render(tree)
+	}
+	if err != nil {
+		fence := strings.Repeat("`", max(3, longestRun(words, '`')+1))
+		return fence + "text\n" + words + "\n" + fence
+	}
+	return strings.TrimSpace(rendered)
+}
+
+// longestRun is the length of the longest run of char in value.
+func longestRun(value string, char rune) int {
+	longest, run := 0, 0
+	for _, c := range value {
+		if c == char {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	return longest
+}
+
 // pictureCaption is a file's name as the caption of its picture: `[`, `]` and backticks escaped
 // and runs of whitespace one space, the rule the dashboard writes a pasted picture's caption by
 // (contracts/src/dispatch-text-rules.ts, pictureCaption).
@@ -457,16 +498,7 @@ func codeSpan(value string) string {
 		}
 		return char
 	}, value)
-	longest, run := 0, 0
-	for _, char := range value {
-		if char == '`' {
-			run++
-			longest = max(longest, run)
-		} else {
-			run = 0
-		}
-	}
-	fence := strings.Repeat("`", longest+1)
+	fence := strings.Repeat("`", longestRun(value, '`')+1)
 	if strings.HasPrefix(value, "`") || strings.HasSuffix(value, "`") {
 		value = " " + value + " "
 	}

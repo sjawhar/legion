@@ -8,6 +8,7 @@ import {
   getIssueArtifactText,
   putReportSettings,
 } from "./api";
+import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 import { pastePicture } from "./sends";
 import { asUser } from "./users";
@@ -82,6 +83,15 @@ test("a report with a picture, sent from the ? panel, files an issue routed to t
     await dialog.getByRole("link", { name: filed.key }).click();
     await expect(page).toHaveURL(`/issues/${filed.key}`);
     await expect(reportDialog(page)).toHaveCount(0);
+    const picture = documentEditor(page).getByRole("img", { name: "shot.png" });
+    await expect(picture).toHaveAttribute(
+      "src",
+      `/api/v1/issues/${filed.key}/artifacts/shot-png/versions/1`
+    );
+    await picture.scrollIntoViewIfNeeded();
+    await expect
+      .poll(() => picture.evaluate((image: HTMLImageElement) => image.naturalWidth))
+      .toBeGreaterThan(0);
   } finally {
     await alice.close();
   }

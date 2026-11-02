@@ -71,11 +71,17 @@ export function SettingsPage(): ReactNode {
   // A link to one section (`/settings#problem-reports`, from the report dialog) brings it into
   // view: the router renders the page after the browser would have looked for the fragment. The
   // sections above it grow as their reads land, so it is kept in view as the page grows, until
-  // the reader scrolls or types, or three seconds pass.
+  // the reader scrolls, types or presses, or three seconds pass.
   const { hash } = useLocation();
   useEffect(() => {
     if (hash.length <= 1) return;
-    const section = document.getElementById(decodeURIComponent(hash.slice(1)));
+    let id = hash.slice(1);
+    try {
+      id = decodeURIComponent(id);
+    } catch {
+      // A fragment that is not percent-encoding names the section as written.
+    }
+    const section = document.getElementById(id);
     if (section === null) return;
     const bring = () => section.scrollIntoView({ block: "start" });
     bring();
@@ -84,7 +90,7 @@ export function SettingsPage(): ReactNode {
     growth.observe(section.parentElement);
     const stop = () => growth.disconnect();
     const timer = window.setTimeout(stop, 3000);
-    const moves = ["wheel", "touchstart", "keydown"] as const;
+    const moves = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
     for (const move of moves) window.addEventListener(move, stop, { once: true, passive: true });
     return () => {
       stop();

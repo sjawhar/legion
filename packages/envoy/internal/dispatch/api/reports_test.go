@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -329,7 +330,10 @@ func TestReportWithoutPicturesTakesJSON(t *testing.T) {
 func TestReportRepeatUnderOneKeyFilesOnce(t *testing.T) {
 	handler, database := newReportServer(t)
 	putReportSettings(t, handler, map[string]any{"project": "CORE", "agent_route": nil})
-	pictures := []reportTestPicture{{name: "shot.png", contentType: "image/png", content: pngBytes("pixels")}}
+	pictures := []reportTestPicture{
+		{name: "shot.png", contentType: "image/png", content: pngBytes("pixels")},
+		{name: "after.png", contentType: "image/png", content: pngBytes("later")},
+	}
 	first := reportRequest(t, handler, reportFields(false), pictures, "bob", "report-1")
 	again := reportRequest(t, handler, reportFields(false), pictures, "bob", "report-1")
 	if first.Code != http.StatusCreated || again.Code != http.StatusCreated || !replayed(again) {
@@ -373,5 +377,135 @@ func TestReportTakesWordsAtTheLimitAndRefusesANulPictureName(t *testing.T) {
 	}
 	if count := countIssues(t, database); count != 1 {
 		t.Fatalf("issues = %d, want the one report at the limit", count)
+	}
+}
+
+// Words that leave a code fence open, as a pasted log often does, keep the pictures and the
+// details after them: each is shown, and the details are a section of their own. Words the
+// document cannot hold (block HTML, a malformed decision block) are kept verbatim as code rather
+// than refusing the report.
+func TestReportWordsThatLeaveABlockOpenKeepTheDetailsAfterThem(t *testing.T) {
+	handler, database := newReportServer(t)
+	putReportSettings(t, handler, map[string]any{"project": "CORE", "agent_route": nil})
+	for _, words := range []string{
+		"It crashes:\n```\npanic: boom",
+		"It crashes:\n~~~\npanic: boom",
+		"It crashes:\n<!-- left open",
+		"It crashes:\n<div>\n\npanic\n\n</div>",
+		"It crashes:\n:::ask{#x}\nno options",
+	} {
+		fields := reportFields(false)
+		fields["body"] = words
+		response := reportRequest(t, handler, fields,
+			[]reportTestPicture{{name: "shot.png", contentType: "image/png", content: pngBytes("pixels")}}, "bob", "")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("%q: status=%d body=%s", words, response.Code, response.Body.String())
+		}
+		key := decodeBody[model.Issue](t, response).Key
+		spec := reportSpecMarkdown(t, database, key)
+		tree, err := pmdoc.Parse(spec)
+		if err != nil {
+			t.Fatalf("%q: the spec does not parse: %v\n%s", words, err, spec)
+		}
+		var heading, picture, crashes bool
+		var walk func(node *pmdoc.Node, inHeading bool)
+		walk = func(node *pmdoc.Node, inHeading bool) {
+			switch {
+			case node.Type == "heading":
+				inHeading = true
+			case node.Type == "image":
+				picture = true
+			case node.Type == "text" && inHeading && strings.Contains(node.Text, "Where it happened"):
+				heading = true
+			case node.Type == "text" && strings.Contains(node.Text, "panic") || strings.Contains(node.Text, "left open") || strings.Contains(node.Text, "no options"):
+				crashes = true
+			}
+			for _, child := range node.Children {
+				walk(child, inHeading)
+			}
+		}
+		walk(tree, false)
+		if !heading || !picture || !crashes {
+			t.Fatalf("%q: heading=%t picture=%t words kept=%t in\n%s", words, heading, picture, crashes, spec)
+		}
+	}
+}
+
+// A picture named as the spec is stored under another name, and a page address past its bound is
+// cut, not refused: the browser supplies it and the person cannot shorten it.
+func TestReportKeepsThePictureNamesApartFromTheSpecAndCutsALongAddress(t *testing.T) {
+	handler, database := newReportServer(t)
+	putReportSettings(t, handler, map[string]any{"project": "CORE", "agent_route": nil})
+	fields := reportFields(false)
+	fields["page"] = "https://dispatch.example/delivery?" + strings.Repeat("q", maxReportPage)
+	response := reportRequest(t, handler, fields,
+		[]reportTestPicture{{name: "spec.md", contentType: "image/png", content: pngBytes("pixels")}}, "bob", "")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	key := decodeBody[model.Issue](t, response).Key
+	var names []string
+	rows, err := database.Pool.Query(context.Background(), `select name from artifacts where issue_key = $1 order by name`, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if len(names) != 2 || names[0] != "spec-2.md" || names[1] != "spec.md" {
+		t.Fatalf("names = %v, want the picture as spec-2.md beside spec.md", names)
+	}
+	spec := reportSpecMarkdown(t, database, key)
+	if !strings.Contains(spec, "q…") || strings.Contains(spec, strings.Repeat("q", maxReportPage)) {
+		t.Fatalf("the address was not cut to its bound:\n%.400s", spec)
+	}
+}
+
+// Pictures that together pass one upload's 25 MiB are refused whole, 413, and nothing is filed.
+func TestReportRefusesPicturesPastTheUploadLimit(t *testing.T) {
+	handler, database := newReportServer(t)
+	putReportSettings(t, handler, map[string]any{"project": "CORE", "agent_route": nil})
+	half := pngBytes(strings.Repeat("x", maxArtifactBlobSize/2+1))
+	response := reportRequest(t, handler, reportFields(false), []reportTestPicture{
+		{name: "one.png", contentType: "image/png", content: half},
+		{name: "two.png", contentType: "image/png", content: half},
+	}, "bob", "")
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) {
+		t.Fatalf("status=%d body=%.300s, want 413 CAP_EXCEEDED", response.Code, response.Body.String())
+	}
+	if count := countIssues(t, database); count != 0 {
+		t.Fatalf("issues = %d, want none", count)
+	}
+}
+
+func TestReportTitleIsTheFirstLineCutAtAWord(t *testing.T) {
+	for _, row := range []struct{ body, want string }{
+		{"\n\n  The   Send button\toverlaps  \nmore", "The Send button overlaps"},
+		{strings.Repeat("word ", 30), strings.TrimSpace(strings.Repeat("word ", 15)) + "…"},
+		{strings.Repeat("é", 100), strings.Repeat("é", reportTitleRunes-1) + "…"},
+	} {
+		if got := reportTitle(row.body); got != row.want {
+			t.Errorf("reportTitle(%q) = %q, want %q", row.body, got, row.want)
+		}
+		if runes := len([]rune(reportTitle(row.body))); runes > reportTitleRunes {
+			t.Errorf("reportTitle(%q) is %d runes, past %d", row.body, runes, reportTitleRunes)
+		}
+	}
+}
+
+func TestReportCodeSpanHoldsAnyValueOnOneLine(t *testing.T) {
+	for _, row := range []struct{ value, want string }{
+		{"Mozilla/5.0", "`Mozilla/5.0`"},
+		{"a`b", "``a`b``"},
+		{"`edge``", "``` `edge`` ```"},
+		{"line\nbreak\x00", "`line break `"},
+	} {
+		if got := codeSpan(row.value); got != row.want {
+			t.Errorf("codeSpan(%q) = %q, want %q", row.value, got, row.want)
+		}
 	}
 }

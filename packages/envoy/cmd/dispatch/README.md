@@ -2179,6 +2179,8 @@ Each item below names a path with its method and identity, then its purpose.
   The fields are `{body, page, page_build, user_agent, viewport {width, height}, ask_agent}`.
   It writes, in one transaction, an issue labelled `report` in the project the report settings name, created by the reporter and given to that project's default assignee, each picture a file of the issue, and a spec holding the words, each picture inline, and where it happened:
   the page, this server's commit (`buildCommit`, as `/healthz` reports it), the page's build, the browser, the window and the reporter.
+  The words are written as the document's own Markdown writer renders them, which closes a code fence they leave open, and words the document cannot hold (block HTML, a malformed decision block) are kept verbatim in a code block, so neither swallows nor refuses what follows.
+  A page address, build or browser string past its bound (2,048, 200 and 1,024 characters) is cut with an ellipsis rather than refused, since the person cannot shorten it; a picture named `spec.md` is stored under another name.
   With `ask_agent` the issue carries the settings' agent route from its first event, so its `issue.created`, a person's, is published to the role's holder, followed by each picture's `artifact.created`; a role nobody holds then drops the wake, and the issue keeps the route.
   `201` the issue (its read, `GET /api/v1/issues/{key}`, answers whether its route reaches anyone); `409 REPORTS_NOT_CONFIGURED` with no project set, `409 REPORTS_AGENT_NOT_CONFIGURED` for `ask_agent` with no agent set, `400 REPORT_INPUT` a field or file refused, `400 CAP_EXCEEDED` words past `DispatchBodyMax`.
 

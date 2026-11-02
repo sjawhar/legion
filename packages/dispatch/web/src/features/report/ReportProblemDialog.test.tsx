@@ -111,6 +111,8 @@ test("sends the words, the page's details and the pictures, then names the new i
     expect(await screen.findByText(/Reported as/)).toBeTruthy();
     const link = screen.getByRole("link", { name: "CORE-12" });
     expect(link.getAttribute("href")).toBe("/issues/CORE-12");
+    // The box is gone; focus stays in the dialog, on the new issue's link.
+    await waitFor(() => expect(document.activeElement).toBe(link));
   } finally {
     view.unmount();
   }
@@ -139,6 +141,38 @@ test("a pasted or dropped picture is listed and can be removed; text pastes as t
     fireEvent.click(screen.getByRole("button", { name: "Send report" }));
     await waitFor(() => expect(view.sent).toHaveLength(1));
     expect(view.sent[0]?.pictures.map((picture) => picture.name)).toEqual(["pasted.png"]);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("two pictures of one name are removed apart", async () => {
+  const view = renderDialog(settings("CORE", null));
+  try {
+    const field = await screen.findByLabelText("What went wrong");
+    fireEvent.paste(field, { clipboardData: { files: [png("image.png"), png("image.png")] } });
+    fireEvent.click(screen.getByRole("button", { name: "Remove image.png, picture 1" }));
+    expect(screen.getByRole("button", { name: "Remove image.png" })).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a refusal that says the settings changed reads them again", async () => {
+  const view = renderDialog(settings("CORE", "role:dispatch-fixer"), async () => {
+    throw new ApiError(409, {
+      code: "REPORTS_AGENT_NOT_CONFIGURED",
+      error: "no agent fixes reports: a person names its role in Settings",
+    });
+  });
+  const read = api.getReportSettings as unknown as { mock: { calls: unknown[] } };
+  try {
+    fireEvent.click(await screen.findByLabelText("Ask an agent to fix this"));
+    fireEvent.change(screen.getByLabelText("What went wrong"), { target: { value: "Broken" } });
+    const before = read.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Send report" }));
+    expect(await screen.findByText(/no agent fixes reports/)).toBeTruthy();
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(before));
   } finally {
     view.unmount();
   }
