@@ -75,6 +75,14 @@ type Options struct {
 	// refuses it either, since refusing calls with no relaunch under way would stall agents that
 	// work today.
 	PluginRelaunchable bool
+	// NoPluginInstall is supervise.Deps.NoPluginInstall as the API sees it: whether this claim's
+	// launch installs no plugin at all, which only the daemon knows, since a role's backend and
+	// the runtime it launches into are its configuration (internal/daemon's noPluginInstall — a
+	// Claude Code role's plugin in a pod is its image's own claude-envoy). Nothing of this
+	// daemon relaunches such a claim for its contract and its registration stands, so the routes
+	// serve it on the contract it speaks (staleClaim). Nil is a daemon whose every claim a
+	// relaunch can carry.
+	NoPluginInstall func(c supervise.Claim) bool
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
@@ -174,8 +182,9 @@ type server struct {
 	designGate      config.DesignGate
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
-	// pluginRelaunchable is Options.PluginRelaunchable.
+	// pluginRelaunchable is Options.PluginRelaunchable, noPluginInstall Options.NoPluginInstall.
 	pluginRelaunchable bool
+	noPluginInstall    func(c supervise.Claim) bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
@@ -228,6 +237,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		designGate:         opts.DesignGate,
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
+		noPluginInstall:    opts.NoPluginInstall,
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
 		githubAPI:          opts.GitHubAPI,
@@ -278,6 +288,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 
 	mux.HandleFunc("POST /legion/v1/claims/register", s.register)
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
+	mux.HandleFunc("POST /legion/v1/claims/ready-for-update", s.readyForUpdate)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
