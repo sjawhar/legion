@@ -2,15 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-251",
-  "previousHandoff": "d94e8bfd5029a3e2ea333a4af56b6db5d846d03f",
-  "headReviewed": "the handoff push above 58b87102d223 (code head 56b6404b40e1)",
-  "completed": "2026-11-01T22:38:26Z",
-  "decision": "approved",
-  "round": "confirmation after the architect returned the issue from acceptance: since my approval at d94e8bfd only .legion/INFRA-251/implement.json and test.json changed (5b31b3b7, 58b87102); no code moved and no merge of main",
+  "previousHandoff": "395494600965e47836fad5be69443fcf006b5423",
+  "headReviewed": "the handoff push above 04a8d9a079e7 (code head 79fd47725984)",
+  "completed": "2026-11-02T06:02:03Z",
+  "decision": "changes_requested",
+  "round": "narrowed round (architect): 418b4320 (the devbox proof follows spec v5, the key-file base URL, the libs' setupVersion) and the merge 79fd4772",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "e2e": "E2E (implementer) present; E2E (tester), round 27, names code head 56b6404b40e1, the code at this head",
-  "ci": "CI head d94e8bfd: ci-ok success, pr-title success; compare d94e8bfd...58b87102 is handoffs-only (2 files). Read 2026-11-01T22:38Z."
+  "important": 1,
+  "minor": 4,
+  "accepted": [
+    "The merge 79fd4772 leaves the change's diff unchanged: the unchanged-diff fingerprint is 14538e1082c245e0 at 418b4320 and at 79fd4772.",
+    "Tree 5's set-back check fails when the park stands. When the daemon sets the status back, it passes: the log fields match engine.go:268-269, and the set-back is written as legion-daemon:<project> (client.go daemonActor). park_seq5 is read before the PATCH. No later checkpoint assumes tree 5 is parked.",
+    "The key-file route checks LEGION_E2E_MODEL_BASE_URL with model_base_url_refusal and passes it as --base-url, and the gateway route refuses it.",
+    "setupVersion is a real top-level setting of the pinned 18.13.3 (CURRENT_SETUP_VERSION n0 = 2). The libs change nothing for the other proofs beyond skipping the wizard."
+  ],
+  "keyFindings": [
+    {"severity": "important", "file": "scripts/e2e/lib/install-key-file-model-route.sh:318 (and install-model-gateway.sh:388, install-box-login-route.sh:211)", "description": "setupVersion: 2 stops the wizard only while the build's CURRENT_SETUP_VERSION is 2. On a pin that adds a setup step, every proof's panes hang at the wizard again, with no error. The same build has startup.setupWizard (boolean), and selectSetupScenes returns no scenes when it is false, whatever the version; record-casts.sh:166-169 already writes it. Write `startup:\\n  setupWizard: false`, and fix the comments and the README sentences at 4466, 4552 and 4590."},
+    {"severity": "minor", "file": "scripts/e2e/lib/install-box-login-route.sh:208", "description": "The comment says 'the pinned Oh My Pi … 2 in that build', but box-login runs the operator's own build, not .omp-pin."},
+    {"severity": "minor", "file": "scripts/e2e/README.md:2877", "description": "trees-parked gives the order wrong: the script PATCHes tree 5 (line 714) before the three parks finish and before the questions (740-742), but the README says the questions come 'then' and that tree 5 is 'also' set."},
+    {"severity": "minor", "file": "scripts/e2e/README.md:2951", "description": "The blank line before '## dispatch-user-turns.sh' was dropped, so the heading follows a code fence directly."},
+    {"severity": "minor", "file": "scripts/e2e/lib/model-endpoint.sh:3", "description": "The header comment, and README 4559, list who sources model-endpoint.sh, but leave out parked-decision-devbox.sh, which now sources it (line 74)."}
+  ],
+  "providers": "Verified from each run's own turns in the session store: DeepReview29 (54 assistant turns) and CodeQuality29 (30), all anthropic / claude-opus-5-5.",
+  "dispatch": "dispatch answers was refused three times (ECONNREFUSED), at 05:5xZ and at 06:0xZ; nothing in this round depends on a person's answer.",
+  "ci": "CI head 820465bf (only .legion/INFRA-251/test.json above it), read 2026-11-02T06:02Z: queued behind a backlog (changes success, the rest queued). A request for changes does not wait on CI."
 }
