@@ -204,6 +204,19 @@ Each item below names a task and where its code is, then notes on it.
   A process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks its keys again under the registry's lock before it counts as live once more (`Registration.renew`);
   beside a live process whose keys it does not share it is refused (`Registration.Lost`), stops serving after its HTTP drain, and exits 1
 
+- **Phase handoffs on an issue**: `internal/dispatch/api/handoffs.go`, `store/migrations/20261101144901_handoffs.up.sql`
+
+  A session records its handoff for one phase of an issue with `POST /api/v1/issues/{key}/handoffs/{phase}` (bearer only:
+  the session names itself in `actor`, a cookie caller is `403 HANDOFF_FORBIDDEN`);
+  the phase is a lowercase slug (`^[a-z][a-z0-9-]{0,31}$`;
+  Legion writes `plan`, `implement`, `test`, `review`) and the body one JSON object, stored in `handoffs.body` as the exact text sent (a `text` column, never `jsonb`) and capped at `contracts.DispatchHandoffBodyMax` bytes (`413 CAP_EXCEEDED`).
+  The version is `coalesce(max(version), 0) + 1` inside the insert, after `requireOpenIssue` locks the issue row (a closed issue is `409 ISSUE_CLOSED`), and `unique (issue_key, phase, version)` holds it.
+  The same transaction appends `handoff.recorded` `{handoff_id, phase, version}` on the issue, which never carries the body and, a session's event, notifies no one;
+  a handoff writes no write advice and no reference edges.
+  `GET /api/v1/issues/{key}/handoffs` lists metadata newest first, `GET .../handoffs/{phase}/latest` and `GET /api/v1/handoffs/{id}` answer one record with its body (`404 HANDOFF_NOT_FOUND`), on a closed issue too.
+  A write is keyed: a repeat under the same `Idempotency-Key` is answered the first call's `201` and records no second version.
+  Shapes: `Handoff`, `HandoffSummary`, `HandoffRecordedPayload` in `packages/contracts/src/dispatch-api.ts`
+
 - **Load test**: `loadtest/`
 
   the 2-core reproduction of the 2026-10-26 outage load:
@@ -611,10 +624,11 @@ A helper that walks the room inside `Server.Apply` outside a transaction, as an 
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason:
 whether the service builds the decoder (`newDocumentCopy`:
-the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
+the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's decode of an update it appends: a browser's, which no document here encoded (`appendUpdate`), and one whose header names no single client's item count (`refuseUpdateItemCap`)) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
 ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.
-`TestTheStoreTakesOneBrowserUpdateItsRoomTook` and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates a check at ygo's default queue refuses, which fails the room;
+`TestTheStoreTakesOneBrowserUpdateItsRoomTook` is a browser's update the store decodes itself, which a check at ygo's default queue refuses, failing the room;
+`TestASettlementStampsMoreBlocksThanYgosDefaultQueue` is a server-encoded one the store judges by its header alone (`refuseUpdateItemCap`), which such a check would refuse the same way;
 `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`, `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
 Every copy that replays the room's commits makes no commit of its own:
@@ -750,8 +764,10 @@ the empty halves a block replacement leaves of the textblock it lands in, which 
 One the accept left unchanged whose spread already read back otherwise before it, such as a spread its markdown never carried, keeps that spread.
 Every other block, mark and node stays as it was.
 An empty replacement keeps the paragraph it empties, which is not written beside other blocks.
-Outside an ask it then runs, over every document-level block it changed, `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison (`refuseReshapedAccept`: `pmdoc.BlockShapeError`).
+Outside an ask it then runs, over every document-level block it changed, `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison (`refuseReshapedAccept`: the read-back's `Shape`).
 Both write a table without the empty cells its colspans and rowspans add, which the read-back of the whole document below writes, so an accept across many tables costs no more there than the cells those tables hold.
+Both verdicts come from one rendering and parse of each block (`pmdoc.ReadBackBlock`), which the checks of one write share through a `blockReadBacks` map, so a block two or three of them read — the block a write lands in can hold the whole document's text — is read back once rather than once a check.
+A replace shares one the same way (`refuseUnreadableReplacement`, `refuseReshapedReplacement`, `refuseCodeThatReshapesItsBlock`).
 A non-empty replacement inside a typed block is checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's `paragraph+ bullet_list?` rule.
 Last, the whole document is read back (`refuseMisreadAccept`:
 `pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes and text, a column without alignment expected back unaligned as the renderer writes it:
@@ -1162,8 +1178,12 @@ one in a document the block index has not reached.
 
 Each identified block of a document is a graph node too (and so is each block of a comment or message, below):
 kind `block`, id `<document ref_key>#<block id>` (`text.TargetID`), its reference the document's with `#b-` and the id as `text.EncodeBlockID` writes it (`refs.BlockRef`).
-`refs.IndexBlocks` indexes a version's blocks in the version writer's transaction, from the same render and extraction as its references:
+`refs.IndexBlocks` indexes a version's blocks in the version writer's transaction, up to the bound below, from the same render and extraction as its references:
 the blocks the render's offsets name, which `GET /api/v1/artifacts/{id}/blocks` lists, the first holder of a repeated id being the node.
+A write of more than 2,000 blocks (`docs.deferBlockIndexBlocks`, about a tenth of the second an upload is held to) indexes its references alone and leaves its blocks owed:
+migration 0122's trigger marked the version owed when its row was inserted, and the block-index reconciliation below indexes them out of the request, within 30 s of the write, unless a settlement that writes a version of its own indexes that version's blocks first — which it does only where the document changed after the write (`docs.contentChangedSinceVersion`).
+Until the index catches up, a reference into such a document resolves to no block, so the mention is listed from the document and a backlink names the document rather than the block holding it;
+measured end to end on a 2,402-block document, that wait was 34.5 s (sjawhar/legion#2519).
 A block whose id is longer than `text.MaxBlockIDBytes` is no node (`uniqueBlocks`):
 a mention inside it starts at the innermost node holding it, or at the document when none does, and `IndexBlocks` logs a warning naming the document, the version, how many such blocks it skipped, the longest one's id bytes and the bound.
 The version is still written.
@@ -1429,6 +1449,12 @@ A document `pmdoc` refuses names the first refused block it writes.
 One walk of the tree goldmark reads decides every block refusal in document order before conversion (`refuseBlocks`), and it refuses every block kind conversion does not convert (`convertedBlocks`), a link reference definition among them, so conversion refuses no block;
 `TestParseNamesTheFirstRefusedBlock` holds that order for every pair of block refusals.
 Spacing refusals (`browserListSpacing`) come before the walk, and inline ones, such as a footnote reference, in conversion after it.
+
+A document opens at most `maxNesting` (100) blocks inside one another — a quote, a list, a list item, a typed block and a footnote definition each count one (`pmdoc/nesting.go`) — and a write whose markdown goes past it is refused naming the line, `line N opens a block inside 100 blocks`.
+The browser editor's parser is held to the same number, counting the same blocks (`maxBlockNesting` in proof-editor's `src/block-nesting.ts`, whose comment names `maxNesting` and which `maxNesting`'s comment names back), as it was already held to `maxTypedNesting` (32, `maxDirectiveNesting`) for `:::` openers:
+a list or quote opener standing past the bound opens no block there and its line reads as the text it is.
+So every document this accepts draws in a browser as it reads here, and a list or quote this refuses reads in a comment as its own text rather than costing the reader the page, which a few hundred `- ` markers on one line did by overflowing that parser's stack (sjawhar/legion#2519).
+The browser counts no footnote definition, which only lets it draw deeper than this accepts, never shallower.
 
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`.
 The embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and the fixture generator reads that checked-in file.
@@ -3740,13 +3766,14 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
 - Every other answer given before a request's body is read waits for that body (`drainBeforeAnswer`, `api/body_drain.go`, which `register` puts around every route but a `GET`):
   the layer's `KEY_INVALID`, the closed-issue refusal, `LOGIN_CHANGED`, a refused path parameter, a handler's refusal made before it decodes.
   The layer's `KEY_IN_FLIGHT` is not one of them: the layer reads that body itself, above.
-  The answer is written only once the rest of the body is read and discarded, never spooled, at most `routeBodyLimit` and one byte more.
+  The answer is written only once the rest of the body is read and discarded, never spooled, at most the route's limit (`routeBody`) and one byte more.
   An HTTP/1.1 client that sends a whole body before it reads the answer - WebKit and Firefox uploading a file - otherwise met net/http's close of a connection with its body unread as a reset, and dropped the answer with it (the browser suite's 20 MB in-flight upload row).
   Both reads, the drain's and the layer's, are bounded at `bodyDrainLimit` (a minute), a read deadline through `http.ResponseController.SetReadDeadline` lifted only once the body has reached its end:
   a body that stops arriving gets its answer as it stood, with `Connection: close`, and the connection closes as soon as the answer is out.
   A read that failed, or stopped at the limit, leaves the deadline in place, because net/http reads on after the answer, up to 256 KiB more of a `Content-Length` body that leaves that little unread (its discard before the answer's header, and its `Close` of the body once the handler returns):
   lifted, those reads let a stalled 100 KB body hold its connection open after its answer, and withheld the answer to one that stalled just past the limit (`TestADrainStopsWaitingForABodyThatStalls`).
-  A body past the limit is answered as the limit answers it, in place of the early answer and without its `Idempotency-Key` and `Retry-After` (`413 CAP_EXCEEDED` on the three upload routes, `413 REQUEST_TOO_LARGE` on every other), and the connection closes, so a client that sends past 26 MiB may still see a failed connection.
+  A body past the limit is answered as the limit answers it, in place of the early answer and without its `Idempotency-Key` and `Retry-After` (`413 CAP_EXCEEDED` on the three upload routes and on the handoff write, `413 REQUEST_TOO_LARGE` on every other;
+  `routeBody` gives each route its limit and its 413 alike), and the connection closes, so a client that sends past 26 MiB may still see a failed connection.
   The one early answer the limit does not replace is a `401`:
   a caller that resolves to nobody is refused before any limit is judged, and a page whose session lapsed reads that `401` as its cue to sign in again.
   A body a layer read to its end or past the limit itself is left as it is.
@@ -3754,8 +3781,9 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
   on go1.27 net/http decides that from the reader its own response keeps, not from the copy of the request `trackTransactions` hands the handler (the comment at the drain's mount in `server.go`).
   `routes.enforceCookieOrigin`'s `403` for a cross-origin cookie write is answered before the route, outside the drain.
 
-- The layer then reads the body, spooling at most the route's own limit (`routeBodyLimit`:
+- The layer then reads the body, spooling at most the route's own limit (`routeBody`:
   an upload's file and a megabyte of fields for the three upload routes, `keyedUploads`, 26 MiB;
+  `handoffRequestLimit`, 1,576,960 bytes, for the handoff write;
   `maxJSONRequestBytes`, 1 MiB, for every other); a body past it runs unkeyed and its route refuses it.
   A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and a spill Dispatch could not write (`keyedSpillError`:
   a full disk, a temporary directory it cannot write) is a 5xx with the key echoed, Dispatch's own failure, which the client asks again.
@@ -4014,7 +4042,8 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   `contracts.GithubPushSubject`) with the payload fields `kind: "push"`, `repo`, `ref`, `after`, `before`, `pusher`, `head_subject` (the head commit's first non-empty message line, capped at 2,048 runes with a trailing `…` so the envelope stays under NATS's max payload), `commit_count`, `compare_url`, `changed_paths` (the unique paths across every pushed commit's `added`, `removed`, and `modified` lists, in first-seen order, newline-separated, at most 100 of them and 32,768 runes of text, each path listed whole or not at all;
   omitted when no commit is listed, since the payload drops empty strings), and `changed_paths_truncated` (`"true"` when the list stopped at either cap with a unique path left, else `"false"` — present on every push, so its absence alone tells a consumer the listener predates the field), and `forced` (`"true"` or `"false"`, GitHub's own flag, present on every push the same way).
   A forced push's commits are listed from the merge base, so its `changed_paths` do not describe what it did to the head it replaced.
-  Envoy forwards what GitHub sent; what counts as a handoff-only push is the Legion daemon's rule, not the listener's.
+  Envoy forwards what GitHub sent.
+  The Legion daemon reads no `changed_paths`, `changed_paths_truncated` or `forced` since sjawhar/legion#2354, when its handoffs moved from committed files to Dispatch records and no push is told apart by its paths; the listener still sends them.
 
 - A workflow run with no pull request publishes `workflow.<file>.<action>`.
   A finished Actions job on the default branch, of a run with no pull request, publishes `job.<run_id>.completed`:

@@ -326,20 +326,18 @@ func latePullRequest(t *testing.T, pool *pgxpool.Pool) record.PullRequest {
 	return *got
 }
 
-// latePush is the push of legion/LEGION-208 from before to after by pusher, unforced, whose
-// commits changed paths, as the push webhook carries it and as the pass rebuilds it from the
-// branch's activity and GitHub's compare (the daemon's activityPushes).
-func latePush(before, after, paths, pusher string) intake.Push {
-	whole, unforced := "false", "false"
-	return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: before, After: after, ChangedPaths: &paths, Truncated: &whole, Forced: &unforced, Pusher: pusher}
+// latePush is the push of legion/LEGION-208 from before to after by pusher, as the push webhook
+// carries it and as the pass rebuilds it from the branch's activity (the daemon's lostPushes).
+func latePush(before, after, pusher string) intake.Push {
+	return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: before, After: after, Pusher: pusher}
 }
 
-// The review App pushes the tester's red tests and its handoff onto the implementer's red code, and
-// the pass rebuilds both pushes from the branch's activity and applies the head it read, so the
-// move counts no fix attempt and plans the red. The push webhooks arriving late decide nothing -
-// the push the chain began from, whose move the record made before the pass read, and a copy of
-// each push the pass rebuilt: the judgement, the pushes waiting for a link, the phase and the
-// outbox stand, and the record keeps each as its move's push or a repeat of it.
+// The review App pushes the tester's red tests twice onto the implementer's red code, and the
+// pass rebuilds both pushes from the branch's activity and applies the head it read, so the move
+// counts no fix attempt and plans the red. The push webhooks arriving late decide nothing - the
+// push the chain began from, whose move the record made before the pass read, and a copy of each
+// push the pass rebuilt: the judgement, the pushes waiting for a link, the phase and the outbox
+// stand, and the record keeps each as its move's push or a repeat of it.
 func TestALatePushAfterThePassRebuiltItsChainDecidesNothing(t *testing.T) {
 	const implementer = "legion-implementer[bot]"
 	pr := redRecord(record.PullRequestOpen, "code", lateApplied.Add(-2*time.Hour))
@@ -347,22 +345,22 @@ func TestALatePushAfterThePassRebuiltItsChainDecidesNothing(t *testing.T) {
 	pool := migratedPool(t)
 	seedLateIssue(t, pool, phase.Testing, "testing", pr)
 	apply := githubFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
-	tests := latePush("code", "red-tests", "src/widget_test.go", testReviewApp)
-	handoff := latePush("red-tests", "tester-handoff", ".legion/LEGION-208/test.json", testReviewApp)
+	tests := latePush("code", "red-tests", testReviewApp)
+	more := latePush("red-tests", "more-red-tests", testReviewApp)
 	apply("push-read:code...red-tests", tests)
-	apply("push-read:red-tests...tester-handoff", handoff)
-	apply("head-read:tester-handoff", passHead("tester-handoff", lateApplied))
-	if got := latePullRequest(t, pool); got.HeadSHA != "tester-handoff" || got.Run != nil || !got.PlannedRed || got.FixAttempts != 0 {
-		t.Fatalf("after the pass the record is at %q, run %+v, plannedRed=%t, fixAttempts=%d; want tester-handoff judged by its pushes, the red planned and no attempt counted",
+	apply("push-read:red-tests...more-red-tests", more)
+	apply("head-read:more-red-tests", passHead("more-red-tests", lateApplied))
+	if got := latePullRequest(t, pool); got.HeadSHA != "more-red-tests" || got.Run != nil || !got.PlannedRed || got.FixAttempts != 0 {
+		t.Fatalf("after the pass the record is at %q, run %+v, plannedRed=%t, fixAttempts=%d; want more-red-tests judged by its pushes, the red planned and no attempt counted",
 			got.HeadSHA, got.Run, got.PlannedRed, got.FixAttempts)
 	}
 	for _, late := range []struct {
 		id   string
 		push intake.Push
 	}{
-		{"the push the chain began from", latePush("base", "code", "src/widget.go", implementer)},
+		{"the push the chain began from", latePush("base", "code", implementer)},
 		{"the red tests' webhook", tests},
-		{"the handoff's webhook", handoff},
+		{"the second push of red tests' webhook", more},
 	} {
 		latePushDecidesNothing(t, pool, apply, late.id, late.push)
 	}
