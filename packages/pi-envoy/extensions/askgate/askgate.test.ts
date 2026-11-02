@@ -3389,10 +3389,20 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         primary: { provider: "openai-codex", id: "gpt-5.5" },
       });
       await skipped.bash("s", ASK);
+      // The 20 ms deadline is for the model call (untilAborted), which it must time out. A real
+      // dry run spawns the stub CLI and shares that deadline, and on a busy machine the spawn
+      // alone outlasts 20 ms, so every call ended `error` and never reached the model. The dry run
+      // answers at once with the JSON the stub prints.
       const halted = bind({
         env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "20" },
         cwd: work,
         complete: untilAborted,
+        dryRun: async () => ({
+          exitCode: 0,
+          stdout: JSON.stringify(QUESTION_ARGS, null, 2),
+          stderr: "",
+          timedOut: false,
+        }),
       });
       for (const id of ["a", "b", "c", "d"]) await halted.bash(id, ASK);
       expect(halted.entries.map((e) => e.outcome)).toEqual([
