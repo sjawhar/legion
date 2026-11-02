@@ -15279,7 +15279,7 @@ var dispatchToolSpecs = [
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
       reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
-      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
+      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'. human does not " + "apply to an approval request a newer version moved: it stays with you until dispatch " + "request-approval hands it back at the current version.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: commentValidation
@@ -19738,6 +19738,18 @@ function askIDInputProblem(asks, scope) {
   const hints = asks.slice(0, askHintLimit).map((ask) => `${ask.id.slice(0, 8)}\u2026 ${textHead(ask.question)}`);
   return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
 }
+async function movedApprovalLine(client, askID) {
+  const ask = (await client.getAsk(askID).catch(() => {
+    return;
+  }))?.ask;
+  const approval = ask?.approval;
+  if (ask?.kind !== "approval" || approval === undefined)
+    return;
+  if (approval.requested_version >= approval.version)
+    return;
+  const owner = ask.issue_key === null ? `--project ${ask.approval_artifact?.project ?? "<project>"} --artifact ${approval.artifact_id}` : ask.approval_artifact?.primary === true ? `--issue ${ask.issue_key}` : `--issue ${ask.issue_key} --artifact ${approval.artifact_id}`;
+  return `The reply did not hand the ask to the human: it is the approval request for ${approval.name} ` + `at version ${approval.requested_version}, and ${approval.name} is now version ${approval.version}. ` + "No reply hands a moved approval request back. Once the human has agreed to every point in " + `version ${approval.version}, run: dispatch request-approval ${owner} --summary ` + `'<what changed since version ${approval.requested_version}>'`;
+}
 async function invalidReplyToAskProblem(client, owner, resolved) {
   if (owner.kind === "issue") {
     const issue = resolved?.issue ?? await client.getIssue(owner.issue);
@@ -21144,9 +21156,11 @@ async function executeDispatchTool(input) {
       });
       if (replyToAsk !== undefined) {
         const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
+        const moved = requestedTurn !== "agent" && comment.ask_waiting_on === "agent" ? await movedApprovalLine(client, replyToAsk) : undefined;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
+            ...moved === undefined ? [] : [moved],
             ...adviceLines
           ].join(`
 `),
