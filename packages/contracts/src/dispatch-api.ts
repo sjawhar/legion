@@ -2300,6 +2300,7 @@ export interface DecisionLink {
 // ask (a person's decision links the answered ask) and "agent" otherwise; `unsure` is set by a
 // paragraph that starts `Unsure:`; `replaced` by sitting under the section headed exactly
 // `## Replaced`. `changed_version` and `changed_at` are the greatest of its blocks'.
+// `text_sha256` is the sum of `text`, which Keep carries back to say which text it agreed with.
 // `waiting_review` is an agent's decision, not replaced, whose text nobody has kept as it
 // stands.
 export interface Decision {
@@ -2307,6 +2308,7 @@ export interface Decision {
   readonly heading: string;
   readonly ref: string;
   readonly text: string;
+  readonly text_sha256: string;
   readonly kind: "agent" | "person";
   readonly unsure: boolean;
   readonly replaced: boolean;

@@ -1275,12 +1275,18 @@ export class DispatchApiClient {
     return this.json<IssueDecisions>(`/api/v1/issues/${pathSegment(key)}/decisions`);
   }
 
-  /** Record that the caller agrees with the decision that heading block opens, at the version
-   *  its text stands at now. */
-  keepDecision(id: string, blockId: string, bounds: WriteBounds): Promise<DecisionKeep> {
+  /** Record that the caller agrees with the decision that heading block opens, as the text they
+   *  read: `textSha256` is the decision's own `text_sha256`, and a decision that changed since
+   *  is `409 DECISION_CHANGED`. */
+  keepDecision(
+    id: string,
+    blockId: string,
+    textSha256: string,
+    bounds: WriteBounds
+  ): Promise<DecisionKeep> {
     return this.post<DecisionKeep>(
       `/api/v1/artifacts/${pathSegment(id)}/blocks/${pathSegment(blockId)}/keep`,
-      {},
+      { text_sha256: textSha256 },
       bounds
     );
   }
