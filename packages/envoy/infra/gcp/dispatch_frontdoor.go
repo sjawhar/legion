@@ -531,19 +531,25 @@ func newDispatchFrontDoor(ctx *pulumi.Context, s dispatchSettings, service *tail
 	// cert-publish writes that one Secret and nothing else: get, for the claim gate's read, and
 	// patch, for the gate's and the loop's merge patches; no update, which no script sends, and no
 	// create, since the component creates it. Its name is the only one the rule names.
-	if _, err := rbacv1.NewRole(ctx, tlsName, &rbacv1.RoleArgs{
+	role, err := rbacv1.NewRole(ctx, tlsName, &rbacv1.RoleArgs{
 		Metadata: metadata(tlsName),
 		Rules: rbacv1.PolicyRuleArray{rbacv1.PolicyRuleArgs{
 			ApiGroups: pulumi.StringArray{pulumi.String("")}, Resources: pulumi.StringArray{pulumi.String("secrets")},
 			ResourceNames: pulumi.StringArray{pulumi.String(tlsName)},
 			Verbs:         pulumi.StringArray{pulumi.String("get"), pulumi.String("patch")},
 		}},
-	}, child...); err != nil {
+	}, child...)
+	if err != nil {
 		return corev1.PodSpecArgs{}, nil, err
 	}
+	// The binding names the Role by an output that waits on the Role's ID. On a preview that creates
+	// the Role the name is unknown, so pulumi-kubernetes sends no server-side dry run of the binding:
+	// from an account without the bind verb (the deployment's CI account) the API server checks
+	// escalation by reading the Role, which does not exist yet, and refuses the dry run as "not found".
+	roleName := pulumi.All(role.ID(), role.Metadata.Name().Elem()).ApplyT(func(v []any) string { return v[1].(string) }).(pulumi.StringOutput)
 	if _, err := rbacv1.NewRoleBinding(ctx, tlsName, &rbacv1.RoleBindingArgs{
 		Metadata: metadata(tlsName),
-		RoleRef:  rbacv1.RoleRefArgs{ApiGroup: pulumi.String("rbac.authorization.k8s.io"), Kind: pulumi.String("Role"), Name: pulumi.String(tlsName)},
+		RoleRef:  rbacv1.RoleRefArgs{ApiGroup: pulumi.String("rbac.authorization.k8s.io"), Kind: pulumi.String("Role"), Name: roleName},
 		Subjects: rbacv1.SubjectArray{rbacv1.SubjectArgs{Kind: pulumi.String("ServiceAccount"), Name: pulumi.String(name), Namespace: pulumi.String(s.namespace)}},
 	}, child...); err != nil {
 		return corev1.PodSpecArgs{}, nil, err
