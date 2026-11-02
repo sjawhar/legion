@@ -502,10 +502,9 @@ func (s *supervision) podWentWithoutItsRound(ctx context.Context, issue string, 
 }
 
 // endRoundOverAGonePod ends the round the sweep has just read the pod of as gone. The report is
-// decided here and the round ends here, at the first sweep that reads it: a round left open over
-// a pod that is not there is relaunched into the pod that replaced it one role at a time, and
-// every turn and every answer of those processes is counted by its machine against the round of
-// a pod they never ran in.
+// decided from the parts of the round its claims hold: a claim whose process now runs in another
+// pod keeps the part the dead pod left it (Claim.leftPodRound), so no turn or answer of the
+// process that replaced it changes the report.
 //
 // What was lost is the claims of the round that had not answered by now, so a round every
 // blocking claim answered lost nothing and is told to nobody: the workers pushed everything they
@@ -787,10 +786,8 @@ const (
 // and it reads podGone, which is a statement rather than a failure: nothing more can be read of
 // that pod, and the round open over it is over with it (endRoundOverAGonePod). Read as a pod
 // that has drifted from nothing, it would carry the round on over a pod that took its workers'
-// unpushed work with it. Read as nothing at all, it would leave that round open while the
-// displaced path relaunches each role into the pod that replaced this one, and every turn and
-// answer of those processes would be counted against a round their pod never ran in. The caller
-// is what logs it, because the caller is what decides it.
+// unpushed work with it. Read as nothing at all, it would leave that round open over a pod that is
+// not there. The caller is what logs it, because the caller is what decides it.
 func (s *supervision) groupDrift(ctx context.Context, issue string, group []supervise.Claim) ([]string, podReading) {
 	var reasons []string
 	for _, c := range group {
