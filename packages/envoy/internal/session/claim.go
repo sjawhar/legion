@@ -7,36 +7,33 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// ClaimStaleAfter is how long a claim may go unrefreshed before another holder
-// may take the route. The plugin heartbeats every 90 seconds
-// (DEFAULT_HEARTBEAT_MS, packages/envoy-client/src/envoy-settings.ts), so this
-// allows three missed heartbeats before assuming the claiming process is gone.
+// ClaimStaleAfter is how long a session's claim may go unrefreshed before a reader treats the
+// process that wrote it as gone. The plugin heartbeats every 90 seconds (DEFAULT_HEARTBEAT_MS,
+// packages/envoy-client/src/envoy-settings.ts), so this allows three missed heartbeats before
+// assuming it is. Role resolution reads it (roles.Fresh, and with it the role lane's stale-holder
+// check and Dispatch's outbox); mergeForClaim itself weighs no claim's freshness any more, for
+// the reason its own comment gives.
 const ClaimStaleAfter = 5 * time.Minute
 
-// mergeForClaim decides which of two competing claims on a session route wins.
+// mergeForClaim decides what a claim on a session route writes. A transient KV error is returned
+// so the caller refuses to write: the stored entry did not answer, and a write built on a read
+// that failed would discard whatever that entry holds. Every other claim is accepted and stamped
+// with now, so the route names the process that heartbeated last.
 //
-// Precedence, in order:
-//   - a transient KV error is returned so the caller refuses to write
-//   - no incumbent, or the same process re-claiming: accept
-//   - a portless claim cannot displace a live portful route
-//   - a driving claim always wins (beats a non-driving incumbent; a newer
-//     driving claim beats an older one, which is a genuine re-home)
-//   - a non-driving claim cannot displace a live driving incumbent; it may take
-//     over only once that claim goes stale (process presumed gone)
+// It arbitrated between competing processes until dispatch://INFRA-889. A harness can keep a
+// session's state on shared disk, so several live processes can hold one session id - the one
+// driving it, plus any that merely have it loaded - and each heartbeats a claim. Two rules chose
+// between them: a claim naming no serving port could not displace a live route that named one,
+// and a non-driving claim could not displace a live driving incumbent until that incumbent's
+// claim went stale. Both turned on the two claims naming different serving ports, and a
+// registration may no longer carry a port at all (cmd/listener/api.go's subscribeHandler refuses
+// one), so every claim now names port 0, neither rule could fire again, and the entry follows the
+// latest heartbeat. The incumbent is still read, for curErr: what it holds no longer enters the
+// decision.
 func mergeForClaim(cur SessionEntry, curErr error, next SessionEntry, now int64) (SessionEntry, error) {
 	if curErr != nil && !errors.Is(curErr, nats.ErrKeyNotFound) {
 		return SessionEntry{}, curErr
 	}
-	if curErr == nil && next.Port == 0 && cur.Port > 0 && !claimStale(cur, now) {
-		return cur, nil
-	}
-	if curErr == nil && next.Port != cur.Port && !next.Driving && cur.Driving && !claimStale(cur, now) {
-		return cur, nil
-	}
 	next.UpdatedAt = now
 	return next, nil
-}
-
-func claimStale(entry SessionEntry, now int64) bool {
-	return now-entry.UpdatedAt >= int64(ClaimStaleAfter/time.Millisecond)
 }
