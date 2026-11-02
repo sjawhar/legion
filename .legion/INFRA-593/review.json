@@ -2,17 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-11-02T00:30:33Z",
-  "round": 17,
-  "headReviewed": "fccd461afa15311f91a9419defaaebd842e61924",
-  "decision": "changes_requested",
+  "previousHandoff": "e7e6af5e019ec2c67c7883ba7df6efd1d263988c",
+  "completed": "2026-11-02T07:16:22Z",
+  "round": 18,
+  "headReviewed": "ed2dd50085d06fb31a50007919282ad5762f1cfd",
+  "reviewerCommits": ["6e8d0ab909bc398b0ce55ab01cadecaf8699919d"],
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 0,
-  "roundShape": "round-shape.py v3, old 95ef78087492a3b5090986869215f31cad567838 -> new fccd461afa15311f91a9419defaaebd842e61924: 68 files both, 2 whose own diff differs: docs/compaction_test.go (the two regression tests, +188) and cmd/dispatch/README.md (the #2640 merge: the PR's sentences unchanged, on main's line breaks). No runtime file.",
-  "codeVerdict": "Approved apart from the merge. TestACompactionThatDoesNotWaitHoldsNoRoomLockWhileItWaitsForAConnection and TestAWaitingCompactionWhoseReadFailedStillWaitsForTheRoomsLock pin round 15's two lock fixes; each waits on events bounded by roomWait, runs on its own cloned database (storetest.Open), and per tester round 22 fails with its fix reverted and passes 20/20 under -race.",
-  "ci": "At fccd461a (run 41356973556), read 00:30 UTC: lint, typecheck, test, pr-title, dispatch, envoy-go and every other lane success; ci-ok still queued. GitHub reports the pull request CONFLICTING.",
-  "keyFindings": [
-    {"severity": "important", "file": "(branch)", "description": "Main merged #2519 ('a long or deeply nested list no longer freezes a reader's tab') after this head's base, changing ten of the PR's files, runtime among them (docs/ledger.go, mutation.go, persistence.go, roomcursor.go, service.go, tree.go, websocket.go). The implementer merges main; round-shape decides the next round."}
-  ]
+  "important": 0,
+  "minor": 4,
+  "roundShape": "round-shape.py v3, fccd461a -> ed2dd500: 68 -> 69 files (+ outbox/lease.go from #2395), 14 whose own diff differs, runtime among them (docs/persistence.go, service.go, tree.go, websocket.go, outbox/publisher.go, infra/gcp/dispatch.go). Full round; thermonuclear pair ran at ed2dd500.",
+  "mergeResolutions": "242a64bd (#2519): LoadDoc, failRoomLoad and onLoadDocument's defer are main's byte for byte; bootstrapLoadedState sits where main's applyLoadedState was; loadableHistory judges by header only (the room's own decode judges a several-client history under the same cap); itemCapRefusal/itemCapError take the cap their caller judged under. ea04bced (#2395): the outbox loses only compactDaily, compactDocuments, compactInterval, documentCompactionLease, Deps.Docs and Deps.Leases (and lease.go's compactDaily goroutine); main.go starts RunCompactionSweep; publisher hold, fence and wake paths untouched; ConnectionsPerProcess = 94 = dispatchConnectionsPerPod, docs and changelog say 94.",
+  "proseFixed": "6e8d0ab9: LoadDoc's doc comment carried its first paragraph twice (merge leftover), now once; onLoadDocument's comment rewrapped; itemCapError's comment named AppendUpdateTx, which no longer calls it (RebuildTx is its one caller); itemCapRefusal's said 'Both refusals' with three callers; refuseUpdateItemCap's comment restated loadableHistory's rule; cmd/dispatch/main.go:467 said the outbox's daily compaction is leased, which this PR removes.",
+  "notDefects": [
+    "bufferedFolds = store.RoomsPoolSize (fold.go:125): a deliberate, commented bound that keeps buffered folds at the concurrency main's loads had; not a defect.",
+    "pr2395's changelog fragment says 92 connections and this PR's says 94: read in order they agree."
+  ],
+  "ci": "Code head ed2dd500 (CI head 9eb3f0b3, handoffs only above it): run 41384681403, every lane success, ci-ok success (read 07:15 UTC); MERGEABLE.",
+  "keyFindings": []
 }
