@@ -86,7 +86,8 @@ func decodeAnswer(answer []byte, into any) error {
 }
 
 // printClaim is the one line a claim prints as: token, role, issue, state, generation, and the
-// plugin contract its registration declared (0 when none is recorded).
+// plugin contract its registration declared (0 when none is recorded), and for a released claim
+// the wake it waits for (writeClaimLine).
 func printClaim(w io.Writer, answer []byte) error {
 	var c api.OperatorClaim
 	if err := decodeAnswer(answer, &c); err != nil {
@@ -107,8 +108,17 @@ func printClaims(w io.Writer, answer []byte) error {
 	return nil
 }
 
+// writeClaimLine is that line. A claim the daemon suspended because it released its idle issue
+// pod reads `released`, with the wake that brings it back after its contract, where the line has
+// room: the pod and this same session come back at the next wake for its role, so a reader tells
+// it from a claim an operator or the workflow suspended, which waits for a resume, and from a
+// failed one, which waits for a retry.
 func writeClaimLine(w io.Writer, c api.OperatorClaim) {
-	fmt.Fprintf(w, "%s %s %s %s %d %d\n", c.Token, c.Role, c.Issue, c.State, c.Generation, c.PluginContract)
+	state, waits := c.State, ""
+	if c.State == string(supervise.StateSuspended) && c.SuspendedBy == string(supervise.SuspendedByReleased) {
+		state, waits = string(supervise.SuspendedByReleased), " waiting for the next wake for its role"
+	}
+	fmt.Fprintf(w, "%s %s %s %s %d %d%s\n", c.Token, c.Role, c.Issue, state, c.Generation, c.PluginContract, waits)
 }
 
 // runClaimsSpawn creates the claim on --role of --issue, in the tree --tree roots, and launches

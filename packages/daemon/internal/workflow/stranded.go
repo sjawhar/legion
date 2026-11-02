@@ -4,16 +4,32 @@ import (
 	"cmp"
 	"context"
 	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 const strandedRoleRunBatchSize = 200
+
+// strandedWakeBound is how long a wake of a released pod may go with no first turn of the woken
+// role before the release is one nothing is bringing back: R5's own bound, the ten minutes the
+// daemon warns and records a stuck resume on.
+const strandedWakeBound = 10 * time.Minute
+
+// StrandedWakes reads the wakes of released pods that have not reached the woken role's first
+// turn (store.Store.UnansweredPodWakes, which is the records' read without the daemon's
+// warned-once mark). Stranded reads it only when a released claim is among the claims it is
+// handed, so a project that releases no pod makes no query for one; a nil reader names no wake,
+// and so strands no released claim.
+type StrandedWakes interface {
+	UnansweredPodWakes(ctx context.Context, project string, bound time.Time) ([]store.PodResume, error)
+}
 
 // Stranded is every claim of s's issues that nothing will wake, by issue and then role. A claim is
 // stranded when its issue's tree runs — the tree's root holds an admission slot and does not
@@ -27,14 +43,20 @@ const strandedRoleRunBatchSize = 200
 //     suspension was recorded before migration 0038 (unknown) and no start is queued for it: the
 //     boot resumes neither, and a start queued for an unknown one resumes it. The daemon resumes
 //     one it or its own exit suspended by rule (supervise's ByRule), at boot (DaemonBooted) and at
-//     the phase's next start, and one whose idle pod it released at the next wake for that role,
-//     so the report leaves every ByRule source out.
+//     the phase's next start, so the report leaves those two sources out.
 //   - Its tree's architect: only its tree's admission starts it, whoever suspended it. A notice to a
 //     suspended one is held until it holds its role again, which nothing in the daemon brings
 //     about, and a notice to a failed one finishes undelivered (the notice executor). Its tree
 //     moves through its phases without it, and stops at the first decision that needs it. One
 //     the daemon or its own exit suspended, or one that failed, is stranded once no admission start
 //     is queued (StartFor).
+//
+// A claim whose idle issue pod the daemon released is the one suspension a wake brings back
+// rather than a start: the next wake for its role starts the pod and resumes the same session,
+// whatever its role, so the report leaves it out while a wake is still to come. It is counted
+// once a wake for it is older than strandedWakeBound with no first turn of the woken role
+// (StrandedWakes, the store's stuck resumes) and the rule above then finds nothing queued for it:
+// the wake went unanswered, and nothing else is bringing that pod back.
 //
 // A suspension that holds for the operator is stranded whatever starts are queued for it: each one
 // waits, on its row's backoff, until the operator resumes the claim (the outbox's start answers
@@ -56,7 +78,11 @@ const strandedRoleRunBatchSize = 200
 //
 // Candidates' queued starts and their claims are read through RoleRuns in bounded batches: a fleet
 // of hundreds of suspended claims makes a few snapshot queries, never one pair per claim.
-func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise.Claim) ([]supervise.Claim, error) {
+func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, wakes StrandedWakes, claims []supervise.Claim) ([]supervise.Claim, error) {
+	unanswered, err := unansweredWakes(ctx, wakes, claims)
+	if err != nil {
+		return nil, err
+	}
 	issues, err := s.Issues(ctx, tx)
 	if err != nil {
 		return nil, err
@@ -84,6 +110,14 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		if c.State != supervise.StateSuspended && c.State != supervise.StateFailed {
 			continue
 		}
+		// A released claim waits for the wake that starts its pod again, whatever its role, so it
+		// is named only once a wake for it has gone unanswered past strandedWakeBound.
+		released := c.SuspendedBy == supervise.SuspendedByReleased && c.State == supervise.StateSuspended
+		if released {
+			if _, stale := unanswered[wakeKey{issue: c.Issue, role: string(c.Role)}]; !stale {
+				continue
+			}
+		}
 		issue, ok := recorded[c.Issue]
 		if !ok {
 			continue
@@ -102,7 +136,7 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		switch {
 		case claim.IsTreeArchitect(c.Role, issue.Key, issue.Tree):
 		case c.Role != claim.RoleArchitect && RoleFor(workingPhase(issue)) == c.Role:
-			if c.State == supervise.StateSuspended && c.SuspendedBy.ByRule() {
+			if c.State == supervise.StateSuspended && c.SuspendedBy.ByRule() && !released {
 				continue
 			}
 			current = issue.Phase
@@ -135,4 +169,40 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		return cmp.Or(cmp.Compare(a.Issue, b.Issue), cmp.Compare(a.Role, b.Role))
 	})
 	return stranded, nil
+}
+
+// wakeKey is one role of one issue: how a wake of a released pod names the claim it brings back.
+type wakeKey struct{ issue, role string }
+
+// unansweredWakes is the issue and role of every wake of a released pod that is older than
+// strandedWakeBound and whose woken role has taken no turn yet, for each project claims holds a
+// released claim of. No released claim reads nothing: the report of a project that releases no
+// pod costs the query it always did.
+func unansweredWakes(ctx context.Context, wakes StrandedWakes, claims []supervise.Claim) (map[wakeKey]struct{}, error) {
+	if wakes == nil {
+		return nil, nil
+	}
+	var projects []string
+	for _, c := range claims {
+		if c.State != supervise.StateSuspended || c.SuspendedBy != supervise.SuspendedByReleased ||
+			slices.Contains(projects, c.Project) {
+			continue
+		}
+		projects = append(projects, c.Project)
+	}
+	if len(projects) == 0 {
+		return nil, nil
+	}
+	bound := time.Now().UTC().Add(-strandedWakeBound)
+	unanswered := map[wakeKey]struct{}{}
+	for _, project := range projects {
+		resumes, err := wakes.UnansweredPodWakes(ctx, project, bound)
+		if err != nil {
+			return nil, err
+		}
+		for _, resume := range resumes {
+			unanswered[wakeKey{issue: resume.Issue, role: resume.Role}] = struct{}{}
+		}
+	}
+	return unanswered, nil
 }

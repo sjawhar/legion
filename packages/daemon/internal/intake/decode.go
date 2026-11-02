@@ -47,6 +47,13 @@ type envoyEnvelope struct {
 // whole.
 const serverStartedSubject = "notifications.dispatch.server.started"
 
+// podWakeSubject is the one subject Envoy's listener reports a wake of a released issue pod on,
+// and says it is listening on (packages/envoy/internal/bus's WakeTopic). The daemon's fourth
+// durable filters on it alone, and decodeMessage matches it whole. It names no issue: a report
+// carries a role token or a session id, which each daemon matches against its own released
+// claims and against nothing else.
+const podWakeSubject = "notifications.legion.wake"
+
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
 // repositories are its configured repositories: a GitHub event whose payload names another
@@ -71,6 +78,11 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, de
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
 		}
 		fact, err = decodeServerStarted(envelope.Payload)
+	case subject == podWakeSubject:
+		if envelope.Source != "envoy" {
+			return decodedMessage{}, fmt.Errorf("the wake subject has envelope source %q", envelope.Source)
+		}
+		fact, err = decodePodWake(envelope.Payload)
 	case strings.HasPrefix(subject, "notifications.dispatch.issue."):
 		if envelope.Source != "dispatch" {
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
@@ -153,6 +165,48 @@ func decodeServerStarted(payload string) (Fact, error) {
 		return nil, nil
 	}
 	return ServerStarted{Commit: started.Commit}, nil
+}
+
+// decodePodWake decodes one wake report of Envoy's listener (PodWake). A report the daemon has no
+// kind for, and a role or agent report that names neither a role nor a session, is no fact rather
+// than poison: a listener may be ahead of the daemon that reads it, and a report nothing can be
+// done about must not stop the subject's consumer. A report with no timestamp of the listener's
+// own is poison, since the whole point of the listener_ready report is its age.
+func decodePodWake(payload string) (Fact, error) {
+	var report struct {
+		Kind     string `json:"kind"`
+		Role     string `json:"role"`
+		Session  string `json:"session"`
+		ReportID string `json:"reportId"`
+		Reason   string `json:"reason"`
+		At       int64  `json:"at"`
+	}
+	if err := json.Unmarshal([]byte(payload), &report); err != nil {
+		return nil, fmt.Errorf("decode the listener's wake report: %w", err)
+	}
+	if report.At == 0 {
+		return nil, fmt.Errorf("the listener's wake report carries no timestamp of its own")
+	}
+	wake := PodWake{Kind: report.Kind, Role: strings.TrimSpace(report.Role), Session: strings.TrimSpace(report.Session),
+		ReportID: report.ReportID, Reason: report.Reason, At: time.UnixMilli(report.At).UTC()}
+	switch wake.Kind {
+	case PodWakeListenerReady:
+		return wake, nil
+	case PodWakeRoleMessage:
+		if wake.Role == "" {
+			return nil, nil
+		}
+	case PodWakeAgentMessage:
+		if wake.Session == "" {
+			return nil, nil
+		}
+	default:
+		return nil, nil
+	}
+	if wake.ReportID == "" {
+		return nil, nil
+	}
+	return wake, nil
 }
 
 type dispatchEvent struct {

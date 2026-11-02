@@ -84,6 +84,10 @@ type listenerDeliveryHandlerConfig struct {
 	// drawing a private set, since a set per handler is a second budget beside the first on the
 	// very rebind this retry exists for. A test that builds a config sets its own.
 	deferredUnplaceable *unplaceableDeferrals
+	// wakes reports an agent delivery this listener can place nowhere to the Legion daemons
+	// (wake_report.go), so a message for a session whose issue pod was released brings the pod
+	// back. It is nil on a listener built without a bus client, and every report tolerates that.
+	wakes *wakeReporter
 }
 
 // wireDeliveryWorkers starts the workers every delivery path hands its work to and returns cfg

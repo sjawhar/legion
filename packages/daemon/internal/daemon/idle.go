@@ -50,7 +50,20 @@ func (w *workflowRuntime) tickIdle(ctx context.Context) {
 
 // releaseIdlePods decides each pod of the project in turn. One issue's failure is logged and the
 // rest are decided: a release is a saving, never a correctness step, and nothing waits on it.
+//
+// Nothing is decided at all while this daemon has not heard the Envoy listener say it is
+// listening inside listenerReadyWindow (R7). Two of the five wakes reach the daemon only as the
+// listener's reports — a message published to a role topic of the pod, and a message sent to a
+// released session — so a listener that stopped reporting and a listener with nothing to report
+// are the same silence, and a pod released into the first is one those two wakes could not bring
+// back. The gate sits here rather than in the rule: IdleRelease is the pure predicate over one
+// pod's view, and this is a fact about the deployment, true or false for every pod at once.
 func (w *workflowRuntime) releaseIdlePods(ctx context.Context) {
+	if !w.listenerReported(time.Now().UTC()) {
+		w.log.Info("idle release: no pod is released while the Envoy listener has not reported itself",
+			"within", listenerReadyWindow.String())
+		return
+	}
 	issues, err := w.idleStore.IdlePods(ctx, w.projectID)
 	if err != nil {
 		w.log.Warn("idle release: could not list the project's pods", "error", err)
@@ -67,7 +80,9 @@ func (w *workflowRuntime) releaseIdlePods(ctx context.Context) {
 // releaseIdlePod decides one issue's pod and, when the rule releases it, writes the release's
 // rows and its mark in one transaction with the view they rest on (store.ReleaseIdleIssue). The
 // pod's image is read before that transaction, from the runtime's own store of pods, because it
-// is the one input the daemon's Postgres does not hold.
+// is the one input the daemon's Postgres does not hold. A pod the rule keeps is recorded with
+// the hold that kept it (store.PodHold), which is what tells a deployment whether release is
+// working.
 func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 	now := time.Now().UTC()
 	onConfiguredImage := w.idleImages.IssuePodRunsConfiguredImage(issue)
@@ -85,6 +100,10 @@ func (w *workflowRuntime) releaseIdlePod(ctx context.Context, issue string) {
 	}
 	if !marked {
 		w.log.Debug("idle release: the pod is kept", "issue", issue, "hold", decision.Hold.String())
+		if err := w.idleStore.RecordPodHold(ctx, store.PodHold{Project: w.projectID, Issue: issue,
+			Reason: decision.Hold.String(), At: now}); err != nil {
+			w.log.Warn("idle release: could not record a pod's hold", "issue", issue, "error", err)
+		}
 		return
 	}
 	w.log.Info("idle release: releasing an issue's pod, which has had no turn in progress and no turn due for the idle period",

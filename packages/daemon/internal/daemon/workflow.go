@@ -99,6 +99,16 @@ type workflowRuntime struct {
 	idleStore  *store.Store
 	idleImages issuePodImages
 	idleTick   time.Duration
+	// idleBackstop is how long after a release a pod comes back if nothing else wakes it
+	// (runtime.kubernetes.idle_release.backstop_minutes); the outbox arms a stored row with it
+	// (outbox.armBackstop) and tickWake fires it.
+	idleBackstop time.Duration
+	// listenerHeard is when the Envoy listener last said it is listening, in epoch milliseconds
+	// on the listener's own clock, and zero while this daemon has heard none. The release
+	// decision refuses to release any pod unless it was inside listenerReadyWindow: a listener
+	// that stopped reporting and one with nothing to report are the same silence, and a pod
+	// released into the first could not be woken by a role or agent message (wake.go).
+	listenerHeard atomic.Int64
 	// holdWarnAfter and holdWarnEvery bound the watchdog log a hold that never releases gets: zero
 	// means the production defaults. A test shortens both to bound how long the warning takes to
 	// observe.
@@ -322,7 +332,11 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// when they look. Neither could write it itself: the engine returns early on an event whose
 	// sequence or status it has already seen (Engine.dispatchIssue), which is exactly the
 	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
-	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
+	// The pod wake handler runs last and writes nothing of the record: it reads Envoy's listener
+	// reports against the supervisor's own released claims (wake.go), which no earlier handler
+	// touches.
+	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission,
+		podWakeHandler{runtime: w}}, reviewAppLogin
 	w.pool = st.Pool()
 	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
 		return nil, err
@@ -612,9 +626,10 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 	w.attachIdleRelease(supervision)
 }
 
-// attachIdleRelease wires the idle tick, and leaves it off unless the deployment releases pods:
-// `runtime: kubernetes` with a non-zero idle_minutes, over a runtime that can say whether an
-// issue's pod runs the image the configuration names.
+// attachIdleRelease wires the idle tick and the wake tick, and leaves both off unless the
+// deployment releases pods: `runtime: kubernetes` with a non-zero idle_minutes, over a runtime
+// that can say whether an issue's pod runs the image the configuration names. The backstop its
+// releases arm is the outbox's, since the outbox is what finishes a release.
 func (w *workflowRuntime) attachIdleRelease(supervision *supervision) {
 	k := supervision.cfg.Runtime.Kubernetes
 	if supervision.cfg.Runtime.Name != "kubernetes" || k == nil || !k.IdleRelease.Releases() {
@@ -626,6 +641,8 @@ func (w *workflowRuntime) attachIdleRelease(supervision *supervision) {
 		return
 	}
 	w.idlePeriod, w.idleStore, w.idleImages = k.IdleRelease.Idle(), supervision.supervisor.store, images
+	w.idleBackstop = k.IdleRelease.Backstop()
+	w.outbox.backstop = w.idleBackstop
 }
 
 // replayTerminal applies the ready or failure fact of every stored claim in either state that no
@@ -745,6 +762,7 @@ func (w *workflowRuntime) dispatchBuild(ctx context.Context) string {
 }
 
 func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState) {
+	w.observeResume(c, state)
 	if err := w.applyTerminal(context.Background(), c, state); err != nil {
 		w.log.Error("apply supervision terminal fact", "claim", c.Token, "state", state, "error", err)
 		select {
@@ -752,6 +770,32 @@ func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState
 		default:
 		}
 	}
+}
+
+// observeResume stamps the pod-ready time of an open resume when its woken role's agent reports
+// ready in the replacement pod (R5). It is the daemon's own earliest evidence that the pod the
+// wake asked for came back: nothing of the runtime's reports a pod's readiness to the daemon,
+// and a claim that reaches ready has a pod, a launcher, a restored workspace and an agent in it.
+// Only the first observation of a resume is kept (store.MarkPodResumeReady), which is the one R5
+// measures, and a daemon that releases no pod records nothing.
+func (w *workflowRuntime) observeResume(c supervise.Claim, state supervise.ClaimState) {
+	if state != supervise.StateReady || w.idleStore == nil || c.Issue == "" || c.Role == claim.RoleController {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
+		defer cancel()
+		id, open, err := w.idleStore.OpenPodResume(ctx, w.projectID, c.Issue, string(c.Role))
+		if err != nil || !open {
+			if err != nil {
+				w.log.Warn("wake: could not read the open resume of a claim that is ready", "claim", c.Token, "error", err)
+			}
+			return
+		}
+		if err := w.idleStore.MarkPodResumeReady(ctx, id, time.Now().UTC()); err != nil {
+			w.log.Warn("wake: could not stamp a resume's pod-ready time", "claim", c.Token, "error", err)
+		}
+	}()
 }
 
 // applyTerminal applies a claim's ready or failure as a workflow fact. The daemon's own controller
@@ -820,6 +864,10 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	})
 	group.Go(func() error {
 		w.tickIdle(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.tickWake(running)
 		return nil
 	})
 	group.Go(func() error {
@@ -1119,10 +1167,15 @@ func (w *workflowRuntime) claimReady(c supervise.Claim) {
 // next tick. The machine calls it inside its own decision, so the fact is applied on a goroutine
 // of its own, bounded like a terminal fact; a failure is logged and not the daemon's end, since
 // the tick decides the same thing again.
+//
+// It is also the first turn an open resume of this role is measured to (R5): the confirmation is
+// the delivery's own, so a woken role that has taken the work its pod came back for is a resume
+// that ended, whatever else the session goes on to do.
 func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
 	if c.Issue == "" || c.Role == claim.RoleController {
 		return
 	}
+	w.observeFirstTurn(c)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
 		defer cancel()
@@ -1133,6 +1186,29 @@ func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
 		}
 		if _, err := intake.ApplyFact(ctx, w.pool, "supervise", id, fact, w.handlers...); err != nil {
 			w.log.Warn("apply the confirmation of a task", "claim", c.Token, "error", err)
+		}
+	}()
+}
+
+// observeFirstTurn stamps the first-turn time of this role's open resume, which ends the resume
+// R5 measures (store.MarkPodResumeFirstTurn). Only the first observation is kept, so a role that
+// confirms task after task has one resume measured and the rest read no open row at all.
+func (w *workflowRuntime) observeFirstTurn(c supervise.Claim) {
+	if w.idleStore == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
+		defer cancel()
+		id, open, err := w.idleStore.OpenPodResume(ctx, w.projectID, c.Issue, string(c.Role))
+		if err != nil || !open {
+			if err != nil {
+				w.log.Warn("wake: could not read the open resume of a claim that took its task", "claim", c.Token, "error", err)
+			}
+			return
+		}
+		if err := w.idleStore.MarkPodResumeFirstTurn(ctx, id, time.Now().UTC()); err != nil {
+			w.log.Warn("wake: could not stamp a resume's first turn", "claim", c.Token, "error", err)
 		}
 	}()
 }

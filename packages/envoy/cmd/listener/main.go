@@ -69,6 +69,9 @@ type listenerDeps struct {
 	// there, so envoy-client's retry of a send does not forward again to one the first attempt
 	// confirmed, and no one is counted as confirming a message without having sent its receipt.
 	confirmed *dedupe.Cache
+	// wakes reports a role message with no live holder to the Legion daemons (wake_report.go),
+	// nil on a listener built without a bus client.
+	wakes *wakeReporter
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -957,6 +960,7 @@ func main() {
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
 	// Phase 6: Open the role lane and /v1 onto the stores, then bind the durable consumer.
+	wakes := newWakeReporter(client, cfg.MachineID, logger)
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
 		forwardRole:       startRoleForward(client),
@@ -979,6 +983,7 @@ func main() {
 		// handler it replaces was holding rather than opening a second one beside it
 		// (unplaceableDeferrals, unplaceable_delivery.go).
 		deferredUnplaceable: newUnplaceableDeferrals(),
+		wakes:               wakes,
 	}
 	// The durable path's pushes to serving-port sessions run off its handler, on one worker per
 	// session (servePortWorkers), so a port slow to accept holds up no other session's delivery;
@@ -1078,6 +1083,7 @@ func main() {
 		streamName: bus.Stream,
 		delivery:   &deliveryConfig,
 		confirmed:  dedupe.New(10 * time.Minute),
+		wakes:      wakes,
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 
@@ -1148,6 +1154,18 @@ func main() {
 		ciDebounce := envDuration(logger, "ENVOY_CI_DEBOUNCE", 5*time.Second)
 		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 	}
+
+	// Phase 6b3: Say that this listener is listening, now and every bus.ListenerReadyInterval.
+	// A Legion daemon releases no issue pod unless it has heard one of these inside its own
+	// window: without them a listener that stopped reporting and a listener with nothing to
+	// report are the same silence, and the daemon would go on releasing pods nothing could wake.
+	// It runs under the KV loops' context, so the shutdown ends it and waits for it.
+	readyLoopDone := make(chan struct{})
+	go func() {
+		defer close(readyLoopDone)
+		wakes.run(kvLoopsCtx)
+	}()
+	kvLoopsDone = append(kvLoopsDone, readyLoopDone)
 
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;

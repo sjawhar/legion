@@ -270,11 +270,15 @@ const legionPendingStatusWrite = z.strictObject({
 /** `api.StrandedClaim` — one claim nothing will wake (`workflow.Stranded`): a worker of its issue's
  * phase, or its tree's architect, in a tree that runs, named by its issue, its role and its state;
  * the issue's entry under `issues` carries the rest. Its state and role say the move that brings it
- * back (`api.StrandedClaim.Move`). */
+ * back (`api.StrandedClaim.Move`). `state` is the claim's own but for one value: a claim the
+ * daemon suspended because it released its idle issue pod reads `released`
+ * (`supervise.SuspendedByReleased`), since the next wake for its role brings the pod and the
+ * session back and no operator move is called for. Such a claim is listed only once a wake for it
+ * is more than ten minutes old with no first turn of the woken role. */
 const legionStrandedClaim = z.strictObject({
   issue: issueKey,
   role: z.enum(LEGION_ROLES),
-  state: z.enum(["suspended", "failed"]),
+  state: z.enum(["suspended", "failed", "released"]),
 });
 
 /** `api.HeldOutboxRow` — one due lifecycle outbox row its issue's lifecycle lane cannot run yet,
@@ -560,6 +564,68 @@ export const LegionActivityRequest = z.strictObject({
 });
 
 export type LegionActivityRequestBody = z.output<typeof LegionActivityRequest>;
+
+/** `api.ReleaseRecordsRequest`, the body of `POST /legion/v1/claims/release-records`: the claim,
+ * the secret its registration was issued, and the moment the window the caller reads begins. It
+ * is authenticated by that secret, as `claims/ready` is, because that is the credential an issue
+ * pod holds — a pod has its claim token and its secret, and no operator token. It names no
+ * session and no generation: the route reads records and decides nothing about the claim. */
+export const LegionReleaseRecordsRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  secret: nonEmptyString,
+  since: timestamp,
+});
+
+export type LegionReleaseRecordsRequestBody = z.output<typeof LegionReleaseRecordsRequest>;
+
+/** `api.PodReleaseView` — one release of an issue pod: the issue and the generation it was
+ * released at, the roles whose claims the release suspended, when it completed, and the size of
+ * the workspace bundle it saved, zero when the workspace held nothing unpushed. */
+const legionPodRelease = z.strictObject({
+  id: z.number().int().positive(),
+  issue: issueKey,
+  generation: z.number().int().nonnegative(),
+  roles: z.array(nonEmptyString),
+  at: timestamp,
+  bundleBytes: z.number().int().nonnegative(),
+});
+
+/** `api.PodResumeView` — one wake of a released pod: the release it ended (absent when no release
+ * row is recorded for it), the role it was for, what kind of wake it was, when it reached the
+ * daemon, and the two times R5 measures, each absent until it is observed. `stuck` is a resume
+ * with no first turn ten minutes after its wake, and absent otherwise. */
+const legionPodResume = z.strictObject({
+  id: z.number().int().positive(),
+  release: z.number().int().positive().optional(),
+  issue: issueKey,
+  role: z.string(),
+  kind: nonEmptyString,
+  at: timestamp,
+  podReadyAt: timestamp.optional(),
+  firstTurnAt: timestamp.optional(),
+  stuck: z.literal(true).optional(),
+});
+
+/** `api.PodHoldView` — one pass of the idle rule that kept a pod past the idle period, with the
+ * rule's own name for what held it (`workflow.IdleHold`). */
+const legionPodHold = z.strictObject({
+  id: z.number().int().positive(),
+  issue: issueKey,
+  reason: nonEmptyString,
+  at: timestamp,
+});
+
+/** `api.ReleaseRecordsResponse`, the answer of `POST /legion/v1/claims/release-records`: every
+ * release, wake and hold the daemon recorded at or after the request's `since`, each list oldest
+ * first and never null. They are the project's records, not the reading pod's own: a measurement
+ * of the release names the releases the reader did not see. */
+export const LegionReleaseRecordsResponse = z.strictObject({
+  releases: z.array(legionPodRelease),
+  resumes: z.array(legionPodResume),
+  holds: z.array(legionPodHold),
+});
+
+export type LegionReleaseRecords = z.output<typeof LegionReleaseRecordsResponse>;
 
 /** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`

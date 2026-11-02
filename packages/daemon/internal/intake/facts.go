@@ -957,6 +957,39 @@ type ServerStarted struct {
 
 func (ServerStarted) isFact() {}
 
+// PodWake is one report the Envoy listener published on its wake subject
+// (bus.WakeTopic, "notifications.legion.wake"). Every daemon reads the subject, so every daemon
+// sees every listener's reports and acts only on a role token or a session id among its own
+// released claims; a daemon that owns neither does nothing with the report and acknowledges it.
+//
+// Kind is "role_message" (a message published to a role topic with no live holder, a keep: false
+// one included), "agent_message" (a message sent to the agent subject of a session the listener
+// could place nowhere) or "listener_ready" (the listener saying it is listening, at its start and
+// every five minutes). A report of any other kind is decoded to no fact at all, so a listener
+// ahead of a daemon poisons nothing.
+//
+// Role, Session and ReportID are the listener's; At is the listener's own clock, decoded from the
+// report's epoch milliseconds. ReportID is one message's id however many delivery attempts the
+// listener reports it on, which is what makes a wake one wake (store.TakePodWake).
+type PodWake struct {
+	Kind     string
+	Role     string
+	Session  string
+	ReportID string
+	Reason   string
+	At       time.Time
+}
+
+func (PodWake) isFact() {}
+
+// The kinds a PodWake carries, which are the listener's own spelling of them
+// (packages/envoy/internal/bus's WakeKind constants).
+const (
+	PodWakeRoleMessage   = "role_message"
+	PodWakeAgentMessage  = "agent_message"
+	PodWakeListenerReady = "listener_ready"
+)
+
 // CheckWake is a compare that found a reason to wake issue Issue's production check (the
 // check_compare outbox row's GitHub read): a build that carries the check's merge, or a deploy
 // workflow's job whose named step succeeded after the pull request merged. Look is the look the

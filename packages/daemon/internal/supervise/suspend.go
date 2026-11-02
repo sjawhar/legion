@@ -112,20 +112,34 @@ func holdSuspendUntilReady(m *Machine, _ context.Context, ev Event) error {
 	return ErrSuspendHeld
 }
 
-// suspendedAgain is a suspension of a claim already suspended. An operator's suspend of a claim the
-// daemon suspended takes the suspension over (Claim.SuspendedBy), so the rule resumes it no more
-// until the operator does; any other changes nothing, and an operator's suspension stays the
-// operator's.
+// suspendedAgain is a suspension of a claim already suspended, and decides which of the two
+// suspensions the claim keeps (Claim.SuspendedBy).
+//
+// An operator's suspend of a claim the daemon suspended takes the suspension over, so the rule
+// resumes it no more until the operator does, and an operator's suspension stays the operator's
+// whoever suspends after it.
+//
+// A claim suspended as released is taken over by any other suspension. A released claim is one
+// whose issue pod the daemon deleted while it was idle, and the next wake for its role raises
+// that pod again; once a linger, a park, a close, a hand-over or the operator has suspended it
+// for a reason of their own, no wake may raise anything, so the claim stops being a released
+// one. The release's own suspension of a claim already released changes nothing.
+//
+// Every other pair changes nothing.
 func suspendedAgain(m *Machine, ctx context.Context, ev Event) error {
 	request, err := suspendRequest(m, ev)
 	if err != nil {
 		return err
 	}
-	if request.By != SuspendedByOperator || m.claim.SuspendedBy == SuspendedByOperator {
+	held := m.claim.SuspendedBy
+	takeOver := (request.By == SuspendedByOperator && held != SuspendedByOperator) ||
+		(held == SuspendedByReleased && request.By != SuspendedByReleased)
+	if !takeOver {
 		return nil
 	}
-	m.log.Info("supervise: the operator's suspension takes the suspended claim over", "reason", request.Reason, "suspendedBy", m.claim.SuspendedBy)
-	m.claim.SuspendedBy = SuspendedByOperator
+	m.log.Info("supervise: a later suspension takes the suspended claim over",
+		"reason", request.Reason, "suspendedBy", held, "now", request.By)
+	m.claim.SuspendedBy = request.By
 	return m.persist(ctx)
 }
 

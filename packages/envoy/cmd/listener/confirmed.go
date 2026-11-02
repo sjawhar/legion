@@ -233,12 +233,20 @@ func (s *roleSend) delivered(outcome sendOutcome) {
 // noHolder answers writeRoleHolderError's 404 (unclaimed or holder_lapsed) for a role with no live
 // claim, which the Legion daemon reads as notify.ErrNoHolder, recorded role_unclaimed or
 // role_lapsed. The role lane counts an unclaimed role skipped and a lapsed holder failed.
+//
+// It also reports the role to the Legion daemons as a wake (wake_report.go). A role of a Legion
+// issue has no holder for two reasons that look alike here — nobody ever claimed it, and the pod
+// its holder ran in was released — and the daemon alone can tell them apart: it acts only on a
+// role token among its own released claims, and ignores every other report. The answer stays the
+// 404 it has always been, so the sender's next try is what reaches the woken role; a publish that
+// keeps nothing is reported like any other, since a keep is not what wakes a pod.
 func (s *roleSend) noHolder(result roleHolderResult) {
 	s.record.refuseRoleHolder(s.w, s.role, result)
 	outcome := sendHolderLapsed
 	if result.state == roleHolderUnclaimed {
 		outcome = sendUnclaimed
 	}
+	s.d.wakes.roleUnheld(s.role, s.item, string(result.state))
 	s.settle(outcome)
 }
 

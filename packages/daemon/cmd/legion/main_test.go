@@ -1582,6 +1582,17 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 			want: "claims nothing will wake: 4 — resume LEGION-208 architect; suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) LEGION-208 implementer; failed, retry LEGION-210 architect; failed, needs a workflow start LEGION-211 reviewer\n",
 		},
 		{
+			// INFRA-945: the daemon released this pod and a wake brings it back, which is neither
+			// a suspension waiting for an operator nor a failure waiting for a retry. It is named
+			// at all only because a wake for it went unanswered.
+			name: "a released claim apart from a suspended and a failed one",
+			stranded: `[{"issue":"LEGION-208","role":"implementer","state":"suspended"},{"issue":"LEGION-209","role":"tester","state":"released"},` +
+				`{"issue":"LEGION-210","role":"reviewer","state":"failed"}]`,
+			want: "claims nothing will wake: 3 — suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) LEGION-208 implementer; " +
+				"failed, needs a workflow start LEGION-210 reviewer; " +
+				"released, whose wake went unanswered for more than 10 minutes: the next wake for the role starts its pod again LEGION-209 tester\n",
+		},
+		{
 			name:     "only failed",
 			stranded: `[{"issue":"LEGION-210","role":"reviewer","state":"failed"}]`,
 			want:     "claims nothing will wake: 1 — failed, needs a workflow start LEGION-210 reviewer\n",

@@ -123,6 +123,12 @@ type KubernetesSettings struct {
 	// role of such a pod is told as LEGION_TEST_PG_DSN, so every pod may read it.
 	TestPostgres    bool                    `json:"test_postgres"`
 	RepositoryCache RepositoryCacheSettings `json:"repository_cache"`
+	// IdleRelease is the settled `runtime.kubernetes.idle_release`: the two periods a pod needs
+	// to read the release records it may fetch — how long it must be quiet before the daemon
+	// releases it, and how long after a release the backstop wakes a phase worker whose phase is
+	// open. `idle_minutes: 0` is how a deployment turns release off, so the zero is also the
+	// answer to "does this deployment release pods".
+	IdleRelease IdleReleaseSettings `json:"idle_release"`
 }
 
 // SchedulingSettings is `runtime.kubernetes.scheduling`; the selector and the tolerations are `{}`
@@ -166,6 +172,13 @@ type RepositoryCacheSettings struct {
 	RefreshMinutes int                 `json:"refresh_minutes"`
 	RetainHours    int                 `json:"retain_hours"`
 	Resources      ReservationSettings `json:"resources"`
+}
+
+// IdleReleaseSettings is the settled `runtime.kubernetes.idle_release`, in minutes as the file
+// sets them.
+type IdleReleaseSettings struct {
+	IdleMinutes     int `json:"idle_minutes"`
+	BackstopMinutes int `json:"backstop_minutes"`
 }
 
 // AgentSecretsSettings is `runtime.kubernetes.agent_secrets` without `token_file`, the path of the
@@ -347,6 +360,10 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,
 			RetainHours:    block.RepositoryCache.RetainHours,
 			Resources:      reservationSettingsOf(block.RepositoryCache.Resources),
+		},
+		IdleRelease: IdleReleaseSettings{
+			IdleMinutes:     block.IdleRelease.IdleMinutes,
+			BackstopMinutes: block.IdleRelease.BackstopMinutes,
 		},
 	}
 	maps.Copy(settings.Scheduling.NodeSelector, block.Scheduling.NodeSelector)

@@ -199,6 +199,14 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	if cfg.unplaceableRetryWindow > 0 {
 		windowDeferrals = uint64(cfg.unplaceableRetryWindow / unplaceableRetryDelay)
 	}
+	// A session the Legion daemon released with its issue pod is placeable nowhere for exactly
+	// this reason: its record is gone with the pod, or names a port nothing serves. So every
+	// attempt reports the session to the Legion daemons as a wake (wake_report.go), carrying the
+	// message's own event id: the daemon acts on a session id among its own released claims and
+	// ignores every other report, and takes one wake per event id however many attempts the
+	// retry window pays for, so reporting each attempt loses no wake to a report the bus refused
+	// and makes no second one.
+	cfg.wakes.sessionUnplaceable(sessionID, item, reason)
 	// What does not hold the retry open is session.ReasonNone, the defensive arm above: an
 	// undelivered result that carries it is another listener's session to place, however often
 	// this one sees the message. Every outcome a deployed listener reaches here with carries one

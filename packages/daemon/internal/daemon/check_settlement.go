@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -63,6 +64,60 @@ func (w *workflowRuntime) readSettlement(ctx, read context.Context, github githu
 		w.log.Warn("apply a head's settlement read from GitHub", "repo", pr.Repo, "pullRequest", pr.Number, "head", head, "error", err)
 	}
 	return false
+}
+
+// wakeOnSettlement brings back the released pod of pr's issue when a CI settlement stands for the
+// head of its pull request (classify.Settled over the record, which the listener's settlement and
+// readSettlement's own fallback both write). It is the required-checks pass's one wake: the pass
+// reads every open pull request of the project, and a settled head is the one thing a released
+// pod's phase worker is waiting on that reaches the daemon through no delivery of its own.
+//
+// Only a phase worker whose phase is open is woken: the settlement is the verdict on the work
+// that worker owes, and a role with no phase left to work has nothing to do with it. One head can
+// settle more than once as the rest of its checks finish, and each settlement is read again by
+// every pass; the head is the wake's key, so the pod comes back for the first of them alone
+// (store.TakePodWake).
+func (w *workflowRuntime) wakeOnSettlement(ctx context.Context, pr record.PullRequest) {
+	runner := w.outboxWake.Load()
+	if runner == nil || pr.Issue == "" || !classify.Settled(pr) {
+		return
+	}
+	released := runner.releasedClaims(pr.Issue, "")
+	if len(released) == 0 {
+		return
+	}
+	issue, err := runner.issue(ctx, pr.Issue)
+	if err != nil {
+		w.log.Warn("wake: could not read the issue of a settled pull request", "issue", pr.Issue, "error", err)
+		return
+	}
+	head := classify.WorkflowHead(pr)
+	detail := fmt.Sprintf("the checks of %s head %s settled %s", pr.Repo, head, settlementResult(pr))
+	for _, machine := range released {
+		held := machine.Claim()
+		if !phaseOpenFor(issue, held) {
+			continue
+		}
+		if _, err := runner.wakePod(ctx, podWake{Issue: pr.Issue, Role: held.Role, Kind: wakeSettlement,
+			Detail: detail, Key: head}); err != nil {
+			w.log.Warn("wake: a CI settlement did not bring its released pod back",
+				"issue", pr.Issue, "role", held.Role, "head", head, "error", err)
+		}
+	}
+}
+
+// settlementResult is the settlement in a few words, for the message the woken role is given: the
+// checks it names failed or cancelled, or that every check passed.
+func settlementResult(pr record.PullRequest) string {
+	switch {
+	case len(pr.Failing) > 0 && len(pr.Cancelled) > 0:
+		return "with " + strings.Join(pr.Failing, ", ") + " failed and " + strings.Join(pr.Cancelled, ", ") + " cancelled"
+	case len(pr.Failing) > 0:
+		return "with " + strings.Join(pr.Failing, ", ") + " failed"
+	case len(pr.Cancelled) > 0:
+		return "with " + strings.Join(pr.Cancelled, ", ") + " cancelled"
+	}
+	return "with every check passed"
 }
 
 // reviewerVerdicts are the check names a Legion role's verdict is published under. Envoy's listener

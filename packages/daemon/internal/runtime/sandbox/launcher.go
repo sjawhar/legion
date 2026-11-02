@@ -101,6 +101,10 @@ func (s *launcherSession) ServeLauncher(conn net.Conn, reader *bufio.Reader, wri
 			s.deliver(value.ID, value)
 		case shimwire.LauncherStopResult:
 			s.deliver(value.ID, value)
+		case shimwire.LauncherBundleResult:
+			// Every slice of one sequence carries the sequence's id, and the slices are sent one
+			// at a time, so one waiter is registered under that id at a time.
+			s.deliver(value.ID, value)
 		default:
 			return
 		}
@@ -297,6 +301,24 @@ func (d *launchers) stop(ctx context.Context, token claim.Token, podUID string, 
 		session.mu.Unlock()
 	}
 	return nil
+}
+
+// bundle sends one slice of a saved workspace bundle to token's launcher in podUID and answers
+// the launcher's result. Held on the result of the last slice is the launcher holding the whole,
+// digest-checked body: the confirmation the daemon deletes its saved copy on.
+func (d *launchers) bundle(ctx context.Context, token claim.Token, podUID string, command shimwire.LauncherBundle) (shimwire.LauncherBundleResult, error) {
+	answer, _, err := d.request(ctx, token, podUID, command, command.ID)
+	if err != nil {
+		return shimwire.LauncherBundleResult{}, err
+	}
+	result, ok := answer.(shimwire.LauncherBundleResult)
+	if !ok {
+		return shimwire.LauncherBundleResult{}, fmt.Errorf("launcher %s bundle: got %T", token, answer)
+	}
+	if !result.OK {
+		return result, fmt.Errorf("launcher %s bundle slice %d: %s", token, command.Index, result.Error)
+	}
+	return result, nil
 }
 
 // bindLauncherSecrets binds each launcher role's Secret of the pod l launches to the new pod's uid,

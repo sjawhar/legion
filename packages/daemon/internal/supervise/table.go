@@ -607,7 +607,7 @@ func fillTable(t *builder) {
 		nil, StateWorking)
 	t.row(onSuspend, "a suspension of a rule-resuming launch is held until the agent is ready", holdSuspendUntilReady,
 		nil, StateLaunching, StateShimConnected)
-	t.row(onSuspend, "already suspended: an operator's suspend takes the suspension over", suspendedAgain, nil, StateSuspended)
+	t.row(onSuspend, "already suspended: an operator's suspend, and any suspend of a released claim, takes the suspension over", suspendedAgain, nil, StateSuspended)
 	t.ignore(onSuspend, notRegistered,
 		StateQueued, StateLaunchUncertain)
 	t.ignore(onSuspend, failedClaim, StateFailed)

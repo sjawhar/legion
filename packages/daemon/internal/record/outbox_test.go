@@ -46,6 +46,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		CheckBound{},
 		PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest"},
 		PhaseEnded{Role: claim.RoleImplementer, From: phase.Retro, To: phase.Implementing, Reason: "CI is red at head: pytest", TaskFollows: true},
+		PodWoken{Role: claim.RoleTester, Kind: "ci_settlement", Detail: "the checks of head c0de settled: failed"},
 	}
 	for _, payload := range payloads {
 		t.Run(string(payload.OutboxKind()), func(t *testing.T) {
@@ -156,7 +157,8 @@ func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
 		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindMergeQueuePublish, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge,
-		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded, OutboxKindIssueRelease}
+		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded, OutboxKindIssueRelease,
+		OutboxKindPodWoken}
 	lanes := map[OutboxKind][]OutboxLane{}
 	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard, LaneRoleMessage} {
 		for _, kind := range LaneKinds(lane) {

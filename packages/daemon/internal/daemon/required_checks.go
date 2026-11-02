@@ -155,6 +155,10 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			cancel()
 			return
 		}
+		// A settlement that stands for this head is a wake for the issue's released pod: it is
+		// the verdict the phase worker is waiting on, and it reaches the daemon as a record, not
+		// as a delivery for the role (check_settlement.go).
+		w.wakeOnSettlement(ctx, pr)
 		checks, err := w.requiredFor(prCtx, github, pr, base, read)
 		cancel()
 		if err != nil {

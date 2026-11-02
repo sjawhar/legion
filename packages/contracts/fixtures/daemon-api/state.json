@@ -479,6 +479,10 @@
             "ephemeral_storage": "2Gi",
             "ephemeral_storage_request": "1Gi"
           }
+        },
+        "idle_release": {
+          "idle_minutes": 10,
+          "backstop_minutes": 60
         }
       }
     },

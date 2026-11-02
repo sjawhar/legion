@@ -95,7 +95,7 @@ type RetryLater struct {
 func (r *RetryLater) Error() string { return r.Err.Error() }
 func (r *RetryLater) Unwrap() error { return r.Err }
 
-// Consumers are this project's three durable JetStream consumers, created before intake runs so a
+// Consumers are this project's four durable JetStream consumers, created before intake runs so a
 // daemon whose stream is missing refuses to boot instead of booting with no intake. repos is the
 // set GitHub intake hears and decodes, which SetRepositories replaces under mu. pool is the
 // Postgres every fact is applied on and every consumer's position is kept in (consumer_positions).
@@ -114,14 +114,20 @@ type Consumers struct {
 	// message counted pending and never delivered.
 	server jetstream.Consumer
 	github jetstream.Consumer
+	// wake is the durable on Envoy's listener's wake reports (podWakeSubject), a durable of its
+	// own for the same reason the server one is: one subject, and never a second filter subject
+	// on a durable that already carries a wildcard. Every project's daemon consumes the subject
+	// and acts only on a role token or session id among its own released claims, so each needs a
+	// durable with a position of its own.
+	wake jetstream.Consumer
 
-	progress struct{ dispatch, server, github *consumerProgress }
+	progress struct{ dispatch, server, github, wake *consumerProgress }
 
 	mu    sync.Mutex
 	repos []ghrepo.Repository
 }
 
-// OpenConsumers creates or updates this project's Dispatch, Dispatch-server and GitHub durable
+// OpenConsumers creates or updates this project's Dispatch, Dispatch-server, GitHub and wake durable
 // consumers. A consumer created here for the first time starts at the next message, so a first
 // daemon on a stream that already holds history (production keeps 72 hours of it) does not replay
 // it into admission, nor Dispatch's earlier starts into the production checks: the daemon's own
@@ -168,11 +174,22 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Po
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
-	consumers := &Consumers{spec: spec, pool: pool, stream: stream, dispatch: dispatch, server: server, github: github, repos: slices.Clone(spec.Repositories)}
+	wake, err := openConsumer(ctx, stream, pool, spec.Logger, jetstream.ConsumerConfig{
+		Durable:       wakeConsumerName(spec.Project),
+		FilterSubject: podWakeSubject,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       spec.AckWait,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open the pod wake durable consumer: %w", err)
+	}
+	consumers := &Consumers{spec: spec, pool: pool, stream: stream, dispatch: dispatch, server: server, github: github,
+		wake: wake, repos: slices.Clone(spec.Repositories)}
 	opened := spec.Now()
 	consumers.progress.dispatch = &consumerProgress{name: dispatchConsumerName(spec.Project), opened: opened}
 	consumers.progress.server = &consumerProgress{name: dispatchServerConsumerName(spec.Project), opened: opened}
 	consumers.progress.github = &consumerProgress{name: githubConsumerName(spec.Project), opened: opened}
+	consumers.progress.wake = &consumerProgress{name: wakeConsumerName(spec.Project), opened: opened}
 	return consumers, nil
 }
 
@@ -461,7 +478,7 @@ func (c *Consumers) oldestWaiting(ctx context.Context, info *jetstream.ConsumerI
 	return oldest.Time, nil
 }
 
-// Run consumes the three durable consumers until ctx ends, and returns the error of the one that
+// Run consumes the four durable consumers until ctx ends, and returns the error of the one that
 // stops first. Every decoded fact enters ApplyFact on the consumers' pool; a committed transaction
 // is acknowledged, a rolled-back transaction is nacked with a delay, poison is terminated, and a
 // committed refusal is logged then acknowledged. Each message acknowledged or terminated is
@@ -481,6 +498,9 @@ func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
 	})
 	group.Go(func() error {
 		return c.consumeConsumer(consumeContext, github, c.progress.github, handlers)
+	})
+	group.Go(func() error {
+		return c.consumeConsumer(consumeContext, c.wake, c.progress.wake, handlers)
 	})
 	return group.Wait()
 }
@@ -854,4 +874,8 @@ func dispatchServerConsumerName(project string) string {
 
 func githubConsumerName(project string) string {
 	return "legion-go-" + project + "-github"
+}
+
+func wakeConsumerName(project string) string {
+	return "legion-go-" + project + "-wake"
 }

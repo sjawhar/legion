@@ -1524,6 +1524,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Grants:             grants,
 		Releaser:           s.supervisor.deps.Runtime,
 		Trees:              st,
+		ReleaseRecords:     st,
 		ClaimReady:         claimReadyHook(keeper, claimReady),
 		PromptAgents:       promptAgents(p.roleReferences),
 		CapabilityReported: s.capabilityReported,
@@ -1731,7 +1732,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	stranded, err := workflow.Stranded(ctx, tx, records, claims)
+	stranded, err := workflow.Stranded(ctx, tx, records, s.store, claims)
 	if err != nil {
 		return api.State{}, err
 	}

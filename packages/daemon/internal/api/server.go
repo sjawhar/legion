@@ -101,6 +101,10 @@ type Options struct {
 	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
 	// through and reserve and finish a closed tree's cleanup through.
 	Trees TreeLifecycles
+	// ReleaseRecords reads the records of the idle release — every release of an issue pod, every
+	// wake that brought one back and every pod the rule held — which a pod's own session reads
+	// through the claim route (INFRA-945 R6). Nil serves that route nothing to read.
+	ReleaseRecords ReleaseRecordStore
 	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
 	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
@@ -159,6 +163,12 @@ type TreeLifecycles interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
+// ReleaseRecordStore reads the idle release's records (store.Store) for the one project this
+// daemon coordinates, which is the only project a claim of this daemon can ask about.
+type ReleaseRecordStore interface {
+	PodReleaseRecords(ctx context.Context, project string, since time.Time) (store.PodReleaseRecords, error)
+}
+
 type server struct {
 	state             StateSource
 	stateTransactions StateTransactions
@@ -178,23 +188,24 @@ type server struct {
 	pluginRelaunchable bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
-	controllerMu sync.Mutex
-	tokens       appauth.Tokens
-	githubOwners func() []string
-	githubAPI    string
-	mergeRules   func(project string) config.MergeRules
-	grants       *credential.Grants
-	releaser     store.TreeReleaser
-	trees        TreeLifecycles
-	pool         *pgxpool.Pool
-	handlers     []intake.Handler
-	prepare      func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	unread       func(resolved string) bool
-	await        func(repo, tree, child, parent string)
-	roleFor      func(phase.Phase) claim.Role
-	records      record.Store
-	dispatch     dispatch.Client
-	claimReady   func(c supervise.Claim)
+	controllerMu   sync.Mutex
+	tokens         appauth.Tokens
+	githubOwners   func() []string
+	githubAPI      string
+	mergeRules     func(project string) config.MergeRules
+	grants         *credential.Grants
+	releaser       store.TreeReleaser
+	trees          TreeLifecycles
+	releaseRecords ReleaseRecordStore
+	pool           *pgxpool.Pool
+	handlers       []intake.Handler
+	prepare        func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
+	unread         func(resolved string) bool
+	await          func(repo, tree, child, parent string)
+	roleFor        func(phase.Phase) claim.Role
+	records        record.Store
+	dispatch       dispatch.Client
+	claimReady     func(c supervise.Claim)
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
@@ -234,6 +245,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
+		releaseRecords:     opts.ReleaseRecords,
 		grants:             opts.Grants,
 		pool:               opts.Pool,
 		handlers:           opts.Handlers,
@@ -280,6 +292,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/claims/activity", s.activity)
+	mux.HandleFunc("POST /legion/v1/claims/release-records", s.releaseRecordsRoute)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
 	mux.HandleFunc("POST /legion/v1/controller/github-credential", s.controllerGitHubCredential)

@@ -27,6 +27,8 @@ import {
   LegionPhaseRetryRequest,
   LegionReadyRequest,
   LegionRegisterResponse,
+  LegionReleaseRecordsRequest,
+  LegionReleaseRecordsResponse,
   LegionRootCloseRequest,
   LegionSignOffRequest,
   LegionStateResponse,
@@ -704,6 +706,83 @@ test("a session's activity report carries its reading, its work and its wake", (
   expect(LegionActivityRequest.safeParse(badAt).success).toBeFalse();
   // No generation: the secret is the whole fence, and an added key is refused.
   expect(LegionActivityRequest.safeParse({ ...report, generation: 3 }).success).toBeFalse();
+});
+
+// The records of the idle release, as a pod reads them with the credential it holds: its claim
+// token, its secret and the window's start. The answer's three lists are always present, and a
+// time a record does not hold yet — the pod-ready and first-turn times of a resume still under
+// way — is absent rather than null.
+test("an issue pod reads the release records with its claim credential", () => {
+  const request = {
+    claimToken: "legion-legion-legion-208-implementer",
+    secret: "claim-secret",
+    since: "2026-11-02T09:00:00.000Z",
+  };
+  expect(LegionReleaseRecordsRequest.safeParse(request).success).toBeTrue();
+  // The window is an instant, the credential is the claim's alone, and an added key is refused.
+  expect(
+    LegionReleaseRecordsRequest.safeParse({ ...request, since: "2026-11-02" }).success
+  ).toBeFalse();
+  expect(
+    LegionReleaseRecordsRequest.safeParse({ ...request, sessionId: "ses_1" }).success
+  ).toBeFalse();
+  const { secret: _secret, ...noSecret } = request;
+  expect(LegionReleaseRecordsRequest.safeParse(noSecret).success).toBeFalse();
+
+  const records = {
+    releases: [
+      {
+        id: 1,
+        issue: "LEGION-208",
+        generation: 3,
+        roles: ["implementer", "tester"],
+        at: "2026-11-02T09:00:00.000Z",
+        bundleBytes: 2048,
+      },
+    ],
+    resumes: [
+      {
+        id: 2,
+        release: 1,
+        issue: "LEGION-208",
+        role: "implementer",
+        kind: "delivery",
+        at: "2026-11-02T09:05:00.000Z",
+        podReadyAt: "2026-11-02T09:07:00.000Z",
+      },
+    ],
+    holds: [
+      { id: 3, issue: "LEGION-209", reason: "background work", at: "2026-11-02T09:01:00.000Z" },
+    ],
+  };
+  const parsed = LegionReleaseRecordsResponse.parse(records);
+  expect(parsed.resumes[0]?.firstTurnAt).toBeUndefined();
+  expect(parsed.resumes[0]?.stuck).toBeUndefined();
+
+  // A quiet window is three empty lists, never a missing one.
+  expect(
+    LegionReleaseRecordsResponse.safeParse({ releases: [], resumes: [], holds: [] }).success
+  ).toBeTrue();
+  expect(LegionReleaseRecordsResponse.safeParse({ releases: [], resumes: [] }).success).toBeFalse();
+  // A resume with no first turn ten minutes after its wake says so, and only as true.
+  const stuck = { ...records, resumes: [{ ...records.resumes[0], stuck: true }] };
+  expect(LegionReleaseRecordsResponse.safeParse(stuck).success).toBeTrue();
+  const notStuck = { ...records, resumes: [{ ...records.resumes[0], stuck: false }] };
+  expect(LegionReleaseRecordsResponse.safeParse(notStuck).success).toBeFalse();
+});
+
+// INFRA-945: a claim whose idle issue pod the daemon released is listed as stranded only once a
+// wake for it has gone unanswered, and it reads `released` there rather than `suspended`: the
+// next wake for its role brings the pod back, and no operator move is called for.
+test("a stranded claim may read as released", () => {
+  const stranded = (state: string) => ({
+    ...(fixture("state.json") as Record<string, unknown>),
+    strandedClaims: [{ issue: "LEGION-208", role: "implementer", state }],
+  });
+  for (const state of ["released", "suspended", "failed"]) {
+    expect(LegionStateResponse.safeParse(stranded(state)).success).toBeTrue();
+  }
+  expect(LegionStateResponse.safeParse(stranded("idle")).success).toBeFalse();
 });
 
 test("the state golden shows a claim's capability report beside its locator", () => {

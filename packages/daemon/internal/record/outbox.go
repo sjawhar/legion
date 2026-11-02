@@ -37,6 +37,7 @@ const (
 	OutboxKindCheckBound        OutboxKind = "check_bound"
 	OutboxKindPhaseEnded        OutboxKind = "phase_ended"
 	OutboxKindIssueRelease      OutboxKind = "issue_release"
+	OutboxKindPodWoken          OutboxKind = "pod_woken"
 )
 
 // OutboxLane is which executor of an issue runs a kind. An issue's rows run on three lanes side by
@@ -68,7 +69,7 @@ const (
 var laneKinds = map[OutboxLane][]OutboxKind{
 	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindIssueRelease, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
 	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
-	LaneRoleMessage: {OutboxKindPhaseEnded},
+	LaneRoleMessage: {OutboxKindPhaseEnded, OutboxKindPodWoken},
 }
 
 // LaneOf is the lane that runs kind.
@@ -596,6 +597,34 @@ func (p PhaseEnded) Message(issue string) string {
 		issue, p.From, p.To, follows, p.To, p.Reason)
 }
 
+// PodWoken tells a role whose issue pod was released, and has now been brought back, why it came
+// back, on that role's own Envoy topic. It is the second message the daemon addresses to a role
+// of its own accord, and it exists for one reason: the role's first turn in the replacement pod
+// must know what woke it. A wake that carries work of its own — a task, a notice, a phase-ended
+// message the daemon already had for the role — needs none of these, since that work names
+// itself; the wakes that carry nothing (a CI settlement, a message the Envoy listener could not
+// place, the backstop) each write one.
+//
+// Kind is the wake's own name, as the resume records spell it (store.PodResume.Kind), and Detail
+// the wake in the daemon's words: the head and result of a settlement, that the backstop ran out.
+// It stops nothing and starts nothing: the woken role's own pending task, if it has one, is sent
+// as the resume sends it.
+type PodWoken struct {
+	Role   claim.Role `json:"role"`
+	Kind   string     `json:"kind"`
+	Detail string     `json:"detail"`
+}
+
+func (PodWoken) OutboxKind() OutboxKind { return OutboxKindPodWoken }
+
+// Message is what the runner publishes for issue: one sentence naming the wake, so the role's
+// first turn reads why its pod came back before it reads anything else.
+func (p PodWoken) Message(issue string) string {
+	return fmt.Sprintf("%s: your issue pod was released while it was idle and has been brought back for you;"+
+		" your session, your phase and the task you held are as you left them, and the workspace holds what was"+
+		" pushed plus the work the release saved. What brought it back: %s.", issue, p.Detail)
+}
+
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
 	if err := validateOutboxPayload(payload); err != nil {
@@ -736,6 +765,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindPodWoken:
+		value := PodWoken{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -856,6 +891,13 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.TaskFollows && value.Role != claim.RoleImplementer {
 			return fmt.Errorf("only the implementer is told its task follows, since the phase the red opens is its own; the %s is not", value.Role)
+		}
+	case PodWoken:
+		if !claim.IsRole(value.Role) {
+			return fmt.Errorf("a pod-woken message goes to a role of the pod that came back; %q is none", value.Role)
+		}
+		if value.Kind == "" || value.Detail == "" {
+			return fmt.Errorf("a pod-woken message names the wake and says what it was; it names %q and %q", value.Kind, value.Detail)
 		}
 	default:
 		return fmt.Errorf("unknown outbox payload %T", payload)

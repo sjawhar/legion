@@ -112,6 +112,10 @@ type outbox struct {
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
+	// backstop is how long after a release that pod comes back if nothing else wakes it
+	// (runtime.kubernetes.idle_release.backstop_minutes), armed by the release's last row as a
+	// stored due time. Zero, which is every deployment that releases no pod, arms none.
+	backstop time.Duration
 	// limits is every GitHub rate limit a row met, by the budget it exhausted, held until its
 	// deadline: a row that spends one of those budgets waits for the latest deadline among them
 	// (standingLimit) rather than meet a limit again. The lanes run rows on many goroutines, so
@@ -131,7 +135,8 @@ type outbox struct {
 
 // outboxTrees is the store's tree barrier (store.Store) as the outbox runs it: an issue close's
 // suspension, an idle release's own two decisions and the bundle it saves, a stop's wait for a
-// stored claim's machine, and a workflow tree close's cleanup.
+// stored claim's machine, a workflow tree close's cleanup, and everything a release and the
+// wakes that end it are recorded and keyed by (release_records.go, wake.go).
 type outboxTrees interface {
 	IssueSuspension(ctx context.Context, project string, closing store.IssueClose, outOfWorkflow func(status string) bool) (bool, error)
 	IssueRelease(ctx context.Context, project string, release store.IssueReleased, outOfWorkflow func(status string) bool) (bool, error)
@@ -142,6 +147,15 @@ type outboxTrees interface {
 	StoredClaimMayRun(ctx context.Context, token claim.Token, row int64) (bool, error)
 	ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error)
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
+	RecordPodRelease(ctx context.Context, rel store.PodRelease) (int64, error)
+	LatestPodRelease(ctx context.Context, project, issue string) (int64, bool, error)
+	RecordPodWake(ctx context.Context, res store.PodResume) (int64, error)
+	MarkPodResumeStuck(ctx context.Context, id int64) error
+	StuckPodResumes(ctx context.Context, project string, before time.Time) ([]store.PodResume, error)
+	TakePodWake(ctx context.Context, project, issue, kind, key string, at time.Time) (bool, error)
+	ArmPodWakeBackstop(ctx context.Context, project, issue string, release int64, due time.Time) error
+	DuePodWakeBackstops(ctx context.Context, project string, now time.Time) ([]store.PodWakeBackstop, error)
+	ClearPodWakeBackstop(ctx context.Context, project, issue string) error
 }
 
 func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
@@ -502,6 +516,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.checkBound(ctx, row)
 	case record.PhaseEnded:
 		return r.phaseEnded(ctx, row, value)
+	case record.PodWoken:
+		return r.podWokenMessage(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -739,6 +755,17 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
 	}
+	// The owning architect holds no role because its issue pod was released: the notice is a
+	// daemon delivery for a role of that pod, so it brings the pod back and the row is held for
+	// the architect as any other row waiting on its architect is, until the resumed session takes
+	// the role and the next attempt publishes.
+	if machine, released := r.releasedClaimOf(architect); released {
+		held := machine.Claim()
+		if _, err := r.wakeForDelivery(ctx, held.Issue, held.Role,
+			fmt.Sprintf("a %s notice of %s", payload.Kind, row.Issue)); err != nil {
+			return err
+		}
+	}
 	if ended := architectEnded(tree, r.claimState(architect)); ended != "" {
 		r.log.Info("outbox notice finished undelivered: its architect will not hold its role again",
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
@@ -796,10 +823,13 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 // holding it as an architect's notice is held: the role's next task from the daemon names its phase
 // anyway, so a message nobody is there to read is worth nothing later, and a role that never claims
 // its topic — a session that has not registered, or one that failed — would hold the row for ever.
-// The three answers of the confirmed publish route are different failures and keep the ordinary
-// retry: a holder that did not confirm in time (notify.ErrNotDelivered) can take it on the next
-// attempt, a holder that does not advertise the delivery mode (notify.ErrRefusedByHolder) can be
-// replaced by another session on the role, and a forward the listener's own NATS grant denies
+// The one holder-less case that is not dropped is a role whose issue pod was released: the message
+// is a daemon delivery for a role of that pod, so it wakes the pod (wake.go) and the row waits for
+// the resumed session to take its role, which is as close to "the role is there" as the release
+// gets. The three answers of the confirmed publish route are different failures and keep the
+// ordinary retry: a holder that did not confirm in time (notify.ErrNotDelivered) can take it on the
+// next attempt, a holder that does not advertise the delivery mode (notify.ErrRefusedByHolder) can
+// be replaced by another session on the role, and a forward the listener's own NATS grant denies
 // (notify.ErrPublishDenied) goes through once an operator changes that grant.
 func (r *outbox) phaseEnded(ctx context.Context, row record.OutboxRow, payload record.PhaseEnded) error {
 	if r.notices == nil {
@@ -812,12 +842,78 @@ func (r *outbox) phaseEnded(ctx context.Context, row record.OutboxRow, payload r
 	message := payload.Message(row.Issue)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(token), message, message, record.OutboxKey(row.ID))
 	if errors.Is(published, notify.ErrNoHolder) {
+		waiting, err := r.wakeForDelivery(ctx, row.Issue, payload.Role,
+			fmt.Sprintf("the %s phase of %s ended while its pod was gone", payload.From, row.Issue))
+		if err != nil {
+			return err
+		}
+		if waiting {
+			return wait.Errorf("the phase-ended message for %s's %s waits for its released pod to come back", row.Issue, payload.Role)
+		}
 		r.log.Info("outbox phase-ended message finished undelivered: no live session holds the role",
 			"row", row.ID, "issue", row.Issue, "role", payload.Role, "from", payload.From, "to", payload.To)
 		return nil
 	}
 	if published != nil {
 		return fmt.Errorf("publish the end of %s's %s phase to its %s: %w", row.Issue, payload.From, payload.Role, published)
+	}
+	return nil
+}
+
+// wakeForDelivery brings issue's released pod back for a daemon delivery that reaches role over
+// Envoy rather than through its claim — an architect's notice, a phase-ended message — and
+// answers whether the row that asked must wait for it. The delivery is its own message and names
+// its own reason, so the wake carries no second one; why is the line the wake is logged under.
+//
+// It answers false when the role holds no released claim, which is every other reason a role
+// topic has no holder, so the caller's own rule for a role that is simply not there is unchanged.
+func (r *outbox) wakeForDelivery(ctx context.Context, issue string, role claim.Role, why string) (bool, error) {
+	if len(r.releasedClaims(issue, role)) == 0 {
+		return false, nil
+	}
+	woken, err := r.wakePod(ctx, podWake{Issue: issue, Role: role, Kind: wakeDelivery})
+	if err != nil {
+		return false, err
+	}
+	if woken == 0 {
+		return false, nil
+	}
+	r.log.Info("outbox: a daemon delivery woke a released issue pod", "issue", issue, "role", role, "delivery", why)
+	return true, nil
+}
+
+// podWokenMessage publishes the one message a woken role is given, naming the wake that brought
+// its pod back (record.PodWoken), on that role's own Envoy topic and the role-message lane, so it
+// waits behind no start or stop of the issue.
+//
+// A topic with no live holder waits rather than ending the row, which is the opposite of the
+// phase-ended message's rule and for the opposite reason: this row is written at the moment the
+// pod is woken, so the role has no holder yet by construction, and the row exists precisely to be
+// read by the session that is coming back. It waits on the row's own backoff until the resumed
+// session takes its role, and finishes undelivered once the claim will hold that role no longer —
+// it failed, retired, or this daemon no longer supervises it — so no row waits for ever. A holder
+// that refuses the delivery mode, or a forward the listener's grant denies, keeps the ordinary
+// retry as the phase-ended message's do.
+func (r *outbox) podWokenMessage(ctx context.Context, row record.OutboxRow, payload record.PodWoken) error {
+	if r.notices == nil {
+		return errors.New("pod-woken executor has no Envoy publisher")
+	}
+	token, err := claim.NewToken(r.project, row.Issue, payload.Role)
+	if err != nil {
+		return fmt.Errorf("the %s of %s: %w", payload.Role, row.Issue, err)
+	}
+	message := payload.Message(row.Issue)
+	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(token), message, message, record.OutboxKey(row.ID))
+	if errors.Is(published, notify.ErrNoHolder) {
+		if state := r.claimState(token); claimEnded(state) {
+			r.log.Info("outbox pod-woken message finished undelivered: the woken role will not hold its role again",
+				"row", row.ID, "issue", row.Issue, "role", payload.Role, "kind", payload.Kind, "state", state)
+			return nil
+		}
+		return wait.Errorf("the pod-woken message for %s's %s waits for its session to take the role", row.Issue, payload.Role)
+	}
+	if published != nil {
+		return fmt.Errorf("publish the wake of %s's pod to its %s: %w", row.Issue, payload.Role, published)
 	}
 	return nil
 }
@@ -1298,7 +1394,28 @@ func (r *outbox) releaseIssue(ctx context.Context, row record.OutboxRow, payload
 	}
 	r.log.Info("outbox: released the idle pod of an issue; its roles resume in the same sessions at the next wake",
 		"issue", row.Issue, "tree", payload.Tree, "generation", payload.Generation, "bundle", bundle.Size())
+	release, err := r.recordRelease(ctx, row.Issue, payload.Generation, bundle.Size())
+	if err != nil {
+		return err
+	}
+	if err := r.armBackstop(ctx, row.Issue, release); err != nil {
+		return err
+	}
 	return r.trees.ClearIssueRelease(ctx, r.project, row.Issue)
+}
+
+// recordRelease writes the release's own record: which roles it suspended, when it finished and
+// how large the bundle it saved was (store.PodRelease). It answers the row's id, which the
+// backstop and every wake of this pod name. A release records what it did even when nothing ever
+// wakes the pod, so a window's count of releases is complete without reading any resume.
+func (r *outbox) recordRelease(ctx context.Context, issue string, generation uint64, bundle int) (int64, error) {
+	var roles []string
+	for _, machine := range r.releasedClaims(issue, "") {
+		roles = append(roles, string(machine.Claim().Role))
+	}
+	slices.Sort(roles)
+	return r.trees.RecordPodRelease(ctx, store.PodRelease{Project: r.project, Issue: issue,
+		Generation: generation, Roles: roles, At: r.now().UTC(), BundleBytes: bundle})
 }
 
 // cancelRelease undoes a release that did not finish: the bundle it may have stored is deleted,
@@ -1308,6 +1425,9 @@ func (r *outbox) releaseIssue(ctx context.Context, row record.OutboxRow, payload
 // would have left it.
 func (r *outbox) cancelRelease(ctx context.Context, issue string, hold workflow.IdleHold, why string) error {
 	if err := r.trees.DeleteWorkspaceBundle(ctx, issue); err != nil {
+		return err
+	}
+	if err := r.trees.ClearPodWakeBackstop(ctx, r.project, issue); err != nil {
 		return err
 	}
 	for _, machine := range r.supervisor.supervised() {

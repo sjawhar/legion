@@ -207,12 +207,20 @@ func claimRuns(state supervise.ClaimState) bool {
 }
 
 // holdsRole is whether held's claim keeps its role through the decision in flight: it runs
-// (claimRuns), and that decision is not stopping its process for good (supervise.ClaimView's
-// Stopping) — a suspension, a failure, a release. The routing reads it, so no notice is routed to
-// a sub-architect whose session is being stopped; it goes on up the tree, as it will once the stop
-// returns.
+// (claimRuns) or its issue pod was released, and that decision is not stopping its process for
+// good (supervise.ClaimView's Stopping) — a suspension, a failure, a release. The routing reads
+// it, so no notice is routed to a sub-architect whose session is being stopped; it goes on up the
+// tree, as it will once the stop returns.
+//
+// A released claim holds its role. Its session, its phase and the task it holds are all still
+// there and the next wake brings them back in a pod of their own, so a notice of its issue is
+// still that sub-architect's to read: routing the notice past it to the tree root would tell the
+// wrong architect, and the notice is what wakes the pod (the outbox's notice).
 func holdsRole(held supervise.ClaimView) bool {
-	return claimRuns(held.State) && !held.Stopping
+	if held.Stopping {
+		return false
+	}
+	return claimRuns(held.State) || held.SuspendedBy == supervise.SuspendedByReleased
 }
 
 // claimEnded is whether a claim in state will not hold its role again: this daemon does not

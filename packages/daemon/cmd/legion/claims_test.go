@@ -927,3 +927,36 @@ func TestClaimsForgetSessionRequiresTheRecordedSession(t *testing.T) {
 	}
 	d.wantNothingReached()
 }
+
+// INFRA-945: an operator reading the claims tells a claim whose idle pod the daemon released
+// from one that is suspended and from one that failed. The released one reads `released`, with
+// the wake that brings it back; the other two read their own state and name no wake.
+func TestClaimLineShowsAReleasedClaimApartFromASuspendedAndAFailedOne(t *testing.T) {
+	line := func(c api.OperatorClaim) string {
+		var out bytes.Buffer
+		writeClaimLine(&out, c)
+		return out.String()
+	}
+	released := api.OperatorClaim{
+		Token: "legion-legion-legion-209-implementer", Role: legionclaim.RoleImplementer, Issue: "LEGION-209",
+		State: "suspended", Generation: 2, SuspendedBy: "released", PluginContract: api.DaemonAPIVersion,
+	}
+	suspended := released
+	suspended.Token, suspended.SuspendedBy = "legion-legion-legion-210-implementer", "operator"
+	suspended.Issue = "LEGION-210"
+	failed := released
+	failed.Token, failed.Issue, failed.State, failed.SuspendedBy = "legion-legion-legion-211-implementer", "LEGION-211", "failed", ""
+
+	want := fmt.Sprintf("legion-legion-legion-209-implementer implementer LEGION-209 released 2 %d waiting for the next wake for its role\n", api.DaemonAPIVersion)
+	if got := line(released); got != want {
+		t.Errorf("the released claim printed %q, want %q", got, want)
+	}
+	want = fmt.Sprintf("legion-legion-legion-210-implementer implementer LEGION-210 suspended 2 %d\n", api.DaemonAPIVersion)
+	if got := line(suspended); got != want {
+		t.Errorf("the suspended claim printed %q, want %q", got, want)
+	}
+	want = fmt.Sprintf("legion-legion-legion-211-implementer implementer LEGION-211 failed 2 %d\n", api.DaemonAPIVersion)
+	if got := line(failed); got != want {
+		t.Errorf("the failed claim printed %q, want %q", got, want)
+	}
+}

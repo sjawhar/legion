@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -178,7 +179,7 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		},
 	}
 
-	got, err := Stranded(context.Background(), nil, s, claims)
+	got, err := Stranded(context.Background(), nil, s, nil, claims)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -223,7 +224,7 @@ func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 		queued: map[claim.Token][]record.QueuedSupervise{
 			unknownStarted.Token: {{ID: 21, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
 		}}
-	got, err := Stranded(context.Background(), nil, store, claims)
+	got, err := Stranded(context.Background(), nil, store, nil, claims)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -257,7 +258,7 @@ func TestStrandedReadsRoleRunsInBatches(t *testing.T) {
 		claims = append(claims, current)
 	}
 
-	got, err := Stranded(context.Background(), nil, store, claims)
+	got, err := Stranded(context.Background(), nil, store, nil, claims)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
@@ -266,5 +267,84 @@ func TestStrandedReadsRoleRunsInBatches(t *testing.T) {
 	}
 	if store.roleRunCalls != 0 || store.roleRunsCalls != 3 {
 		t.Fatalf("role-run reads = %d single and %d batches, want 0 single and 3 bounded batches", store.roleRunCalls, store.roleRunsCalls)
+	}
+}
+
+// strandedWakes is the store's unanswered wakes as Stranded reads them: the wakes of released
+// pods older than the bound whose woken role has taken no turn, warned about or not.
+type strandedWakes struct {
+	resumes  []store.PodResume
+	calls    int
+	projects []string
+	before   time.Time
+}
+
+func (w *strandedWakes) UnansweredPodWakes(_ context.Context, project string, before time.Time) ([]store.PodResume, error) {
+	w.calls++
+	w.projects = append(w.projects, project)
+	w.before = before
+	return w.resumes, nil
+}
+
+// A released claim waits for a wake, which starts its pod again and resumes the same session, so
+// the report leaves it out — until a wake for it is more than ten minutes old and the woken role
+// has taken no turn. Then nothing is bringing that pod back, whatever the claim's role, and the
+// report names it.
+func TestStrandedCountsAReleasedClaimOnlyWhenItsWakeWentUnanswered(t *testing.T) {
+	issues := []record.Issue{
+		strandedIssue("LEGION-1", "LEGION-1", phase.Implementing),
+		strandedIssue("LEGION-2", "LEGION-2", phase.Testing),
+		strandedIssue("LEGION-3", "LEGION-3", phase.Reviewing),
+		strandedIssue("LEGION-4", "LEGION-4", phase.Merging),
+	}
+	release := func(c supervise.Claim) supervise.Claim {
+		c.SuspendedBy = supervise.SuspendedByReleased
+		return c
+	}
+	// Released and waiting: a wake for either brings its pod back, so neither is stranded.
+	waiting := release(strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleImplementer, supervise.StateSuspended))
+	waitingArchitect := release(strandedClaim(t, "LEGION-3", "LEGION-3", claim.RoleArchitect, supervise.StateSuspended))
+	// Released, woken, and the woken role never took a turn: the wake went unanswered.
+	unanswered := release(strandedClaim(t, "LEGION-2", "LEGION-2", claim.RoleTester, supervise.StateSuspended))
+	unansweredArchitect := release(strandedClaim(t, "LEGION-4", "LEGION-4", claim.RoleArchitect, supervise.StateSuspended))
+	claims := []supervise.Claim{waiting, unanswered, waitingArchitect, unansweredArchitect}
+	stored := map[claim.Token]supervise.Claim{}
+	for _, c := range claims {
+		stored[c.Token] = c
+	}
+	s := &strandedStore{issues: issues, slots: slotsOf("LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4"), claims: stored}
+	wakes := &strandedWakes{resumes: []store.PodResume{
+		{ID: 1, Project: "legion", Issue: "LEGION-2", Role: string(claim.RoleTester), Kind: "checks", At: time.Now().Add(-11 * time.Minute)},
+		{ID: 2, Project: "legion", Issue: "LEGION-4", Role: string(claim.RoleArchitect), Kind: "notice", At: time.Now().Add(-20 * time.Minute)},
+	}}
+
+	got, err := Stranded(context.Background(), nil, s, wakes, claims)
+	if err != nil {
+		t.Fatalf("Stranded: %v", err)
+	}
+
+	want := []supervise.Claim{unanswered, unansweredArchitect}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stranded = %v, want %v", names(got), names(want))
+	}
+	// The wakes are read once, for the project of the released claims, and the bound is the ten
+	// minutes a resume has to reach the woken role's first turn.
+	if wakes.calls != 1 || !reflect.DeepEqual(wakes.projects, []string{"legion"}) {
+		t.Fatalf("the stuck wakes were read %d times for %v, want once for the claims' project", wakes.calls, wakes.projects)
+	}
+	if bound := time.Since(wakes.before); bound < strandedWakeBound || bound > strandedWakeBound+time.Minute {
+		t.Errorf("the wakes were read before %s, %s ago; want the %s bound", wakes.before, bound, strandedWakeBound)
+	}
+
+	// No released claim among them: the report makes no query for a wake at all.
+	quiet := &strandedWakes{}
+	suspended := strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleImplementer, supervise.StateSuspended)
+	suspended.SuspendedBy = supervise.SuspendedByOperator
+	s.claims = map[claim.Token]supervise.Claim{suspended.Token: suspended}
+	if _, err := Stranded(context.Background(), nil, s, quiet, []supervise.Claim{suspended}); err != nil {
+		t.Fatalf("Stranded: %v", err)
+	}
+	if quiet.calls != 0 {
+		t.Errorf("the stuck wakes were read %d times with no released claim, want none", quiet.calls)
 	}
 }

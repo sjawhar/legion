@@ -279,6 +279,147 @@ func (s *server) activity(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ReleaseRecordsRequest is the body of `POST /legion/v1/claims/release-records`: the claim, the
+// secret its registration was issued, and the moment the window the caller reads begins. It is
+// the credential an issue pod actually holds — a pod has its claim token and its secret, and no
+// operator token — so a pod's own session can measure what the idle release did (INFRA-945 R6).
+// It names no session and no generation: the route reads records, decides nothing about the
+// claim, and the secret the registration issued is the whole fence.
+type ReleaseRecordsRequest struct {
+	ClaimToken claim.Token `json:"claimToken"`
+	Secret     string      `json:"secret"`
+	// Since is the start of the window: every record the daemon kept at or after it.
+	Since time.Time `json:"since"`
+}
+
+// ReleaseRecordsResponse is what that route answers: the releases, the resumes and the holds the
+// daemon recorded in the window, each list oldest first and never null.
+type ReleaseRecordsResponse struct {
+	Releases []PodReleaseView `json:"releases"`
+	Resumes  []PodResumeView  `json:"resumes"`
+	Holds    []PodHoldView    `json:"holds"`
+}
+
+// PodReleaseView is one release of an issue pod (store.PodRelease): the issue and the generation
+// it was released at, the roles whose claims the release suspended, when it completed, and the
+// size of the workspace bundle it saved — zero when the workspace held nothing unpushed.
+type PodReleaseView struct {
+	ID          int64     `json:"id"`
+	Issue       string    `json:"issue"`
+	Generation  uint64    `json:"generation"`
+	Roles       []string  `json:"roles"`
+	At          time.Time `json:"at"`
+	BundleBytes int       `json:"bundleBytes"`
+}
+
+// PodResumeView is one wake of a released pod (store.PodResume): the release it ended (absent
+// when no release row is recorded for it), the role the wake was for, what kind of wake it was,
+// when it reached the daemon, and the two times R5 measures — when the replacement pod was Ready
+// and when the woken role took its first turn, each absent until it is observed. Stuck is a
+// resume with no first turn ten minutes after its wake.
+type PodResumeView struct {
+	ID          int64      `json:"id"`
+	Release     int64      `json:"release,omitempty"`
+	Issue       string     `json:"issue"`
+	Role        string     `json:"role"`
+	Kind        string     `json:"kind"`
+	At          time.Time  `json:"at"`
+	PodReadyAt  *time.Time `json:"podReadyAt,omitempty"`
+	FirstTurnAt *time.Time `json:"firstTurnAt,omitempty"`
+	Stuck       bool       `json:"stuck,omitempty"`
+}
+
+// PodHoldView is one pass of the idle rule that kept a pod past the idle period (store.PodHold),
+// with the rule's own name for what held it (workflow.IdleHold).
+type PodHoldView struct {
+	ID     int64     `json:"id"`
+	Issue  string    `json:"issue"`
+	Reason string    `json:"reason"`
+	At     time.Time `json:"at"`
+}
+
+// releaseRecordsRoute is a session reading what the idle release did in a window (INFRA-945 R6):
+// every release of an issue pod, every wake that brought one back and every pod the rule held,
+// recorded at or after the moment the caller names, oldest first. The records are the project's,
+// not the claim's own pod's: a measurement of the release names the releases it did not see, and
+// a claim of this daemon can ask about no other project.
+//
+// It is authenticated exactly as its siblings are — the claim's token and the secret its
+// registration was issued (authenticated) — since that is the credential an issue pod holds, and
+// refuses as they do: a blank field with the field's name, a claim this daemon does not hold or a
+// wrong secret with claim.InvalidSecret, and a stale plugin with the stale-contract 409. A caller
+// that proves no claim is told nothing of the project's releases.
+func (s *server) releaseRecordsRoute(w http.ResponseWriter, r *http.Request) {
+	var req ReleaseRecordsRequest
+	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireFields(w,
+		field{"claimToken", string(req.ClaimToken)}, field{"secret", req.Secret},
+	) {
+		return
+	}
+	if req.Since.IsZero() {
+		writeJSON(w, http.StatusBadRequest, errorBody("since is required"))
+		return
+	}
+	m, ok := s.authenticated(req.ClaimToken, req.Secret)
+	if !ok {
+		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
+		return
+	}
+	if s.refuseIfStaleClaim(w, r, m.Claim()) {
+		return
+	}
+	if s.releaseRecords == nil {
+		writeJSON(w, http.StatusInternalServerError, errorBody("the daemon has no store to read the release records from"))
+		return
+	}
+	records, err := s.releaseRecords.PodReleaseRecords(r.Context(), s.project, req.Since.UTC())
+	if err != nil {
+		s.log.Error("api: a session's read of the release records failed", "claim", req.ClaimToken, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody("read the release records: "+err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, releaseRecordsView(records))
+}
+
+// releaseRecordsView is records as the route serves them. Each list is an array on the wire,
+// empty rather than null, so a reader of a quiet window needs no special case.
+func releaseRecordsView(records store.PodReleaseRecords) ReleaseRecordsResponse {
+	view := ReleaseRecordsResponse{
+		Releases: make([]PodReleaseView, len(records.Releases)),
+		Resumes:  make([]PodResumeView, len(records.Resumes)),
+		Holds:    make([]PodHoldView, len(records.Holds)),
+	}
+	for i, release := range records.Releases {
+		view.Releases[i] = PodReleaseView{
+			ID: release.ID, Issue: release.Issue, Generation: release.Generation,
+			Roles: release.Roles, At: release.At.UTC(), BundleBytes: release.BundleBytes,
+		}
+		if release.Roles == nil {
+			view.Releases[i].Roles = []string{}
+		}
+	}
+	for i, resume := range records.Resumes {
+		view.Resumes[i] = PodResumeView{
+			ID: resume.ID, Release: resume.Release, Issue: resume.Issue, Role: resume.Role,
+			Kind: resume.Kind, At: resume.At.UTC(), PodReadyAt: instantUTC(resume.PodReadyAt),
+			FirstTurnAt: instantUTC(resume.FirstTurnAt), Stuck: resume.Stuck,
+		}
+	}
+	for i, hold := range records.Holds {
+		view.Holds[i] = PodHoldView{ID: hold.ID, Issue: hold.Issue, Reason: hold.Reason, At: hold.At.UTC()}
+	}
+	return view
+}
+
+// instantUTC is instant in UTC: a time the records may not hold yet, absent on the wire.
+func instantUTC(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	utc := t.UTC()
+	return &utc
+}
+
 // authenticated is the claim's machine when secret is the one its registration was issued. A
 // claim the daemon does not supervise, one no agent has registered on, and a wrong secret all
 // answer the same: nothing about the claim is told to a caller that cannot prove it holds it.

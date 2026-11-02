@@ -116,6 +116,9 @@ var settingsEmitted = map[string]string{
 	"Toleration.Operator":                            "runtime.kubernetes.scheduling.tolerations[].operator",
 	"Toleration.Value":                               "runtime.kubernetes.scheduling.tolerations[].value",
 	"Toleration.Effect":                              "runtime.kubernetes.scheduling.tolerations[].effect",
+	"Kubernetes.IdleRelease":                         "runtime.kubernetes.idle_release",
+	"IdleReleaseConfig.IdleMinutes":                  "runtime.kubernetes.idle_release.idle_minutes",
+	"IdleReleaseConfig.BackstopMinutes":              "runtime.kubernetes.idle_release.backstop_minutes",
 	"PodResources.Issue":                             "runtime.kubernetes.resources.issue",
 	"PodResources.Controller":                        "runtime.kubernetes.resources.controller",
 	"Reservation.CPU":                                "runtime.kubernetes.resources.<pod>.cpu",
@@ -281,10 +284,13 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
 	assertKeys(t, "settings.runtime.kubernetes", kubernetesKeys, []string{
 		"namespace", "image", "storage_class", "issue_volume", "scheduling", "resources", "session_store",
-		"agent_secrets", "plugins", "setup", "test_postgres", "repository_cache",
+		"agent_secrets", "plugins", "setup", "test_postgres", "repository_cache", "idle_release",
 	})
 	assertKeys(t, "settings.runtime.kubernetes.repository_cache", keysOf(t, kubernetesKeys["repository_cache"]), []string{
 		"volume", "refresh_minutes", "retain_hours", "resources",
+	})
+	assertKeys(t, "settings.runtime.kubernetes.idle_release", keysOf(t, kubernetesKeys["idle_release"]), []string{
+		"idle_minutes", "backstop_minutes",
 	})
 	apps := keysOf(t, top["github_apps"])
 	assertKeys(t, "settings.github_apps", apps, []string{"implement", "review"})
