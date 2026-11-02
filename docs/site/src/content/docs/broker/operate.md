@@ -196,8 +196,10 @@ refuses to start with only some of them:
 - `BROKER_VM_EXCHANGE_ACCOUNTS`: `<service account email>=<project>=<person>[=<session>]`, the
   person and the Dispatch project a fleet writes for. An account `BROKER_VM_SERVICES` lists and
   this setting does not gets a token that names its service and no person, which Dispatch and the
-  Envoy listener read and which reaches no secret: such a machine is refused the enrollment
-  `403 FLEET_NAMES_NO_PERSON`, naming the account and this setting.
+  Envoy listener read. Either way it reaches the fleet's Dispatch token alone and never its
+  secrets: the machine login the exchange mints names no person, so a machine reads what its
+  service owns and the shared agent-tier secrets, and a person reaches their own on that machine
+  only by signing in on it.
 
 One fleet's entry, `example-fleet`, whose machines run as one account in `example-project`, are
 named `example-vm-...`, and write for one person:
@@ -210,7 +212,9 @@ BROKER_VM_INSTANCES=example-fleet@example-project.iam.gserviceaccount.com=exampl
 BROKER_VM_EXCHANGE_ACCOUNTS=example-fleet@example-project.iam.gserviceaccount.com=EXAMPLE=ada@example.com
 ```
 
-A machine of that fleet then reads whatever `ada@example.com` may read, and asks her for the rest.
+A machine of that fleet then reads the secrets `example-fleet` owns and the shared agent-tier
+ones, and asks for the rest. `ada@example.com` is on the Dispatch token it trades for, not on its
+machine login: her own secrets stay hers until she signs in on that machine.
 The broker refuses an exchange whose token is for another audience or does not verify, whose email
 Google does not hold verified, whose account no entry lists, or whose Compute Engine project or
 instance name the entry's pins do not allow, each `400 invalid_request` naming what did not match.
@@ -224,7 +228,7 @@ while it renews. Dispatch's machine-login page lists each machine's login, its h
 approver, and anyone signed in may revoke it, which ends that machine's enrollment; the machine
 trades again at its next call. A revoke ends the enrollment, not the Google identity token: someone
 who copied that token off the machine trades it again within its hour, under a machine login of
-their own key, and reads what that fleet's person may read. To end a copied token for certain, take
+their own key, and reads what that fleet's service may read. To end a copied token for certain, take
 the machine out of its fleet and wait out the hour, as [a copied machine
 token](#a-copied-machine-token) says. To stop a fleet trading, remove its entries and redeploy the
 broker: each machine's credential stops authenticating at its next call, and its next trade is
@@ -823,7 +827,7 @@ order by at;
 
 A copy's access token is bound to the copier's own key, so it cannot spend the machine's token, and
 its enrollment is its own: ending one ends nothing of the machine's. What it does get is whatever
-the fleet's person may read. Revoking the machine's login on Dispatch's machine-login page ends
+the fleet's service may read. Revoking the machine's login on Dispatch's machine-login page ends
 every enrollment that login made, but not the copied token: within its hour the copy trades again
 under a login of its own. To end it for certain, take the machine out of the fleet's settings and
 redeploy the broker: change `BROKER_VM_INSTANCES` so the glob no longer matches the machine's name,

@@ -34,10 +34,11 @@ has one of two kinds:
 
 A machine holding a Google identity token enrols a `session` too: it trades that token at the
 broker's token exchange, which answers a Dispatch access token and the machine login that trade
-minted, and the machine enrols with that login. It acts for the person its fleet's
-`BROKER_VM_EXCHANGE_ACCOUNTS` entry names, as a person's own machine does; a fleet whose entry
-names no person is refused the enrollment (`FLEET_NAMES_NO_PERSON`), since its token names a
-service and a secret is a person's.
+minted, and the machine enrols with that login. That login names the machine's fleet and no
+person, so the session acts for the fleet's service: it reads the secrets that service owns and
+the shared agent-tier ones, and no person's. The person a fleet's
+`BROKER_VM_EXCHANGE_ACCOUNTS` entry names reaches the Dispatch token alone; that person reaches
+their own secrets on the machine only by signing in on it.
 
 An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
 renews the sessions it registered, `agent-secrets renew` renews a box, and Legion's pod shim renews
@@ -243,9 +244,8 @@ proving the pods' account is what makes a pod the service's.
 per account, each account bound to one service; for each account, `BROKER_VM_PROJECTS` and
 `BROKER_VM_INSTANCES` may pin the one Compute Engine project its machines run in and the glob
 their instance names match. Those entries are what the broker's token exchange decides a machine's
-Google identity token on; a machine's own session acts for the person its
-`BROKER_VM_EXCHANGE_ACCOUNTS` entry names, so what it may read is that person's rather than the
-service's.
+Google identity token on, and a machine of a bound account is then that service's own session, so
+the service's secrets go to it at once.
 
 A service's secrets go to its own sessions and to no one else. That includes a person's own
 session, and a pod run under another service account even when a launcher logged in as the service

@@ -769,14 +769,16 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
 // its configuration: the audience and skew every request object is checked against, and, for each
-// service account, the registered service a pod running as it proves. A grant lasts the lifetime
-// its request signed, or until its session ends.
+// service account, the registered service a pod running as it proves, and for each Google
+// service account, the one a machine of that fleet proves. A grant lasts the lifetime its
+// request signed, or until its session ends.
 func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
 	m := &requests.Machine{
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
-		ServicesByAccount: cfg.ServicesByAccount,
-		Minters:           kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
+		ServicesByAccount:   cfg.ServicesByAccount,
+		VMServicesByAccount: cfg.VMServicesByAccount,
+		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
@@ -857,7 +859,6 @@ func machineCredentials(enr *enroll.Service) oauth.MachineCredentials {
 			Subject:      cred.Subject,
 			Service:      cred.Service,
 			Host:         cred.Host,
-			Operator:     cred.Operator,
 			TokenExpires: cred.Expires,
 			Thumbprint:   cred.Thumbprint,
 			JWK:          cred.JWK,

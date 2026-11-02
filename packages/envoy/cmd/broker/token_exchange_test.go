@@ -88,17 +88,30 @@ const (
 	// machineAudience is what a machine's Google identity token must carry here, its own beside
 	// the two above.
 	machineAudience = "https://broker.example/machines"
-	// fleetSecret is the agent-tier secret fleetPerson owns, which a machine of the pinned fleet
-	// is granted at once because its launcher credential enrols a session that acts for her.
-	// fleetSecretPath is its path in the store the broker reads, and fleetSecretValue what it
-	// holds.
-	fleetSecret      = "FLEET_SECRET"
-	fleetSecretPath  = "example/agent-secrets/fleet-secret"
-	fleetSecretValue = "fleet-secret-v1"
-	// fleetSecretKMSKey is the key the fake store records against that secret, a placeholder of
-	// the shape an ARN has.
-	fleetSecretKMSKey = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+	// The four secrets the machine half of this test asks for. personSecret is fleetPerson's
+	// own, which no machine gets without her sign-in; sharedSecret is shared and agent tier,
+	// which every session gets at once; pinnedFleetSecret and poolFleetSecret are the two
+	// fleets' services' own, each of which goes to that fleet's machines and to no one else.
+	personSecret      = "PERSON_SECRET"
+	sharedSecret      = "SHARED_SECRET"
+	pinnedFleetSecret = "PINNED_FLEET_SECRET"
+	poolFleetSecret   = "POOL_FLEET_SECRET"
+	// The values the fake store holds for them.
+	sharedSecretValue      = "shared-secret-v1"
+	pinnedFleetSecretValue = "pinned-fleet-secret-v1"
+	poolFleetSecretValue   = "pool-fleet-secret-v1"
+	// secretKMSKey is the key the fake store records against each, a placeholder of the shape an
+	// ARN has.
+	secretKMSKey = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 )
+
+// fakeSecret is one row of the store the broker reads with BROKER_FAKE_SECRETS_FILE: its path,
+// the owner tag that decides who gets it, and its value. Its exposed name is the last path
+// element upper-cased with its hyphens turned to underscores, which is what a request asks for.
+func fakeSecret(path, owner, value string) string {
+	return `{"name": "` + path + `", "kms_key_id": "` + secretKMSKey +
+		`", "tags": {"owner": "` + owner + `", "tier": "agent"}, "value": "` + value + `"}`
+}
 
 // TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt is the live proof of the exchange: the
 // real binary on a fresh schema, a pod's projected token exchanged with a DPoP proof of a key this
@@ -415,10 +428,15 @@ func TestAPodWritesOnlyUnderASessionRegisteredForIt(t *testing.T) {
 //
 // It is also the live proof of the bridge the same trade builds to the secrets routes: the
 // token answer names the launcher credential the exchange minted for the machine, that
-// credential's own key enrols a session at POST /v1/enrollments, and that session asks for and
-// reads the secret its fleet's person owns — the whole of what a machine does, from a metadata
-// token to a secret, with no step a person takes. The machine of the fleet that names no person
-// holds a credential too and is refused the enrollment, naming the setting that fixes it.
+// credential's own key enrols a session at POST /v1/enrollments, and that session reads the
+// secrets its fleet's service owns and the shared agent-tier ones — the whole of what a machine
+// does, from a metadata token to a secret, with no step a person takes.
+//
+// Secret authority follows the access token, so a machine reads no person's secret: the fleet
+// whose entry names a person is answered a Dispatch token that says so, and its machine is still
+// refused that person's own secret, which waits for her approval. A fleet whose entry names
+// nobody enrols just the same and reads its own service's secrets: no enrolment is refused for
+// want of a person.
 //
 // Each machine here signs with a key of its own, as two real machines do: a launcher credential
 // is keyed on the key it holds, so one key cannot be two machines' credentials.
@@ -543,36 +561,59 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 		}
 	})
 
-	t.Run("the credential the exchange minted enrols the machine's session and reads its secret", func(t *testing.T) {
+	t.Run("the credential the exchange minted enrols a session with its fleet's authority", func(t *testing.T) {
 		if fleetCredential == "" {
 			t.Fatal("the exchange named no credential, so there is nothing to enrol under")
 		}
 		machine := podBroker{t: t, base: "http://" + broker.Addr}
 		session := machine.enrolMachine(key, fleetCredential, "example-machine-1")
-		granted := machine.ask(session, fleetSecret)
-		if granted.State != "granted" || granted.GrantID == nil {
-			t.Fatalf("the machine's request for %s = %+v, want it granted at once: %s is an agent-tier secret %s owns, and the machine's session acts for her", fleetSecret, granted, fleetSecret, fleetPerson)
+		for _, want := range []struct {
+			secret, value, proves string
+		}{
+			{secret: pinnedFleetSecret, value: pinnedFleetSecretValue, proves: "its own fleet's service owns it"},
+			{secret: sharedSecret, value: sharedSecretValue, proves: "a shared agent-tier secret goes to every session at once"},
+		} {
+			granted := machine.ask(session, want.secret)
+			if granted.State != "granted" || granted.GrantID == nil {
+				t.Fatalf("the machine's request for %s = %+v, want it granted at once: %s", want.secret, granted, want.proves)
+			}
+			if got := machine.values(session, *granted.GrantID)[want.secret]; got != want.value {
+				t.Fatalf("the machine read %s = %q, want %q", want.secret, got, want.value)
+			}
 		}
-		if got := machine.values(session, *granted.GrantID)[fleetSecret]; got != fleetSecretValue {
-			t.Fatalf("the machine read %s = %q, want %q", fleetSecret, got, fleetSecretValue)
+		if denied := machine.ask(session, poolFleetSecret); denied.State != "denied" {
+			t.Fatalf("the machine's request for %s = %+v, want it denied: that secret is the other fleet's service's", poolFleetSecret, denied)
 		}
 	})
 
-	t.Run("a machine whose fleet names no person is refused the enrollment, naming the setting", func(t *testing.T) {
+	t.Run("a machine reads no person's secret, though its fleet entry names one", func(t *testing.T) {
+		// The whole point of the shape: this fleet's entry names fleetPerson, and the Dispatch
+		// token the same trade minted says so. Her secrets are still hers: the credential the
+		// exchange minted names no person, so the machine's session acts for its service, and
+		// asking for her secret opens an approval request to her rather than granting it.
+		machine := podBroker{t: t, base: "http://" + broker.Addr}
+		session := machine.enrolMachine(key, fleetCredential, "example-machine-person-check")
+		asked := machine.ask(session, personSecret)
+		if asked.State != "pending" || asked.GrantID != nil {
+			t.Fatalf("the machine's request for %s = %+v, want it pending with no grant: %s owns it and nobody has signed in on this machine", personSecret, asked, fleetPerson)
+		}
+	})
+
+	t.Run("a fleet that names no person enrols too, with its own service's authority", func(t *testing.T) {
 		if poolCredential == "" {
 			t.Fatal("the service-only exchange named no credential, so there is nothing to enrol under")
 		}
 		machine := podBroker{t: t, base: "http://" + broker.Addr}
-		_, status, answer := machine.enrolSession(poolKey, poolCredential, "example-pool-1")
-		var refusal struct{ Code, Error string }
-		machine.decode(answer, &refusal)
-		if status != http.StatusForbidden || refusal.Code != "FLEET_NAMES_NO_PERSON" {
-			t.Fatalf("the service-only machine's enrollment = %d %s, want 403 FLEET_NAMES_NO_PERSON: its token names a service Dispatch reads, and a secret is a person's", status, answer)
+		session := machine.enrolMachine(poolKey, poolCredential, "example-pool-1")
+		granted := machine.ask(session, poolFleetSecret)
+		if granted.State != "granted" || granted.GrantID == nil {
+			t.Fatalf("the service-only machine's request for %s = %+v, want it granted at once: no enrolment is refused for want of a person", poolFleetSecret, granted)
 		}
-		for _, names := range []string{"BROKER_VM_EXCHANGE_ACCOUNTS", poolFleetAccount} {
-			if !strings.Contains(refusal.Error, names) {
-				t.Errorf("the refusal reads %q, which does not name %q: it must say which entry to add", refusal.Error, names)
-			}
+		if got := machine.values(session, *granted.GrantID)[poolFleetSecret]; got != poolFleetSecretValue {
+			t.Fatalf("the service-only machine read %s = %q, want %q", poolFleetSecret, got, poolFleetSecretValue)
+		}
+		if denied := machine.ask(session, pinnedFleetSecret); denied.State != "denied" {
+			t.Fatalf("the service-only machine's request for %s = %+v, want it denied: that secret is the other fleet's service's", pinnedFleetSecret, denied)
 		}
 	})
 
@@ -661,13 +702,14 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 // two listed callers — dispatch, which reads a token back and ends one, and listener, which only
 // reads one back — the registrar that logs in as the deployment's daemon
 // and registers its pods' session names, and how long an access token it mints lasts.
-func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Issuer, accessSeconds int) []string {
+func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Issuer, accessSeconds int, extraSecrets ...string) []string {
 	t.Helper()
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
-	fakeSecrets := `{"secrets": [
-		{"name": "` + fleetSecretPath + `", "kms_key_id": "` + fleetSecretKMSKey + `", "tags": {"owner": "` + fleetPerson + `", "tier": "agent"}, "value": "` + fleetSecretValue + `"}
-	]}`
-	if err := os.WriteFile(fakeSecretsFile, []byte(fakeSecrets), 0o600); err != nil {
+	rows := append([]string{
+		fakeSecret("example/agent-secrets/person-secret", fleetPerson, "person-secret-v1"),
+		fakeSecret("example/agent-secrets/shared-secret", "shared", sharedSecretValue),
+	}, extraSecrets...)
+	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": [`+strings.Join(rows, ",\n")+`]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return []string{
@@ -693,7 +735,9 @@ func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Iss
 // and no person, which is what mints a token that names its service and nobody.
 func googleExchangeEnv(t *testing.T, databaseURL string, cluster, github, google *oidctest.Issuer, accessSeconds int) []string {
 	t.Helper()
-	return append(exchangeEnv(t, databaseURL, cluster, github, accessSeconds),
+	return append(exchangeEnv(t, databaseURL, cluster, github, accessSeconds,
+		fakeSecret("example/agent-secrets/pinned-fleet-secret", pinnedFleetService, pinnedFleetSecretValue),
+		fakeSecret("example/agent-secrets/pool-fleet-secret", poolFleetService, poolFleetSecretValue)),
 		"BROKER_GOOGLE_OIDC_ISSUER="+google.URL(),
 		"BROKER_GOOGLE_OIDC_AUDIENCE="+machineAudience,
 		"BROKER_VM_SERVICES="+pinnedFleetService+"="+pinnedFleetAccount+" "+poolFleetService+"="+poolFleetAccount,

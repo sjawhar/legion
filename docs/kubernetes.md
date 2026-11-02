@@ -4571,6 +4571,7 @@ An issued token carries these claims and no others:
   A `person` token carries none.
 
 - `credential_id` — the launcher credential the exchange minted for a machine presenting its Google identity token, which that machine enrols its session under.
+  That credential names the machine's fleet and no person, whatever the fleet's entry says, so the sessions it enrols read the secrets that service owns and no person's.
   Every other kind of subject token carries none.
 
 The subject token's own kind decides those claims (`packages/envoy/internal/broker/exchange/exchange.go`).

@@ -31,6 +31,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -170,6 +171,11 @@ type Machine struct {
 	// the service a pod whose projected token proved it runs as that account proves, when its
 	// launcher's service is that one (requester).
 	ServicesByAccount map[string]string
+	// VMServicesByAccount is BROKER_VM_SERVICES, keyed by a Google service account's email: the
+	// service a machine whose Google identity token the exchange took proves, when its launcher
+	// credential's service is that one (requester). It is read on every call, so an account
+	// dropped from the setting stops its machines' service secrets at their next one.
+	VMServicesByAccount map[string]string
 	// Minters maps each policy kind (policy.Kinds) to its Minter. A release never returns the
 	// stored value of a kind secret.
 	Minters map[string]Minter
@@ -198,22 +204,25 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 
 type enrollmentRow struct {
 	ID, Kind, Thumbprint string
-	// Operator is the person the session acts for, nil for a pod; Service is the service of the
-	// launcher credential that enrolled it, nil for a person's machine; Subject is a pod's
-	// verified service account, nil for a session; Host is that credential's host.
+	// Operator is the person the session acts for, nil for a pod and for a machine's own
+	// session; Service is the service of the launcher credential that enrolled it, nil for a
+	// person's machine; Subject is a pod's verified service account or the credential subject a
+	// machine's session recorded, nil for every other session; Host is that credential's host.
 	Operator, Service, Subject, Host *string
 	RuntimeID, Slot                  string
 }
 
 // requester is enrollment e as the policy sees it, read through q: the person it acts for (none
-// for a pod), its service, and the names that person withheld from it (RevokeByApprover's
-// withhold). Its service is its launcher credential's only when it is a pod and
-// ServicesByAccount maps the pod's verified service account to that same service: a machine
-// login's service name is the machine's own claim, which anyone signed in to Dispatch may
-// approve, so the account is what proves the service. Any other session has none.
+// for a pod, and none for a machine's own session), its service, and the names that person
+// withheld from it (RevokeByApprover's withhold). Its service is its launcher credential's only
+// when the account the enrollment recorded still proves it: `BROKER_SERVICES` for a pod's
+// verified service account, `BROKER_VM_SERVICES` for the Google account a machine's credential
+// subject names (exchange.MachineAccount). A machine login's service name is the machine's own
+// claim, which anyone signed in to Dispatch may approve, so the account is what proves the
+// service. Any other session has none.
 // It is read on every request, decision and release, so an account dropped from the
-// configuration stops an enrolled pod's service secrets at its next call, not at its lease's
-// end. A caller that decides
+// configuration stops an enrolled pod's or machine's service secrets at its next call, not at
+// its lease's end. A caller that decides
 // for the session reads it after locking the session's row, which RevokeByApprover holds while it
 // withholds, so a withhold either committed before the read or waits for the caller.
 func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (policy.Requester, error) {
@@ -226,9 +235,18 @@ func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (po
 		return policy.Requester{}, err
 	}
 	var service string
-	if e.Subject != nil && e.Service != nil && e.Kind == "pod" {
-		if bound, ok := m.ServicesByAccount[*e.Subject]; ok && bound == *e.Service {
-			service = *e.Service
+	if e.Subject != nil && e.Service != nil {
+		switch e.Kind {
+		case "pod":
+			if bound, ok := m.ServicesByAccount[*e.Subject]; ok && bound == *e.Service {
+				service = *e.Service
+			}
+		case "session":
+			if account, machine := exchange.MachineAccount(*e.Subject); machine {
+				if bound, ok := m.VMServicesByAccount[account]; ok && bound == *e.Service {
+					service = *e.Service
+				}
+			}
 		}
 	}
 	return policy.Requester{Operator: deref(e.Operator), Service: service, Withheld: withheld}, nil

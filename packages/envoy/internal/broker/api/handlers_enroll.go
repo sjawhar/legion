@@ -18,7 +18,8 @@ import (
 // (enroll.Enrollment.Slot), chosen by the launcher whose proof authenticates the call.
 type createEnrollmentBody struct {
 	// What the session is: "session" (an agent session on a machine its person logged in, or a
-	// machine enrolling under the launcher credential its token exchange minted) or "pod".
+	// machine enrolling under the launcher credential its token exchange minted, which acts for
+	// that machine's fleet rather than for a person) or "pod".
 	Kind string `json:"kind"`
 	// The session's runtime: a pod's UID, or whatever names the session on its machine (the
 	// helper's host:pid:start time, a container's id). A launcher enrolls one live session per
@@ -82,9 +83,9 @@ type selfResponse struct {
 
 // createEnrollment authenticates by launcher proof now (payload carries "lid"), never a bearer
 // token; cred is the launcher credential's own identity, read by server.authenticate from the
-// verified proof's launcher id. A machine whose fleet's entry names no person holds a credential
-// with no person for its sessions to act for: 403 FLEET_NAMES_NO_PERSON, whose message names the
-// BROKER_VM_EXCHANGE_ACCOUNTS entry to add.
+// verified proof's launcher id. A machine's own credential enrols a session that carries no
+// operator and acts for its fleet's service, as a pod's enrolment does for the service its
+// token proves.
 func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	var body createEnrollmentBody
 	if !readJSON(w, r, &body, "INVALID_ENROLLMENT") {
@@ -111,9 +112,6 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 		return
 	case errors.Is(err, enroll.ErrInvalidSlot):
 		writeError(w, http.StatusBadRequest, "INVALID_SLOT", err.Error())
-		return
-	case errors.Is(err, enroll.ErrFleetNamesNoPerson):
-		writeError(w, http.StatusForbidden, "FLEET_NAMES_NO_PERSON", err.Error())
 		return
 	case errors.Is(err, enroll.ErrOperatorMismatch):
 		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())

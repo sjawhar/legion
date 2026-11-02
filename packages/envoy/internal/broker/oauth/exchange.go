@@ -215,10 +215,6 @@ type MachineCredential struct {
 	// credential keyed by a subject carries one, which is what says the login is a service's
 	// and no person approved it.
 	Service string
-	// Operator is the person the machine's fleet writes for, and is what makes its enrollments
-	// that person's sessions, exactly as a dev box's machine login does. It is empty for a fleet
-	// whose entry names no person, whose token names its service instead.
-	Operator string
 	// Host is the machine as an operator reads it on their machine-login page:
 	// <project>/<zone>/<instance name> for a machine minted on a Compute Engine instance, and
 	// the account for one minted anywhere else.
@@ -677,10 +673,11 @@ func (p *Provider) liveCredential(ctx context.Context, subjectToken map[string]a
 //
 // The credential is keyed by the machine (exchange.MachineSubject) and bound to the key the
 // request's DPoP proof presented, so a machine's next exchange moves the one credential it holds
-// and no machine can move another's. Its operator is the person the fleet's entry names, which
-// is what makes the machine's enrollments that person's sessions, as a dev box's machine login
-// does; a fleet listed with no person has none, and such a machine holds a credential that
-// enrolls nothing until its entry names one.
+// and no machine can move another's. It names its fleet's service and no person, whatever the
+// fleet's entry says: secret authority follows the access token, so a machine's sessions reach
+// its service's secrets and the shared agent-tier ones and no person's. The person a fleet entry
+// names reaches the Dispatch token's claims alone; a person reaches their own secrets on that
+// machine only through their own sign-in.
 //
 // A key another live credential holds is invalid_grant rather than a server error: the broker's
 // state refuses it and the machine fixes it by making a key of its own, which is what every
@@ -697,11 +694,9 @@ func (p *Provider) machineCredential(ctx context.Context, r *http.Request, sessi
 	if !ok {
 		return "", MachineCredential{}, oauth2.ErrInvalidRequest.WithHint("The subject token names no expiry, so there is nothing to expire the machine's credential with.")
 	}
-	person, _ := session.Extra[ClaimPerson].(string)
 	cred := MachineCredential{
 		Subject:    exchange.MachineSubject(identity, thumbprint),
 		Service:    session.Fleet,
-		Operator:   person,
 		Host:       machineHost(identity),
 		Thumbprint: thumbprint,
 		JWK:        key,

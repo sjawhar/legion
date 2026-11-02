@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -17,12 +16,11 @@ import (
 const (
 	machineAccountEmail = "example-fleet@example-project.iam.gserviceaccount.com"
 	machineFleet        = "example-fleet"
-	machinePerson       = "ada@example.com"
 )
 
 // issueMachineCredential mints or moves the credential of the machine subject names, in a
 // transaction of its own, the way the exchange's seam does inside its own.
-func issueMachineCredential(t *testing.T, svc *Service, subject, operator, thumbprint string) string {
+func issueMachineCredential(t *testing.T, svc *Service, subject, thumbprint string) string {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := svc.Store.Pool.Begin(ctx)
@@ -34,7 +32,6 @@ func issueMachineCredential(t *testing.T, svc *Service, subject, operator, thumb
 		Subject:      subject,
 		Service:      machineFleet,
 		Host:         "example-project/example-zone-a/example-machine-1",
-		Operator:     operator,
 		TokenExpires: time.Now().Add(time.Hour),
 		Thumbprint:   thumbprint,
 		JWK:          json.RawMessage(`{"kty":"EC"}`),
@@ -65,7 +62,7 @@ func TestAMachinesCredentialAuthenticatesWhileItsAccountIsListed(t *testing.T) {
 	keyed := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-pool-machine")
 
 	for _, subject := range []string{onInstance, keyed} {
-		id := issueMachineCredential(t, svc, subject, machinePerson, "tp-"+subject)
+		id := issueMachineCredential(t, svc, subject, "tp-"+subject)
 		thumbprint, live, err := svc.AuthenticateLauncher(ctx, id)
 		if err != nil || !live || thumbprint != "tp-"+subject {
 			t.Fatalf("AuthenticateLauncher(%s) = %q, %t, %v; want its key and live", subject, thumbprint, live, err)
@@ -83,17 +80,17 @@ func TestAMachinesCredentialAuthenticatesWhileItsAccountIsListed(t *testing.T) {
 }
 
 // TestAMachinesSecondExchangeMovesItsOneCredential: the subject holds one credential, so a
-// machine that exchanges again moves its key, its person and its expiry under the same id rather
-// than taking a second row. A machine of the same account with a key of its own holds a
-// credential of its own.
+// machine that exchanges again moves its key and its expiry under the same id rather than taking
+// a second row. A machine of the same account with a key of its own holds a credential of its
+// own.
 func TestAMachinesSecondExchangeMovesItsOneCredential(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
 	svc.VMServicesByAccount = map[string]string{machineAccountEmail: machineFleet}
 	subject := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-one")
 
-	first := issueMachineCredential(t, svc, subject, machinePerson, "tp-one")
-	again := issueMachineCredential(t, svc, subject, machinePerson, "tp-one-rotated")
+	first := issueMachineCredential(t, svc, subject, "tp-one")
+	again := issueMachineCredential(t, svc, subject, "tp-one-rotated")
 	if again != first {
 		t.Fatalf("the machine's second exchange = credential %s, want the one it already holds, %s", again, first)
 	}
@@ -102,46 +99,95 @@ func TestAMachinesSecondExchangeMovesItsOneCredential(t *testing.T) {
 		t.Fatalf("AuthenticateLauncher after the second exchange = %q, %t, %v; want the key it last proved", thumbprint, live, err)
 	}
 	other := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-two")
-	if second := issueMachineCredential(t, svc, other, machinePerson, "tp-two"); second == first {
+	if second := issueMachineCredential(t, svc, other, "tp-two"); second == first {
 		t.Fatalf("a second machine of %s took the first's credential %s; each key holds its own", machineAccountEmail, first)
 	}
 }
 
-// TestAMachineEnrolsASessionUnderItsFleetsPerson: the credential the exchange minted is the
-// bridge to every secrets route. It enrols a session for the person its fleet's entry names,
-// exactly as a dev box's machine login does; a fleet whose entry names none is refused
-// ErrFleetNamesNoPerson, whose message names the setting to add and the account to add it for.
-func TestAMachineEnrolsASessionUnderItsFleetsPerson(t *testing.T) {
+// TestAMachineEnrolsASessionThatActsForItsFleetAndNoPerson: the credential the exchange minted
+// is the bridge to every secrets route. It carries its fleet's service and no person, so the
+// session it enrols carries no operator either and records the credential's subject, which is
+// what makes the session its fleet's and nobody's (requests.Machine.requester). Nothing here is
+// refused for want of a person: secret authority follows the access token, and a person reaches
+// their own secrets on that machine only through their own sign-in.
+func TestAMachineEnrolsASessionThatActsForItsFleetAndNoPerson(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
 	svc.VMServicesByAccount = map[string]string{machineAccountEmail: machineFleet}
-	subject := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-person")
+	subject := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-machine")
 
-	id := issueMachineCredential(t, svc, subject, machinePerson, "tp-person")
-	cred, err := svc.Credential(ctx, id)
+	cred, err := svc.Credential(ctx, issueMachineCredential(t, svc, subject, "tp-machine"))
 	if err != nil {
 		t.Fatalf("Credential: %v", err)
+	}
+	if cred.Operator != nil || cred.Service == nil || *cred.Service != machineFleet {
+		t.Fatalf("the machine's credential = operator %v, service %v; want its fleet's service and no person", cred.Operator, cred.Service)
 	}
 	enrolled, err := svc.Create(ctx, cred, Enrollment{Kind: "session", RuntimeID: "machine-1", Thumbprint: "tp-session"})
 	if err != nil {
 		t.Fatalf("a machine's session enrollment: %v", err)
 	}
-	if enrolled.Operator == nil || *enrolled.Operator != machinePerson {
-		t.Fatalf("the enrollment's operator = %v, want the person its fleet's entry names, %s", enrolled.Operator, machinePerson)
+	if enrolled.Operator != nil {
+		t.Errorf("the enrollment's operator = %v, want none: a machine acts for its fleet, never for a person", *enrolled.Operator)
 	}
+	if enrolled.Subject == nil || *enrolled.Subject != subject {
+		t.Fatalf("the enrollment's subject = %v, want the credential's %q: it is what proves the fleet", enrolled.Subject, subject)
+	}
+}
 
-	serviceOnly := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-service-only")
-	withoutPerson, err := svc.Credential(ctx, issueMachineCredential(t, svc, serviceOnly, "", "tp-service-only"))
+// TestOnlyAMachinesOwnCredentialEnrolsItsSession: a Kubernetes service's token login enrols the
+// pods its tokens prove and no session, and one machine's credential never ends another
+// machine's session.
+func TestOnlyAMachinesOwnCredentialEnrolsItsSession(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	svc.VMServicesByAccount = map[string]string{machineAccountEmail: machineFleet}
+	svc.ServiceLogins = map[string]string{"system:serviceaccount:example:example-daemon": "legion-daemon"}
+
+	daemon, err := svc.Credential(ctx, func() string {
+		tx, err := svc.Store.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		id, err := svc.IssueTokenLoginTx(ctx, tx, TokenLogin{
+			Subject: "system:serviceaccount:example:example-daemon", Service: "legion-daemon",
+			Host: "example/example-daemon", TokenExpires: time.Now().Add(time.Hour),
+			Thumbprint: "tp-daemon", JWK: json.RawMessage(`{"kty":"EC"}`), Expires: time.Now().Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("IssueTokenLoginTx(the daemon): %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return id.String()
+	}())
 	if err != nil {
 		t.Fatalf("Credential: %v", err)
 	}
-	_, err = svc.Create(ctx, withoutPerson, Enrollment{Kind: "session", RuntimeID: "machine-2", Thumbprint: "tp-session-2"})
-	if !errors.Is(err, ErrFleetNamesNoPerson) {
-		t.Fatalf("a session under a fleet that names no person = %v, want ErrFleetNamesNoPerson", err)
+	if _, err := svc.Create(ctx, daemon, Enrollment{Kind: "session", RuntimeID: "daemon-1", Thumbprint: "tp-daemon-session"}); !errors.Is(err, ErrOperatorMismatch) {
+		t.Fatalf("a Kubernetes service login's session enrollment = %v, want ErrOperatorMismatch: it enrols the pods its tokens prove", err)
 	}
-	for _, names := range []string{"BROKER_VM_EXCHANGE_ACCOUNTS", machineAccountEmail} {
-		if !strings.Contains(err.Error(), names) {
-			t.Errorf("the refusal reads %q, which does not name %q", err, names)
-		}
+
+	one := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-one")
+	two := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-two")
+	credOne, err := svc.Credential(ctx, issueMachineCredential(t, svc, one, "tp-one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credTwo, err := svc.Credential(ctx, issueMachineCredential(t, svc, two, "tp-two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrolled, err := svc.Create(ctx, credOne, Enrollment{Kind: "session", RuntimeID: "machine-one", Thumbprint: "tp-session-one"})
+	if err != nil {
+		t.Fatalf("the first machine's session enrollment: %v", err)
+	}
+	if err := svc.Revoke(ctx, credTwo, enrolled.ID.String(), "launcher:two"); !errors.Is(err, ErrNotEnrollingCredential) {
+		t.Fatalf("another machine's revoke of this one's session = %v, want ErrNotEnrollingCredential", err)
+	}
+	if err := svc.Revoke(ctx, credOne, enrolled.ID.String(), "launcher:one"); err != nil {
+		t.Fatalf("the machine's own revoke of its session: %v", err)
 	}
 }

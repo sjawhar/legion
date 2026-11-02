@@ -4198,9 +4198,12 @@ a real mismatch ends with the lease, after which the renewal is `ENROLLMENT_NOT_
 Its iat/key/URL failures remain `PROOF_INVALID` and retry.
 Other session routes map a not-live proof to `PROOF_INVALID` as before.
 A machine that presented its Google identity token to the RFC 8693 token exchange enrols a `session` under the launcher credential that exchange minted for it (`oauth.ExchangeConfig.MachineCredentials`, wired to `enroll.Service.IssueTokenLoginTx` in `cmd/broker`), signing the enrollment with the very key its DPoP proof presented.
-It needs no kind and no token of its own here: the credential is the proof, and its `operator` is the person its fleet's `BROKER_VM_EXCHANGE_ACCOUNTS` entry names, so its sessions are that person's exactly as a dev box's machine login's are.
-A machine whose fleet's entry names no person holds a credential with no person for its sessions to act for, so `POST /v1/enrollments` refuses it `403 FLEET_NAMES_NO_PERSON` (`enroll.ErrFleetNamesNoPerson`), naming the account and the setting to add it to:
-its access token names a service, which Dispatch and the Envoy listener read, and a secret is a person's.
+It needs no kind and no token of its own here: the credential is the proof.
+That credential names its fleet's service and **no operator**, whatever its `BROKER_VM_EXCHANGE_ACCOUNTS` entry says, so the session it enrols carries none either and records the credential's `subject` instead, which is what makes it its fleet's (`requests.Machine.requester` reads `BROKER_VM_SERVICES` over the account `exchange.MachineAccount` takes out of that subject, as it reads `BROKER_SERVICES` over a pod's).
+Secret authority follows the access token: a machine reads the secrets its service owns and the shared agent-tier ones, never a person's, and a person reaches their own on that machine only through their own sign-in.
+A fleet entry's person and project reach the Dispatch token's claims alone.
+`authorized` is what holds that boundary: a credential with no operator may act on a pod or on a machine's own session (`machineCredential`, a credential with a service, no operator and a subject that reads as a Google account) and on nothing else, and such an enrollment is ended only by the credential that made it (`ErrNotEnrollingCredential`), so one machine of a fleet never ends another's.
+No enrollment is refused for want of a person.
 `internal/broker/policy` decides who may have which secret from the secret's own tags (below);
 `internal/broker/proof` authenticates a session's or a launcher's signed request against its live enrollment or credential;
 `internal/broker/machine` decides typed-code machine logins, logs services in with their projected Kubernetes tokens, and mints the launcher credentials both issue;
@@ -4639,8 +4642,8 @@ each pin is optional per account and the two go together, so an account named in
 an account pinned in neither takes its machines wherever they run, a token carrying no `google.compute_engine` claims included, which is what a token minted through a workload identity pool and a token from a Kubernetes pod's metadata server both carry), `BROKER_VM_EXCHANGE_ACCOUNTS` (optional;
 whitespace-separated `<service account email>=<project>=<person>[=<session>]` entries, the grammar `BROKER_EXCHANGE_ACCOUNTS` uses for a pod, such as `example-fleet@example-project.iam.gserviceaccount.com=EXAMPLE=ada@example.com`;
 the token the exchange mints for a machine of that account may write that one project, acts for that person, and writes under the session the entry fixes, an entry that fixes none requiring the machine to name its own, the session everything after the third `=`;
-each account is named at most once and must be one `BROKER_VM_SERVICES` lists, and an account that setting lists and this one does not gets a token that names its service and no person at all, which Dispatch and the Envoy listener read and which enrols nothing:
-a machine of such a fleet is refused `POST /v1/enrollments` `403 FLEET_NAMES_NO_PERSON`, naming the account and this setting, so it reaches no secret until an entry here names the person its sessions act for;
+each account is named at most once and must be one `BROKER_VM_SERVICES` lists, and an account that setting lists and this one does not gets a token that names its service and no person at all, which Dispatch and the Envoy listener read;
+either way the entry reaches the Dispatch token alone and never a secret, since the credential the exchange mints names no person and the machine's sessions are its service's;
 `Config.ExchangeGoogleAccounts` is what the four settings together make, one `exchange.GoogleEntry` per listed account, which is the whole of what the exchange decides a machine's token on;
 unset, every listed account's machines get such a service-only token), `BROKER_EXCHANGE_K8S_AUDIENCE` (optional;
 the audience a pod's projected token must carry to be exchanged for a Dispatch access token

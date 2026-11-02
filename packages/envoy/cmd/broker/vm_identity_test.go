@@ -171,9 +171,10 @@ func TestAStandInIssuerIsDiscoveredInGooglesPlace(t *testing.T) {
 	}
 }
 
-// TestTheEnrollmentServiceCarriesTheMachineServices pins the one place the broker hands
-// BROKER_VM_SERVICES to AuthenticateLauncher, without which a machine's own launcher credential
-// stops authenticating at its next call.
+// TestTheEnrollmentServiceCarriesTheMachineServices pins the two places the broker hands
+// BROKER_VM_SERVICES on: AuthenticateLauncher, without which a machine's own launcher credential
+// stops authenticating at its next call, and the request decisions, without which a machine's
+// session is never its fleet's.
 func TestTheEnrollmentServiceCarriesTheMachineServices(t *testing.T) {
 	cfg := vmConfig(t, "example-vm-audience")
 	enr := &enroll.Service{VMServicesByAccount: cfg.VMServicesByAccount}
@@ -183,6 +184,9 @@ func TestTheEnrollmentServiceCarriesTheMachineServices(t *testing.T) {
 	m := newRequestMachine(cfg, nil, nil, nil, nil)
 	if want := map[string]string{"system:serviceaccount:example:example-sa": "example-service"}; !maps.Equal(m.ServicesByAccount, want) {
 		t.Fatalf("request Machine's ServicesByAccount = %v, want %v", m.ServicesByAccount, want)
+	}
+	if want := map[string]string{exampleVMAccount: "example-fleet"}; !maps.Equal(m.VMServicesByAccount, want) {
+		t.Fatalf("request Machine's VMServicesByAccount = %v, want %v: without it no machine's session is ever its fleet's", m.VMServicesByAccount, want)
 	}
 }
 
