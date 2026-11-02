@@ -84,6 +84,29 @@ export type IssueTab =
   | "artifacts"
   | "activity";
 
+/** The issue tabs whose whole route is the tab itself: no block, no slug, no id. Each one is
+ *  parsed from the segment of its own name, built as `<issue>/<kind>`, shown as `<KEY> <kind>`
+ *  and is the tab of its own name, so the chains below hold the five in one arm rather than one
+ *  apiece and a sixth tab is this list. The spec and the conversation stay out of it: a spec
+ *  route carries a block, and the conversation is written `log` in a reference and
+ *  `conversation` in a path. */
+const PLAIN_ISSUE_TABS = ["verification", "plan", "activity", "children", "artifacts"] as const;
+
+type PlainIssueTab = (typeof PLAIN_ISSUE_TABS)[number];
+
+/** The plain tab a path segment names, or `undefined` for anything else. */
+function plainIssueTab(value: string): PlainIssueTab | undefined {
+  return PLAIN_ISSUE_TABS.find((tab) => tab === value);
+}
+
+type PlainIssueRoute = Extract<IssueRoute, { kind: PlainIssueTab }>;
+
+/** Whether the route is one of those tabs, narrowing it for the builders below and leaving the
+ *  rest of the union to the arms that follow. */
+function isPlainIssueRoute(route: DispatchRoute | AgentArtifactRoute): route is PlainIssueRoute {
+  return PLAIN_ISSUE_TABS.some((tab) => tab === route.kind);
+}
+
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
 const issueKeyOnlyPattern = new RegExp(`^${issueKeyPattern}$`);
@@ -134,23 +157,11 @@ export function issueTabForRoute(
   route: IssueRoute,
   artifact: Pick<Artifact, "kind" | "primary"> | undefined
 ): IssueTab {
-  if (route.kind === "children") {
-    return "children";
+  if (isPlainIssueRoute(route)) {
+    return route.kind;
   }
   if (route.kind === "conversation") {
     return "conversation";
-  }
-  if (route.kind === "activity") {
-    return "activity";
-  }
-  if (route.kind === "artifacts") {
-    return "artifacts";
-  }
-  if (route.kind === "verification") {
-    return "verification";
-  }
-  if (route.kind === "plan") {
-    return "plan";
   }
   if (route.kind === "artifact") {
     return isPrimaryDocumentArtifactRoute(route, artifact) ? "spec" : "artifacts";
@@ -244,23 +255,12 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   if (target === "spec") {
     return { key, kind: "spec" };
   }
-  if (target === "verification") {
-    return { key, kind: "verification" };
-  }
-  if (target === "plan") {
-    return { key, kind: "plan" };
+  const plain = plainIssueTab(target);
+  if (plain !== undefined) {
+    return { key, kind: plain };
   }
   if (legacyLogReferencePattern.test(target) || target === "conversation") {
     return { key, kind: "conversation" };
-  }
-  if (target === "activity") {
-    return { key, kind: "activity" };
-  }
-  if (target === "children") {
-    return { key, kind: "children" };
-  }
-  if (target === "artifacts") {
-    return { key, kind: "artifacts" };
   }
   const artifact = target.match(issueArtifactReferencePattern);
   if (artifact !== null) {
@@ -358,23 +358,12 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   if (target === "spec") {
     return { key, kind: "spec" };
   }
-  if (target === "verification") {
-    return { key, kind: "verification" };
-  }
-  if (target === "plan") {
-    return { key, kind: "plan" };
+  const plain = plainIssueTab(target);
+  if (plain !== undefined) {
+    return { key, kind: plain };
   }
   if (target === "conversation") {
     return { key, kind: "conversation" };
-  }
-  if (target === "activity") {
-    return { key, kind: "activity" };
-  }
-  if (target === "children") {
-    return { key, kind: "children" };
-  }
-  if (target === "artifacts") {
-    return { key, kind: "artifacts" };
   }
   const artifact = target.match(/^artifacts?\/([^/?#\s]+)$/);
   if (artifact !== null) {
@@ -598,25 +587,13 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec${block}`;
   }
-  if (route.kind === "verification") {
-    return `${issue}/verification`;
-  }
-  if (route.kind === "plan") {
-    return `${issue}/plan`;
+  if (isPlainIssueRoute(route)) {
+    return `${issue}/${route.kind}`;
   }
   // The conversation keeps the `log` spelling every reference written before the Activity tab
   // existed used; activity, newer, is spelled as its own path is.
   if (route.kind === "conversation") {
     return `${issue}/log`;
-  }
-  if (route.kind === "activity") {
-    return `${issue}/activity`;
-  }
-  if (route.kind === "children") {
-    return `${issue}/children`;
-  }
-  if (route.kind === "artifacts") {
-    return `${issue}/artifacts`;
   }
   if (route.kind === "artifact") {
     return `${issue}/artifact/${encodeURIComponent(route.slug)}${
@@ -781,23 +758,16 @@ export function shortForm(route: DispatchReferenceRoute): string {
     const base = `${route.project}/${route.slug}`;
     return route.item === undefined ? `${base}${block}` : `${base} ${route.item.kind}${block}`;
   }
+  if (isPlainIssueRoute(route)) {
+    return `${route.key} ${route.kind}`;
+  }
   switch (route.kind) {
     case "issue":
       return route.key;
     case "spec":
       return `${route.key} spec${block}`;
-    case "verification":
-      return `${route.key} verification`;
-    case "plan":
-      return `${route.key} plan`;
     case "conversation":
       return `${route.key} log`;
-    case "activity":
-      return `${route.key} activity`;
-    case "children":
-      return `${route.key} children`;
-    case "artifacts":
-      return `${route.key} artifacts`;
     case "artifact":
       return `${route.key} ${route.slug}${block}`;
     case "ask":
@@ -855,23 +825,11 @@ export function buildIssuePath(route: IssueRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec`;
   }
-  if (route.kind === "verification") {
-    return `${issue}/verification`;
-  }
-  if (route.kind === "plan") {
-    return `${issue}/plan`;
+  if (isPlainIssueRoute(route)) {
+    return `${issue}/${route.kind}`;
   }
   if (route.kind === "conversation") {
     return `${issue}/conversation`;
-  }
-  if (route.kind === "activity") {
-    return `${issue}/activity`;
-  }
-  if (route.kind === "children") {
-    return `${issue}/children`;
-  }
-  if (route.kind === "artifacts") {
-    return `${issue}/artifacts`;
   }
   if (route.kind === "artifact") {
     const artifact = `${issue}/artifacts/${encodeURIComponent(route.slug)}`;

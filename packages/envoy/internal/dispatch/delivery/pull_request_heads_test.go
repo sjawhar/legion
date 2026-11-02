@@ -12,8 +12,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// seedHeadIssue records one issue the attribution can name, with a project of its own. The key
-// is HEAD-<n>, since an issue's number is its key's.
+// seedHeadIssue records one issue the attribution can name, with a project of its own, mapped
+// to acme/widgets by default: a head row is attributed only to an issue that resolves to the
+// pull request's own repository (headAttribution), so an issue of no repository is attributed
+// to nobody. The key is HEAD-<n>, since an issue's number is its key's.
 func seedHeadIssue(t *testing.T, ctx context.Context, pool *store.Pool, number int) string {
 	t.Helper()
 	key := fmt.Sprintf("HEAD-%d", number)
@@ -21,6 +23,13 @@ func seedHeadIssue(t *testing.T, ctx context.Context, pool *store.Pool, number i
 		insert into projects (key, name) values ('HEAD', 'Heads') on conflict (key) do nothing
 	`); err != nil {
 		t.Fatalf("seed the project: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into repo_projects (repo, project, created_by, is_default)
+		values ('acme/widgets', 'HEAD', '{"kind":"system","id":"test"}'::jsonb, true)
+		on conflict (repo) do nothing
+	`); err != nil {
+		t.Fatalf("map the repository to the project: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 		insert into issues (key, project_key, number, title, status, created_by, rank)
@@ -164,6 +173,37 @@ func TestReadThroughCommitPullsStoresEveryPullRequestNamedForACommit(t *testing.
 	other, err := HeadAttributedTo(ctx, pool, "HEAD-1", "5555555555555555555555555555555555555555")
 	if err != nil || other {
 		t.Fatalf("HeadAttributedTo(HEAD-1) = %v, %v; want false", other, err)
+	}
+}
+
+// A pull request's title, body and branch are text any account that can open one writes, and an
+// attributed head row is what makes a `before_merge` result read current, so an issue that
+// resolves to another repository attributes nothing: the row is still written, with no issue.
+func TestAPullRequestNamingAnIssueOfAnotherRepositoryAttributesNobody(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	seedHeadIssue(t, ctx, pool, 3)
+
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/other/commits/{sha}/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{map[string]any{
+			"number": 11, "title": "HEAD-3 the work", "body": "", "html_url": "https://github.com/acme/other/pull/11",
+			"state": "open", "merged": false, "updated_at": "2026-02-01T00:00:00Z",
+			"head": map[string]any{"ref": "legion/HEAD-3", "sha": "7777777777777777777777777777777777777777"},
+			"base": map[string]any{"ref": "main"},
+		}})
+	})
+	if _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/other",
+		"7777777777777777777777777777777777777777", time.Now()); err != nil {
+		t.Fatalf("read through the commit's pull requests: %v", err)
+	}
+	head := readHead(t, ctx, pool, "acme/other", 11)
+	if head.IssueKey != nil || head.AttributionSource != "none" {
+		t.Fatalf("#11 = %+v, want a row attributed to nobody: HEAD-3 resolves to acme/widgets", head)
+	}
+	attributed, err := HeadAttributedTo(ctx, pool, "HEAD-3", "7777777777777777777777777777777777777777")
+	if err != nil || attributed {
+		t.Fatalf("HeadAttributedTo(HEAD-3) = %v, %v; want false", attributed, err)
 	}
 }
 

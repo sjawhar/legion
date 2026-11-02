@@ -55,7 +55,7 @@ type recordedResult struct {
 
 type issueResults struct {
 	Issue                  string             `json:"issue"`
-	VerificationArtifactID *string            `json:"verification_artifact_id"`
+	VerificationArtifactID string             `json:"verification_artifact_id"`
 	Checks                 []model.CheckBlock `json:"checks"`
 }
 
@@ -156,10 +156,9 @@ func TestResultRecordsAgainstAChecksOfTheIssueAndOfAnAncestor(t *testing.T) {
 	if event["result_id"] != childResult.Result.ID || event["issue"] != child.Key || event["check_issue"] != parent.Key {
 		t.Fatalf("result.recorded payload = %+v, want the child's result on the parent's check", event)
 	}
-
 	// Both results stand under the parent's check, newest first.
 	read := readResults(t, handler, parent.Key)
-	if read.VerificationArtifactID == nil || len(read.Checks) != 2 {
+	if read.VerificationArtifactID == "" || len(read.Checks) != 2 {
 		t.Fatalf("the parent's results read = %+v, want its Verification document and two checks", read)
 	}
 	if results := checkOf(t, read, "k1").Results; len(results) != 2 || results[0].ID != childResult.Result.ID {
@@ -457,5 +456,55 @@ func TestRecordingAResultReadsThroughToAPullRequestDispatchHasNoEventFor(t *test
 	}
 	if got := currencyOf(t, readResults(t, handler, issue.Key), "k1", recorded.Result.ID); got != model.CurrencyCurrent {
 		t.Fatalf("a result at a head the read-through learned = %q, want current", got)
+	}
+}
+
+// The answer to a record carries the moment the row was written, not the zero time: created_at
+// is a declared field of the contract, and a reader takes it for when the run happened.
+func TestRecordedResultAnswersTheTimeItWasStored(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "RESA", "Stored at", "A spec\n")
+	uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "verification.md", twoChecks)
+
+	recorded := decodeBody[recordedResult](t, recordResult(t, handler, issue.Key, resultBody("k1", "pass", headCommit, nil)))
+	if recorded.Result.CreatedAt.IsZero() {
+		t.Fatalf("the record's answer carries created_at %s, want the moment the row was written", recorded.Result.CreatedAt)
+	}
+	var stored time.Time
+	if err := database.Pool.QueryRow(context.Background(),
+		`select created_at from check_results where id = $1::uuid`, recorded.Result.ID).Scan(&stored); err != nil {
+		t.Fatalf("read the stored result: %v", err)
+	}
+	if !recorded.Result.CreatedAt.Equal(stored) {
+		t.Fatalf("the record's answer carries created_at %s, want the row's %s", recorded.Result.CreatedAt, stored)
+	}
+	if read := checkOf(t, readResults(t, handler, issue.Key), "k1").Results; len(read) != 1 || !read[0].CreatedAt.Equal(stored) {
+		t.Fatalf("the results read carries %+v, want the one result at %s", read, stored)
+	}
+}
+
+// A child proving its parent's check records the result on the child, and the child's pull
+// request is what carries that work: its head makes the child's result current. The parent's
+// own result at that same commit is not made current by it, since no pull request of the
+// parent's holds the commit — the rule that a child's pull request never answers for a root's
+// own result still stands.
+func TestChildsResultAgainstAnAncestorsCheckIsCurrentAtTheChildsHead(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	parent := createInteractionIssue(t, handler, "RESX", "Parent", "A spec\n")
+	uploadDocument(t, handler, "/api/v1/issues/"+parent.Key, "verification.md", siblingChecks)
+	child := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues",
+		map[string]any{"project": "RESX", "title": "Child", "parent": parent.Key, "force": true}, "alice"))
+	// One open pull request, attributed to the child, at the commit both results name.
+	writeHead(t, database, "acme/widgets", 21, headCommit, "open", child.Key)
+
+	fromChild := decodeBody[recordedResult](t, recordResult(t, handler, child.Key, resultBody("k1", "pass", headCommit, nil)))
+	fromParent := decodeBody[recordedResult](t, recordResult(t, handler, parent.Key, resultBody("k1", "pass", headCommit, nil)))
+
+	read := readResults(t, handler, parent.Key)
+	if got := currencyOf(t, read, "k1", fromChild.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("the child's result at the child's own head = %q, want current", got)
+	}
+	if got := currencyOf(t, read, "k1", fromParent.Result.ID); got != model.CurrencyOlder {
+		t.Fatalf("the parent's own result at the child's head = %q, want older", got)
 	}
 }

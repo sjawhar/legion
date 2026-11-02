@@ -2764,8 +2764,8 @@ describe("executeDispatchTool", () => {
     expect(childrenOnly.text).toContain("Progress: children 2/5\n");
   });
 
-  test("dispatch_read prints one Coverage line per gap, and none when the read is unavailable", async () => {
-    const read = async (coverage: Record<string, unknown> | null) => {
+  test("dispatch_read prints one Coverage line per gap, and names a read it could not make", async () => {
+    const read = async (coverage: Record<string, unknown> | null | number) => {
       const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
         const pathname = new URL(String(url)).pathname;
         if (pathname === "/api/v1/issues/DSP-7") {
@@ -2797,6 +2797,9 @@ describe("executeDispatchTool", () => {
         if (pathname === "/api/v1/issues/DSP-7/coverage") {
           if (coverage === null) {
             return response({ error: "no such route", code: "NOT_FOUND" }, 404);
+          }
+          if (typeof coverage === "number") {
+            return response({ error: "the coverage read failed", code: "INTERNAL" }, coverage);
           }
           return response(coverage);
         }
@@ -2830,6 +2833,7 @@ describe("executeDispatchTool", () => {
           text: "One.",
           checks: 1,
           plan_tasks: 0,
+          gaps: ["has no plan task"],
         },
         {
           block_id: "r2",
@@ -2837,6 +2841,7 @@ describe("executeDispatchTool", () => {
           text: "Two.",
           checks: 0,
           plan_tasks: 0,
+          gaps: ["has no check", "has no plan task"],
         },
       ],
       gaps: ["r1 has no plan task", "r2 has no check", "r2 has no plan task"],
@@ -2865,14 +2870,20 @@ describe("executeDispatchTool", () => {
           text: "One.",
           checks: 1,
           plan_tasks: 1,
+          gaps: [],
         },
       ],
       gaps: [],
     });
     expect(covered).not.toContain("Coverage:");
 
-    // A Dispatch that does not serve the read leaves the summary without the lines.
-    expect(await read(null)).not.toContain("Coverage:");
+    // A Dispatch that does not serve the read at all says so in one word; any other failure is
+    // named, so a spec with uncovered requirements never reads like a covered one because the
+    // server answered 500.
+    expect(await read(null)).toContain("Coverage: unavailable\nExternal links:");
+    const failed = await read(500);
+    expect(failed).toContain("Coverage: unavailable: ");
+    expect(failed).toContain("the coverage read failed");
   });
 
   test("dispatch_doc_read --blocks prints a typed block's serves and needs", async () => {
@@ -11277,6 +11288,15 @@ describe("executeDispatchTool", () => {
         target.searchParams.get("from") === "dispatch://DSP-42"
       ) {
         return response({ node: { kind: "issue", id: "DSP-42" }, edges: [] });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/coverage") {
+        return response({
+          issue: "DSP-42",
+          spec_artifact_id: "artifact-1",
+          has_plan: false,
+          requirements: [],
+          gaps: [],
+        });
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };

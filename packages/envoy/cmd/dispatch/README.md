@@ -2534,7 +2534,8 @@ Each item below names a path with its method and identity, then its purpose.
   GET lists the `check` blocks of the issue's Verification document in document order:
   `{issue, verification_artifact_id, checks}`, each check with its attributes (`when`, `surface`, `run`, `negative_control`), the version its words last changed in, their digest, and every result recorded against it from any issue, newest first.
   Each result carries `currency`: `current`, `older`, or `unknown` when the check's issue resolves to no repository or Dispatch's GitHub App cannot read it.
-  A `before_merge` result is current while its commit is the head of an `open` pull request attributed to the check's issue, or the final head of a `merged` one, and the check's words are the ones it proved; an `after_merge` or `default_branch` result while its commit is on the default branch of that repository.
+  A `before_merge` result is current while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the issue the result was recorded on or to the check's issue, and the check's words are the ones it proved; a child proving its parent's check records the result on the child, so the child's own pull request makes it current, while a result the parent recorded for itself at that commit stays older.
+  An `after_merge` or `default_branch` result is current while its commit is on the default branch of that repository.
   Nothing is written on a push: a push that moves a pull request's head makes the result at the old head older by itself.
   An issue with no Verification document answers no checks.
 

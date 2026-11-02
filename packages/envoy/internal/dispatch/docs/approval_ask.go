@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -21,23 +22,32 @@ import (
 // each stands in the list.
 const ApprovalDocumentsJSONPath = `jsonb_path_query_array(a.approval, '$.documents[*].artifact_id')`
 
-// OpenApprovalAsk returns the open approval ask naming artifactID, locked, or nil. A request that
-// names two documents is found by either of them. The caller holds the document owner's row, so it
-// observes the same version the review and approval routes use.
+// OpenApprovalAsk returns the open approval ask naming artifactID, locked, or nil. A request
+// that names two documents is found by either of them. The caller holds the document owner's
+// row, so it observes the same version the review and approval routes use.
 func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
+	return OpenApprovalAskForDocuments(ctx, tx, []string{artifactID})
+}
+
+// OpenApprovalAskForDocuments returns the newest open approval ask naming any of artifactIDs,
+// locked, or nil. A request about to name several documents is found by any one of them, so a
+// request opened over an issue's Verification document alone is the one a later request over
+// the spec and that document renews: two open requests naming one document would ask a person
+// twice about it and strand whichever they did not answer.
+func OpenApprovalAskForDocuments(ctx context.Context, tx pgx.Tx, artifactIDs []string) (*model.Ask, error) {
 	row := tx.QueryRow(ctx, `
 		select `+AskColumns+`
 		from asks a
-		where a.kind = 'approval' and a.state = 'open' and `+ApprovalDocumentsJSONPath+` ? $1::text
+		where a.kind = 'approval' and a.state = 'open' and `+ApprovalDocumentsJSONPath+` ?| $1::text[]
 		order by a.created_at desc, a.id desc
 		limit 1
 		for no key update
-	`, artifactID)
+	`, artifactIDs)
 	ask, err := ScanAsk(row)
 	if err == nil {
 		return &ask, nil
 	}
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	return nil, fmt.Errorf("read open approval ask: %w", err)
@@ -177,7 +187,13 @@ func joinWithAnd(parts []string) string {
 // the one that grew a request to two documents writes when a version move rewords such a request
 // during a rolling deploy.
 func ApprovalAskSummary(ask model.Ask) (string, error) {
-	for _, documents := range [][]model.AskApprovalDocument{ask.Approval.Documents, ask.Approval.Documents[:1]} {
+	candidates := [][]model.AskApprovalDocument{ask.Approval.Documents}
+	// The lead alone is a second candidate only when the request names more than one document:
+	// over one it is the same list, and over none there is nothing to slice.
+	if len(ask.Approval.Documents) > 1 {
+		candidates = append(candidates, ask.Approval.Documents[:1])
+	}
+	for _, documents := range candidates {
 		prefix := ApprovalQuestion(documents, "")
 		if ask.Question == prefix {
 			return "", nil

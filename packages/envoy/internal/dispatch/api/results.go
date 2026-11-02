@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,7 +29,10 @@ import (
 // (refs.IssueAncestors), since a child proves its parent's checks, and appends `result.recorded`
 // on the check's own issue. The read route lists the checks of one issue's Verification
 // document with every result recorded against each, from any issue, newest first, and says
-// whether each still speaks for the work as it stands (currency, below).
+// whether each still speaks for the work as it stands (currency, below): a `before_merge`
+// result is current at the head of a pull request attributed to the issue it was recorded on or
+// to the check's issue, so a child's pull request makes the child's own result current without
+// making its parent's.
 
 // checkResultRole bounds the role a result names: the word the pull-request body line prints.
 var checkResultRole = regexp.MustCompile(`^[a-z-]{1,32}$`)
@@ -36,9 +40,14 @@ var checkResultRole = regexp.MustCompile(`^[a-z-]{1,32}$`)
 // resultCommitSHA is the commit a result ran at, as the column's own check spells it.
 var resultCommitSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// checkWhenBeforeMerge is a check's `when` when its block names none: the schema's default
-// (pmdoc/schema/blocks.json).
-const checkWhenBeforeMerge = "before_merge"
+// The three values a check's `when` takes, the closed enum pmdoc/schema/blocks.json declares
+// under `choices`. checkWhenBeforeMerge is also the default a check whose block names none
+// carries.
+const (
+	checkWhenBeforeMerge   = "before_merge"
+	checkWhenAfterMerge    = "after_merge"
+	checkWhenDefaultBranch = "default_branch"
+)
 
 // checkResultSummaryRunes is how much of a check's words the pull-request body line carries.
 const checkResultSummaryRunes = 80
@@ -99,6 +108,24 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issueKey := r.PathValue("key")
+	pool, err := s.readyPool()
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+
+	// The check is resolved before the transaction opens. Resolving it folds the live
+	// Verification document, which for a document no room holds is a cold read bounded by a
+	// minute (docs/read_cache.go), and no issue row lock is held across a read that long: four
+	// writers parked on one issue's row lock already cost a read of an unrelated issue the whole
+	// seventeen seconds the lock was held (store/pool.go). Nothing the lock protects is settled
+	// here — the check's words and its `when` are the document's, not the issue's — and what it
+	// does protect, the block's indexed version and digest, is read again under it below.
+	check, err := s.resolveCheck(r.Context(), pool, issueKey, input.Check)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -115,11 +142,6 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	check, err := s.resolveCheck(r.Context(), tx, issueKey, input.Check)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	checkOpen := recordingOpen
 	if check.IssueKey != issueKey {
 		if checkOpen, err = lockIssueForResult(r.Context(), tx, check.IssueKey); err != nil {
@@ -127,11 +149,18 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The version and digest the row records are the block's as this transaction sees them, read
+	// again under the locks: a document version that landed between the resolve and the lock
+	// would otherwise have the result recorded against the words it replaced.
+	if err := s.refreshResolvedCheck(r.Context(), tx, &check, input.Check); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	// The one write a closed issue takes. A check that runs after the merge, or on the default
 	// branch, can only be proved once the issue has closed, so refusing it would make the
 	// production check unrecordable; every other write on a closed issue — a comment, a
 	// document version, a result for a pre-merge check — stays refused as it was.
-	if (!recordingOpen || !checkOpen) && check.When != "after_merge" && check.When != "default_branch" {
+	if (!recordingOpen || !checkOpen) && check.When != checkWhenAfterMerge && check.When != checkWhenDefaultBranch {
 		writeError(w, "ISSUE_CLOSED", http.StatusConflict,
 			fmt.Sprintf("issue is closed: only a result for a check whose when is after_merge or default_branch is recorded there, and %s is %s", check.BlockID, check.When))
 		return
@@ -162,7 +191,7 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	}
 	seq := int64(event.Seq)
 	result.EventSeq = &seq
-	if err := insertCheckResult(r.Context(), tx, result); err != nil {
+	if err := insertCheckResult(r.Context(), tx, &result); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -192,28 +221,31 @@ func (s *server) listCheckResults(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	artifactID, err := s.verificationDocumentOf(r.Context(), s.deps.Store.Pool, issueKey)
+	artifact, held, err := s.verificationDocument(r.Context(), s.deps.Store.Pool, issueKey, "")
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	body := map[string]any{"issue": issueKey, "verification_artifact_id": nil, "checks": []model.CheckBlock{}}
-	if artifactID == "" {
+	body := map[string]any{"issue": issueKey, "verification_artifact_id": artifact.ID, "checks": []model.CheckBlock{}}
+	if !held {
 		WriteJSON(w, http.StatusOK, body)
 		return
 	}
-	body["verification_artifact_id"] = artifactID
-	checks, err := s.checkBlocksOf(r.Context(), s.deps.Store.Pool, issueKey, artifactID)
+	checks, err := s.checkBlocksOf(r.Context(), s.deps.Store.Pool, artifact)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	recorded, err := loadCheckResults(r.Context(), s.deps.Store.Pool, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	currency := newCurrencyReader(s)
 	for index := range checks {
-		results, err := loadCheckResults(r.Context(), s.deps.Store.Pool, artifactID, checks[index].BlockID)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
+		results := recorded[checks[index].BlockID]
+		if results == nil {
+			results = []model.CheckResult{}
 		}
 		for result := range results {
 			results[result].Currency = currency.of(r.Context(), checks[index], results[result])
@@ -282,18 +314,49 @@ func (s *server) requireIssueExists(ctx context.Context, key string) error {
 	return nil
 }
 
-// verificationDocumentOf is the issue's Verification document, or "" when it has none.
-func (s *server) verificationDocumentOf(ctx context.Context, q queryer, issueKey string) (string, error) {
-	var id string
-	err := q.QueryRow(ctx, `select id::text from artifacts where issue_key = $1 and role = 'verification'`, issueKey).Scan(&id)
+// verificationDocument is one issue's Verification document and whether it has one. slug, when
+// it is not "", holds the answer to the document filed under it, which is how a canonical block
+// reference names one. A row whose role is null answers to its slug alone: a document the
+// release before this one created during the rolling deploy carries no role until the next
+// version written under its row repairs it (documentRole), and the slug is meanwhile the only
+// thing that says what the document is. Every reader of an issue's Verification document in
+// this package goes through here — the results routes, the check resolver and the approval
+// request's second document.
+func (s *server) verificationDocument(ctx context.Context, q queryer, issueKey, slug string) (model.Artifact, bool, error) {
+	artifact, err := scanArtifact(q.QueryRow(ctx, `
+		select `+artifactColumns+` from artifacts
+		where issue_key = $1 and `+verificationRolePredicate+` and ($2 = '' or slug = $2)
+		limit 1
+	`, issueKey, slug))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		return model.Artifact{}, false, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("read the Verification document of %s: %w", issueKey, err)
+		return model.Artifact{}, false, fmt.Errorf("read the Verification document of %s: %w", issueKey, err)
 	}
-	return id, nil
+	return artifact, true, nil
 }
+
+// documentRolePredicate holds the artifacts row of the table aliased `alias` to the issue's
+// document of one role: the role itself, or the slug a document of that name carries, for a row
+// a rolling deploy left with no role because the build that created it did not know the column.
+// documentRole writes the role on every document created since, and storeArtifact repairs an
+// older one on its next version. `alias` is empty where the query names no alias.
+func documentRolePredicate(alias, role, slug string) string {
+	if alias != "" {
+		alias += "."
+	}
+	return `(` + alias + `role = '` + role + `' or (` + alias + `role is null and ` + alias + `slug = '` + slug + `'))`
+}
+
+// verificationRolePredicate is documentRolePredicate for the Verification document of a query
+// that names no alias, since the queries that hold a row to it are written as string literals.
+var verificationRolePredicate = documentRolePredicate("", "verification", "verification-md")
+
+// aliasedVerificationRole and aliasedPlanRole are the same two predicates for a query whose
+// artifacts table is aliased `a`: the issue read and the coverage read both join it that way.
+var aliasedVerificationRole = documentRolePredicate("a", "verification", "verification-md")
+var aliasedPlanRole = documentRolePredicate("a", "plan", "plan-md")
 
 // resolveCheck finds the check a result names among the Verification documents of the recording
 // issue and of every issue above it. The value is a block id, or the canonical block reference
@@ -301,8 +364,8 @@ func (s *server) verificationDocumentOf(ctx context.Context, q queryer, issueKey
 // not unique in that set: an id two documents share is 409 CHECK_AMBIGUOUS, and an id no
 // Verification document of the set holds — or one that is not a `check` block — is 400
 // UNKNOWN_CHECK.
-func (s *server) resolveCheck(ctx context.Context, tx pgx.Tx, issueKey, value string) (resolvedCheck, error) {
-	ancestors, err := refs.IssueAncestors(ctx, tx, issueKey)
+func (s *server) resolveCheck(ctx context.Context, q queryer, issueKey, value string) (resolvedCheck, error) {
+	ancestors, err := refs.IssueAncestors(ctx, q, issueKey)
 	if err != nil {
 		return resolvedCheck{}, err
 	}
@@ -316,19 +379,22 @@ func (s *server) resolveCheck(ctx context.Context, tx pgx.Tx, issueKey, value st
 			return resolvedCheck{}, unknownCheck(value)
 		}
 		blockID = ref.Block
-		if artifactFilter, err = s.verificationDocumentBySlug(ctx, tx, ref.IssueKey, ref.ID); err != nil {
+		document, held, err := s.verificationDocument(ctx, q, ref.IssueKey, ref.ID)
+		if err != nil {
 			return resolvedCheck{}, err
 		}
-		if artifactFilter == "" {
+		if !held {
 			return resolvedCheck{}, unknownCheck(value)
 		}
+		artifactFilter = document.ID
 	}
 
-	rows, err := tx.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		select a.issue_key, d.artifact_id::text, d.changed_version, d.text_sha256
 		from document_blocks d
 		join artifacts a on a.id = d.artifact_id
-		where a.role = 'verification' and a.issue_key = any($1) and d.type = 'check' and d.block_id = $2
+		where `+aliasedVerificationRole+`
+		  and a.issue_key = any($1) and d.type = 'check' and d.block_id = $2
 		  and ($3 = '' or d.artifact_id = $3::uuid)
 		order by a.issue_key
 	`, scope, blockID, artifactFilter)
@@ -371,20 +437,21 @@ func unknownCheck(value string) error {
 		"%s is no check of this issue's Verification document or of one above it", value)
 }
 
-// verificationDocumentBySlug is the Verification document a canonical block reference names, or
-// "" when that issue has no such document under that slug.
-func (s *server) verificationDocumentBySlug(ctx context.Context, q queryer, issueKey, slug string) (string, error) {
-	var id string
+// refreshResolvedCheck re-reads, under the locks the transaction holds, the indexed version and
+// digest of a check resolved before it opened (recordCheckResult), so the row records the block
+// as it stands at the commit. A block the index no longer holds is no check any more.
+func (s *server) refreshResolvedCheck(ctx context.Context, q queryer, check *resolvedCheck, named string) error {
 	err := q.QueryRow(ctx, `
-		select id::text from artifacts where issue_key = $1 and slug = $2 and role = 'verification'
-	`, issueKey, slug).Scan(&id)
+		select changed_version, text_sha256 from document_blocks
+		where artifact_id = $1::uuid and block_id = $2 and type = 'check'
+	`, check.ArtifactID, check.BlockID).Scan(&check.Version, &check.SHA256)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		return unknownCheck(named)
 	}
 	if err != nil {
-		return "", fmt.Errorf("read the Verification document %s/%s: %w", issueKey, slug, err)
+		return fmt.Errorf("read the check %s of document %s: %w", check.BlockID, check.ArtifactID, err)
 	}
-	return id, nil
+	return nil
 }
 
 // checkBlockWords reads one check block's `when` and its words out of the live document. The
@@ -405,26 +472,45 @@ func (s *server) checkBlockWords(ctx context.Context, artifactID, blockID string
 	return checkWhenBeforeMerge, "", nil
 }
 
-// checkBlocksIn is every `check` block of one document, in document order, with its attributes
-// and its words. The document's markdown is read live and parsed; nothing is written.
-func (s *server) checkBlocksIn(ctx context.Context, artifactID string) ([]model.CheckBlock, error) {
+// typedBlocksIn walks the live markdown of one document and hands visit each block of blockType
+// in document order, with its block id. The markdown is read live and parsed; nothing is
+// written. A rendering can repeat an id; the block index keys one row per id, and so does this,
+// so only the first holder of an id is visited. Both readers of a live document's typed blocks
+// come through here: the checks of a Verification document (checkBlocksIn) and the requirements
+// of a spec (requirementBlocksIn).
+func (s *server) typedBlocksIn(ctx context.Context, artifactID, blockType string, visit func(node *pmdoc.Node, id string)) error {
 	markdown, err := s.deps.Docs.Text(ctx, artifactID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	tree, err := pmdoc.ParseRendering(markdown)
 	if err != nil {
-		return nil, fmt.Errorf("read the checks of document %s: %w", artifactID, err)
+		return fmt.Errorf("read the %s blocks of document %s: %w", blockType, artifactID, err)
 	}
-	var checks []model.CheckBlock
+	seen := map[string]struct{}{}
 	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-		if node.Type != "check" {
+		if node.Type != blockType {
 			return true
 		}
 		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
 		if id == "" {
 			return true
 		}
+		if _, repeated := seen[id]; repeated {
+			return true
+		}
+		seen[id] = struct{}{}
+		visit(node, id)
+		return true
+	})
+	return nil
+}
+
+// checkBlocksIn is every `check` block of one document, in document order, with its attributes
+// and its words (typedBlocksIn).
+func (s *server) checkBlocksIn(ctx context.Context, artifactID string) ([]model.CheckBlock, error) {
+	var checks []model.CheckBlock
+	err := s.typedBlocksIn(ctx, artifactID, "check", func(node *pmdoc.Node, id string) {
 		when, _ := node.Attrs["when"].(string)
 		if when == "" {
 			when = checkWhenBeforeMerge
@@ -436,47 +522,52 @@ func (s *server) checkBlocksIn(ctx context.Context, artifactID string) ([]model.
 			BlockID: id, ArtifactID: artifactID, Text: blockWords(node), When: when,
 			Surface: surface, Run: run, NegativeControl: negativeControl, Results: []model.CheckResult{},
 		})
-		return true
 	})
+	if err != nil {
+		return nil, err
+	}
 	return checks, nil
 }
 
 // checkBlocksOf is checkBlocksIn with each block's reference, issue and indexed version and
-// digest filled in from the block index.
-func (s *server) checkBlocksOf(ctx context.Context, q queryer, issueKey, artifactID string) ([]model.CheckBlock, error) {
-	checks, err := s.checkBlocksIn(ctx, artifactID)
+// digest filled in. The reference is built from the document's own slug, which is a property of
+// the artifacts row and not of a block row, so a Verification document whose blocks the index
+// does not hold yet still answers a reference every check can be addressed by.
+func (s *server) checkBlocksOf(ctx context.Context, q queryer, artifact model.Artifact) ([]model.CheckBlock, error) {
+	checks, err := s.checkBlocksIn(ctx, artifact.ID)
 	if err != nil {
 		return nil, err
 	}
 	if len(checks) == 0 {
 		return []model.CheckBlock{}, nil
 	}
-	var slug string
+	issueKey := ""
+	if artifact.IssueKey != nil {
+		issueKey = *artifact.IssueKey
+	}
 	indexed := make(map[string]model.CheckBlock, len(checks))
 	rows, err := q.Query(ctx, `
-		select a.slug, d.block_id, d.changed_version, d.text_sha256
-		from document_blocks d join artifacts a on a.id = d.artifact_id
-		where d.artifact_id = $1 and d.type = 'check'
-	`, artifactID)
+		select block_id, changed_version, text_sha256
+		from document_blocks where artifact_id = $1 and type = 'check'
+	`, artifact.ID)
 	if err != nil {
-		return nil, fmt.Errorf("read the indexed checks of %s: %w", artifactID, err)
+		return nil, fmt.Errorf("read the indexed checks of %s: %w", artifact.ID, err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var block model.CheckBlock
-		if err := rows.Scan(&slug, &block.BlockID, &block.Version, &block.SHA256); err != nil {
-			return nil, fmt.Errorf("read the indexed checks of %s: %w", artifactID, err)
+		if err := rows.Scan(&block.BlockID, &block.Version, &block.SHA256); err != nil {
+			return nil, fmt.Errorf("read the indexed checks of %s: %w", artifact.ID, err)
 		}
 		indexed[block.BlockID] = block
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read the indexed checks of %s: %w", artifactID, err)
+		return nil, fmt.Errorf("read the indexed checks of %s: %w", artifact.ID, err)
 	}
 	for index := range checks {
 		checks[index].IssueKey = issueKey
-		if slug != "" {
-			checks[index].Ref = fmt.Sprintf("dispatch://%s/artifact/%s#b-%s", issueKey, slug, text.EncodeBlockID(checks[index].BlockID))
-		}
+		checks[index].Ref = fmt.Sprintf("dispatch://%s/artifact/%s#b-%s",
+			issueKey, artifact.Slug, text.EncodeBlockID(checks[index].BlockID))
 		if block, ok := indexed[checks[index].BlockID]; ok {
 			checks[index].Version, checks[index].SHA256 = block.Version, block.SHA256
 		}
@@ -499,7 +590,7 @@ func blockWords(node *pmdoc.Node) string {
 			}
 		}
 		for _, word := range strings.Fields(child.Text) {
-			if strings.Contains(word, "dispatch://") || strings.Contains(word, "://") {
+			if strings.Contains(word, "://") {
 				continue
 			}
 			words = append(words, word)
@@ -561,7 +652,9 @@ func (s *server) refuseResultScreenshots(ctx context.Context, q queryer, issueKe
 	return nil
 }
 
-func insertCheckResult(ctx context.Context, tx pgx.Tx, result model.CheckResult) error {
+// insertCheckResult writes one result's row and fills in the created_at the row takes, which
+// the record route answers with: the pointer is the caller's own value, not a copy of it.
+func insertCheckResult(ctx context.Context, tx pgx.Tx, result *model.CheckResult) error {
 	actorJSON, err := encodeJSON(result.Actor)
 	if err != nil {
 		return err
@@ -582,28 +675,31 @@ func insertCheckResult(ctx context.Context, tx pgx.Tx, result model.CheckResult)
 	).Scan(&result.CreatedAt)
 }
 
-// loadCheckResults is every result recorded against one check, from any issue, newest first.
-func loadCheckResults(ctx context.Context, q queryer, artifactID, blockID string) ([]model.CheckResult, error) {
+// loadCheckResults is every result recorded against the checks of one Verification document,
+// from any issue, by the block id of the check each names, newest first within each. One query
+// serves the whole document: a Verification document holding twenty checks is one round trip,
+// not twenty.
+func loadCheckResults(ctx context.Context, q queryer, artifactID string) (map[string][]model.CheckResult, error) {
 	rows, err := q.Query(ctx, `
 		select `+checkResultColumns+`
 		from check_results
-		where check_artifact_id = $1::uuid and check_block_id = $2
-		order by created_at desc, id desc
-	`, artifactID, blockID)
+		where check_artifact_id = $1::uuid
+		order by check_block_id, created_at desc, id desc
+	`, artifactID)
 	if err != nil {
-		return nil, fmt.Errorf("read the results of check %s: %w", blockID, err)
+		return nil, fmt.Errorf("read the results of document %s: %w", artifactID, err)
 	}
 	defer rows.Close()
-	results := []model.CheckResult{}
+	results := map[string][]model.CheckResult{}
 	for rows.Next() {
 		result, err := scanCheckResult(rows)
 		if err != nil {
-			return nil, fmt.Errorf("read the results of check %s: %w", blockID, err)
+			return nil, fmt.Errorf("read the results of document %s: %w", artifactID, err)
 		}
-		results = append(results, result)
+		results[result.CheckBlockID] = append(results[result.CheckBlockID], result)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read the results of check %s: %w", blockID, err)
+		return nil, fmt.Errorf("read the results of document %s: %w", artifactID, err)
 	}
 	return results, nil
 }
@@ -654,50 +750,52 @@ func (s *server) readThroughPullRequests(ctx context.Context, checkIssueKey, sha
 }
 
 // resolvedIssueRepo is the repository an issue resolves to: its own, the nearest one above it,
-// or its project's default (issueRepoLateral); nil when none resolves.
+// or its project's default (refs.IssueRepository); nil when none resolves.
 func (s *server) resolvedIssueRepo(ctx context.Context, issueKey string) (*string, error) {
-	var scan repoScan
-	if err := s.deps.Store.Pool.QueryRow(ctx, `
-		select `+issueRepoColumns+` from issues i`+issueRepoLateral+` where i.key = $1
-	`, issueKey).Scan(scan.targets()...); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("resolve the repository of %s: %w", issueKey, err)
-	}
-	_, resolved, err := scan.resolve(issueKey)
-	return resolved, err
+	return refs.IssueRepository(ctx, s.deps.Store.Pool, issueKey)
 }
 
 // currencyReader answers whether each result still speaks for the work as it stands, over one
 // read of one issue's results. A `before_merge` result is current while its commit is the head
-// of an open pull request attributed to the check's issue, or the final head of a merged one,
-// and the check's words have not changed since: a push that moves the head makes it older with
-// no write of Dispatch's, and rewording the check makes its own results older and no other's.
-// An `after_merge` or `default_branch` result is current while its commit is on the default
-// branch of the check's issue's resolved repository and the words match. Where the issue
-// resolves to no repository, or the App cannot read it, the answer is unknown: the commit is
-// shown with neither mark. The repository, its default branch and GitHub's answer about each
-// commit are each read once per read of the results; a yes about a commit is kept for good and
-// a no re-read after five minutes (default_branch_commits).
+// of an open pull request, or the final head of a merged one, attributed to the issue the
+// result was recorded on or to the check's issue, and the check's words have not changed since:
+// a push that moves the head makes it older with no write of Dispatch's, and rewording the
+// check makes its own results older and no other's. The recording issue counts because a child
+// proving its parent's check records the result on the child, and the child's pull request is
+// what carries that work; the parent's own result at that same head is not made current by it,
+// since that result was recorded on the parent and no pull request of the parent's holds the
+// commit. An `after_merge` or `default_branch` result is current while its commit is on the
+// default branch of the check's issue's resolved repository and the words match. Where the
+// issue resolves to no repository, or the App cannot read it, the answer is unknown: the commit
+// is shown with neither mark, as it is when Dispatch's own read fails.
+//
+// The repository, its default branch, the pull request heads of each issue-and-commit pair and
+// GitHub's answer about each commit are each read once per read of the results; the default
+// branch is held across reads for DefaultBranchCommitStaleAfter (server.defaultBranches), a yes
+// about a commit is kept for good and a no re-read after five minutes
+// (default_branch_commits).
 type currencyReader struct {
 	server   *server
 	repos    map[string]*string
 	branches map[string]string
+	heads    map[[2]string]bool
+	commits  map[[2]string]bool
 }
 
 func newCurrencyReader(s *server) *currencyReader {
-	return &currencyReader{server: s, repos: map[string]*string{}, branches: map[string]string{}}
+	return &currencyReader{
+		server: s, repos: map[string]*string{}, branches: map[string]string{},
+		heads: map[[2]string]bool{}, commits: map[[2]string]bool{},
+	}
 }
 
 func (c *currencyReader) of(ctx context.Context, check model.CheckBlock, result model.CheckResult) string {
-	if check.When == "before_merge" {
-		known, err := delivery.HeadAttributedTo(ctx, c.server.deps.Store.Pool, result.CheckIssueKey, result.CommitSHA)
-		if err != nil {
-			slog.Warn("dispatch: read a result's pull request head", "issue", result.CheckIssueKey, "error", err)
-			return model.CurrencyOlder
+	if check.When == checkWhenBeforeMerge {
+		atHead, known := c.headOf(ctx, result)
+		if !known {
+			return model.CurrencyUnknown
 		}
-		if known && check.SHA256 == result.CheckSHA256 {
+		if atHead && check.SHA256 == result.CheckSHA256 {
 			return model.CurrencyCurrent
 		}
 		return model.CurrencyOlder
@@ -716,8 +814,34 @@ func (c *currencyReader) of(ctx context.Context, check model.CheckBlock, result 
 	return model.CurrencyOlder
 }
 
+// headOf reports whether a result's commit is the head of a pull request attributed to the
+// issue the result was recorded on or to the check's issue, and whether Dispatch could say at
+// all: a read that fails is the unknown answer, as every other failed read is, never "older" —
+// a database hiccup must not make a reviewer refuse an approval.
+func (c *currencyReader) headOf(ctx context.Context, result model.CheckResult) (bool, bool) {
+	for _, issueKey := range []string{result.IssueKey, result.CheckIssueKey} {
+		key := [2]string{issueKey, result.CommitSHA}
+		atHead, memoized := c.heads[key]
+		if !memoized {
+			read, err := delivery.HeadAttributedTo(ctx, c.server.deps.Store.Pool, issueKey, result.CommitSHA)
+			if err != nil {
+				slog.Warn("dispatch: read a result's pull request head", "issue", issueKey, "error", err)
+				return false, false
+			}
+			atHead = read
+			c.heads[key] = atHead
+		}
+		if atHead {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 // defaultBranch is the default branch of the check's issue's resolved repository, and that
-// repository; an empty branch means Dispatch cannot say, which is the unknown answer.
+// repository; an empty branch means Dispatch cannot say, which is the unknown answer. The
+// branch is held on the server between reads, so the Verification tab refetching on every
+// result.recorded does not spend a GET /repos/{owner}/{repo} each time.
 func (c *currencyReader) defaultBranch(ctx context.Context, issueKey string) (string, string) {
 	repo, cached := c.repos[issueKey]
 	if !cached {
@@ -735,6 +859,11 @@ func (c *currencyReader) defaultBranch(ctx context.Context, issueKey string) (st
 	if read {
 		return branch, *repo
 	}
+	now := time.Now()
+	if held, fresh := c.server.defaultBranches.get(*repo, now); fresh {
+		c.branches[*repo] = held
+		return held, *repo
+	}
 	if c.server.deps.GitHub == nil {
 		c.branches[*repo] = ""
 		return "", *repo
@@ -747,13 +876,20 @@ func (c *currencyReader) defaultBranch(ctx context.Context, issueKey string) (st
 		branch = ""
 	}
 	c.branches[*repo] = branch
+	c.server.defaultBranches.put(*repo, branch, now)
 	return branch, *repo
 }
 
-// onDefaultBranch is GitHub's answer about one commit, from default_branch_commits when that
-// answer still stands, and read through the App otherwise. The second value is false when
-// Dispatch could not get an answer at all.
+// onDefaultBranch is GitHub's answer about one commit, from the memo this read already holds,
+// else from default_branch_commits when that answer still stands, and read through the App
+// otherwise. The second value is false when Dispatch could not get an answer at all. Results of
+// one issue overwhelmingly name a handful of commits, so the memo is what keeps a tab listing
+// twenty results to a few round trips.
 func (c *currencyReader) onDefaultBranch(ctx context.Context, repo, branch, sha string) (bool, bool) {
+	memo := [2]string{repo, sha}
+	if onDefault, answered := c.commits[memo]; answered {
+		return onDefault, true
+	}
 	pool := c.server.deps.Store.Pool
 	stored, found, err := delivery.ReadDefaultBranchCommit(ctx, pool, repo, sha)
 	if err != nil {
@@ -761,6 +897,7 @@ func (c *currencyReader) onDefaultBranch(ctx context.Context, repo, branch, sha 
 	}
 	now := time.Now()
 	if found && (stored.OnDefault || now.Sub(stored.CheckedAt) < delivery.DefaultBranchCommitStaleAfter) {
+		c.commits[memo] = stored.OnDefault
 		return stored.OnDefault, true
 	}
 	onDefault, err := delivery.CommitOnDefaultBranch(ctx, c.server.deps.GitHub, repo, branch, sha)
@@ -773,6 +910,7 @@ func (c *currencyReader) onDefaultBranch(ctx context.Context, repo, branch, sha 
 	if err := delivery.WriteDefaultBranchCommit(ctx, pool, repo, sha, onDefault, now); err != nil {
 		slog.Warn("dispatch: record a commit's default-branch answer", "repo", repo, "commit", sha, "error", err)
 	}
+	c.commits[memo] = onDefault
 	return onDefault, true
 }
 
@@ -782,4 +920,43 @@ func unreadableRepository(err error) bool {
 	return errors.Is(err, githubapp.ErrRepositoryUnreadable) ||
 		errors.Is(err, githubapp.ErrNoInstallation) ||
 		errors.Is(err, githubapp.ErrNoAppKey)
+}
+
+// branchCache holds each repository's default branch across reads of the results. The
+// Verification tab refetches the results on every result.recorded, and a read holding an
+// `after_merge` or `default_branch` check otherwise spends a GET /repos/{owner}/{repo} each
+// time. An answer is believed for DefaultBranchCommitStaleAfter, the same five minutes a "no"
+// about a commit is believed for; the empty branch — Dispatch cannot say — is held for that
+// span too, so an unreadable repository is not asked again on every read. Its zero value is an
+// empty cache.
+type branchCache struct {
+	mu    sync.Mutex
+	known map[string]cachedBranch
+}
+
+// cachedBranch is one repository's default branch and when it was read.
+type cachedBranch struct {
+	branch string
+	readAt time.Time
+}
+
+// get is the branch held for repo and whether that answer still stands at now.
+func (c *branchCache) get(repo string, now time.Time) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	held, found := c.known[repo]
+	if !found || now.Sub(held.readAt) >= delivery.DefaultBranchCommitStaleAfter {
+		return "", false
+	}
+	return held.branch, true
+}
+
+// put records what GitHub said about repo's default branch at now.
+func (c *branchCache) put(repo, branch string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.known == nil {
+		c.known = map[string]cachedBranch{}
+	}
+	c.known[repo] = cachedBranch{branch: branch, readAt: now}
 }

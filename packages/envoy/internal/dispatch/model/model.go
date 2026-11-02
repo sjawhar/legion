@@ -649,10 +649,10 @@ type Artifact struct {
 	Name      string  `json:"name"`
 	Kind      string  `json:"kind"`
 	Primary   bool    `json:"primary"`
-	// Role is the part an issue's document plays beside its spec: "verification" for the
-	// document created as verification.md, "plan" for the one created as plan.md, "" for every
-	// other document. It is set from the document's slug when the row is created and never
-	// changes, as Primary never changes, and no request field sets it.
+	// Role is the part an issue's document plays beside its spec: ArtifactRoleVerification for
+	// the document created as verification.md, ArtifactRolePlan for the one created as plan.md,
+	// "" for every other document. It is set from the document's slug when the row is created
+	// and never changes, as Primary never changes, and no request field sets it.
 	Role      string    `json:"role,omitempty"`
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
@@ -661,6 +661,14 @@ type Artifact struct {
 	// version-pinned reviews and any open approval ask; nil for non-documents.
 	Approval *ArtifactApproval `json:"approval,omitempty"`
 }
+
+// ArtifactRoleVerification and ArtifactRolePlan are the two parts Artifact.Role names, the
+// values the contract's union declares (dispatch-api.ts). A document that plays neither holds
+// "".
+const (
+	ArtifactRoleVerification = "verification"
+	ArtifactRolePlan         = "plan"
+)
 
 // ArtifactReview is one human review of a document, pinned to the version it was
 // given on: an approval, or a request for changes with a reason. EventSeq is the
@@ -735,10 +743,10 @@ type ArtifactReviewEventPayload struct {
 	AskID      *string `json:"ask_id"`
 }
 
-// CheckCurrency is whether a recorded result still speaks for the work as it stands:
-// CurrencyCurrent at the commit the work stands at and the words the result proved,
-// CurrencyOlder at an earlier commit or against words that have changed since, and
-// CurrencyUnknown when Dispatch cannot read the repository the check's issue resolves to.
+// CurrencyCurrent, CurrencyOlder and CurrencyUnknown are whether a recorded result still speaks
+// for the work as it stands: CurrencyCurrent at the commit the work stands at and the words the
+// result proved, CurrencyOlder at an earlier commit or against words that have changed since,
+// and CurrencyUnknown when Dispatch cannot read the repository the check's issue resolves to.
 const (
 	CurrencyCurrent = "current"
 	CurrencyOlder   = "older"
@@ -810,13 +818,16 @@ type IssueCoverage struct {
 
 // RequirementCoverage is one `requirement` block of an issue's spec and what serves it: the
 // `check` and `plan_task` blocks of any document of that issue or of any descendant issue, at
-// any status, that name it in `serves`.
+// any status, that name it in `serves`. Gaps is this requirement's own gap lines, the ones
+// IssueCoverage.Gaps carries for it, so a reader draws them beside the requirement without
+// parsing the sentence back.
 type RequirementCoverage struct {
-	BlockID   string `json:"block_id"`
-	Ref       string `json:"ref"`
-	Text      string `json:"text"`
-	Checks    int    `json:"checks"`
-	PlanTasks int    `json:"plan_tasks"`
+	BlockID   string   `json:"block_id"`
+	Ref       string   `json:"ref"`
+	Text      string   `json:"text"`
+	Checks    int      `json:"checks"`
+	PlanTasks int      `json:"plan_tasks"`
+	Gaps      []string `json:"gaps"`
 }
 
 // CheckResultEventPayload is the payload of result.recorded, appended on the check's issue: the

@@ -497,6 +497,22 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, artifactKindMismatch(input.name, artifact, kind))
 		return
 	}
+	// A document the release before this one created during the rolling deploy carries no role:
+	// migration 20261102110000 backfills the rows that existed when it ran, and that release
+	// writes none of its own. Until the role is set the document is invisible to every reader
+	// that looks for an issue's Verification or plan document by it, so the next version written
+	// under the row repairs it from the same slug that would have set it. The slug is unique
+	// within the owner, so at most one row per issue can take either role and the partial unique
+	// index artifacts_issue_role holds.
+	if !created && artifact.Role == "" {
+		if role := documentRole(target, artifact.Kind, artifact.Slug); role != nil {
+			if _, err := tx.Exec(r.Context(), `update artifacts set role = $2 where id = $1 and role is null`, artifact.ID, *role); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			artifact.Role = *role
+		}
+	}
 	// A project document's owner row is the artifact itself, and until here this transaction
 	// has not locked it: the issue branch above locks its issue, but this one only read its
 	// project. Every writer that takes the owner row at all takes it before the room lock -
@@ -1657,16 +1673,18 @@ func artifactSlug(name string) string {
 // unique key the upload already took within the owner (nextArtifactSlug), so a second document
 // whose name gives a slug already in use - verification-md-2 - plays no role rather than
 // colliding with the one that holds it. The role is written once, as is_primary is: a later
-// upload of the same name is that document's next version, under the row this made.
+// upload of the same name is that document's next version, under the row this made, and the
+// only write that ever sets it afterwards is the repair of a row the rolling deploy left with
+// none (storeArtifact).
 func documentRole(target artifactTarget, kind, slug string) *string {
 	if target.IssueKey == nil || kind != "doc" {
 		return nil
 	}
 	switch slug {
 	case "verification-md":
-		return new("verification")
+		return new(model.ArtifactRoleVerification)
 	case "plan-md":
-		return new("plan")
+		return new(model.ArtifactRolePlan)
 	}
 	return nil
 }

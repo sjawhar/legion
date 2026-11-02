@@ -7,10 +7,17 @@ import { api } from "../../api/client";
 import type { IssueCoverage } from "../../api/types";
 import { SpecRequirements } from "./SpecRequirements";
 
-function requirement(blockId: string, text: string, checks: number, planTasks: number) {
+function requirement(
+  blockId: string,
+  text: string,
+  checks: number,
+  planTasks: number,
+  gaps: string[] = []
+) {
   return {
     block_id: blockId,
     checks,
+    gaps,
     plan_tasks: planTasks,
     ref: `dispatch://CORE-1/spec#b-${blockId}`,
     text,
@@ -43,7 +50,10 @@ test("an uncovered requirement is flagged with what it lacks and a covered one i
     issue: "CORE-1",
     requirements: [
       requirement("r1", "Every issue page shows a Plan tab.", 1, 1),
-      requirement("r2", "The Plan tab shows the plan review's approval.", 0, 0),
+      requirement("r2", "The Plan tab shows the plan review's approval.", 0, 0, [
+        "has no check",
+        "has no plan task",
+      ]),
     ],
     spec_artifact_id: "artifact-1",
   });

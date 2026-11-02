@@ -67,3 +67,44 @@ func IssueDescendants(ctx context.Context, q Queryer, key string) ([]string, err
 	}
 	return descendants, nil
 }
+
+// IssueRepository is the repository the issue key resolves to, read through q: its own, the
+// nearest one above it on `child_of`, or its project's default mapping; nil when none resolves,
+// and nil for an issue no row has and for the empty key. The walk climbs one link per step and
+// stops at the first issue naming a repository or at IssueDepthCap links up, which writes never
+// let a chain pass (api's refuseParentTooDeep); a chain still unfinished at the cap is an error
+// rather than the project's default, which would be a wrong answer. api's issueRepoLateral is
+// this same rule for a read resolving many issues at once; this is the one-issue read, which
+// the results route and the pull-request head attribution both make.
+func IssueRepository(ctx context.Context, q Queryer, key string) (*string, error) {
+	if key == "" {
+		return nil, nil
+	}
+	var resolved *string
+	var tooDeep bool
+	if err := q.QueryRow(ctx, `
+		with recursive chain as (
+			select i.parent_key, i.repo, i.project_key, 0 as depth from issues i where i.key = $1
+			union all
+			select p.parent_key, p.repo, c.project_key, c.depth + 1
+			from issues p join chain c on p.key = c.parent_key
+			where c.repo is null and c.depth < $2
+		)
+		select
+			coalesce(
+				(select c.repo from chain c where c.repo is not null order by c.depth limit 1),
+				(select d.repo from repo_projects d
+				 where d.project = (select c.project_key from chain c where c.depth = 0) and d.is_default)
+			),
+			exists (
+				select 1 from chain c
+				where c.depth = $2 and c.repo is null and c.parent_key is not null
+			)
+	`, key, IssueDepthCap).Scan(&resolved, &tooDeep); err != nil {
+		return nil, fmt.Errorf("resolve the repository of %s: %w", key, err)
+	}
+	if tooDeep {
+		return nil, fmt.Errorf("resolve the repository of %s: its parent chain is deeper than %d links or loops", key, IssueDepthCap)
+	}
+	return resolved, nil
+}

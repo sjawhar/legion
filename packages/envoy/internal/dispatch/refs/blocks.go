@@ -445,9 +445,11 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 // q: a block of that document as written's node for its id (uniqueBlocks: the first holder of a
 // repeated id, and no id the index cannot key), any other as its document's current blocks
 // (document_blocks) hold it, with one query for every such target. A target no block has is
-// absent. The write lands in the document's own issue, or in none when a project holds it, and
-// that issue's ancestors are read with it (IssueAncestors), since a pointer may name a block of
-// an issue above the writing document's (pmdoc.CheckBlockPointers).
+// absent. The write lands in the document's own issue, or in none when a project holds it; that
+// issue's ancestors are read only once a target turns out to sit in another document
+// (IssueAncestors), since a pointer inside the writing document - a plan task's `needs`, the
+// common case - is held to nothing above it (pmdoc.CheckBlockPointers), and this runs inside
+// the write's transaction.
 func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []model.ArtifactBlock, targets []text.Ref) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
 	var writing pmdoc.BlockWriting
 	if err := q.QueryRow(ctx, `
@@ -455,11 +457,6 @@ func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []m
 	`, artifactID).Scan(&writing.Document, &writing.Issue); err != nil {
 		return pmdoc.BlockWriting{}, nil, fmt.Errorf("read the reference of document %s: %w", artifactID, err)
 	}
-	ancestors, err := IssueAncestors(ctx, q, writing.Issue)
-	if err != nil {
-		return pmdoc.BlockWriting{}, nil, err
-	}
-	writing.Ancestors = ancestors
 	nodes, _, _ := uniqueBlocks(written)
 	own := make(map[string]string, len(nodes))
 	for _, node := range nodes {
@@ -499,6 +496,11 @@ func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []m
 		found[nodeID] = target
 	}
 	if err := rows.Err(); err != nil {
+		return pmdoc.BlockWriting{}, nil, err
+	}
+	// Only a target in another document can sit in another issue, so the ancestor walk is paid
+	// for only here.
+	if writing.Ancestors, err = IssueAncestors(ctx, q, writing.Issue); err != nil {
 		return pmdoc.BlockWriting{}, nil, err
 	}
 	return writing, found, nil

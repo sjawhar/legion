@@ -22,8 +22,14 @@ import (
 // `Coverage: `, and an approval request's answer, which names the missing checks alone.
 
 // noRequirementsGap is the one gap line a spec that marks no requirement answers, in place of a
-// line per requirement.
-const noRequirementsGap = "the spec marks no requirements"
+// line per requirement. noCheckReason and noPlanTaskReason are what one requirement lacks, as
+// RequirementCoverage.Gaps carries it; a document-level gap line is the requirement's block id
+// and one of these, which is what noCheckGap builds.
+const (
+	noRequirementsGap = "the spec marks no requirements"
+	noCheckReason     = "has no check"
+	noPlanTaskReason  = "has no plan task"
+)
 
 // GET /api/v1/issues/{key}/coverage  (any authenticated caller)
 //
@@ -53,7 +59,7 @@ func (s *server) issueCoverage(ctx context.Context, q queryer, issueKey string) 
 	coverage := model.IssueCoverage{Issue: issueKey, Requirements: []model.RequirementCoverage{}, Gaps: []string{}}
 	err := q.QueryRow(ctx, `
 		select coalesce((select a.id::text from artifacts a where a.issue_key = $1 and a.is_primary), ''),
-		       exists (select 1 from artifacts a where a.issue_key = $1 and a.role = 'plan')
+		       exists (select 1 from artifacts a where a.issue_key = $1 and `+aliasedPlanRole+`)
 	`, issueKey).Scan(&coverage.SpecArtifactID, &coverage.HasPlan)
 	if err != nil {
 		return model.IssueCoverage{}, fmt.Errorf("read the documents of %s: %w", issueKey, err)
@@ -83,15 +89,26 @@ func (s *server) issueCoverage(ctx context.Context, q queryer, issueKey string) 
 		requirement.Ref = "dispatch://" + issueKey + "/spec#b-" + text.EncodeBlockID(requirement.BlockID)
 		counts := served[requirement.BlockID]
 		requirement.Checks, requirement.PlanTasks = counts.checks, counts.planTasks
-		coverage.Requirements[index] = requirement
+		requirement.Gaps = []string{}
 		if requirement.Checks == 0 {
-			coverage.Gaps = append(coverage.Gaps, requirement.BlockID+" has no check")
+			requirement.Gaps = append(requirement.Gaps, noCheckReason)
 		}
 		if coverage.HasPlan && requirement.PlanTasks == 0 {
-			coverage.Gaps = append(coverage.Gaps, requirement.BlockID+" has no plan task")
+			requirement.Gaps = append(requirement.Gaps, noPlanTaskReason)
+		}
+		coverage.Requirements[index] = requirement
+		for _, reason := range requirement.Gaps {
+			coverage.Gaps = append(coverage.Gaps, requirement.BlockID+" "+reason)
 		}
 	}
 	return coverage, nil
+}
+
+// noCheckGap is the gap line a requirement with no check earns, written in one place: the
+// route's gap list, which builds it from the requirement's own reason, and the approval
+// request's answer (missingCheckGaps) carry the same words.
+func noCheckGap(blockID string) string {
+	return blockID + " " + noCheckReason
 }
 
 // missingCheckGaps is the gap lines an approval request's answer carries: one per requirement
@@ -105,42 +122,22 @@ func missingCheckGaps(coverage model.IssueCoverage) []string {
 	gaps := []string{}
 	for _, requirement := range coverage.Requirements {
 		if requirement.Checks == 0 {
-			gaps = append(gaps, requirement.BlockID+" has no check")
+			gaps = append(gaps, noCheckGap(requirement.BlockID))
 		}
 	}
 	return gaps
 }
 
 // requirementBlocksIn is every `requirement` block of one document, in document order, with its
-// words. The document's markdown is read live and parsed, as the checks of a Verification
-// document are (checkBlocksIn); nothing is written.
+// words, read live out of the document's markdown (typedBlocksIn).
 func (s *server) requirementBlocksIn(ctx context.Context, artifactID string) ([]model.RequirementCoverage, error) {
-	markdown, err := s.deps.Docs.Text(ctx, artifactID)
+	var requirements []model.RequirementCoverage
+	err := s.typedBlocksIn(ctx, artifactID, "requirement", func(node *pmdoc.Node, id string) {
+		requirements = append(requirements, model.RequirementCoverage{BlockID: id, Text: blockWords(node)})
+	})
 	if err != nil {
 		return nil, err
 	}
-	tree, err := pmdoc.ParseRendering(markdown)
-	if err != nil {
-		return nil, fmt.Errorf("read the requirements of document %s: %w", artifactID, err)
-	}
-	var requirements []model.RequirementCoverage
-	seen := map[string]struct{}{}
-	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-		if node.Type != "requirement" {
-			return true
-		}
-		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
-		if id == "" {
-			return true
-		}
-		// A rendering can repeat an id; the block index keys one row per id, and so does this.
-		if _, dup := seen[id]; dup {
-			return true
-		}
-		seen[id] = struct{}{}
-		requirements = append(requirements, model.RequirementCoverage{BlockID: id, Text: blockWords(node)})
-		return true
-	})
 	return requirements, nil
 }
 

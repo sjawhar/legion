@@ -411,6 +411,10 @@ type server struct {
 	// (recordRelatedChecks, run as detached work) hold or wait on a pool connection right now, at
 	// most relatedRecordRetryLimit.
 	relatedRecordRetrying atomic.Int32
+	// defaultBranches is each repository's default branch as the results reads last read it
+	// (results.go's branchCache), held across requests so the Verification tab's refetch on
+	// every result.recorded does not spend one GET /repos/{owner}/{repo} apiece.
+	defaultBranches branchCache
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
@@ -1261,6 +1265,15 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 	return tx, nil
+}
+
+// readyPool is the pool a route reads through before it opens its transaction, with the
+// refusal begin would make when there is no database.
+func (s *server) readyPool() (*store.Pool, error) {
+	if s.deps.Store == nil || s.deps.Store.Pool == nil {
+		return nil, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
+	}
+	return s.deps.Store.Pool, nil
 }
 
 // requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations

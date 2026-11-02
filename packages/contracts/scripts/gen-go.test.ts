@@ -47,7 +47,7 @@ describe("gen-go", () => {
   // Each file the generator writes is checked, so a hand-edit of any of them fails CI naming the
   // file it found stale rather than passing because a sibling file still matches. The hand-edit
   // lands on a copy under GEN_GO_CHECK_ROOT, never on the tracked file this workspace shares.
-  for (const stale of [output, daemonOutput, blockSchemaOutput]) {
+  for (const stale of generated) {
     test(`a hand-edit of ${relative(repoRoot, stale)} makes --check fail, naming it`, async () => {
       const root = mkdtempSync(join(tmpdir(), "gen-go-check-"));
       const staleCopy = resolve(root, relative(repoRoot, stale));

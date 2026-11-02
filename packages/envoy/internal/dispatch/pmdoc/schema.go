@@ -409,19 +409,11 @@ func defaultAttributes(typ BlockTypeSchema) Attrs {
 	return attrs
 }
 
-// BlockAttributeValue is one attribute a typed block carries: the name its type declares it
-// under, and the value the block holds, as the opening line writes it before escaping and
-// quoting (TypedBlockAttributes).
-type BlockAttributeValue struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
-
 // TypedBlockAttributes is each attribute node carries, in the order its type declares them
 // (schema/blocks.json), which is the order its opening line writes them: the values a reader of
 // that line reads back, with no escape and no quotes. A block of no type the schema declares
 // carries none, and so does one whose attributes the renderer would refuse.
-func TypedBlockAttributes(node *Node) []BlockAttributeValue {
+func TypedBlockAttributes(node *Node) []model.BlockAttributeValue {
 	typ, ok := typedBlock(node.Type)
 	if !ok {
 		return nil
@@ -435,8 +427,8 @@ func TypedBlockAttributes(node *Node) []BlockAttributeValue {
 
 // typedAttributeValues is a typed block's declared attributes and their written values, in
 // declaration order, leaving out one the block does not hold and one the markdown never carries.
-func typedAttributeValues(n *Node, typ BlockTypeSchema) ([]BlockAttributeValue, error) {
-	var values []BlockAttributeValue
+func typedAttributeValues(n *Node, typ BlockTypeSchema) ([]model.BlockAttributeValue, error) {
+	values := make([]model.BlockAttributeValue, 0, len(typ.Attributes))
 	for _, attribute := range typ.Attributes {
 		name, definition := attribute.Name, attribute.BlockAttributeSchema
 		if name == "invalid" && definition.Server {
@@ -453,28 +445,34 @@ func typedAttributeValues(n *Node, typ BlockTypeSchema) ([]BlockAttributeValue, 
 		if err != nil {
 			return nil, err
 		}
-		values = append(values, BlockAttributeValue{Name: name, Value: encoded})
+		values = append(values, model.BlockAttributeValue{Name: name, Value: encoded})
+	}
+	if len(values) == 0 {
+		return nil, nil
 	}
 	return values, nil
 }
 
 // renderTypedAttributes writes a typed block's directive attributes in the order its type
-// declares them (schema/blocks.json), which is the order every reader of the markdown sees.
-func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
+// declares them (schema/blocks.json), which is the order every reader of the markdown sees. It
+// answers the values it wrote beside the line, so the one caller that wants them both - a
+// version write, which lists every typed block's attributes beside the markdown it renders -
+// encodes each value once rather than walking the tree again for them.
+func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, []model.BlockAttributeValue, error) {
 	id, ok := n.Attrs[BlockIDAttr].(string)
 	if !ok || id == "" {
-		return "", fmt.Errorf("%w: typed block %q is missing blockId", ErrSchema, n.Type)
+		return "", nil, fmt.Errorf("%w: typed block %q is missing blockId", ErrSchema, n.Type)
 	}
 	values, err := typedAttributeValues(n, typ)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	parts := make([]string, 0, len(values)+1)
 	parts = append(parts, TypedBlockIDAttribute(id))
 	for _, value := range values {
 		parts = append(parts, value.Name+"="+strconv.Quote(escapeDirectiveAttribute(value.Value)))
 	}
-	return strings.Join(parts, " "), nil
+	return strings.Join(parts, " "), values, nil
 }
 
 // encodeTypedAttribute is the text one attribute value is written as, before escaping and

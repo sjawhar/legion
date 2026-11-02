@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -405,6 +404,28 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	pool, err := s.readyPool()
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The coverage is read before the transaction opens. Reading it folds the issue's live spec,
+	// which for a document no room holds is a cold read bounded by a minute
+	// (docs/read_cache.go), and no owner row lock is held across a read that long: four writers
+	// parked on one issue's row lock already cost a read of an unrelated issue the whole
+	// seventeen seconds the lock was held (store/pool.go). Nothing the lock protects is settled
+	// by it — the coverage is a report the answer carries, and a gap refuses nothing.
+	requested, err := s.loadArtifact(r.Context(), pool, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	coverage, err := s.coverageOfSpec(r.Context(), pool, requested)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -420,7 +441,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "only documents can be approved")
 		return
 	}
-	if artifact.Role == "plan" {
+	if artifact.Role == model.ArtifactRolePlan {
 		writeError(w, "PLAN_APPROVED_BY_REVIEW", http.StatusConflict,
 			"a plan is approved by its plan review, not by a person: record it with dispatch plan-approve (POST /api/v1/artifacts/{id}/plan-reviews)")
 		return
@@ -467,18 +488,14 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		// nothing: the request is recorded as it always was.
 		Coverage []string `json:"coverage"`
 	}
-	coverage, err := s.coverageOfSpec(r.Context(), tx, artifact)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	// An approval of every document this request names, each at its current version, needs no
 	// request: return the named document's as it stands.
-	settled, err := s.approvedAtNamedVersions(r.Context(), tx, artifact, documents)
+	settled, err := docs.NamedDocumentsApproved(r.Context(), tx, documents, artifact.ID,
+		artifact.Approval != nil && artifact.Approval.State == "approved")
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -487,7 +504,15 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval, Coverage: coverage})
 		return
 	}
-	open, err := docs.OpenApprovalAsk(r.Context(), tx, artifact.ID)
+	// The open request is found by any document this one names, not by the named document
+	// alone: a request already open over the issue's Verification document is renewed to cover
+	// the spec too, rather than a second request being opened on a document the first one is
+	// still asking about, which would strand one of the two in the human's Inbox.
+	named := make([]string, 0, len(documents))
+	for _, document := range documents {
+		named = append(named, document.ArtifactID)
+	}
+	open, err := docs.OpenApprovalAskForDocuments(r.Context(), tx, named)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -655,7 +680,7 @@ func (s *server) renewApprovalAsk(
 	switch {
 	case waitingOn == "human" && changed:
 		return nil, errorf(http.StatusConflict, "APPROVAL_WAITS_ON_HUMAN",
-			"the approval request already waits on the human, asking %q, and a different summary would rewrite the card they are reading, so nothing was changed; raise what changed with the human first, in the request's thread or as a decision block in the document, and once they have agreed to every point in it and a reply or a new version leaves the request waiting on you, hand it back with the new summary",
+			"the approval request already waits on the human, asking %q, and a different summary or another document would rewrite the card they are reading, so nothing was changed; raise what changed with the human first, in the request's thread or as a decision block in the document, and once they have agreed to every point in it and a reply or a new version leaves the request waiting on you, hand it back with the new summary",
 			open.Question)
 	case waitingOn == "agent":
 		if changed {
@@ -773,14 +798,12 @@ func (s *server) verificationDocumentFor(ctx context.Context, q queryer, artifac
 	if artifact.IssueKey == nil {
 		return model.AskApprovalDocument{}, errorf(http.StatusConflict, "NO_VERIFICATION_DOCUMENT", "%s", noVerification)
 	}
-	verification, err := scanArtifact(q.QueryRow(ctx, `
-		select `+artifactColumns+` from artifacts where issue_key = $1 and role = 'verification'
-	`, *artifact.IssueKey))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return model.AskApprovalDocument{}, errorf(http.StatusConflict, "NO_VERIFICATION_DOCUMENT", "%s", noVerification)
-	}
+	verification, held, err := s.verificationDocument(ctx, q, *artifact.IssueKey, "")
 	if err != nil {
 		return model.AskApprovalDocument{}, fmt.Errorf("read the issue's Verification document: %w", err)
+	}
+	if !held {
+		return model.AskApprovalDocument{}, errorf(http.StatusConflict, "NO_VERIFICATION_DOCUMENT", "%s", noVerification)
 	}
 	version, err := settledVersionNumber(ctx, q, verification.ID)
 	if err != nil {
@@ -793,29 +816,6 @@ func (s *server) verificationDocumentFor(ctx context.Context, q queryer, artifac
 	return model.AskApprovalDocument{
 		ArtifactID: verification.ID, Name: verification.Name, Version: version, RequestedVersion: version,
 	}, nil
-}
-
-// approvedAtNamedVersions reports whether every document a request would name already stands
-// approved at the version it names, so the request needs no row. artifact carries its derived
-// approval; the others are read one standing approval at a time, as a request naming more than
-// one document is the exception.
-func (s *server) approvedAtNamedVersions(ctx context.Context, q queryer, artifact model.Artifact, documents []model.AskApprovalDocument) (bool, error) {
-	if artifact.Approval == nil || artifact.Approval.State != "approved" {
-		return false, nil
-	}
-	for _, document := range documents {
-		if document.ArtifactID == artifact.ID {
-			continue
-		}
-		approved, err := docs.LatestApprovedReview(ctx, q, document.ArtifactID)
-		if err != nil {
-			return false, err
-		}
-		if approved == nil || approved.Version != document.Version {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // POST /api/v1/artifacts/{id}/plan-reviews  {version}  (any authenticated actor)
@@ -848,7 +848,7 @@ func (s *server) createArtifactPlanReview(w http.ResponseWriter, r *http.Request
 		s.writeHandlerError(w, err)
 		return
 	}
-	if artifact.Role != "plan" {
+	if artifact.Role != model.ArtifactRolePlan {
 		writeError(w, "NOT_PLAN_DOCUMENT", http.StatusConflict,
 			"only an issue's plan document (plan.md) is approved by a plan review")
 		return

@@ -719,6 +719,9 @@ export interface RequirementCoverage {
   readonly text: string;
   readonly checks: number;
   readonly plan_tasks: number;
+  /** This requirement's own gap lines, the ones `IssueCoverage.gaps` carries for it, so a
+   *  reader draws them beside the requirement without parsing the sentence back. */
+  readonly gaps: readonly string[];
 }
 
 export interface ArtifactBlock {
@@ -2430,15 +2433,19 @@ export interface CheckResult {
   readonly currency?: CheckResultCurrency;
 }
 
+/** When a check runs: before the merge, after it, or against the default branch. The closed
+ *  enum `pmdoc/schema/blocks.json` declares under the `when` attribute's `choices`. */
+export type CheckWhen = "before_merge" | "after_merge" | "default_branch";
+
 /** One `check` block of a Verification document with every result recorded against it, newest
- *  first. `when` is `before_merge`, `after_merge` or `default_branch`. */
+ *  first. */
 export interface CheckBlock {
   readonly block_id: string;
   readonly ref: string;
   readonly issue_key: string;
   readonly artifact_id: string;
   readonly text: string;
-  readonly when: string;
+  readonly when: CheckWhen;
   readonly surface: string;
   readonly run: string;
   readonly negative_control: string;
@@ -2451,7 +2458,8 @@ export interface CheckBlock {
  *  document order. An issue with no Verification document answers no checks. */
 export interface IssueCheckResults {
   readonly issue: string;
-  readonly verification_artifact_id: string | null;
+  /** The issue's Verification document, `""` for an issue that has none. */
+  readonly verification_artifact_id: string;
   readonly checks: readonly CheckBlock[];
 }
 
@@ -2490,7 +2498,7 @@ export interface CheckResultEventPayload {
   readonly check_artifact_id: string;
   readonly check_block_id: string;
   readonly check_version: number;
-  readonly when: string;
+  readonly when: CheckWhen;
   readonly verdict: "pass" | "fail";
   readonly role: string;
   readonly commit_sha: string;

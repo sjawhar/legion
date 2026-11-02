@@ -35,7 +35,9 @@
 # `FAIL: <section> <what>: <observed>` and the script exits 1.
 #
 # Every check is `cmd || fail …`, never part of an `&&` list: under `set -e` a failing command
-# anywhere but last in such a list does not stop the script.
+# anywhere but last in such a list does not stop the script. A negative check — `grep -q … ||
+# fail` and the like — is written as the AND list it reads as, and is safe for that same reason:
+# its failing command is not the last one, so `set -e` leaves the `|| fail` to decide.
 
 # shellcheck disable=SC2016 # the single-quoted jq filters name jq variables, not shell ones
 set -euo pipefail
@@ -314,10 +316,11 @@ record() {
   pass "$section" "$what"
 }
 
-# refused_result SECTION WHAT ISSUE JSON CODE: POST …/results is refused CODE.
+# refused_result SECTION WHAT ISSUE JSON CODE STATUS: POST …/results is refused STATUS CODE.
 refused_result() {
-  local want_code="$5"
+  local want_code="$5" status="$6"
   send POST "/api/v1/issues/$3/results" "$4"
+  want_status "$status" "$1" "$2 is refused $status"
   expect "$1" "$2 is refused $want_code" "\"$want_code\"" '.code'
 }
 
@@ -575,11 +578,11 @@ pass result "a check nobody has run reads no result yet"
 refused_result result "a check id no Verification document in reach holds" "$root" \
   "$(jq -cn --arg s "$session" --arg c "$commit_one" \
     '{actor: {kind: "session", id: $s}, check: "no-such-check", role: "tester", verdict: "pass", commit: $c}')" \
-  UNKNOWN_CHECK
+  UNKNOWN_CHECK 400
 refused_result result "a pass counting a skipped case" "$root" \
   "$(jq -cn --arg s "$session" --arg c "$commit_one" \
     '{actor: {kind: "session", id: $s}, check: "c1", role: "tester", verdict: "pass", commit: $c, skipped: 1}')" \
-  RESULT_CONTRADICTS
+  RESULT_CONTRADICTS 400
 
 # --- closed: the one write a closed issue takes --------------------------------------------------
 
@@ -590,9 +593,7 @@ record closed "record a pass for the after-merge check on the closed $child" "$c
 refused_result closed "a result for a before-merge check on a closed issue" "$child" \
   "$(jq -cn --arg s "$session" --arg c "$commit_two" \
     '{actor: {kind: "session", id: $s}, check: "cbefore", role: "tester", verdict: "pass", commit: $c}')" \
-  ISSUE_CLOSED
-want_status 409 closed "a result for a before-merge check on a closed issue is 409"
-pass closed "a result for a before-merge check on a closed issue is 409 ISSUE_CLOSED"
+  ISSUE_CLOSED 409
 
 printf 'A note the closed issue must refuse.\n' >"$work/note.md"
 send POST "/api/v1/issues/$child/artifacts" "$(document_body "$child" note.md "$work/note.md")"

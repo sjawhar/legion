@@ -130,7 +130,7 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	// records the request it was given against either way.
 	if open != nil {
 		askID = &open.ID
-		closes, err := carryClosesRequest(ctx, tx, open, artifactID, version.Number)
+		closes, err := NamedDocumentsApproved(ctx, tx, open.Approval.Documents, artifactID, carriedAtNamedVersion(open, artifactID, version.Number))
 		if err != nil {
 			return nil, err
 		}
@@ -149,26 +149,12 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	return append(events, event), nil
 }
 
-// carryClosesRequest reports whether carrying an approval of carried at version answers the open
-// request: every other document the request names already stands approved at the version the
-// request names for it.
-func carryClosesRequest(ctx context.Context, tx pgx.Tx, open *model.Ask, carried string, version int) (bool, error) {
-	for _, document := range open.Approval.Documents {
-		if document.ArtifactID == carried {
-			if document.Version != version {
-				return false, nil
-			}
-			continue
-		}
-		approved, err := LatestApprovedReview(ctx, tx, document.ArtifactID)
-		if err != nil {
-			return false, err
-		}
-		if approved == nil || approved.Version != document.Version {
-			return false, nil
-		}
-	}
-	return true, nil
+// carriedAtNamedVersion reports whether the version this carry approves is the version the open
+// request names for the carried document. A request that does not name it at all is decided by
+// its other documents alone, as it always was.
+func carriedAtNamedVersion(open *model.Ask, carried string, version int) bool {
+	named := open.Approval.Document(carried)
+	return named == nil || named.Version == version
 }
 
 // carriedReview is the review version number of artifactID, whose markdown is markdown and whose

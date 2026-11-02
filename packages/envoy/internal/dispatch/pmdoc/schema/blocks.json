@@ -84,7 +84,8 @@
         },
         "needs": {
           "kind": "block[]",
-          "targets": ["plan_task"]
+          "targets": ["plan_task"],
+          "scope": "document"
         }
       }
     },

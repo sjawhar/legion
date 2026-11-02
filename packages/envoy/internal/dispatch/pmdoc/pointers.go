@@ -15,8 +15,9 @@ import (
 var ErrBlockPointer = errors.New("block pointer refused")
 
 // BlockPointer is one reference a typed block's `block[]` attribute holds: the typed block's id
-// and type, the attribute, the canonical block reference as written and as read, and the
-// attribute's targets (none: any block).
+// and type, the attribute, the canonical block reference as written and as read, the attribute's
+// targets (none: any block) and the scope its declaration limits it to (none: any block of the
+// writing document's own issue or of one above it).
 type BlockPointer struct {
 	Block     string
 	BlockType string
@@ -24,6 +25,7 @@ type BlockPointer struct {
 	Ref       string
 	Target    text.Ref
 	Targets   []string
+	Scope     BlockAttributeScope
 }
 
 // BlockPointers lists, in document order, each reference each typed block's `block[]` attributes
@@ -67,7 +69,11 @@ func BlockPointers(tree *Node) []BlockPointer {
 				if !canonical {
 					continue
 				}
-				pointers = append(pointers, BlockPointer{Block: id, BlockType: node.Type, Attribute: name, Ref: ref, Target: target, Targets: typ.Attributes.Get(name).Targets})
+				declared := typ.Attributes.Get(name)
+				pointers = append(pointers, BlockPointer{
+					Block: id, BlockType: node.Type, Attribute: name, Ref: ref, Target: target,
+					Targets: declared.Targets, Scope: declared.Scope,
+				})
 			}
 		}
 		return true
@@ -93,12 +99,6 @@ type BlockWriting struct {
 	Ancestors []string
 }
 
-// sameDocumentPointers are the `block[]` attributes whose target is a block of the writing
-// document itself. A plan task's `needs` orders the tasks of one plan, so it names a task of its
-// own document and never another plan's; every other attribute may name a block of the writing
-// document's own issue or of an issue above it.
-var sameDocumentPointers = map[string]bool{"needs": true}
-
 // CheckBlockPointers refuses tree, the tree a write leaves, when a pointer it introduces names a
 // block the attribute may not name, naming the first such pointer in document order. A pointer is
 // introduced when prior, the tree before the write, holds no pointer with the same typed block id,
@@ -117,7 +117,7 @@ var sameDocumentPointers = map[string]bool{"needs": true}
 // targets do not allow (more than one type is refused when any is outside them), a block of an
 // issue that is neither the writing document's own issue nor one above it, a block of another
 // document when a project holds the writing document and no issue does, or a block of another
-// document under an attribute that points only inside its own document (sameDocumentPointers).
+// document under an attribute the schema scopes to its own document (BlockAttributeScope).
 // Only a write that comes this way is held to this: a browser's edit never does, and a pointer it
 // leaves at a block no document holds stays the unresolved reference it is.
 //
@@ -154,32 +154,35 @@ func CheckBlockPointers(tree, prior *Node, resolve func(targets []text.Ref) (Blo
 	}
 	for _, pointer := range introduced {
 		// at names the pointer every refusal below is about: the block holding it, the attribute,
-		// and the reference as written.
-		at := fmt.Sprintf("typed block %q %s attribute %q points at %s",
-			pointer.BlockType, TypedBlockIDAttribute(pointer.Block), pointer.Attribute, pointer.Ref)
+		// and the reference as written. It is built only by a refusal: a plan whose dozens of
+		// pointers are all legal formats nothing.
+		at := func() string {
+			return fmt.Sprintf("typed block %q %s attribute %q points at %s",
+				pointer.BlockType, TypedBlockIDAttribute(pointer.Block), pointer.Attribute, pointer.Ref)
+		}
 		target, holds := found[text.TargetID(pointer.Target)]
 		if !holds {
-			return fmt.Errorf("%w: %s, which no document holds", ErrBlockPointer, at)
+			return fmt.Errorf("%w: %s, which no document holds", ErrBlockPointer, at())
 		}
 		for _, typ := range target.Types {
 			if !slices.Contains(pointer.Targets, typ) {
 				return fmt.Errorf("%w: %s, a %q block; it points only at %s",
-					ErrBlockPointer, at, typ, strings.Join(pointer.Targets, ", "))
+					ErrBlockPointer, at(), typ, strings.Join(pointer.Targets, ", "))
 			}
 		}
 		switch {
 		case writing.Issue == "":
 			if target.Document != writing.Document {
 				return fmt.Errorf("%w: %s, a block of %s; a document a project holds, which no issue does, points only at a block of itself",
-					ErrBlockPointer, at, target.Document)
+					ErrBlockPointer, at(), target.Document)
 			}
 		case target.Issue != writing.Issue && !slices.Contains(writing.Ancestors, target.Issue):
 			return fmt.Errorf("%w: %s, a block of %s; it points only at a block of %s or of an issue above it",
-				ErrBlockPointer, at, issueOf(target), writing.Issue)
+				ErrBlockPointer, at(), issueOf(target), writing.Issue)
 		}
-		if sameDocumentPointers[pointer.Attribute] && target.Document != writing.Document {
+		if pointer.Scope == BlockAttributeScopeDocument && target.Document != writing.Document {
 			return fmt.Errorf("%w: %s, a block of %s; it points only at a block of its own document, %s",
-				ErrBlockPointer, at, target.Document, writing.Document)
+				ErrBlockPointer, at(), target.Document, writing.Document)
 		}
 	}
 	return nil

@@ -47,8 +47,22 @@ type BlockAttributeSchema struct {
 	// Targets limits a `block[]` attribute to blocks of the named types (a typed block the schema
 	// declares, or a built-in block the link graph holds); absent or empty, it points at any block. No
 	// other kind carries it.
-	Targets []string `json:"targets,omitempty"`
+	Targets []string            `json:"targets,omitempty"`
+	Scope   BlockAttributeScope `json:"scope,omitempty"`
 }
+
+// BlockAttributeScope limits where a `block[]` attribute may point. `document` points only at a
+// block of the document holding it: a plan task's `needs` orders the tasks of one plan, so it names
+// a task of its own document and never another plan's. An attribute declaring no scope points at a
+// block of its document's own issue or of any issue above it, which every pointer is held to
+// anyway. It is a server rule, which the server checks on a write it accepts (pmdoc's
+// CheckBlockPointers), not something an editor draws, so declaring it leaves the schema version
+// alone.
+type BlockAttributeScope string
+
+const (
+	BlockAttributeScopeDocument BlockAttributeScope = "document"
+)
 
 // BlockContentRule describes the block children a typed node may contain.
 type BlockContentRule string

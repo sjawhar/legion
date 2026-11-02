@@ -471,6 +471,12 @@ function stringArg(args: Record<string, unknown>, name: string): string {
   return value;
 }
 
+function numberArg(args: Record<string, unknown>, name: string): number {
+  const value = args[name];
+  if (typeof value !== "number") throw new Error(`${name} is required`);
+  return value;
+}
+
 function optionalString(args: Record<string, unknown>, name: string): string | undefined {
   const value = args[name];
   return typeof value === "string" ? value : undefined;
@@ -2163,7 +2169,7 @@ function issueSummary(
   references: IssueReferences | string,
   graph: readonly string[],
   linkBase: string,
-  coverage: IssueCoverage | undefined,
+  coverage: IssueCoverage | string,
   titles?: ReadonlyMap<string, string>
 ): string {
   const asks = issue.open_asks;
@@ -2195,8 +2201,11 @@ function issueSummary(
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
     // What the spec's requirements lack: one line per gap, or the one line that says the spec
-    // marks none. A gap refuses nothing; it is what the reader fixes before the work starts.
-    ...(coverage?.gaps ?? []).map((gap) => `Coverage: ${gap}`),
+    // marks none. A gap refuses nothing; it is what the reader fixes before the work starts. A
+    // read the server could not answer says so rather than reading as a spec with no gaps.
+    ...(typeof coverage === "string"
+      ? [`Coverage: ${coverage}`]
+      : coverage.gaps.map((gap) => `Coverage: ${gap}`)),
     // The links a person or an agent put on the issue — the pull request that delivers it among
     // them — which the issue page renders with their state; the reference graph below carries
     // only links between Dispatch nodes.
@@ -2299,18 +2308,19 @@ async function issueReferencesOrUnavailable(
 }
 
 /**
- * What the issue's requirements lack, or nothing at all: a Dispatch that does not serve the
- * coverage read yet, or one that cannot answer it, leaves the read without `Coverage:` lines
- * rather than failing it, as the closure section does.
+ * What the issue's requirements lack, or why the server could not say: a Dispatch that does not
+ * serve the coverage read yet answers `unavailable`, and any other failure is named, as the
+ * closure and graph sections do (unavailableReason). A swallowed failure would make a spec with
+ * uncovered requirements read exactly like a fully covered one.
  */
-async function issueCoverageOrNone(
+async function issueCoverageOrReason(
   client: DispatchClient,
   key: string
-): Promise<IssueCoverage | undefined> {
+): Promise<IssueCoverage | string> {
   try {
     return await client.issueCoverage(key);
-  } catch {
-    return undefined;
+  } catch (error) {
+    return unavailableReason(error);
   }
 }
 
@@ -3008,12 +3018,12 @@ async function listDocumentBlocks(
     lines.push(
       `${indent}${block.id} ${block.type} (${block.token ?? "no token"}; ${comments} comment${comments === 1 ? "" : "s"}, ${asks} ask${asks === 1 ? "" : "s"}): ${opening}`
     );
-    // A plan task's and a check's pointers, the two attributes a reader follows between
-    // documents; every attribute of a block is in `dispatch read` of its reference.
-    for (const name of ["serves", "needs"]) {
-      const attribute = block.attributes?.find((held) => held.name === name);
-      if (attribute !== undefined && attribute.value !== "") {
-        lines.push(`${indent}  ${name}: ${attribute.value}`);
+    // Every pointer a typed block holds, in the order its type declares them: a reader follows
+    // these between documents, and a `block[]` attribute a type declares later must not go
+    // silently unprinted. Every attribute of a block is in `dispatch read` of its reference.
+    for (const attribute of block.attributes ?? []) {
+      if (attribute.value !== "" && attribute.value.includes("dispatch://")) {
+        lines.push(`${indent}  ${attribute.name}: ${attribute.value}`);
       }
     }
     if (block.type === "table") {
@@ -4727,12 +4737,17 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_plan_approve": {
-      const resolved = await resolveDocument(
-        documentOwner(),
-        optionalString(args, "artifact") ?? "plan.md"
-      );
-      // The schema requires an integer version, so a call that reaches here carries one.
-      const version = optionalNumber(args, "version") ?? 0;
+      const planOwner = documentOwner();
+      const named = optionalString(args, "artifact");
+      // The server resolves a plan by its role and the dashboard by the issue's
+      // plan_artifact_id, precisely because a hand-renamed document must not displace the Plan
+      // tab; the filename is only what an issue whose detail names no plan falls back on.
+      const byRole =
+        named === undefined && planOwner.kind === "issue"
+          ? ((await client.getIssue(planOwner.issue)).plan_artifact_id ?? "")
+          : "";
+      const resolved = await resolveDocument(planOwner, named ?? (byRole || "plan.md"));
+      const version = numberArg(args, "version");
       const review = await client.planApprove(resolved.artifact.id, { actor, version });
       return {
         text: `The plan review approved ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${review.version}; no human is asked to approve a plan. A later plan version makes this approval stale: run the review again and record it the same way.`,
@@ -5191,7 +5206,7 @@ export async function executeDispatchTool(
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
           ...read.events.flatMap(eventTexts),
         ]),
-        issueCoverageOrNone(client, read.issue.key),
+        issueCoverageOrReason(client, read.issue.key),
       ]);
       return {
         text: issueSummary(

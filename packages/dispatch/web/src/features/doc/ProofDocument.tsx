@@ -16,6 +16,7 @@ import {
   isDocumentSchemaError,
   isDocumentUnloadable,
 } from "../../api/client";
+import { artifactBlocksQuery } from "../../api/queries";
 import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
@@ -291,9 +292,8 @@ export function ProofDocument({
   const rebuildError = page && admission?.kind === "rebuild" ? admission : undefined;
   const shownLoadError = admission?.kind === "failed" ? admission.message : loadError;
   const blockReferencesQuery = useQuery({
+    ...artifactBlocksQuery(artifact.id),
     enabled: version === undefined,
-    queryKey: ["artifact", artifact.id, "blocks"],
-    queryFn: () => api.getArtifactBlocks(artifact.id),
   });
   const versionQuery = useQuery({
     enabled: version !== undefined,

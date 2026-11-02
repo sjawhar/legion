@@ -162,6 +162,37 @@ func NewestReview(ctx context.Context, q Queryer, artifactID string) (*model.Art
 	return newestReview(ctx, q, "newest review", newestReviewQuery, artifactID)
 }
 
+// NamedDocumentsApproved reports whether every document an approval request names stands
+// approved at the version the request names for it. It is the one place that rule is written:
+// the approval request route asks it to decide whether a request needs a row at all, and
+// carryApproval asks it to decide whether carrying one document's approval answers the open
+// request. known is the one document the caller has already judged - the document the request
+// was made on, or the one whose approval is being carried - and knownApproved its verdict;
+// every other document is read here.
+//
+// A document counts as approved only when its newest review, in any state, is an approval of
+// the version the request names. The newest approval alone cannot see a later request for
+// changes, so a request a person answered "Request changes" on would otherwise read as settled
+// and the person never be asked again about the document they rejected.
+func NamedDocumentsApproved(ctx context.Context, q Queryer, documents []model.AskApprovalDocument, known string, knownApproved bool) (bool, error) {
+	for _, document := range documents {
+		if document.ArtifactID == known {
+			if !knownApproved {
+				return false, nil
+			}
+			continue
+		}
+		review, err := NewestReview(ctx, q, document.ArtifactID)
+		if err != nil {
+			return false, err
+		}
+		if review == nil || review.State != "approved" || review.Version != document.Version {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // latestReviewBy is the newest review of artifactID a person gave, in any state, by his canonical
 // login (model.CanonicalLogin), or nil when he has reviewed the document at no version.
 func latestReviewBy(ctx context.Context, q Queryer, artifactID, login string) (*model.ArtifactReview, error) {

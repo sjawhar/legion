@@ -63,7 +63,19 @@ export interface BlockAttributeSchema {
    * other kind carries it.
    */
   readonly targets?: readonly string[];
+  readonly scope?: BlockAttributeScope;
 }
+
+/**
+ * BlockAttributeScope limits where a `block[]` attribute may point. `document` points only at a
+ * block of the document holding it: a plan task's `needs` orders the tasks of one plan, so it names
+ * a task of its own document and never another plan's. An attribute declaring no scope points at a
+ * block of its document's own issue or of any issue above it, which every pointer is held to
+ * anyway. It is a server rule, which the server checks on a write it accepts (pmdoc's
+ * CheckBlockPointers), not something an editor draws, so declaring it leaves the schema version
+ * alone.
+ */
+export type BlockAttributeScope = "document";
 
 /**
  * BlockContentRule describes the block children a typed node may contain.

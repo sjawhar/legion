@@ -36,7 +36,6 @@ import type {
   HandoffSummary,
   InboxRow,
   Issue,
-  IssueCheckResults,
   IssueCoverage,
   IssueDetails,
   IssueSummary,
@@ -271,20 +270,6 @@ export function recordCheckResult(
     `/api/v1/issues/${encodeURIComponent(issue)}/results`,
     "POST",
     input,
-    options
-  );
-}
-
-/** `GET /api/v1/issues/{key}/results`: the issue's checks, each with the results recorded
- *  against it, newest first, and each result's currency. */
-export function getIssueResults(
-  issue: string,
-  options: ApiOptions = {}
-): Promise<IssueCheckResults> {
-  return request<IssueCheckResults>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/results`,
-    "GET",
-    undefined,
     options
   );
 }

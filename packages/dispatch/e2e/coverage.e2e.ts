@@ -15,9 +15,9 @@ A requirement nothing checks is flagged.
 :::
 `;
 
-/** Waits for the server to have indexed the blocks of the version just written: the flag and the
- *  Referenced-by list are read from that index, and a browser that asks before it is written
- *  would read the answer the write has not landed yet. */
+/** One requirement's coverage, read once. The flag and the Referenced-by list are read from the
+ *  block index of the version just written, so each call site polls this until the answer it
+ *  waits for lands rather than trusting the first read. */
 async function coverageOf(issue: string, blockId: string): Promise<RequirementCoverage> {
   const coverage = await getIssueCoverage(issue);
   const requirement = coverage.requirements.find((row) => row.block_id === blockId);

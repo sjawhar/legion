@@ -1,31 +1,17 @@
 import { parseBlockPointerValue } from "@legion/contracts";
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { type ReactNode, useMemo } from "react";
 
-import { api } from "../../api/client";
+import { artifactBlocksQuery } from "../../api/queries";
 import type { Artifact, ArtifactBlock } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
-import {
-  card,
-  dangerText,
-  linkHoverText,
-  linkText,
-  textMutedOnCanvas,
-  textMutedOnSurface,
-} from "../../theme/classes";
+import { card, dangerText, textMutedOnCanvas, textMutedOnSurface } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { withBlock } from "../refs/block-reference";
 import { BlockReferences } from "../refs/ReferencedBy";
-import { referenceTriggerProps } from "../refs/RefPreview";
+import { ReferenceLink } from "../refs/ReferenceLink";
 import { useReferenceTarget } from "../refs/reference-target";
-import {
-  buildDispatchReference,
-  buildReferencePath,
-  documentRoute,
-  parseNodeReference,
-  shortForm,
-} from "../refs/routes";
+import { buildDispatchReference, documentRoute, parseNodeReference } from "../refs/routes";
 
 /** The `block[]` attribute `name` of `block` as the pointers it holds; empty for a block that
  *  carries none and for a value the server would refuse, which no stored block holds. */
@@ -37,20 +23,8 @@ function pointers(block: ArtifactBlock, name: string): readonly string[] {
 /** A block a pointer names, drawn as its own words once the graph answers them and as the
  *  reference's short form until then; a pointer that names nothing shows as the text it is. */
 function BlockLink({ reference }: { reference: string }): ReactNode {
-  const route = parseNodeReference(reference);
-  const { title } = useReferenceTarget(route, { text: false });
-  if (route === undefined) {
-    return <span>{reference}</span>;
-  }
-  return (
-    <Link
-      {...referenceTriggerProps(route)}
-      className={`underline ${linkText} ${linkHoverText}`}
-      to={buildReferencePath(route)}
-    >
-      {title ?? shortForm(route)}
-    </Link>
-  );
+  const { title } = useReferenceTarget(parseNodeReference(reference), { text: false });
+  return <ReferenceLink label={title} reference={reference} />;
 }
 
 /** One side of a task's pointers: the requirements it serves, or the tasks it needs. */
@@ -75,24 +49,54 @@ function Pointers({
   );
 }
 
-function Task({ block, reference }: { block: ArtifactBlock; reference: string }): ReactNode {
+/** One task of the plan: its own link, what it serves, what it needs, and what points at it. */
+function Task({ task }: { task: PlanTask }): ReactNode {
   return (
     <li className={`space-y-2 rounded-lg p-3 ${card}`} data-testid="plan-task">
-      <BlockLink reference={reference} />
-      <Pointers label="Serves" references={pointers(block, "serves")} testId="plan-task-serves" />
-      <Pointers label="Needs" references={pointers(block, "needs")} testId="plan-task-needs" />
-      <BlockReferences reference={reference} />
+      <BlockLink reference={task.reference} />
+      <Pointers label="Serves" references={task.serves} testId="plan-task-serves" />
+      <Pointers label="Needs" references={task.needs} testId="plan-task-needs" />
+      <BlockReferences reference={task.reference} />
     </li>
   );
+}
+
+/** One `plan_task` of the plan as the list draws it: its reference and its two pointer sets,
+ *  each parsed once per read of the blocks rather than on every render of the tab, which stays
+ *  mounted and re-renders on every live event of the issue. */
+interface PlanTask {
+  readonly id: string;
+  readonly reference: string;
+  readonly serves: readonly string[];
+  readonly needs: readonly string[];
 }
 
 function Tasks({ artifact }: { artifact: Artifact }): ReactNode {
   // The same key the document's own block read uses, so a tab opened after the document is
   // already answered.
-  const blocks = useQuery({
-    queryFn: () => api.getArtifactBlocks(artifact.id),
-    queryKey: ["artifact", artifact.id, "blocks"],
-  });
+  const blocks = useQuery(artifactBlocksQuery(artifact.id));
+  const data = blocks.data;
+  const tasks = useMemo<readonly PlanTask[]>(() => {
+    if (data === undefined) {
+      return [];
+    }
+    const document = documentRoute(artifact);
+    return data
+      .filter((block) => block.type === "plan_task")
+      .flatMap((block) => {
+        const route = withBlock(document, block.id);
+        return route === undefined
+          ? []
+          : [
+              {
+                id: block.id,
+                reference: buildDispatchReference(route),
+                serves: pointers(block, "serves"),
+                needs: pointers(block, "needs"),
+              },
+            ];
+      });
+  }, [artifact, data]);
 
   if (blocks.isPending) {
     return (
@@ -108,15 +112,6 @@ function Tasks({ artifact }: { artifact: Artifact }): ReactNode {
       </p>
     );
   }
-
-  const document = documentRoute(artifact);
-  const tasks = blocks.data
-    .filter((block) => block.type === "plan_task")
-    .map((block) => ({ block, route: withBlock(document, block.id) }))
-    .flatMap(({ block, route }) =>
-      route === undefined ? [] : [{ block, reference: buildDispatchReference(route) }]
-    );
-
   if (tasks.length === 0) {
     return (
       <div data-testid="plan-no-tasks">
@@ -127,8 +122,8 @@ function Tasks({ artifact }: { artifact: Artifact }): ReactNode {
 
   return (
     <ul aria-label="Plan tasks" className="space-y-3" data-testid="plan-tasks">
-      {tasks.map(({ block, reference }) => (
-        <Task block={block} key={block.id} reference={reference} />
+      {tasks.map((task) => (
+        <Task key={task.id} task={task} />
       ))}
     </ul>
   );

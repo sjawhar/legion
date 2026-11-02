@@ -1,24 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
 
 import { issueResultsQuery } from "../../api/queries";
-import type { Artifact, CheckBlock, CheckResult } from "../../api/types";
+import type { Artifact, CheckBlock, CheckResult, CheckResultCurrency } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
-import { pillClassName } from "../../components/Pill";
+import { pillClassName, pillShapeClassName } from "../../components/Pill";
 import {
   card,
   dangerText,
-  linkHoverText,
-  linkText,
   successText,
+  surfaceMutedBg,
   textMutedOnCanvas,
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { BlockReferences } from "../refs/ReferencedBy";
-import { referenceTriggerProps } from "../refs/RefPreview";
-import { buildReferencePath, parseNodeReference, shortForm } from "../refs/routes";
+import { ReferenceLink } from "../refs/ReferenceLink";
 import { Timestamp } from "../refs/Timestamp";
 
 /**
@@ -29,9 +26,9 @@ import { Timestamp } from "../refs/Timestamp";
  * result. A currency the server left out - one written before it judged currency - reads as
  * `unknown` for the same reason: nothing judged it.
  */
-export type CheckState = "passed" | "failed" | "older" | "no-result" | "unmarked";
+type CheckState = "passed" | "failed" | "older" | "no-result" | "unmarked";
 
-export function checkState(check: Pick<CheckBlock, "results">): CheckState {
+function checkState(check: Pick<CheckBlock, "results">): CheckState {
   const latest = check.results[0];
   if (latest === undefined) {
     return "no-result";
@@ -61,6 +58,13 @@ const CHECK_STATE_TEXT: Record<CheckState, string> = {
   unmarked: textMutedOnSurface,
 };
 
+/** The two currency marks as a reader sees them, beside `Pass` and `Fail` and the check-state
+ *  labels above; `unknown` draws no mark at all, so it has no label. */
+const CURRENCY_LABELS: Record<Exclude<CheckResultCurrency, "unknown">, string> = {
+  current: "Current",
+  older: "Older",
+};
+
 /** One name/value row of a check or a result. A value the writer left blank still shows its
  *  name: that the check named no negative control is itself what a reader came to see. */
 function Fact({
@@ -85,40 +89,28 @@ function Fact({
 /** A screenshot a result names, which is a `dispatch://` reference to an image document of the
  *  issue that recorded it; one that names nothing shows as the text it is. */
 function Screenshot({ reference }: { reference: string }): ReactNode {
-  const route = parseNodeReference(reference);
-  if (route === undefined) {
-    return <span data-testid="verification-result-screenshot">{reference}</span>;
-  }
-  return (
-    <Link
-      {...referenceTriggerProps(route)}
-      className={`underline ${linkText} ${linkHoverText}`}
-      data-testid="verification-result-screenshot"
-      to={buildReferencePath(route)}
-    >
-      {shortForm(route)}
-    </Link>
-  );
+  return <ReferenceLink reference={reference} testId="verification-result-screenshot" />;
 }
 
 function Result({ result }: { result: CheckResult }): ReactNode {
   // Unknown currency draws neither mark: Dispatch could not read the repository, so saying
   // `current` or `older` would be a judgement nothing made.
-  const marked = result.currency === "current" || result.currency === "older";
+  const marked =
+    result.currency === "current" || result.currency === "older" ? result.currency : undefined;
   return (
     <li className="space-y-2" data-testid="verification-result">
       <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-sm ${textMutedOnSurface}`}>
         <span
-          className={`${pillClassName("label")} ${result.verdict === "pass" ? successText : dangerText}`}
+          className={`${pillShapeClassName} ${surfaceMutedBg} ${result.verdict === "pass" ? successText : dangerText}`}
           data-testid="verification-result-verdict"
         >
           {result.verdict === "pass" ? "Pass" : "Fail"}
         </span>
-        {marked ? (
+        {marked === undefined ? null : (
           <span className={pillClassName("label")} data-testid="verification-result-currency">
-            {result.currency}
+            {CURRENCY_LABELS[marked]}
           </span>
-        ) : null}
+        )}
         <span data-testid="verification-result-role">{result.role}</span>
         <span aria-hidden="true">·</span>
         <Timestamp at={result.created_at} />
@@ -173,7 +165,7 @@ function Check({ check }: { check: CheckBlock }): ReactNode {
     >
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span
-          className={`${pillClassName("label")} ${CHECK_STATE_TEXT[state]}`}
+          className={`${pillShapeClassName} ${surfaceMutedBg} ${CHECK_STATE_TEXT[state]}`}
           data-testid="verification-check-state"
         >
           {CHECK_STATE_LABELS[state]}

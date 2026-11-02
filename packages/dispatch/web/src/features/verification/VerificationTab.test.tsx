@@ -72,7 +72,7 @@ function renderTab(artifact: Artifact | undefined, checks: CheckBlock[]) {
   const getIssueResults = spyOn(api, "getIssueResults").mockResolvedValue({
     checks,
     issue: "CORE-1",
-    verification_artifact_id: artifact?.id ?? null,
+    verification_artifact_id: artifact?.id ?? "",
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
@@ -160,7 +160,7 @@ test("a result shows how it ran, what was seen, its counts, its role and its scr
   const field = (name: string) =>
     within(row).getByTestId(`verification-result-${name}`).textContent;
   expect(field("verdict")).toBe("Fail");
-  expect(field("currency")).toBe("current");
+  expect(field("currency")).toBe("Current");
   expect(field("role")).toBe("tester");
   expect(field("surface")).toBe("cli");
   expect(field("run")).toBe("bun test web/src");

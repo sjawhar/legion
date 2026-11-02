@@ -152,6 +152,58 @@ const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
   { keys: "t v", label: "Activity tab", tab: "activity" },
 ];
 
+/** One of the two role-document tab panels, Verification and Plan. They differ only in the tab
+ *  they name and the component that frames the document; the panel itself, the lazy-mount guard
+ *  and the `ArtifactDocument` under it are one thing, written once. */
+function RoleDocumentPanel({
+  Tab,
+  activated,
+  active,
+  artifact,
+  isClosed,
+  issueKey,
+  onVersionChange,
+  tab,
+}: {
+  Tab: (props: {
+    artifact: Artifact | undefined;
+    children?: ReactNode;
+    issueKey: string;
+  }) => ReactNode;
+  activated: boolean;
+  active: boolean;
+  artifact: Artifact | undefined;
+  isClosed: boolean;
+  issueKey: string;
+  onVersionChange: (artifact: Artifact, version: number | null) => void;
+  tab: "verification" | "plan";
+}): ReactNode {
+  return (
+    <div
+      aria-hidden={!active}
+      aria-labelledby={`issue-${tab}-tab`}
+      hidden={!active}
+      id={`issue-${tab}-panel`}
+      role="tabpanel"
+    >
+      {activated ? (
+        <Tab artifact={artifact} issueKey={issueKey}>
+          {artifact === undefined ? null : (
+            <ArtifactDocument
+              artifact={artifact}
+              isClosed={isClosed}
+              owner={{ key: issueKey, kind: "issue" }}
+              onVersionChange={(version) => onVersionChange(artifact, version)}
+              showDiff={false}
+              version={undefined}
+            />
+          )}
+        </Tab>
+      ) : null}
+    </div>
+  );
+}
+
 function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const {
     activeTab,
@@ -425,50 +477,26 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
           </div>
         ) : null}
       </div>
-      <div
-        aria-hidden={activeTab !== "verification"}
-        aria-labelledby="issue-verification-tab"
-        hidden={activeTab !== "verification"}
-        id="issue-verification-panel"
-        role="tabpanel"
-      >
-        {activatedTabs.verification ? (
-          <VerificationTab artifact={verificationArtifact} issueKey={issueKey}>
-            {verificationArtifact === undefined ? null : (
-              <ArtifactDocument
-                artifact={verificationArtifact}
-                isClosed={isClosed}
-                owner={{ key: issueKey, kind: "issue" }}
-                onVersionChange={(version) => selectDocumentVersion(verificationArtifact, version)}
-                showDiff={false}
-                version={undefined}
-              />
-            )}
-          </VerificationTab>
-        ) : null}
-      </div>
-      <div
-        aria-hidden={activeTab !== "plan"}
-        aria-labelledby="issue-plan-tab"
-        hidden={activeTab !== "plan"}
-        id="issue-plan-panel"
-        role="tabpanel"
-      >
-        {activatedTabs.plan ? (
-          <PlanTab artifact={planArtifact} issueKey={issueKey}>
-            {planArtifact === undefined ? null : (
-              <ArtifactDocument
-                artifact={planArtifact}
-                isClosed={isClosed}
-                owner={{ key: issueKey, kind: "issue" }}
-                onVersionChange={(version) => selectDocumentVersion(planArtifact, version)}
-                showDiff={false}
-                version={undefined}
-              />
-            )}
-          </PlanTab>
-        ) : null}
-      </div>
+      <RoleDocumentPanel
+        Tab={VerificationTab}
+        activated={activatedTabs.verification}
+        active={activeTab === "verification"}
+        artifact={verificationArtifact}
+        isClosed={isClosed}
+        issueKey={issueKey}
+        onVersionChange={selectDocumentVersion}
+        tab="verification"
+      />
+      <RoleDocumentPanel
+        Tab={PlanTab}
+        activated={activatedTabs.plan}
+        active={activeTab === "plan"}
+        artifact={planArtifact}
+        isClosed={isClosed}
+        issueKey={issueKey}
+        onVersionChange={selectDocumentVersion}
+        tab="plan"
+      />
       <div
         aria-hidden={activeTab !== "conversation"}
         aria-labelledby="issue-conversation-tab"

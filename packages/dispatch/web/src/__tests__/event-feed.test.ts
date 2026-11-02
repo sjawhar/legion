@@ -1059,8 +1059,21 @@ test("a recorded result refreshes the results of the check's issue and of the re
     ["issues", "project", "CORE"],
     ["issue", "CORE-1", "results"],
     ["issue", "CORE-9", "results"],
-    ["issue", "CORE-9"],
   ]);
+});
+
+// A document version moves what the Spec tab's gap pills and the Verification tab's checks
+// read: adding a `check` to verification.md, or a `requirement` to the spec, changes both. Both
+// reads hang under the issue's key, and every issue target is `exact`, so the branch names them
+// itself; without that a mounted page shows the old gaps and the old checks for the rest of the
+// session.
+test("a document version refreshes the issue's coverage and its recorded results", () => {
+  const version = event("artifact.version", { artifact_id: "artifact-3", name: "Verification" });
+  const keys = eventRefreshTargets(version, "alice").map((target) =>
+    JSON.stringify(target.queryKey)
+  );
+  expect(keys).toContain(JSON.stringify(["issue", "CORE-1", "coverage"]));
+  expect(keys).toContain(JSON.stringify(["issue", "CORE-1", "results"]));
 });
 
 /** One event of every type the feed can carry, keyed by type so a new one fails to compile here

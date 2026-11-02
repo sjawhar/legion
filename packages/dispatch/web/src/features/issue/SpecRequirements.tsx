@@ -2,43 +2,25 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { issueCoverageQuery } from "../../api/queries";
-import type { IssueCoverage, RequirementCoverage } from "../../api/types";
+import type { RequirementCoverage } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
-import { pillClassName } from "../../components/Pill";
+import { pillShapeClassName } from "../../components/Pill";
 import {
   card,
   dangerText,
   inlineWarningText,
+  surfaceMutedBg,
   textMutedOnCanvas,
   textMutedOnSurface,
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { BlockReferences } from "../refs/ReferencedBy";
 
-/**
- * What the server says this requirement lacks, as it wrote it: its lines of `IssueCoverage.gaps`
- * with the block id they name stripped, so `b3 has no check` reads `has no check`. The server
- * decides which lacks count - a requirement with no plan task is no gap until the issue has a
- * plan document - so nothing is judged again here.
- */
-export function requirementGaps(
-  coverage: Pick<IssueCoverage, "gaps">,
-  requirement: Pick<RequirementCoverage, "block_id">
-): string[] {
-  const prefix = `${requirement.block_id} `;
-  return coverage.gaps
-    .filter((gap) => gap.startsWith(prefix))
-    .map((gap) => gap.slice(prefix.length));
-}
-
-function Requirement({
-  coverage,
-  requirement,
-}: {
-  coverage: IssueCoverage;
-  requirement: RequirementCoverage;
-}): ReactNode {
-  const gaps = requirementGaps(coverage, requirement);
+function Requirement({ requirement }: { requirement: RequirementCoverage }): ReactNode {
+  // What the server says this requirement lacks, in the server's own words. The server decides
+  // which lacks count - a requirement with no plan task is no gap until the issue has a plan
+  // document - so nothing is judged again here.
+  const gaps = requirement.gaps;
   return (
     <li
       className={`space-y-2 rounded-lg p-3 ${card}`}
@@ -49,7 +31,7 @@ function Requirement({
         <span className={textPrimaryOnSurface}>{requirement.text}</span>
         {gaps.map((gap) => (
           <span
-            className={`${pillClassName("label")} ${inlineWarningText}`}
+            className={`${pillShapeClassName} ${surfaceMutedBg} ${inlineWarningText}`}
             data-testid="spec-requirement-gap"
             key={gap}
           >
@@ -98,11 +80,7 @@ export function SpecRequirements({ issueKey }: { issueKey: string }): ReactNode 
       <h2 className={`text-sm font-semibold ${textMutedOnSurface}`}>Requirements</h2>
       <ul aria-label="Requirements" className="space-y-3">
         {coverage.data.requirements.map((requirement) => (
-          <Requirement
-            coverage={coverage.data}
-            key={requirement.block_id}
-            requirement={requirement}
-          />
+          <Requirement key={requirement.block_id} requirement={requirement} />
         ))}
       </ul>
     </section>
