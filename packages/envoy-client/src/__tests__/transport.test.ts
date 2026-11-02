@@ -675,8 +675,8 @@ describe("EnvoyClient", () => {
     const sessions = await client.listSessions();
 
     expect(sessions).toEqual([
-      { ...base, topics: [], roles: [], capabilities: [] },
-      { ...base, session_id: "ses_absent", topics: [], roles: [], capabilities: [] },
+      { ...base, roles: [], capabilities: [] },
+      { ...base, session_id: "ses_absent", roles: [], capabilities: [] },
     ]);
   });
 

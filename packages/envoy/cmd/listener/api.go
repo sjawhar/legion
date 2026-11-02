@@ -971,12 +971,13 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 // 404 writes it. An id the session bucket refuses as a key is the caller's to fix, the 413 or 400
 // writeBusUnavailable writes. A live session whose id only the interest bucket refuses (a legacy id
 // past envoy_interests' get bound that envoy_sessions still serves, or one outside nats.go's key
-// alphabet) is answered 200 with no topics, as GET /v1/sessions lists it, and logged at WARN as the
-// list logs it: Dispatch reads a 413 or 400 here as a session that cannot exist. A read that did
-// not answer — the session's, its interest record's, or the claims view's (sessionInfoFor), all
-// within sendRequestBudget — is a 503 to retry: never a session a caller may take for ended, nor
-// one with no topics or roles. An interest record this build cannot decode is the 500
-// writeInterestRecordUnreadable writes: the bus answered it.
+// alphabet) is answered 200 with topics as the empty list, never null, as GET /v1/sessions lists
+// it, and logged at WARN as the list logs it: Dispatch reads a 413 or 400 here as a session that
+// cannot exist. A read that did not answer — the session's, its interest record's, or the claims
+// view's (sessionInfoFor), all within sendRequestBudget — is a 503 to retry, carrying no row at
+// all: never a session a caller may take for ended, nor one whose topics or roles it may read.
+// An interest record this build cannot decode is the 500 writeInterestRecordUnreadable writes:
+// the bus answered it.
 func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

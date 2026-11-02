@@ -3004,8 +3004,6 @@ func TestSessionEntryRouteRefusesANonGETMethod(t *testing.T) {
 // JSON, key by key, because the defect under test is a JSON type: decoded into a []string, the
 // null the old listener wrote and the empty list the new one writes are the same Go value.
 type noInterestRecordFixture struct {
-	Comment          string                     `json:"comment"`
-	CapturedAtCommit string                     `json:"captured_at_commit"`
 	AfterThisChange  map[string]json.RawMessage `json:"after_this_change"`
 	BeforeThisChange map[string]json.RawMessage `json:"before_this_change"`
 }
@@ -3075,34 +3073,39 @@ func seedNoInterestRecordSession(t *testing.T, sessions *session.SessionRegistry
 // cannot state them: they are checked as integers equal to each other, never against the row.
 var noInterestRecordClockKeys = map[string]bool{"updated_at": true, "last_seen": true}
 
-// compareNoInterestRecordRow holds answer, the listener's raw JSON object, to want, the fixture's
-// row: the same keys, no key more and no key less, and for each key the same JSON bytes, so a null
-// and an empty list are different answers. The two clock keys are only required to be integers
-// equal to each other, since the listener writes the moment it registered the session.
-func compareNoInterestRecordRow(t *testing.T, what string, answer []byte, want map[string]json.RawMessage) {
+// sameNoInterestRecordRowValues holds got to want key by key: the same keys, no key more and no
+// key less, and for each key outside skip the same JSON bytes, so a null and an empty list are
+// different answers. A skipped key must still be present on both sides; its value is the
+// caller's to check. gotName and wantName name the two sides in every failure it reports.
+func sameNoInterestRecordRowValues(t *testing.T, gotName, wantName string, got, want map[string]json.RawMessage, skip map[string]bool) {
 	t.Helper()
-	var got map[string]json.RawMessage
-	if err := json.Unmarshal(answer, &got); err != nil {
-		t.Fatalf("%s: decode the answer as a JSON object: %v; body = %s", what, err, answer)
-	}
 	for key := range got {
 		if _, ok := want[key]; !ok {
-			t.Errorf("%s: the answer carries %q = %s, which the fixture row does not state", what, key, got[key])
+			t.Errorf("%s carries %q = %s, which %s does not state", gotName, key, got[key], wantName)
 		}
 	}
 	for key, wantValue := range want {
 		gotValue, ok := got[key]
 		if !ok {
-			t.Errorf("%s: the answer carries no %q; the fixture row states %s", what, key, wantValue)
+			t.Errorf("%s carries no %q; %s states %s", gotName, key, wantName, wantValue)
 			continue
 		}
-		if noInterestRecordClockKeys[key] {
+		if skip[key] {
 			continue
 		}
 		if gotCompact, wantCompact := compactNoInterestRecordJSON(t, gotValue), compactNoInterestRecordJSON(t, wantValue); gotCompact != wantCompact {
-			t.Errorf("%s: %q = %s, want %s", what, key, gotCompact, wantCompact)
+			t.Errorf("%s: %q = %s, want %s", gotName, key, gotCompact, wantCompact)
 		}
 	}
+}
+
+// compareNoInterestRecordRow holds got, the listener's row decoded key by key, to want, the
+// fixture's row: the same keys, no key more and no key less, and for each key the same JSON bytes,
+// so a null and an empty list are different answers. The two clock keys are only required to be
+// integers equal to each other, since the listener writes the moment it registered the session.
+func compareNoInterestRecordRow(t *testing.T, what string, got, want map[string]json.RawMessage) {
+	t.Helper()
+	sameNoInterestRecordRowValues(t, what+": the answer", "the fixture row", got, want, noInterestRecordClockKeys)
 	var updatedAt, lastSeen int64
 	if err := json.Unmarshal(got["updated_at"], &updatedAt); err != nil {
 		t.Errorf("%s: updated_at = %s, want an integer: %v", what, got["updated_at"], err)
@@ -3155,11 +3158,7 @@ func TestSessionsListRowForASessionWithNoInterestRecordMatchesTheFixture(t *test
 	if row == nil {
 		t.Fatalf("the list carries no row for %s; body = %s", sessionID, list.Body.String())
 	}
-	raw, err := json.Marshal(row)
-	if err != nil {
-		t.Fatalf("re-encode the listed row: %v", err)
-	}
-	compareNoInterestRecordRow(t, "GET /v1/sessions", raw, fixture.AfterThisChange)
+	compareNoInterestRecordRow(t, "GET /v1/sessions", row, fixture.AfterThisChange)
 }
 
 // The per-session route and the list answer one shape built one way, so a caller holding a session
@@ -3173,7 +3172,12 @@ func TestSessionEntryRouteForASessionWithNoInterestRecordMatchesTheFixture(t *te
 	if answer.Code != http.StatusOK {
 		t.Fatalf("GET /v1/registry/%s: status %d %s, want 200", sessionID, answer.Code, answer.Body.String())
 	}
-	compareNoInterestRecordRow(t, "GET /v1/registry/"+sessionID, answer.Body.Bytes(), fixture.AfterThisChange)
+	var row map[string]json.RawMessage
+	if err := json.Unmarshal(answer.Body.Bytes(), &row); err != nil {
+		t.Fatalf("GET /v1/registry/%s: decode the answer as a JSON object: %v; body = %s",
+			sessionID, err, answer.Body.String())
+	}
+	compareNoInterestRecordRow(t, "GET /v1/registry/"+sessionID, row, fixture.AfterThisChange)
 }
 
 // The fixture states a whole row, so it can only stay whole while it names every key sessionInfo
@@ -3223,29 +3227,12 @@ func TestSessionInfoKeysForASessionWithNoInterestRecordAreTheFixtureRowsKeys(t *
 
 // The fixture's before row is what the listener used to write for this session. The after row is
 // pinned to the listener itself by the two route tests above; nothing else reads the before row, so
-// this holds it to the same eleven values and to the one difference the change made: topics was
+// this holds it to the same values and to the one difference the change made: topics was
 // null and is now the empty list.
 func TestFixtureBeforeRowForASessionWithNoInterestRecordDiffersOnlyInTopics(t *testing.T) {
 	fixture := readNoInterestRecordFixture(t)
 	before, after := fixture.BeforeThisChange, fixture.AfterThisChange
-	for key := range before {
-		if _, ok := after[key]; !ok {
-			t.Errorf("the before row carries %q = %s, which the after row does not state", key, before[key])
-		}
-	}
-	for key, afterValue := range after {
-		beforeValue, ok := before[key]
-		if !ok {
-			t.Errorf("the before row carries no %q; the after row states %s", key, afterValue)
-			continue
-		}
-		if key == "topics" {
-			continue
-		}
-		if got, want := compactNoInterestRecordJSON(t, beforeValue), compactNoInterestRecordJSON(t, afterValue); got != want {
-			t.Errorf("the before row's %q = %s, want the after row's %s: the change touched topics alone", key, got, want)
-		}
-	}
+	sameNoInterestRecordRowValues(t, "the before row", "the after row", before, after, map[string]bool{"topics": true})
 	if got := compactNoInterestRecordJSON(t, before["topics"]); got != "null" {
 		t.Errorf("the before row's topics = %s, want null, the value the listener used to write", got)
 	}
