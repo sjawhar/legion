@@ -568,7 +568,13 @@
     "worker_backends": {
       "tester": "omp"
     },
-    "role_config_files": {}
+    "role_config_files": {},
+    "repository_renames": [
+      {
+        "from": "acme/widgets-legacy",
+        "to": "acme/widgets"
+      }
+    ]
   },
   "consumers": [
     {
