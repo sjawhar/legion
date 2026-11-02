@@ -380,8 +380,8 @@ var emptyUpdateV1 = crdt.EncodeStateAsUpdateV1(crdt.New(), nil)
 //
 // The observer renders the replica after an update only when it can neither know the update is a
 // margin write's publish into the room its fork was warm-built from (liveWriteOrigin.marginOnly
-// says why that changes no text), nor reuse the rendering the published live write that made the
-// update made of it, nor know the update was already in the room (changedBy). All three are exact.
+// says why that changes no text) nor reuse the rendering the published live write that made the
+// update made of it (changedBy). Both are exact.
 // The write's rendering (publishedRendering) is taken only on the replica, epoch and foreign
 // count the operation's own fork read found, the replica's under its lock at the position that
 // read copied (readPoint): a replica still at both has consumed, through that read, every commit
@@ -390,15 +390,10 @@ var emptyUpdateV1 = crdt.EncodeStateAsUpdateV1(crdt.New(), nil)
 // the update is the fork after the operation, and rendering is deterministic over one state. That
 // holds only on the room instance the fork was read from: a cold fork, read from the store, holds
 // what the room may not and records no rendering, and a room reloaded since the read has a replica
-// of its own at another epoch. An update already in the room
-// (liveWriteOrigin.inRoom) has a version at or below the head its room instance's load folded
-// (roomInstance.loadedHead), so the loaded document held it, and the replica, which starts from the
-// room as of its first logged commit, holds the load: applying it changed nothing. Nothing makes
-// that history other than what the load folded: RebuildDocument, the one writer that replaces a
-// document's history, runs only on a history that cannot load (rebuild.go), and the write's own
-// refuseUndecodable proved the history through its version decodes; PruneAfter has no production
-// caller. A replica outside the schema (a nil markdown) renders the update, so such an update
-// still logs and counts as changed.
+// of its own at another epoch. A published update the room's load already holds is no commit: ygo
+// calls no update observer for it and logs nothing, so there is nothing to classify. A replica
+// outside the schema (a nil markdown) renders the update, so such an update still logs and counts
+// as changed.
 //
 // The replica starts from the state the log records as of just before the room's first transaction
 // since its load, so a room that is only read holds no replica.
@@ -452,9 +447,6 @@ type renderPathCounts struct {
 	// observerReused counts the logged updates the update observer classified with the rendering
 	// a published live write made of the very state the update left, in place of one of its own.
 	observerReused atomic.Uint64
-	// observerInRoom counts the logged updates the update observer classified as unchanged without
-	// rendering, since the room's load already held them (roomInstance.loadedHead).
-	observerInRoom atomic.Uint64
 	// observerRendered counts the logged updates the update observer applied and then rendered the
 	// replica for (updateChangesMarkdown).
 	observerRendered atomic.Uint64
@@ -595,7 +587,7 @@ func (r *renderedReplica) takeLocked(room string, base []byte, updates []crdt.Lo
 // when a published live write made it, nil otherwise, and rendering that write's operation's
 // rendering of it: whether it changed the room's rendered markdown, and the ask blocks it left
 // when it did. It renders the replica (updateChangesMarkdown) only when nothing else tells. A
-// published live write's update can tell in three ways, tried in this order:
+// published live write's update can tell in two ways, tried in this order:
 //
 //   - it is a margin write's publish into the room instance its fork was warm-built from
 //     (liveWriteOrigin.marginOnly, which says why that changes no text), so it changed nothing,
@@ -605,34 +597,26 @@ func (r *renderedReplica) takeLocked(room string, base []byte, updates []crdt.Lo
 //     replica's epoch and foreign count and the replica still stands at both (standsAt): the
 //     replica is then the fork the operation rendered, so the rendering is the replica's, and the
 //     update changed the markdown exactly when it differs from the replica's before it. A change
-//     the operation did not see as one carries no ask blocks, so it is rendered after all;
-//   - its room instance's load already held it (liveWriteOrigin.inRoom), so applying it changed
-//     nothing, while the replica renders at all: one outside the schema renders the update, so it
-//     still logs and counts as changed.
+//     the operation did not see as one carries no ask blocks, so it is rendered after all.
 //
-// renderedReplica says why the last two are exact. The caller holds mu.
+// renderedReplica says why the last one is exact. The caller holds mu.
 func (r *renderedReplica) changedBy(room string, published *liveWriteOrigin, rendering publishedRendering) (bool, *observedAsks) {
 	if published != nil && published.marginOnly && r.markdown != nil {
 		r.paths.observerMarginOnly.Add(1)
 		return false, nil
 	}
-	if published != nil {
-		if r.standsAt(rendering.forkReadMark) {
-			if r.markdown != nil && *r.markdown == rendering.markdown {
-				r.paths.observerReused.Add(1)
-				return false, nil
-			}
-			if rendering.askBlocks != nil {
-				// Its own string, not a pointer into rendering, which would keep the ask
-				// block ids alive with the replica's markdown.
-				markdown := rendering.markdown
-				r.markdown = &markdown
-				r.paths.observerReused.Add(1)
-				return true, &observedAsks{ids: rendering.askBlocks}
-			}
-		} else if published.inRoom && r.markdown != nil {
-			r.paths.observerInRoom.Add(1)
+	if published != nil && r.standsAt(rendering.forkReadMark) {
+		if r.markdown != nil && *r.markdown == rendering.markdown {
+			r.paths.observerReused.Add(1)
 			return false, nil
+		}
+		if rendering.askBlocks != nil {
+			// Its own string, not a pointer into rendering, which would keep the ask
+			// block ids alive with the replica's markdown.
+			markdown := rendering.markdown
+			r.markdown = &markdown
+			r.paths.observerReused.Add(1)
+			return true, &observedAsks{ids: rendering.askBlocks}
 		}
 	}
 	changed, tree := r.updateChangesMarkdown(room)
@@ -880,8 +864,9 @@ func (r *renderedReplica) hold() *crdt.Doc {
 // that changes only what no rendering carries - an anchor mark, or a heading id or list item label
 // the browser editor derives - is no content change. A document that does not render counts as
 // changed, with no tree. It is the observer's measure of every update, which changedBy reaches
-// without rendering only where it already knows the answer this would give: a published write's
-// own rendering of the same state, or an update the room's load already held.
+// without rendering only where it already knows the answer this would give: a margin write's
+// publish into the room its fork was built from, or a published write's own rendering of the same
+// state.
 func (r *renderedReplica) updateChangesMarkdown(room string) (bool, *pmdoc.Node) {
 	markdown, tree, err := renderDocumentForUpdate(r.doc)
 	if err != nil {

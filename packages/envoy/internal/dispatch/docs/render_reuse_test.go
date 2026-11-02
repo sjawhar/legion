@@ -57,15 +57,14 @@ func renderReuseDocument() string {
 
 // renderPaths is a reading of the service's renderPathCounts.
 type renderPaths struct {
-	observerReused, observerInRoom, observerRendered, observerMarginOnly uint64
-	beforeFromReplica, beforeFromWrite, beforeRendered                   uint64
+	observerReused, observerRendered, observerMarginOnly uint64
+	beforeFromReplica, beforeFromWrite, beforeRendered   uint64
 }
 
 func readRenderPaths(service *Service) renderPaths {
 	counts := &service.renderPaths
 	return renderPaths{
 		observerReused:     counts.observerReused.Load(),
-		observerInRoom:     counts.observerInRoom.Load(),
 		observerRendered:   counts.observerRendered.Load(),
 		observerMarginOnly: counts.observerMarginOnly.Load(),
 		beforeFromReplica:  counts.beforeFromReplica.Load(),
@@ -77,7 +76,6 @@ func readRenderPaths(service *Service) renderPaths {
 func (p renderPaths) minus(base renderPaths) renderPaths {
 	return renderPaths{
 		observerReused:     p.observerReused - base.observerReused,
-		observerInRoom:     p.observerInRoom - base.observerInRoom,
 		observerRendered:   p.observerRendered - base.observerRendered,
 		observerMarginOnly: p.observerMarginOnly - base.observerMarginOnly,
 		beforeFromReplica:  p.beforeFromReplica - base.beforeFromReplica,
@@ -469,7 +467,7 @@ func (m renderMeasure) expect(t *testing.T, want renderPaths, recovered int) {
 	m.sh.mu.Lock()
 	logged, aligned := m.sh.loggedLocked()-m.updates, m.sh.aligned-m.aligned
 	m.sh.mu.Unlock()
-	if observed := int(got.observerReused + got.observerInRoom + got.observerRendered + got.observerMarginOnly); observed+recovered != logged {
+	if observed := int(got.observerReused + got.observerRendered + got.observerMarginOnly); observed+recovered != logged {
 		t.Errorf("the observers classified %d updates and recovered %d, of %d logged", observed, recovered, logged)
 	}
 	if aligned != logged-recovered {
@@ -521,7 +519,13 @@ func (sh *renderShadow) check(t *testing.T) {
 		t.Fatalf("copy the room: %v", err)
 	}
 	rendered, asks, _ := shadowRender(snapshot)
-	if !sameRendering(rendered, room.markdown) {
+	if room.doc == nil {
+		// A room that has committed nothing since its load logs no base, so its shadow holds no
+		// document to compare: a publish the loaded room already held is no commit.
+		if len(room.updates) != 0 {
+			t.Errorf("the room logged %d commits and no base", len(room.updates))
+		}
+	} else if !sameRendering(rendered, room.markdown) {
 		t.Errorf("the room renders %s and its shadow %s", describeRendering(rendered), describeRendering(room.markdown))
 	}
 	if room.doc != nil {
@@ -828,8 +832,8 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 // E7. A room evicted and reloaded between the write's fork read and its publish has a replica of
 // its own, at another epoch, so the write's rendering is never taken there. Reloaded before the
 // write's append, the room renders the update; reloaded after its commit, the room's load already
-// holds it - and with a browser's edit the new replica's foreign count is the fork read's, so only
-// the epoch tells the two apart.
+// holds it, so its publish is no commit and nothing classifies it - and with a browser's edit the
+// new replica's foreign count is the fork read's, so only the epoch tells the two apart.
 func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 	for _, afterCommit := range []bool{false, true} {
 		name := "before the append"
@@ -889,11 +893,7 @@ func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 			}
 			ledger.publish()
 			sh.check(t)
-			if afterCommit {
-				m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1, observerInRoom: 1}, 0)
-			} else {
-				m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1}, 0)
-			}
+			m.expect(t, renderPaths{beforeFromReplica: 1, observerRendered: 1}, 0)
 			sh.versions(t, write)
 		})
 	}
@@ -988,8 +988,8 @@ func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 	}
 }
 
-// E10. A cold write's publish loads the room from the store, which holds the write, so every one
-// of its updates is already in the room and nothing renders it; each is no content change.
+// E10. A cold write's publish loads the room from the store, which holds the write, so its
+// publish changes nothing in the room: ygo commits nothing for it, and no observer classifies it.
 func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -999,7 +999,7 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 		{
 			name: "one operation",
 			ops:  []model.EditOp{{Op: "replace", Find: "Paragraph 18 opens", With: "Paragraph 18 now opens"}},
-			want: renderPaths{beforeRendered: 1, observerInRoom: 1},
+			want: renderPaths{beforeRendered: 1},
 		},
 		{
 			name: "two operations",
@@ -1007,7 +1007,7 @@ func TestRenderReuseAColdWriteIsAlreadyInTheRoom(t *testing.T) {
 				{Op: "replace", Find: "Paragraph 18 opens", With: "Paragraph 18 now opens"},
 				{Op: "replace", Find: "Paragraph 19 opens", With: "Paragraph 19 now opens"},
 			},
-			want: renderPaths{beforeRendered: 1, beforeFromWrite: 1, observerInRoom: 2},
+			want: renderPaths{beforeRendered: 1, beforeFromWrite: 1},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1081,7 +1081,7 @@ func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 		t.Fatalf("load the room: %v", err)
 	}
 	instance := service.instanceOf(service.srv.GetDoc(artifactID))
-	if instance == nil || instance.loadedHead >= int64(write.versions[0]) {
+	if instance == nil || instance.hold.snapshot().through >= int64(write.versions[0]) {
 		t.Fatalf("the room's load holds the write's version %d (loaded head %+v)", write.versions[0], instance)
 	}
 	ledger.publish()
@@ -1092,7 +1092,7 @@ func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 
 // E12. A document outside the schema: a warm repair's rendering is taken and counted a change; a
 // document pushed outside the schema after the fork read renders, and WARNs, as before; a cold
-// repair is already in the room it loads.
+// repair is already in the room it loads, so its publish commits nothing.
 func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 	const updatedOutside = "updated document outside Proof schema"
 	captureWarnings := func(t *testing.T) *storetest.LockedLog {
@@ -1152,7 +1152,7 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 		m := sh.measure()
 		write := sh.write(t, replaceWhole(service, artifactID))
 		sh.check(t)
-		m.expect(t, renderPaths{observerInRoom: 1}, 0)
+		m.expect(t, renderPaths{}, 0)
 		if stored := sh.versions(t, write); len(stored) != 1 || !stored[0] {
 			t.Errorf("content_changed = %v, want [true]", stored)
 		}

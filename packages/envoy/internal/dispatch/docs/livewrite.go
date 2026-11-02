@@ -198,14 +198,10 @@ type forkReadMark struct {
 // It also carries what lets the observer classify the update without rendering the room
 // (renderedReplica.changedBy): rendering, the operation's own rendering of the state the update
 // leaves, which the observer takes out once it has consumed the update (renderedReplica.consumed),
-// so no markdown outlives that; and inRoom, which says the room instance the update is published
-// into loaded it already (roomInstance.loadedHead). publishLiveUpdate sets inRoom on the
-// publishing goroutine before the update reaches the room, and the observer reads it only once the
-// room's log has handed the update over.
+// so no markdown outlives that.
 type liveWriteOrigin struct {
 	slot      *suppressSlot
 	rendering publishedRendering
-	inRoom    bool
 	// marginOnly says the update is a margin write (applyMargin) whose fork was warm-built from
 	// the very room document it is applied to, so it cannot change the document's XML fragment
 	// and the room's update observer keeps the rendering it has rather than rendering the
@@ -219,7 +215,7 @@ type liveWriteOrigin struct {
 	// have been R: a margin write made on a cold fork, forked from a store that holds what R
 	// lacks, or published into a room replaced or reloaded since its fork, is never tagged, and
 	// its publish is rendered as any other update is. It is set inside the publish's Apply,
-	// against the document the update reaches, beside inRoom (publishLiveUpdate).
+	// against the document the update reaches (publishLiveUpdate).
 	marginOnly bool
 	// shadow is the write's shadow on the publish of its last update, nil on the others
 	// (reachShadow).
@@ -832,21 +828,19 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 // the room's worker never waits on it for the rest of this Apply. No close retires the room's
 // worker under this Apply: ygo refuses a close while a caller is inside the room (roomServer).
 //
-// The origin carries rendering, the operation's own rendering of what the update leaves, and
-// inRoom, set where the update reaches the room instance and before it is applied: whether that
-// instance's load already held the update's version (roomInstance.loadedHead). The room's update
-// observer classifies the update by either when it can (renderedReplica.changedBy). marginRoom is
-// the room document a margin write's fork was warm-built from, or the zero pointer
-// (liveWrite.marginRooms): the update is tagged margin-only when the document it reaches is that
-// one (liveWriteOrigin.marginOnly). shadow, on the write's last update, is the shadow whose window
-// the update's drain closes.
+// The origin carries rendering, the operation's own rendering of what the update leaves, which the
+// room's update observer takes when it can (renderedReplica.changedBy). An update the room already
+// held is no commit: ygo calls no update observer for it, so there is nothing for the observer to
+// classify. marginRoom is the room document a margin write's fork was warm-built from, or the zero
+// pointer (liveWrite.marginRooms): the update is tagged margin-only when the document it reaches is
+// that one (liveWriteOrigin.marginOnly). shadow, on the write's last update, is the shadow whose
+// window the update's drain closes.
 func (s *Service) publishLiveUpdate(room string, update []byte, version persistence.Version, rendering publishedRendering, marginRoom weak.Pointer[crdt.Doc], shadow *roomShadow) error {
 	ctx := withOwnerVerified(context.Background())
 	slot := s.prepareSuppressedPersistence(room)
 	origin := &liveWriteOrigin{slot: slot, rendering: rendering, shadow: shadow}
 	recorded, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		instance := s.instanceOf(doc)
-		origin.inRoom = instance != nil && int64(version) <= instance.loadedHead
 		// Tagged against the document Apply hands here, not the one the room held when the
 		// publish began (liveWriteOrigin.marginOnly).
 		origin.marginOnly = marginRoom.Value() == doc
