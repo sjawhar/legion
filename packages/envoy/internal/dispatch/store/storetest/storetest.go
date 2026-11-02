@@ -161,7 +161,8 @@ func prepare(raw string) error {
 		return err
 	}
 	name := "dispatch_template_" + suffix
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+	// The template is a file copy of template1, for the reason each clone of it is one.
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		return fmt.Errorf("create template database: %w", err)
 	}
 	shared.template = name
