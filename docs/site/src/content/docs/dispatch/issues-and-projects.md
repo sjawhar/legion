@@ -239,6 +239,8 @@ agents using it stop working at once.
   it is resolved or its suggestion is accepted or rejected, and a message thread is never
   closed. The filter opens on **All** every visit. A conversation holding something you have
   not read is marked **New**, and **Jump to latest** counts those and takes you to the top.
+  The time on each card and reply links to it ([Links to a comment, message, or
+  ask](/legion/dispatch/documents/#links-to-a-comment-message-or-ask)).
 - **Children** lists the issue's child issues, each with its status, how much of its own tree is
   done, and its latest activity.
 - **Artifacts** lists the issue's documents and files, with a count. Pick a file, or drop one on the

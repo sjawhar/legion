@@ -210,9 +210,11 @@ test("AskCard keeps a deleted anchor document's quote", () => {
 
   try {
     expect(view.getByText("The surviving passage.", { exact: true })).toBeTruthy();
-    // The deleted document's quote links nowhere; the only link left is the asker's live link.
+    // The deleted document's quote links nowhere; the only links left are the asker's live link
+    // and the ask's own time.
     expect(view.getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual([
       "/agents/session-1/live",
+      "/issues/CORE-1/asks/ask-1",
     ]);
   } finally {
     view.unmount();

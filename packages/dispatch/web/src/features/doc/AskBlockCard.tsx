@@ -19,8 +19,8 @@ import { URGENCY_LABELS } from "../inbox/ask-urgency";
 import { AgentName } from "../refs/AgentName";
 import { blockFragment } from "../refs/block-reference";
 import { CopyRefButton } from "../refs/CopyRefButton";
+import { ItemTimestamp } from "../refs/ItemTimestamp";
 import { buildReferencePath, itemRoute, parseNodeReference, shortForm } from "../refs/routes";
-import { Timestamp } from "../refs/Timestamp";
 import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./typed-block-drawing";
 
 const PILL_CLASS = "rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase";
@@ -113,7 +113,7 @@ export function AskBlockCard({
                   )}
                 </span>
                 {named ? <span aria-hidden="true">·</span> : null}
-                <Timestamp at={ask.created_at} />
+                <ItemTimestamp at={ask.created_at} route={reference} />
               </span>
             )}
             {/* The open card's metadata line carries the reference itself; the record it shows
@@ -128,7 +128,7 @@ export function AskBlockCard({
                 {facts.answeredAt === undefined ? null : (
                   <>
                     <span aria-hidden="true">·</span>
-                    <Timestamp at={facts.answeredAt} />
+                    <ItemTimestamp at={facts.answeredAt} route={reference} />
                   </>
                 )}
               </span>
@@ -176,6 +176,7 @@ export function AskBlockCard({
             documentLink={false}
             edits={[]}
             frame="block"
+            reference={reference}
           />
         ) : (
           <AttributeRecord facts={facts} />

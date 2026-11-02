@@ -157,7 +157,8 @@ decision block, and in the ask's own row where there is no second column.
 ![An ask card in the Inbox: the question, its two options and Other, a note field, and Answer.](/legion/media/dispatch/ask-card.png)
 
 1. Read the question. The line under it names who asked, when, and the ask's `dispatch://`
-   reference, which you can copy.
+   reference, which you can copy. The time is a link to the ask, and a reply's time a link to the
+   reply ([Links to a comment, message, or ask](/legion/dispatch/documents/#links-to-a-comment-message-or-ask)).
 2. Pick an option. When the ask allows more than one, the options are checkboxes. To answer in your
    own words, pick **Other** and type your answer; Other needs text.
 3. Add a note if you want. You can type context beside any option.

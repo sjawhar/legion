@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import type { Artifact, Comment } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -339,7 +340,9 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
           }}
         />
       </KeymapProvider>
-    </QueryClientProvider>
+    </QueryClientProvider>,
+    // The expanded thread's times link to their comments, which needs a router.
+    { wrapper: MemoryRouter }
   );
 
   try {

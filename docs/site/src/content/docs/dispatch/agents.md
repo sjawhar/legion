@@ -49,7 +49,8 @@ you left it in. The search survives a reload through the page's address.
 ## Sending to one agent
 
 Choose an agent's title to open its row. The row shows your recent exchanges with that agent and a
-message box.
+message box. The time on a message or reply filed on an issue links to it on that issue's
+Conversation tab; a message straight to the agent has no address, so its time is plain text.
 
 By default the message goes straight to the agent, on no issue. Choose **Choose issue** to file it
 on an open issue instead; it is then posted on that issue as a comment that mentions the agent.
