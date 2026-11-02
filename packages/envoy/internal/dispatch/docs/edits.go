@@ -1301,7 +1301,20 @@ func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string, byM
 	// required, is the item's and is dropped. The item keeps its number: a list numbers its items
 	// by place. A `find` that matched as text carried its marker as text, and selected nothing.
 	if byMarker {
-		return with[width:], 0, nil
+		text := with[width:]
+		bare := text
+		if _, found, boxWidth := pmdoc.LeadingTaskCheckbox(text); found {
+			bare = text[boxWidth:]
+		}
+		// A with that is the marker alone would empty the item's text with no word of it, which
+		// an empty with does on purpose.
+		if strings.TrimSpace(bare) == "" {
+			return "", 0, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+				"with %q is the selected item's marker with no text after it, which would empty the item; give the item's new text after the marker, or pass an empty with to delete the item's text on purpose",
+				with,
+			)}
+		}
+		return text, 0, nil
 	}
 	return "", 0, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
 		"with begins with a marker of the same kind as the matched block's own (%s, which the block renders as %q), so the result would carry it twice; omit the marker to replace the block's text, backslash-escape it (%s) to keep prose that merely looks like a marker, or use insert plus delete to change the block's kind, level or number",
@@ -1550,9 +1563,9 @@ func renderedInlineText(markdown string) string {
 
 // cellQuoteParts is quote split as a markdown table row is split into cells: at every pipe after an
 // even run of backslashes (none included), inside code spans and links too, since a row ends a cell
-// there (pmdoc's splitAtEvenEscapedPipes). Each part is trimmed and read as the text its cell would
-// hold, a pipe after an odd run being the pipe a cell holds and each pair of backslashes before a
-// pipe one backslash. An empty part between two pipes is an empty cell and is kept; the empty text
+// there (pmdoc's splitAtEvenEscapedPipes). Each part is trimmed and kept as the markdown its cell
+// would hold: a pipe after an odd run is the pipe a cell holds, its escape taken off, and every
+// other backslash stays for the cell's inline parse. An empty part between two pipes is an empty cell and is kept; the empty text
 // before a leading pipe and after a trailing one is no cell and is dropped. A quote with no such
 // pipe is no row, and has no parts.
 func cellQuoteParts(quote string) []string {
@@ -1578,11 +1591,15 @@ func cellQuoteParts(quote string) []string {
 			index--
 			continue
 		}
-		part.WriteString(strings.Repeat(`\`, run/2))
+		// The row takes only the escape of its own pipe: an odd run's last backslash goes with
+		// the pipe it escapes, and every other backslash stays markdown for the cell's inline
+		// parse (renderedInlineText) to read, as the table parser leaves it.
 		if run%2 == 1 {
+			part.WriteString(strings.Repeat(`\`, run-1))
 			part.WriteByte('|')
 			continue
 		}
+		part.WriteString(strings.Repeat(`\`, run))
 		split = true
 		flush()
 	}

@@ -2524,6 +2524,40 @@ func TestAListMarkerSelectionEdgeCases(t *testing.T) {
 	}
 }
 
+// A with that is only the selected item's marker, and its box, would empty the item with no word
+// of it, so it is refused; an empty with deletes the text on purpose.
+func TestAMarkerOnlyWithForASelectedItemIsRefused(t *testing.T) {
+	for doc, op := range map[string]model.EditOp{
+		"- deploy\n":     {Op: "replace", Find: "- deploy", With: "- "},
+		"1. deploy\n":    {Op: "replace", Find: "1. deploy", With: "1. "},
+		"- [ ] deploy\n": {Op: "replace", Find: "- [ ] deploy", With: "- [x] "},
+	} {
+		tree, err := parseInput(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = applyAlone(tree, op)
+		var invalid *ErrInvalidOp
+		if !errors.As(err, &invalid) || !strings.Contains(invalid.Error(), "marker with no text after it") {
+			t.Fatalf("marker-only with %q on %q = %v, want it refused", op.With, doc, err)
+		}
+	}
+}
+
+// A row quote takes off only the escape of a pipe a cell holds, leaving every other backslash to
+// the cell's inline parse, as the table parser does: a cell shown as `x\|z` is quoted `x\\\|z`.
+func TestARowQuoteDecodesACellsEscapedPipeOnce(t *testing.T) {
+	tree, err := parseInput("| A | B |\n| --- | --- |\n| x\\\\\\|z | y |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: `x\\\|z | y`, With: "w"})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || !strings.Contains(missing.Error(), `the cells are "x\\|z", "y"`) {
+		t.Fatalf("row quote of a cell holding a backslash and a pipe = %v, want both cells named", err)
+	}
+}
+
 // A row quote keeps an empty cell between two pipes, one part alone is no row, and a part written
 // with inline markdown matches the text its cell shows.
 func TestARowQuoteReadsEmptyAndFormattedCells(t *testing.T) {
