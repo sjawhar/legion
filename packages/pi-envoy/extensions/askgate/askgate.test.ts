@@ -4554,21 +4554,36 @@ describe("the literal grammar, widened to forms with no expansion", () => {
     // input is not the here-document, and a body whose quotes or parenthesis send a scan for the
     // closing `)` past the end of the command.
     test("every form it reads as literal matches bash, and no other is read", () => {
-      for (const command of [
+      // [the command, whether the gate reads it]. A row the gate reads must also give bash's own
+      // argv; a row it refuses must be refused, since "not read" is half of what the fix claims.
+      for (const [command, read] of [
         // Read: the shapes the fix is for.
-        `dispatch comment --issue X-1 --body "$(cat <<'EOF'\nIt's one, 1) two, a " quote\nEOF\n)"`,
-        `dispatch comment --issue X-1 --body "$(cat <<"EOF"\nplain\nEOF\n)"`,
-        `dispatch comment --issue X-1 --body "$(cat - <<'EOF'\nwith a dash\nEOF\n)"`,
-        `dispatch comment --issue X-1 --body "$(cat <<-'EOF'\n\twith tabs\n\tEOF\n)"`,
+        [
+          `dispatch comment --issue X-1 --body "$(cat <<'EOF'\nIt's one, 1) two, a " quote\nEOF\n)"`,
+          true,
+        ],
+        [`dispatch comment --issue X-1 --body "$(cat <<"EOF"\nplain\nEOF\n)"`, true],
+        [`dispatch comment --issue X-1 --body "$(cat - <<'EOF'\nwith a dash\nEOF\n)"`, true],
+        [`dispatch comment --issue X-1 --body "$(cat <<-'EOF'\n\twith tabs\n\tEOF\n)"`, true],
         // Not read: bash word-splits and globs an unquoted substitution.
-        `dispatch comment --issue X-1 --body $(cat <<'EOF'\nok --issue Y-9\nEOF\n)`,
+        [`dispatch comment --issue X-1 --body $(cat <<'EOF'\nok --issue Y-9\nEOF\n)`, false],
         // Not read: bash removes the delimiter's quoting, so the body ends at `#$`.
-        `dispatch comment --issue X-1 --body "$(cat <<"#\\$"\nshown\n#$\necho SMUGGLED\n#$\n)"`,
+        [
+          `dispatch comment --issue X-1 --body "$(cat <<"#\\$"\nshown\n#$\necho SMUGGLED\n#$\n)"`,
+          false,
+        ],
         // Not read: `cat` on its own line reads the shell's input, not the here-document.
-        `dispatch comment --issue X-1 --body "$(cat\n<<'EOF'\nnot the body\nEOF\n)"`,
-      ]) {
+        [`dispatch comment --issue X-1 --body "$(cat\n<<'EOF'\nnot the body\nEOF\n)"`, false],
+        // Not read: bash refuses an unpaired backtick in the delimiter with a syntax error.
+        [`dispatch comment --issue X-1 --body "$(cat <<"A\`B"\nhi\nA\`B\n)"`, false],
+      ] as Array<[string, boolean]>) {
         const argv = core.commandArgv(command);
-        if (argv !== undefined) expect(argv).toEqual(bashArgv(command));
+        if (read) {
+          expect(argv).toBeDefined();
+          expect(argv).toEqual(bashArgv(command));
+        } else {
+          expect(argv).toBeUndefined();
+        }
       }
     });
     test("is in the literal grammar, so the write is reviewed", () => {

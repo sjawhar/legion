@@ -786,7 +786,7 @@ function heredocSubstitution(
 ): { end: number; value: string } | undefined {
   if (!text.startsWith("$(", from)) return undefined;
   const opener =
-    /^[^\S\n]*cat[^\S\n]+(?:-[^\S\n]+)?<<(-?)[^\S\n]*(?:'([^']*)'|"([^"\\]*)")[^\S\n]*\n/.exec(
+    /^[^\S\n]*cat[^\S\n]+(?:-[^\S\n]+)?<<(-?)[^\S\n]*(?:'([^']*)'|"([^"\\`]*)")[^\S\n]*\n/.exec(
       text.slice(from + 2)
     );
   if (opener === null) return undefined;
