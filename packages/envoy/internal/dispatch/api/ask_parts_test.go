@@ -436,14 +436,18 @@ func askPartRef(issueKey, askID, blockID string) string {
 	return "dispatch://" + issueKey + "/ask/" + askID + "#b-" + blockID
 }
 
-// latestEventID is the id of the newest event of the issue, the id a ?since= read counts from.
-func latestEventID(t *testing.T, database *store.Store, issueKey string) int64 {
+// answeredEventID is the id of the issue's ask.answered event, the event that stamped the
+// answer's part rows (ask_transitions.go) and the since a poller shown those rows reads from next.
+func answeredEventID(t *testing.T, database *store.Store, issueKey string) int64 {
 	t.Helper()
 	var id int64
 	if err := database.Pool.QueryRow(context.Background(), `
-		select coalesce(max(id), 0) from events where issue_key = $1
+		select coalesce(max(id), 0) from events where issue_key = $1 and type = 'ask.answered'
 	`, issueKey).Scan(&id); err != nil {
-		t.Fatalf("read the newest event of %s: %v", issueKey, err)
+		t.Fatalf("read the ask.answered event of %s: %v", issueKey, err)
+	}
+	if id == 0 {
+		t.Fatalf("no ask.answered event on %s", issueKey)
 	}
 	return id
 }
@@ -645,8 +649,11 @@ func TestAPinnedAskPartShowsTheRevisionItNames(t *testing.T) {
 }
 
 // The answer's part rows are stamped with the ask.answered event that carried them (refs.Stamp),
-// so a ?since= read of the ask lists the edges the answer wrote and no older one; an unstamped row
-// is invisible to every such read.
+// so a ?since= read of the ask lists the edges the answer wrote, each stamped with that event,
+// and no older one; an unstamped row is invisible to every such read. One read does not settle
+// it: a since read caps at the event log's safe horizon, which a transaction open anywhere on
+// the Postgres instance holds back, so the read before the answer is taken through
+// awaitSinceRead, and only a read that answered within referencesSinceWait is final.
 func TestAnAnsweredAsksPartEdgesAreListedSince(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -656,18 +663,28 @@ func TestAnAnsweredAsksPartEdgesAreListedSince(t *testing.T) {
 	ask := createPartAsk(t, handler, source.Key, "Does dispatch://"+target.Key+" ship first?",
 		map[string]string{"label": "Monday"})
 	askRef := "dispatch://" + source.Key + "/ask/" + ask.ID
-	beforeTheAnswer := latestEventID(t, database, source.Key)
+	beforeTheAnswer := eventHead(t, database)
 	answerPartAsk(t, handler, ask, "alice", []string{"Monday"}, "Monday, once dispatch://"+target.Key+" lands.")
+	theAnswer := answeredEventID(t, database, source.Key)
 
 	since := url.Values{"from": {askRef}, "since": {strconv.FormatInt(beforeTheAnswer, 10)}}
-	edges := readGraph(t, handler, since).Edges
-	if len(edges) != 1 || edges[0].Kind != "mentions" || edges[0].Node.ID != target.Key ||
-		edges[0].Block == nil || edges[0].Block.BlockID != "b3" {
-		t.Fatalf("?from= the ask since the event before the answer lists %#v, want the answer part's mention", edges)
-	}
-	afterTheAnswer := latestEventID(t, database, source.Key)
+	awaitSinceRead(t, "?from= the ask since the log's head before the answer, wanting the answer part's mention stamped with event "+strconv.FormatInt(theAnswer, 10),
+		func() model.GraphReferences { return readGraph(t, handler, since) },
+		func(read model.GraphReferences) bool {
+			if len(read.Edges) != 1 {
+				return false
+			}
+			edge := read.Edges[0]
+			return edge.Kind == "mentions" && edge.Node.ID == target.Key &&
+				edge.Block != nil && edge.Block.BlockID == "b3" &&
+				edge.SourceSeq != nil && *edge.SourceSeq == theAnswer
+		})
+
+	// The awaited read listed the answer's mention, so the horizon had passed the ask.answered
+	// event; the horizon only grows, so a read since that same event, the poller's own next read,
+	// answers nothing because of the since filter and not because of a stale horizon.
 	if edges := readGraph(t, handler, url.Values{
-		"from": {askRef}, "since": {strconv.FormatInt(afterTheAnswer, 10)},
+		"from": {askRef}, "since": {strconv.FormatInt(theAnswer, 10)},
 	}).Edges; len(edges) != 0 {
 		t.Fatalf("?from= the ask since the answer's own event lists %#v, want none", edges)
 	}

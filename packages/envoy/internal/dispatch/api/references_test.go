@@ -393,13 +393,47 @@ func awaitGraphEdges(t *testing.T, handler http.Handler, query url.Values, want 
 	}
 }
 
+// awaitSinceRead reads again until holds accepts the answer, because a since read answers only
+// the edges at or below the event log's safe horizon, and any transaction holding a transaction
+// id on the Postgres instance holds that horizon back: in this package, storetest's own
+// "create database … template …" and "drop database … with (force)" transactions
+// (storetest.Open and storetest's dropDatabase). Such a read waits out referencesSinceWait and
+// then answers at the horizon it was left with, which may be short of what committed before it,
+// so it is read again, bounded by eventFeedWait. A read that answered within referencesSinceWait
+// was not held back: what it listed is what it owed, so holds failing on it, a missing edge as
+// much as a duplicate or a wrongly stamped one, is a product failure and fails the test at once.
+// what names the read in either failure.
+func awaitSinceRead(
+	t *testing.T,
+	what string,
+	read func() model.GraphReferences,
+	holds func(model.GraphReferences) bool,
+) {
+	t.Helper()
+	deadline := time.Now().Add(eventFeedWait)
+	for {
+		started := time.Now()
+		answer := read()
+		took := time.Since(started)
+		if holds(answer) {
+			return
+		}
+		if took < referencesSinceWait {
+			t.Fatalf("%s answered %#v in %s, inside %s: the horizon held nothing back, so that is every edge it owes",
+				what, answer.Edges, took, referencesSinceWait)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s = %#v after %s, the last read taking %s and every read held past %s",
+				what, answer.Edges, eventFeedWait, took, referencesSinceWait)
+		}
+	}
+}
+
 // A since read answers every mention committed before it, also on a server where nothing else
 // observes the event log: no event stream has started the relay and no Delivery page the hub.
 // Each observation is proven safe only by a later one, so a read that stopped at the horizon
 // proven so far would answer nothing here, the first after boot, and each later read would stop
-// at the previous read's observation, however old. A read held past referencesSinceWait (an open
-// transaction elsewhere on the shared test cluster holds the horizon back) may answer less and
-// is read again; a read that answered within it must hold the mention.
+// at the previous read's observation, however old. awaitSinceRead settles which answer is final.
 func TestReferencesSinceAnswersAMentionCommittedBeforeTheReadOnAQuietServer(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -413,21 +447,12 @@ func TestReferencesSinceAnswersAMentionCommittedBeforeTheReadOnAQuietServer(t *t
 	comment := createReferenceAPIComment(t, handler, citing.Key, "Blocked on "+targetRef)
 
 	query := url.Values{"to": {targetRef}, "since": {"0"}}
-	deadline := time.Now().Add(eventFeedWait)
-	for {
-		started := time.Now()
-		read := graphEdges(t, handler, query)
-		took := time.Since(started)
-		if len(read.Edges) == 1 && read.Edges[0].Kind == "mentions" && blockOf(read.Edges[0].Node, "comment", comment.ID) {
-			return
-		}
-		if took < referencesSinceWait {
-			t.Fatalf("since 0 answered %#v in %s; want the mention by comment %s, committed before the read", read.Edges, took, comment.ID)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("since 0 = %#v, every read held past %s; want the mention by comment %s", read.Edges, referencesSinceWait, comment.ID)
-		}
-	}
+	awaitSinceRead(t, "since 0 ?to= "+targetRef+", wanting the mention by comment "+comment.ID,
+		func() model.GraphReferences { return graphEdges(t, handler, query) },
+		func(read model.GraphReferences) bool {
+			return len(read.Edges) == 1 && read.Edges[0].Kind == "mentions" &&
+				blockOf(read.Edges[0].Node, "comment", comment.ID)
+		})
 }
 
 // A poller reads ?since=<the highest source_seq it was shown>. Event ids are not commit order:
