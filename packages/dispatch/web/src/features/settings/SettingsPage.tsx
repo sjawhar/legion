@@ -1,6 +1,7 @@
 import { canonicalRepo } from "@legion/contracts/repo";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 
 import { api, apiErrorMessage } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
@@ -36,6 +37,7 @@ import {
 } from "./classes";
 import { ProjectSelect } from "./ProjectSelect";
 import { ProjectsSection } from "./ProjectsSection";
+import { ReportSettingsForm } from "./ReportSettingsForm";
 
 interface MappingInput {
   readonly repo: string;
@@ -66,6 +68,36 @@ function withMapping(current: RepoProject[], mapping: RepoProject): RepoProject[
 
 export function SettingsPage(): ReactNode {
   useDocumentTitle("Settings · Dispatch");
+  // A link to one section (`/settings#problem-reports`, from the report dialog) brings it into
+  // view: the router renders the page after the browser would have looked for the fragment. The
+  // sections above it grow as their reads land, so it is kept in view as the page grows, until
+  // the reader scrolls, types or presses, or three seconds pass.
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (hash.length <= 1) return;
+    let id = hash.slice(1);
+    try {
+      id = decodeURIComponent(id);
+    } catch {
+      // A fragment that is not percent-encoding names the section as written.
+    }
+    const section = document.getElementById(id);
+    if (section === null) return;
+    const bring = () => section.scrollIntoView({ block: "start" });
+    bring();
+    if (typeof ResizeObserver === "undefined" || section.parentElement === null) return;
+    const growth = new ResizeObserver(bring);
+    growth.observe(section.parentElement);
+    const stop = () => growth.disconnect();
+    const timer = window.setTimeout(stop, 3000);
+    const moves = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
+    for (const move of moves) window.addEventListener(move, stop, { once: true, passive: true });
+    return () => {
+      stop();
+      window.clearTimeout(timer);
+      for (const move of moves) window.removeEventListener(move, stop);
+    };
+  }, [hash]);
   const queryClient = useQueryClient();
   const [repository, setRepository] = useState("");
   const [project, setProject] = useState("");
@@ -346,6 +378,20 @@ export function SettingsPage(): ReactNode {
             Saving verifies the Dispatch GitHub App can read the deploy repository.
           </p>
           <DeliverySettingsForm />
+        </section>
+        <section aria-labelledby="problem-reports-heading" id="problem-reports">
+          <h2
+            className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
+            id="problem-reports-heading"
+          >
+            Problem reports
+          </h2>
+          <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
+            Where Report a problem files what people tell you about Dispatch itself, and which agent
+            fixes a report when its reporter asks. Report a problem is in the ? panel and the Ctrl+K
+            palette on every page.
+          </p>
+          <ReportSettingsForm />
         </section>
       </div>
     </section>

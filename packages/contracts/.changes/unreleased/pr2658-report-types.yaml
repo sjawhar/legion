@@ -1,0 +1,2 @@
+kind: Added
+body: '`ReportSettings`, `ReportSettingsInput`, `ReportInput` and `ReportResponse`: the shapes of `GET`/`PUT /api/v1/settings/reports` and `POST /api/v1/reports`, where a report of a problem with Dispatch is filed as an issue and optionally routed to an agent''s role.'

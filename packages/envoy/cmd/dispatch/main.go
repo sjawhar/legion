@@ -374,6 +374,7 @@ func main() {
 		WebDistDir:     webDistDir,
 		AssetStore:     dashboard.NewStore(database.Pool),
 		DashboardEntry: dashboardBuild.Entry,
+		Commit:         buildCommit,
 		People:         people,
 		Sessions:       sessions,
 		Identity:       requestIdentity,

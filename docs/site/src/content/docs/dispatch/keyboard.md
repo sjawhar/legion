@@ -21,13 +21,15 @@ shortcuts, so single letters never interrupt your typing.
 
 `?` opens **Keyboard shortcuts**: every shortcut the current page offers, grouped by where it
 applies. Type in its filter box to narrow the list. A shortcut that would do nothing right now,
-such as one that needs a focused row, is greyed out.
+such as one that needs a focused row, is greyed out. Its **Report a problem** button opens the
+form for telling Dispatch's maintainers about something wrong with Dispatch itself
+([Reporting a problem](/legion/dispatch/#reporting-a-problem)).
 
 `Ctrl+K` opens the palette. With an empty box it lists the actions for the page you are on, each
 with the keys that also run it. Type to filter those actions and to search all of Dispatch. Use
 the arrow keys and `Enter` to pick a row. Some actions are only in the palette, because a single
 key would be too easy to press by mistake: **Close issue**, **Reopen issue**, and
-**Set priority P0** to **P3**.
+**Set priority P0** to **P3**. **Report a problem** is in the palette on every page.
 
 `/` opens the palette for search alone, with your last search selected so that typing replaces
 it. `g p` opens it as a project list.

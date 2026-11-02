@@ -283,6 +283,12 @@ Sign in, then open **Settings**:
   GitHub again, and two re-listings walk those 28 days a day per pass, about 28 passes in all:
   one of each run's branch and event, and one of each deploy run's creation time, which decides
   the deploy a pull request is credited to.
+- **Problem reports**: choose the project that [Report a problem](/legion/dispatch/#reporting-a-problem)
+  files its issues in, and, to offer **Ask an agent to fix this**, the role of the agent that fixes
+  them, written `role:<name>`. Name a role rather than a session: the agent claims its role again
+  when it restarts, while a session's id changes, so a session is refused. Until a project is set,
+  the report form says reports are not set up; with no role, it offers no agent. A wake sent while
+  no session holds the role is not kept, so run the agent before people start ticking the box.
 - **Agent tokens**: make a token for each agent you run.
   [Dispatch for agents](/legion/dispatch/for-agents/#connecting-an-agent) covers the rest.
 

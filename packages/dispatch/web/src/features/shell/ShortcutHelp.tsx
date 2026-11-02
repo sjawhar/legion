@@ -77,9 +77,12 @@ const SCOPE_ORDER: readonly KeymapScope[] = [
  */
 export function ShortcutHelp({
   onClose,
+  onReport,
   snapshot,
 }: {
   onClose: () => void;
+  /** Opens **Report a problem**, offered beside Close; the panel closes first. */
+  onReport?: () => void;
   snapshot: readonly KeyBindingDescription[] | null;
 }): ReactNode {
   const open = snapshot !== null;
@@ -127,6 +130,18 @@ export function ShortcutHelp({
               type="search"
               value={filter}
             />
+            {onReport === undefined ? null : (
+              <button
+                className={`min-h-11 shrink-0 rounded-lg px-3 text-sm font-medium ${textMutedOnSurface}`}
+                onClick={() => {
+                  onClose();
+                  onReport();
+                }}
+                type="button"
+              >
+                Report a problem
+              </button>
+            )}
             <button
               className={`min-h-11 rounded-lg px-3 text-sm font-medium ${textMutedOnSurface}`}
               onClick={onClose}

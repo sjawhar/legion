@@ -16,6 +16,7 @@ const tables = [
   "repo_projects",
   "architecture_sources",
   "delivery_settings",
+  "report_settings",
   "delivery_changes",
   "delivery_session_group_members",
   "delivery_session_groups",

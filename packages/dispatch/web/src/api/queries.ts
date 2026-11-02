@@ -291,6 +291,14 @@ export const deliveryPipelineQuery = (view: DeliveryLiveView & { kind: "pipeline
     queryFn: (context) => subscribeLive(context, view),
   });
 
+/** Where a report of a problem with Dispatch goes: the report form and its Settings section read
+ *  it. */
+export const reportSettingsQuery = () =>
+  queryOptions({
+    queryKey: ["report-settings"],
+    queryFn: () => api.getReportSettings(),
+  });
+
 /** The delivery timeline's configuration record, or `null` until someone sets it: the Settings
  *  section's form reads it, while the Delivery page's setup form starts from the `null` the
  *  timeline's `DELIVERY_NOT_CONFIGURED` already implies and reads nothing. */

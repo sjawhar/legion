@@ -197,6 +197,14 @@ export function putRepoProject(
   return request<RepoProject>(`/api/v1/settings/repo-projects/${repo}`, "PUT", input, { login });
 }
 
+/** Sets where reports of a problem with Dispatch go, as Settings → Problem reports does. */
+export function putReportSettings(
+  input: { project: string | null; agent_route: string | null },
+  login = "alice"
+): Promise<unknown> {
+  return request<unknown>("/api/v1/settings/reports", "PUT", input, { login });
+}
+
 /** Removes `repo`'s mapping, as the Settings page's Delete does. */
 export function deleteRepoProject(repo: string, login = "alice"): Promise<void> {
   return request<void>(`/api/v1/settings/repo-projects/${repo}`, "DELETE", {}, { login });

@@ -151,6 +151,9 @@ type Deps struct {
 	// DashboardEntry is the entry chunk (`/assets/index-*.js`) of the dashboard build this process
 	// serves, "" when it serves none; GET /api/v1/dashboard/builds answers it as serving.
 	DashboardEntry string
+	// Commit is the legion commit this binary was built from (cmd/dispatch's buildCommit, which
+	// /healthz reports), "" for a build that names none; a report names it as the deployed version.
+	Commit string
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -211,6 +214,8 @@ type DepsInput struct {
 	ListenerRosterUncached bool
 	// DashboardEntry is this process's dashboard entry chunk; see Deps.DashboardEntry.
 	DashboardEntry string
+	// Commit is the commit this binary was built from; see Deps.Commit.
+	Commit string
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -280,6 +285,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		TestHookTimeout:        input.TestHookTimeout,
 		ListenerRosterUncached: input.ListenerRosterUncached,
 		DashboardEntry:         input.DashboardEntry,
+		Commit:                 input.Commit,
 	}, nil
 }
 

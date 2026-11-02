@@ -366,6 +366,7 @@ var keyedUploads = map[string]bool{
 	issueUploadRoute: true,
 	http.MethodPost + " /api/v1/projects/{key}/artifacts":      true,
 	http.MethodPost + " /api/v1/agents/{session_id}/artifacts": true,
+	http.MethodPost + " /api/v1/reports":                       true,
 }
 
 // keyLease is how long a keyed request holds its key without a renewal before a repeat presumes

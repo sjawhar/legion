@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+    Dispatch takes reports of problems with Dispatch itself. `POST /api/v1/reports` files a person's
+    words, the pictures they pasted (up to ten, 25 MiB together) and where it happened (the page,
+    this server's commit, the page's build, the browser, the window and the reporter) as an issue
+    labelled `report` in the project the report settings name, given to that project's default
+    assignee; the issue, its pictures and its spec are written in one transaction. When the reporter
+    asks an agent to fix it, the issue carries the settings' agent route from its first event, so
+    the reporter's `issue.created` is published to the session holding that role. The two settings
+    live in the new one-row `report_settings` table (migration `20261102024952_report_settings`),
+    read and written by `GET` and `PUT /api/v1/settings/reports`: the project, and the agent named
+    by a role route only, since a session's id changes when its agent restarts. The dashboard offers
+    the form as **Report a problem** in the `?` panel and the `Ctrl+K` palette on every page, and the
+    settings in **Settings → Problem reports**.

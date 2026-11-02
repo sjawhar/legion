@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import type { KeyBindingDescription } from "./keymap";
@@ -28,6 +28,25 @@ test("? lists the Architecture section between Project and Board, with its bindi
     expect(
       within(screen.getByRole("region", { name: "Architecture" })).getByText("Next component")
     ).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("? offers Report a problem, which closes the panel and opens the report", () => {
+  const calls: string[] = [];
+  const view = render(
+    <MemoryRouter>
+      <ShortcutHelp
+        onClose={() => calls.push("close")}
+        onReport={() => calls.push("report")}
+        snapshot={snapshot}
+      />
+    </MemoryRouter>
+  );
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Report a problem" }));
+    expect(calls).toEqual(["close", "report"]);
   } finally {
     view.unmount();
   }

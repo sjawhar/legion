@@ -82,6 +82,10 @@ import type {
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
   RepoProject,
+  ReportInput,
+  ReportResponse,
+  ReportSettings,
+  ReportSettingsInput,
   SearchResponse,
   Subscriber,
   Suggestions,
@@ -1352,6 +1356,36 @@ export class DispatchApiClient {
     bounds: WriteBounds
   ): Promise<DeliverySettings> {
     return this.put<DeliverySettings>("/api/v1/settings/delivery", input, bounds);
+  }
+
+  /** Where a report of a problem with Dispatch goes; every field null until a person sets it. */
+  getReportSettings(): Promise<ReportSettings> {
+    return this.json<ReportSettings>("/api/v1/settings/reports");
+  }
+
+  /** Sets where reports go (human callers only); a session route is `400 REPORT_SETTINGS_INPUT`. */
+  putReportSettings(input: ReportSettingsInput, bounds: WriteBounds): Promise<ReportSettings> {
+    return this.put<ReportSettings>("/api/v1/settings/reports", input, bounds);
+  }
+
+  /** Files a report, its issue, pictures and route written in one request: JSON when it has no
+   *  picture, so a reload can send it again, else its fields in the multipart body's `report`
+   *  part and each picture a `picture` part. */
+  createReport(
+    input: ReportInput,
+    pictures: readonly File[],
+    bounds: WriteBounds
+  ): Promise<ReportResponse> {
+    if (pictures.length === 0) {
+      return this.post<ReportResponse>("/api/v1/reports", input, bounds);
+    }
+    const body = new FormData();
+    body.set("report", JSON.stringify(input));
+    for (const picture of pictures) {
+      // A File carries its own name into the part's filename.
+      body.append("picture", picture);
+    }
+    return this.post<ReportResponse>("/api/v1/reports", body, bounds);
   }
 
   /** Creates a Delivery session group: its sessions' pull requests take it as their Parent agent.

@@ -213,6 +213,11 @@ func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
 		{"upload project document: content", nulRequest{method: http.MethodPost, target: "/api/v1/projects/TEST/artifacts", body: map[string]any{"name": "other.md", "content": nulText}}, "content"},
 		{"upload project file: markdown", nulRequest{method: http.MethodPost, target: "/api/v1/projects/TEST/artifacts", form: map[string]string{"name": "other.md"}, file: []byte(nulText)}, "file"},
 
+		{"report: body", nulRequest{method: http.MethodPost, target: "/api/v1/reports", body: map[string]any{"body": nulText, "page": "https://dispatch.example/", "viewport": map[string]any{"width": 1, "height": 1}}}, "body"},
+		{"report: page", nulRequest{method: http.MethodPost, target: "/api/v1/reports", body: map[string]any{"body": "Broken", "page": nulText, "viewport": map[string]any{"width": 1, "height": 1}}}, "page"},
+		{"report with pictures: body", nulRequest{method: http.MethodPost, target: "/api/v1/reports", form: map[string]string{"report": `{"body":"a\u0000b","page":"https://dispatch.example/","viewport":{"width":1,"height":1}}`}, file: []byte("# Notes\n")}, "report.body"},
+		{"set report settings: agent route", nulRequest{method: http.MethodPut, target: "/api/v1/settings/reports", body: map[string]any{"project": nil, "agent_route": nulText}}, "agent_route"},
+
 		{"edit document: replace", nulRequest{method: http.MethodPost, target: spec + "/edits", body: map[string]any{"ops": []map[string]any{{"op": "replace", "find": "before", "with": nulText}}}}, "ops[0].with"},
 		{"edit document: insert", nulRequest{method: http.MethodPost, target: spec + "/edits", body: map[string]any{"ops": []map[string]any{{"op": "insert", "after": "end", "markdown": nulText}}}}, "ops[0].markdown"},
 		{"edit document: retype attribute", nulRequest{method: http.MethodPost, target: spec + "/edits", body: map[string]any{"ops": []map[string]any{{"op": "retype", "block": f.block, "type": "callout", "attributes": map[string]any{"title": nulText}}}}}, "ops[0].attributes.title"},
