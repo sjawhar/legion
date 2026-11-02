@@ -57,8 +57,9 @@ type artifactGrantsChangedPayload struct {
 
 // grantArtifact is an artifact as the grants routes read it: enough to decide whether it is a
 // page file, to own the event, and to write its address. MIME is the stored type of its latest
-// version, "" for an artifact with no version, and the page test reads it with the name
-// (isPageFile).
+// version, which the page test reads with the name (isPageFile): it is "" for an artifact with
+// no version, and for a read that does not select it, which is every read but the page file's
+// own (grantPageColumns).
 type grantArtifact struct {
 	ID        string
 	IssueKey  *string
@@ -105,24 +106,33 @@ func (a grantArtifact) isPage() bool {
 	return isPageFile(a.Name, a.MIME)
 }
 
-// grantArtifactColumns reads an artifact for these routes, over artifacts aliased a: the latest
-// version's stored type comes from one backwards probe of artifact_versions' (artifact_id,
-// number) key, as the summary reads its size.
+// grantArtifactColumns reads an artifact for these routes, over artifacts aliased a, in the
+// order grantArtifact.scanTargets scans it.
 const grantArtifactColumns = `a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id,
-	a.slug, a.name, a.kind, a.is_primary,
+	a.slug, a.name, a.kind, a.is_primary`
+
+// grantPageColumns adds the latest version's stored type, from one backwards probe of
+// artifact_versions' (artifact_id, number) key, as the summary reads its size. The page test is
+// the only reader of it (grantArtifact.isPage), so only the read that makes that test selects
+// it: the grant list and the granted file's lookup pay no probe for a column they never read.
+const grantPageColumns = grantArtifactColumns + `,
 	coalesce((select v.mime from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1), '')`
 
-func scanGrantArtifact(row pgx.Row) (grantArtifact, error) {
-	var artifact grantArtifact
-	err := row.Scan(&artifact.ID, &artifact.IssueKey, &artifact.Project, &artifact.SessionID,
-		&artifact.Slug, &artifact.Name, &artifact.Kind, &artifact.Primary, &artifact.MIME)
+// scanTargets is where each column of grantArtifactColumns is scanned, in the constant's order.
+// Every read of those columns scans through it, so the order is written once and a column added
+// to the constant is added here, for all three routes at once, rather than in each read.
+func (a *grantArtifact) scanTargets() []any {
+	return []any{&a.ID, &a.IssueKey, &a.Project, &a.SessionID, &a.Slug, &a.Name, &a.Kind, &a.Primary}
+}
+
+// scanGrantArtifact reads one row of grantArtifactColumns into artifact, and of whatever columns
+// the caller selected past them into past: grantPageColumns' stored type, and nothing else.
+func scanGrantArtifact(row pgx.Row, artifact *grantArtifact, past ...any) error {
+	err := row.Scan(append(artifact.scanTargets(), past...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return grantArtifact{}, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
+		return errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
 	}
-	if err != nil {
-		return grantArtifact{}, err
-	}
-	return artifact, nil
+	return err
 }
 
 // pageFileOfRequest is the page file {id} names, for all three routes: a grant list belongs to a
@@ -133,10 +143,10 @@ func (s *server) pageFileOfRequest(ctx context.Context, q queryer, r *http.Reque
 	if err != nil {
 		return grantArtifact{}, err
 	}
-	artifact, err := scanGrantArtifact(q.QueryRow(ctx, `
-		select `+grantArtifactColumns+` from artifacts a where a.id = $1
-	`, id))
-	if err != nil {
+	var artifact grantArtifact
+	if err := scanGrantArtifact(q.QueryRow(ctx, `
+		select `+grantPageColumns+` from artifacts a where a.id = $1
+	`, id), &artifact, &artifact.MIME); err != nil {
 		return grantArtifact{}, err
 	}
 	if !artifact.isPage() {
@@ -162,9 +172,9 @@ func (s *server) readArtifactGrants(ctx context.Context, q queryer, pageID strin
 	for rows.Next() {
 		var grant artifactGrant
 		var data grantArtifact
-		if err := rows.Scan(&grant.ID, &data.ID, &data.IssueKey, &data.Project, &data.SessionID,
-			&data.Slug, &data.Name, &data.Kind, &data.Primary, &data.MIME,
-			&grant.Version, &grant.GrantedBy, &grant.CreatedAt); err != nil {
+		targets := append([]any{&grant.ID}, data.scanTargets()...)
+		targets = append(targets, &grant.Version, &grant.GrantedBy, &grant.CreatedAt)
+		if err := rows.Scan(targets...); err != nil {
 			return nil, err
 		}
 		grant.ArtifactID, grant.Ref, grant.Name = data.ID, data.ref(), data.Name
@@ -230,10 +240,10 @@ func (s *server) resolveGrantedFile(ctx context.Context, q queryer, reference st
 		return grantArtifact{}, nil, errorf(http.StatusBadRequest, "NOT_A_FILE_REFERENCE",
 			"a grant names one file, as dispatch://<issue or project>/artifact/<slug>[@v<N>]; %q names none", reference)
 	}
-	data, err := scanGrantArtifact(q.QueryRow(ctx, `
+	var data grantArtifact
+	if err := scanGrantArtifact(q.QueryRow(ctx, `
 		select `+grantArtifactColumns+` from artifacts a where a.ref_key = $1
-	`, text.TargetID(ref)))
-	if err != nil {
+	`, text.TargetID(ref)), &data); err != nil {
 		var refusal *apiError
 		if errors.As(err, &refusal) && refusal.code == "ARTIFACT_NOT_FOUND" {
 			return grantArtifact{}, nil, errorf(http.StatusBadRequest, "DATA_FILE_NOT_FOUND",

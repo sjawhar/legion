@@ -85,6 +85,14 @@ const pageContentSecurityPolicy = "sandbox allow-scripts; default-src 'none'; sc
 // serveFilePage answers one version of a page file as HTML. It reads the version's bytes the two
 // ways serveFileVersion reads them, from the row or from the file store by hash, and refuses the
 // same way; only the headers differ.
+func (s *server) serveFilePage(w http.ResponseWriter, r *http.Request, artifactID string, number int, content []byte, sha *string, size *int64) {
+	s.serveVersionBytes(w, r, artifactID, number, content, sha, size, pageHeaders(w, r, sha))
+}
+
+// pageHeaders is the page answer's headers, written once with the body's length: serveFilePage
+// hands it to serveVersionBytes, which calls it after the last refusal and before the first
+// byte, and a HEAD calls it itself on the length of the version's bytes, having read none of
+// them (getArtifactVersionPage). Both answers carry the same headers, Content-Length included.
 //
 // The answer is `inline` to a request whose Sec-Fetch-Dest is `iframe`, the frame a view block
 // inserts. Every other request, and a request that sends no Sec-Fetch-Dest, gets `attachment`: a
@@ -92,12 +100,12 @@ const pageContentSecurityPolicy = "sandbox allow-scripts; default-src 'none'; sc
 // names the header so no cache gives one of those answers to the other request. `no-cache` makes
 // the browser ask again on each load, under the version's ETag, so a later change to these
 // headers reaches every page.
-func (s *server) serveFilePage(w http.ResponseWriter, r *http.Request, artifactID string, number int, content []byte, sha *string, size *int64) {
+func pageHeaders(w http.ResponseWriter, r *http.Request, sha *string) func(length int64) {
 	disposition := "attachment"
 	if r.Header.Get("Sec-Fetch-Dest") == "iframe" {
 		disposition = "inline"
 	}
-	s.serveVersionBytes(w, r, artifactID, number, content, sha, size, func(length int64) {
+	return func(length int64) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Disposition", disposition)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -110,7 +118,7 @@ func (s *server) serveFilePage(w http.ResponseWriter, r *http.Request, artifactI
 		w.Header().Set("Content-Security-Policy", pageContentSecurityPolicy)
 		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		w.WriteHeader(http.StatusOK)
-	})
+	}
 }
 
 // serveVersionBytes writes a version's bytes under the headers its route sets: a row holding

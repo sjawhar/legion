@@ -51,17 +51,21 @@ type documentSummary struct {
 	Size          *int64 `json:"size"`
 }
 
-// summaryLatestVersion is the select-list term an artifact summary reads its latest version
-// through, over artifacts aliased a: one index probe of artifact_versions' (artifact_id, number)
-// key per artifact, inside the summary's one query.
-const summaryLatestVersion = `(select max(v.number) from artifact_versions v where v.artifact_id = a.id)`
+// summaryLatest is the join an artifact summary reads its latest version through, over artifacts
+// aliased a: one backwards walk of artifact_versions' (artifact_id, number) key per artifact,
+// inside the summary's one query, rather than one probe for the number and a second for that
+// version's size.
+const summaryLatest = `left join lateral (
+			select v.number, v.size from artifact_versions v
+			where v.artifact_id = a.id order by v.number desc limit 1
+		) latest on true`
 
-// summaryLatestSize is the select-list term an artifact summary reads that version's size column
-// through, over artifacts aliased a: a second probe of the same key, backwards from the artifact's
-// last version. It is null for an artifact with no version, and for a document version, which
-// records no size. A reader that must hold a set of files under a byte cap reads the sizes here
-// and refuses before it asks for any bytes.
-const summaryLatestSize = `(select v.size from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1)`
+// summaryLatestColumns is what that join gives the select list: the artifact's greatest version
+// number, which is its newest row's, and that version's size in bytes. Both are null for an
+// artifact with no version, and the size is null for a document version, which records none. A
+// reader that must hold a set of files under a byte cap reads the sizes here and refuses before
+// it asks for any bytes.
+const summaryLatestColumns = `latest.number, latest.size`
 
 func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -76,8 +80,9 @@ func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select a.id::text, a.slug, a.name, a.kind, `+summaryLatestVersion+`, `+summaryLatestSize+`, a.is_primary
-		from artifacts a where a.issue_key = $1 order by a.created_at, a.id
+		select a.id::text, a.slug, a.name, a.kind, `+summaryLatestColumns+`, a.is_primary
+		from artifacts a `+summaryLatest+`
+		where a.issue_key = $1 order by a.created_at, a.id
 	`, summary.Key)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -100,8 +105,9 @@ func (s *server) getProjectDocumentSummary(w http.ResponseWriter, r *http.Reques
 	read := func(predicate string, value string) (documentSummary, error) {
 		var summary documentSummary
 		err := q.QueryRow(ctx, `
-			select a.id::text, coalesce(a.project_key, ''), a.slug, a.name, a.kind, `+summaryLatestVersion+`, `+summaryLatestSize+`
-			from artifacts a where `+predicate, value).Scan(
+			select a.id::text, coalesce(a.project_key, ''), a.slug, a.name, a.kind, `+summaryLatestColumns+`
+			from artifacts a `+summaryLatest+`
+			where `+predicate, value).Scan(
 			&summary.ID, &summary.Project, &summary.Slug, &summary.Name, &summary.Kind, &summary.LatestVersion, &summary.Size,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {

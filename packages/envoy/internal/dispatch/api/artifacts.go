@@ -816,18 +816,29 @@ func (s *server) blockReferences(ctx context.Context, artifactID string) (map[st
 	return references, nil
 }
 
-func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
+// artifactVersionOfRequest is the prologue both version routes make before they read a version,
+// and answers the request itself when one of its steps refuses: the caller is signed in,
+// {number} is a version number a version could have, and {id} names an artifact.
+func (s *server) artifactVersionOfRequest(w http.ResponseWriter, r *http.Request) (model.Artifact, int, bool) {
 	if !s.requireAuthenticated(w, r) {
-		return
+		return model.Artifact{}, 0, false
 	}
 	number, err := strconv.Atoi(r.PathValue("number"))
 	if err != nil || number < 1 {
 		writeError(w, "INVALID_VERSION", http.StatusBadRequest, "version number must be positive")
-		return
+		return model.Artifact{}, 0, false
 	}
 	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
 		s.writeHandlerError(w, err)
+		return model.Artifact{}, 0, false
+	}
+	return artifact, number, true
+}
+
+func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
+	artifact, number, ok := s.artifactVersionOfRequest(w, r)
+	if !ok {
 		return
 	}
 	if artifact.Kind == "doc" {
@@ -866,19 +877,12 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 // exist before the page test can run, and a version that is not there is 404 rather than 415.
 //
 // Go's ServeMux serves HEAD from this GET pattern, so a HEAD gets each refusal too: that is the
-// request the block sends before it inserts a frame.
+// request the block sends before it inserts a frame. A HEAD's answer is its headers alone, since
+// net/http discards the body, so it reads the length of the page out of the row and never the
+// page itself.
 func (s *server) getArtifactVersionPage(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
-		return
-	}
-	number, err := strconv.Atoi(r.PathValue("number"))
-	if err != nil || number < 1 {
-		writeError(w, "INVALID_VERSION", http.StatusBadRequest, "version number must be positive")
-		return
-	}
-	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
-	if err != nil {
-		s.writeHandlerError(w, err)
+	artifact, number, ok := s.artifactVersionOfRequest(w, r)
+	if !ok {
 		return
 	}
 	if artifact.Kind == "doc" {
@@ -906,6 +910,23 @@ func (s *server) getArtifactVersionPage(w http.ResponseWriter, r *http.Request) 
 	if size != nil && *size > maxPageBytes {
 		writeError(w, "PAGE_TOO_LARGE", http.StatusRequestEntityTooLarge, fmt.Sprintf("a page is at most %d bytes", maxPageBytes))
 		return
+	}
+	// A HEAD is answered from the length alone: octet_length reads it from the stored value's
+	// header, so the page the block asks after before each frame - over a megabyte of it - is
+	// neither detoasted nor sent for a body net/http drops. A row holding no bytes answers null
+	// and falls through to the read below, which keeps the file store's own refusals.
+	if r.Method == http.MethodHead {
+		var length *int64
+		if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+			select octet_length(content) from artifact_versions where artifact_id = $1 and number = $2
+		`, artifact.ID, number).Scan(&length); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if length != nil {
+			pageHeaders(w, r, sha)(*length)
+			return
+		}
 	}
 	var content []byte
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
