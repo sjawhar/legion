@@ -77,7 +77,7 @@ func TestARequestIsAnsweredByTheStreamsAcknowledgementAlone(t *testing.T) {
 	window := client.WindowUntil(nil)
 
 	stored := contracts.AgentSubject("ses_request_stored")
-	if err := answerOf(t, window.Request(stored, forwardEnvelope("stored"), bus.RequestOptions{Timeout: 2 * time.Second}), 5*time.Second); err != nil {
+	if err := answerOf(t, window.Request(stored, forwardEnvelope("stored"), bus.RequestOptions{MsgID: bus.ForwardMsgID("stored", stored), Timeout: 2 * time.Second}), 5*time.Second); err != nil {
 		t.Fatalf("a Request the stream acknowledged, with nobody subscribed to its subject, returned %v, want nil", err)
 	}
 
@@ -85,7 +85,7 @@ func TestARequestIsAnsweredByTheStreamsAcknowledgementAlone(t *testing.T) {
 	// only reply this Request gets.
 	const uncaptured = "notifications.role.request-receipt"
 	responder(t, url, uncaptured)
-	err := answerOf(t, window.Request(uncaptured, forwardEnvelope("receipt"), bus.RequestOptions{Timeout: 300 * time.Millisecond}), 5*time.Second)
+	err := answerOf(t, window.Request(uncaptured, forwardEnvelope("receipt"), bus.RequestOptions{MsgID: bus.ForwardMsgID("receipt", uncaptured), Timeout: 300 * time.Millisecond}), 5*time.Second)
 	if !errors.Is(err, bus.ErrNotAcknowledged) {
 		t.Fatalf("a Request its receiver answered with an empty receipt returned %v, want ErrNotAcknowledged: the stream stored nothing of it", err)
 	}
@@ -98,7 +98,7 @@ func TestARequestNobodyAnswersIsNotAcknowledgedWithinItsTimeout(t *testing.T) {
 	_, _, client := requestClient(t)
 
 	started := time.Now()
-	err := answerOf(t, client.WindowUntil(nil).Request("notifications.role.request-nobody", forwardEnvelope("nobody"), bus.RequestOptions{Timeout: timeout}), 5*time.Second)
+	err := answerOf(t, client.WindowUntil(nil).Request("notifications.role.request-nobody", forwardEnvelope("nobody"), bus.RequestOptions{MsgID: bus.ForwardMsgID("nobody", "notifications.role.request-nobody"), Timeout: timeout}), 5*time.Second)
 	elapsed := time.Since(started)
 	if !errors.Is(err, bus.ErrNotAcknowledged) || errors.Is(err, bus.ErrUnavailable) {
 		t.Fatalf("an unanswered Request returned %v, want ErrNotAcknowledged, not ErrUnavailable", err)
@@ -120,7 +120,7 @@ func TestAnUnansweredRequestSaysWhetherItsPublishWasConfirmed(t *testing.T) {
 	window := client.WindowUntil(nil)
 
 	err := answerOf(t, window.Request("notifications.role.request-confirmed", forwardEnvelope("confirmed"),
-		bus.RequestOptions{Timeout: 300 * time.Millisecond}), 5*time.Second)
+		bus.RequestOptions{MsgID: bus.ForwardMsgID("confirmed", "notifications.role.request-confirmed"), Timeout: 300 * time.Millisecond}), 5*time.Second)
 	if !errors.Is(err, bus.ErrNotAcknowledged) || errors.Is(err, bus.ErrPublishUnconfirmed) {
 		t.Fatalf("an unanswered Request whose publish was confirmed returned %v, want ErrNotAcknowledged and not ErrPublishUnconfirmed", err)
 	}
@@ -130,7 +130,7 @@ func TestAnUnansweredRequestSaysWhetherItsPublishWasConfirmed(t *testing.T) {
 	// been accepted.
 	thaw := server.Freeze(t)
 	err = answerOf(t, window.Request("notifications.role.request-unconfirmed", forwardEnvelope("unconfirmed"),
-		bus.RequestOptions{Timeout: 500 * time.Millisecond}), 5*time.Second)
+		bus.RequestOptions{MsgID: bus.ForwardMsgID("unconfirmed", "notifications.role.request-unconfirmed"), Timeout: 500 * time.Millisecond}), 5*time.Second)
 	connected := client.Connected()
 	thaw()
 	if !connected {
@@ -193,14 +193,14 @@ func TestARequestWhoseConnectionIsLostAnswersUnavailable(t *testing.T) {
 	}))
 	window := client.WindowUntil(nil)
 
-	pending := window.Request("notifications.role.request-lost", forwardEnvelope("lost"), bus.RequestOptions{Timeout: 30 * time.Second})
+	pending := window.Request("notifications.role.request-lost", forwardEnvelope("lost"), bus.RequestOptions{MsgID: bus.ForwardMsgID("lost", "notifications.role.request-lost"), Timeout: 30 * time.Second})
 	server.Stop(t)
 	if err := answerOf(t, pending, 10*time.Second); !errors.Is(err, bus.ErrUnavailable) || errors.Is(err, bus.ErrNotAcknowledged) {
 		t.Fatalf("a Request whose connection was lost returned %v, want ErrUnavailable", err)
 	}
 
 	select {
-	case err := <-window.Request("notifications.role.request-lost", forwardEnvelope("after"), bus.RequestOptions{}):
+	case err := <-window.Request("notifications.role.request-lost", forwardEnvelope("after"), bus.RequestOptions{MsgID: bus.ForwardMsgID("after", "notifications.role.request-lost")}):
 		if !errors.Is(err, bus.ErrUnavailable) {
 			t.Fatalf("a Request on a lost window answered %v, want ErrUnavailable", err)
 		}
@@ -213,7 +213,7 @@ func TestARequestWhoseConnectionIsLostAnswersUnavailable(t *testing.T) {
 func TestARequestToASubjectNATSRefusesIsRefusedAtOnce(t *testing.T) {
 	_, _, client := requestClient(t)
 	select {
-	case err := <-client.WindowUntil(nil).Request("notifications.agent..bad", forwardEnvelope("bad"), bus.RequestOptions{}):
+	case err := <-client.WindowUntil(nil).Request("notifications.agent..bad", forwardEnvelope("bad"), bus.RequestOptions{MsgID: bus.ForwardMsgID("bad", "notifications.agent..bad")}):
 		if !errors.Is(err, bus.ErrRefused) {
 			t.Fatalf("a Request to an invalid subject answered %v, want ErrRefused", err)
 		}
@@ -237,7 +237,7 @@ func TestManyRequestsInFlightOnOneWindowEachTakeTheirOwnAnswer(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			name := fmt.Sprintf("many-%d", index)
-			request := window.Request(subject, forwardEnvelope(name), bus.RequestOptions{Timeout: 5 * time.Second})
+			request := window.Request(subject, forwardEnvelope(name), bus.RequestOptions{MsgID: bus.ForwardMsgID(name, subject), Timeout: 5 * time.Second})
 			publish := window.PublishAsync(numberedEnvelope(orderedStreamTopic, index))
 			if err := <-request; err != nil {
 				failures <- fmt.Errorf("request %s: %w", name, err)
@@ -324,7 +324,7 @@ func TestAWindowSendsNothingPastItsDeadline(t *testing.T) {
 	if elapsed > 700*time.Millisecond {
 		t.Fatalf("the send answered %s after it began, want about the 200ms to its deadline", elapsed)
 	}
-	err = answerOf(t, window.Request(subject, forwardEnvelope("deadline-request"), bus.RequestOptions{Timeout: time.Second}), time.Second)
+	err = answerOf(t, window.Request(subject, forwardEnvelope("deadline-request"), bus.RequestOptions{MsgID: bus.ForwardMsgID("deadline-request", subject), Timeout: time.Second}), time.Second)
 	if !errors.Is(err, bus.ErrWindowDeadline) {
 		t.Fatalf("a Request past the window's deadline answered %v, want ErrWindowDeadline", err)
 	}

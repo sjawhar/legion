@@ -50,7 +50,7 @@ func TestEveryDeniedRequestOfOneWindowNamesItsOwnSubject(t *testing.T) {
 			defer wg.Done()
 			subject := fmt.Sprintf("%s-%d", deniedRole, index)
 			started := time.Now()
-			err := <-window.Request(subject, roleEnvelope(subject), bus.RequestOptions{Timeout: timeout})
+			err := <-window.Request(subject, roleEnvelope(subject), bus.RequestOptions{MsgID: bus.ForwardMsgID(subject, subject), Timeout: timeout})
 			answers <- answered{subject: subject, err: err, elapsed: time.Since(started)}
 		}()
 	}

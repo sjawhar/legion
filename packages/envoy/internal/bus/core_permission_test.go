@@ -152,7 +152,7 @@ func TestAWindowRequestReportsAForwardNATSDenies(t *testing.T) {
 	client, _ := grantedClient(t)
 	started := time.Now()
 	select {
-	case err := <-client.WindowUntil(nil).Request(deniedRole, roleEnvelope(deniedRole), bus.RequestOptions{Timeout: 2 * time.Second}):
+	case err := <-client.WindowUntil(nil).Request(deniedRole, roleEnvelope(deniedRole), bus.RequestOptions{MsgID: bus.ForwardMsgID("denied", deniedRole), Timeout: 2 * time.Second}):
 		if !errors.Is(err, bus.ErrPublishDenied) || errors.Is(err, bus.ErrNotAcknowledged) {
 			t.Fatalf("denied Request answered %v, want ErrPublishDenied", err)
 		}

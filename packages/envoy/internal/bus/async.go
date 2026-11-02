@@ -82,8 +82,11 @@ type Sender interface {
 
 // RequestOptions shapes one Request.
 type RequestOptions struct {
-	// MsgID, when not empty, is sent as the request's Nats-Msg-Id header (ForwardMsgID), so a
-	// stream that captures the subject stores one copy of the envelope however often it is sent.
+	// MsgID is sent as the request's Nats-Msg-Id header (ForwardMsgID), so the stream that
+	// captures the subject stores one copy of the envelope however often it is sent. It is
+	// required: a request is a forward of one envelope to one recipient, and an unnamed one
+	// would be stored again by every attempt, so an empty MsgID is refused ErrNoForwardMsgID
+	// before anything is sent, as StartRequestStoredTo refuses one.
 	MsgID string
 	// Timeout bounds the wait for the stream's acknowledgement once the request is sent; zero is
 	// publishAcknowledgementTimeout.
@@ -336,6 +339,9 @@ func (w *window) Request(subject string, item contracts.Envelope, opts RequestOp
 func (w *window) request(subject string, item contracts.Envelope, opts RequestOptions) (func() error, error) {
 	if err := w.expired(); err != nil {
 		return nil, err
+	}
+	if opts.MsgID == "" {
+		return nil, fmt.Errorf("%w: to %q", ErrNoForwardMsgID, subject)
 	}
 	if err := checkSubject(subject); err != nil {
 		return nil, err

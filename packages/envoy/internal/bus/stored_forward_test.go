@@ -100,6 +100,44 @@ func TestStartRequestStoredToRefusesAForwardWithoutAMsgID(t *testing.T) {
 	}
 }
 
+// A window's Request is the outbox's forward of one envelope to one holder, so it is named by the
+// same rule and refused the same way: an unnamed request would be stored again by every attempt
+// of the outbox's retry, which is what the Nats-Msg-Id exists to stop. The refusal reaches the
+// caller in the request's own channel, before anything is sent.
+func TestAWindowRequestRefusesAForwardWithoutAMsgID(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	subject := contracts.AgentSubject("ses_unnamed_request")
+
+	item := contracts.Envelope{
+		EventID:        "evt_unnamed_request",
+		Source:         "agent",
+		SourceEventID:  "src_unnamed_request",
+		Topic:          "notifications.role.unnamed-request",
+		DedupeKey:      "publish.unnamed-request",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "a request with no Nats-Msg-Id",
+	}
+	select {
+	case err := <-client.WindowUntil(nil).Request(subject, item, bus.RequestOptions{Timeout: 2 * time.Second}):
+		if !errors.Is(err, bus.ErrNoForwardMsgID) || !errors.Is(err, bus.ErrRefused) {
+			t.Fatalf("an unnamed request answered %v, want ErrNoForwardMsgID and ErrRefused", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an unnamed request was never answered")
+	}
+	info, err := client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	if stored := info.State.Subjects[subject]; stored != 0 {
+		t.Fatalf("the stream holds %d copies on %s after a refused request, want 0", stored, subject)
+	}
+}
+
 // A forward whose flush times out is refused by StartRequestStoredTo itself, before any wait, and
 // within the window the caller gave rather than the client's default 10 s flush: the forward is
 // still buffered on this side of a stalled connection and is not known to have reached anyone, so
