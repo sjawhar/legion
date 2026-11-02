@@ -100,10 +100,6 @@ type deliveryMode uint8
 const (
 	coreDelivery deliveryMode = iota
 	durableDelivery
-	// liveDelivery is a message the live lane took off core NATS (liveDeliveryHandler). Like
-	// coreDelivery it is delivered to whoever is there and never retried; unlike it, its envelope
-	// must name the subject it arrived on as its topic.
-	liveDelivery
 )
 
 // durableRetryDelay is how long the server waits to deliver again a durable message whose
@@ -155,12 +151,12 @@ func (s *durableSettle) finish(retry bool, delay time.Duration) {
 type deliveryMessage struct {
 	data []byte
 	mode deliveryMode
-	// msg is the NATS message: set for durableDelivery, which acknowledges it, and liveDelivery,
-	// which reads its subject.
+	// msg is the NATS message: set for durableDelivery, which acknowledges it and reads its
+	// subject.
 	msg *nats.Msg
 	// metadata is a durable message's JetStream metadata, read once by its handler: its stream
 	// sequence, which says which session consumers hold it (storedSeq) and keys an unplaceable
-	// deferral, and its delivery count, which bounds that retry. It is nil for a core or live
+	// deferral, and its delivery count, which bounds that retry. It is nil for a core
 	// message, and for a durable one whose metadata will not parse, which can be bounded by
 	// nothing (unplaceableAgentDelivery) and is in no consumer's window as far as this listener
 	// can tell (storedSeq 0).
@@ -170,9 +166,9 @@ type deliveryMessage struct {
 }
 
 // storedSeq is the stream sequence of a durable message, which decides whether a session's
-// consumer holds it (session.SessionEntry.ConsumerHoldsStored): 0 for a core or live message, and
-// for a durable one whose metadata will not parse, so such a message is delivered rather than left
-// to a consumer that may not hold it.
+// consumer holds it (session.SessionEntry.ConsumerHoldsStored): 0 for a core message, and for a
+// durable one whose metadata will not parse, so such a message is delivered rather than left to a
+// consumer that may not hold it.
 func (message deliveryMessage) storedSeq() uint64 {
 	if message.metadata == nil {
 		return 0
@@ -181,8 +177,8 @@ func (message deliveryMessage) storedSeq() uint64 {
 }
 
 // finalize makes core delivery's loss-on-failure semantics explicit: only a
-// durable JetStream message receives an acknowledgement or retry request. A role-lane or live-lane
-// message is core NATS, sent once to whoever was subscribed, so nothing acknowledges or retries it.
+// durable JetStream message receives an acknowledgement or retry request. A role-lane message is
+// core NATS, sent once to whoever was subscribed, so nothing acknowledges or retries it.
 // A retry takes the standard delay; a path that needs its own asks for it through finalizeAfter.
 func (message deliveryMessage) finalize(retry bool) {
 	if message.mode != durableDelivery {
@@ -414,13 +410,6 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 		if err := decodeStoredEnvelope(message.data, &item); err != nil {
 			cfg.logger.Error("listener decode failed", slog.String("error", err.Error()))
 			message.finalize(false)
-			return
-		}
-		// The live lane chose this message by its subject, so an envelope naming another topic would
-		// be routed past that choice: to a role lane or an agent's inbox, or to sessions subscribed
-		// to a topic nobody published on.
-		if message.mode == liveDelivery && item.Topic != message.msg.Subject {
-			cfg.logger.Warn("listener live envelope names a topic other than its subject", slog.String("subject", message.msg.Subject), slog.String("topic", item.Topic), slog.String("event_id", item.EventID))
 			return
 		}
 		// The stream captures every agent subject, so it also stores each forward a sender made to
@@ -734,7 +723,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
 	// The durable path's message carries the stream sequence that says whether the session's
-	// consumer already holds it, and the core and live paths' message is in no consumer.
+	// consumer already holds it, and the core path's message is in no consumer.
 	var result session.HandleAgentResult
 	if message.mode == durableDelivery {
 		result = session.ResolveStoredAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer, message.storedSeq())
@@ -781,8 +770,10 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		deliveryStatus := "delivered"
 		deliveryLog := "listener agent delivered"
 		if result.Skipped {
+			// The session holds its own NATS subscription and the message reaches it there
+			// (session.Deliverer.Resolve): this listener handed it to nobody.
 			deliveryStatus = "skipped"
-			deliveryLog = "listener agent skipped push"
+			deliveryLog = "listener agent session takes the message off its own subscription"
 		}
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,

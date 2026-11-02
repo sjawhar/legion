@@ -16,10 +16,11 @@ import (
 )
 
 // roleReceiptTimeout bounds the wait for a role holder's answer to a forward: its empty receipt,
-// or the stream's acknowledgement of the stored copy for a holder with a serving port. A holder
-// that never answers holds back its own owner's later events for that long and nothing else: the
-// batch waiting on it settles and releases every other owner as their own sends come in, and the
-// batches beside it read and publish the owners it does not hold (Outbox.scan, lanes).
+// or the stream's acknowledgement of the stored copy for a holder whose entry records a port. A
+// holder that never answers holds back its own owner's later events for that long and nothing
+// else: the batch waiting on it settles and releases every other owner as their own sends come
+// in, and the batches beside it read and publish the owners it does not hold (Outbox.scan,
+// lanes).
 const roleReceiptTimeout = 5 * time.Second
 
 // errNoRoleReaders is a role route's holder resolved with no role-claim or session reader in Deps.
@@ -40,7 +41,8 @@ var errNoRoleReaders = errors.New("the outbox has no role-claim or session reade
 //   - otherwise the envelope is forwarded to holder with a Request (sendChains).
 //
 // holder is the claim's holder whenever it is known, so the destination's key is the holder's agent
-// subject (destination.key) even while it stays pending. streamAck is a holder with a serving port.
+// subject (destination.key) even while it stays pending. streamAck is a holder whose session entry
+// records a port.
 type roleForward struct {
 	holder    string
 	streamAck bool
@@ -161,10 +163,10 @@ func forwardOf(item contracts.Envelope, resolution roles.Resolution, err error, 
 // role forward. It goes to the holder's agent subject with a Request under the forward's MsgId
 // (bus.ForwardMsgID), so the stream, which captures agent subjects, stores one copy however often
 // it is sent. The answer is the holder's empty receipt for a self-subscribed holder (or one with
-// neither a port nor a subscription of its own, which nothing answers, so it stays pending). For a
-// holder with a serving port it is the stream's acknowledgement of the stored copy, since a holder
-// delivered by its listener from the stream never answers the request itself; that is true once
-// the listener delivers to such holders from the stream and acknowledges each stored copy.
+// no subscription of its own, which nothing answers, so it stays pending). For a holder whose
+// entry records a port it is the stream's acknowledgement of the stored copy alone: no listener
+// delivers to a port, so such a holder answers nothing itself, and only a session consumer of its
+// own would reach it.
 func (f *roleForward) send(sender bus.Sender, item contracts.Envelope) <-chan error {
 	item.DedupeKey = contracts.RoleForwardDedupePrefix + item.DedupeKey
 	subject := contracts.AgentSubject(f.holder)
