@@ -756,7 +756,9 @@ func refusedAtResume(t *testing.T, limiter *admission.Limiter, address, target, 
 // only then had its 201 replaced by the 429 - and every client that obeyed Retry-After uploaded
 // the file a second time.
 func TestAWriteRefusedWhenItAsksItsUnitsBackCommitsNothing(t *testing.T) {
-	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: 250 * time.Millisecond})
+	limiter := admission.New(admission.Limits{
+		Read: 4, Write: 1, Wait: 250 * time.Millisecond, WriteWait: 250 * time.Millisecond,
+	})
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
 		admission: limiter, files: filestest.NewMemory(),
 	})

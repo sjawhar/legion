@@ -12,8 +12,11 @@ import (
 // only the test's own release or cancellation moves it.
 const patient = time.Minute
 
+// newLimiter gives both classes the same wait, so a test that names a wait gets it whichever
+// class it then admits; a zero wait leaves each class its own default (DefaultWait,
+// DefaultWriteWait).
 func newLimiter(read, write int, wait time.Duration) *Limiter {
-	return New(Limits{Read: read, Write: write, Wait: wait})
+	return New(Limits{Read: read, Write: write, Wait: wait, WriteWait: wait})
 }
 
 func admit(t *testing.T, l *Limiter, class Class, weight int) *Ticket {
@@ -194,10 +197,10 @@ func TestAFullQueueRefusesAtOnce(t *testing.T) {
 	}
 }
 
-// A request waits DefaultWait, 1 s, for room and is then refused, so its refusal is answered once
+// A read waits DefaultWait, 1 s, for room and is then refused, so its refusal is answered once
 // its wait has run out and not much later.
 func TestAWaitPastItsBoundIsRefused(t *testing.T) {
-	l := newLimiter(1, 1, 0) // a zero wait is DefaultWait
+	l := newLimiter(1, 1, 0) // a zero wait leaves each class its default
 	held := admit(t, l, Read, 1)
 	started := time.Now()
 	_, err := l.Admit(context.Background(), Read, 1)
@@ -214,6 +217,76 @@ func TestAWaitPastItsBoundIsRefused(t *testing.T) {
 	}
 	held.Release()
 	admit(t, l, Read, 1).Release()
+}
+
+// A write waits for room past the wait a read is refused at: room that comes after a read's wait
+// but inside a write's is the write's, where one wait for both classes refused that write. The
+// waits here are short ones of the same shape as the shipped DefaultWait and DefaultWriteWait,
+// and the room comes between the two, as the burst at the window start of INFRA-589's 1x
+// reproduction took 2-6 s to free a write unit against a 1 s wait (DefaultWriteWait).
+func TestAWriteWaitsForRoomPastAReadsWait(t *testing.T) {
+	const readWait, writeWait = 100 * time.Millisecond, time.Second
+	const roomComes = 300 * time.Millisecond
+	limits := Limits{Read: 1, Write: 1, Wait: readWait, WriteWait: writeWait}
+
+	t.Run("a write takes room that comes past a read's wait", func(t *testing.T) {
+		l := New(limits)
+		held := admit(t, l, Write, 1)
+		started := time.Now()
+		outcome := admitInBackground(t, l, context.Background(), Write, 1)
+
+		time.Sleep(roomComes) // past a read's wait, inside a write's
+		if stats := classStats(l, Write); stats.Queued != 1 || stats.WaitExceeded != 0 {
+			t.Fatalf("write stats %+v after %v, want the write still queued: its wait is %v, not a read's %v",
+				stats, roomComes, writeWait, readWait)
+		}
+		held.Release()
+		result := receive(t, outcome)
+		if result.err != nil {
+			t.Fatalf("a write whose room came %v in, inside its %v wait: %v, want it admitted", roomComes, writeWait, result.err)
+		}
+		result.ticket.Release()
+		if waited := time.Since(started); waited < roomComes {
+			t.Fatalf("the write was admitted after %v, want it to have waited for the room that came %v in", waited, roomComes)
+		}
+	})
+
+	t.Run("a read with the same room held is refused at its own wait", func(t *testing.T) {
+		l := New(limits)
+		held := admit(t, l, Read, 1)
+		defer held.Release()
+		started := time.Now()
+		_, err := l.Admit(context.Background(), Read, 1)
+		waited := time.Since(started)
+		if refusalReason(err) != WaitExceeded {
+			t.Fatalf("a read behind a held one: %v, want a wait_exceeded refusal", err)
+		}
+		if waited < readWait || waited >= roomComes {
+			t.Fatalf("the read was refused after %v, want it refused at its own %v wait, before the %v at which the write above found room",
+				waited, readWait, roomComes)
+		}
+		if stats := classStats(l, Read); stats.WaitExceeded != 1 {
+			t.Fatalf("read stats %+v, want the one wait_exceeded refusal", stats)
+		}
+	})
+
+	t.Run("a write is refused at its own wait when no room comes", func(t *testing.T) {
+		l := New(limits)
+		held := admit(t, l, Write, 1)
+		defer held.Release()
+		started := time.Now()
+		_, err := l.Admit(context.Background(), Write, 1)
+		waited := time.Since(started)
+		if refusalReason(err) != WaitExceeded {
+			t.Fatalf("a write behind a held one: %v, want a wait_exceeded refusal", err)
+		}
+		if waited < writeWait || waited >= writeWait+250*time.Millisecond {
+			t.Fatalf("refused after %v, want after its %v wait and within 250ms of it", waited, writeWait)
+		}
+		if stats := classStats(l, Write); stats.WaitExceeded != 1 || stats.LongestRefusedWait < writeWait {
+			t.Fatalf("write stats %+v, want one wait_exceeded refusal recorded as having waited its %v", stats, writeWait)
+		}
+	})
 }
 
 // A request whose client goes away while it waits leaves the queue and takes no unit with it:
@@ -427,7 +500,8 @@ func TestClassOfMethods(t *testing.T) {
 
 // The server reads 14 at once and writes 12 at once per CPU it may use, at least one CPU's worth
 // and at most MaxReadLimit (28) and MaxWriteLimit (24), so two CPUs already reach both caps and 16
-// get no more; the two together hold at most MaxAdmittedUnits (40), and each waits DefaultWait, 1 s.
+// get no more; the two together hold at most MaxAdmittedUnits (40), a read waits DefaultWait, 1 s,
+// for room and a write DefaultWriteWait, 2 s.
 func TestTheDefaultLimitsFollowTheCPUs(t *testing.T) {
 	for procs, want := range map[int][2]int{0: {14, 12}, 1: {14, 12}, 2: {28, 24}, 3: {28, 24}, 16: {28, 24}, 64: {28, 24}} {
 		if got := [2]int{readLimit(procs), writeLimit(procs)}; got != want {
@@ -443,7 +517,10 @@ func TestTheDefaultLimitsFollowTheCPUs(t *testing.T) {
 		t.Errorf("DefaultLimits() = %+v, want the two classes capped at %d units together", limits, MaxAdmittedUnits)
 	}
 	if limits.Wait != time.Second {
-		t.Errorf("DefaultLimits() = %+v, want a 1 s wait", limits)
+		t.Errorf("DefaultLimits() = %+v, want a read to wait 1 s for room", limits)
+	}
+	if limits.WriteWait != 2*time.Second {
+		t.Errorf("DefaultLimits() = %+v, want a write to wait 2 s for room", limits)
 	}
 }
 
@@ -451,7 +528,10 @@ func TestTheDefaultLimitsFollowTheCPUs(t *testing.T) {
 // the other is quiet: with every read unit held a write class of 24 has 12 units left, and with
 // no read held it has all 24.
 func TestTheCombinedCapBoundsTheTwoClassesTogether(t *testing.T) {
-	l := New(Limits{Read: MaxReadLimit, Write: MaxWriteLimit, Total: MaxAdmittedUnits, Wait: 20 * time.Millisecond})
+	l := New(Limits{
+		Read: MaxReadLimit, Write: MaxWriteLimit, Total: MaxAdmittedUnits,
+		Wait: 20 * time.Millisecond, WriteWait: 20 * time.Millisecond,
+	})
 	reads := admit(t, l, Read, MaxReadLimit)
 	writes := make([]*Ticket, 0, MaxWriteLimit)
 	for range MaxAdmittedUnits - MaxReadLimit {
@@ -490,7 +570,7 @@ func TestTheCombinedCapBoundsTheTwoClassesTogether(t *testing.T) {
 // A request its own class has room for, which only the combined cap holds up, is granted by the
 // other class's release.
 func TestAWaitOnTheCombinedCapEndsWhenTheOtherClassReleases(t *testing.T) {
-	l := New(Limits{Read: 4, Write: 4, Total: 5, Wait: patient})
+	l := New(Limits{Read: 4, Write: 4, Total: 5, Wait: patient, WriteWait: patient})
 	read := admit(t, l, Read, 3)
 	write := admit(t, l, Write, 2)
 	waiting := admitInBackground(t, l, context.Background(), Write, 2)
@@ -510,7 +590,7 @@ func TestAWaitOnTheCombinedCapEndsWhenTheOtherClassReleases(t *testing.T) {
 // A head the combined cap holds up is not overtaken by a later, lighter request of the other
 // class, which would fit both its own class and the cap: the room belongs to the head.
 func TestAHeadHeldByTheCombinedCapIsNotOvertakenByTheOtherClass(t *testing.T) {
-	l := New(Limits{Read: 4, Write: 4, Total: 4, Wait: patient})
+	l := New(Limits{Read: 4, Write: 4, Total: 4, Wait: patient, WriteWait: patient})
 	read := admit(t, l, Read, 3)
 	heavy := admitInBackground(t, l, context.Background(), Write, 2)
 	light := admitInBackground(t, l, context.Background(), Read, 1)
@@ -538,7 +618,7 @@ func TestAHeadHeldByTheCombinedCapIsNotOvertakenByTheOtherClass(t *testing.T) {
 // A parked ticket gives its units back to the combined cap as well as to its class, so a request
 // the cap alone held up runs while its holder waits elsewhere.
 func TestAParkedTicketFreesCombinedRoom(t *testing.T) {
-	l := New(Limits{Read: 4, Write: 4, Total: 4, Wait: 20 * time.Millisecond})
+	l := New(Limits{Read: 4, Write: 4, Total: 4, Wait: 20 * time.Millisecond, WriteWait: 20 * time.Millisecond})
 	read := admit(t, l, Read, 2)
 	parked := admit(t, l, Write, 2)
 	if _, err := l.Admit(context.Background(), Write, 2); refusalReason(err) != WaitExceeded {
@@ -570,7 +650,7 @@ func TestAParkedTicketFreesCombinedRoom(t *testing.T) {
 func TestTheReservationKeepsReadRoomFromWritesWhileReadsWait(t *testing.T) {
 	l := New(Limits{
 		Read: MaxReadLimit, Write: MaxWriteLimit, Total: MaxAdmittedUnits,
-		ReservedReads: ReservedReadUnits, Wait: patient,
+		ReservedReads: ReservedReadUnits, Wait: patient, WriteWait: patient,
 	})
 	writes := make([]*Ticket, 0, MaxWriteLimit)
 	for range MaxWriteLimit {
@@ -645,7 +725,7 @@ func TestTheReservationKeepsReadRoomFromWritesWhileReadsWait(t *testing.T) {
 // A write the reservation alone holds up is not in the way of the reads the room is kept for:
 // the read queued behind it takes the unit the write may not, though the write arrived first.
 func TestAWriteHeldByTheReservationDoesNotHoldBackTheReads(t *testing.T) {
-	l := New(Limits{Read: 4, Write: 4, Total: 4, ReservedReads: 2, Wait: patient})
+	l := New(Limits{Read: 4, Write: 4, Total: 4, ReservedReads: 2, Wait: patient, WriteWait: patient})
 	writes := []*Ticket{admit(t, l, Write, 1), admit(t, l, Write, 1), admit(t, l, Write, 1)}
 	read := admit(t, l, Read, 1)
 	waitingWrite := admitInBackground(t, l, context.Background(), Write, 1)
@@ -679,7 +759,7 @@ func TestAWriteHeldByTheReservationDoesNotHoldBackTheReads(t *testing.T) {
 // A write the reservation holds up is granted once the reads drop below the reservation and ask
 // for nothing more: the room is reserved against the reads that want it, not idled.
 func TestAWriteHeldByTheReservationRunsWhenTheReadsDropBelowIt(t *testing.T) {
-	l := New(Limits{Read: 8, Write: 8, Total: 8, ReservedReads: 5, Wait: patient})
+	l := New(Limits{Read: 8, Write: 8, Total: 8, ReservedReads: 5, Wait: patient, WriteWait: patient})
 	writes := make([]*Ticket, 0, 4)
 	for range 4 {
 		writes = append(writes, admit(t, l, Write, 1))

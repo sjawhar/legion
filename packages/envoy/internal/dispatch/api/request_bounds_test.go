@@ -71,13 +71,13 @@ func holdIssueRow(t *testing.T, database *store.Store, key string) func() {
 	return release
 }
 
-// A write that finds its class's one unit held waits its 1 s in the queue and is refused 429
-// OVERLOADED, which tells its client to retry: it never runs, so it never queues behind the held
-// write for as long as that write is held. The admission's own share of the refusal - its wait in
-// the queue, which the limiter records - is its wait and within 250 ms past it. The round trip,
-// which a loaded machine stretches with scheduling it does not control, is held only to arriving
-// while the write is still held and inside the next bound a request meets, the request pool's 3 s
-// acquire bound, with a second to spare.
+// A write that finds its class's one unit held waits its 2 s in the queue (`DefaultWriteWait`)
+// and is refused 429 OVERLOADED, which tells its client to retry: it never runs, so it never
+// queues behind the held write for as long as that write is held. The admission's own share of
+// the refusal - its wait in the queue, which the limiter records - is its wait and within 250 ms
+// past it. The round trip, which a loaded machine stretches with scheduling it does not control,
+// is held only to arriving while the write is still held and inside the next bound a request
+// meets, the request pool's 3 s acquire bound.
 func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 	limiter := admission.New(admission.Limits{Read: 1, Write: 1})
 	handler, database, _ := newTestServer(t, testServerOptions{admission: limiter})
@@ -92,8 +92,8 @@ func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 
 	started := time.Now()
 	refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "OTHER", "name": "Other"}, "alice")
-	if waited := time.Since(started); waited >= admission.DefaultWait+time.Second {
-		t.Fatalf("the refusal took %v, want it a second before the request pool's 3s acquire bound", waited)
+	if waited := time.Since(started); waited >= admission.DefaultWriteWait+time.Second {
+		t.Fatalf("the refusal took %v, want it within the request pool's 3s acquire bound", waited)
 	}
 	select {
 	case response := <-held:
@@ -105,8 +105,8 @@ func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 	if stats.WaitExceeded != 1 {
 		t.Fatalf("write stats %+v, want one wait_exceeded refusal", stats)
 	}
-	if stats.LongestRefusedWait < admission.DefaultWait || stats.LongestRefusedWait >= admission.DefaultWait+250*time.Millisecond {
-		t.Fatalf("the refused write waited %v in the queue, want its %v wait and within 250ms past it", stats.LongestRefusedWait, admission.DefaultWait)
+	if stats.LongestRefusedWait < admission.DefaultWriteWait || stats.LongestRefusedWait >= admission.DefaultWriteWait+250*time.Millisecond {
+		t.Fatalf("the refused write waited %v in the queue, want its %v wait and within 250ms past it", stats.LongestRefusedWait, admission.DefaultWriteWait)
 	}
 
 	release()
@@ -510,7 +510,7 @@ func TestTheDeliveryTimelineHoldsAtMostTwoConnections(t *testing.T) {
 // they cared to, and every other write on it was refused 429 OVERLOADED.
 func TestATricklingBodyDoesNotHoldItsWriteUnitWithoutEnd(t *testing.T) {
 	const idle, queueWait = 2 * time.Second, 3 * time.Second
-	limiter := admission.New(admission.Limits{Read: 4, Write: 2, Wait: queueWait})
+	limiter := admission.New(admission.Limits{Read: 4, Write: 2, Wait: queueWait, WriteWait: queueWait})
 	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{admission: limiter})
 	served.transfer = transferBounds{idle: idle}
 	issue := createInteractionIssue(t, handler, "TEST", "Trickled writes", "A spec")
@@ -598,7 +598,7 @@ func TestABodyThatKeepsArrivingIsTakenHoweverLongItTakes(t *testing.T) {
 // the 200 of a handler that wrote nothing: under load a client that gives up while queued is the
 // most frequent way a request ends with nothing written.
 func TestARequestWhoseClientLeavesWhileItIsQueuedIsLoggedClientGone(t *testing.T) {
-	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: 10 * time.Second})
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: 10 * time.Second, WriteWait: 10 * time.Second})
 	handler, database, _ := newTestServer(t, testServerOptions{admission: limiter})
 	issue := createInteractionIssue(t, handler, "TEST", "Queued writes", "A spec")
 	release := holdIssueRow(t, database, issue.Key)
@@ -847,7 +847,7 @@ func TestASlowButSteadyReaderOfALargeAnswerIsAnsweredInFull(t *testing.T) {
 // `status=429 elapsed_ms=1000 bytes=135` - its slot held for the whole wait and a refusal written to
 // a client that had gone - while a GET closed the same way was logged 499.
 func TestAQueuedWriteWhoseClientHangsUpIsLoggedClientGone(t *testing.T) {
-	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: 10 * time.Second})
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: 10 * time.Second, WriteWait: 10 * time.Second})
 	handler, database, _ := newTestServer(t, testServerOptions{admission: limiter})
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -908,7 +908,7 @@ func TestAQueuedWriteWhoseClientHangsUpIsLoggedClientGone(t *testing.T) {
 // everything that had arrived meanwhile, and refused writes the server had already admitted.
 func TestAWriteWhoseBodyOutlastsItsWaitIsAdmittedAfterIt(t *testing.T) {
 	const wait, sending = 500 * time.Millisecond, 1500 * time.Millisecond
-	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: wait})
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: wait, WriteWait: wait})
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{admission: limiter})
 	served.transfer = transferBounds{idle: 5 * time.Second}
 	issue := createInteractionIssue(t, handler, "TEST", "Slow write bodies", "A spec")

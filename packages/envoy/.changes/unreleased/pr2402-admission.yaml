@@ -17,14 +17,17 @@ body: |-
   blocks are now checked one after another rather than five at once, so one check's two reads are
   all the edit runs at once. Measured on two CPUs, fewer reads committed more
   events at ten times the load but refused 4-6% of the reads at the everyday load. A request that
-  finds no room waits at most 1 second in a queue twice as long as its class's limit, in the
+  finds no room waits in a queue twice as long as its class's limit, in the
   order the requests arrived at the server rather than the order they got round to asking for
-  room, and is otherwise answered `429 OVERLOADED` with
+  room: a read waits at most 1 second there and a write at most 2, a burst of writes taking
+  seconds to free a write unit while a refused write is sent again a second later anyway, so the
+  longer wait serves the write where the shorter refused it. A request not admitted inside its
+  wait is answered `429 OVERLOADED` with
   `Retry-After: 1` and `Cache-Control: no-store`, after its body is off the connection: nothing
-  of it ran, so any method may be sent again. That 1 second is the wait over the whole request,
+  of it ran, so any method may be sent again. That wait is the wait over the whole request,
   however often it asks: a write admitted, parked while it waits for a document's writer gate
   and resumed queues again where it arrived, ahead of every write that arrived after it, and is
-  refused only within what is left of the one second, where a second whole wait refused writes
+  refused only within what is left of its one wait, where a second whole wait refused writes
   the server had already admitted (at ten times the load, refusals reached a p99 of 2.1 seconds
   and a maximum of 5.8). A read has a deadline of 20 seconds, 5 minutes for the four file
   version downloads, and past it is `503 REQUEST_TIMEOUT`; a write has none and runs to completion
