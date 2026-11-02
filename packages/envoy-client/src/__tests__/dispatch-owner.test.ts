@@ -76,16 +76,15 @@ test.each([
   // A versioned document: a version's stored text holds no block ids.
   "dispatch://CORE-1/artifact/spec@v2#b-x",
   "dispatch://CORE/artifact/handbook-md@v2#b-x",
-  // Nothing but a document, a comment or an issue's message holds blocks.
+  // Nothing but a document, an ask, a comment or an issue's message holds blocks.
   "dispatch://CORE-1#b-x",
   "dispatch://CORE-1/log#b-x",
-  "dispatch://CORE-1/ask/aaaaaaaa-0000-4000-8000-000000000042#b-x",
-  "dispatch://CORE/artifact/handbook-md/ask/aaaaaaaa-0000-4000-8000-000000000042#b-x",
   "dispatch://CORE/artifact/handbook-md/message/33333333-3333-4333-8333-333333333333#b-x",
   // A message never changes, so a pinned message block names nothing.
   "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2@v1",
-  // A comment has no document version.
+  // An ask or a comment has no document version.
   "dispatch://CORE/artifact/handbook-md@v3/comment/88888888-8888-4888-8888-888888888888#b-b2",
+  "dispatch://CORE/artifact/handbook-md@v3/ask/22222222-2222-4222-8222-222222222222#b-b3",
 ])("%s names nothing", (ref) => {
   expect(parseDispatchRef(ref)).toBeNull();
 });
@@ -132,6 +131,38 @@ test("a block of a comment or a message names the block and the item it is in", 
   );
   expect(dispatchRefFromUrl(`${server}/issues/CORE-1/messages/${message}#b-b2`, server)).toBe(
     `dispatch://CORE-1/message/${message}#b-b2`
+  );
+});
+
+// A part of an ask - its question, one of its options or its answer - names the part and the ask
+// it is in: an issue's ask and a project document's, pinned to a revision of the ask's parts or
+// not.
+test("a part of an ask names the part and the ask it is in", () => {
+  const ask = "22222222-2222-4222-8222-222222222222";
+  const askBlock: ParsedDispatchRef = {
+    owner: { kind: "issue", issue: "CORE-1" },
+    kind: "block",
+    id: ask,
+    block: "b3",
+    item: { kind: "ask", id: ask },
+  };
+  expect(parseDispatchRef(`dispatch://CORE-1/ask/${ask}#b-b3`)).toEqual(askBlock);
+  expect(parseDispatchRef(`dispatch://CORE-1/ask/${ask}#b-b3@v2`)).toEqual({
+    ...askBlock,
+    pin: "2",
+  });
+  expect(parseDispatchRef(`dispatch://CORE/artifact/handbook-md/ask/${ask}#b-b3`)).toEqual({
+    owner: { kind: "project", project: "CORE" },
+    kind: "block",
+    id: ask,
+    artifact: "handbook-md",
+    block: "b3",
+    item: { kind: "ask", id: ask },
+  });
+  // The ask's page names the same part.
+  const server = "http://dispatch.test";
+  expect(dispatchRefFromUrl(`${server}/issues/CORE-1/asks/${ask}#b-b3`, server)).toBe(
+    `dispatch://CORE-1/ask/${ask}#b-b3`
   );
 });
 

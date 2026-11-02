@@ -1,0 +1,9 @@
+kind: Fixed
+body: |-
+  AskGate reviews a Dispatch write whose body is a quoted here-document in a double-quoted
+  command substitution (`--body "$(cat <<'EOF' … EOF)"`), which posted unreviewed before. The
+  text is written out in the command, so the gate reads it rather than naming the value an
+  expansion it cannot read. Unquoted, where bash splits the output into words and expands each
+  as a glob, it is not read, and neither is an unquoted delimiter, a second operand, a `cat` on
+  its own line, a double-quoted delimiter holding a backslash, or anything but blanks between
+  the closing delimiter and the parenthesis.

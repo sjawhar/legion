@@ -23,7 +23,7 @@
 // written once and appended to ever after: the create carries a header paragraph and no record,
 // and every record, the session's first included, is a fenced block appended through `docEdit`.
 // That is the one rule that keeps a record safe, because Dispatch stores an upload of a name it
-// already holds as a new version of that same document (`findArtifactByName`,
+// already holds as a new version of that same document (`findArtifactByNameOrSlug`,
 // `packages/envoy/internal/dispatch/api/artifacts.go`), which the reader reads in place of
 // everything the versions before it held: a second create would erase every record appended since
 // the first. The document's id is held in memory for the session; holding none — a process that
@@ -51,7 +51,8 @@
 // same record sent again with another body gets `422 KEY_REUSED` and is not written.
 //
 // How long a write runs: until Dispatch has answered it or the session's shutdown cuts it. The
-// client asks again under the call's key (`DISPATCH_WRITE_RETRY`, 30 s,
+// client asks again under the call's key (`DISPATCH_WRITE_RETRY`, 30 s, or 55 s once Dispatch may
+// be running the write,
 // `packages/envoy-client/src/dispatch-http.ts`), so a slow Dispatch is waited out rather than given
 // up at a stop of the recorder's own.
 //

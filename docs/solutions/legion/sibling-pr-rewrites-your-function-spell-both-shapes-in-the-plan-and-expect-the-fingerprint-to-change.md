@@ -42,9 +42,11 @@ resolution has to change executable lines.
 The planner wrote task 0 — *base selection, no code* — and two versions of the reducer step:
 
 - **Task 0.** `jj git fetch`; `legion gh -- pr view 1024 --json state,mergedAt,mergeCommit`. If
-  `MERGED`, move the plan handoff onto `main` **before writing any code** and implement against
-  the post-merge shape; if `OPEN`, implement on the current base and rebase only when GitHub
-  reports `CONFLICTING`. Choosing a base before a pull request exists is not the rebase Sami's
+  `MERGED`, start the branch from the merged `main` **before writing any code** and implement
+  against the post-merge shape; if `OPEN`, implement on the current base and rebase only when
+  GitHub reports `CONFLICTING`. Before sjawhar/legion#2354 the branch already carried a plan
+  handoff commit, which that step moved onto `main`.
+  Choosing a base before a pull request exists is not the rebase Sami's
   rule forbids ("Please don't do unnecessary rebases (i.e. unless there are merge conflicts)",
   2026-09-11); the architect agreed and the spec records it.
 - **Task 1, step 8a (`shapeOnCurrentMain`)** and **step 8c (`shapeAfterLegion57`)**: the exact
@@ -76,8 +78,9 @@ the reviewer can hold the resolution to a written target.
 **Superseded 2026-09-27 (LEGION-118):** a rebase rooted at the branch's fork point also rewrites
 another tree's branch when one is stacked on it; resolve with a forward merge instead, from the
 bookmark rather than `@` (`jj new legion/<KEY> main@origin -m "<message>"`,
-`skills/legion-worker/references/conflicts-and-rewrites.md`; a handoff split leaves `@` empty and undescribed, and `jj git
-push` refuses a commit with no description). What follows records the earlier workflow.
+`skills/legion-worker/references/conflicts-and-rewrites.md`; `@` is often an empty, undescribed
+commit that `jj git push` refuses, as a handoff split left it before sjawhar/legion#2354). What
+follows records the earlier workflow.
 
 ```sh
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch
@@ -155,14 +158,16 @@ interdiff confined to the plan's named sites is the expected outcome, not a defe
 The architect's end-game assignment reads mergeability *first*:
 
 1. `legion gh -- pr view <n> --json mergeable,mergeStateStatus`.
-2. `CONFLICTING` → do **not** push the `.legion/` deletion. Rebase as above, post the
-   fingerprint comment, push, the `legion` tool's `handoff_complete` with both fingerprints. The architect
-   routes the next round.
-3. `MERGEABLE` → `rm -r .legion`, `jj split -m "chore: remove .legion/ handoffs after clean
-   review (<KEY>)" .legion`, bookmark on `@-`, push, confirm
-   `jj diff --from <reviewed head> --to <new head> --summary` prints only `D .legion/…` lines,
-   then `legion threads resolve --pr <n> --repo <owner>/<repo>` before the completion (expect
-   `no unresolved threads` when the review was clean).
+2. `CONFLICTING` → do **not** treat the head as final. Resolve as above, post the
+   fingerprint comment, push, the `legion` tool's `handoff_complete` with both fingerprints. The
+   architect routes the next round.
+3. `MERGEABLE` → `legion threads resolve --pr <n> --repo <owner>/<repo>` before the completion
+   (expect `no unresolved threads` when the review was clean), and the reviewer approves the code
+   head by SHA. Before sjawhar/legion#2354 this branch began with `rm -r .legion`,
+   `jj split -m "chore: remove .legion/ handoffs after clean review (<KEY>)" .legion`, a bookmark
+   on `@-`, a push, and a check that `jj diff --from <reviewed head> --to <new head> --summary`
+   printed only `D .legion/…` lines. A handoff is a Dispatch record now, so the approved head is
+   the reviewed head.
 
 LEGION-79 took branch 2 on its first end-game (the sibling had merged in the 40 minutes since
 approval) and branch 3 on the second. Reading `mergeable` before acting is what kept the

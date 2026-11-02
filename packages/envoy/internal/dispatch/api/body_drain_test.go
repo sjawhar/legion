@@ -232,7 +232,7 @@ func (b repeatedByte) Read(p []byte) (int, error) {
 }
 
 // INFRA-258. An early answer drains at most the route's own limit and one byte
-// more (routeBodyLimit): a body that runs past it is answered as the limit answers it, 413 with the
+// more (routeBody): a body that runs past it is answered as the limit answers it, 413 with the
 // route's refusal and none of the early answer's headers, and the rest is never read. A body inside
 // the limit is read to its end and the early answer stands, whichever layer gave it: the keyed
 // layer's KEY_IN_FLIGHT, the closed-issue refusal of an upload, LOGIN_CHANGED on a JSON route. A
@@ -249,7 +249,7 @@ func TestAnEarlyAnswerDrainsTheBodyUpToTheRoutesLimit(t *testing.T) {
 	repeated := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+open.Key+"/artifacts", endlessBody(keyedBodyMax))
 	repeated.Header.Set("Content-Type", "multipart/form-data; boundary=x")
 	repeated.SetPathValue("key", open.Key)
-	holdKeyInFlight(t, database, "held", repeated.URL.Path, requestDigestOf(t, repeated, uploadPattern))
+	holdKeyInFlight(t, database, "alice", "held", repeated.URL.Path, requestDigestOf(t, repeated, uploadPattern))
 
 	multipartBody := map[string]string{"Content-Type": "multipart/form-data; boundary=x"}
 	keyed := func(key string, header map[string]string) map[string]string {
@@ -343,14 +343,14 @@ func TestAnEarlyAnswerDrainsTheBodyUpToTheRoutesLimit(t *testing.T) {
 	}
 }
 
-// holdKeyInFlight leaves alice's key held by a first request to path that is still running: a row
+// holdKeyInFlight leaves login's key held by a first request to path that is still running: a row
 // in flight, inside its lease, judged by digest.
-func holdKeyInFlight(t *testing.T, database *store.Store, key, path, digest string) {
+func holdKeyInFlight(t *testing.T, database *store.Store, login, key, path, digest string) {
 	t.Helper()
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into request_keys (login, idempotency_key, request_digest, method, path)
-		values ('alice', $1, $2, 'POST', $3)
-	`, key, digest, path); err != nil {
+		values ($1, $2, $3, 'POST', $4)
+	`, login, key, digest, path); err != nil {
 		t.Fatalf("hold the key %s in flight: %v", key, err)
 	}
 }
@@ -536,8 +536,8 @@ func TestADrainStopsWaitingForABodyThatStalls(t *testing.T) {
 	toOpen := "/api/v1/issues/" + open.Key + "/artifacts"
 	toClosed := "/api/v1/issues/" + closed.Key + "/artifacts"
 	message := "/api/v1/issues/" + open.Key + "/messages"
-	holdKeyInFlight(t, database, "held", toOpen, "digest")
-	holdKeyInFlight(t, database, "held-message", message, "digest")
+	holdKeyInFlight(t, database, "alice", "held", toOpen, "digest")
+	holdKeyInFlight(t, database, "alice", "held-message", message, "digest")
 	const multipart, jsonBody = "multipart/form-data; boundary=x", "application/json"
 	const jsonLimit = int(maxJSONRequestBytes)
 	opening := []byte("--x\r\n")
@@ -622,7 +622,7 @@ func TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody(t *testing.T) {
 	open := createArtifactIssue(t, handler)
 	closed := createClosedIssue(t, handler)
 	toOpen := "/api/v1/issues/" + open.Key + "/artifacts"
-	holdKeyInFlight(t, database, "held", toOpen, "digest")
+	holdKeyInFlight(t, database, "alice", "held", toOpen, "digest")
 	for _, early := range []struct {
 		name, target, key, contentType, login, code string
 	}{
