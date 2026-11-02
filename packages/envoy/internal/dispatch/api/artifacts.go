@@ -442,7 +442,7 @@ func (s *server) storeArtifact(
 	}
 	var artifact model.Artifact
 	var created bool
-	artifact, err = s.findArtifactByName(r.Context(), tx, target, input.name)
+	artifact, err = s.findArtifactByNameOrSlug(r.Context(), tx, target, input.name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
 		if refusal := newArtifactNameRefusal(input.name); refusal != nil {
@@ -476,7 +476,9 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	} else if artifact.Kind != kind {
-		writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH",
+			"%q names artifact %s (%s), a %s; this upload is a %s, so it cannot be its next version: give it another name",
+			input.name, artifact.Slug, artifact.Name, artifact.Kind, kind))
 		return
 	}
 	// A project document's owner row is the artifact itself, and until here this transaction
@@ -1374,20 +1376,25 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 // artifactOwnerKey is the owner part of ref_key (artifactTarget.refPrefix), which the 0071
 // trigger fills ref_key from, so a lookup by owner compares what ref_key was built from. Its
 // session arm, 'agent/' || session_id, has a second reader: an agent's conversation's lookups
-// (agentArtifactByNameSQL, agentArtifactSlugTakenSQL in agent_artifacts.go) compare session_id
+// (agentArtifactByNameOrSlugSQL, agentArtifactSlugTakenSQL in agent_artifacts.go) compare session_id
 // itself, so a change to ref_key's owner part changes both.
 const artifactOwnerKey = `coalesce(issue_key, project_key, 'agent/' || session_id)`
 
-// artifactByNameSQL and artifactSlugTakenSQL are an upload's two lookups by owner, $1 the owner
-// key and $2 the name or the slug; an agent's conversation runs its own pair
-// (artifactTarget.ownerLookup).
+// artifactByNameOrSlugSQL and artifactSlugTakenSQL are an upload's two lookups by owner, $1 the
+// owner key and $2 the name or the slug; an agent's conversation runs its own pair
+// (artifactTarget.ownerLookup). An upload's name finds the artifact whose name or slug it is, so a
+// name that is one artifact's slug is that artifact's next version rather than a second artifact
+// the same reference would also name. An owner that already holds two such artifacts (one whose
+// slug and another whose name it is, which uploads stored before this lookup read slugs) gets the
+// one whose slug it is, the one a read by that reference resolves to (resolveDocumentReference).
 const (
-	artifactByNameSQL    = `select ` + artifactColumns + ` from artifacts where ` + artifactOwnerKey + ` = $1 and name = $2`
+	artifactByNameOrSlugSQL = `select ` + artifactColumns + ` from artifacts where ` + artifactOwnerKey +
+		` = $1 and $2 in (name, slug) order by slug = $2 desc limit 1`
 	artifactSlugTakenSQL = `select exists(select 1 from artifacts where ` + artifactOwnerKey + ` = $1 and slug = $2)`
 )
 
-func (s *server) findArtifactByName(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
-	query, owner := target.ownerLookup(artifactByNameSQL, agentArtifactByNameSQL)
+func (s *server) findArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
+	query, owner := target.ownerLookup(artifactByNameOrSlugSQL, agentArtifactByNameOrSlugSQL)
 	artifact, err := scanArtifact(q.QueryRow(ctx, query, owner, name))
 	if err != nil {
 		return model.Artifact{}, err
