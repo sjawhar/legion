@@ -2542,6 +2542,19 @@ func TestAMarkerOnlyWithForASelectedItemIsRefused(t *testing.T) {
 			t.Fatalf("marker-only with %q on %q = %v, want it refused", op.With, doc, err)
 		}
 	}
+	// On a plain item a box is text, so a with of the marker and a box gives the item that text.
+	for doc, op := range map[string]model.EditOp{
+		"- deploy\n":  {Op: "replace", Find: "- deploy", With: "- [x] "},
+		"1. deploy\n": {Op: "replace", Find: "1. deploy", With: "1. [ ] "},
+	} {
+		tree, err := parseInput(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := applyAlone(tree, op); err != nil {
+			t.Fatalf("with %q on the plain item %q = %v, want the box written as text", op.With, doc, err)
+		}
+	}
 }
 
 // A row quote takes off only the escape of a pipe a cell holds, leaving every other backslash to

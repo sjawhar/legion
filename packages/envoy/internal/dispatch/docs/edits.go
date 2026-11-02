@@ -1303,7 +1303,9 @@ func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string, byM
 	if byMarker {
 		text := with[width:]
 		bare := text
-		if _, found, boxWidth := pmdoc.LeadingTaskCheckbox(text); found {
+		// A box opening the text is the item's checkbox only on a task item, as the tick below
+		// reads it; on a plain item it is text.
+		if _, found, boxWidth := pmdoc.LeadingTaskCheckbox(text); found && pmdoc.TaskItemAt(tree, r.From) {
 			bare = text[boxWidth:]
 		}
 		// A with that is the marker alone would empty the item's text with no word of it, which
