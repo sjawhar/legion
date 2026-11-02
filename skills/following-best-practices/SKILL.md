@@ -12,7 +12,7 @@ A design a person sends back usually skipped practices that everyone who builds 
 
 ## 1. Before you design
 
-Before you write a design, a recommendation or options, research and write down your answers to these three questions. Answer from the problem, before you sketch a design, so a design you already have in mind does not choose the answers.
+Before you write a design, a recommendation or options, research and write down your answers to these three questions in a message, file or Dispatch comment of their own. Answer from the problem, and write that before any text that states or leans to a design, so a design you already have in mind does not choose the answers.
 
 1. What is best practice here? List every practice that applies to this kind of problem, each with a source you read (the tools' own documentation, two or three well-regarded projects) and why it applies here.
 2. What is the world-class answer? Name the criteria that make it the best answer for this problem.
@@ -23,7 +23,7 @@ Then:
 - Follow every best practice unless a fact of this case rules it out, and write that fact in the design. Less work, less money, no new credential, or a precedent here that does it another way is not such a fact.
 - Design the world-class answer. Fall short of it only when a fact of this case requires it, and name each shortfall with its reason. Name a cost the person must accept as a cost, for them to decide.
 - Settle a disputed fact with evidence: the documentation, the code or a probe. Ask the person only for a cost to accept or a choice of priority.
-- In a spec, open the `Design` part with a `### Best practice and world-class` entry: each best practice with its source and whether the design follows it, the world-class answer, and each place the design falls short with its reason. The approver then sees the comparison without asking for it.
+- In a spec, open the `Design` part with a `### Best practice and world-class` entry copied from step 1: each best practice with its source and whether the design follows it, the world-class answer, and each place the design falls short with its reason. The approver then sees the comparison without asking for it.
 
 ## 2. Before each approval request
 
@@ -58,7 +58,7 @@ List each place it accepts less than that answer (a manual step, a workaround, a
 ```
 
 - Fix each finding from either review, or record it in the `### Best practice and world-class` entry with the fact or the cost that requires it. Never request approval while a finding is neither. A NOT WORLD-CLASS verdict whose findings are all fixed or recorded does not block the request.
-- Write both reviewers' final verdicts in that entry, with each reviewer's model and the time it answered, and name the verdicts in the approval request, so the approver sees that the reviews ran and what they found.
+- Write both reviewers' final verdicts in that entry, not another section, with each reviewer's model and the clock time (UTC) it answered, and name the verdicts in the approval request, so the approver sees that the reviews ran and what they found.
 - Run step 2 again before a later approval request when the design, the problem, its constraints or the evidence changed since the last review.
 - Stop after three rounds of step 2 on one proposal: list each change made after the last round and each finding still open, with its cost, in the entry. Review loops between agents do not end by themselves.
 - When a reviewer names a practice or an answer you did not consider, go back to step 1 with it instead of defending the design.

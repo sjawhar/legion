@@ -75,8 +75,8 @@ factual claim in it, one at a time, and you do not judge the design.
 
    - List every best practice with its source and whether the design follows it.
    - State the world-class answer and every shortfall from it with its reason.
-   - Hold the best-practice and world-class reviews' final verdicts, with each reviewer's model and
-     the time it answered.
+   - Hold the best-practice and world-class reviews' final verdicts in that entry, with each
+     reviewer's model and the clock time (UTC) it answered.
    - Show every finding from either review fixed or recorded with the fact or cost that requires it.
    - After a third review round, list the changes since the last round and every finding still open,
      with its cost.
