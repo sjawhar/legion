@@ -303,14 +303,30 @@ func TargetSpansBlocks(doc *Node, r Range) bool {
 
 // FindHeading finds the heading whose text, as a read serves it (TextContent), equals title
 // exactly. occurrence is zero-based; without it, repeated titles return ErrTargetAmbiguous.
+// It validates doc first: a nil tree wants a document, and one Validate refuses is Validate's
+// error. It validates the tree rather than the document (ValidateDocument), so a tree that is no
+// document is searched for its headings as it always was, and finds none.
 func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	if doc == nil {
-		return Range{}, fmt.Errorf("%w: FindHeading wants a document", ErrSchema)
+		return Range{}, wantsDocument("FindHeading")
 	}
 	if err := doc.Validate(); err != nil {
 		return Range{}, err
 	}
+	return findHeading(doc, title, occurrence)
+}
 
+// FindHeading is FindHeading over d's tree without validating it again; the zero ValidDocument
+// wants a document, as FindHeading's nil tree does.
+func (d ValidDocument) FindHeading(title string, occurrence *int) (Range, error) {
+	if d.doc == nil {
+		return Range{}, wantsDocument("FindHeading")
+	}
+	return findHeading(d.doc, title, occurrence)
+}
+
+// findHeading is the heading search itself, over a tree its caller has validated.
+func findHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	var matches []Candidate
 	pos := 0
 	for _, child := range doc.Children {
