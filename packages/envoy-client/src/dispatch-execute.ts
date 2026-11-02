@@ -2,6 +2,7 @@ import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
   Advised,
+  Agent,
   ArchitectureSource,
   Artifact,
   ArtifactBlock,
@@ -1864,21 +1865,24 @@ function componentsLine(components: IssueComponents): string {
  * page see one name for one holder; without a registry it falls back to the title the session
  * stamped on the claim, as the dashboard's does. Whether it holds is `claimHolds`, the judgement
  * the dashboard's claim chip makes too: a session the loaded registry does not list reads
- * "· not running", as the chip does, and its issue is free to claim; with no registry (`titles`
+ * "· not running", as the chip does, and its issue is free to claim; with no registry (`agents`
  * undefined) a session's claim reads "· liveness unknown", since nothing can say whether that
- * session runs. A person's claim, and a session the registry lists, carry no marker.
+ * session runs. A person's claim, and a session the registry lists as live, carry no marker.
  *
- * `liveness` is the issue read's own answer about the holder, which the list of titles cannot
- * give: a holder that has missed its heartbeats without ending reads
+ * `read` is the issue read's own answer about the holder, which only `dispatch_read` has; a list
+ * row has none and is judged by the holder's own registry row instead (`holderLiveness`). Either
+ * way a holder that has missed its heartbeats without ending reads
  * "· unresponsive since <last seen>, takeable at <time>". An agent deciding whether to take the
  * issue reads exactly that - wait until the second time, or pick it up now - so both times are
  * named, and the second is `claimTakeableAt`, the moment the server's own refusal names.
  */
 function claimText(
   claim: IssueClaim,
-  titles: ReadonlyMap<string, string> | undefined,
-  liveness: ClaimHolderLiveness = {}
+  agents: LiveAgents | undefined,
+  read: ClaimHolderLiveness = {}
 ): string {
+  const titles = agents?.titles;
+  const liveness = holderLiveness(claim, agents, read);
   const holding = claimHolds(claim, titles, liveness);
   const takeableAt = claimTakeableAt(liveness);
   const unresponsive =
@@ -1897,28 +1901,84 @@ function claimText(
 }
 
 /**
- * The live agent registry behind one piece of output, as session titles by id: at most one
- * `GET /api/v1/agents` per tool call, never per row, and none at all unless a session holds
- * something being rendered — the same gate the dashboard applies with `useAgents(holdsSession)`.
+ * What a reader knows about a session claim's holder: the issue read's own answer wherever it
+ * gave one, filled in from the holder's row in the live agent registry, which says the same
+ * thing for a reader that has no such read. The registry lists an unresponsive session, because
+ * an unresponsive session keeps its roles and its claims, so reading the list as membership
+ * alone showed such a holder as plainly holding while `dispatch read` and the dashboard said
+ * unresponsive (dispatch://INFRA-392, R5).
+ */
+function holderLiveness(
+  claim: IssueClaim,
+  agents: LiveAgents | undefined,
+  read: ClaimHolderLiveness
+): ClaimHolderLiveness {
+  if (claim.actor.kind !== "session") return read;
+  const row = agents?.liveness.get(claim.actor.id);
+  if (row === undefined) return read;
+  // Each field is omitted rather than set to undefined: a reader compiled with
+  // exactOptionalPropertyTypes (claude-envoy) takes "absent" and "undefined" for different
+  // things, and `null` is what either side says when it looked and could not tell.
+  const holderState = read.holder_state ?? row.holder_state;
+  const lastSeen = read.last_seen ?? row.last_seen;
+  const takeableAt = read.takeable_at ?? row.takeable_at;
+  return {
+    ...(holderState === undefined ? {} : { holder_state: holderState }),
+    ...(lastSeen === undefined ? {} : { last_seen: lastSeen }),
+    ...(takeableAt === undefined ? {} : { takeable_at: takeableAt }),
+  };
+}
+
+/**
+ * The live agent registry behind one piece of output: each listed session's title, for naming a
+ * holder, and what that session's own row says about it, for judging one.
+ */
+interface LiveAgents {
+  /** Session titles by session id, as `actorLabel` and `claimHolds` read them. */
+  readonly titles: ReadonlyMap<string, string>;
+  /** Each listed session's state and last registration, by session id (`agentLiveness`). */
+  readonly liveness: ReadonlyMap<string, ClaimHolderLiveness>;
+}
+
+/**
+ * The registry behind one piece of output: at most one `GET /api/v1/agents` per tool call, never
+ * per row, and none at all unless a session holds something being rendered — the same gate the
+ * dashboard applies with `useAgents(holdsSession)`.
  *
  * `undefined` is no registry: none was needed, or the agents request failed. Names then fall back
  * to the title each session stamped on its write, and a session's claim reads "liveness unknown"
  * (`claimText`) rather than running or not running. A holder the registry does not list is the
  * ordinary case, a session that has ended, whose claim the next agent may take.
  */
-async function liveSessionTitles(
+async function liveAgents(
   client: DispatchClient,
   needed: boolean
-): Promise<ReadonlyMap<string, string> | undefined> {
+): Promise<LiveAgents | undefined> {
   if (!needed) {
     return undefined;
   }
   try {
     const agents = await client.listAgents();
-    return new Map(agents.map((agent) => [agent.session_id, agent.title]));
+    return {
+      titles: new Map(agents.map((agent) => [agent.session_id, agent.title])),
+      liveness: new Map(agents.map((agent) => [agent.session_id, agentLiveness(agent)])),
+    };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * One agent row as a claim's reader judges it. A Dispatch server predating `state` names none,
+ * and a claim is then judged by list membership alone, as it always was. The row's `last_seen`
+ * is epoch milliseconds, where a claim's liveness carries RFC3339, and a row with no
+ * registration behind it (0) names no time rather than 1970.
+ */
+function agentLiveness(agent: Agent): ClaimHolderLiveness {
+  return {
+    ...(agent.state === undefined ? {} : { holder_state: agent.state }),
+    ...(agent.last_seen > 0 ? { last_seen: new Date(agent.last_seen).toISOString() } : {}),
+  };
 }
 
 /** Whether a claim needs the live registry to be named: only a session has a title that moves. */
@@ -2033,7 +2093,7 @@ function issueSummary(
   references: IssueReferences | string,
   graph: readonly string[],
   linkBase: string,
-  titles?: ReadonlyMap<string, string>
+  agents?: LiveAgents
 ): string {
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
@@ -2053,11 +2113,11 @@ function issueSummary(
     `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
-    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles, issue)}`,
+    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, agents, issue)}`,
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
-    `Route: ${routeText(issue, titles)}`,
+    `Route: ${routeText(issue, agents?.titles)}`,
     repositoryLine(issue),
     `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...(specApproval === undefined
@@ -3765,7 +3825,7 @@ export async function executeDispatchTool(
         updated_at: row.updated_at,
         progress: row.progress,
       }));
-      const titles = await liveSessionTitles(
+      const agents = await liveAgents(
         client,
         rows.some((row) => holdsSession(row.claim))
       );
@@ -3789,7 +3849,7 @@ export async function executeDispatchTool(
                     (row.open_asks === 0
                       ? ""
                       : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
-                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`) +
+                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, agents)}`) +
                     (progress === "" ? "" : ` · ${progress}`) +
                     // A route that reaches a live session changes nothing about the row; one
                     // that reaches nobody, or cannot be judged, is what the owner audit reads.
@@ -4709,10 +4769,10 @@ export async function executeDispatchTool(
       const read = await readPromise;
       // The claim's holder must read the same here as on the issue page, so the label comes
       // from the live registry — asked for only when a session holds this issue.
-      const [references, graph, titles, pictures] = await Promise.all([
+      const [references, graph, agents, pictures] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
+        liveAgents(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
         picturesOf([
           ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
           ...read.events.flatMap(eventTexts),
@@ -4725,7 +4785,7 @@ export async function executeDispatchTool(
           references,
           [...pictures.lines, ...graph],
           linkBase,
-          titles
+          agents
         ),
         details: { issue: read.issue.key },
         ...showImages(pictures),

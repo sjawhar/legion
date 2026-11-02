@@ -7,7 +7,8 @@ import "time"
 // LiveWindow here to prove that three registration refreshes and one listener call fit inside it,
 // and a gate that read a deployment's environment instead would prove nothing about the tree.
 // WithSessionLiveWindow and WithSessionGoneHorizon move what one registry runs with; these are
-// what a registry with no option, and every caller holding a record and no registry (IsLive), use.
+// what a registry given no option, and every reader judging a record against the package's own
+// windows, use.
 const (
 	// LiveWindow is how long a session's last registration keeps it live. A pane refreshes its
 	// registration every DEFAULT_HEARTBEAT_MS (packages/envoy-client/src/envoy-settings.ts), so
@@ -26,10 +27,15 @@ const (
 	LastSeenMemory = 2 * time.Hour
 )
 
-// State is what a session's last registration says about it. Every reader of the registry that
-// used to read a record's absence as death reads a state instead: a push to a serving port, topic
-// fan-out and the active-sessions gauge want Live, while the role reaper and the session reaper
-// act only on Gone.
+// State is what a session's last registration says about it, and what every reader that used to
+// read a record's absence as death reads instead. The active-sessions gauge counts the Live
+// records (LiveCount), as do the two decisions that may act only on a session answering now: a
+// role lookup's resolution of the holder, and a soft claim taking a role from the session
+// holding it (cmd/listener's sessionIsLive). Topic fan-out keeps an Unresponsive recipient and
+// skips its push with a status of its own rather than a failure, while the role reaper and the
+// session reaper act only on Gone. A push to a session's own serving port reads no state at
+// all: it asks Get for the port and host the record carries, and Get's one measure is the
+// bucket's maximum age.
 type State string
 
 const (
@@ -66,11 +72,4 @@ func StateOf(entry SessionEntry, now time.Time, live, horizon time.Duration) Sta
 		return Unresponsive
 	}
 	return Gone
-}
-
-// IsLive reports whether entry's last registration is within the package's own live window, for a
-// caller that holds a record and has no registry to ask. A caller that has one asks it
-// (SessionRegistry.Lookup), since an option may have moved its windows.
-func IsLive(entry SessionEntry, now time.Time) bool {
-	return StateOf(entry, now, LiveWindow, GoneHorizon) == Live
 }

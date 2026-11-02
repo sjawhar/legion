@@ -30,6 +30,21 @@ const SessionStateSchema = z.enum(["live", "unresponsive", "gone"]);
 
 export type SessionState = z.infer<typeof SessionStateSchema>;
 
+/**
+ * What an agent must do about a session that stopped answering (dispatch://INFRA-392). Every
+ * answer that names a session in that state says this, in one wording: the tool descriptions
+ * (`tool-contract.ts`), the send confirmation, and the refusal an unresponsive holder's role
+ * lookup or publish gets, which is read at the moment an agent decides whether its peer is
+ * alive. The 20 minutes are counted from the holder's last registration (`last_seen`), the sum
+ * the Dispatch server itself refuses another agent's take by
+ * (`ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS`).
+ */
+export const UNRESPONSIVE_RULE =
+  "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a " +
+  "message sent to it is stored until it answers. Start no replacement for it and take no claim " +
+  "from it until it is gone, or until 20 minutes have passed since its last_seen, the time of " +
+  "its last registration.";
+
 // A listener predating the field names no state, and it lists only sessions it holds a
 // registration for: `live` is what such an answer means, and reading an absent state as anything
 // else would make every session on an older listener look dead.
@@ -105,16 +120,37 @@ const RoleHeldWireSchema = z.object({
   holder: z.string(),
 });
 
+/**
+ * A listener's error body. Beyond the message and its `code`, a refusal that names a session
+ * names that session's state and its last registration, and a role's 404 names its holder too:
+ * a send's `no live session <id>` carries `state` and `last_seen`
+ * (`cmd/listener/api.go`'s `noLiveSessionRefusal`), and a role lookup's or a role publish's
+ * `holder lapsed` carries `holder`, `holder_state`, `last_seen` and `claim_released`
+ * (`cmd/listener/role_holder.go`'s `roleHolderError`). The listener's own text names none of
+ * them, so `EnvoyApiError` says them itself (`refusalStateText`): an agent told its peer did not
+ * answer must be told whether that peer is unresponsive — still holding its role and its claims
+ * — or gone.
+ */
 const ErrorWireSchema = z.object({
   error: z.string(),
   code: z.string().optional(),
   expected: z.array(z.string()).optional(),
+  state: SessionStateSchema.optional(),
+  holder: z.string().optional(),
+  holder_state: SessionStateSchema.optional(),
+  last_seen: z.number().int().optional(),
+  /** Always false on a lapsed role's 404: a lookup releases no claim, whatever the state. */
+  claim_released: z.boolean().optional(),
 });
 
 const EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: z.string().optional(),
   holder: z.string().optional(),
   recipient_state: SessionStateSchema.optional(),
+  // The recipient's last registration (epoch ms), which the listener sends with an unresponsive
+  // recipient's state so the sender can say how long it has been stalled; omitted when it knows
+  // none, and absent from a listener predating the field.
+  last_seen: z.number().int().optional(),
 });
 
 const ReplayWireSchema = z.object({
@@ -377,6 +413,10 @@ export type SendResult = {
   /** The recipient's state as the listener resolved it; `live` from a listener that names none.
    *  A message to an unresponsive recipient is stored and reaches it when it answers again. */
   readonly recipientState: SessionState;
+  /** The recipient's last registration in epoch milliseconds, which the listener sends beside an
+   *  unresponsive recipient's state so the sender can say since when it has been silent. Absent
+   *  when the listener knows none, and from a listener predating the field. */
+  readonly lastSeen?: number;
 };
 
 export type PublishResult = {
@@ -404,11 +444,45 @@ export type ReplayResult = z.infer<typeof ReplayWireSchema>;
 export type ReplaySubjectResult = ReplayResult["subjects"][number];
 export type ReplayMessage = ReplaySubjectResult["messages"][number];
 
+/**
+ * What a refusal naming a session's state adds to its message: which of the three states the
+ * listener put that session in, when it last registered, and, for one that is unresponsive, the
+ * rule that it is not dead. The listener's own text says neither ("no live session ses_x",
+ * "role reviewer holder ses_x lapsed; claim retained (last seen 1762...)"), and an agent reading
+ * only the message cannot tell a peer that stopped answering from one that ended — which is the
+ * mistake this change exists to stop (dispatch://INFRA-392, R7). A body that names no state adds
+ * nothing, so an older listener's message is what it always was.
+ */
+function refusalStateText(parsed: z.infer<typeof ErrorWireSchema>): string {
+  const state = parsed.holder_state ?? parsed.state;
+  if (state === undefined) return "";
+  const who = parsed.holder === undefined ? "That session" : `Holder ${parsed.holder}`;
+  // A listener that can name no registration at all sends none (the field is omitted, or 0):
+  // the state alone is said, since a made-up time would read as knowledge nobody has.
+  const seen =
+    parsed.last_seen === undefined || parsed.last_seen <= 0
+      ? ""
+      : `, last seen ${new Date(parsed.last_seen).toISOString()}`;
+  const rule = state === "unresponsive" ? ` ${UNRESPONSIVE_RULE}` : "";
+  return ` ${who} is ${state}${seen}.${rule}`;
+}
+
 export class EnvoyApiError extends Error {
   readonly name = "EnvoyApiError";
   readonly expected: readonly string[] | undefined;
   /** The listener's machine-readable `code`, when its error body carries one. */
   readonly code: string | undefined;
+  /** The session the refusal is about: a role's holder, where its body names one. */
+  readonly holder: string | undefined;
+  /** That session's state as the listener's record put it, when the body names one: a refused
+   *  send's `state`, a lapsed role's `holder_state`. */
+  readonly sessionState: SessionState | undefined;
+  /** That session's last registration in epoch milliseconds, when the body names one. */
+  readonly lastSeen: number | undefined;
+  /** Whether the refusal released the holder's role claim. The listener answers it on every
+   *  lapsed role and it is always false: a lookup or a publish takes nothing from a holder,
+   *  whatever its state. */
+  readonly claimReleased: boolean | undefined;
 
   constructor(
     readonly details: {
@@ -428,10 +502,14 @@ export class EnvoyApiError extends Error {
     super(
       parsed === undefined
         ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}`
-        : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`
+        : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}${refusalStateText(parsed)}`
     );
     this.expected = parsed?.expected;
     this.code = parsed?.code;
+    this.holder = parsed?.holder;
+    this.sessionState = parsed?.holder_state ?? parsed?.state;
+    this.lastSeen = parsed?.last_seen;
+    this.claimReleased = parsed?.claim_released;
   }
 }
 
@@ -597,6 +675,11 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         recipient: response.recipient ?? input.targetSessionID,
         confirmed: response.recipient !== undefined,
         recipientState: response.recipient_state ?? "live",
+        // Omitted rather than zero when the listener names none, so a reader never reads 1970
+        // as a last registration.
+        ...(response.last_seen === undefined || response.last_seen <= 0
+          ? {}
+          : { lastSeen: response.last_seen }),
       };
     },
     publish: async (input) => {

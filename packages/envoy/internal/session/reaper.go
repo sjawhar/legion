@@ -8,6 +8,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,13 +20,15 @@ import (
 	"github.com/sjawhar/envoy/internal/metrics"
 )
 
-// reapStoredMessageCap bounds the messages one reaped session's stored-message count reads, and
+// reapStoredMessageCap bounds the reads one reaped session's stored-message count makes, and
 // reapStoredReadBudget bounds the time a whole pass spends on those counts, as replayMaxMessages
 // and replayReadBudget bound one /v1/replay answer (cmd/listener/replay.go). A pass holds no
 // caller's deadline, but it shares one bus with every delivery this listener makes, and counts
-// that read a whole retention window per record would take that bus away from them. A count that
-// stopped at either bound says so on its log line, so the number is never read as the whole of
-// what was stored.
+// that read a whole retention window per record would take that bus away from them. Each read is
+// held to the pass's own deadline as well, since a stored-message read waits 10 s of its own
+// otherwise (bus.Client.NextStoredMessage), which is twice the budget for every count a pass
+// makes. A count that stopped at either bound says so on its log line, so the number is never
+// read as the whole of what was stored.
 const (
 	reapStoredMessageCap = 500
 	reapStoredReadBudget = 5 * time.Second
@@ -173,11 +176,16 @@ func (r *SessionRegistry) goneCandidates(now time.Time) []goneCandidate {
 // pass judged it on, and reports whether it did. A registration that landed since makes JetStream
 // refuse the delete with wrong last sequence (10071, which nats.go names nats.ErrKeyExists), and
 // the record is kept: false and no error, as store's interest reaper keeps a row written again
-// (store.Registry.deleteInterestAt). A copy that holds no revision for the key, because a watch
-// moved the epoch since its read began (kvwatch.Copy.FenceFor), names no revision, which a
-// conditional delete cannot express, so that record is deleted at the revision the bucket reads
-// for it (bus.KeyValue.DeleteAtRead) - still a delete of the record the pass can see and not of
-// one written after it.
+// (store.Registry.deleteInterestAt).
+//
+// A copy that holds no revision for the key, because a watch moved the epoch since its read began
+// (kvwatch.Copy.FenceFor), names none for the delete to be conditioned on, which a conditional
+// delete cannot express. Such a record is read from the bucket and judged again on its own last
+// registration (judgeGone), and deleted at the revision that read answered, so the delete is
+// still of a record this pass judged gone and never of one written after it: a session that
+// registered in between reads live or unresponsive and keeps its record, and a key the bucket no
+// longer holds is no delete at all. Both answer false and no error, so a pass counts and logs
+// only sessions whose records it really took away.
 //
 // The copy is told what the delete did either way, so the row and the key's revision fence follow
 // the bucket without waiting for the watcher's own delivery.
@@ -187,32 +195,60 @@ func (r *SessionRegistry) deleteGone(ctx context.Context, candidate goneCandidat
 	r.mu.RUnlock()
 	revision := candidate.revision
 	if revision == 0 {
-		read, answered, err := bus.Bounded(ctx, func() (uint64, error) { return kv.DeleteAtRead(candidate.sessionID) })
-		if !answered {
-			return false, fmt.Errorf("delete session %s's record: %w", candidate.sessionID, err)
-		}
-		if err != nil {
+		judged, err := r.judgeGone(ctx, kv, candidate.sessionID)
+		if err != nil || judged == 0 {
 			return false, err
 		}
-		revision = read
-	} else {
-		_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
-			return struct{}{}, kv.Delete(candidate.sessionID, nats.LastRevision(revision))
-		})
-		if !answered {
-			return false, fmt.Errorf("delete session %s's record at revision %d: %w", candidate.sessionID, revision, err)
-		}
-		if errors.Is(err, nats.ErrKeyExists) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
+		revision = judged
+	}
+	_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
+		return struct{}{}, kv.Delete(candidate.sessionID, nats.LastRevision(revision))
+	})
+	if !answered {
+		return false, fmt.Errorf("delete session %s's record at revision %d: %w", candidate.sessionID, revision, err)
+	}
+	if errors.Is(err, nats.ErrKeyExists) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 	r.mu.Lock()
 	r.cache.Evict(r.watcher, epoch, candidate.sessionID, revision+1)
 	r.unlockAndNotify()
 	return true, nil
+}
+
+// judgeGone reads sessionID's record from the bucket and answers the revision to delete it at
+// while that record's own last registration still puts the session past the gone horizon
+// (StateOf), and 0 when it does not. It is how a candidate the pass can name no revision for is
+// judged a second time, immediately before the delete that acts on it: the first judgement was
+// made on the copy's row, and nothing but a reading of the record the bucket holds now may take
+// that record away.
+//
+// A key the bucket no longer holds, and a record a registration has renewed since, are both 0:
+// the caller deletes nothing, counts nothing and logs nothing for them. A value this build cannot
+// read is dated by nothing, and a record no reader can judge is not one this pass deletes: it is
+// the error that reports the record kept.
+func (r *SessionRegistry) judgeGone(ctx context.Context, kv bus.KeyValue, sessionID string) (uint64, error) {
+	got, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.Get(sessionID) })
+	if !answered {
+		return 0, fmt.Errorf("read session %s's record before deleting it: %w", sessionID, err)
+	}
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var stored SessionEntry
+	if err := json.Unmarshal(got.Value(), &stored); err != nil {
+		return 0, fmt.Errorf("judge session %s's record before deleting it: %w", sessionID, err)
+	}
+	if r.stateOf(stored, r.now()) != Gone {
+		return 0, nil
+	}
+	return got.Revision(), nil
 }
 
 // streamState is the sequence space the notification stream holds, read once per pass (one
@@ -235,9 +271,16 @@ func (reaper SessionReaper) streamState(ctx context.Context) nats.StreamState {
 }
 
 // storedAfterLastSeen counts the messages the notification stream holds on sessionID's own agent
-// subject that it stored after lastSeen, reading forward from the stream's first sequence
-// (bus.Client.NextStoredMessage) and stopping where the stream holds no more
-// (nats.ErrMsgNotFound).
+// subject that it stored after lastSeen. It seeks the first of them (storedWalk.firstAfter) and
+// reads forward from there (bus.Client.NextStoredMessage), stopping where the stream holds no
+// more (nats.ErrMsgNotFound).
+//
+// The seek is what spends the count's reads on the messages that answer the question. The stream
+// stores in sequence order, so the messages stored after the registration are the ones from one
+// sequence on, and the walk finds that sequence in a read per doubling stride rather than a read
+// per message skipped: a session with a retention window of older messages on its subject would
+// otherwise spend the whole cap reaching the first message that counts, and be reported as having
+// had nothing stored for it when hundreds were waiting.
 //
 // It is the messages stored after the session's last registration and nothing more. The listener
 // keeps no read receipt, so it cannot say which of them the session read: a self-subscribed
@@ -252,32 +295,130 @@ func (reaper SessionReaper) storedAfterLastSeen(ctx context.Context, sessionID s
 	if reaper.Client == nil || stream.LastSeq == 0 || lastSeen <= 0 {
 		return 0, false
 	}
-	subject := contracts.AgentSubject(sessionID)
-	after := time.UnixMilli(lastSeen)
-	// The cap is on messages read, not on messages counted. The walk starts at the stream's
-	// first sequence, and every message this subject holds from before the session's last
-	// registration is read and discarded on the way to the ones that count - a count capped on
-	// its hits alone would read a whole retention window to reach a cap it never hit.
-	reads := 0
-	for seq := stream.FirstSeq; seq <= stream.LastSeq; {
-		if reads >= reapStoredMessageCap || time.Now().After(deadline) || ctx.Err() != nil {
-			return count, true
+	walk := &storedWalk{
+		reaper:   reaper,
+		subject:  contracts.AgentSubject(sessionID),
+		after:    time.UnixMilli(lastSeen),
+		stream:   stream,
+		deadline: deadline,
+	}
+	first, outcome := walk.firstAfter(ctx)
+	if outcome != storedFound {
+		return 0, true
+	}
+	for seq := first; seq <= stream.LastSeq; {
+		stored, outcome := walk.next(ctx, seq)
+		if outcome != storedFound {
+			return count, outcome == storedStopped
 		}
-		reads++
-		stored, err := reaper.Client.NextStoredMessage(ctx, subject, seq)
-		if errors.Is(err, nats.ErrMsgNotFound) {
-			return count, false
-		}
-		if err != nil {
-			return count, true
-		}
-		if stored.Sequence > stream.LastSeq {
-			return count, false
-		}
-		if stored.Time.After(after) {
-			count++
-		}
+		count++
 		seq = stored.Sequence + 1
 	}
 	return count, false
+}
+
+// storedWalk is one reaped session's walk of the notification stream: what it looks for, and what
+// it has left to look with. The seek and the count share one walk, so the cap and the deadline
+// bound the whole of that record's reading and not each phase of it.
+type storedWalk struct {
+	reaper   SessionReaper
+	subject  string
+	after    time.Time
+	stream   nats.StreamState
+	deadline time.Time
+	reads    int
+}
+
+// storedOutcome is what one read of a walk's subject answered.
+type storedOutcome uint8
+
+const (
+	// storedFound: a message on the subject at or after the sequence asked for, within the
+	// sequence space the pass read for the stream.
+	storedFound storedOutcome = iota
+	// storedNone: the stream holds no such message, so there is nothing further out to find.
+	storedNone
+	// storedStopped: the read budget, the pass's deadline, ctx or a read that failed ended the
+	// walk, so what it counted is a part of what was stored.
+	storedStopped
+)
+
+// next reads the first message at or after seq on the walk's subject, and spends one of the
+// walk's reads on it. Each read is held to the pass's own deadline: the pass carries no caller's
+// deadline, and a stored-message read given none waits out its own 10 s (bus.Client's
+// storedMessageWait), twice the budget of every count a pass makes.
+//
+// A message past the last sequence the pass read for the stream is one stored since that read,
+// which this count does not reach for: it is the end of the walk, as no message at all is.
+func (w *storedWalk) next(ctx context.Context, seq uint64) (bus.StoredMessage, storedOutcome) {
+	if w.reads >= reapStoredMessageCap || time.Now().After(w.deadline) || ctx.Err() != nil {
+		return bus.StoredMessage{}, storedStopped
+	}
+	w.reads++
+	readCtx, cancel := context.WithDeadline(ctx, w.deadline)
+	defer cancel()
+	stored, err := w.reaper.Client.NextStoredMessage(readCtx, w.subject, seq)
+	switch {
+	case errors.Is(err, nats.ErrMsgNotFound):
+		return bus.StoredMessage{}, storedNone
+	case err != nil:
+		return bus.StoredMessage{}, storedStopped
+	case stored.Sequence > w.stream.LastSeq:
+		return bus.StoredMessage{}, storedNone
+	}
+	return stored, storedFound
+}
+
+// firstAfter is the sequence to count the walk's subject from: the lowest one whose next message
+// on that subject the stream stored after the session's last registration, which is the first
+// message that counts. The stream stores in sequence order, so every message the walk reads from
+// there on counts too.
+//
+// It steps out from the subject's first message in strides that double, each stride one read
+// whatever it skips, until a read lands at or past the registration; then it halves the stride it
+// overshot in until the two ends meet. A subject the stream holds nothing of past that point
+// answers the sequence beyond its last message, which counts nothing: a read that found no
+// message says only that there is none further out, never that the ones behind it were older than
+// the registration.
+func (w *storedWalk) firstAfter(ctx context.Context) (uint64, storedOutcome) {
+	lo, stride := w.stream.FirstSeq, uint64(1)
+	var hi uint64
+	for hi == 0 {
+		if lo > w.stream.LastSeq {
+			return lo, storedFound
+		}
+		seq := w.stream.LastSeq
+		if gap := w.stream.LastSeq - lo; stride-1 < gap {
+			seq = lo + stride - 1
+		}
+		stored, outcome := w.next(ctx, seq)
+		switch {
+		case outcome == storedStopped:
+			return 0, storedStopped
+		case outcome == storedNone || stored.Time.After(w.after):
+			if seq == lo {
+				// The stride began where the window does: no message of the subject was
+				// stepped over, so this is the first sequence that counts.
+				return lo, storedFound
+			}
+			hi = seq
+		default:
+			// Older than the registration, and so is every message of the subject below it.
+			lo = stored.Sequence + 1
+			stride *= 2
+		}
+	}
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		stored, outcome := w.next(ctx, mid)
+		switch {
+		case outcome == storedStopped:
+			return 0, storedStopped
+		case outcome == storedNone || stored.Time.After(w.after):
+			hi = mid
+		default:
+			lo = stored.Sequence + 1
+		}
+	}
+	return lo, storedFound
 }

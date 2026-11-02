@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // laneReport is the listener's report of a failed role-lane forward, as
@@ -1100,11 +1101,16 @@ func TestACatchUpCopyCommittedAfterTheFreshOneIsNotPublished(t *testing.T) {
 // A listener that says the architect's session is only unresponsive — past its live window,
 // inside its gone horizon, still holding the role — has refused nothing permanent: the row is
 // kept and tried again on the outbox's backoff, so the notice reaches that session once its
-// heartbeats land, and no copy of the re-hold schedule is spent on it. Read as no holder at all,
-// which is what every such refusal was before dispatch://INFRA-392, the same answer finishes the
-// notice undelivered the moment nobody will hold the role for it — here an architect this daemon
-// supervises no claim for — and the notice is lost. Both answers come from a listener answering
-// as the real one does, since the notice's fate turns on how that body is read.
+// heartbeats land, and no copy of the re-hold schedule is spent on it. The answer is a wait
+// (wait.ErrWaiting), not a failure of the row's, and it names the holder and the state the
+// listener reported it in, so the outbox logs it as waiting rather than as a failed row
+// (TestAnUnresponsiveArchitectsNoticeIsLoggedAsAWaitNotAFailedRow). It is no notice held for an
+// architect that holds no role either (errNoticeWaits): this architect holds its role, and
+// nothing of its tree is held behind this row. Read as no holder at all, which is what every
+// such refusal was before dispatch://INFRA-392, the same answer finishes the notice undelivered
+// the moment nobody will hold the role for it — here an architect this daemon supervises no
+// claim for — and the notice is lost. Both answers come from a listener answering as the real
+// one does, since the notice's fate turns on how that body is read.
 func TestANoticeIsKeptWhileItsArchitectsSessionIsUnresponsive(t *testing.T) {
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	runner := &outbox{supervisor: sup, log: quietLogger()}
@@ -1129,9 +1135,53 @@ func TestANoticeIsKeptWhileItsArchitectsSessionIsUnresponsive(t *testing.T) {
 	if !errors.Is(kept, notify.ErrHolderUnresponsive) || errors.Is(kept, errNoticeWaits) {
 		t.Fatalf("answer to an unresponsive holder = %v, want the row kept and retried on its backoff", kept)
 	}
+	if !errors.Is(kept, wait.ErrWaiting) {
+		t.Fatalf("answer to an unresponsive holder = %v, want a wait rather than a failure of the row's", kept)
+	}
+	if !strings.Contains(kept.Error(), "ses_architect") || !strings.Contains(kept.Error(), "unresponsive") {
+		t.Fatalf("answer to an unresponsive holder = %q, want it to name the holder and its state", kept)
+	}
 
 	state = "gone"
 	if dropped := runner.noticeAnswered(context.Background(), row, notice, notice, treeSnapshot{}, architect, refused()); dropped != nil {
 		t.Fatalf("answer to a holder that is gone = %v, want the notice finished undelivered", dropped)
+	}
+}
+
+// What the outbox then logs for such a row: the wait line, naming the holder and the state the
+// listener reported, and never "outbox row failed" — an unresponsive holder is the session's box
+// under load, not a fault of the daemon's, and the row is tried again until its heartbeats land.
+func TestAnUnresponsiveArchitectsNoticeIsLoggedAsAWaitNotAFailedRow(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaimOn(t, sup, "LEGION-1", supervise.StateReady, "ses_architect")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"role legion-LEGION-1-architect holder ses_architect lapsed; claim retained","reason":"holder_lapsed",`+
+			`"holder":"ses_architect","holder_state":"unresponsive","last_seen":1,"claim_released":false}`)
+	}))
+	defer server.Close()
+	clock := time.Now()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, clock))
+	var logged bytes.Buffer
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records,
+		notices: notify.New(server.URL, ""), supervisor: sup, project: "legion", now: func() time.Time { return clock }}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if strings.Contains(logged.String(), "level=ERROR") || strings.Contains(logged.String(), `msg="outbox row failed"`) {
+		t.Errorf("the notice of an unresponsive architect was logged as a failure:\n%s", logged.String())
+	}
+	if !strings.Contains(logged.String(), `msg="outbox row waits" row=1 kind=notice`) ||
+		!strings.Contains(logged.String(), "ses_architect") || !strings.Contains(logged.String(), "unresponsive") {
+		t.Errorf("no wait line naming the holder and its state:\n%s", logged.String())
+	}
+	if rows := outboxRows(t, pool); rows != 1 {
+		t.Errorf("outbox rows = %d, want the notice kept for the session to answer for itself", rows)
 	}
 }

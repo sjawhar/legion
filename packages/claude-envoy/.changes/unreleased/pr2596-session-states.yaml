@@ -3,4 +3,6 @@ body: |-
     The Envoy tools render a session's `state` and `last_seen`, and the lists ask for unresponsive
     sessions too. A session that ends is `gone` at once: `shutdown` waits for a registration
     already in flight before it deletes the session, rather than queueing behind a write that is
-    stuck, and adopting a handoff deletes the session id it leaves.
+    stuck, and adopting a handoff deletes the session id it leaves. The shutdown wait is a quarter
+    of a second in all, since the process is killed five seconds after it is asked to stop and a
+    delete never sent would leave the row behind for an hour.

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -191,6 +192,110 @@ func TestAReapedSessionsStoredCountStartsAtItsLastRegistration(t *testing.T) {
 	}
 	if got := counterValue(t, met, "stored"); got != 3 {
 		t.Fatalf("messages stored after the last registration = %d, want the 3 published after it", got)
+	}
+}
+
+// A candidate the pass can name no revision for - the copy holds none because a watch moved the
+// epoch under its read - is judged a second time, against the record the bucket holds, before
+// anything is deleted. A session that registered since keeps its record, and a key the bucket no
+// longer holds is no delete at all: neither is counted or logged as a session this pass took the
+// record of. Deleting whatever that read answered took away the live registration of a session
+// that had just come back, which is the one thing this whole change exists to stop.
+func TestADeleteWithNoJudgedRevisionJudgesTheRecordAgain(t *testing.T) {
+	client := setupNATS(t)
+	now := &clock{}
+	r := reapingRegistry(t, client, now)
+	if err := r.Put("ses_back", SessionEntry{Port: 1, MachineID: "m1"}); err != nil {
+		t.Fatalf("register ses_back: %v", err)
+	}
+	now.advance(3 * time.Minute)
+	candidates := r.goneCandidates(now.Now())
+	if len(candidates) != 1 {
+		t.Fatalf("the pass judged %+v, want the one record gone", candidates)
+	}
+	// The registration that lands between the pass's decision and its delete.
+	if err := r.Put("ses_back", SessionEntry{Port: 1, MachineID: "m1"}); err != nil {
+		t.Fatalf("re-register ses_back: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// The same candidate with no revision on it, which is what a copy that cannot fence the key
+	// hands the pass (kvwatch.Copy.FenceFor).
+	unfenced := goneCandidate{sessionID: "ses_back", lastSeen: candidates[0].lastSeen}
+	switch deleted, err := r.deleteGone(ctx, unfenced); {
+	case err != nil:
+		t.Fatalf("delete ses_back with no judged revision: %v", err)
+	case deleted:
+		t.Fatal("the pass deleted, counted and logged the record of a session that registered again")
+	}
+	entry, err := r.Refresh(ctx, "ses_back")
+	if err != nil {
+		t.Fatalf("the bucket's record of ses_back after the pass: %v", err)
+	}
+	if state := r.EntryState(entry); state != Live {
+		t.Fatalf("ses_back after the pass = %s, want it live on the registration that landed", state)
+	}
+
+	missing := goneCandidate{sessionID: "ses_never_stored", lastSeen: candidates[0].lastSeen}
+	switch deleted, err := r.deleteGone(ctx, missing); {
+	case err != nil:
+		t.Fatalf("delete a key the bucket does not hold: %v", err)
+	case deleted:
+		t.Fatal("the pass counted a key the bucket did not hold")
+	}
+}
+
+// The count reaches the messages stored after the last registration however many the stream holds
+// on that subject from before it: the walk steps over those in doubling strides rather than
+// reading them one by one. Reading forward from the stream's first sequence spent the whole read
+// cap on messages from before the registration and reported nothing stored for a session that had
+// messages waiting - the worst case being the busiest session, which is the one an operator most
+// wants the number for.
+func TestAReapedSessionsStoredCountIsReachedPastMoreOldMessagesThanTheCap(t *testing.T) {
+	client := setupNATS(t)
+	now := &clock{}
+	r := reapingRegistry(t, client, now)
+	const sessionID = "ses_busy"
+	publish := func(eventID string) {
+		t.Helper()
+		item := contracts.Envelope{
+			EventID:        eventID,
+			Source:         "agent",
+			SourceSession:  "ses_sender",
+			Topic:          contracts.AgentSubject(sessionID),
+			DedupeKey:      eventID,
+			IssuedAt:       time.Now().UnixMilli(),
+			PayloadSummary: "stored for a session that stopped answering",
+		}
+		if err := client.Publish(item); err != nil {
+			t.Fatalf("publish %s: %v", eventID, err)
+		}
+	}
+	for before := range reapStoredMessageCap + 100 {
+		publish(fmt.Sprintf("before-%d", before))
+	}
+	// The stream stamps a message with the server's clock in milliseconds, as the registration
+	// records its own: a pause here keeps the two phases on either side of the registration
+	// rather than inside one millisecond of it.
+	time.Sleep(10 * time.Millisecond)
+	if err := r.Put(sessionID, SessionEntry{Port: 1, MachineID: "m1", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register %s: %v", sessionID, err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	publish("after-1")
+	publish("after-2")
+	now.advance(3 * time.Minute)
+
+	met := metrics.New()
+	stored := met.NewCounter("stored", "test")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if reaped := r.ReapSessions(ctx, SessionReaper{Client: client, StoredAfterLastSeen: stored}); reaped != 1 {
+		t.Fatalf("the pass reaped %d records, want the one past the horizon", reaped)
+	}
+	if got := counterValue(t, met, "stored"); got != 2 {
+		t.Fatalf("messages stored after the last registration = %d, want the 2 published after it", got)
 	}
 }
 

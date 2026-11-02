@@ -299,8 +299,9 @@ type Service struct {
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
 	// the document (keepInstance). roomLoads holds what each room's load records between its read
 	// of the store (servicePersistenceAdapter.LoadDoc) and the instance the hook ygo calls next on
-	// the same goroutine starts (onLoadDocument): the head that read saw, and every version this
-	// process appended while the load ran, which reaches no instance of its own (roomLoad).
+	// the same goroutine starts (onLoadDocument): the head that read saw, the state it read, which
+	// that hook applies to the room's document (applyLoadedState), and every version this process
+	// appended while the load ran, which reaches no instance of its own (roomLoad).
 	instances sync.Map
 	roomLoads sync.Map
 	// reads holds the renderings of the documents cold reads served, each under the stored state

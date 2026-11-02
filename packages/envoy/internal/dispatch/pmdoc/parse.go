@@ -142,16 +142,29 @@ func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, err
 // block of live the markdown leaves unchanged keeps its id (carryBlockIDs), which the markdown
 // cannot name, so the write leaves it as it was. A block id of any length is written; one longer
 // than text.MaxBlockIDBytes is simply no graph node (refs.IndexBlocks). A document whose rendering,
-// the markdown it is stored as, reads back otherwise is refused (RefuseMisreadDocument).
+// the markdown it is stored as, reads back otherwise is refused (RefuseMisreadDocument);
+// ParseWritten is this parse with that read-back, for a write that goes on to read the same
+// rendering.
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
+	doc, _, err := ParseWritten(markdown, live)
+	return doc, err
+}
+
+// ParseWritten is ParseForWrite with the read-back its refusal of a document that reads back
+// otherwise already made: the markdown the document is stored as and that markdown's tree
+// (WrittenReadBack). A write that stores that rendering and reads it again - for its task items,
+// for its blocks - shares this parse rather than making a second one of the same markdown. A
+// refused parse answers the zero read-back.
+func ParseWritten(markdown string, live *Node) (*Node, WrittenReadBack, error) {
 	doc, err := parseForWrite(markdown, live, true, NewWriteBudget())
 	if err != nil {
-		return nil, err
+		return nil, WrittenReadBack{}, err
 	}
-	if err := RefuseMisreadDocument(doc); err != nil {
-		return nil, err
+	read, misread, err := documentMisread(doc)
+	if err := refuseMisread(misread, err); err != nil {
+		return nil, WrittenReadBack{}, err
 	}
-	return doc, nil
+	return doc, read, nil
 }
 
 // ParseFragment parses markdown a caller writes into a document, rather than one that begins it,
@@ -442,44 +455,47 @@ func readInline(markdown string, inline parser.Parser, context parser.Context, b
 	return paragraph.Children, nil
 }
 
-// BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
-// parser reads it back. A table in it is written spanless (renderSpanless): the cells a span adds
-// are empty, which the parser refuses nowhere, and the header still reaches every cell a row holds,
-// so the verdict is the one its markdown written with the spans gets.
-func BlockReadError(block *Node) error {
-	markdown, err := renderSpanless(readAlone(block))
-	if err != nil {
-		return err
-	}
-	_, err = ParseRendering(markdown)
-	return renderedNesting(block, err)
+// BlockReadBack is what one rendering and parse of a document-level block says of it: Read is the
+// parser's refusal of its markdown, nil where the parser reads it back, and Shape what that
+// markdown reads back as when it is not blocks of the same kinds nested the same way - the first
+// block that reads back as another - nil where it reads back so. What a textblock holds is not
+// compared, and every Shape verdict is ErrSchema, as the parser's own refusals are. A write runs
+// both checks over the blocks it changed (docs' refuseUnreadableReplacement and
+// refuseReshapedReplacement, refuseUnreadableAccept and refuseReshapedAccept), and a caller that
+// takes the two from one read-back renders and parses each block once rather than once a check:
+// the block a write lands in can hold the whole document's text, and a one-word edit of a
+// mebibyte-long paragraph rendered and parsed it four times (sjawhar/legion#2519).
+type BlockReadBack struct {
+	Read  error
+	Shape error
 }
 
-// BlockShapeError says what a document-level block's markdown reads back as when that is not
-// blocks of the same kinds nested the same way - the first block that reads back as another - or
-// is nil when it reads back so, or the parser's refusal of the markdown. What a textblock holds is
-// not compared. Every verdict it gives is ErrSchema, as the parser's own refusals are. A table in
-// it is written spanless (renderSpanless), so each of its rows reads back as wide as its widest row
-// as it holds cells, where written with its spans a row would read back wider wherever a span
-// covers a cell.
-func BlockShapeError(block *Node) error {
+// ReadBackBlock reads a document-level block's markdown back once and answers both verdicts
+// (BlockReadBack). A table in it is written spanless (renderSpanless): the cells a span adds are
+// empty, which the parser refuses nowhere, and the header still reaches every cell a row holds, so
+// the parser's verdict is the one its markdown written with the spans gets, while each row reads
+// back as wide as its widest row as it holds cells, where written with its spans a row would read
+// back wider wherever a span covers a cell. A block the renderer or the parser refuses has that
+// refusal as both verdicts: its markdown reads back as nothing to compare.
+func ReadBackBlock(block *Node) BlockReadBack {
 	doc := readAlone(block)
 	markdown, err := renderSpanless(doc)
 	if err != nil {
-		return err
+		return BlockReadBack{Read: err, Shape: err}
 	}
 	back, err := ParseRendering(markdown)
 	if err != nil {
-		return renderedNesting(block, err)
+		refusal := renderedNesting(block, err)
+		return BlockReadBack{Read: refusal, Shape: refusal}
 	}
 	if reason := readDifference(doc, back, shapeOnly); reason != "" {
-		return readsBackAs(reason)
+		return BlockReadBack{Shape: readsBackAs(reason)}
 	}
-	return nil
+	return BlockReadBack{}
 }
 
-// readsBackAs is a block's markdown reading back as blocks of another shape (BlockShapeError):
-// a refusal, so it is ErrSchema, worded as what reads back.
+// readsBackAs is a block's markdown reading back as blocks of another shape (ReadBackBlock's
+// Shape): a refusal, so it is ErrSchema, worded as what reads back.
 type readsBackAs string
 
 func (reason readsBackAs) Error() string { return string(reason) }

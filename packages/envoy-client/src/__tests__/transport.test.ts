@@ -666,6 +666,122 @@ describe("EnvoyClient", () => {
     expect(older.recipientState).toBe("live");
   });
 
+  // A sender decides whether to wait on the recipient's state and on how long it has been
+  // silent, and the listener sends both; dropping last_seen left the caller the state alone
+  // (dispatch://INFRA-392, R7).
+  test("carries the recipient's last registration from a send, and omits one the listener cannot name", async () => {
+    const envelope = {
+      event_id: "event-stalled",
+      source: "agent",
+      source_event_id: "agent.sender.event-stalled",
+      topic: "notifications.agent.ses_stalled",
+      dedupe_key: "event-stalled",
+      issued_at: 1,
+      payload_summary: "hello",
+      trace_id: "trace-stalled",
+      recipient: "ses_stalled",
+      recipient_state: "unresponsive",
+    };
+    const recorded = recordFetch([
+      jsonResponse({ ...envelope, last_seen: 1_700_000_000_000 }),
+      jsonResponse(envelope),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const timed = await client.send({
+      sourceSessionID: "ses_sender",
+      targetSessionID: "ses_stalled",
+      message: "hello",
+    });
+    const untimed = await client.send({
+      sourceSessionID: "ses_sender",
+      targetSessionID: "ses_stalled",
+      message: "hello",
+    });
+
+    expect(timed.lastSeen).toBe(1_700_000_000_000);
+    expect(untimed.lastSeen).toBeUndefined();
+  });
+
+  // The refusal an agent reads at the moment it decides whether its peer is alive. The
+  // listener's own text names no state, so an unresponsive holder's lapsed role read as a dead
+  // one, and the next agent took its work (dispatch://INFRA-392, R7).
+  test("a lapsed role's refusal says which state its holder is in, and that the claim stands", async () => {
+    const recorded = recordFetch([
+      Response.json(
+        {
+          error:
+            "role reviewer holder ses_stalled lapsed; claim retained (last seen 1700000000000)",
+          reason: "holder_lapsed",
+          holder: "ses_stalled",
+          holder_state: "unresponsive",
+          last_seen: 1_700_000_000_000,
+          claim_released: false,
+        },
+        { status: 404 }
+      ),
+      Response.json(
+        {
+          error: "role reviewer holder ses_ended lapsed; claim retained (last seen unavailable)",
+          reason: "holder_lapsed",
+          holder: "ses_ended",
+          holder_state: "gone",
+          claim_released: false,
+        },
+        { status: 404 }
+      ),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const stalled = await client.getRole("reviewer").catch((error: unknown) => error);
+    const ended = await client.getRole("reviewer").catch((error: unknown) => error);
+
+    expect(stalled).toBeInstanceOf(EnvoyApiError);
+    const unresponsive = stalled as EnvoyApiError;
+    expect(unresponsive.message).toBe(
+      "role reviewer holder ses_stalled lapsed; claim retained (last seen 1700000000000) Holder ses_stalled is unresponsive, last seen 2023-11-14T22:13:20.000Z. An unresponsive session is not dead: it keeps its role claims and its issue claims, and a message sent to it is stored until it answers. Start no replacement for it and take no claim from it until it is gone, or until 20 minutes have passed since its last_seen, the time of its last registration."
+    );
+    expect(unresponsive.sessionState).toBe("unresponsive");
+    expect(unresponsive.holder).toBe("ses_stalled");
+    expect(unresponsive.lastSeen).toBe(1_700_000_000_000);
+    expect(unresponsive.claimReleased).toBe(false);
+
+    // A holder past the gone horizon is said to be gone, with no rule to wait on, and a time
+    // the listener cannot name is left unsaid rather than guessed.
+    const gone = ended as EnvoyApiError;
+    expect(gone.message).toBe(
+      "role reviewer holder ses_ended lapsed; claim retained (last seen unavailable) Holder ses_ended is gone."
+    );
+    expect(gone.sessionState).toBe("gone");
+    expect(gone.lastSeen).toBeUndefined();
+  });
+
+  // A send refused for a session the listener will not answer for names that session's state
+  // the same way, so "no live session" no longer reads as death on its own.
+  test("a refused send says whether the session is unresponsive or gone", async () => {
+    const recorded = recordFetch([
+      Response.json(
+        {
+          error: "no live session ses_stalled",
+          state: "unresponsive",
+          last_seen: 1_700_000_000_000,
+        },
+        { status: 404 }
+      ),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const refusal = (await client
+      .send({ sourceSessionID: "ses_sender", targetSessionID: "ses_stalled", message: "hello" })
+      .catch((error: unknown) => error)) as EnvoyApiError;
+
+    expect(refusal.message).toStartWith(
+      "no live session ses_stalled That session is unresponsive, last seen 2023-11-14T22:13:20.000Z. An unresponsive session is not dead:"
+    );
+    expect(refusal.sessionState).toBe("unresponsive");
+    expect(refusal.lastSeen).toBe(1_700_000_000_000);
+  });
+
   test("normalizes non-success responses into a typed API error", async () => {
     const recorded = recordFetch([new Response("invalid role", { status: 400 })]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });

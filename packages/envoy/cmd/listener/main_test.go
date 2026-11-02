@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -1115,6 +1116,116 @@ func TestDeleteSessionHandler_KeepsAnotherClientInstancesRegistration(t *testing
 	}
 	if entry.ClientInstanceID != "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2" {
 		t.Fatalf("entry = %+v, want the other client instance's registration kept as it was", entry)
+	}
+}
+
+// The finding this condition exists for (dispatch://INFRA-392): the daemon's clean stop of a dead
+// role's session can still be in flight when the very decision that asked for it has relaunched
+// the claim and the new process has registered the same session id again. The stop names the
+// moment its probe judged the process gone, and a registration written after that moment is the
+// relaunch's: it stays, and the route says so rather than taking a live session's registration.
+func TestDeleteSessionHandler_KeepsARegistrationWrittenAfterTheStopsMoment(t *testing.T) {
+	const sessionID = "ses_relaunched_under_the_stop"
+	_, sessions := setupSessionsTest(t, nil, nil)
+	putSessionForInstance(t, sessions, sessionID, "")
+	dead, err := sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the dead launch's registration: %v", err)
+	}
+	// The moment the probe judged the process gone, which the stop carries, and the relaunch's
+	// own registration after it: the clock is waited past that moment so the second write is
+	// strictly newer, as a relaunch seconds later is.
+	stop := dead.UpdatedAt
+	for time.Now().UnixMilli() <= stop {
+		time.Sleep(time.Millisecond)
+	}
+	putSessionForInstance(t, sessions, sessionID, "")
+	relaunched, err := sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the relaunch's registration: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete,
+		fmt.Sprintf("/v1/sessions/%s?if_not_registered_after=%d", sessionID, stop), nil)
+	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var answer struct {
+		Deleted bool   `json:"deleted"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&answer); err != nil {
+		t.Fatalf("decode the answer: %v", err)
+	}
+	if answer.Deleted || answer.Reason != "the registration was written after the moment the delete belongs to" {
+		t.Fatalf("answer = %+v, want the relaunch's registration kept with its reason", answer)
+	}
+	entry, err := sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("the relaunch's registration is gone: %v", err)
+	}
+	if entry.UpdatedAt != relaunched.UpdatedAt {
+		t.Fatalf("the stored registration was written at %d, want the relaunch's %d", entry.UpdatedAt, relaunched.UpdatedAt)
+	}
+	if _, state := sessions.Lookup(sessionID); state != session.Live {
+		t.Fatalf("the relaunched session reads %s, want live", state)
+	}
+}
+
+// The stop that is still the stored registration's: nothing has registered that session id since
+// the probe judged its process gone, so the record goes and the session is gone at once.
+func TestDeleteSessionHandler_DeletesTheRegistrationTheStopsMomentCovers(t *testing.T) {
+	const sessionID = "ses_dead_launch"
+	_, sessions := setupSessionsTest(t, nil, nil)
+	putSessionForInstance(t, sessions, sessionID, "")
+	dead, err := sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the dead launch's registration: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete,
+		fmt.Sprintf("/v1/sessions/%s?if_not_registered_after=%d", sessionID, dead.UpdatedAt), nil)
+	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"deleted":true}` {
+		t.Fatalf("body = %s, want {\"deleted\":true}", got)
+	}
+	if _, state := sessions.Lookup(sessionID); state != session.Gone {
+		t.Fatalf("the deleted session reads %s, want gone", state)
+	}
+}
+
+// A moment this route cannot read is a refusal, not a delete: a caller whose condition was
+// silently dropped would remove exactly the registration it asked to keep.
+func TestDeleteSessionHandler_RefusesAMomentThatIsNotMilliseconds(t *testing.T) {
+	const sessionID = "ses_bad_moment"
+	_, sessions := setupSessionsTest(t, nil, nil)
+	putSessionForInstance(t, sessions, sessionID, "")
+
+	for _, asked := range []string{"just now", "0", "-1", "1762000000.5"} {
+		t.Run(asked, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodDelete,
+				"/v1/sessions/"+sessionID+"?if_not_registered_after="+url.QueryEscape(asked), nil)
+			deleteSessionHandler(sessions).ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), "if_not_registered_after") {
+				t.Fatalf("body = %s, want a refusal naming the parameter", rr.Body.String())
+			}
+			if _, err := sessions.Get(sessionID); err != nil {
+				t.Fatalf("the refused request deleted the registration: %v", err)
+			}
+		})
 	}
 }
 
@@ -2959,7 +3070,7 @@ func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotS
 	var mu sync.Mutex
 	var forwardedTo []string
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(subject string, _ contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(subject string, _ contracts.Envelope, _ string, _ time.Duration) error {
 		mu.Lock()
 		defer mu.Unlock()
 		forwardedTo = append(forwardedTo, subject)
@@ -3001,7 +3112,7 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return errors.New("nats: connection closed")
 	})
@@ -3057,7 +3168,7 @@ func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *t
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return nil
 	})
@@ -3112,7 +3223,7 @@ func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedeli
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return nil
 	})
@@ -3199,7 +3310,7 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 				t.Fatalf("claim role: %v", err)
 			}
 			cfg := harness.config
-			cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error { return tc.forwardErr })
+			cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error { return tc.forwardErr })
 			cfg = wireTestDeliveryWorkers(t, cfg)
 			handler := coreNATSDeliveryHandler(cfg)
 			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-error-kind-"+role)
@@ -3987,9 +4098,9 @@ func (l *pushLog) all() []string {
 
 // inlineForward is a role forward seam (listenerDeliveryHandlerConfig.forwardRole) whose publish
 // always succeeds and whose wait is forward: a test that stands in for the holder's answer.
-func inlineForward(forward func(subject string, item contracts.Envelope, timeout time.Duration) error) func(string, contracts.Envelope, time.Duration, bool) (func() error, error) {
-	return func(subject string, item contracts.Envelope, timeout time.Duration, _ bool) (func() error, error) {
-		return func() error { return forward(subject, item, timeout) }, nil
+func inlineForward(forward func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error) func(string, contracts.Envelope, string, time.Duration, bool) (func() error, error) {
+	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, _ bool) (func() error, error) {
+		return func() error { return forward(subject, item, msgID, timeout) }, nil
 	}
 }
 
@@ -5307,4 +5418,79 @@ func TestTheDriftCorrectionWritesADurableOnlyWhenThePolicyChangesIt(t *testing.T
 	}
 	bind(drifted)
 	settle(creates, 0, "second start on the corrected durable")
+}
+
+// The default session reap interval is short enough for the adoption this change is accepted on:
+// the bucket's maximum age is read, and a record past the gone horizon deleted, only on a reaper
+// pass (session.ReapSessions), so an age another process set reaches a running listener within
+// two whole passes. A1 and A7 give that two minutes, and the setting's documentation
+// (packages/envoy/docs/architecture.md and the docs site's settings table) states one minute.
+// The role claim reaper runs on the same period, which only makes it release a gone holder's
+// claim sooner: the grace a restored claim keeps is measured against the live window from the
+// listener's start, not counted in passes.
+func TestTheDefaultSessionReapIntervalMeetsTheTwoMinuteAdoption(t *testing.T) {
+	if got := 2 * defaultSessionReapInterval; got > 2*time.Minute {
+		t.Fatalf("two passes at the default session reap interval take %s, want them inside the two minutes a maximum-age change is given to reach a running listener", got)
+	}
+}
+
+// A period or a window an operator wrote as zero or a negative value is refused by name, and the
+// listener does not start: ENVOY_SESSION_REAP_INTERVAL=0 reached time.NewTicker and panicked the
+// reaper loops before this change. A value time.ParseDuration cannot read is still a WARN and
+// the default, as it always was, since a listener never refuses to start over a malformed
+// duration. A setting where zero says something - ENVOY_UNPLACEABLE_RETRY_WINDOW=0s, which asks
+// for no retry at all - keeps reading through envDuration, which takes it.
+func TestEnvPositiveDurationRefusesADurationThatIsNotPositive(t *testing.T) {
+	const name = "ENVOY_SESSION_REAP_INTERVAL"
+	logs := &cmdtest.LockedBuffer{}
+	logger := logging.NewWithWriter("test", logs)
+	for _, value := range []string{"0", "0s", "-1m"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv(name, value)
+			got, err := envPositiveDuration(logger, name, time.Minute)
+			if want := fmt.Sprintf("invalid %s %q", name, value); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("envPositiveDuration(%q) = %s, %v; want a refusal naming %s and %q", value, got, err, name, value)
+			}
+		})
+	}
+	t.Run("a malformed duration still starts on the default", func(t *testing.T) {
+		t.Setenv(name, "1 hour")
+		got, err := envPositiveDuration(logger, name, time.Minute)
+		if got != time.Minute || err != nil {
+			t.Fatalf("envPositiveDuration(\"1 hour\") = %s, %v; want the default and no refusal", got, err)
+		}
+		if !strings.Contains(logs.String(), "invalid "+name) {
+			t.Fatalf("the log does not warn about the malformed value:\n%s", logs.String())
+		}
+	})
+	t.Run("a positive duration is taken", func(t *testing.T) {
+		t.Setenv(name, "30s")
+		got, err := envPositiveDuration(logger, name, time.Minute)
+		if got != 30*time.Second || err != nil {
+			t.Fatalf("envPositiveDuration(\"30s\") = %s, %v; want 30s", got, err)
+		}
+	})
+	t.Run("a setting zero speaks for keeps taking it", func(t *testing.T) {
+		t.Setenv("ENVOY_UNPLACEABLE_RETRY_WINDOW", "0s")
+		if got := envDuration(logger, "ENVOY_UNPLACEABLE_RETRY_WINDOW", defaultUnplaceableRetryWindow); got != 0 {
+			t.Fatalf("envDuration(\"0s\") = %s, want the zero window that asks for no retry", got)
+		}
+	})
+}
+
+// The listener keeps no last-seen memory of its own: it opens the session registry on
+// session.LastSeenMemory, the package's own value, which must outlast both deadlines the
+// listener reads a departed session's last heartbeat for. The interest reaper can hold a dead
+// session's row until store.InterestReapAllowance after its last write, and /v1/interests/ gives
+// that row's session its real last heartbeat; and a refusal for a session past the gone horizon
+// says when it last registered. A retention shorter than either - the fifteen minutes the
+// listener used to set - leaves a row listed with no heartbeat to give and a gone session's
+// refusal unable to say when it was last seen.
+func TestTheRegistrysLastSeenMemoryOutlastsWhatTheListenerReadsItFor(t *testing.T) {
+	if allowance := store.InterestReapAllowance(store.InterestReapGrace); session.LastSeenMemory <= allowance {
+		t.Fatalf("session.LastSeenMemory is %s and the interest reaper holds a dead session's row for %s, so a row it still lists can have no last heartbeat", session.LastSeenMemory, allowance)
+	}
+	if session.LastSeenMemory <= session.GoneHorizon {
+		t.Fatalf("session.LastSeenMemory is %s and the gone horizon is %s, so a refusal for a session that has just gone cannot say when it was last seen", session.LastSeenMemory, session.GoneHorizon)
+	}
 }

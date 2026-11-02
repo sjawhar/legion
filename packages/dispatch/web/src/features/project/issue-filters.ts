@@ -4,7 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import type { IssueSummary } from "../../api/types";
 import { useCappedSearchParam } from "../../lib/query-param";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
-import { claimHasLapsed } from "../issue/ClaimChip";
+import { claimIsTakeable } from "../issue/ClaimChip";
 import { useAgentRegistry } from "../refs/agent-registry";
 import { issueIsUnread } from "./UnreadDot";
 
@@ -23,15 +23,16 @@ export interface IssueFiltersState {
   readonly search: string;
   readonly needsYou: boolean;
   readonly unread: boolean;
-  /** Only issues an agent could pick up: nobody has claimed them, or the session that did is
-   *  gone (`claimHasLapsed`), which is exactly when the server hands the claim to the next
-   *  agent that asks. A holder that has only missed its heartbeats is not gone and keeps the
-   *  issue, so it stays out of this list (dispatch://INFRA-392). */
+  /** Only issues an agent could pick up: nobody has claimed them, or the server would hand the
+   *  claim to the next agent that asks (`claimIsTakeable`) - its holder has gone, or has missed
+   *  its heartbeats for longer than the claim's grace. A holder that has missed its heartbeats
+   *  inside that grace keeps the issue, and the server refuses the take, so it stays out of
+   *  this list (dispatch://INFRA-392). */
   readonly unclaimed: boolean;
-  /** Why the Unclaimed filter cannot tell which claims have lapsed while it is on: the agent list
-   *  is `refilling`, or its read failed (`unreachable`). Until it can, every session's claim
-   *  counts as held - no claim is called lapsed from a list that did not answer - and the strip
-   *  says so. `undefined` while the filter is off or the list is current or loading. */
+  /** Why the Unclaimed filter cannot tell which claims are takeable while it is on: the agent
+   *  list is `refilling`, or its read failed (`unreachable`). Until it can, every session's
+   *  claim counts as held - no claim is called free from a list that did not answer - and the
+   *  strip says so. `undefined` while the filter is off or the list is current or loading. */
   readonly unclaimedUnchecked: "refilling" | "unreachable" | undefined;
   readonly activeFilterCount: number;
   readonly activeFilters: ActiveFilter[];
@@ -109,7 +110,7 @@ export function useIssueFilters(): IssueFiltersState {
       return (
         (!needsYou || issue.open_asks > 0) &&
         (!unread || issueIsUnread(issue, lastReadSequence)) &&
-        (!unclaimed || issue.claim === null || claimHasLapsed(issue.claim, registry)) &&
+        (!unclaimed || issue.claim === null || claimIsTakeable(issue.claim, registry)) &&
         (query === "" ||
           issue.key.toLocaleLowerCase().includes(query) ||
           issue.title.toLocaleLowerCase().includes(query))

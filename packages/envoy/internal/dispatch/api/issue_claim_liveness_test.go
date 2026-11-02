@@ -224,6 +224,61 @@ func TestAnUndatedSilenceKeepsTheClaim(t *testing.T) {
 	}
 }
 
+// dispatch://INFRA-392. The refusal a take gets and the instant an issue page shows come from
+// one rule (judgeClaim), so they name one boundary and turn at one moment. That boundary is the
+// age the silence may reach, as contracts.IssueClaimUnresponsiveGrace itself reads - the claim
+// is held until the holder was last seen longer ago than the grace - so a holder exactly at the
+// grace still has its issue, and the millisecond after it the claim is any agent's. Reading the
+// page's takeable_at that way predicts the write's verdict at every moment below, which is the
+// agreement this pins; the grace running out is no state change either, and the read goes on
+// saying unresponsive.
+func TestTheRefusalAndTheIssueReadShareTheGracesBoundary(t *testing.T) {
+	lastSeen := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	holder := &model.IssueClaim{
+		Actor: model.Actor{Kind: "session", ID: "ses-stalled"},
+		At:    lastSeen.Add(-2 * time.Hour),
+	}
+	contender := model.Actor{Kind: "session", ID: "ses-two"}
+	takeableAt := lastSeen.Add(contracts.IssueClaimUnresponsiveGrace)
+	roster := buildRouteRoster([]envoy.Session{{
+		SessionID: holder.Actor.ID, Title: "worker " + holder.Actor.ID,
+		State: envoy.StateUnresponsive, LastSeen: lastSeen.UnixMilli(),
+	}})
+	for _, tc := range []struct {
+		name    string
+		now     time.Time
+		blocked bool
+	}{
+		{name: "a millisecond before the grace runs out", now: takeableAt.Add(-time.Millisecond), blocked: true},
+		{name: "exactly at the grace", now: takeableAt, blocked: true},
+		{name: "a millisecond past it", now: takeableAt.Add(time.Millisecond)},
+	} {
+		judged := unresponsiveHolder(holder, envoy.StateUnresponsive, lastSeen)
+		blocked := claimBlockedBy(holder, contender, humanRule{forcible: true}, judged, tc.now)
+		if (blocked != nil) != tc.blocked {
+			t.Fatalf("%s: a take is refused with %v, want blocked=%v", tc.name, blocked, tc.blocked)
+		}
+		read := roster.claimLiveness(holder, tc.now)
+		if read.HolderState == nil || *read.HolderState != envoy.StateUnresponsive {
+			t.Fatalf("%s: holder_state = %v, want unresponsive", tc.name, read.HolderState)
+		}
+		if read.TakeableAt == nil || !read.TakeableAt.Equal(takeableAt) {
+			t.Fatalf("%s: takeable_at = %v, want %s, the heartbeat plus the grace",
+				tc.name, read.TakeableAt, takeableAt.Format(time.RFC3339Nano))
+		}
+		if free := tc.now.After(*read.TakeableAt); free == tc.blocked {
+			t.Fatalf("%s: the page reads the claim free=%v while the write answered %v: one rule, two answers",
+				tc.name, free, blocked)
+		}
+		if !tc.blocked {
+			continue
+		}
+		if want := "keeps the claim until " + takeableAt.Format(time.RFC3339); !strings.Contains(blocked.Error(), want) {
+			t.Fatalf("%s: refusal %q, want it to name %q, the instant the read names", tc.name, blocked.Error(), want)
+		}
+	}
+}
+
 // stalledListener is a listener whose one session, session-one, answers every read with the
 // state and heartbeat the test sets, on the per-session route a claim write reads and in the
 // list an issue read's roster takes. It serves the live rows alone to a read that did not ask

@@ -9,9 +9,12 @@ body: |-
     `recipient_state: unresponsive`, topic fan-out skips it with a status of its own rather than a
     failure, and its interests are kept. Only the role-claim reaper releases a claim, and only once
     the holder is `gone`. Every list, lookup and refusal carries `state` and `last_seen`, a role
-    lookup answers `holder_state` and `claim_released`, and `GET /v1/sessions` and
+    lookup answers `holder_state` and `claim_released`, a publish answers `holder_state` for the
+    role it reached and lists under `unresponsive` each topic recipient whose copy was stored
+    without waiting for a receipt, and `GET /v1/sessions` and
     `GET /v1/registry/<id>` take `include=unresponsive`; without it an unresponsive session is not
-    answered for, and the 404 keeps the `no live session <id>` prefix it had. A session reaper
+    answered for, and the 404 keeps the `no live session <id>` prefix it had, saying in its own
+    text when this listener remembers no registration to name. A session reaper
     deletes a record past the gone horizon at exactly the revision its pass judged, so a
     registration that lands between the decision and the delete survives, and counts the messages
     stored on the session's subject after its last registration — bounded, and not a count of

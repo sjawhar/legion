@@ -8,12 +8,16 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/reearth/ygo/persistence"
+
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -308,6 +312,212 @@ func TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable(t *testing.T) {
 	}
 	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocumentUnloadable) || errors.Is(err, ErrServiceUnavailable) {
 		t.Fatalf("corrupt load = %v, want ErrDocumentUnloadable", err)
+	}
+}
+
+// refusedForTheItemCap checks a refusal naming the item count an update's header declares, the
+// count read from that header alone: the refusal the store writes for that count
+// (itemCapRefusal), rather than the sentence written again here.
+func refusedForTheItemCap(t *testing.T, what string, err error, items uint64) {
+	t.Helper()
+	want := itemCapRefusal(items)
+	if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), want.Error()) {
+		t.Fatalf("%s: %v, want %v", what, err, want)
+	}
+}
+
+// The store judges an update by the item count its header declares (updateItems) rather than by
+// decoding it: a transaction's append of an update this process encoded is refused past the cap
+// from that header (AppendUpdateTx, refuseUpdateItemCap), and so is a stored history a room is
+// about to take (servicePersistenceAdapter.LoadDoc, loadableHistory), which took that decode off
+// every cold load of a document one client wrote (sjawhar/legion#2519).
+//
+// A header that reads says nothing about the body behind it, so the append of a malformed update
+// is taken, and the refusal comes when the room's own load applies that history to its document
+// (onLoadDocument, applyLoadedState). That refusal is the load's own failure, not one of this
+// service's answers, so the hook fails the room there and drops the record the load began: the
+// room is left failed for the next access to reload, and the record goes because no instance will
+// ever take it (beginRoomLoad, keepInstance).
+func TestTheStoreJudgesAnUpdateByItsHeader(t *testing.T) {
+	overTheCap := encoding.NewEncoder()
+	overTheCap.WriteVarUint(1)
+	overTheCap.WriteVarUint(maxUpdateItems + 1)
+	malformed := encoding.NewEncoder()
+	malformed.WriteVarUint(1)
+	malformed.WriteVarUint(1)
+	malformed.WriteRaw([]byte{0xff, 0xff, 0xff})
+	for _, test := range []struct {
+		name     string
+		update   []byte
+		appended func(*testing.T, error)
+		loaded   func(*testing.T, error)
+	}{
+		{
+			name:   "a header declaring more items than one update may hold",
+			update: overTheCap.Bytes(),
+			appended: func(t *testing.T, err error) {
+				refusedForTheItemCap(t, "a transaction's append of an update over the cap", err, maxUpdateItems+1)
+			},
+			loaded: func(t *testing.T, err error) {
+				refusedForTheItemCap(t, "a room's load of a history over the cap", err, maxUpdateItems+1)
+			},
+		},
+		{
+			name:   "a header that reads over a body that does not",
+			update: malformed.Bytes(),
+			appended: func(t *testing.T, err error) {
+				if err != nil {
+					t.Fatalf("a transaction's append of a malformed update: %v, want it taken: its header is all this check reads", err)
+				}
+			},
+			loaded: func(t *testing.T, err error) {
+				if err == nil {
+					t.Fatal("a room took a history ygo cannot decode, want its load refused")
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database := storetest.Open(t)
+			artifactID := createDocument(t, database, "")
+			ctx := context.Background()
+			tx, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin the append: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			_, appended := NewPgVersioned(database).AppendUpdateTx(ctx, tx, artifactID, test.update, true)
+			test.appended(t, appended)
+
+			service := New(Deps{
+				Store:       database,
+				Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadUpdate: test.update},
+				Events:      events.NewBroker(),
+				Identity:    headerIdentity(database),
+				Settle:      time.Hour,
+			})
+			t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+			// The failed room's eviction is held, so the failure it carries is still the room's
+			// to read below: the eviction releases the room's state as it goes.
+			hold := make(chan struct{})
+			defer close(hold)
+			service.beforeFailedEviction = func(room string) {
+				if room == artifactID {
+					<-hold
+				}
+			}
+
+			test.loaded(t, service.warmLiveDocument(ctx, artifactID))
+			if failure := service.roomFailure(artifactID); failure == nil {
+				t.Error("the refused load left the room healthy, so nothing reloads the document")
+			}
+			if _, kept := service.roomLoads.Load(artifactID); kept {
+				t.Error("the refused load left its record behind, which no instance will take")
+			}
+		})
+	}
+}
+
+// panickingRoomLoadStore panics in the store read a room's load makes
+// (servicePersistenceAdapter.LoadDoc), for the first load of one room and no other read. That
+// panic is the one way a load fails with nothing of this service still to run on its goroutine:
+// the read hands ygo no bytes, so ygo decodes nothing after it, and a panic out of the hook ygo
+// calls next is recovered there (applyLoadedState) or swallowed by ygo's own safeHook.
+//
+// cancel, where a row sets one, ends the caller's context inside that read and before the panic,
+// so the caller whose Apply meets ygo's answer has gone and can fail nothing.
+type panickingRoomLoadStore struct {
+	VersionedStore
+	room   string
+	loads  atomic.Int64
+	cancel func()
+}
+
+func (s *panickingRoomLoadStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+	if room != s.room || s.loads.Add(1) > 1 {
+		return s.VersionedStore.Load(ctx, room)
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	panic("the store's read of this room's history panicked")
+}
+
+// A load that panics is failed where the panic is met, on the load's own goroutine and before ygo
+// closes the room's barrier (LoadDoc), as the store's refusal and a history the room's document
+// cannot take are failed there (loadableHistory, applyLoadedState). It was once left to whichever
+// caller's Apply met ygo's recovery of it (sjawhar/ygo v1.54.1-sami.3,
+// provider/websocket/server.go:1904-1923), and such a caller can answer for no load: ygo removes
+// the room and closes its barrier before any waiter wakes (server.go:1932-1941), so the record
+// under the room's name by the time that caller looks can be a later load's, and failing that
+// room would fail the room the later load is building, while dropping its record would leave its
+// instance holding none, so the versions appended while it ran would reach no cursor
+// (keepInstance, sjawhar/legion#2519). A caller whose own context ended meanwhile answered for
+// nothing at all, and the room stayed healthy behind a load that never made one.
+//
+// So no caller answers for a load now. Whoever is waiting, the panicking load fails its room and
+// drops its own record, and the load that begins after it is left alone: it keeps its own record
+// and finds a room it can build.
+func TestALoadThatPanicsFailsItsRoomWhereThePanicIsMet(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		// callerGone ends the caller's context inside the read that panics.
+		callerGone bool
+	}{
+		{name: "a caller still waiting for the load"},
+		{name: "a caller whose context ended while the load ran", callerGone: true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			database := storetest.Open(t)
+			artifactID := createDocument(t, database, "")
+			panicking := &panickingRoomLoadStore{VersionedStore: NewPgVersioned(database), room: artifactID}
+			service := New(Deps{
+				Store:       database,
+				Persistence: panicking,
+				Events:      events.NewBroker(),
+				Identity:    headerIdentity(database),
+				Settle:      time.Hour,
+			})
+			t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+			// The failed room's eviction is held, so the failure the load leaves is still the
+			// room's to read below: the eviction releases the room's state as it goes.
+			evicting := make(chan struct{})
+			releaseEviction := sync.OnceFunc(func() { close(evicting) })
+			defer releaseEviction()
+			service.beforeFailedEviction = func(room string) {
+				if room == artifactID {
+					<-evicting
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if row.callerGone {
+				panicking.cancel = cancel
+			}
+
+			if err := service.warmLiveDocument(ctx, artifactID); err == nil {
+				t.Fatal("the load's read panicked, want the load refused")
+			}
+			if failure := service.roomFailure(artifactID); failure == nil {
+				t.Error("the panicking load left the room healthy, so nothing reloads the document")
+			}
+			if _, kept := service.roomLoads.Load(artifactID); kept {
+				t.Error("the panicking load left its record behind, which no instance will take")
+			}
+
+			// The load that begins after it. Its caller waits for the failed room's eviction
+			// (awaitRoomRecovery), so this reads what that load left, not what the one before it did.
+			releaseEviction()
+			if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+				t.Fatalf("the load after the one that panicked: %v, want the document loaded", err)
+			}
+			if _, kept := service.roomLoads.Load(artifactID); !kept {
+				t.Error("the load after the one that panicked kept no record, so an append while it ran reaches no cursor")
+			}
+			if failure := service.roomFailure(artifactID); failure != nil {
+				t.Errorf("the load after the one that panicked met a failed room: %v", failure)
+			}
+		})
 	}
 }
 

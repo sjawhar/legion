@@ -228,6 +228,8 @@ jobs:
             # packages/envoy/listenfd serves on the socket a test or harness holds (#2229).
             # internal/dispatch/dashboard and internal/dispatch/processes: cmd/dispatch imports them
             # (INFRA-559, INFRA-555).
+            # internal/roles and, through it, internal/store, internal/session and internal/kvwatch:
+            # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
@@ -282,7 +284,10 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/session/*'
+              - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
             # embedded probes, turnscope.yml and role prompts included, and the envoy package it
@@ -363,6 +368,7 @@ jobs:
               - 'packages/envoy/internal/logging/*'
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
               - 'packages/envoy/internal/store/*'
@@ -373,6 +379,8 @@ jobs:
             # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
             # .go files cmd/dispatch/settings_test.go:137 walks, and the pod spec
             # cmd/dispatch/pod_grace_period_test.go:17 reads.
+            # internal/roles and, through it, internal/store, internal/session and internal/kvwatch:
+            # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_command_tests: &dispatch_command_tests
               - 'packages/envoy/cmd/dispatch/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
@@ -394,7 +402,10 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/session/*'
+              - 'packages/envoy/internal/store/*'
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
@@ -840,11 +851,14 @@ jobs:
             # The pmdoc race job: the closure of `go test -race ./internal/dispatch/pmdoc/...`,
             # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
             # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
-            # render_readback_test.go:32), so the editor's package is here too.
+            # render_readback_test.go:32), so the editor's package is here too, and
+            # heavy_bodies_test.go:10 reads the body cap every writer of a comment meets
+            # (contracts.DispatchBodyMax), so the contracts package is too.
             envoy_go_race_pmdoc:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *go_workspace
+              - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/cputest/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'
@@ -3082,14 +3096,14 @@ jobs:
   # The session state rig (dispatch://INFRA-392) runs on the same stack and needs no agent: it
   # SIGSTOPs a child process carrying envoy-client's own registration and heartbeat and holds the
   # listener to `unresponsive` — the role claim kept, the send stored — until the gone horizon.
-  # It takes about five minutes of real time on its own, because the role claim reaper's pass,
-  # which the last property waits out, is fixed at five minutes in the listener
-  # (StartRoleClaimReaper, packages/envoy/cmd/listener/main.go); hence the raise from 15 minutes.
+  # Its longest property waits out that horizon and one reaper pass: the role claim reaper runs
+  # at ENVOY_SESSION_REAP_INTERVAL, which the rig sets to two seconds, so the suite costs the
+  # horizon rather than the five minutes a fixed reaper pass used to cost it.
   envoy-session-stall:
     needs: changes
     if: needs.changes.outputs.envoy_session_stall == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 15
     env:
       LEGION_E2E_ENVOY_STACK: "1"
     steps:

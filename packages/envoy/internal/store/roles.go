@@ -85,7 +85,10 @@ func (r *Registry) roleKeys() ([]string, error) {
 // failed, and reading it again returns the same record; each error wrapping it names which.
 var ErrMalformedRoleClaim = errors.New("malformed role claim")
 
-func decodeRoleClaim(value []byte) (RoleClaim, error) {
+// DecodeRoleClaim reads a stored role claim record: a structured claim naming a holder, or a bare
+// session id an earlier build stored. Any other record is ErrMalformedRoleClaim. Dispatch's outbox
+// reads the role bucket through it too (roles.Buckets), so the two readers cannot drift.
+func DecodeRoleClaim(value []byte) (RoleClaim, error) {
 	var claim RoleClaim
 	err := json.Unmarshal(value, &claim)
 	if err == nil {
@@ -111,7 +114,7 @@ func decodeRoleClaim(value []byte) (RoleClaim, error) {
 // nobody, so the copy keeps no entry for it, as a delete marker leaves none.
 func newRoleHolderCopy() kvwatch.Copy[string] {
 	return kvwatch.NewCopy(kvwatch.Rows[string]{Decode: func(entry kvwatch.Entry) (string, bool, error) {
-		claim, err := decodeRoleClaim(entry.Value)
+		claim, err := DecodeRoleClaim(entry.Value)
 		if err != nil {
 			return "", false, err
 		}
@@ -285,7 +288,7 @@ func (r *Registry) roleClaim(ctx context.Context, role string) (RoleClaim, nats.
 	if err != nil {
 		return RoleClaim{}, nil, err
 	}
-	claim, err := decodeRoleClaim(entry.Value())
+	claim, err := DecodeRoleClaim(entry.Value())
 	if err != nil {
 		return RoleClaim{}, nil, err
 	}

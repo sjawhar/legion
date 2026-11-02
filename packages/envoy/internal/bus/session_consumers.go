@@ -140,7 +140,7 @@ func (s *SessionConsumers) Publish(ctx context.Context, msg *nats.Msg) error {
 	if err := s.client.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	return s.client.currentConn().PublishMsg(msg)
+	return s.client.Connection().PublishMsg(msg)
 }
 
 // SubscribeReplies subscribes handler over core NATS to subject, typically a reply-inbox wildcard,
@@ -152,7 +152,7 @@ func (s *SessionConsumers) SubscribeReplies(subject string, handler nats.MsgHand
 	if _, err := s.client.SubscribeCore(subject, handler); err != nil {
 		return err
 	}
-	return s.client.currentConn().Flush()
+	return s.client.Connection().Flush()
 }
 
 // SessionConsumerStart is what Ensure or RestartAtFloor did to a session's consumer.

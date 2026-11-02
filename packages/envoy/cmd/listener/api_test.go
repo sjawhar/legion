@@ -23,6 +23,7 @@ import (
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -1017,7 +1018,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		stallSessionReads(t, harness.sessions)
 		var forwards atomic.Int32
 		cfg := harness.config
-		cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
+		cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 			forwards.Add(1)
 			return nil
 		})
@@ -3008,5 +3009,121 @@ func TestSessionEntryRouteRefusesANonGETMethod(t *testing.T) {
 	}
 	if body := strings.TrimSpace(recorder.Body.String()); body != `{"error":"method not allowed"}` {
 		t.Fatalf("body = %s, want the file's own method refusal", body)
+	}
+}
+
+// Every role answer names the holder's state under one field, holder_state: the 404 of a lapsed
+// holder named it already, and the 200 of a live one and the publish route's 200 now name it too
+// (dispatch://INFRA-392, R1, which puts the role lookup and the role publish among the answers
+// that carry the state). A client then reads one field from every role answer instead of
+// inferring live from the status code.
+func TestRoleAnswersNameALiveHoldersState(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const (
+		role   = "state-on-the-200"
+		holder = "ses_live_holder"
+	)
+	claimRoleFor(t, harness.registry, harness.sessions, holder, role, nil)
+	startStandIn(t, testnats.URL(t), holder, always)
+	d := harness.publishDeps(t)
+
+	recorder := httptest.NewRecorder()
+	roleGetHandler(d).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /v1/roles/%s: status %d %s, want 200", role, recorder.Code, recorder.Body.String())
+	}
+	var lookup struct {
+		Holder      string        `json:"holder"`
+		HolderState session.State `json:"holder_state"`
+		LastSeen    int64         `json:"last_seen"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &lookup); err != nil {
+		t.Fatalf("decode the lookup's answer %s: %v", recorder.Body.String(), err)
+	}
+	if lookup.Holder != holder || lookup.HolderState != session.Live || lookup.LastSeen == 0 {
+		t.Fatalf("the lookup's 200 = %+v, want %s live with its last registration", lookup, holder)
+	}
+
+	published, _ := publishThrough(d, `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"take this","idempotency_key":"state-1"}`)
+	if published.Code != http.StatusOK {
+		t.Fatalf("publish to %s: status %d %s, want 200", role, published.Code, published.Body.String())
+	}
+	var answer publishResponse
+	if err := json.Unmarshal(published.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode the publish answer %s: %v", published.Body.String(), err)
+	}
+	if answer.Holder != holder || answer.HolderState != session.Live {
+		t.Fatalf("the publish's 200 = %+v, want holder %s and holder_state live", answer, holder)
+	}
+}
+
+// envoy_sends_unresponsive_total counts what its name and its help say: one per send accepted and
+// stored for a recipient past the live window. A send the bus did not take stored nothing, and a
+// duplicate the stream recognised stored nothing new, so neither is a message now waiting for a
+// session that stopped answering and neither is counted. The count rose for both before this
+// change, so a box's operator read the share of its traffic going to stalled sessions too high.
+func TestSendsToAnUnresponsiveRecipientAreCountedOnlyWhenStored(t *testing.T) {
+	d, now := stalledSessionsRig(t)
+	const target = "ses_counted_recipient"
+	register(t, d, target, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
+	now.advance(90 * time.Second)
+	met := metrics.New()
+	d.sendsToUnresponsive = met.NewCounter("envoy_sends_unresponsive_total", "Sends accepted and stored for a recipient past the live window")
+	counted := func() string {
+		t.Helper()
+		scrape := httptest.NewRecorder()
+		met.Handler().ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		for line := range strings.SplitSeq(scrape.Body.String(), "\n") {
+			if value, ok := strings.CutPrefix(line, "envoy_sends_unresponsive_total "); ok {
+				return value
+			}
+		}
+		return "0"
+	}
+	// source dispatch makes the key name an upstream event, which is what earns the publish a
+	// Nats-Msg-Id and so lets the stream recognise the repeat below as the duplicate it is
+	// (contracts.DedupeKeyNamesTheUpstreamEvent).
+	body := fmt.Sprintf(`{"target_session":%q,"source":"dispatch","source_session":"ses_sender","message":"stored for you","idempotency_key":"counted-1"}`, target)
+	send := func(through *listenerDeps) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		sendHandler(through, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(body)))
+		return recorder
+	}
+
+	stored := send(d)
+	var answer sendResponse
+	if err := json.Unmarshal(stored.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode the send answer %s: %v", stored.Body.String(), err)
+	}
+	if stored.Code != http.StatusOK || answer.RecipientState != session.Unresponsive || answer.Duplicate {
+		t.Fatalf("the first send: status %d %s, want 200 stored for an unresponsive recipient", stored.Code, stored.Body.String())
+	}
+	if got := counted(); got != "1" {
+		t.Fatalf("envoy_sends_unresponsive_total = %s after one stored send, want 1", got)
+	}
+
+	repeat := send(d)
+	if err := json.Unmarshal(repeat.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode the repeat's answer %s: %v", repeat.Body.String(), err)
+	}
+	if repeat.Code != http.StatusOK || !answer.Duplicate {
+		t.Fatalf("the repeat: status %d %s, want 200 naming the duplicate the stream dropped", repeat.Code, repeat.Body.String())
+	}
+	if got := counted(); got != "1" {
+		t.Fatalf("envoy_sends_unresponsive_total = %s after a duplicate the stream stored nothing new for, want 1", got)
+	}
+
+	closed, err := bus.Connect([]string{testnats.URL(t)}, bus.WithName("closed-sender"))
+	if err != nil {
+		t.Fatalf("connect the sender that will be stopped: %v", err)
+	}
+	closed.Close()
+	unsent := send(&listenerDeps{client: closed, registry: d.registry, sessions: d.sessions, sendsToUnresponsive: d.sendsToUnresponsive})
+	if unsent.Code == http.StatusOK {
+		t.Fatalf("the send through a stopped client: status %d %s, want a refusal", unsent.Code, unsent.Body.String())
+	}
+	if got := counted(); got != "1" {
+		t.Fatalf("envoy_sends_unresponsive_total = %s after a send the bus never took, want 1", got)
 	}
 }

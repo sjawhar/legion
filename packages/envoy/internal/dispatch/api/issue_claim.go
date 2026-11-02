@@ -37,18 +37,20 @@ import (
 // chooses it, and that the request has no second parameter for claiming on someone's behalf.
 // The body is closed to unknown fields, so an invented one is refused rather than ignored.
 //
-// The taking rule lives in claimBlockedBy alone, and it is a test of the holder's registry
-// state, never of any list's membership: a claim whose session the Envoy registry calls live,
-// or calls unresponsive within the grace of its last heartbeat, belongs to that session until
-// it releases it or a human forces it; a claim whose session is gone, or whose unresponsive
-// session has not been seen for longer than that grace, may be taken by any agent without
-// asking, and the takeover is recorded on the issue and delivered to the session that lost it.
+// Which writes a holder blocks is claimBlockedBy's alone, and what it asks about the holder is
+// judgeClaim, a test of that session's registry record and never of any list's membership: a
+// claim whose session the Envoy registry calls live, or calls unresponsive within the grace of
+// its last heartbeat, belongs to that session until it releases it or a human forces it; a
+// claim whose session is gone, or whose unresponsive session has not been seen for longer than
+// that grace, may be taken by any agent without asking, and the takeover is recorded on the
+// issue and delivered to the session that lost it.
 //
-// An issue read answers the same question from the other source: the route roster, the
-// server's copy of the listener's session list, up to five seconds old
-// (issue_route_status.go's claimLiveness). The two can disagree by that age, and only this one
-// decides a write - which is also why a read answers holder_state "unknown" while the listener
-// is down and a write refuses ENVOY_UNAVAILABLE.
+// An issue read answers the same question, with the same judgeClaim, from the other source: the
+// route roster, the server's copy of the listener's session list, up to five seconds old
+// (issue_route_status.go's claimLiveness). So the two never read one record differently, but
+// they can hold records of different ages, and only this one decides a write - which is also
+// why a read answers holder_state "unknown" while the listener is down and a write refuses
+// ENVOY_UNAVAILABLE.
 //
 // Every claim write is the resolve-then-lock pair envoy_resolve.go owns, because the listener
 // lookup never runs inside a transaction (fetchHolderLiveness carries the reason): judgeHolder
@@ -237,13 +239,12 @@ type judgement struct {
 // and whatever the first wrote is already another's to overwrite — so the holder's own record
 // decides.
 //
-// That record gives three answers. A live holder keeps its claim. An unresponsive holder keeps
-// it too, for contracts.IssueClaimUnresponsiveGrace past the heartbeat it was last seen at:
-// missing heartbeats under box load is ordinary, and a session that comes back must still have
-// the issue it was working (dispatch://INFRA-392). Past that grace, and for a holder that is
-// gone or has no record at all, the claim is free. A holder the listener calls unresponsive
-// while naming no heartbeat keeps its claim: nothing established when it was last seen, and
-// the direction that errs toward one session per issue is to wait.
+// That record gives three answers, and judgeClaim below is where it gives them: a live holder
+// keeps its claim, an unresponsive one keeps it for the grace past the heartbeat it was last
+// seen at, and a gone one holds nothing. The test is written once there because an issue read
+// asks the same question of the same record (issue_route_status.go's claimLiveness), and the
+// two must never disagree: the instant that read names as the one the claim comes free at is
+// the instant this refusal counts to.
 func claimBlockedBy(
 	current *model.IssueClaim, actor model.Actor, rule humanRule, judged judgement, now time.Time,
 ) error {
@@ -266,24 +267,62 @@ func claimBlockedBy(
 		return nil
 	}
 	holder := *judged.live.holder
-	conflict := &claimConflict{
-		claim: *current, liveTitle: holder.Title, state: holder.State, forcible: rule.forcible,
-	}
-	switch holder.State {
-	case envoy.StateGone:
-		// A record the listener answers with but calls gone is no holder at all.
+	taking := judgeClaim(holder.State, holder.LastSeen, now)
+	if taking.takeable {
 		return nil
-	case envoy.StateUnresponsive:
-		if holder.LastSeen <= 0 {
-			return conflict
-		}
-		conflict.lastSeen = time.UnixMilli(holder.LastSeen).UTC()
-		conflict.takeableAt = conflict.lastSeen.Add(contracts.IssueClaimUnresponsiveGrace)
-		if now.After(conflict.takeableAt) {
-			return nil
-		}
 	}
-	return conflict
+	return &claimConflict{
+		claim: *current, liveTitle: holder.Title, state: holder.State,
+		lastSeen: taking.lastSeen, takeableAt: taking.takeableAt, forcible: rule.forcible,
+	}
+}
+
+// claimTakeability is what a holder's registry record says about its claim: the heartbeat the
+// record is dated by, the instant the claim comes free without a person's force, and whether it
+// is free now. lastSeen and takeableAt are zero when nothing establishes them - a record that
+// names no heartbeat dates neither, and nothing frees a live holder's claim by waiting, so there
+// is no instant to name for one.
+type claimTakeability struct {
+	lastSeen   time.Time
+	takeableAt time.Time
+	takeable   bool
+}
+
+// judgeClaim is the taking rule's test of the holder's own registry record, and the only copy of
+// it: a claim write refuses by it (claimBlockedBy, against the record the listener answered for
+// that holder by id) and an issue read shows it (claimLiveness, against the route roster's row
+// for that session), so the refusal a take gets and the page a person reads cannot drift apart.
+// state is the state the registry judged the record in, lastSeenMilli the registration it is
+// dated by, zero for a record that names none.
+//
+// A live holder keeps its claim: its own release, or a person, is what ends it. An unresponsive
+// holder keeps it too, until its silence outlasts contracts.IssueClaimUnresponsiveGrace: missing
+// heartbeats under box load is ordinary, and a session that comes back must still have the issue
+// it was working (dispatch://INFRA-392). That grace is the age the silence may reach, as the
+// registry's own windows are (internal/session's StateOf) and as the constant itself reads - the
+// claim is held "until it was last seen longer ago than this" - so a holder exactly takeableAt
+// old still has the issue, and the claim is free from the moment after it. An unresponsive
+// holder the registry cannot date keeps its claim: nothing established when it was last seen,
+// and the direction that errs toward one session per issue is to wait. A gone holder - a record
+// past the gone horizon, or no record at all - holds nothing.
+func judgeClaim(state string, lastSeenMilli int64, now time.Time) claimTakeability {
+	var judged claimTakeability
+	if lastSeenMilli > 0 {
+		judged.lastSeen = time.UnixMilli(lastSeenMilli).UTC()
+	}
+	switch state {
+	case envoy.StateGone:
+		// Gone is takeable now, and now is when the reader said so: the registry keeps no
+		// heartbeat for a session it holds no record of, so there is no earlier instant to name.
+		judged.takeable, judged.takeableAt = true, now.UTC()
+	case envoy.StateUnresponsive:
+		if judged.lastSeen.IsZero() {
+			break
+		}
+		judged.takeableAt = judged.lastSeen.Add(contracts.IssueClaimUnresponsiveGrace)
+		judged.takeable = now.After(judged.takeableAt)
+	}
+	return judged
 }
 
 // sameHolder reports whether two nullable claims name the same holder.
