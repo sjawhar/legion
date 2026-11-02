@@ -92,8 +92,8 @@ const (
 )
 
 // serverChangeKinds names each kind and the topic its sender publishes to: a role topic the stand-in
-// holds, an ad-hoc topic no stream subject captures (bus.UsesCoreTransport), and a captured topic
-// the stream stores and POST /v1/replay serves to a session that registered it.
+// holds, an ad-hoc topic no stream subject captures (bus.Client.UsesCoreTransport), and a captured
+// topic the stream stores and POST /v1/replay serves to a session that registered it.
 var serverChangeKinds = [kindCount]struct{ name, topic string }{
 	{"role", contracts.RoleTopicPrefix + serverChangeRole},
 	{"ad-hoc", serverChangeAdHoc},

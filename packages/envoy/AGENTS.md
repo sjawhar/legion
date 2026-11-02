@@ -2695,9 +2695,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 
 - A failed control delivery or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`.
   Control exceptions keep their ordinary transport:
-  a role lane's `notifications.envoy.exceptions.notifications.role.<role>` takes core NATS because no stream subject captures it (`bus.UsesCoreTransport`), and an agent subject's `notifications.envoy.exceptions.notifications.agent.<id>` is the one exception subject the stream captures, so it keeps JetStream.
+  a role lane's `notifications.envoy.exceptions.notifications.role.<role>` takes core NATS because no stream subject captures it (`bus.Client.UsesCoreTransport`), and an agent subject's `notifications.envoy.exceptions.notifications.agent.<id>` is the one exception subject the stream captures, so it keeps JetStream.
   A fanout refusal's original topic is never a control topic, since `listenerDeliveryHandler` sends a `notifications.role.` topic to `roleTopicDelivery` and a `notifications.agent.` topic to `agentSubjectDelivery` and only what remains to `fanoutDelivery`, the one place `fanoutRefusal` is set;
-  its exception subject is therefore never one the stream captures either, so `bus.UsesCoreTransport` already routes it over core NATS and the explicit `client.PublishCore` in `publishDeliveryException` now only restates the routing rule's own answer for every reachable input.
+  its exception subject is therefore never one the stream captures either, so `bus.Client.UsesCoreTransport` already routes it over core NATS and the explicit `client.PublishCore` in `publishDeliveryException` now only restates the routing rule's own answer for every reachable input.
   The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`;
   omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`;
   the exception lane is not recursively exceptional.
@@ -3342,7 +3342,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   A `notifications.role.<role>` topic is not published on the role lane:
   the listener forwards it to the live holder's agent subject itself and waits for the holder's receipt, forwarding again until one arrives (`sendToRole`, `cmd/listener/confirmed.go`;
   the "Role messages use core NATS" rule under "Critical conventions" has the retry).
-  An ad-hoc topic (`bus.UsesCoreTransport`) is published over core NATS, for the serve-port sessions the live topics lane delivers to and any subscriber the registry does not know, then forwarded the same way, `event_id` and `dedupe_key` unchanged, to the agent subject of each `self_subscribed` session registered on it on any machine (`store.Registry.MatchAll`), the `source_session` excepted, all at once (`sendToTopic`).
+  An ad-hoc topic (`bus.Client.UsesCoreTransport`) is published over core NATS, for the serve-port sessions the live topics lane delivers to and any subscriber the registry does not know, then forwarded the same way, `event_id` and `dedupe_key` unchanged, to the agent subject of each `self_subscribed` session registered on it on any machine (`store.Registry.MatchAll`), the `source_session` excepted, all at once (`sendToTopic`).
   Both are answered once each recipient confirmed, or once 4 s from the request's arrival have passed (`publishDeliveryWindow`), and neither publishes a delivery exception: the sender has the answer.
   Only a receipt that arrived through the route counts as a confirmation:
   the route keeps its own record of each session that confirmed a dedupe key (`listenerDeps.confirmed`, 10 minutes), which a later send of the key reads, apart from the delivery handlers' dedupe cache, where the live topics lane's fanout and the durable's inbox delivery record a self-subscribed session whose push they skipped without hearing from it.

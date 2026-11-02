@@ -487,9 +487,9 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 }
 
 // sendToTopic delivers an ad-hoc topic message through the publish route: a topic no stream subject
-// captures (bus.UsesCoreTransport), which core NATS hands once to whoever is subscribed at that
-// moment. It still publishes the envelope on the topic, for the serve-port sessions the live lane
-// delivers to and any subscriber the registry does not know; then it forwards the same envelope,
+// captures (bus.Client.UsesCoreTransport), which core NATS hands once to whoever is subscribed at
+// that moment. It still publishes the envelope on the topic, for the serve-port sessions the live
+// lane delivers to and any subscriber the registry does not know; then it forwards the same envelope,
 // topic, event_id and dedupe_key unchanged, to the agent subject of every recipient
 // (topicRecipients) in parallel and answers once each confirmed, or 504 not_confirmed naming each
 // that did not once publishDeliveryWindow from arrived has passed. A recipient that took both
