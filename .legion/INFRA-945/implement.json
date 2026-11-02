@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-945",
+  "previousHandoff": "",
+  "proof": [
+    {
+      "criterion": "A3/C6: a released pod comes back on each wake of R3 items 1 to 5; each woken role gets its task or message once with the wake named; a role message and a direct message sent during the release each reach the woken session once, also across a daemon restart; keep: false wakes the role; an envoy_subscribe topic does not wake the pod; a resume with no first turn after 10 minutes writes the warning and the stuck record",
+      "surface": "the Go daemon on a real Postgres, a real Envoy listener process, a real nats-server, a real `legion launcher` per Ready pod of a fake Kubernetes API with an Agent Sandbox controller stand-in, and a scripted Oh My Pi per pod that registers, claims its role topic and records every delivery",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE LEGION_TEST_NATS_URL=nats://127.0.0.1:4223 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:8223 go test ./internal/daemon -run TestIdleReleaseAndWake -count=1 -timeout 10m -v",
+      "observed": "--- PASS: TestIdleReleaseAndWake (217.67s), with all six subtests PASS: AReleasedPodComesBackOnEachOfTheFiveWakes (60.81s), EachWokenRoleGetsItsTaskOnceNamingTheWake, ARoleMessageThatKeepsNothingStillWakesTheRole (7.26s), AnEventOnASubscribedTopicDoesNotWakeThePod (8.09s), AResumeWithNoFirstTurnAfterTenMinutesIsWarnedAndRecordedStuck (43.49s), AMessageSentDuringTheReleaseReachesTheWokenSessionOnceAcrossARestart (29.42s). Nine pods were created, launched, made quiet and released by the daemon's own idle tick, then woken one per wake kind.",
+      "headSha": "9cd57e337f7f0787050c9950e81429af96530e06",
+      "negativeControl": "The same rig with the Envoy listener's readiness withheld: `go test ./internal/daemon -run TestTheDaemonReleasesNothingWithoutAFreshListenerReport -count=1 -v` → PASS over three cases (no_report_at_all, a_report_older_than_the_window, a_report_inside_the_window), the first two releasing no pod. Measured before the fixes, the same rig refused every release with `\"outbox: the idle release of an issue's pod did not finish\",\"hold\":\"bundle_save_failed\",\"reason\":\"... holds no role process to bundle it\"` on all nine issues."
+    },
+    {
+      "criterion": "C2: the loader refuses a backstop_minutes below idle_minutes, naming the key, and a valid block passes that check",
+      "surface": "the `legion` CLI an operator runs, built from this head",
+      "command": "cd packages/daemon && go build -o $TMPDIR/bin/legion ./cmd/legion && $TMPDIR/bin/legion start --check-config --config <a file with runtime.kubernetes.idle_release {idle_minutes: 10, backstop_minutes: 5}>",
+      "observed": "legion start: runtime.kubernetes.idle_release.backstop_minutes (5) is below runtime.kubernetes.idle_release.idle_minutes (10): a backstop that short would wake a pod the daemon has only just released — exit 1",
+      "headSha": "9cd57e337f7f0787050c9950e81429af96530e06",
+      "negativeControl": "The same file with backstop_minutes: 60 passes that check and the loader moves on to the next unrelated requirement (`legion start: project is required`), so the refusal is the idle_release rule's and not a blanket one."
+    },
+    {
+      "criterion": "A2/C3: a release bundles the workspace's unpushed work and the next pod restores it, with real jj and git; the 40 MiB bound is refused naming the size; a restore whose base is gone writes the notice and still starts the roles",
+      "surface": "the real shim and the real launcher over real jj and git working copies",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE go test ./internal/shim ./internal/launcher -run 'WorkspaceBundle|Bundle' -count=1 -timeout 20m",
+      "observed": "ok github.com/sjawhar/legion/daemon/internal/shim 1.083s; ok github.com/sjawhar/legion/daemon/internal/launcher 2.965s — a working-copy change, an unpushed commit on the issue branch, an unpushed commit on a second head and a moved local bookmark are bundled, nothing is pushed to the remote, and a second workspace restores all four with each head visible and the working copy on its saved commit.",
+      "headSha": "9cd57e337f7f0787050c9950e81429af96530e06",
+      "negativeControl": "One byte over the bound is refused with the size named, and a bundle whose sha256 does not match is refused by the launcher before anything is written (`launcher_bundle sequence rebuilt to another digest than its slices declared`), the roles starting all the same."
+    },
+    {
+      "criterion": "A3/C5: which kinds of background work the pinned Oh My Pi reports to the daemon",
+      "surface": "the pinned Oh My Pi binary (omp 18.13.2 at /opt/omp/bin/omp) running a real role pane with this branch's pi-envoy and pi-legion",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-session-activity-omp.test.ts",
+      "observed": "1 pass, 0 fail. 'the backgrounded bash job reported [\"async-job\"]; the task subagent brought the report to [\"async-job\",\"subagent\"]; the named bash service wrote 121 heartbeats and was reported by nothing, across 3 reports' — which is the measurement the plan's departure 2 asked for: the host reports an async job and a subagent, and not a named bash service.",
+      "headSha": "9cd57e337f7f0787050c9950e81429af96530e06",
+      "negativeControl": "The named bash service is the control: it ran throughout (121 heartbeats, provably alive) and the newest report the daemon held stayed {running: false, kinds: []}, so the test pins an absence rather than assuming one."
+    },
+    {
+      "criterion": "C8: an issue pod reads the release records with the credential it holds, and an unauthenticated caller does not",
+      "surface": "the daemon's HTTP API",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u OMP_SESSION_SQL_DSN_FILE go test ./internal/api -run 'ReleaseRecords' -count=1",
+      "observed": "ok github.com/sjawhar/legion/daemon/internal/api 5.744s — GET /legion/v1/claims/release-records answers a release, a resume and a hold written through the store.",
+      "headSha": "9cd57e337f7f0787050c9950e81429af96530e06",
+      "negativeControl": "The same route with no claim token, with a wrong secret and with an unreadable `since` is refused 400/403 by the sibling claim routes' own codes."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/supervise/{machine.go,suspend.go,delivery.go}: the `released` suspension source, `SuspendSource.RetiresPhaseTask`, and a source-rank takeover in `suspendedAgain`",
+    "packages/daemon/internal/workflow/{idle.go,wake.go,resume.go,stranded.go,effects.go,engine.go}: R1's conditions as one pure function with its hold reasons, the five wakes, the boot's exception, R6's stranded rule, and `release` as a stop",
+    "packages/daemon/internal/store/{idle.go,issue_release.go,issue_suspend.go,wake.go,workspace_bundles.go,release_records.go,claims.go}: the per-issue idle view, the release authorizer and its shared fences, the wake marks, backstops and listener reports, the bundle table and the release/resume/hold records",
+    "packages/daemon/internal/store/migrations/: six timestamp-named migrations (claim_suspended_by_released, claim_session_activity, workspace_bundles, issue_idle_release, pod_release_records, pod_wakes)",
+    "packages/daemon/internal/daemon/{idle.go,wake.go,outbox.go,workflow.go,kubernetes.go,stranded.go,notice_routing.go}: the idle tick, the release's three acts, the wake paths, the backstop and stuck passes, and the records",
+    "packages/daemon/internal/record/outbox.go: the `issue_bundle` and `issue_release` kinds and the `release` supervise op",
+    "packages/daemon/internal/{shimwire,shim,launcher,stream,runtime}: the `bundle-workspace` frame pair, the shim's jj and git save, the chunked `launcher_bundle` pair with the launcher's reassembly and once-per-pod restore, and the runtime seam that carries the bundle to the pod before any role starts",
+    "packages/daemon/internal/workspace/jjgit.go: the jj and git helpers the shim and the launcher share",
+    "packages/daemon/internal/{api,claim,config}: POST /legion/v1/claims/activity, GET /legion/v1/claims/release-records, `runtime.kubernetes.idle_release`, and the retired `worker_idle_retire_seconds` reason",
+    "packages/daemon/cmd/legion/: a released claim on its own line in `legion state`",
+    "packages/envoy/{cmd/listener,internal/bus}: the wake report on notifications.legion.wake and the listener_ready heartbeat",
+    "packages/pi-shared, packages/pi-legion, packages/claude-envoy, packages/contracts: the session activity report, its route, the restored-workspace notice, and the contract at 48",
+    "packages/daemon/internal/prompts/, skills/legion-worker/SKILL.md, docs/site/.../concepts.md, docs/kubernetes.md: R9's guidance and the new `### Idle release` section with its rollback"
+  ],
+  "trickyParts": [
+    "The claim's activity columns are deliberately absent from `putClaim`'s `on conflict do update`, so a machine's claim write cannot erase a session's report. Anything deciding on them must read the store, never a live `Machine.Claim()`, which shows the zero values until the claim is reloaded.",
+    "A release is three acts on the issue's lifecycle lane in order: the save (`issue_bundle`), the role stops (`supervise` op `release`), the teardown (`issue_release`). The save must precede the stops because only the role's shim can run jj in the workspace. R4's boundary is the first role stop, so the save sits before it and a wake arriving during the save cancels the release and its bundle.",
+    "`ByRule()` names only the sources the boot resumes (`daemon`, `exit`); a released claim is resumed by the wake, not the boot, and `RuleMayResume()` (negative on `operator` alone) is what makes `deliverResuming` and `resumeByRule` work for it unchanged.",
+    "The daemon addresses the claims and pod tables by the project token and the Dispatch mirror by the project key. `workflow.Config` now carries both; mixing them is invisible at compile time and was one of the three defects this round found."
+  ],
+  "deviations": [
+    "Plan departure 1 stands as the architect decided: no previous-contract gate is built, and the guard is that no session-facing response carries `suspendedBy` at all. `suspendedBy` is served on the operator routes, which no plugin calls, and on `strandedClaims`, which is the operator's own state.",
+    "Plan departure 2 is measured and stands: the pinned Oh My Pi (18.13.2) reports an async job and a subagent, and does not report a named bash service, which R9's guidance therefore covers instead (criterion C5's run above).",
+    "T3.5's seventh condition, 'no INFRA-484 update round open on the pod', is left out with a comment naming sjawhar/legion#2538: `supervise.Claim.UpdateRound` does not exist on this branch, and the forward merge that brings the field in adds one table row.",
+    "DaemonAPIVersion is 48, not the 47 the plan named: main landed 45, which moved #2538 to 46 and #2539 to 47 (the architect's message of 2026-11-02 04:40Z).",
+    "The acceptance rig runs one role per pod and starts the launcher in its single-role form, because the roles-dir form makes Linux user, mount, PID and IPC namespaces over the worker image's layout, which this container has not. The daemon's side of the protocol is identical, but the rig therefore does not exercise role namespaces or the once-per-pod restore, which `internal/runtime/sandbox`'s own test covers instead.",
+    "7330b412b77b, a commit no role of this tree made, removed `.legion/INFRA-945/plan.json` from this branch while this phase ran. The architect's answer: keep it, the plan stays readable at dispatch://INFRA-945/artifact/plan-md, and write this handoff as the running role prompt says."
+  ],
+  "discoveredComplexity": [
+    "Three defects fatal to the whole feature were found only by the acceptance rig, each invisible to every unit test because each half of the seam was tested alone. (1) The listener built its wake report's envelope without `source_event_id`, which `contracts.Envelope.Validate` requires, so every report including `listener_ready` was dropped before publication and no pod could ever be released. (2) The workflow engine addressed the pod tables by the project key while the daemon addressed them by the token, so engine writes and daemon reads never met. (3) The release stopped every role process before the teardown asked one of those roles' shims for the bundle, so every release was cancelled with `bundle_save_failed`. Each is fixed here with a regression test that drives both sides of its seam.",
+    "A fourth gap: nothing on the daemon side read a saved bundle back or sent it to the replacement pod's launcher, so R2's restore half was unwired — both ends existed and were unit-tested, and `grep` for `SplitWorkspaceBundle` outside tests found only its own declaration. The runtime now sends the slices before any `launcher_start` and deletes the stored bundle on the launcher's `Held`.",
+    "`workflowRuntime.idleTick`'s comment says a test shortens it, but nothing sets it and nothing reachable from the daemon's boot can, so the rig waits out the real one-minute tick. Not changed here; it is why the rig costs 217 s rather than 30.",
+    "A direct message to a session that also holds an interest in its own agent subject may be delivered twice: the listener's subscribe handler appends the agent subject to a session's stored topics, so the session is reachable on both the interest fan-out and the agent-subject path. Seen once while building the rig, not chased, and nothing was changed for it; it is `packages/envoy`'s to judge."
+  ],
+  "openQuestionsForArchitect": [
+    "Q2 from the plan is still open and is yours at accepting: sjawhar/legion#2588 (INFRA-839) has not merged, so this tree carries no `keep` field. Every role publish here keeps nothing, which is exactly R3 item 3's `keep: false` case and is what the rig proves; if #2588 merges first, the kept-message half arrives with it and needs no change here.",
+    "Three test-failure classes in this pod are environmental and are not this change's: `drop test database: ERROR: permission denied to terminate process (SQLSTATE 42501)` at teardown under load, anything needing Docker (`rootless Docker not found`), and `internal/runtime/tmux`'s `TestNewRefusesLaunchersItCannotRun` and `cmd/legion`'s `TestSessionsImportRefusesSymlinkedSessionDirectory`, which read this container's own PATH and session layout. CI should show all of them green."
+  ]
+}
