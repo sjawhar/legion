@@ -2755,7 +2755,8 @@ Each item below names a check, then what it holds, with 4b.5's acceptance item i
 
 The devbox proof of INFRA-214's A3 and A4.
 A person decides on a tree that Legion does not run, and the decision reaches the project controller.
-The rig is Stage 3's ([`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)), copied: a scratch Dispatch with header identity, NATS and Postgres in containers, a real Envoy listener, and the Go daemon and `legion controller start` built from the checkout.
+The rig is Stage 3's ([`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)), copied:
+a scratch Dispatch with header identity, NATS and Postgres in containers, a real Envoy listener, and the Go daemon and `legion controller start` built from the checkout.
 The agents are real.
 Nothing in the run reads production, and no tree reaches a pull request.
 
@@ -2768,6 +2769,11 @@ LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic 
 **Inputs.**
 
 - `LEGION_E2E_MODEL_ROUTE`: `gateway` with `LEGION_E2E_MODEL_GATEWAY_URL` and `hawk-token`, or `key-file` with `LEGION_E2E_ANTHROPIC_KEY_FILE`, as Stage 3 reads them.
+
+- `LEGION_E2E_MODEL_BASE_URL` (`key-file` only):
+  the Anthropic-compatible endpoint the key file's key is for, passed to [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) as `--base-url`.
+  Anthropic's own endpoint when unset; a gateway key needs its gateway's URL here.
+  `prerequisites` refuses a URL [`model_base_url_refusal`](lib/model-endpoint.sh) refuses, and refuses the variable under `gateway`.
 
 - Legion's two role Apps: this deployment's own pair by default, each key read through `agent-secrets`, or another pair through `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_ID`, `LEGION_E2E_REVIEW_APP_KEY_NAME` and `LEGION_E2E_APP_KEY_RUNNER` ([`lib/github-apps.sh`](#libgithub-appssh)), as Stage 3 reads them.
   `prerequisites` proves each key is its id's App against GitHub's `GET /app` ([`read_app_logins`](#libworkflowsh)), and `legion.yaml`'s `github_apps` is the block it proved.
@@ -2784,13 +2790,15 @@ The devbox `gh` must act as the proof human (`require_proof_human`, [`lib/workfl
 After the script reads its inputs, it unsets every `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable.
 Thus no process of the run gets an operator's endpoint or bearer.
 
-**Services.** Postgres (`legion-e2e-pd-pg-<pid>`) and NATS (`legion-e2e-pd-nats-<pid>`) in containers, the Envoy listener, the scratch Dispatch, the daemon, and each controller in a window of the run's own tmux server.
+**Services.**
+Postgres (`legion-e2e-pd-pg-<pid>`) and NATS (`legion-e2e-pd-nats-<pid>`) in containers, the Envoy listener, the scratch Dispatch, the daemon, and each controller in a window of the run's own tmux server.
 The person is `smoke`: each write of the proof human carries the `X-Dispatch-User: smoke` header, and Dispatch records the actor `user:smoke`.
-The stand-in session of `dispatch_agent` (`session stage3-architect-stand-in`) writes the session reply of the control and parks tree 5.
+The stand-in session of `dispatch_agent` (`session stage3-architect-stand-in`) writes the session reply of the control and tries to park tree 5, which the daemon sets back.
 The script posts the hold marks on trees 1 and 3 over the same agents' bearer, naming session 1, the first controller's session, as their author.
 The project maps `sjawhar/legion-smoke` as its default repository.
 
-**Files.** The work directory is `/tmp/legion-e2e-pd.<pid>.<random>`.
+**Files.**
+The work directory is `/tmp/legion-e2e-pd.<pid>.<random>`.
 
 - `legion.yaml`: Stage 3's daemon configuration, with `gates.design: root-issues`, `admission_cap: 3` and `controller_wake_interval_seconds: 86400`.
   Three slots, since trees 1 and 4 run again and tree 3 still needs one.
@@ -2807,25 +2815,96 @@ Each checkpoint prints `== <name>`, what it saw, and `ok <name>`.
 The first failure ends the run and names the checkpoint.
 The transcript records the duration of each wait.
 
-| checkpoint | what it holds |
-| :--- | :--- |
-| `prerequisites` | The tools, the two role Apps proved against GitHub's `GET /app` (`read_app_logins`), the inputs of the model route, no leftover of an earlier run (`refuse_leftovers legion-e2e-pd`), the proof human, and a read of `sjawhar/legion-smoke`. Then the script unsets the environment. |
-| `rig` | The tokens, Postgres, NATS, the listener on a port the kernel chose (`start_held`), Dispatch on a port its keeper holds for the run (`keep_port`, `start_kept`), the project and its repository mapping, the isolated profile with this checkout's `pi-envoy` and `pi-legion`, and the model route. |
-| `boot` | The daemon's port is held by its keeper (`keep_port`) and named in `legion.yaml`, `legion start --check-config` passes, the daemon starts on that port's socket (`start_kept`, `LEGION_LISTEN_FD`), and `legion state` answers. |
-| `controller-up` | The first controller starts. `controllerLocator.sessionId` names session 1. The profile holds one session file, and its header names that session. Its first user message is the start message, and an assistant message follows. |
-| `trees-wait-on-a-person` | The person files trees 1, 2, 4 and 5 and sets each to `todo`. Each tree gets to `awaiting_person` with `waitingOn.kind: gate`. |
-| `trees-parked` | `legion status <key> backlog` parks trees 1 and 2. Right after tree 1's park, the script posts the controller's hold mark on tree 1 as session 1 (`Parked by Legion while it waits on: …`), the comment the controller posts when it parks a tree for a hold. Tree 2 gets no mark. The person sets tree 4 to `backlog`, and the stand-in session (`dispatch_agent`) sets tree 5 to `backlog`. Each tree gets to phase `done` with no slot, and its architect gets to `suspended`. A park can come while the architect's last turn still runs, with its suspension held for that turn. A decision made then goes to that live session, and the daemon has nothing to relay, so no check answers on a tree before its architect is suspended. The newest `backlog` write is by `session:legion-daemon:<project>` on trees 1 and 2, by `user:smoke` on tree 4, and by `session:stage3-architect-stand-in` on tree 5. Only tree 1 carries the mark. The stand-in session then opens a question on each tree, as its architect would. |
-| `answer-readmits` | A3. The person answers the question on tree 1. The daemon log holds `workflow: a person's decision on a parked tree goes to the controller` with `decision=ask-answered` for tree 1. Session 1 receives `summary: parked-decision on <tree 1>`. Then it calls `set_status` to `todo`. Dispatch records that write as `legion-daemon:<project>`. Admission takes tree 1 again. A user turn of its architect names `dispatch://<tree 1>/ask/<id> (ask-answered by user:smoke)`. Session 1 writes a `Parked decision read: …` comment on tree 1. |
-| `question-stays-parked` | A3. The person replies on the open approval ask of tree 2. The daemon log holds `workflow: a person's decision on a parked tree goes to the controller` with `decision=ask-reply` and `actor=user:smoke`. Session 1 receives the notice and answers on that ask: its reply begins `Parked decision read: …`, and the ask then waits on the person. The control: the stand-in session replies (`turn: agent`) on the same ask. The daemon logs `workflow: a session's reply on a parked tree is not relayed`, and no second notice gets to session 1. 600 s after the reply, tree 2 is still `backlog` and phase `done`, with no `todo` event after the person's reply. |
-| `foreign-park-stays` | A3. The person answers the questions on tree 2, which the operator parked with no hold mark, tree 4, which the person parked, and tree 5, which the stand-in session parked. For each tree, the daemon log holds the workflow's relay with `decision=ask-answered`, and session 1 receives the notice. Session 1 writes a new `Parked decision read: …` comment on each tree that names who parked it and says it stays parked: `legion-daemon` on tree 2, `smoke parked the tree` on tree 4, and `stage3-architect-stand-in parked the tree` on tree 5. 600 s after the latest comment, session 1 has set none of the three trees to `todo`. Each is still `backlog` and phase `done`, with no `todo` event after its answer. |
-| `approval-queues` | A3. The person approves the spec of tree 4, still parked by the person. That approval is the person's handover (sjawhar/legion#2619): the daemon logs `admission: queued a person's handover` with `source=approval`, Dispatch records `todo` as `legion-daemon:<project>`, admission takes tree 4, and it gets to `planning`. No spec notice of tree 4 finishes undelivered, the daemon relays nothing for the approval, and session 1 receives no further notice on tree 4. |
-| `controller-down` | Session 1 quits as a person quits it, and the controller role has no holder. |
-| `walk-on-start` | A4. The person files tree 3. The tree waits on its gate. The script parks it with `legion status`, posts the hold mark as session 1, and opens a question on it as the stand-in session. When the tree is phase `done` and its architect is `suspended`, the person answers the question while no controller runs, and the daemon logs the relay. The second controller starts. The script reads only its session file. Its first user message is the start message. It holds no notice for tree 3. It sets tree 3 to `todo`, and Dispatch records that write as the daemon's. Admission takes tree 3, and the task of its architect names the answer. Session 2 writes a comment on tree 3. When the file of session 2 stays the same for 120 s, trees 2 and 5 are still `backlog` with no newer `Parked decision read:` comment, and session 2 has set neither to `todo`. |
-| `verdict` | [`lib/parked-decision-verdict.jq`](lib/parked-decision-verdict.jq) reads the daemon log. `unmatched` and `unrelayed` are empty, and `undelivered` and `sent` are empty too: each decision of the run is an answer or a reply, which the workflow relays itself, and the one approval, tree 4's, was queued as a handover. The log holds the workflow's relay of a person's answer on each of trees 1 to 5. |
-| `cleanup-is-complete` | The second controller quits. Each service and container stops. The branch `legion/<tree>` of each tree is gone from `sjawhar/legion-smoke` (GitHub answers 404). The work directory is gone. |
+- `prerequisites`: The tools, the two role Apps proved against GitHub's `GET /app` (`read_app_logins`), the inputs of the model route, no leftover of an earlier run (`refuse_leftovers legion-e2e-pd`), the proof human, and a read of `sjawhar/legion-smoke`.
+  Then the script unsets the environment.
+
+- `rig`: The tokens, Postgres, NATS, the listener on a port the kernel chose (`start_held`), Dispatch on a port its keeper holds for the run (`keep_port`, `start_kept`), the project and its repository mapping, the isolated profile with this checkout's `pi-envoy` and `pi-legion`, and the model route.
+
+- `boot`: The daemon's port is held by its keeper (`keep_port`) and named in `legion.yaml`, `legion start --check-config` passes, the daemon starts on that port's socket (`start_kept`, `LEGION_LISTEN_FD`), and `legion state` answers.
+
+- `controller-up`: The first controller starts.
+  `controllerLocator.sessionId` names session 1.
+  The profile holds one session file, and its header names that session.
+  Its first user message is the start message, and an assistant message follows.
+
+- `trees-wait-on-a-person`: The person files trees 1, 2, 4 and 5 and sets each to `todo`.
+  Each tree gets to `awaiting_person` with `waitingOn.kind: gate`.
+
+- `trees-parked`: `legion status <key> backlog` parks trees 1 and 2.
+  Right after tree 1's park, the script posts the controller's hold mark on tree 1 as session 1 (`Parked by Legion while it waits on: …`), the comment the controller posts when it parks a tree for a hold.
+  Tree 2 gets no mark.
+  The person sets tree 4 to `backlog`.
+  Each of the three gets to phase `done` with no slot, and its architect gets to `suspended`.
+  A park can come while the architect's last turn still runs, with its suspension held for that turn.
+  A decision made then goes to that live session, and the daemon has nothing to relay, so no check answers on a tree before its architect is suspended.
+  The newest `backlog` write is by `session:legion-daemon:<project>` on trees 1 and 2 and by `user:smoke` on tree 4.
+  Only tree 1 carries the mark.
+  The stand-in session then opens a question on each of the three, as its architect would.
+  The stand-in session (`dispatch_agent`) also sets tree 5 to `backlog`.
+  A session outside a tree cannot park a root that waits on a person:
+  the daemon logs `workflow: a session wrote a lifecycle status; the daemon re-asserts its own` for tree 5 with `wrote=backlog`, Dispatch shows the logged status written back by `legion-daemon:<project>`, and tree 5 still waits on its gate and is not parked (`Engine.sessionStatusWrite`).
+
+- `answer-readmits`: A3.
+  The person answers the question on tree 1.
+  The daemon log holds `workflow: a person's decision on a parked tree goes to the controller` with `decision=ask-answered` for tree 1.
+  Session 1 receives `summary: parked-decision on <tree 1>`.
+  Then it calls `set_status` to `todo`.
+  Dispatch records that write as `legion-daemon:<project>`.
+  Admission takes tree 1 again.
+  A user turn of its architect names `dispatch://<tree 1>/ask/<id> (ask-answered by user:smoke)`.
+  Session 1 writes a `Parked decision read: …` comment on tree 1.
+
+- `question-stays-parked`: A3.
+  The person replies on the open approval ask of tree 2.
+  The daemon log holds `workflow: a person's decision on a parked tree goes to the controller` with `decision=ask-reply` and `actor=user:smoke`.
+  Session 1 receives the notice and answers on that ask: its reply begins `Parked decision read: …`, and the ask then waits on the person.
+  The control: the stand-in session replies (`turn: agent`) on the same ask.
+  The daemon logs `workflow: a session's reply on a parked tree is not relayed`, and no second notice gets to session 1.
+  600 s after the reply, tree 2 is still `backlog` and phase `done`, with no `todo` event after the person's reply.
+
+- `foreign-park-stays`: A3.
+  The person answers the questions on tree 2, which the operator parked with no hold mark, and tree 4, which the person parked.
+  For each tree, the daemon log holds the workflow's relay with `decision=ask-answered`, and session 1 receives the notice.
+  Session 1 writes a new `Parked decision read: …` comment on each tree that names who parked it and says it stays parked:
+  `legion-daemon` on tree 2 and `smoke parked the tree` on tree 4.
+  600 s after the latest comment, session 1 has set neither tree to `todo`.
+  Each is still `backlog` and phase `done`, with no `todo` event after its answer.
+
+- `approval-queues`: A3.
+  The person approves the spec of tree 4, still parked by the person.
+  That approval is the person's handover (sjawhar/legion#2619):
+  the daemon logs `admission: queued a person's handover` with `source=approval`, Dispatch records `todo` as `legion-daemon:<project>`, admission takes tree 4, and it gets to `planning`.
+  No spec notice of tree 4 finishes undelivered, the daemon relays nothing for the approval, and session 1 receives no further notice on tree 4.
+
+- `controller-down`: Session 1 quits as a person quits it, and the controller role has no holder.
+
+- `walk-on-start`: A4.
+  The person files tree 3.
+  The tree waits on its gate.
+  The script parks it with `legion status`, posts the hold mark as session 1, and opens a question on it as the stand-in session.
+  When the tree is phase `done` and its architect is `suspended`, the person answers the question while no controller runs, and the daemon logs the relay.
+  The second controller starts.
+  The script reads only its session file.
+  Its first user message is the start message.
+  It holds no notice for tree 3.
+  It sets tree 3 to `todo`, and Dispatch records that write as the daemon's.
+  Admission takes tree 3, and the task of its architect names the answer.
+  Session 2 writes a comment on tree 3.
+  When the file of session 2 stays the same for 120 s, tree 2 is still `backlog` with no newer `Parked decision read:` comment, and session 2 has not set it to `todo`.
+
+- `verdict`: [`lib/parked-decision-verdict.jq`](lib/parked-decision-verdict.jq) reads the daemon log.
+  `unmatched` and `unrelayed` are empty, and `undelivered` and `sent` are empty too:
+  each decision of the run is an answer or a reply, which the workflow relays itself, and the one approval, tree 4's, was queued as a handover.
+  The log holds the workflow's relay of a person's answer on each of trees 1 to 4.
+
+- `cleanup-is-complete`: The second controller quits.
+  Each service and container stops.
+  The branch `legion/<tree>` of each tree is gone from `sjawhar/legion-smoke` (GitHub answers 404).
+  The work directory is gone.
 
 The last line is `parked decision devbox e2e: PASS` or `parked decision devbox e2e: FAIL (check <name>)`.
-The EXIT trap does the same cleanup on each exit: it stops the controllers, the daemon, Dispatch, the listener and the containers, closes the open pull requests of the run, removes its branches, and copies each session of the profile into the evidence directory.
+The EXIT trap does the same cleanup on each exit:
+it stops the controllers, the daemon, Dispatch, the listener and the containers, closes the open pull requests of the run, removes its branches, and copies each session of the profile into the evidence directory.
 A pass leaves nothing but the evidence directory.
 A failure also leaves the work directory, and prints its path.
 
@@ -2835,7 +2914,6 @@ The input is the JSON objects of the daemon, one to a line:
 ```bash
 jq -r '.[].jsonPayload | tojson' <log export>.json | jq -R -s -f scripts/e2e/lib/parked-decision-verdict.jq
 ```
-
 ## dispatch-user-turns.sh
 
 LEGION-394's acceptance: a person's direct Send or Aside from Dispatch's conversation page is the session's own user turn, and everything else keeps its Envoy card.
@@ -4238,7 +4316,7 @@ Each item below names a flag, then what it means.
 It writes `<dir>/hawk-token`, the key command:
 `hawk-token` (resolved on `PATH`) run under the caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset is unset for it), for that one command.
 It appends one line per invocation, one per mint, one per call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`, and one line per call and its outcome to `<dir>/hawk-token.calls` ([`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads it); stdout carries the key alone.
-The profile's `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey` and `X-Api-Key` both `!exec <dir>/hawk-token` (Oh My Pi runs a `!command` through `/bin/sh -c`, and `exec` makes the key command the process it started, so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model role, the roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`, `ollama`, `llama.cpp` and `lm-studio`.
+The profile's `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey` and `X-Api-Key` both `!exec <dir>/hawk-token` (Oh My Pi runs a `!command` through `/bin/sh -c`, and `exec` makes the key command the process it started, so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model role, the roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets `enabledModels: [anthropic/*]`, disables `amazon-bedrock`, `bedrock-mantle`, `google`, `ollama`, `llama.cpp` and `lm-studio`, and sets `setupVersion: 2`, so the pinned Oh My Pi, whose `CURRENT_SETUP_VERSION` is 2, opens no setup wizard in the fresh profile.
 Stdout is the key command's path.
 
 A pane cannot run `hawk-token` itself, which is why the command, and only it, gets the operator's environment.
@@ -4324,7 +4402,7 @@ Unlike `hawk-token` there is nothing to mint and no login to lose to a relocked 
 every call is a plain, fast file read, `served` or `failed` (there is no `timeout` or `killed` here, since nothing is minted or waited on).
 It appends one tab-separated line per call to `<dest>/anthropic-key.calls`, and to the caller's `MODEL_GATEWAY_CALLS_FILE` when its environment names one, in exactly the record shape [`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads
 — the installer's preflight (`--preflight`) is no agent's and is left out, the same rule `hawk-token`'s own key command follows.
-The profile's `agent/models.yml` points the `anthropic` provider at `--base-url` with `apiKey` and `X-Api-Key` both `!exec <key-dir>/anthropic-key`, and its `agent/config.yml` pins every model role to `anthropic/claude-opus-4-8` and disables every other provider a pane could reach without the key file, the same shape [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) writes.
+The profile's `agent/models.yml` points the `anthropic` provider at `--base-url` with `apiKey` and `X-Api-Key` both `!exec <key-dir>/anthropic-key`, and its `agent/config.yml` pins every model role to `anthropic/claude-opus-4-8` and disables every other provider a pane could reach without the key file, the same shape [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) writes, `setupVersion: 2` included.
 
 The script creates the profile's two directories, `<dest>` and `<key-dir>`, and removes neither;
 the caller does, with its work directory, `<key-dir>` unconditionally and `<dest>` only when it keeps no evidence.
@@ -4362,7 +4440,7 @@ it never opens, reads, copies or hashes it, and runs no `omp` command that touch
 `--operator-home` is the operator's real home, which the stage proof captures before it runs anything under the run's own `HOME`;
 the script never takes it from its own `$HOME`.
 
-The profile's `agent/config.yml` is the key-file route's (every model role `anthropic/claude-opus-4-8`, `enabledModels` that one model, every other provider a pane could reach disabled) plus `memory.backend: "off"`, so the run writes no memory into the operator's database.
+The profile's `agent/config.yml` is the key-file route's (every model role `anthropic/claude-opus-4-8`, `enabledModels` that one model, every other provider a pane could reach disabled, `setupVersion: 2`) plus `memory.backend: "off"`, so the run writes no memory into the operator's database.
 No `models.yml` is written, so no `apiKey` or `X-Api-Key` overrides the stored login.
 
 **The operator's build.**

@@ -2,13 +2,16 @@
 # The devbox proof that a person's decision on a parked Legion tree reaches the controller
 # (INFRA-214, A3 and A4). A scratch Dispatch, NATS, a real Envoy listener, the Go daemon and the
 # operator-launched controller, all built from this checkout, run on this box with real agents.
-# Trees 1, 2, 4 and 5 wait on their design gate and are parked: the operator's `legion status` parks
+# Trees 1, 2 and 4 wait on their design gate and are parked: the operator's `legion status` parks
 # trees 1 and 2 (the daemon's session), with the controller's hold mark beside tree 1's park only,
-# the person parks tree 4, and another session parks tree 5. The person approves tree 1, and the
-# controller re-admits it from the `parked-decision` notice, since it is Legion's own hold; the
-# person questions tree 2, and it stays parked; the person approves trees 2, 4 and 5, and the
-# controller comments but leaves them parked, since none is Legion's own hold. Tree 3 is parked with
-# the hold mark and approved while no controller runs, and the next controller's start walk
+# and the person parks tree 4. The person answers tree 1's question, and the controller re-admits
+# it from the `parked-decision` notice, since it is Legion's own hold; the person questions tree 2,
+# and it stays parked; the person answers trees 2 and 4, and the controller comments but leaves
+# them parked, since neither is Legion's own hold; the person approves tree 4's spec, which the
+# daemon queues as the person's handover. Tree 5 also waits on its gate, and a session outside its
+# tree tries to park it: the daemon sets its own status back (Engine.sessionStatusWrite), so a
+# session cannot park a root that waits on a person, and tree 5 keeps waiting. Tree 3 is parked
+# with the hold mark and answered while no controller runs, and the next controller's start walk
 # re-admits it. The rig is Stage 3's (stage3-devbox-workflow.sh), copied: nothing here reads
 # production, and no tree reaches a pull request.
 #
@@ -30,6 +33,8 @@ Inputs (environment):
   LEGION_E2E_MODEL_ROUTE         gateway or key-file (required)
   LEGION_E2E_MODEL_GATEWAY_URL   the model gateway's Anthropic endpoint (gateway; needs hawk-token)
   LEGION_E2E_ANTHROPIC_KEY_FILE  a 0600 file that holds an Anthropic key (key-file)
+  LEGION_E2E_MODEL_BASE_URL      the Anthropic-compatible endpoint that key is for (key-file;
+                                 default https://api.anthropic.com)
   PARKED_DECISION_EVIDENCE_DIR   the evidence directory (default: a fresh /tmp directory, kept)
   PARKED_DECISION_UNTIL          stop after this checkpoint passes (a development run, not the proof)
   LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID,
@@ -65,6 +70,8 @@ fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 # shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
 . "$root/scripts/e2e/lib/transcript.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/model-endpoint.sh
+. "$root/scripts/e2e/lib/model-endpoint.sh"
 transcript_to "$evidence/transcript.log"
 ok=
 check=setup
@@ -386,11 +393,20 @@ set_status_after() {
             | contains("set_status") and test("[\"'"'"'`]" + $issue + "[\"'"'"'`]") and test("[\"'"'"'`]todo[\"'"'"'`]"))))))
   ' "$1" >/dev/null
 }
-# todo_by_daemon_after ISSUE SEQ: Dispatch shows ISSUE set `todo` by the daemon's session after the
-# event SEQ.
-todo_by_daemon_after() {
-  dispatch_events "$1" | jq -e --argjson seq "$2" --arg daemon "legion-daemon:$project" '
-    any(.[]; .seq > $seq and .type == "issue.updated" and .payload.status == "todo" and .actor.id == $daemon)' >/dev/null
+# status_by_daemon_after ISSUE STATUS SEQ: Dispatch shows ISSUE set to STATUS by the daemon's session
+# after the event SEQ; todo_by_daemon_after ISSUE SEQ is that for `todo`.
+status_by_daemon_after() {
+  dispatch_events "$1" | jq -e --arg status "$2" --argjson seq "$3" --arg daemon "legion-daemon:$project" '
+    any(.[]; .seq > $seq and .type == "issue.updated" and .payload.status == $status and .actor.id == $daemon)' >/dev/null
+}
+todo_by_daemon_after() { status_by_daemon_after "$1" todo "$2"; }
+# reasserted_status ISSUE prints the status the daemon logged it set back on ISSUE after the stand-in
+# session wrote `backlog` there (Engine.sessionStatusWrite), and fails while it logged none.
+reasserted_status() {
+  jq -R -s -er --arg issue "$1" --arg session "$dispatch_agent_session" '
+    [split("\n")[] | fromjson? | select(type == "object")
+      | select(.msg == "workflow: a session wrote a lifecycle status; the daemon re-asserts its own"
+        and .issue == $issue and .session == $session and .wrote == "backlog")] | last // empty | .status' "$evidence/logs/daemon.log"
 }
 last_seq() { dispatch_events "$1" | jq -er 'map(.seq) | max // 0'; }
 # read_comment ISSUE SESSION prints the newest comment on ISSUE by SESSION that begins
@@ -516,10 +532,17 @@ if [ -n "$until_checkpoint" ]; then
   esac
 fi
 model_route=${LEGION_E2E_MODEL_ROUTE:-}
+# The endpoint the key file's key is for (lib/model-endpoint.sh), Anthropic's own when unset: a
+# gateway key sent to Anthropic's own endpoint is refused there, so a gateway's key names its URL.
+model_base_url=${LEGION_E2E_MODEL_BASE_URL:-}
 case "$model_route" in
-  gateway) command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway" ;;
+  gateway) command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
+    [ -z "$model_base_url" ] || fail "LEGION_E2E_MODEL_BASE_URL is the key-file route's endpoint; the gateway route takes LEGION_E2E_MODEL_GATEWAY_URL" ;;
   key-file) key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
-    [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key" ;;
+    [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+    if [ -n "$model_base_url" ] && why=$(model_base_url_refusal "$model_base_url") && [ -n "$why" ]; then
+      fail "LEGION_E2E_MODEL_BASE_URL $why: name the model endpoint's base URL, or leave it unset for Anthropic's own"
+    fi ;;
   *) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
 esac
 refuse_leftovers legion-e2e-pd
@@ -548,11 +571,11 @@ case "$model_route" in
       fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
     ;;
   key-file)
-    key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
+    key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file" --base-url "${model_base_url:-$anthropic_base_url}") ||
       fail "the agents' model route through the key file could not be installed (the reason is above)"
     ;;
 esac
-note "the agents' model route: $model_route, keyed by $key_command"
+note "the agents' model route: $model_route, keyed by $key_command$([ "$model_route" = key-file ] && printf ', calling %s' "${model_base_url:-$anthropic_base_url}")"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&
@@ -666,7 +689,7 @@ waited=$SECONDS
 tree1=$(new_issue "Parked decision proof tree 1: answered after its park ($work)")
 tree2=$(new_issue "Parked decision proof tree 2: questioned after its park ($work)")
 tree4=$(new_issue "Parked decision proof tree 4: parked by the person, answered, then approved ($work)")
-tree5=$(new_issue "Parked decision proof tree 5: parked by another session, then answered ($work)")
+tree5=$(new_issue "Parked decision proof tree 5: a session's park is set back ($work)")
 for tree in $tree1 $tree2 $tree4 $tree5; do
   set_status "$tree" todo
 done
@@ -687,29 +710,37 @@ park "$tree1"
 controller_mark "$tree1" "the proof's hold of tree 1"
 park "$tree2"
 set_status "$tree4" backlog
+park_seq5=$(last_seq "$tree5")
 dispatch_agent PATCH "issues/$tree5" '{"status":"backlog"}' >/dev/null
-for tree in $tree1 $tree2 $tree4 $tree5; do
+for tree in $tree1 $tree2 $tree4; do
   until_true 300 "$tree to be parked" parked "$tree"
 done
 # Who parked a tree is the author of its park: the operator's `legion status` writes as the daemon's
-# session, the person's own write as the person, and the stand-in's as its session. Tree 1 also
-# carries the controller's hold mark, as session 1 posts it after a park for a hold, so its park is
-# Legion's own hold; tree 2's operator park carries none.
+# session and the person's own write as the person. Tree 1 also carries the controller's hold mark,
+# as session 1 posts it after a park for a hold, so its park is Legion's own hold; tree 2's operator
+# park carries none.
 [ "$(parked_by "$tree1")" = "session:legion-daemon:$project" ] || fail "$tree1's park is by $(parked_by "$tree1"), want the daemon's session"
 [ "$(parked_by "$tree2")" = "session:legion-daemon:$project" ] || fail "$tree2's park is by $(parked_by "$tree2"), want the daemon's session"
 [ "$(parked_by "$tree4")" = "user:$proof_human_user" ] || fail "$tree4's park is by $(parked_by "$tree4"), want user:$proof_human_user"
-[ "$(parked_by "$tree5")" = "session:$dispatch_agent_session" ] || fail "$tree5's park is by $(parked_by "$tree5"), want session:$dispatch_agent_session"
 has_mark "$tree1" || fail "$tree1 carries no hold mark from $session1"
 ! has_mark "$tree2" || fail "$tree2, the operator's park, carries a hold mark"
+# A session outside a tree cannot park a root that waits on a person: the daemon records the write,
+# sets its own status back through its outbox and tells the tree's architect
+# (Engine.sessionStatusWrite). Tree 5 is that root, so it never parks and keeps waiting on its gate.
+until_true 300 "the daemon to set $tree5's status back after the stand-in session's park" reasserted_status "$tree5"
+status5=$(reasserted_status "$tree5")
+until_true 300 "Dispatch to show $tree5 $status5 again by legion-daemon:$project" status_by_daemon_after "$tree5" "$status5" "$park_seq5"
+waits_on_gate "$tree5" || fail "$tree5 no longer waits on its gate after the session's park: $(daemon_state | jq -c --arg k "$tree5" '.issues[$k] | {phase, slot, waitingOn, architect: .architect.state}')"
+! parked "$tree5" || fail "$tree5 is parked after a session outside its tree wrote backlog"
 # Each parked tree gets a question the person answers later, opened by the stand-in session as the
 # tree's architect would have asked it: an answer to a question is the decision the daemon relays
 # (workflow's dispatchAskClosed), where a person's approval of a parked labelled root's spec is
 # queued by the daemon itself (#2619, approval-queues).
 declare -A question_of
-for tree in $tree1 $tree2 $tree4 $tree5; do
+for tree in $tree1 $tree2 $tree4; do
   question_of[$tree]=$(open_question "$tree")
 done
-note "$tree1 (the daemon's session, with the hold mark) and $tree2 (the daemon's session, no mark), $tree4 (by $proof_human_user) and $tree5 (by session $dispatch_agent_session) are phase done with no slot, each architect suspended, each with an open question ($(since "$waited"))"
+note "$tree1 (the daemon's session, with the hold mark) and $tree2 (the daemon's session, no mark) and $tree4 (by $proof_human_user) are phase done with no slot, each architect suspended, each with an open question; the daemon set $tree5 back to $status5 after session $dispatch_agent_session wrote backlog, and it still waits on its gate ($(since "$waited"))"
 pass
 done_with trees-parked
 
@@ -774,21 +805,20 @@ begin foreign-park-stays
 waited=$SECONDS
 # A park that is not Legion's own hold moves only when whoever made it asks: the controller moves
 # none of these trees and names who parked each, the daemon's session with no hold mark for tree 2
-# (the operator's `legion status`), the person for tree 4 and the stand-in session for tree 5.
+# (the operator's `legion status`) and the person for tree 4.
 declare -A seq_of before_of told_of parker_of read_of
 parker_of[$tree2]="legion-daemon"
 parker_of[$tree4]="$proof_human_user parked the tree"
-parker_of[$tree5]="$dispatch_agent_session parked the tree"
-for tree in $tree2 $tree4 $tree5; do
+for tree in $tree2 $tree4; do
   seq_of[$tree]=$(last_seq "$tree")
   before_of[$tree]=$(read_comment "$tree" "$session1" || true)
   told_of[$tree]=$(controller_deliveries "$session1_file" "$(notice_needle parked-decision "$tree")")
 done
-for tree in $tree2 $tree4 $tree5; do
+for tree in $tree2 $tree4; do
   answer_question "${question_of[$tree]}"
 done
 later=0
-for tree in $tree2 $tree4 $tree5; do
+for tree in $tree2 $tree4; do
   until_true 300 "the workflow to relay the person's answer on $tree" relayed_logged "$tree" ask-answered
   needle=$(notice_needle parked-decision "$tree")
   until_true 600 "session 1 to receive another '$needle'" delivered_more "$session1_file" "$needle" "${told_of[$tree]}"
@@ -804,10 +834,10 @@ for tree in $tree2 $tree4 $tree5; do
 done
 rest=$((later + 600 - $(date +%s)))
 if ((rest > 0)); then
-  note "reading $tree2, $tree4 and $tree5 again ${rest}s from now, 600 s after the latest comment"
+  note "reading $tree2 and $tree4 again ${rest}s from now, 600 s after the latest comment"
   sleep "$rest"
 fi
-for tree in $tree2 $tree4 $tree5; do
+for tree in $tree2 $tree4; do
   ! set_status_after "$session1_file" "$tree" "" || fail "session 1 set $tree, which is no hold of Legion's own, to todo"
   dispatch_status_is "$tree" backlog >/dev/null || fail "$tree is $(dispatch_get "issues/$tree" | jq -r .status), want backlog"
   parked "$tree" || fail "$tree is no longer phase done with no slot and its architect suspended: $(daemon_state | jq -c --arg k "$tree" '.issues[$k] | {phase, slot, architect: .architect.state}')"
@@ -815,7 +845,7 @@ for tree in $tree2 $tree4 $tree5; do
     fail "Dispatch shows a status todo event on $tree after the answer"
   read_of[$tree]=$(any_read_comment "$tree")
 done
-note "600 s on, $tree2, $tree4 and $tree5 are backlog, phase done, with no todo event after their answers ($(since "$waited"))"
+note "600 s on, $tree2 and $tree4 are backlog, phase done, with no todo event after their answers ($(since "$waited"))"
 pass
 done_with foreign-park-stays
 
@@ -880,14 +910,14 @@ until_true 300 "$tree3's architect to be told '$answer3'" architect_turn_holds "
 until_true 600 "session 2 to post its Parked decision read: comment on $tree3" read_comment "$tree3" "$session2"
 note "the walk re-admitted $tree3 with no notice; its architect's task names $answer3; session 2 commented on it ($(since "$waited"))"
 until_true 1800 "session 2's file to stay unchanged for 120 s" file_quiet "$session2_file" 120
-# Tree 4 runs since approval-queues; trees 2 and 5 stay parked.
-for tree in $tree2 $tree5; do
+# Tree 4 runs since approval-queues; tree 2 stays parked.
+for tree in $tree2; do
   dispatch_status_is "$tree" backlog >/dev/null || fail "$tree is $(dispatch_get "issues/$tree" | jq -r .status), want backlog"
   ! set_status_after "$session2_file" "$tree" "" || fail "session 2 set $tree, which is no hold of Legion's own, to todo"
   [ "$(any_read_comment "$tree")" = "${read_of[$tree]}" ] || fail "$tree has a Parked decision read: comment newer than foreign-park-stays's: the walk judged its answer again"
 done
 ! controller_delivered "$session2_file" "$needle3" || fail "session 2 holds a '$needle3' delivery"
-note "$tree2 and $tree5 are still backlog with no newer Parked decision read: comment ($(since "$waited"))"
+note "$tree2 is still backlog with no newer Parked decision read: comment ($(since "$waited"))"
 pass
 done_with walk-on-start
 
@@ -901,10 +931,10 @@ jq -e '.unmatched == [] and .unrelayed == []' <<<"$verdict" >/dev/null ||
 # finished undelivered for the outbox to relay.
 jq -e '.undelivered == [] and .sent == []' <<<"$verdict" >/dev/null ||
   fail "the verdict holds a spec decision the outbox relayed: $(jq -c '{undelivered, sent}' <<<"$verdict")"
-for tree in $tree1 $tree2 $tree3 $tree4 $tree5; do
+for tree in $tree1 $tree2 $tree3 $tree4; do
   relayed_logged "$tree" ask-answered || fail "the daemon log holds no relay of a person's answer on $tree"
 done
-note "undelivered 0, sent 0, unrelayed 0, unmatched 0; the workflow relayed a person's answer on each of $tree1, $tree2, $tree3, $tree4 and $tree5"
+note "undelivered 0, sent 0, unrelayed 0, unmatched 0; the workflow relayed a person's answer on each of $tree1, $tree2, $tree3 and $tree4"
 pass
 done_with verdict
 

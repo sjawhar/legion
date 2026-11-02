@@ -205,6 +205,10 @@ modelRoles:
   review: $model
   oracle: $model
   deep: $model
+# The pinned Oh My Pi opens its setup wizard ("Setup step 1 of 5") in a profile whose setupVersion is
+# below its CURRENT_SETUP_VERSION, 2 in that build and the value an operator's own config.yml holds,
+# and a pane waiting on the wizard never starts its session. The profile is set up already.
+setupVersion: 2
 EOF
 [ -L "$link" ] || ln -s -- "$operator_db" "$link"
 {

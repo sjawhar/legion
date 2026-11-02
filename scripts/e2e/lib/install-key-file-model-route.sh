@@ -312,6 +312,10 @@ modelRoles:
 # (packages/pi-envoy/README.md, "The time limit").
 extensionHandlers:
   toolCallTimeoutMs: 120000
+# The pinned Oh My Pi opens its setup wizard ("Setup step 1 of 5") in a profile whose setupVersion is
+# below its CURRENT_SETUP_VERSION, 2 in that build and the value an operator's own config.yml holds,
+# and a pane waiting on the wizard never starts its session. The profile is set up already.
+setupVersion: 2
 EOF
 echo "$me: OMP profile $profile routes $model straight to $base_url, keyed by $key_command from $key_file" >&2
 printf '%s\n' "$key_command"
