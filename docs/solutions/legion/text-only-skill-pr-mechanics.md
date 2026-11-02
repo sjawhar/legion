@@ -69,9 +69,11 @@ parenthetical that wraps) is fine as long as no check greps the whole construct 
 
 The plan's fix-4 "verified" note said Zod's default object mode strips unknown keys, so the first cut
 wrote "fields outside the declared shape … the daemon ignores them". Every phase schema in
-`packages/contracts/src/handoff-schema.ts` is `.passthrough()` (lines 186–192 at 8672ab82): undeclared
-fields survive `legion handoff read` and reach the next worker; what actually fails is a *declared*
-field of the wrong type, which nulls the whole file. The reviewer caught it with the source line.
+`packages/contracts/src/handoff-schema.ts` was `.passthrough()` (lines 186–192 at 8672ab82):
+undeclared fields survived `legion handoff read` and reached the next worker, and what failed was
+a *declared* field of the wrong type, which nulled the whole file. The reviewer caught it with
+the source line. Since sjawhar/legion#2354 a handoff is a record on the Dispatch issue, its body
+is one JSON object, and that schema file is gone.
 
 A planner's `verified` field is an input to re-check, not a fact. Before a skill or role prompt
 states what code does, read the line and cite the symbol (`validatePhaseHandoff`, `.passthrough()`),
@@ -84,12 +86,16 @@ Fix 5's first cut told the reviewer to submit `APPROVED` on a clean pass. The sa
 review gate" already said the only approval is of the head that differs from the reviewed one by the
 `.legion/` deletion alone, and that no implementation change may follow an approval. Read literally,
 the new paragraph approved the pre-deletion head, put an implementation push after an approval, and
-fired the second `pr-review` wake fix 5 existed to remove. Correct rule (now in both files): one
-submission per round; `REQUEST_CHANGES` when a correctness finding stands; `COMMENT` for a clean pass
-while the head still carries `.legion/`; `APPROVE` only for the deletion head, named by SHA.
+fired the second `pr-review` wake fix 5 existed to remove. The rule that round wrote into both
+files: one submission per round; `REQUEST_CHANGES` when a correctness finding stands; `COMMENT`
+for a clean pass while the head still carried `.legion/`; `APPROVE` only for the deletion head,
+named by SHA. Since sjawhar/legion#2354 it is one review per round, `REQUEST_CHANGES` when a
+correctness finding stands and otherwise `APPROVE` of the head reviewed, named by SHA
+(`skills/legion-worker/references/merge-gate.md`), and a `COMMENT` decides nothing.
 
 Before committing a rule about a lifecycle step, grep the file for every other mention of that step
-(here: `approve`, `.legion/`, `deletion`) and read them together. The mechanics stay the same — one
+(on that round: `approve`, `.legion/`, `deletion`) and read them together. The mechanics stay the
+same — one
 `POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json` with `event` inside the body,
 because `gh api` moves `-f` fields into the URL when `--input` is used and GitHub would then create a
 pending draft review.

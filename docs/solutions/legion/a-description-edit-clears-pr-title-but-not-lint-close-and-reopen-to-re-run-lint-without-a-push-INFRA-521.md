@@ -22,9 +22,11 @@ Extends docs/solutions/legion/the-private-names-check-reads-each-events-frozen-b
   `pull_request` `opened`, `reopened` and `synchronize`. A description edit starts only `PR Title`
   (`pr-title.yaml`, which also listens to `edited`). So after fixing description text, `PR Title`
   goes green and `lint` stays red at that head.
-- To re-run `lint` with the corrected text when there is nothing to push (a handoff-only push
-  carries `skip-checks: true` and starts nothing), close and reopen the pull request at the same
-  head. The `reopened` event carries the current body and a fresh merge ref.
+- To re-run `lint` with the corrected text when there is nothing to push, close and reopen the
+  pull request at the same head. The `reopened` event carries the current body and a fresh merge
+  ref. Before sjawhar/legion#2354 a handoff-only push carried `skip-checks: true` and started
+  nothing, so it could not re-run `lint` either; since then a handoff is a Dispatch record, and
+  every push carries code.
 - A reopen also starts every other `pull_request` workflow. Cancel the runs that already passed at
   that head, but only those no branch rule requires.
 - A job re-run replays the old event payload and the old merge commit, so it also cannot pick up a
