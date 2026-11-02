@@ -72,8 +72,9 @@ type Deps struct {
 // stored yet, the handed update last (flushThrough), each with the class and the in-flight credit
 // the observer recorded for it (UpdateCredit, taken and landed under that lock).
 // AppendUpdateWithCredit appends one update of a room the same way, which is what the room's
-// persistence does with an update no class was recorded for. AppendRoomUpdateTx appends one
-// update of such a flush inside a durable writer's transaction, gated on the flush
+// persistence does with an update no class was recorded for. AppendParkedUpdate stores a room's
+// parked bytes, which change nothing a settlement reads (storeParked). AppendRoomUpdateTx appends
+// one update of such a flush inside a durable writer's transaction, gated on the flush
 // (flushThrough). Document writes that join an API transaction use
 // AppendUpdateTx, classifying the update the way the room's update observer
 // classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
@@ -86,6 +87,7 @@ type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error)
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
+	AppendParkedUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error)
 	AppendRoomUpdateTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
@@ -660,6 +662,7 @@ func New(deps Deps) *Service {
 	srv.Authorize = service.authorize
 	srv.OnTokenAuth = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject
+	srv.OnPeerUpdate = service.onPeerUpdate
 	srv.OnLoadDocument = service.onLoadDocument
 	srv.OnLastPeer = service.settleLastPeer
 	// ygo calls it once for every room it retires, whichever way: the idle sweep, CloseRoom.

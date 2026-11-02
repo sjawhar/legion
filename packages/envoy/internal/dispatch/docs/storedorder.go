@@ -21,7 +21,9 @@ import (
 //     (the measure updateChangesMarkdown applies to a live update).
 //  2. Versions. A version's markdown is the render of the fold through its doc_update_version.
 //  3. Pending. No update leaves the fold holding structs it parked: an update stored before one it
-//     depends on was stored out of order.
+//     depends on was stored out of order. One row breaks it by design: the parked bytes of a peer's
+//     update that waited for an edit the room had not received, which the room stores at once so
+//     a restart keeps them (storeParked). Its predecessor is stored when it arrives, after it.
 //
 // The fold starts from the document's oldest retained update, its base. Compaction folds older
 // history into that row (Compact) and a rebuild replaces the whole history with one row there
@@ -47,7 +49,8 @@ const (
 	// its doc_update_version.
 	StoredOrderVersion StoredOrderMismatchKind = "version"
 	// StoredOrderPending is an update after which the fold holds more parked structs than before
-	// it: an update it depends on is stored after it, or not at all.
+	// it: an update it depends on is stored after it, or not at all - a misordered store, or the
+	// parked bytes the room stores on purpose ahead of their predecessor (storeParked).
 	StoredOrderPending StoredOrderMismatchKind = "pending"
 )
 

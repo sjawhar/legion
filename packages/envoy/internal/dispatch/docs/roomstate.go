@@ -65,6 +65,12 @@ type roomState struct {
 	// recorded them, which is seq order for each room instance (queuedClass).
 	updateClasses  []*queuedClass
 	pendingUpdates int
+	// parked are the parked bytes of commits that parked something and changed nothing, which no
+	// OnUpdate hands to the room's persistence (classifyDrained). They wait here, with the cursor
+	// of the room instance that parked them, until a drainer that holds no replica lock and no
+	// document lock stores them (storeParked): a drain can run under a settlement's document lock,
+	// and the store takes that lock.
+	parked []parkedBytes
 	// shadow is what the latest committed live write left the room to measure again the classes
 	// of the browser updates stored after its own (roomShadow), nil while none is left.
 	shadow     *roomShadow
@@ -302,12 +308,19 @@ func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 // unusedLocked is whether state holds nothing that outlasts its room. These are every holder: an
 // open writer, a running or armed settlement, a latest edit source no settlement has read, a
 // failure being recovered from (whose eviction forgets the state itself, evictRoom), a connected
-// browser, an update the room's persistence has not taken or appended, and an in-flight credit
-// whose append has not landed. Its caller holds state.mu.
+// browser, an update the room's persistence has not taken or appended, a commit's parked bytes not
+// yet stored, and an in-flight credit whose append has not landed. Its caller holds state.mu.
 func (s *Service) unusedLocked(state *roomState) bool {
 	return state.liveWriter == nil && state.settling == 0 && !s.isSettleTimerArmed(state.settle) &&
 		!state.unsettled && state.failed == nil && len(state.connected) == 0 &&
-		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
+		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0 &&
+		len(state.parked) == 0
+}
+
+// parkedBytes is one commit's parked bytes and the cursor of the room instance that took them.
+type parkedBytes struct {
+	update []byte
+	cursor *roomCursor
 }
 
 // queueUpdateClass records what the room's update observer read off one update, for the

@@ -246,6 +246,13 @@ func (room *shadowRoom) take(sh *renderShadow, log *crdt.UpdateLog) {
 		if err := crdt.ApplyUpdateV1(room.doc, logged.Update, nil); err != nil {
 			sh.failf("the shadow could not apply a logged update: %v", err)
 		}
+		// What the commit parked follows its update, as the replica applies it, so the shadow
+		// holds what the room holds (crdt.LoggedUpdate).
+		if len(logged.Parked) > 0 {
+			if err := crdt.ApplyUpdateV1(room.doc, logged.Parked, nil); err != nil {
+				sh.failf("the shadow could not apply a logged update's parked bytes: %v", err)
+			}
+		}
 		markdown, _, _ := shadowRender(room.doc)
 		changed := markdown == nil || room.markdown == nil || *markdown != *room.markdown
 		room.markdown = markdown

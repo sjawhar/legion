@@ -352,6 +352,11 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems), crdt.WithFormatCleanup(false))...)
 }
 
+// emptyUpdateV1 is the V1 encoding of no structs and no delete ranges. ygo logs it beside Parked
+// for a commit that kept only parked bytes, and calls no OnUpdate for that commit
+// (crdt.LoggedUpdate).
+var emptyUpdateV1 = crdt.EncodeStateAsUpdateV1(crdt.New(), nil)
+
 // renderedReplica is the copy of a room's document its update observer renders and the room's
 // reads walk (readLive). ygo fires the observer after the transaction has released the document's
 // lock (sjawhar/ygo v1.51.3-sami.4, crdt/doc.go, transactInternal), and a walk of the live tree
@@ -545,7 +550,10 @@ func (r *renderedReplica) drainLocked(room string) (settles, changed bool) {
 // takeLocked moves the replica through what one drain of the room's log handed over - base, when
 // it recorded one, and updates - in commit order, classifying each update as it takes it
 // (changedBy) and calling the replica's classify, when set, with each update, its commit position
-// and the ask blocks it left. The caller holds mu.
+// and the ask blocks it left. A logged update's Parked carries what its transaction kept but could
+// not integrate; it follows Update, so a replica rebuilt from the log holds every byte the room
+// held, even when an entry parked something and changed nothing, and so had no OnUpdate
+// (crdt.LoggedUpdate). The caller holds mu.
 func (r *renderedReplica) takeLocked(room string, base []byte, updates []crdt.LoggedUpdate) (settles, changed bool) {
 	note := func(update crdt.LoggedUpdate, contentChanged bool, asks *observedAsks) {
 		r.seq++
@@ -568,6 +576,13 @@ func (r *renderedReplica) takeLocked(room string, base []byte, updates []crdt.Lo
 			slog.Error("dispatch: apply a committed update to the document's rendered copy", "room", room, "error", err)
 			r.recover(room, updates[i:], note)
 			return settles, changed
+		}
+		if len(update.Parked) > 0 {
+			if err := crdt.ApplyUpdateV1(r.doc, update.Parked, nil); err != nil {
+				slog.Error("dispatch: apply a committed update's parked bytes to the document's rendered copy", "room", room, "error", err)
+				r.recover(room, updates[i:], note)
+				return settles, changed
+			}
 		}
 		published, rendering := r.consumed(update)
 		contentChanged, asks := r.changedBy(room, published, rendering)

@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"path"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -663,15 +665,75 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		// document's lock at its commit - so its class is recorded, in the drain and in commit
 		// order, before ygo's persistence observer, which runs after this one on this goroutine,
 		// hands it on.
-		settles, changed := replica.observe(room)
-		if changed && s.afterCreditUpdate != nil {
-			s.afterCreditUpdate(room)
-		}
-		if settles {
-			s.scheduleSettle(room)
-		}
+		s.observeRoomUpdates(room, replica)
 	})
 	return nil
+}
+
+// onPeerUpdate drains a room's log after ygo applies a peer's update, and stores what the update
+// parked. An update that changed the document already ran its OnUpdate observers, which drained it
+// there. One that only parked bytes - it waits for an edit the room has not received - has no
+// OnUpdate, so this is the one place its bytes are made durable, before ygo answers the peer and
+// before ygo's Shutdown, which waits for this hook, can let the process exit. The hook runs on the
+// peer's read loop, which holds no lock of the service's, so it can wait for the document's lock
+// the store takes; an OnUpdate observer cannot, since it runs on the goroutine that committed,
+// which can be a settlement holding that lock.
+func (s *Service) onPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
+	if err := apply(); err != nil {
+		return err
+	}
+	if replica := s.replicaOf(info.Doc); replica != nil {
+		s.observeRoomUpdates(info.Room, replica)
+	}
+	s.storeParked(info.Room)
+	return nil
+}
+
+// observeRoomUpdates drains replica's log and arms the settlement the drained updates owe. It runs
+// from the room's OnUpdate observer for every commit that changed the document, and after a peer's
+// apply for one that only parked (onPeerUpdate). The caller holds no replica lock.
+func (s *Service) observeRoomUpdates(room string, replica *renderedReplica) {
+	settles, changed := replica.observe(room)
+	if changed && s.afterCreditUpdate != nil {
+		s.afterCreditUpdate(room)
+	}
+	if settles {
+		s.scheduleSettle(room)
+	}
+}
+
+// storeParked appends, in the order the room committed them, the parked bytes its drains queued
+// (classifyDrained), each on its own and gated on the cursor of the room instance that parked
+// it (AppendParkedUpdate). It stores them with no class, no credit and no settlement owed: they
+// changed nothing the room renders, and the commit that integrates them marks the document owed.
+// A load of the stored history parks them again and integrates them once their predecessor
+// arrives, which a
+// browser that reconnects sends; the commit that integrates them stores them a second time, in
+// its own update, which a load applies to no effect, since a struct a document already holds is
+// skipped. The bytes are bounded by the room's pending queue (MaxPendingItems), which refuses an
+// update that would park past it, and a struct sent again parks only once, so a peer that keeps
+// sending what cannot integrate cannot grow the store past that bound per room instance. An
+// append that fails fails the room, as any of the room's appends does.
+func (s *Service) storeParked(room string) {
+	for {
+		state := s.lockExistingState(room)
+		if state == nil || len(state.parked) == 0 {
+			if state != nil {
+				s.unlockState(room, state)
+			}
+			return
+		}
+		next := state.parked[0]
+		state.parked = slices.Delete(state.parked, 0, 1)
+		s.unlockState(room, state)
+		if s.roomFailed(room) {
+			continue
+		}
+		ctx := withRoomCursor(context.Background(), next.cursor)
+		if _, err := s.persistence.AppendParkedUpdate(ctx, room, next.update); err != nil {
+			s.failRoom(room, fmt.Errorf("store the parked bytes of a document update: %w", err))
+		}
+	}
 }
 
 // classifyDrained records the class of logged, the update room's log handed over at commit
@@ -680,10 +742,26 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 // which runs holding the replica's lock. It reports whether a settlement follows the update, which
 // is every update but a repair's, and whether it changed the content.
 //
+// A commit that parked something and changed nothing is logged with an empty update
+// (emptyUpdateV1) and its bytes in Parked, and ygo calls no OnUpdate for it, so no persistence
+// call will ever take a class for it: none is queued. Its parked bytes are queued on the room's
+// record instead, for storeParked to store outside the replica's lock - a drain runs under a
+// settlement's document lock too (readPoint), and the store takes that lock. A published live
+// write that parked is already durable, stored by the transaction that wrote it, so only another
+// origin's bytes are queued.
+//
 // The cursor is the instance's, taken here rather than looked up when the update reaches the
 // store: a room evicted and reloaded in between is a different instance, which did not take this
 // update and must not be recorded as holding the version it is stored at.
 func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (settles, changed bool) {
+	if len(logged.Parked) > 0 && bytes.Equal(logged.Update, emptyUpdateV1) {
+		if _, published := logged.Origin.(*liveWriteOrigin); !published {
+			state := s.lockState(room)
+			state.parked = append(state.parked, parkedBytes{update: logged.Parked, cursor: &instance.cursor})
+			s.unlockState(room, state)
+		}
+		return false, false
+	}
 	class := documentUpdateClass{seq: seq, contentChanged: contentChanged, cursor: &instance.cursor}
 	if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 		// A repair's writer appends its update in its own transaction, under the document's
