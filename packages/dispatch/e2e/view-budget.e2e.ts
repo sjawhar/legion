@@ -28,20 +28,25 @@ import { asUser } from "./users";
  * can store no such block - fetched to open this row's document with the block written as a
  * plain paragraph.
  *
- * Measured at `a8f4f74c`, `main` at the merge's second parent, on 2026-11-02: 1,780,380 bytes.
+ * Measured at `b284275e`, `main` at the merge base, on 2026-11-02: 1,780,431 bytes, from three
+ * runs that agreed. The base moves with every forward merge, so re-measure it after one: a pin
+ * left behind charges `main`'s own growth to this change, which it did twice here, by 1,839
+ * bytes and then by 51.
  * To measure it again, in a checkout of that commit with this file copied in and cut to the byte
  * row alone, `e2e/api.ts`'s `uploadIssueFile`, `uploadProjectFile` and `createArtifactGrant`
  * added there (the base answers the grants route `404`, which that copy swallows) and that row
- * opening `BASE_DOCUMENT` in place of the directive, run:
+ * opening `BASE_DOCUMENT` in place of the directive and waiting for its caption's paragraph in
+ * place of the block's frame, run:
  *
- *   cd packages/dispatch && bun run build:web && DATABASE_URL='postgres://…' bun e2e/run.ts -- \
- *     bunx playwright test --config e2e/playwright.config.ts --project=chromium \
+ *   (cd packages/contracts && bun run build) && cd packages/dispatch && bun run build:web && \
+ *     DATABASE_URL='postgres://…' bun e2e/run.ts -- bunx playwright test \
+ *     --config e2e/playwright.config.ts --project=chromium \
  *     view-budget.e2e.ts -g 'a view block costs the reader at most 10,000 more bytes'
  *
  * The row prints `view budget: … bytes of JavaScript` for the document it opened, at the base
  * commit and at this one alike, so the two runs the pull request quotes are those two lines.
  */
-const BASE_JS_BYTES: number | undefined = 1_780_380;
+const BASE_JS_BYTES: number | undefined = 1_780_431;
 
 /** What R6 allows the change to add to that number. */
 const BUDGET_BYTES = 10_000;
