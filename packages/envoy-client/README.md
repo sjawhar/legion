@@ -205,10 +205,13 @@ Successful direct sends return both the envelope and listener-selected recipient
 `duplicate` when the listener already held a send under that target and idempotency key;
 publishes return the envelope and an optional role holder. Network failures, timeouts (5 s an
 attempt, the answer's body included) and 5xx responses retry once after 250 ms, under the same
-idempotency key. A send whose last attempt got no answer or a 5xx throws
-`EnvoySendUnconfirmedError`: the message may or may not be stored, and the error names its
-`idempotencyKey`, under which a resend is stored at most once inside the stream's 72-hour
-duplicate window. A 4xx stays an `EnvoyApiError`. Listener error responses preserve their
+idempotency key; a 4xx whose body does not arrive is still a refusal. A send any attempt of which
+got no answer, an unreadable 2xx or a 5xx throws `EnvoySendUnconfirmedError`, even when a later
+attempt was refused: the message may or may not have arrived. The error names its
+`idempotencyKey` and says in `resendSafe` whether the listener's dedupe key for it
+(`agent.<target>.<key>`) is one a repeat is recognised by (`MINTED_DEDUPE_KEY_PATTERN`); when it
+is, a resend under that key inside the 72-hour duplicate window reaches the recipient once. A send
+refused with a 4xx on every attempt stays an `EnvoyApiError`. Listener error responses preserve their
 `error` and optional `expected` fields. The listener's bearer is the `token` the client is given
 (`envoySettings`); without one it sends no `Authorization` header.
 

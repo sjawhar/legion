@@ -149,7 +149,7 @@ describe("envoy_send resend", () => {
     expect(
       sendConfirmationText({ envelope, recipient: "ses_b", confirmed: true, duplicate: true })
     ).toBe(
-      "already sent to ses_b: Envoy held a send under this idempotency_key, so it stored no second copy"
+      "sent to ses_b once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy"
     );
     expect(
       sendConfirmationText({ envelope, recipient: "ses_b", confirmed: true, duplicate: false })

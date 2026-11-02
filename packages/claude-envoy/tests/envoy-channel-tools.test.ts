@@ -119,7 +119,7 @@ test("a send that is not confirmed names its key, and a resend under that key se
   )
   const key = keys[0] as string
   expect(failed).toContain("The send to ses_receiver is not confirmed delivered")
-  expect(failed).toContain(`Sending it again with idempotency_key ${key} is safe`)
+  expect(failed).toContain(`Sending it again with idempotency_key ${key} within 72 hours is safe`)
 
   answer = "repeat"
   const resent = await executeEnvoyTool(runtime, "envoy_send", {
@@ -131,7 +131,7 @@ test("a send that is not confirmed names its key, and a resend under that key se
   expect(keys).toEqual([key, key, key])
   expect(resent).toMatchObject({
     message:
-      "already sent to ses_receiver: Envoy held a send under this idempotency_key, so it stored no second copy",
+      "sent to ses_receiver once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy",
   })
 })
 

@@ -836,7 +836,7 @@ printf 'sending through the real client with the bus down\n'
       if (last.details.status !== 503 || !last.message.startsWith(prefix)) {
         throw new Error(`the client threw ${last.details.status}: ${last.message}, want 503 opening with ${JSON.stringify(prefix)}`);
       }
-      if (!thrown.message.includes(`idempotency_key ${thrown.idempotencyKey} is safe`)) {
+      if (!thrown.resendSafe || !thrown.message.includes(`idempotency_key ${thrown.idempotencyKey} within`)) {
         throw new Error(`the client error names no resend key: ${thrown.message}`);
       }
       const record = { name: thrown.name, status: last.details.status, message: thrown.message };

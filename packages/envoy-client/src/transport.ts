@@ -1,4 +1,9 @@
-import { DELIVERY_DUPLICATE_WINDOW_MS, type Envelope, EnvelopeSchema } from "@legion/contracts";
+import {
+  DELIVERY_DUPLICATE_WINDOW_MS,
+  type Envelope,
+  EnvelopeSchema,
+  MINTED_DEDUPE_KEY_PATTERN,
+} from "@legion/contracts";
 import { z } from "zod";
 import { normalizeEnvoyUrl } from "./envoy-settings";
 import { machineID } from "./machine";
@@ -410,17 +415,24 @@ export class EnvoyApiError extends Error {
   }
 }
 
+/** The listener's own test of whether a send's dedupe key lets the stream and hosts drop a repeat. */
+const mintedDedupeKey = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
+
 /**
- * A send that ended without the listener's word on it: its last attempt got no answer at all (the
- * request timed out or its connection failed) or got a 5xx, so the message may or may not be
- * stored for its target. Every attempt carried `idempotencyKey`, and the listener stores a send
- * once per target and key for the notification stream's duplicate window
- * (`DELIVERY_DUPLICATE_WINDOW_MS`), so sending the message again under that key inside the window
- * delivers it at most once. A 4xx is the listener's refusal and stays an `EnvoyApiError`. `last`
- * (also the `cause`) is what the last attempt got.
+ * A send that ended without the listener's word that it was stored: an attempt got no answer at
+ * all (the request timed out, its connection failed, or a 2xx answer's body did not arrive or did
+ * not parse) or got a 5xx, so the message may or may not have reached its target, even when a
+ * later attempt was refused. Every attempt carried `idempotencyKey`. The listener sends under the
+ * dedupe key `agent.<target>.<idempotencyKey>`, and when that key is one a repeat is recognised by
+ * (`MINTED_DEDUPE_KEY_PATTERN`: a lower-case UUID and a target with no dot), the stream and the
+ * recipient's plugin hand the recipient one copy for `DELIVERY_DUPLICATE_WINDOW_MS`, which states
+ * where that fails (`resendSafe`). A send refused with a 4xx on every attempt it made stays an
+ * `EnvoyApiError`. `last` (also the `cause`) is what the last attempt got.
  */
 export class EnvoySendUnconfirmedError extends Error {
   override readonly name = "EnvoySendUnconfirmedError";
+  /** Whether a resend under `idempotencyKey` inside the duplicate window reaches the target once. */
+  readonly resendSafe: boolean;
 
   constructor(
     readonly targetSessionID: string,
@@ -433,12 +445,20 @@ export class EnvoySendUnconfirmedError extends Error {
         ? `the listener answered ${last.details.status} (${last.message})`
         : `the listener did not answer (${last instanceof Error ? last.message : String(last)})`;
     const tried = attempts === 1 ? "on its only attempt" : `on the last of ${attempts} attempts`;
+    const resendSafe = mintedDedupeKey.test(`agent.${targetSessionID.trim()}.${idempotencyKey}`);
+    const resend = resendSafe
+      ? `Sending it again with idempotency_key ${idempotencyKey} within ` +
+        `${DELIVERY_DUPLICATE_WINDOW_MS / 3_600_000} hours is safe: Envoy recognises the repeat, ` +
+        "and the recipient gets the message once."
+      : `Envoy cannot recognise a resend under idempotency_key ${idempotencyKey} as a repeat ` +
+        "(the key is not a lower-case UUID, or the session id holds a dot): ask the recipient " +
+        "whether it arrived before sending it again.";
     super(
       `The send to ${targetSessionID} is not confirmed delivered: ${got} ${tried}. It may or may ` +
-        `not have arrived. Sending it again with idempotency_key ${idempotencyKey} is safe: Envoy ` +
-        `keeps one copy per key for ${DELIVERY_DUPLICATE_WINDOW_MS / 3_600_000} hours.`,
+        `not have arrived. ${resend}`,
       { cause: last }
     );
+    this.resendSafe = resendSafe;
   }
 }
 
@@ -478,13 +498,52 @@ export type EnvoyClient = {
   readonly replay: (input: ReplayInput) => Promise<ReplayResult>;
 };
 
-type RequestOptions = { readonly timeoutMs?: number; readonly retry?: boolean };
+type RequestOptions = {
+  readonly timeoutMs?: number;
+  readonly retry?: boolean;
+  /** Called for each attempt that got no answer or a 5xx: one the listener may have acted on. */
+  readonly onUnanswered?: () => void;
+};
+
+/** One attempt's outcome: the listener's status and body, or no answer and why. */
+type AttemptOutcome =
+  | { readonly response: Response; readonly body: string }
+  | { readonly unanswered: unknown };
 
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config.token;
   const attempts = config.retry === false ? 1 : 2;
+
+  const attemptOnce = async (
+    url: string,
+    init: RequestInit,
+    deadlineMs: number
+  ): Promise<AttemptOutcome> => {
+    const headers = new Headers(init.headers);
+    if (apiToken) headers.set("Authorization", `Bearer ${apiToken}`);
+    let response: Response;
+    try {
+      response = await config.fetch(url, {
+        ...init,
+        headers,
+        signal: AbortSignal.timeout(deadlineMs),
+      });
+    } catch (error) {
+      return { unanswered: error };
+    }
+    // The body is read under the same deadline. A refusal whose body does not arrive is still the
+    // listener's refusal; any other answer whose body does not arrive is no answer.
+    try {
+      return { response, body: await response.text() };
+    } catch (error) {
+      if (response.status >= 400 && response.status < 500) {
+        return { response, body: `(its body did not arrive: ${String(error)})` };
+      }
+      return { unanswered: error };
+    }
+  };
 
   const request = async (
     path: string,
@@ -494,36 +553,30 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     const url = `${baseUrl}${path}`;
     const tries = options.retry === false ? 1 : attempts;
     for (let attempt = 0; attempt < tries; attempt += 1) {
-      let response: Response;
-      let responseBody: string;
-      try {
-        const headers = new Headers(init.headers);
-        if (apiToken) headers.set("Authorization", `Bearer ${apiToken}`);
-        response = await config.fetch(url, {
-          ...init,
-          headers,
-          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs),
-        });
-        // Read under the same deadline: an answer whose body never arrives is no answer.
-        responseBody = await response.text();
-      } catch (error) {
+      const outcome = await attemptOnce(url, init, options.timeoutMs ?? timeoutMs);
+      if ("unanswered" in outcome) {
+        options.onUnanswered?.();
         if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
-        throw error;
+        throw outcome.unanswered;
       }
-      if (response.ok) return responseBody;
+      const { response, body } = outcome;
+      if (response.ok) return body;
 
       const error = new EnvoyApiError({
         method: init.method ?? "GET",
         url,
         status: response.status,
-        responseBody,
+        responseBody: body,
       });
-      if (response.status >= 500 && attempt + 1 < tries) {
-        await waitForRetry();
-        continue;
+      if (response.status >= 500) {
+        options.onUnanswered?.();
+        if (attempt + 1 < tries) {
+          await waitForRetry();
+          continue;
+        }
       }
       throw error;
     }
@@ -589,22 +642,36 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
     send: async (input) => {
       const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      let answer: string;
+      // An attempt the listener may have acted on keeps the send unconfirmed, whatever a later
+      // attempt got: a first attempt can store the message and lose its answer, and the retry
+      // then find the target gone.
+      let unanswered = false;
+      let response: z.infer<typeof EnvelopeResponseSchema>;
       try {
-        answer = await post("/v1/messages/send", {
-          source: input.source ?? "agent",
-          ...sourceSession(input.sourceSessionID),
-          target_session: input.targetSessionID,
-          message: input.message,
-          idempotency_key: idempotencyKey,
-          ...messageMetadata(input),
-        });
+        const answer = await post(
+          "/v1/messages/send",
+          {
+            source: input.source ?? "agent",
+            ...sourceSession(input.sourceSessionID),
+            target_session: input.targetSessionID,
+            message: input.message,
+            idempotency_key: idempotencyKey,
+            ...messageMetadata(input),
+          },
+          {
+            onUnanswered: () => {
+              unanswered = true;
+            },
+          }
+        );
+        // A 2xx whose body does not parse is the listener's word that cannot be read.
+        response = EnvelopeResponseSchema.parse(JSON.parse(answer));
       } catch (error) {
-        // A 4xx is the listener's refusal: nothing was stored. Anything else may have been.
-        if (error instanceof EnvoyApiError && error.details.status < 500) throw error;
+        if (error instanceof EnvoyApiError && error.details.status < 500 && !unanswered) {
+          throw error;
+        }
         throw new EnvoySendUnconfirmedError(input.targetSessionID, idempotencyKey, attempts, error);
       }
-      const response = EnvelopeResponseSchema.parse(JSON.parse(answer));
       return {
         envelope: response,
         recipient: response.recipient ?? input.targetSessionID,

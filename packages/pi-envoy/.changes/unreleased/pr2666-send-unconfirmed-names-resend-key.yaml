@@ -2,4 +2,5 @@ kind: Fixed
 body: |-
   `envoy_send` no longer ends in a bare `The operation timed out.`: a send that is not confirmed
   delivered says so and names its `idempotency_key`, and `envoy_send` takes that key, so the same
-  message sent again is stored at most once. A resend Envoy already held answers `already sent`.
+  message sent again within 72 hours reaches the recipient once. A send whose key Envoy already
+  held says it was sent once.

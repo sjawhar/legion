@@ -185,7 +185,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key and Envoy stores it at most once.`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; sending the same message again with that idempotency_key within 72 hours delivers it once.`,
     arguments: (schema) => ({
       session_id: schema
         .string()
@@ -262,7 +262,7 @@ export function sendConfirmationText(result: {
   readonly duplicate: boolean;
 }): string {
   if (result.duplicate) {
-    return `already sent to ${result.recipient}: Envoy held a send under this idempotency_key, so it stored no second copy`;
+    return `sent to ${result.recipient} once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy`;
   }
   return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
 }
