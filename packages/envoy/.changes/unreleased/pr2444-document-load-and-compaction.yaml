@@ -18,7 +18,7 @@ body: |-
   documents with rows to fold names (`doc_compaction_owed`), written by each append in its own
   statement and cleared by compaction; migration 20261028195714_doc_compaction_owed adds it and
   backfills it. Compaction reads and folds on a two-connection pool of its own
-  (`dispatch-compaction`), so one server's stated connection ceiling rises by 2, to 92; it holds no
+  (`dispatch-compaction`), so one server's stated connection ceiling rises by 2, to 94; it holds no
   document lock while it folds, writes under the lock only when the rows it folded are unchanged,
   and leaves rows younger than 2 minutes as
   written. The guarantee that `doc_updates` and any backup of it hold no text a write deleted now
