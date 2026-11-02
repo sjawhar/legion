@@ -117,13 +117,18 @@ func ListenerPermissions(machineID string) Permissions {
 
 // ListenerHostPermissions is the grant of a listener's own NATS user, one no session shares, as
 // machine machineID: the listener's set (ListenerPermissions), the session consumers' calls
-// included, then the subscribe to every notification topic (bus.NotificationTopicPrefix) that
-// ENVOY_SUBSCRIBE_ALL_TOPICS needs, which the role-lane entries of listenerGrant do not cover: a
-// listener opted in holds a core subscription on notifications.> in its machine's queue group, so
-// a session it serves receives a topic the stream does not store. That subscribe is all this set
-// adds to the listener's: it holds none of SessionPermissions' publish entries, so a process
-// connecting as this user can neither publish a session's agent stream frames nor subscribe to a
-// session's control subject. HostPermissions stays the set of a user a host's sessions share.
+// included, then a subscribe to every notification topic (bus.NotificationTopicPrefix) that
+// nothing now uses. It existed for the opt-in that had a listener hold a core subscription on
+// notifications.> for the sessions it served, and that opt-in went with the listener's push to
+// a session's serving port (dispatch://INFRA-889), so this set now grants exactly what
+// ListenerPermissions grants. It keeps the subscribe rather than dropping it, and so stays a
+// set of its own rather than an alias, because a change to a set rewrites every hub's rendered
+// authorization: it replaces a VM hub's instance and reaches a clustered hub only as a live
+// reload, which dispatch://INFRA-429's non-goals leave to dispatch://INFRA-551. No grant code
+// changes here, and permissions_test.go keeps asserting that subscribe. The set holds none of
+// SessionPermissions' publish entries, so a process connecting as this user can neither publish
+// a session's agent stream frames nor subscribe to a session's control subject.
+// HostPermissions stays the set of a user a host's sessions share.
 func ListenerHostPermissions(machineID string) Permissions {
 	grant := ListenerPermissions(machineID)
 	grant.Subscribe.Allow = append(grant.Subscribe.Allow, bus.NotificationTopicPrefix+">")
