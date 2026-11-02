@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -415,7 +417,56 @@ func reviewPermissionPool(t *testing.T) *pgxpool.Pool {
 }
 
 func reviewPermissionRuntime(pool *pgxpool.Pool, githubAPI string, log *slog.Logger) *workflowRuntime {
+	return reviewPermissionRuntimeRenamed(pool, githubAPI, log, ghrepo.Renames{})
+}
+
+// reviewPermissionRuntimeRenamed is reviewPermissionRuntime under the deployment's repository
+// equivalence renames (repositories.renames): the one line of the runtime a configured rename
+// changes.
+func reviewPermissionRuntimeRenamed(pool *pgxpool.Pool, githubAPI string, log *slog.Logger, renames ghrepo.Renames) *workflowRuntime {
 	tokens := &forgettingTokens{}
 	return &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"}, tokens: tokens, forget: tokens,
-		githubAPI: githubAPI, log: log, reviewAppLogin: "legion-reviewer[bot]"}
+		githubAPI: githubAPI, log: log, reviewAppLogin: "legion-reviewer[bot]", repositories: newRepositories("LEGION", renames)}
+}
+
+// A review on a pull request already open when its repository was transferred finds the record:
+// the row keeps acme/widgets, the name the pull request opened under, while the review names
+// cybermonklabs/widgets, so the record is read under both names of the configured pair
+// (ghrepo.Renames.Lookups). The permission is then read on the repository the review names, the
+// one GitHub serves. With no pair configured no name finds the row, the review is one the daemon
+// does not record, and GitHub is asked nothing at all.
+func TestAReviewNamingARenamedRepositoryReadsThePermissionOfTheRecordedPullRequest(t *testing.T) {
+	pool := reviewPermissionPool(t)
+	for _, tc := range []struct {
+		name    string
+		renames ghrepo.Renames
+		// asked is the GitHub path the permission read asks for, none when no read is made.
+		asked []string
+		want  bool
+	}{
+		{name: "the pair configured", renames: mustRenames(t, renamedWidgets), want: true,
+			asked: []string{"/repos/cybermonklabs/widgets/collaborators/a-writer/permission"}},
+		{name: "no pair configured", renames: ghrepo.Renames{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				asked = append(asked, r.URL.Path)
+				fmt.Fprint(w, `{"permission":"write","user":{"login":"a-writer"}}`)
+			}))
+			defer server.Close()
+			w := reviewPermissionRuntimeRenamed(pool, server.URL, quietLogger(), tc.renames)
+			review := intake.PullRequestReview{Repo: "cybermonklabs/widgets", Number: 42, State: "approved", Author: "a-writer"}
+			got, err := w.reviewerCanWrite(context.Background(), review)
+			if err != nil {
+				t.Fatalf("a-writer's permission on the renamed repository: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("a-writer can write = %v, want %v", got, tc.want)
+			}
+			if !slices.Equal(asked, tc.asked) {
+				t.Errorf("GitHub was asked %q, want %q", asked, tc.asked)
+			}
+		})
+	}
 }

@@ -146,3 +146,36 @@ func TestNewRenamesOfNoneIsTheZeroValue(t *testing.T) {
 		}
 	}
 }
+
+// Lookups is the order a read keyed by repository tries: the name the fact carries first, then
+// the other name of the pair that names it. A deployment that configures no rename, and a name no
+// pair holds, answer that one name alone, so such a read stays the one read it was.
+func TestLookupsAreTheNameThenItsPartner(t *testing.T) {
+	var zero Renames
+	for _, name := range []string{"sjawhar/legion", "cybermonklabs/legion", "", "not a repository"} {
+		if got := zero.Lookups(name); !slices.Equal(got, []string{name}) {
+			t.Errorf("zero Renames.Lookups(%q) = %q, want %q alone", name, got, name)
+		}
+	}
+	renames, err := NewRenames([]Rename{rename("sjawhar/legion", "cybermonklabs/legion"), rename("acme/widgets", "acme/gadgets")})
+	if err != nil {
+		t.Fatalf("NewRenames: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		want []string
+	}{
+		{"sjawhar/legion", []string{"sjawhar/legion", "cybermonklabs/legion"}},
+		{"cybermonklabs/legion", []string{"cybermonklabs/legion", "sjawhar/legion"}},
+		{"SJAWHAR/Legion", []string{"SJAWHAR/Legion", "cybermonklabs/legion"}},
+		{"acme/gadgets", []string{"acme/gadgets", "acme/widgets"}},
+		{"other/repo", []string{"other/repo"}},
+		{"sjawhar/legion-smoke", []string{"sjawhar/legion-smoke"}},
+		{"", []string{""}},
+		{"not a repository", []string{"not a repository"}},
+	} {
+		if got := renames.Lookups(tc.name); !slices.Equal(got, tc.want) {
+			t.Errorf("Lookups(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

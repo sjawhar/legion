@@ -646,13 +646,17 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 
 // recordedPullRequest says whether the daemon records the pull request a review or a checks
 // settlement names (PullRequestReview, PullRequestChecks), by repository and number as the workflow
-// looks it up (record.PullRequestRecorded), and is true for every other fact. It is one read of the
-// pool within AckWait, in no transaction and under no lock, made before the review's GitHub reads
-// (resolveReviewBody, resolveReviewPermission): the workflow applies either fact only to a recorded
-// pull request, so one of any other pull request is acknowledged with no transaction under the fact
-// lock (ApplyFact) and no GitHub read, whatever the number of other pull requests a mapped
-// repository reviews and checks. A pull request recorded after this read, by a later opened, gets
-// its checks and reviews from their next event or from the pass's read.
+// looks it up (record.PullRequestRecorded), and is true for every other fact. It asks under each
+// name the fact's repository is looked up by (ghrepo.Renames.Lookups, ConsumerSpec.Renames), as
+// the workflow reads the row: a pull request already open when its repository was transferred is
+// recorded under the name it moved from, while the fact names the one it moved to. It is one read
+// of the pool per name within the one AckWait, in no transaction and under no lock, made before
+// the review's GitHub reads (resolveReviewBody, resolveReviewPermission): the workflow applies
+// either fact only to a recorded pull request, so one of any other pull request is acknowledged
+// with no transaction under the fact lock (ApplyFact) and no GitHub read, whatever the number of
+// other pull requests a mapped repository reviews and checks. A pull request recorded after this
+// read, by a later opened, gets its checks and reviews from their next event or from the pass's
+// read.
 func recordedPullRequest(ctx context.Context, spec ConsumerSpec, pool *pgxpool.Pool, fact Fact) (bool, error) {
 	var repo string
 	var number int
@@ -666,7 +670,13 @@ func recordedPullRequest(ctx context.Context, spec ConsumerSpec, pool *pgxpool.P
 	}
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()
-	return record.PullRequestRecorded(read, pool, repo, number)
+	for _, name := range spec.Renames.Lookups(repo) {
+		recorded, err := record.PullRequestRecorded(read, pool, name, number)
+		if err != nil || recorded {
+			return recorded, err
+		}
+	}
+	return false, nil
 }
 
 // readMapping runs ConsumerSpec.RepositoryMapping within AckWait; no reader reads nothing.

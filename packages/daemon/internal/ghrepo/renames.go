@@ -88,6 +88,23 @@ func (r Renames) Partner(name string) (Repository, bool) {
 	return partner, found
 }
 
+// Lookups is the names a read keyed by repository must try for name, in the order it must try
+// them: name itself, as the fact that carries it spells it, and then the other name of the pair
+// that names it, when a pair does. It is a lookup order, not an equality — `Same` answers whether
+// two names are one repository, while this answers what to look under when a record may be held
+// under either — and it is the one place that order is written, so every read keyed by a
+// repository is one loop over it and none derives the rule again.
+//
+// A deployment that configures no rename, and a name no pair holds, answer the one name, so such
+// a read stays exactly the one it was. A configured name answers two, and the second read is made
+// only when the first finds nothing.
+func (r Renames) Lookups(name string) []string {
+	if partner, found := r.Partner(name); found {
+		return []string{name, partner.String()}
+	}
+	return []string{name}
+}
+
 // Pairs are the configured pairs, in configured order, as a copy no caller can use to change the
 // equivalence.
 func (r Renames) Pairs() []Rename { return slices.Clone(r.pairs) }

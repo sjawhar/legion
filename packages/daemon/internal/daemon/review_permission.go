@@ -92,15 +92,24 @@ func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.Pu
 }
 
 // reviewedRepository reads the record of the pull request review is on and parses its repository,
-// the one lookup reviewerCanWrite and reviewBody both need before either reads GitHub. A review on
-// a pull request the daemon does not record answers recorded=false, which both callers take as
-// nothing left to do: the workflow drops such a review unread, so no check of it is ever read.
+// the one lookup reviewerCanWrite and reviewBody both need before either reads GitHub. The record
+// is read under each name the review's repository is looked up by (ghrepo.Renames.Lookups,
+// repositories.renames), the first row found being the pull request: a pull request already open
+// when its repository was transferred is recorded under the name it moved from, while the review
+// names the one it moved to. A review on a pull request no name finds answers recorded=false,
+// which both callers take as nothing left to do: the workflow drops such a review unread, so no
+// check of it is ever read.
 func (w *workflowRuntime) reviewedRepository(ctx context.Context, review intake.PullRequestReview) (repository ghrepo.Repository, recorded bool, err error) {
 	var pr *record.PullRequest
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		var err error
-		pr, err = w.records.PullRequestByNumber(ctx, tx, review.Repo, review.Number)
-		return err
+		for _, name := range w.repositories.renames.Lookups(review.Repo) {
+			found, err := w.records.PullRequestByNumber(ctx, tx, name, review.Number)
+			if err != nil || found != nil {
+				pr = found
+				return err
+			}
+		}
+		return nil
 	}); err != nil {
 		return ghrepo.Repository{}, false, fmt.Errorf("read the record of pull request %s#%d: %w", review.Repo, review.Number, err)
 	}

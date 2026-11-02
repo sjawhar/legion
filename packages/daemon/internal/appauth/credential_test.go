@@ -1,9 +1,12 @@
 package appauth
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +117,140 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 		!strings.Contains(err.Error(), `"outside-project"`) || len(minted) != 0 {
 		t.Errorf("the controller asking for an owner outside the project = %v, minted %q; want ErrOwnerOutsideProject naming it and no mint", err, minted)
 	}
+}
+
+// legionRename is the pair a deployment configures over sjawhar/legion's transfer to
+// cybermonklabs: one repository under two names, whose owners the bundle holds one entry for.
+var legionRename = ghrepo.Rename{From: ghrepo.MustParse("sjawhar/legion"), To: ghrepo.MustParse("cybermonklabs/legion")}
+
+// mustRenames is the equivalence pairs configure, for a test that configures a pair it wrote.
+func mustRenames(t *testing.T, pairs ...ghrepo.Rename) ghrepo.Renames {
+	t.Helper()
+	renames, err := ghrepo.NewRenames(pairs)
+	if err != nil {
+		t.Fatalf("NewRenames(%v): %v", pairs, err)
+	}
+	return renames
+}
+
+// A configured rename whose `to` the project owns is one pair of owners: the bundle's sjawhar
+// directory and its cybermonklabs directory hold one entry, minted once for cybermonklabs, the
+// owner the repository moved to and whose installation holds it now. That one entry is the write
+// lease whenever either of them is the bundle's Default — a pod launched for an issue recorded on
+// sjawhar before the transfer has to write the repository as GitHub holds it now — and the
+// read-only one for a role on any other owner. Every owner outside the pair is minted for itself,
+// as it always was. The alias owner is a default the controller may ask for.
+func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
+	owners := func() []string { return []string{"Cybermonklabs", "acme"} }
+	for _, tc := range []struct {
+		name    string
+		role    claim.Role
+		owner   string
+		def     string
+		tokens  map[string]string
+		minted  []string
+		shared  bool
+		appName string
+	}{
+		{
+			name: "an implementer on the owner the repository moved from", role: claim.RoleImplementer, owner: "sjawhar", def: "sjawhar", shared: true, appName: "implement",
+			tokens: map[string]string{"acme": "implement-read-for-acme", "cybermonklabs": "implement-token-for-cybermonklabs", "sjawhar": "implement-token-for-cybermonklabs"},
+			minted: []string{"acme", "cybermonklabs"},
+		},
+		{
+			name: "an implementer on the owner it moved to", role: claim.RoleImplementer, owner: "Cybermonklabs", def: "cybermonklabs", shared: true, appName: "implement",
+			tokens: map[string]string{"acme": "implement-read-for-acme", "cybermonklabs": "implement-token-for-cybermonklabs", "sjawhar": "implement-token-for-cybermonklabs"},
+			minted: []string{"acme", "cybermonklabs"},
+		},
+		{
+			name: "an implementer on another owner of the project", role: claim.RoleImplementer, owner: "acme", def: "acme", shared: true, appName: "implement",
+			tokens: map[string]string{"acme": "implement-token-for-acme", "cybermonklabs": "implement-read-for-cybermonklabs", "sjawhar": "implement-read-for-cybermonklabs"},
+			minted: []string{"acme", "cybermonklabs"},
+		},
+		{
+			name: "the controller asked for the alias owner its launch recorded", role: claim.RoleController, owner: "Sjawhar", def: "sjawhar", shared: true, appName: "review",
+			tokens: map[string]string{"acme": "review-read-for-acme", "cybermonklabs": "review-read-for-cybermonklabs", "sjawhar": "review-read-for-cybermonklabs"},
+			minted: []string{"acme", "cybermonklabs"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var minted []string
+			credential := GitHubCredential(countingTokens{minted: &minted}, owners, mustRenames(t, legionRename), nil)
+			bundle, err := credential(context.Background(), tc.role, tc.owner)
+			if err != nil {
+				t.Fatalf("credential: %v", err)
+			}
+			if bundle.Default != tc.def {
+				t.Errorf("Default = %q, want %q", bundle.Default, tc.def)
+			}
+			if got := bundleTokens(t, bundle); !maps.Equal(got, tc.tokens) {
+				t.Errorf("tokens = %v, want %v", got, tc.tokens)
+			}
+			if !slices.Equal(minted, tc.minted) {
+				t.Errorf("minted for %v, want %v: the pair's two directories hold one lease, minted once", minted, tc.minted)
+			}
+			if tc.shared && bundle.Owners["sjawhar"] != bundle.Owners["cybermonklabs"] {
+				t.Errorf("sjawhar's entry = %+v and cybermonklabs' = %+v, want the one entry in both directories", bundle.Owners["sjawhar"], bundle.Owners["cybermonklabs"])
+			}
+			for owner, rendered := range bundle.Owners {
+				if rendered.App != tc.appName {
+					t.Errorf("%s's render = App %q, want %q", owner, rendered.App, tc.appName)
+				}
+			}
+			if err := bundle.Validate(); err != nil {
+				t.Errorf("the bundle does not validate: %v", err)
+			}
+		})
+	}
+
+	// With no pair configured, the owner the repository moved from is an owner like any other:
+	// its own read-only lease, minted for itself, as today.
+	t.Run("no pair configured", func(t *testing.T) {
+		var minted []string
+		both := func() []string { return []string{"Cybermonklabs", "sjawhar"} }
+		credential := GitHubCredential(countingTokens{minted: &minted}, both, ghrepo.Renames{}, nil)
+		bundle, err := credential(context.Background(), claim.RoleImplementer, "cybermonklabs")
+		if err != nil {
+			t.Fatalf("credential: %v", err)
+		}
+		want := map[string]string{"cybermonklabs": "implement-token-for-cybermonklabs", "sjawhar": "implement-read-for-sjawhar"}
+		if got := bundleTokens(t, bundle); !maps.Equal(got, want) || bundle.Default != "cybermonklabs" {
+			t.Errorf("Default %q and tokens %v, want cybermonklabs and %v", bundle.Default, got, want)
+		}
+		if !slices.Equal(minted, []string{"cybermonklabs", "sjawhar"}) {
+			t.Errorf("minted for %v, want each owner its own lease", minted)
+		}
+	})
+
+	// Where the owner the repository moved from is itself an owner of the project, its own entry
+	// wins — its repositories are the project's and its token is its own — and the conflict is
+	// logged once, naming the pair, however many bundles the credential builds.
+	t.Run("the owner it moved from is an owner of the project", func(t *testing.T) {
+		var minted []string
+		var logged bytes.Buffer
+		both := func() []string { return []string{"Cybermonklabs", "sjawhar"} }
+		credential := GitHubCredential(countingTokens{minted: &minted}, both, mustRenames(t, legionRename), slog.New(slog.NewTextHandler(&logged, nil)))
+		bundle, err := credential(context.Background(), claim.RoleImplementer, "cybermonklabs")
+		if err != nil {
+			t.Fatalf("credential: %v", err)
+		}
+		want := map[string]string{"cybermonklabs": "implement-token-for-cybermonklabs", "sjawhar": "implement-read-for-sjawhar"}
+		if got := bundleTokens(t, bundle); !maps.Equal(got, want) {
+			t.Errorf("tokens = %v, want %v: each owner keeps its own token", got, want)
+		}
+		if !slices.Equal(minted, []string{"cybermonklabs", "sjawhar"}) {
+			t.Errorf("minted for %v, want each owner its own lease", minted)
+		}
+		if _, err := credential(context.Background(), claim.RoleReviewer, "sjawhar"); err != nil {
+			t.Fatalf("credential: %v", err)
+		}
+		if got := strings.Count(logged.String(), "moved a repository between two owners of this project"); got != 1 {
+			t.Errorf("the conflict is logged %d times, want once:\n%s", got, logged.String())
+		}
+		if !strings.Contains(logged.String(), "from=sjawhar/legion to=cybermonklabs/legion owner=sjawhar") {
+			t.Errorf("the conflict line does not name the pair:\n%s", logged.String())
+		}
+	})
 }
 
 // countingTokens records every owner it is asked to mint for.
