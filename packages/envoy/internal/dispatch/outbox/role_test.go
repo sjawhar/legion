@@ -111,9 +111,17 @@ func newRoleRigOn(t *testing.T, url string, client *bus.Client, conn *natsgo.Con
 }
 
 // deps is the outbox's dependencies as cmd/dispatch wires them: role routes resolved through
-// roles.Buckets on the outbox's own client.
+// roles.Buckets on the outbox's own client, judged by the package's own windows, which is what
+// a deployment that sets neither ENVOY_SESSION_LIVE_WINDOW nor ENVOY_SESSION_GONE_HORIZON
+// gives it.
 func (r *roleRig) deps() Deps {
-	holders := roles.NewBuckets(r.client)
+	return r.depsJudgedBy(roles.Windows{})
+}
+
+// depsJudgedBy is deps whose role-route holders are judged by windows, as cmd/dispatch judges
+// them by the two the deployment gave its listeners (roleHolderWindows, cmd/dispatch/main.go).
+func (r *roleRig) depsJudgedBy(windows roles.Windows) Deps {
+	holders := roles.NewBuckets(r.client, windows)
 	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders}
 }
 
@@ -521,6 +529,62 @@ func TestARoleRouteToAnUnresponsiveHolderStaysPending(t *testing.T) {
 	}
 	if claimed, err := rig.registry.RoleHolder(role); err != nil || claimed != holder {
 		t.Fatalf("the claim after the scan names %q (%v), want the unresponsive holder's kept", claimed, err)
+	}
+}
+
+// A role route's holder is judged by the windows Dispatch was given, never by the package's
+// compiled ones. Raising the gone horizon is the answer this change names for a stall longer
+// than an hour, and a deployment raises it in Dispatch as well as in its listeners
+// (ENVOY_SESSION_GONE_HORIZON, cmd/dispatch's roleHolderWindows): a holder silent for longer
+// than the compiled hour but inside the raised horizon is unresponsive, so its event stays
+// pending with the claim untouched, where the compiled windows call the same holder gone and
+// publish the event with nothing sent.
+//
+// That publish is the harm, not a slower delivery: the listener, carrying the operator's
+// horizon, still calls the holder unresponsive and keeps its role, so an event Dispatch marks
+// reached with nothing sent reaches the holder never, however long it stalled
+// (dispatch://INFRA-392).
+func TestARoleRouteIsJudgedOnTheWindowsDispatchWasGiven(t *testing.T) {
+	rig := newRoleRig(t)
+	// Silent for longer than the compiled gone horizon, and well inside a horizon raised to
+	// three hours for a deployment whose sessions stall for longer than one.
+	const silence = session.GoneHorizon + 30*time.Minute
+	for _, tc := range []struct {
+		name    string
+		role    string
+		holder  string
+		windows roles.Windows
+		pending bool
+	}{
+		{"the horizon the deployment raised", "reviewer", "ses_inside_raised_horizon", roles.Windows{Horizon: 3 * time.Hour}, true},
+		{"the compiled windows", "scribe", "ses_past_compiled_horizon", roles.Windows{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig.claimRegisteredAt(t, tc.role, tc.holder, silence)
+			claimedAt := rig.roleClaim(t, tc.role).ClaimedAt
+			rig.silent(t, contracts.RoleTopicPrefix+tc.role)
+			rig.silent(t, contracts.AgentSubject(tc.holder))
+			event := rig.routedEvent(t, "T-"+tc.role, tc.role, model.Actor{Kind: "user", ID: "alice"})
+
+			holding(t, rig.depsJudgedBy(tc.windows)).scan(context.Background(), unfenced{})
+
+			published := publishedAt(t, rig.database, event.ID)
+			attempts, failure, destinations := eventState(t, rig.database, event.ID)
+			reached := strings.Contains(strings.Join(destinations, ","), contracts.RoleTopicPrefix)
+			switch {
+			case tc.pending && published != nil:
+				t.Fatalf("the event of a holder inside the raised horizon was published at %s with nothing sent; it is unresponsive, and its event waits for it", published)
+			case tc.pending && (attempts != 1 || failure == nil || !strings.Contains(*failure, "unresponsive") || reached):
+				t.Fatalf("attempt_count %d, publish_error %v, published_destinations %v: want it backed off naming the unresponsive holder with the role route still pending", attempts, failure, destinations)
+			case !tc.pending && published == nil:
+				t.Fatalf("the event of a holder past the compiled gone horizon was not published: attempt_count %d, publish_error %v", attempts, failure)
+			case !tc.pending && !reached:
+				t.Fatalf("published_destinations %v, want the gone holder's role route counted as reached", destinations)
+			}
+			if claim := rig.roleClaim(t, tc.role); claim.HolderSessionID != tc.holder || claim.ClaimedAt != claimedAt {
+				t.Fatalf("the claim after the scan is %+v, want %s's untouched, claimed at %d", claim, tc.holder, claimedAt)
+			}
+		})
 	}
 }
 

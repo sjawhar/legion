@@ -114,7 +114,7 @@ func writeRoleClaimUnreadable(w http.ResponseWriter, role string, err error) int
 // role-holder resolution reads its holder through roleHolderSessions.Holder instead, which asks
 // the same two reads in the same order and leaves the judgement to internal/roles. No push to a
 // session's serving port reads this function at all: the push paths read
-// session.SessionRegistry.Get, whose answer follows the bucket's maximum age alone.
+// session.SessionRegistry.Lookup and push only to a session that reads session.Live.
 //
 // The cache answers when it holds a record accept takes (session.SessionRegistry.Lookup, which
 // judges the record's own age and never its membership of the cache); otherwise the session is
@@ -274,9 +274,9 @@ func notGone(state session.State) bool { return state != session.Gone }
 // (sendToRole); and GET /v1/registry/<id> asked without include=unresponsive, which answers for
 // the live sessions alone. A role-holder resolution asks the same question of its holder, and
 // asks it of internal/roles, which reads the holder's state itself (roles.ResolveHolder):
-// a role reaches its holder only while that holder can answer a forward's receipt. None of them
-// is a push to a serving port: those read session.SessionRegistry.Get, which judges nothing but
-// the bucket's maximum age.
+// a role reaches its holder only while that holder can answer a forward's receipt. A push to a
+// serving port asks it too, through session.SessionRegistry.Lookup: that push goes to a session
+// that reads session.Live and to no other.
 func sessionIsLive(state session.State) bool { return state == session.Live }
 
 // roleHolderReadTimeout bounds each of the role paths' session-bucket reads, well inside the

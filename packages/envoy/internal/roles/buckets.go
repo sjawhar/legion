@@ -51,14 +51,14 @@ type Buckets struct {
 	sessions *bus.KeyValue
 }
 
-// NewBuckets returns Buckets reading through client and judging a holder's record by the first of
-// windows, or by the package's own windows when none is given (Windows).
-func NewBuckets(client JetStream, windows ...Windows) *Buckets {
-	buckets := &Buckets{client: client}
-	if len(windows) > 0 {
-		buckets.Windows = windows[0]
-	}
-	return buckets
+// NewBuckets returns Buckets reading through client and judging a holder's record by windows. It
+// takes the windows rather than defaulting them, so no caller reaches the package's compiled
+// windows by forgetting to say which it means: a process judging a holder on windows its
+// deployment did not set calls a holder the listener still calls unresponsive gone, and marks
+// its event published with nothing sent. A caller that does mean the compiled windows passes a
+// zero Windows, whose own zero fields are session.LiveWindow and session.GoneHorizon.
+func NewBuckets(client JetStream, windows Windows) *Buckets {
+	return &Buckets{Windows: windows, client: client}
 }
 
 // bucket returns the handle of bucket on the client's current connection, opening it when it is

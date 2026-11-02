@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
+	"github.com/sjawhar/envoy/internal/envconf"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -146,53 +147,23 @@ func roleHolderMayBeLive(logger *logging.Logger, sessions *session.SessionRegist
 // the bucket's maximum age is settled once per period, so a raise made elsewhere reaches this
 // listener that soon (session.ReapSessions): a minute, which is what the two-minute adoption this
 // change is accepted on needs, and what the setting's documentation states.
-//
-// The role claim reaper takes the same period, since what it waits for is what the session reaper
-// decides (the loops below say why). A minute only makes it ask sooner: nothing it does is timed
-// by its period. The grace a restored claim gets is measured from the listener's own start
-// against the live window (store.Registry.ReleaseExpiredRoleClaim), not counted in passes, so a
-// claim that survived four passes at five minutes survives twenty at one; what changes is that a
-// gone holder's role is free within a minute of its record going, instead of five.
 const defaultSessionReapInterval = time.Minute
 
-// envDuration reads a duration an operator may override through the environment: an unset or
-// empty value leaves fallback standing, and so does one time.ParseDuration refuses, after a
-// single WARN naming the variable - a listener never refuses to start over a malformed duration.
-// The WARN's message and fields are what an operator's log filter matches, so they name the
-// variable exactly as it is written in the environment.
+// defaultRoleClaimReapInterval is how often the role claim reaper runs when
+// ENVOY_ROLE_CLAIM_REAP_INTERVAL names no other period: the five minutes the fixed pass this
+// change replaces ran at, which the deployment keeps.
 //
-// It takes any duration it can read, zero and negative ones included, so it is the reader for a
-// setting where zero says something: ENVOY_UNPLACEABLE_RETRY_WINDOW=0s asks for no retry of an
-// unplaceable delivery at all (unplaceable_delivery.go), and the acceptance test of the
-// exception lane sets exactly that. A setting zero cannot mean is read through
-// envPositiveDuration instead.
-func envDuration(logger *logging.Logger, name string, fallback time.Duration) time.Duration {
-	v := os.Getenv(name)
-	if v == "" {
-		return fallback
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		logger.Warn("invalid "+name+"; using default", slog.String("value", v), slog.String("error", err.Error()))
-		return fallback
-	}
-	return d
-}
-
-// envPositiveDuration is envDuration for a period or a window no listener can run on at zero:
-// the live window and the gone horizon, which decide every session's state, and the reap
-// interval, which is a ticker's period (time.NewTicker panics on a non-positive one, and both
-// reaper loops take it). A value that parses but is zero or negative is refused by name and the
-// value, as bus.ParseSessionMaxAge refuses its own, and the listener does not start: an operator
-// who wrote a duration meant it, so starting on the default instead would serve a listener
-// nobody asked for. An unset or malformed value is still the default, as above.
-func envPositiveDuration(logger *logging.Logger, name string, fallback time.Duration) (time.Duration, error) {
-	d := envDuration(logger, name, fallback)
-	if d <= 0 {
-		return 0, fmt.Errorf("invalid %s %q: want a positive Go duration such as 1m", name, os.Getenv(name))
-	}
-	return d, nil
-}
+// It is not the session reaper's period, short though that is. A session's record reads gone
+// when the session bucket expires its key as well as when its last registration passes the gone
+// horizon, and the bucket ships with a five-minute maximum age, so a stalled session's key is
+// gone five minutes after its last heartbeat and the reaper then finds its holder gone. Judged
+// every minute, a stalled holder would lose its role up to five times sooner than the fixed pass
+// this change replaces, which is the opposite of what this change is for; the raise of that
+// maximum age past the gone horizon is dispatch://INFRA-887's, and it cannot land first. The
+// grace a restored claim gets is measured from the listener's own start against the live window
+// (store.Registry.ReleaseExpiredRoleClaim), not counted in passes, so the period does not move
+// it; what the period decides is how long after a holder is gone its role is free.
+const defaultRoleClaimReapInterval = 5 * time.Minute
 
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
 // by bus.Client subscriptions. It attempts every one so a failed rebuild of one
@@ -1036,16 +1007,26 @@ func main() {
 	// the compiled constant, which .github/scripts/check-heartbeat-margin.sh reads to prove that
 	// three registration refreshes fit inside the live window; a deployment that moves one moves
 	// what this listener runs with and nothing else. A value that is not a positive duration is
-	// refused by name here rather than taken (envPositiveDuration).
-	sessionLiveWindow, err := envPositiveDuration(logger, "ENVOY_SESSION_LIVE_WINDOW", session.LiveWindow)
+	// refused by name here rather than taken (envconf.PositiveDuration). Dispatch reads the same
+	// two windows with the same rules and judges a role route's holder by them, so a deployment
+	// gives both processes the same values (cmd/dispatch's roleHolderWindows).
+	sessionLiveWindow, err := envconf.PositiveDuration(logger.Slog(), os.LookupEnv, "ENVOY_SESSION_LIVE_WINDOW", session.LiveWindow)
 	if err != nil {
 		log.Fatal(err)
 	}
-	sessionGoneHorizon, err := envPositiveDuration(logger, "ENVOY_SESSION_GONE_HORIZON", session.GoneHorizon)
+	sessionGoneHorizon, err := envconf.PositiveDuration(logger.Slog(), os.LookupEnv, "ENVOY_SESSION_GONE_HORIZON", session.GoneHorizon)
 	if err != nil {
 		log.Fatal(err)
 	}
-	sessionReapInterval, err := envPositiveDuration(logger, "ENVOY_SESSION_REAP_INTERVAL", defaultSessionReapInterval)
+	// The two reaper loops below run on periods of their own: what the session reaper decides is
+	// what the role claim reaper waits for, but each pass costs something different and a gone
+	// holder's role is not freed sooner than the deployment means it to be (the two defaults say
+	// why).
+	sessionReapInterval, err := envconf.PositiveDuration(logger.Slog(), os.LookupEnv, "ENVOY_SESSION_REAP_INTERVAL", defaultSessionReapInterval)
+	if err != nil {
+		log.Fatal(err)
+	}
+	roleClaimReapInterval, err := envconf.PositiveDuration(logger.Slog(), os.LookupEnv, "ENVOY_ROLE_CLAIM_REAP_INTERVAL", defaultRoleClaimReapInterval)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -1071,7 +1052,8 @@ func main() {
 		slog.String("ttl", sessions.TTL().String()),
 		slog.String("live_window", sessionLiveWindow.String()),
 		slog.String("gone_horizon", sessionGoneHorizon.String()),
-		slog.String("reap_interval", sessionReapInterval.String()))
+		slog.String("reap_interval", sessionReapInterval.String()),
+		slog.String("role_claim_reap_interval", roleClaimReapInterval.String()))
 
 	// Wait for the session cache to finish its initial scan before we accept
 	// traffic, mirroring the interest-cache gate above. Bounded at 30s: a healthy
@@ -1115,8 +1097,8 @@ func main() {
 
 	// The window an agent delivery this listener cannot place is retried within before it is
 	// given up with a record (unplaceable_delivery.go). Zero is a value an operator may mean
-	// here - retry nothing - so it is read through envDuration and not refused.
-	unplaceableRetryWindow := envDuration(logger, "ENVOY_UNPLACEABLE_RETRY_WINDOW", defaultUnplaceableRetryWindow)
+	// here - retry nothing - so it is read through envconf.Duration and not refused.
+	unplaceableRetryWindow := envconf.Duration(logger.Slog(), os.LookupEnv, "ENVOY_UNPLACEABLE_RETRY_WINDOW", defaultUnplaceableRetryWindow)
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
@@ -1298,16 +1280,17 @@ func main() {
 	// maximum age raised past the gone horizon the age would hold a dead holder's claim for an
 	// hour after the reaper had already found it gone.
 	//
-	// The role claim reaper runs at the session reaper's own period, since what it waits for is
-	// what that reaper decides: a claim is released once its holder is gone, and the session
-	// reaper is what finds a holder gone. Left on a period of its own an operator cannot move,
-	// a listener told to judge records every ten seconds would still hold a gone holder's role
-	// for up to five minutes after it had deleted that holder's record.
+	// The role claim reaper runs at ENVOY_ROLE_CLAIM_REAP_INTERVAL, its own period and not the
+	// session reaper's: what it waits for is what that reaper decides, but a pass of it is what
+	// takes a gone holder's role away, and an operator who shortens the session reaper's period
+	// to settle the bucket's maximum age sooner is not asking for that (the two defaults say
+	// why). Each pass is judged against this listener's own live window, not counted, so the
+	// period moves when a gone holder's role is freed and nothing else.
 	sessionLive, _ := sessions.Windows()
 	kvLoopsCtx, kvLoopsCancel := context.WithCancel(context.Background())
 	kvLoopsDone := []<-chan struct{}{
 		registry.StartReaper(kvLoopsCtx, func(sessionID string) (bool, error) { return sessionMayBeLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),
-		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, sessionReapInterval, sessionLive),
+		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, roleClaimReapInterval, sessionLive),
 		// The session reaper is the one loop that deletes a session's record, and the one place
 		// the bucket's maximum age is settled while the listener runs (session.ReapSessions).
 		sessions.StartSessionReaper(kvLoopsCtx, sessionReapInterval, session.SessionReaper{
@@ -1332,7 +1315,7 @@ func main() {
 	// due.
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
 	if ciStore != nil {
-		ciDebounce := envDuration(logger, "ENVOY_CI_DEBOUNCE", 5*time.Second)
+		ciDebounce := envconf.Duration(logger.Slog(), os.LookupEnv, "ENVOY_CI_DEBOUNCE", 5*time.Second)
 		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 	}
 

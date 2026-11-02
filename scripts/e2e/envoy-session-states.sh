@@ -59,7 +59,11 @@
 #   ENVOY_SESSION_GONE_HORIZON=10m    longer than check 2's bus outage and check 8's 7-minute
 #                                     stall, so neither reads gone while it is only stalled
 #   ENVOY_SESSION_REAP_INTERVAL=20s   a change to the bucket's maximum age reaches both inside the
-#                                     two minutes check 8 allows, and both reapers act promptly
+#                                     two minutes check 8 allows, and a record past the horizon is
+#                                     deleted promptly
+#   ENVOY_ROLE_CLAIM_REAP_INTERVAL=20s  the role claim reaper has a period of its own, five
+#                                     minutes by deployment default, and checks 4 and 6 wait out a
+#                                     pass of it; at that default each wait would cost five minutes
 # and every plugin heartbeats at ENVOY_HEARTBEAT_MS=5000, so a live session refreshes six times
 # inside the live window: the shipping margin — three refreshes inside five minutes
 # (.github/scripts/check-heartbeat-margin.sh) — kept at this scale. Check 6 runs a listener of its
@@ -282,6 +286,7 @@ claude_version=
 live_window=30s
 gone_horizon=10m
 reap_interval=20s
+role_reap_interval=20s
 heartbeat_ms=5000
 max_age=2h
 max_age_shown=2h0m0s
@@ -719,7 +724,8 @@ start_listener() {
     ENVOY_LISTEN_FD=3 ENVOY_API_TOKEN="$(cat "$work/envoy-token")" \
     ENVOY_MACHINE_ID="envoy-session-states-$$-$1" ENVOY_LISTEN_HOST=127.0.0.1 NATS_URLS="$nats_url" \
     ENVOY_SESSION_LIVE_WINDOW="$live_window" ENVOY_SESSION_GONE_HORIZON="$gone_horizon" \
-    ENVOY_SESSION_REAP_INTERVAL="$reap_interval" "$work/bin/envoy-listener"
+    ENVOY_SESSION_REAP_INTERVAL="$reap_interval" \
+    ENVOY_ROLE_CLAIM_REAP_INTERVAL="$role_reap_interval" "$work/bin/envoy-listener"
 }
 
 serving() { curl -fsS --max-time 3 -H "@$work/envoy-auth-header" "http://127.0.0.1:$1/v1/sessions"; }
@@ -1275,8 +1281,9 @@ check_role_claim_survives_lookups() {
   nats_publish "notifications.role.$role" "a direct publish onto a lapsed holder's role" \
     >"$evidence/logs/nats-publish.log" 2>&1 ||
     refuse "the direct nats publish on notifications.role.$role failed; see $evidence/logs/nats-publish.log" || return 1
-  # A reaper pass, which is the one thing that may ever release a claim, and only for a gone holder.
-  sleep "$((2 * ${reap_interval%s}))"
+  # A role claim reaper pass, which is the one thing that may ever release a claim, and only for
+  # a gone holder. It runs at ENVOY_ROLE_CLAIM_REAP_INTERVAL, this run's own.
+  sleep "$((2 * ${role_reap_interval%s}))"
   after=$(role_record "$role")
   [ "$(jq -r '.holder_session_id' <<<"$after")" = "$holder" ] ||
     refuse "envoy_roles names $(jq -r '.holder_session_id' <<<"$after") after a reaper pass, not $holder" || return 1
@@ -1348,13 +1355,15 @@ check_gone_only_past_the_horizon() {
   wait_until 180 "the victim session to register live" state_is "$port_a" "$victim" '' live || return 1
   api "$port_a" POST /v1/roles/set "$(jq -cn --arg s "$victim" --arg r "$role" '{session_id:$s,role:$r}')" ||
     refuse "the victim could not take the role $role" || return 1
-  # The listener that judges this boundary: a 90s gone horizon and a reaper pass every 10s.
+  # The listener that judges this boundary: a 90s gone horizon, and a pass of each reaper every
+  # 10s — the session reaper, which deletes the dead holder's record, and the role claim reaper,
+  # which then releases its claim.
   rm -f "$work/shortlistener.port"
   start_held shortlistener short_port ENVOY_LISTEN_FD -- env -i PATH="$PATH" HOME=/nonexistent \
     ENVOY_LISTEN_FD=3 ENVOY_API_TOKEN="$(cat "$work/envoy-token")" \
     ENVOY_MACHINE_ID="envoy-session-states-short-$$" ENVOY_LISTEN_HOST=127.0.0.1 \
     NATS_URLS="$nats_url" ENVOY_SESSION_LIVE_WINDOW=30s ENVOY_SESSION_GONE_HORIZON=90s \
-    ENVOY_SESSION_REAP_INTERVAL=10s "$work/bin/envoy-listener"
+    ENVOY_SESSION_REAP_INTERVAL=10s ENVOY_ROLE_CLAIM_REAP_INTERVAL=10s "$work/bin/envoy-listener"
   await_start shortlistener "$shortlistener_pid" 60 "the short-horizon listener to serve" serving "$short_port"
   exec {victim_fd}>&-
   kill -KILL "$victim_pid" || refuse "could not kill the victim session" || return 1
@@ -1418,9 +1427,10 @@ gone_horizon_boundary() {
   note "SIGKILL-to-gone latency: ${measured_kill_latency}s, and ${horizon_elapsed}s after the session's last registration (gone horizon 90s, a reaper pass every 10s)"
   [ "$horizon_elapsed" -ge 90 ] ||
     refuse "the killed session read gone ${horizon_elapsed}s after its last registration, inside its own 90s horizon" || return 1
-  # The role claim reaper runs at this listener's own ENVOY_SESSION_REAP_INTERVAL, the ten
+  # The role claim reaper runs at this listener's own ENVOY_ROLE_CLAIM_REAP_INTERVAL, the ten
   # seconds set above (StartRoleClaimReaper, cmd/listener/main.go), so the release is one pass
-  # behind the session reaper's that found the holder gone.
+  # behind the session reaper's that found the holder gone. At the deployment's own five minutes
+  # this wait would be the five, which is why the rig sets its own.
   wait_until 120 "the role reaper to release the gone holder's claim" \
     role_reason_is "$short_port" "$role" unclaimed || return 1
   note "the role claim was released only once its holder was gone"

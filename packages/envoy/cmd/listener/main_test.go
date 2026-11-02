@@ -5425,57 +5425,29 @@ func TestTheDriftCorrectionWritesADurableOnlyWhenThePolicyChangesIt(t *testing.T
 // pass (session.ReapSessions), so an age another process set reaches a running listener within
 // two whole passes. A1 and A7 give that two minutes, and the setting's documentation
 // (packages/envoy/docs/architecture.md and the docs site's settings table) states one minute.
-// The role claim reaper runs on the same period, which only makes it release a gone holder's
-// claim sooner: the grace a restored claim keeps is measured against the live window from the
-// listener's start, not counted in passes.
 func TestTheDefaultSessionReapIntervalMeetsTheTwoMinuteAdoption(t *testing.T) {
 	if got := 2 * defaultSessionReapInterval; got > 2*time.Minute {
 		t.Fatalf("two passes at the default session reap interval take %s, want them inside the two minutes a maximum-age change is given to reach a running listener", got)
 	}
 }
 
-// A period or a window an operator wrote as zero or a negative value is refused by name, and the
-// listener does not start: ENVOY_SESSION_REAP_INTERVAL=0 reached time.NewTicker and panicked the
-// reaper loops before this change. A value time.ParseDuration cannot read is still a WARN and
-// the default, as it always was, since a listener never refuses to start over a malformed
-// duration. A setting where zero says something - ENVOY_UNPLACEABLE_RETRY_WINDOW=0s, which asks
-// for no retry at all - keeps reading through envDuration, which takes it.
-func TestEnvPositiveDurationRefusesADurationThatIsNotPositive(t *testing.T) {
-	const name = "ENVOY_SESSION_REAP_INTERVAL"
-	logs := &cmdtest.LockedBuffer{}
-	logger := logging.NewWithWriter("test", logs)
-	for _, value := range []string{"0", "0s", "-1m"} {
-		t.Run(value, func(t *testing.T) {
-			t.Setenv(name, value)
-			got, err := envPositiveDuration(logger, name, time.Minute)
-			if want := fmt.Sprintf("invalid %s %q", name, value); err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("envPositiveDuration(%q) = %s, %v; want a refusal naming %s and %q", value, got, err, name, value)
-			}
-		})
+// The role claim reaper runs on a period of its own, and its default is no shorter than the age
+// the session bucket ships with: a stalled session's key is expired by that age, and a holder
+// whose key is gone reads gone, so a pass more often than that frees a stalled holder's role
+// sooner than the fixed five-minute pass this change replaces - the harm this whole change
+// exists to end. Raising that maximum age past the gone horizon is dispatch://INFRA-887's, and
+// it cannot land first, so the default stands at the bucket's own age. Two passes still fit
+// well inside the gone horizon, so a holder that really is gone loses its role promptly.
+func TestTheDefaultRoleClaimReapIntervalOutlastsTheSessionBucketsShippingAge(t *testing.T) {
+	// The age session.OpenSessionRegistry creates the session bucket with, which the deployment
+	// leaves alone (ENVOY_SESSION_MAX_AGE unset).
+	const shippingSessionMaxAge = 5 * time.Minute
+	if defaultRoleClaimReapInterval < shippingSessionMaxAge {
+		t.Fatalf("the default role claim reap interval is %s, want at least the %s the session bucket keeps a record for: a stalled holder reads gone when its key expires, and a shorter pass takes its role sooner than the five-minute pass this change replaced", defaultRoleClaimReapInterval, shippingSessionMaxAge)
 	}
-	t.Run("a malformed duration still starts on the default", func(t *testing.T) {
-		t.Setenv(name, "1 hour")
-		got, err := envPositiveDuration(logger, name, time.Minute)
-		if got != time.Minute || err != nil {
-			t.Fatalf("envPositiveDuration(\"1 hour\") = %s, %v; want the default and no refusal", got, err)
-		}
-		if !strings.Contains(logs.String(), "invalid "+name) {
-			t.Fatalf("the log does not warn about the malformed value:\n%s", logs.String())
-		}
-	})
-	t.Run("a positive duration is taken", func(t *testing.T) {
-		t.Setenv(name, "30s")
-		got, err := envPositiveDuration(logger, name, time.Minute)
-		if got != 30*time.Second || err != nil {
-			t.Fatalf("envPositiveDuration(\"30s\") = %s, %v; want 30s", got, err)
-		}
-	})
-	t.Run("a setting zero speaks for keeps taking it", func(t *testing.T) {
-		t.Setenv("ENVOY_UNPLACEABLE_RETRY_WINDOW", "0s")
-		if got := envDuration(logger, "ENVOY_UNPLACEABLE_RETRY_WINDOW", defaultUnplaceableRetryWindow); got != 0 {
-			t.Fatalf("envDuration(\"0s\") = %s, want the zero window that asks for no retry", got)
-		}
-	})
+	if got := 2 * defaultRoleClaimReapInterval; got > session.GoneHorizon {
+		t.Fatalf("two passes at the default role claim reap interval take %s, want them inside the %s gone horizon, so a gone holder's role is free well before an operator waits out another horizon", got, session.GoneHorizon)
+	}
 }
 
 // The listener keeps no last-seen memory of its own: it opens the session registry on

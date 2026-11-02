@@ -299,10 +299,16 @@ modification time.
 | `gone` | It last registered before the gone horizon, or Envoy holds no record of it. |
 
 Only the role claim reaper releases a role claim, and only once that role's holder is `gone`; it
-runs every `ENVOY_SESSION_REAP_INTERVAL` (1 minute by default), the period the session reaper
-keeps. No lookup, publish or failed delivery releases one. A Legion role whose agent process exits
-is `gone` at once, so its successor's soft claim takes the role without waiting out the live
-window; that claim replaces the holder, it does not release the claim.
+runs every `ENVOY_ROLE_CLAIM_REAP_INTERVAL` (5 minutes by default), a period of its own and not
+the session reaper's. No lookup, publish or failed delivery releases one. A Legion role whose
+agent process exits is `gone` at once, so its successor's soft claim takes the role without
+waiting out the live window; that claim replaces the holder, it does not release the claim.
+
+Dispatch judges a role route's holder by the same two windows, and both processes carry the same
+values: give every listener of a deployment and Dispatch's server the same
+`ENVOY_SESSION_LIVE_WINDOW` and `ENVOY_SESSION_GONE_HORIZON`. With a horizon only the listener
+carries, Dispatch counts the event of a holder that listener still calls `unresponsive` as sent
+with nothing to send, and the event reaches that holder never.
 
 So read `state`, never the length of the list: a session missing from the default list has not
 ended, and a session that reads `unresponsive` is working.
@@ -393,9 +399,10 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_SUBSCRIBE_ALL_TOPICS` | Set to `1` to have the listener also deliver every topic the stream does not store, such as a team topic, to the sessions on its machine that registered a serve port. Only a NATS user allowed to subscribe to `notifications.>` (a host's own user) may set it; under any other the listener exits at start with an error naming the variable. |
 | `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies and raises one it finds with fewer, at start and every 30 seconds after ([Keeping the stream](#keeping-the-stream)). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
 | `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes. Once the stream holds that much it refuses every new message and keeps every one it holds, which leaves only when it is 72 hours old, and the sender gets an error it can retry: the listener answers a GitHub webhook `503`, which Dispatch's redelivery sweep has GitHub send again (five times, over about half an hour); Dispatch's outbox retries its event; an agent's send or publish fails with `stream ENVOY_NOTIFICATIONS is full`. Size the limit above what the stream takes in 72 hours at its busiest, with room to spare. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it raises a smaller limit, or none, to its own at start and every 30 seconds, and never lowers one ([Keeping the stream](#keeping-the-stream)). A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
-| `ENVOY_SESSION_LIVE_WINDOW` | How long after its last registration a session reads `live`, as a Go duration; default `5m`. Past it the session reads `unresponsive`, which is not dead ([Live, unresponsive, gone](#live-unresponsive-gone)). |
-| `ENVOY_SESSION_GONE_HORIZON` | How long after its last registration a session reads `unresponsive` before it reads `gone`, as a Go duration; default `1h`. Only a `gone` session loses its role claim. Keep it at or below `ENVOY_SESSION_MAX_AGE`, or a record the bucket expires first reads `gone` before the horizon. |
-| `ENVOY_SESSION_REAP_INTERVAL` | How often the session reaper looks for `gone` sessions to release the role claims of, as a Go duration; default `1m`. Nothing else releases a claim. |
+| `ENVOY_SESSION_LIVE_WINDOW` | How long after its last registration a session reads `live`, as a Go duration; default `5m`. Past it the session reads `unresponsive`, which is not dead ([Live, unresponsive, gone](#live-unresponsive-gone)). Dispatch's server reads it too and judges a role route's holder by it, so give every listener of a deployment and Dispatch the same value. |
+| `ENVOY_SESSION_GONE_HORIZON` | How long after its last registration a session reads `unresponsive` before it reads `gone`, as a Go duration; default `1h`. Only a `gone` session loses its role claim. Keep it at or below `ENVOY_SESSION_MAX_AGE`, or a record the bucket expires first reads `gone` before the horizon. Dispatch's server reads it too and judges a role route's holder by it, so give every listener of a deployment and Dispatch the same value: a horizon only the listener carries has Dispatch count an event sent to a holder the listener still calls `unresponsive`, with nothing sent ([Live, unresponsive, gone](#live-unresponsive-gone)). |
+| `ENVOY_SESSION_REAP_INTERVAL` | How often the session reaper deletes the records of `gone` sessions, and settles the session bucket's maximum age, as a Go duration; default `1m`. |
+| `ENVOY_ROLE_CLAIM_REAP_INTERVAL` | How often the role claim reaper looks for role claims whose holder is `gone` and releases them, as a Go duration; default `5m`. Nothing else releases a claim. Keep it at or above `ENVOY_SESSION_MAX_AGE`: a record the bucket expires reads `gone`, so a shorter period takes a merely stalled holder's role that much sooner. |
 | `ENVOY_SESSION_MAX_AGE` | The `envoy_sessions` bucket's `MaxAge`, as a Go duration: how long a registration record survives in NATS. Unset, the listener leaves the bucket as it is. `/healthz` reports the age in use as `session_max_age`. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |

@@ -100,12 +100,16 @@ it is always `false`, because no answer releases one.
 
 No lookup, publish, role-lane delivery attempt, Dispatch outbox forward or daemon probe releases a
 role claim, whatever the holder's state. Only the role claim reaper does, and only once the
-holder's own record reads
-`gone`. It runs on the session reaper's period, `ENVOY_SESSION_REAP_INTERVAL` (a Go duration,
-default 1m), since what it waits for is what the session reaper decides. A Legion role whose agent
-process exits is `gone` at once rather than at the end of the live window, so its successor's soft
-claim takes the role without waiting the window out; a soft claim replaces the holder, it does not
-release the claim.
+holder's own record reads `gone`. It runs on a period of its own,
+`ENVOY_ROLE_CLAIM_REAP_INTERVAL` (a Go duration, default 5m), and not on the session reaper's: a
+record the session bucket expires reads `gone` too, so a shorter period takes a merely stalled
+holder's role that much sooner. A Legion role whose agent process exits is `gone` at once rather
+than at the end of the live window, so its successor's soft claim takes the role without waiting
+the window out; a soft claim replaces the holder, it does not release the claim.
+
+Dispatch reads `ENVOY_SESSION_LIVE_WINDOW` and `ENVOY_SESSION_GONE_HORIZON` too and judges a role
+route's holder by them (`roles.Windows`, `cmd/dispatch`'s `roleHolderWindows`), so a deployment
+gives its listeners and its Dispatch server the same two values.
 
 `ENVOY_SESSION_MAX_AGE` sets the `envoy_sessions` bucket's `MaxAge`; unset, the listener leaves the
 bucket's own. A gone horizon longer than that age reads a record the bucket expired as `gone`

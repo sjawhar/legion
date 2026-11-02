@@ -41,7 +41,7 @@ func bucketsRig(t *testing.T) (*roles.Buckets, *store.Registry, *session.Session
 	if err != nil {
 		t.Fatalf("open JetStream: %v", err)
 	}
-	return roles.NewBuckets(client), registry, sessions, js
+	return roles.NewBuckets(client, roles.Windows{}), registry, sessions, js
 }
 
 // Before any bucket exists a role has no claim; once one does, Buckets reads the claim a listener
@@ -53,7 +53,7 @@ func TestBucketsReadAClaimAsTheRegistryWroteIt(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	if claim, err := roles.NewBuckets(client).RoleClaim(context.Background(), "reviewer"); err != nil || claim.HolderSessionID != "" {
+	if claim, err := roles.NewBuckets(client, roles.Windows{}).RoleClaim(context.Background(), "reviewer"); err != nil || claim.HolderSessionID != "" {
 		t.Fatalf("the claim with no role bucket is %+v, %v; want none", claim, err)
 	}
 

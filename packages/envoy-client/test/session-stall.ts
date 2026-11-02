@@ -36,11 +36,13 @@ const HEARTBEAT_MS = 2_000;
 const LIVE_WINDOW_MS = 10_000;
 const GONE_HORIZON_MS = 60_000;
 /**
- * ENVOY_SESSION_REAP_INTERVAL, the cadence of both of the listener's session loops: the session
- * reaper, which deletes the record of a session past the horizon, and the role claim reaper,
- * which releases that session's role claim and no earlier one's (`StartRoleClaimReaper`,
- * packages/envoy/cmd/listener/main.go, started on this same interval). Nothing else releases a
- * claim, so the last property below waits out one pass of it rather than five minutes.
+ * The cadence of both of the listener's session loops, each read from a setting of its own:
+ * ENVOY_SESSION_REAP_INTERVAL for the session reaper, which deletes the record of a session past
+ * the horizon, and ENVOY_ROLE_CLAIM_REAP_INTERVAL for the role claim reaper, which releases that
+ * session's role claim and no earlier one's (`StartRoleClaimReaper`,
+ * packages/envoy/cmd/listener/main.go). The deployment's role-claim period is five minutes, and
+ * nothing else releases a claim, so this rig gives the listener one of its own and the last
+ * property below waits out a pass of it rather than those five minutes.
  */
 const REAP_INTERVAL_MS = 2_000;
 /**
@@ -383,6 +385,7 @@ describe.skipIf(!envoyStackEnabled)("a session its box stalls", () => {
         ENVOY_SESSION_LIVE_WINDOW: goDuration(LIVE_WINDOW_MS),
         ENVOY_SESSION_GONE_HORIZON: goDuration(GONE_HORIZON_MS),
         ENVOY_SESSION_REAP_INTERVAL: goDuration(REAP_INTERVAL_MS),
+        ENVOY_ROLE_CLAIM_REAP_INTERVAL: goDuration(REAP_INTERVAL_MS),
         ENVOY_SESSION_MAX_AGE: goDuration(SESSION_MAX_AGE_MS),
       },
     });
@@ -550,7 +553,7 @@ describe.skipIf(!envoyStackEnabled)("a session its box stalls", () => {
     });
     expect(await roleClaim(claims, child.role)).toEqual(claimed);
 
-    // The role claim reaper runs on the same REAP_INTERVAL_MS pass as the session reaper, and
+    // The role claim reaper runs on its own REAP_INTERVAL_MS pass, as the session reaper does, and
     // passes over an unresponsive holder every time: for the whole horizon the claim stays the
     // one the child made. Every read here is taken a pass short of the horizon
     // (stalled.lastSeen + GONE_HORIZON_MS), which is the earliest moment any pass may release it.

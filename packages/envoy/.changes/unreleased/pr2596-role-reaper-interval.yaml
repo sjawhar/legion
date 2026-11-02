@@ -1,12 +1,13 @@
 kind: Fixed
 body: |-
-  The role claim reaper runs at `ENVOY_SESSION_REAP_INTERVAL`, the period the session reaper
-  already took, instead of a fixed five minutes. What it waits for is what that reaper decides —
-  a claim is released once its holder is gone, and the session reaper is what finds a holder gone
-  — so a listener told to judge records every ten seconds used to hold a gone holder's role for
-  up to five minutes after it had deleted that holder's record. The default is that reaper's own
-  minute, so a gone holder's role is released within a minute of its record going; a restored
-  claim's grace is measured from the listener's start against the live window, not counted in
-  passes, so it is unchanged by the shorter period.
+  The role claim reaper runs on a period of its own, `ENVOY_ROLE_CLAIM_REAP_INTERVAL`, instead of
+  a fixed five minutes no operator could move. Its default is those same five minutes, so a
+  deployment keeps the release it had: a session whose record the bucket expires reads `gone` as
+  surely as one past the gone horizon, and the session bucket ships with a five-minute maximum
+  age, so judging claims every minute — the session reaper's period — would have taken a merely
+  stalled holder's role up to five times sooner than before. The session reaper keeps
+  `ENVOY_SESSION_REAP_INTERVAL`, a minute by default, and the startup line that resolves the
+  session windows now reports both periods. A restored claim's grace is measured from the
+  listener's start against the live window, not counted in passes, so no period changes it.
 custom:
   Issue: pr2596
