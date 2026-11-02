@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+    `dispatch artifact` refuses `--content` and `--content-file` under a `--name` whose extension
+    is not `.md` or `.markdown` (`rows.jsonl`, `sizes.tsv`), before it sends anything, and the
+    refusal names `--path`. Inline content is always stored as a Markdown document, so such an
+    upload was accepted and came back altered, a JSONL file's lines joined into one paragraph.
+    A name with no extension, such as a document title, is still taken.
+time: 2026-11-02T09:30:00.000000000Z
+custom:
+    Issue: pr2673

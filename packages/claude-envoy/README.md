@@ -325,9 +325,11 @@ every third-party package they inline, written from Bun's metafile by
 
 - Main's tree carries the bundles and `legion/`; a pull request never commits them. Main's Rebuild
   Claude Envoy plugin workflow (`.github/workflows/claude-envoy-rebuild.yaml`) builds main's tip
-  after each merge and commits `dist/` and `legion/` when they differ, onto main's tip at the time
-  it lands even when main moved meanwhile, unless main already holds a newer build; when a build
-  input (`scripts/build-inputs.txt`) changed in between, it starts a fresh run too. So main's
+  after each merge that changes a build input (`scripts/build-inputs.txt`, which the workflow's
+  `on.push.paths` covers; a merge that changes none starts no run, since it would rebuild the
+  bundles main already holds) and commits `dist/` and `legion/` when they differ, onto main's tip
+  at the time it lands even when main moved meanwhile, unless main already holds a newer build;
+  when a build input changed in between, it starts a fresh run too. So main's
   built files are a build of a recent main, at most one run behind its inputs, its two jobs'
   runner queues included (more than an hour when the Actions queue is long). In that window
   `hooks/hooks.json`, `.mcp.json`, `bin/` and `.claude-plugin/` from the merge are live beside the

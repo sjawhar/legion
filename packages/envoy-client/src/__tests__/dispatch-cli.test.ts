@@ -659,6 +659,21 @@ describe("the dispatch CLI", () => {
     expect(requests).toEqual([]);
   });
 
+  // --content and --content-file store their text as a Markdown document, so under a .jsonl name
+  // the call is refused before any request, dry run included, naming --path.
+  test("artifact refuses --content-file under a name that is not Markdown, naming --path", async () => {
+    const argv = ["artifact", "--issue", "DSP-1", "--name", "rows.jsonl", "--content-file", "-"];
+    for (const call of [[...argv, "--dry-run"], argv]) {
+      const { code, stdout } = await run(call, omp, '{"row_id": 1}\n{"row_id": 2}\n');
+      expect(code, call.join(" ")).toBe(1);
+      expect(stdout.split("\n").slice(0, 2)).toEqual([
+        "dispatch artifact was not called: 1 problem",
+        `- content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph), and "rows.jsonl" is not a Markdown name. Upload the file under the same name with path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged; content takes a name ending in .md or .markdown or with no extension.`,
+      ]);
+    }
+    expect(requests).toEqual([]);
+  });
+
   // A dry run runs the call's own pre-send check, so a call it refuses is refused alike, before
   // any request: the owner resolved from LEGION_ISSUE or left missing, a ref naming another
   // owner, a picture file that is not there.
@@ -794,6 +809,43 @@ describe("the dispatch CLI", () => {
       });
     }
   });
+
+  // Dispatch's own refusal that carries no key back says its keyed layer did not judge the
+  // request, so the carried sighting is set aside: the write asks /healthz instead of being sent
+  // again, and the call's save leaves the sighting out of state.json, so the next call trusts
+  // nothing it carried. A client that kept the sighting would resend through its 15 s of pauses;
+  // the test's 30 s bound lets that show as five posts rather than as a timeout.
+  test("a Dispatch refusal that echoes no key drops the carried sighting from state.json", async () => {
+    const origin = `http://127.0.0.1:${server.port}`;
+    const file = join(stateDir, "sessions", "ses-1", "state.json");
+    mkdirSync(join(stateDir, "sessions", "ses-1"), { recursive: true });
+    const keyedLayer = { [origin]: new Date(Date.now() - 60_000).toISOString() };
+    writeFileSync(file, JSON.stringify({ advice: [], pictures: [], follows: [], keyedLayer }));
+    nextProcess("ses-1");
+    let posts = 0;
+    let probes = 0;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const { pathname } = new URL(request.url);
+      if (pathname === "/healthz") {
+        probes++;
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      }
+      if (request.method === "POST" && pathname === "/api/v1/issues/DSP-1/messages") {
+        posts++;
+        return Response.json({ code: "INTERNAL", error: "database is down" }, { status: 503 });
+      }
+      return fetch(request);
+    }) as typeof fetch;
+    const { code } = await run(
+      ["message", "--issue", "DSP-1", "--body", "Deliverable landed."],
+      omp,
+      "",
+      fetchImpl
+    );
+    expect({ code, posts, probes }).toEqual({ code: 1, posts: 1, probes: 1 });
+    expect(JSON.parse(readFileSync(file, "utf-8")).keyedLayer).toEqual({});
+  }, 30_000);
 
   test("a read from a Dispatch server older than the repository fields answers, warning on stderr", async () => {
     const { code, stdout, stderr } = await run(["read", "--issue", "DSP-3"], omp);
