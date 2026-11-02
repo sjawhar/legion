@@ -322,9 +322,19 @@ func TestPodUpdateAsksAnUnansweredClaimAgainUnderANewDeliveryID(t *testing.T) {
 // op to answer with. The round asks it all the same, and the end of the turn that task starts is
 // its answer, recorded with no head, so the round completes and the pod is replaced like any
 // other.
+//
+// The claim is at exactly one contract below this daemon's, which is the worker of the release
+// before this one: the plugin main has released, and the plugin every live worker runs at the
+// first boot of this release. That is the case this path exists for, and the one a bound rather
+// than a pin on PodUpdateContract let through — with the constant left at 45 while the op moved
+// to 46, such a worker read as able to answer an op its plugin does not have, and every round
+// of the first roll stalled. api's TestPodUpdateContractIsTheContractThatIntroducedTheOp pins
+// the constant to the contract that introduced the op, so PodUpdateContract-1 here cannot name
+// anything but the released plugin.
 func TestPodUpdateTakesTheTurnsEndAsTheAnswerOfAClaimBelowTheContract(t *testing.T) {
 	h := updateHarness(t, PodUpdateContract-1)
 	h.reach(StateReady)
+	h.m.deps.PluginContract = PodUpdateContract
 
 	h.openUpdate(testRound, testReasons)
 
@@ -547,6 +557,51 @@ func TestPodUpdateARefusedRelaunchLeavesThePluginRoundStanding(t *testing.T) {
 		t.Errorf("PluginRelaunchFor after the end that relaunched = %d, want the daemon's own contract %d", got, h.m.deps.PluginContract)
 	}
 	h.wantBudgets(Budgets{})
+}
+
+// The drop a plugin round's end makes can itself find the worker in a turn: a restart leaves a
+// question armed for the ask nothing read (askFirst), the drop answers it, and the agent says it
+// is streaming, which moves the claim to working (answerAskFirstAfterDrop). The relaunch is off
+// then, for the reason the guard above it exists — a relaunch ends the process where it stands,
+// and this one would cut a turn that started a moment ago and throw away whatever it has not
+// pushed. The round and the worker's answer stand, and the next sweep's post ends the round for
+// real once the turn is over.
+func TestPodUpdateAPluginRoundsEndRelaunchesNoWorkerItsOwnDropFoundInATurn(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+	round := PluginRound(PodUpdateContract + 1)
+	h.openUpdate(round, testReasons)
+	h.wantPrompts(1)
+	h.signalUpdate("c0ffee")
+	answered := h.claim()
+
+	h.restart()
+	if !h.m.askFirst {
+		t.Fatal("the restored claim has nothing to ask its agent; this test needs the question a restart leaves open")
+	}
+	// The agent is in a turn this daemon never saw begin, which is what that question is for.
+	h.conn.SetStreaming(true)
+
+	h.must(PodUpdateEnded{Claim: h.token, Round: round})
+
+	h.wantState(StateWorking)
+	h.wantCalls("Resume", 0)
+	c := h.wantRound(round)
+	if c.PluginRelaunchFor != 0 {
+		t.Errorf("PluginRelaunchFor = %d, want 0: no relaunch was made", c.PluginRelaunchFor)
+	}
+	if c.UpdateSignalledAt == nil || c.UpdateHead != answered.UpdateHead {
+		t.Errorf("claim after the end that relaunched nothing = %+v, want the worker's answer at %q standing", c, answered.UpdateHead)
+	}
+
+	h.mustQuiet(StreamTurnEnd{Claim: h.token})
+	h.must(PodUpdateEnded{Claim: h.token, Round: round})
+
+	h.wantState(StateLaunching)
+	h.wantCalls("Resume", 1)
+	if got := h.wantRound("").PluginRelaunchFor; got != h.m.deps.PluginContract {
+		t.Errorf("PluginRelaunchFor after the end that relaunched = %d, want the daemon's own contract %d", got, h.m.deps.PluginContract)
+	}
 }
 
 // A stale plugin on a claim that can answer opens a round of that claim's own instead of
@@ -1481,9 +1536,10 @@ func TestPodUpdateAClaimInTheRoundsOwnPodStillLosesItsAnswerToAForeignTurn(t *te
 	}
 }
 
-// The round's own record of a claim that left it: the round, and whether the claim had answered
-// it by then. Both are written where the launch records which pod the claim's process came up
-// in, and they are the whole of what the claim's part in that round is read from afterwards.
+// The round's own record of a claim that left it: the round it left, written where the launch
+// records which pod the claim's process came up in, with the answer the claim already had
+// standing beside it. The two are the whole of what the claim's part in that round is read from
+// afterwards.
 func TestPodUpdateRecordsTheRoundAClaimLeavesAndWhetherItHadAnswered(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -1506,20 +1562,20 @@ func TestPodUpdateRecordsTheRoundAClaimLeavesAndWhetherItHadAnswered(t *testing.
 			h.diesIntoPod(testOtherPod)
 
 			c := h.wantRound(testRound)
-			if c.UpdateLeftRound != testRound || c.UpdateLeftAnswered != tc.answers {
+			if c.UpdateLeftRound != testRound || (c.UpdateSignalledAt != nil) != tc.answers {
 				t.Fatalf("the claim in the new pod left %q with answered=%t, want the round %q left with answered=%t",
-					c.UpdateLeftRound, c.UpdateLeftAnswered, testRound, tc.answers)
+					c.UpdateLeftRound, c.UpdateSignalledAt != nil, testRound, tc.answers)
 			}
-			if s := h.store.load(h.token); s.UpdateLeftRound != testRound || s.UpdateLeftAnswered != tc.answers {
+			if s := h.store.load(h.token); s.UpdateLeftRound != testRound || (s.UpdateSignalledAt != nil) != tc.answers {
 				t.Errorf("the stored claim left %q with answered=%t, want the record durable: a restart reads it from the store alone",
-					s.UpdateLeftRound, s.UpdateLeftAnswered)
+					s.UpdateLeftRound, s.UpdateSignalledAt != nil)
 			}
 		})
 	}
 }
 
-// The control for both halves of the record: a claim whose process comes up in its round's own
-// pod has left no round, and a claim in no round leaves none whatever pod it comes up in.
+// The control for the record: a claim whose process comes up in its round's own pod has left no
+// round, and a claim in no round leaves none whatever pod it comes up in.
 func TestPodUpdateRecordsNoLeftRoundWhereNoRoundWasLeft(t *testing.T) {
 	t.Run("the claim comes up in its round's own pod", func(t *testing.T) {
 		h := updateHarness(t, PodUpdateContract)
@@ -1529,9 +1585,8 @@ func TestPodUpdateRecordsNoLeftRoundWhereNoRoundWasLeft(t *testing.T) {
 
 		h.diesIntoPod(testRoundPod)
 
-		if c := h.wantRound(testRound); c.UpdateLeftRound != "" || c.UpdateLeftAnswered {
-			t.Fatalf("the claim back in the round's own pod left %q with answered=%t, want no round left",
-				c.UpdateLeftRound, c.UpdateLeftAnswered)
+		if c := h.wantRound(testRound); c.UpdateLeftRound != "" {
+			t.Fatalf("the claim back in the round's own pod left %q, want no round left", c.UpdateLeftRound)
 		}
 	})
 	t.Run("the claim is in no round", func(t *testing.T) {
@@ -1540,9 +1595,8 @@ func TestPodUpdateRecordsNoLeftRoundWhereNoRoundWasLeft(t *testing.T) {
 
 		h.diesIntoPod(testOtherPod)
 
-		if c := h.wantRound(""); c.UpdateLeftRound != "" || c.UpdateLeftAnswered {
-			t.Fatalf("the claim in another pod left %q with answered=%t, want no round left: it was in none",
-				c.UpdateLeftRound, c.UpdateLeftAnswered)
+		if c := h.wantRound(""); c.UpdateLeftRound != "" {
+			t.Fatalf("the claim in another pod left %q, want no round left: it was in none", c.UpdateLeftRound)
 		}
 	})
 }
@@ -1566,9 +1620,9 @@ func TestPodUpdateASuspensionKeepsAClaimOutOfTheRoundItLeft(t *testing.T) {
 	if c.Locator != nil {
 		t.Fatalf("the suspended claim records the process %+v; this test is about the claim whose locator the suspension took", c.Locator)
 	}
-	if c.UpdateLeftRound != testRound || c.UpdateLeftAnswered {
+	if c.UpdateLeftRound != testRound || c.UpdateSignalledAt != nil {
 		t.Fatalf("the suspended claim left %q with answered=%t, want the round it left standing unanswered",
-			c.UpdateLeftRound, c.UpdateLeftAnswered)
+			c.UpdateLeftRound, c.UpdateSignalledAt != nil)
 	}
 
 	err := h.handle(PodUpdateSignalled{Claim: h.token, Generation: h.generation(), Session: session, Round: testRound, Head: "c0ffee"})
@@ -1599,9 +1653,8 @@ func TestPodUpdateTheRoundsEndClearsTheRoundTheClaimLeft(t *testing.T) {
 
 	h.must(PodUpdateEnded{Claim: h.token, Round: testRound})
 
-	if c := h.wantRound(""); c.UpdateLeftRound != "" || c.UpdateLeftAnswered {
-		t.Fatalf("the claim after the round ended left %q with answered=%t, want the record cleared with the round",
-			c.UpdateLeftRound, c.UpdateLeftAnswered)
+	if c := h.wantRound(""); c.UpdateLeftRound != "" {
+		t.Fatalf("the claim after the round ended left %q, want the record cleared with the round", c.UpdateLeftRound)
 	}
 
 	h.openUpdate(PodRound(testOtherPod), testReasons)

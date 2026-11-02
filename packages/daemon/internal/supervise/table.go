@@ -1189,7 +1189,7 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 	if m.claim.UpdateRound == "" || m.claim.UpdateSignalledAt == nil {
 		return
 	}
-	if m.claim.LeftPodRound() {
+	if m.claim.LeftPodRound(m.claim.UpdateRound) {
 		return
 	}
 	if ownTask && updatesRound(m.claim.Pending, m.claim.UpdateRound) {
@@ -1313,7 +1313,7 @@ func (m *Machine) answerByTurnEnd() {
 	if !updatesRound(p, m.claim.UpdateRound) || p.ConfirmedAt.IsZero() {
 		return
 	}
-	if m.claim.LeftPodRound() {
+	if m.claim.LeftPodRound(m.claim.UpdateRound) {
 		return
 	}
 	if m.askFirst || m.unseenTurn {
@@ -1783,10 +1783,9 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 // filed against the round that replaced it: a plugin round's answer, which promises the pod and
 // the disk survive, can never end a pod round that deletes both. The switch clears the old
 // round's answer with the rest of its fields (clearUpdate) and asks the worker again under the
-// new round's own words, which name the new round's id. The old round's ask goes with it
-// (dropUpdateTask), and the mark a restart armed for that ask goes in the same step
-// (answerAskFirstAfterDrop), so the new round's ask is prompted rather than taken for the work
-// of whatever turn is running.
+// new round's own words, which name the new round's id. The old round's ask goes with it, and
+// the mark a restart armed for that ask goes in the same step (dropUpdateTask), so the new
+// round's ask is prompted rather than taken for the work of whatever turn is running.
 //
 // A claim that already holds a phase task is answered ErrDeliveryPending, which is a wait rather
 // than a fault: the update task must never displace the work in flight. The refusal is swallowed,
@@ -1805,9 +1804,6 @@ func openPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 		m.log.Info("supervise: an update round is open on this claim; its worker is asked to push its work and answer",
 			"round", open.Round, "reasons", open.Reasons)
 		if err := m.dropUpdateTask(ctx); err != nil {
-			return err
-		}
-		if err := m.answerAskFirstAfterDrop(ctx); err != nil {
 			return err
 		}
 		opened := now
@@ -1896,14 +1892,22 @@ func rotateTaskID(id string) string {
 // — a pod this daemon has already replaced — and until some turn reads them, every task of the
 // claim's next phase is refused behind this one (ErrDeliveryPending). A task a turn confirmed is
 // left where it is: that turn is the worker's, and its end retires the delivery (settle).
+//
+// The mark a restart armed for that ask goes in the same step, here rather than in each caller
+// (answerAskFirstAfterDrop): a drop that left it armed would make the claim's next task the
+// running turn's, confirmed and retired unsent, and a caller that forgot the second call was
+// exactly that bug. It is answered whether or not this drop took a task back, as it was at every
+// caller before: the question is the pending delivery's, and a claim that still holds one is
+// answered nothing there.
 func (m *Machine) dropUpdateTask(ctx context.Context) error {
-	p := m.claim.Pending
-	if !updatesRound(p, m.claim.UpdateRound) || !p.ConfirmedAt.IsZero() {
-		return nil
+	if p := m.claim.Pending; updatesRound(p, m.claim.UpdateRound) && p.ConfirmedAt.IsZero() {
+		m.log.Info("supervise: the update round is over for this claim; the task it sent and nothing read is taken back",
+			"round", m.claim.UpdateRound, "delivery", p.ID)
+		if err := m.retirePending(ctx); err != nil {
+			return err
+		}
 	}
-	m.log.Info("supervise: the update round is over for this claim; the task it sent and nothing read is taken back",
-		"round", m.claim.UpdateRound, "delivery", p.ID)
-	return m.retirePending(ctx)
+	return m.answerAskFirstAfterDrop(ctx)
 }
 
 // askForUpdate gives the claim the round's task, when this claim is one the round asks and the ask
@@ -1917,7 +1921,7 @@ func (m *Machine) dropUpdateTask(ctx context.Context) error {
 // so the ask would cost one turn and teach the round nothing. It is asked nothing however often
 // it is started again, and a suspension does not bring it back into the round.
 func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time.Time) error {
-	if m.claim.UpdateSignalledAt != nil || m.claim.LeftPodRound() {
+	if m.claim.UpdateSignalledAt != nil || m.claim.LeftPodRound(m.claim.UpdateRound) {
 		return nil
 	}
 	if !HoldsCapability(m.claim.State) && m.claim.State != StateSuspended {
@@ -1994,6 +1998,12 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 // not pushed. Nothing is changed there, and the next sweep posts the end again once the turn is
 // over and the answer stands.
 //
+// The claim is read for that turn twice, because the end's own first step can start one: the
+// drop of the round's ask answers the question a restart armed for it, and that answer can find
+// the agent streaming and move the claim to working (dropUpdateTask, answerAskFirstAfterDrop).
+// A relaunch after it would cut exactly the turn the rule above protects, so it is read again
+// after the drop and the round is left standing there too.
+//
 // Only a claim whose process is running is replaced (HoldsCapability). A plugin round whose claim
 // is suspended, launching or queued has no process to replace, and its next launch installs this
 // daemon's plugin anyway, so the round ends there and launches nothing: relaunching a claim an
@@ -2039,10 +2049,15 @@ func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.dropUpdateTask(ctx); err != nil {
 		return err
 	}
-	// The relaunch below ends the mark with the process it replaces, but a launch the lifecycle
-	// refuses leaves this claim where it is, and the ask it just dropped is gone either way.
-	if err := m.answerAskFirstAfterDrop(ctx); err != nil {
-		return err
+	// The drop answers the question a restart armed for the ask it took back, and that answer
+	// can find the agent in a turn of its own and move the claim to working
+	// (answerAskFirstAfterDrop). Relaunching then would cut the very turn the guard above exists
+	// to protect, so the round and its answer are left standing and the next sweep's post ends
+	// it again once the turn is over.
+	if m.claim.State == StateWorking {
+		m.log.Info("supervise: this claim's worker started a turn of its own as its plugin round ended; the round stands and the next sweep ends it again",
+			"round", m.claim.UpdateRound)
+		return nil
 	}
 	m.clearUpdate()
 	m.claim.PluginRelaunchFor = m.deps.PluginContract
@@ -2050,17 +2065,14 @@ func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 }
 
 // leaveRound is the round going from this claim with no process this machine replaces: the ask
-// nothing read goes (dropUpdateTask) with the mark a restart armed for it
-// (answerAskFirstAfterDrop), every field the round wrote goes (clearUpdate), the claim is
-// written, and the task the round was holding back is sent. It is the whole of the round's end
-// for a pod's round — whose pod is gone by the time that end is posted — and for a plugin round
-// the registration ended, which differ only in what they log. sendPending hands nothing to a
-// claim that is not ready or idle, so a failed or suspended claim is sent nothing by it.
+// nothing read goes with the mark a restart armed for it (dropUpdateTask), every field the round
+// wrote goes (clearUpdate), the claim is written, and the task the round was holding back is
+// sent. It is the whole of the round's end for a pod's round — whose pod is gone by the time
+// that end is posted — and for a plugin round the registration ended, which differ only in what
+// they log. sendPending hands nothing to a claim that is not ready or idle, so a failed or
+// suspended claim is sent nothing by it.
 func (m *Machine) leaveRound(ctx context.Context) error {
 	if err := m.dropUpdateTask(ctx); err != nil {
-		return err
-	}
-	if err := m.answerAskFirstAfterDrop(ctx); err != nil {
 		return err
 	}
 	m.clearUpdate()
@@ -2097,7 +2109,7 @@ func (m *Machine) clearUpdate() {
 	m.claim.UpdateRound, m.claim.UpdateReasons, m.claim.UpdateHead = "", "", ""
 	m.claim.UpdateOpenedAt, m.claim.UpdateTaskedAt = nil, nil
 	m.claim.UpdateSignalledAt, m.claim.UpdateToldAt = nil, nil
-	m.claim.UpdateLeftRound, m.claim.UpdateLeftAnswered = "", false
+	m.claim.UpdateLeftRound = ""
 }
 
 // podUpdateSignalled records the worker's answer to the update task — its work is pushed, and the
@@ -2130,9 +2142,9 @@ func podUpdateSignalled(m *Machine, ctx context.Context, ev Event) error {
 			"answered", signal.Round, "round", m.claim.UpdateRound, "head", signal.Head)
 		return foreignRoundRefusal(m.claim, signal.Round)
 	}
-	if m.claim.LeftPodRound() {
+	if m.claim.LeftPodRound(m.claim.UpdateRound) {
 		m.log.Warn("supervise: this claim left its update round when the daemon started it again in another pod; the answer is refused",
-			"round", m.claim.UpdateRound, "answeredWhenItLeft", m.claim.UpdateLeftAnswered, "head", signal.Head)
+			"round", m.claim.UpdateRound, "answeredWhenItLeft", m.claim.UpdateSignalledAt != nil, "head", signal.Head)
 		return leftPodRoundRefusal(m.claim)
 	}
 	at := m.deps.Clock.Now()

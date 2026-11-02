@@ -969,15 +969,22 @@ func blockingClaims(group []supervise.Claim) []supervise.Claim {
 // it holds the pod until it does: the round asks it at the next tick, and a replacement made
 // before that would end a turn of a worker the round asked nothing of.
 //
-// A claim that has left the round waits for nothing (supervise's Claim.LeftPodRound, which is
+// A claim that has left *this* round waits for nothing (supervise's Claim.LeftPodRound, which is
 // the one statement of that rule and is asked here rather than restated). The pod it was in is
 // gone, the round asks it nothing more, and a replacement held for its answer would be held for
-// an answer no process will give. What that claim lost is the other question (lostClaims), and
-// the two are never the same set.
+// an answer no process will give.
+//
+// A claim that left some earlier round is not that claim. It still records the round it left,
+// this round's open has not reached it yet, and it holds this round's pod exactly as any claim
+// the round has not reached does — which is why the predicate is asked about the round being
+// decided rather than about the claim's own. Asked the other way, such a claim stopped holding
+// the pod, and its disk could be deleted with work on it the round had asked nobody for.
+//
+// What a claim lost is the other question (lostClaims), and the two are never the same set.
 func waitingClaims(group []supervise.Claim, round string) []supervise.Claim {
 	var waiting []supervise.Claim
 	for _, c := range blockingClaims(group) {
-		if !answered(c, round) && !c.LeftPodRound() {
+		if !answered(c, round) && !c.LeftPodRound(round) {
 			waiting = append(waiting, c)
 		}
 	}

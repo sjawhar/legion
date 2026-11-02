@@ -9,11 +9,10 @@
 -- asks about is on a disk this process never saw, and no turn and no answer of it takes any part
 -- in the round. '' means the claim left no round. It is written once, where the launch records
 -- the pod the new process came up in.
--- claims.update_left_answered is whether the claim had answered the round when it left it. What
--- the round's pod took with it is the members of the round that neither answered nor left having
--- answered, so this says which of those two a claim that left is.
 -- claims.update_round is left as it was when a claim leaves, so a claim is still a member of the
--- round it left, and only the end of that round clears these two columns, with every other field
--- the round wrote.
+-- round it left, and only the end of that round clears this column, with every other field the
+-- round wrote. Whether that claim had answered when it left is claims.update_signalled_at, which
+-- a claim that has left never changes: what the round's pod took with it is the members of the
+-- round that neither answered nor left having answered, and the two columns together say which
+-- of those a claim that left is.
 alter table claims add column update_left_round text not null default '';
-alter table claims add column update_left_answered boolean not null default false;

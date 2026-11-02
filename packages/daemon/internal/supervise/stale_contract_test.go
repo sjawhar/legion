@@ -20,9 +20,19 @@ import "testing"
 // Observed live on 2026-10-30: after a daemon boot on a newer contract, an issue's claims came up
 // on the previous image at plugin contract 42, every `legion` tool call failed, and the daemon
 // went on routing work to them until an operator moved the issue by hand.
+//
+// The claim is one contract below this daemon's, which is the worker of the release before this
+// one: the plugin main has released, and the plugin every live worker runs at the first boot of
+// this release. It is the case this change exists for, and the one a bound rather than a pin on
+// PodUpdateContract let through — with the constant left at 45 while the op moved to 46, such a
+// worker read as able to answer an op its plugin does not have, and neither this relaunch nor
+// the turn's-end answer ran, so every round of the first roll stalled. The relative form is
+// safe to write now because api's TestPodUpdateContractIsTheContractThatIntroducedTheOp pins the
+// constant to the contract that introduced the op, so PodUpdateContract-1 cannot name anything
+// but the released plugin.
 func TestAStalePluginBelowTheUpdateContractIsRelaunchedWhenItsTurnEnds(t *testing.T) {
 	t.Run("idle, so it is relaunched at once", func(t *testing.T) {
-		h := updateHarness(t, PodUpdateContract-2)
+		h := updateHarness(t, PodUpdateContract-1)
 		h.reach(StateReady)
 		h.m.deps.PluginContract = PodUpdateContract
 		recorded := h.locator()
@@ -45,7 +55,7 @@ func TestAStalePluginBelowTheUpdateContractIsRelaunchedWhenItsTurnEnds(t *testin
 	})
 
 	t.Run("in a turn, so it is relaunched once that turn ends", func(t *testing.T) {
-		h := updateHarness(t, PodUpdateContract-2)
+		h := updateHarness(t, PodUpdateContract-1)
 		h.reach(StateReady)
 		h.must(RequestDeliver{Claim: h.token, Task: "implement the plan"})
 		h.must(StreamTurnStart{Claim: h.token})
@@ -68,70 +78,6 @@ func TestAStalePluginBelowTheUpdateContractIsRelaunchedWhenItsTurnEnds(t *testin
 		h.wantCalls("Resume", 1)
 		if c := h.claim(); c.PluginRelaunchFor != PodUpdateContract {
 			t.Errorf("PluginRelaunchFor after the turn ended = %d, want this daemon's %d", c.PluginRelaunchFor, PodUpdateContract)
-		}
-	})
-}
-
-// The worker of the release before this one, at exactly one contract below: the plugin main has
-// released, which is the plugin every live worker runs at the first boot of this release. It is
-// the case this change exists for, and the one a bound rather than a pin on PodUpdateContract
-// let through — with the constant left at 45 while the op moved to 46, such a worker read as
-// able to answer an op its plugin does not have, so neither of the two paths below ran and
-// every round of the first roll stalled.
-//
-// Both paths are here because a worker takes one or the other and nothing else: the stale lane
-// relaunches it where no round covers it, and inside a round the end of its task's turn is its
-// answer, so its pod is replaced like any other pod's.
-//
-// The two contracts are written as the numbers they are rather than as PodUpdateContract-1 and
-// PodUpdateContract. A relative pair moves with the constant, so it cannot tell a constant that
-// is right from one left behind: at 45 the claim would move to 44 with it and both paths would
-// run. 45 is what main released and 46 is what carries the op, and neither is this constant's
-// to change.
-const (
-	releasedPluginContract = 45
-	readyForUpdateContract = 46
-)
-
-func TestAWorkerOfTheReleasedPluginIsCarriedPastTheUpdateContract(t *testing.T) {
-	t.Run("no round covers it, so the stale lane relaunches it", func(t *testing.T) {
-		h := updateHarness(t, releasedPluginContract)
-		h.reach(StateReady)
-		h.m.deps.PluginContract = readyForUpdateContract
-
-		h.must(StalePlugin{Claim: h.token, Trigger: "boot"})
-
-		h.wantState(StateLaunching)
-		h.wantCalls("Resume", 1)
-		if c := h.claim(); c.PluginRelaunchFor != readyForUpdateContract {
-			t.Errorf("PluginRelaunchFor = %d, want this daemon's %d", c.PluginRelaunchFor, readyForUpdateContract)
-		}
-		if c := h.claim(); c.UpdateRound != "" {
-			t.Errorf("UpdateRound = %q, want none: a worker a relaunch can carry needs no plugin round", c.UpdateRound)
-		}
-	})
-
-	t.Run("a round covers it, so the end of its turn is its answer", func(t *testing.T) {
-		h := updateHarness(t, releasedPluginContract)
-		h.reach(StateReady)
-		h.m.deps.PluginContract = readyForUpdateContract
-
-		h.openUpdate(testRound, testReasons)
-
-		h.wantPrompts(1)
-		if c := h.wantRound(testRound); c.UpdateSignalledAt != nil {
-			t.Errorf("UpdateSignalledAt = %v before any turn ran, want nil", c.UpdateSignalledAt)
-		}
-
-		h.must(StreamTurnStart{Claim: h.token})
-		h.must(StreamTurnEnd{Claim: h.token})
-
-		c := h.claim()
-		if c.UpdateSignalledAt == nil {
-			t.Fatal("the end of the update task's turn recorded no answer; this worker has no op to answer with, so its pod would never be replaced")
-		}
-		if c.UpdateHead != "" {
-			t.Errorf("UpdateHead = %q, want none: a turn's end reports no head", c.UpdateHead)
 		}
 	})
 }

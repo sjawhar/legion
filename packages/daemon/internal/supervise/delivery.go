@@ -164,7 +164,7 @@ func (c Claim) openRoundHoldsTask() bool {
 // that reads it would be asked to push work that died with the pod the round was opened over,
 // and it would refuse the answer the ask asks for. That drop and the phase check's are one shape
 // below, and both leave through the answer every drop of a delivery gives the mark armed for it
-// (answerAskFirstAfterDrop).
+// (answerAskFirstAfterDrop, which dropUpdateTask makes of its own).
 func (m *Machine) sendPending(ctx context.Context) error {
 	// A claim holding a suspension is handed nothing (holdSuspension).
 	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
@@ -187,16 +187,16 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		return nil
 	}
 	// Every reason to drop the delivery rather than send it is decided here and leaves through
-	// the one exit below, because a dropped delivery leaves no mark armed for it, here or at any
-	// other drop (answerAskFirstAfterDrop): a drop that returned of its own would leave the
-	// question a restart armed for that delivery standing (askFirst), and the next task would be
-	// confirmed by whatever turn is running and retired unsent. Nothing here sends, so the ask of
-	// a round this claim's process has left is still dropped before the connection carries
-	// anything to the worker that cannot answer it.
+	// one of the two exits below, because a dropped delivery leaves no mark armed for it, here
+	// or at any other drop (answerAskFirstAfterDrop): a drop that returned of its own would
+	// leave the question a restart armed for that delivery standing (askFirst), and the next
+	// task would be confirmed by whatever turn is running and retired unsent. Nothing here
+	// sends, so the ask of a round this claim's process has left is still dropped before the
+	// connection carries anything to the worker that cannot answer it.
 	//
 	// holds is whether the delivery is still the claim's to send; the ask of a left round never
 	// is, and its issue's phase is not asked about, since the round's words are what it is.
-	left := m.claim.LeftPodRound() && updatesRound(p, m.claim.UpdateRound)
+	left := m.claim.LeftPodRound(m.claim.UpdateRound) && updatesRound(p, m.claim.UpdateRound)
 	holds := !left
 	if holds {
 		var err error
@@ -206,17 +206,14 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	}
 	switch {
 	case left:
-		if err := m.dropUpdateTask(ctx); err != nil {
-			return err
-		}
+		// dropUpdateTask answers the mark for the ask it takes back.
+		return m.dropUpdateTask(ctx)
 	case !holds:
 		m.log.Info("supervise: the issue has left the phase this task was queued for; it is dropped rather than sent",
 			"delivery", p.ID, "issue", m.claim.Issue, "queuedFor", p.Phase)
 		if err := m.retirePending(ctx); err != nil {
 			return err
 		}
-	}
-	if !holds {
 		return m.answerAskFirstAfterDrop(ctx)
 	}
 	// The question a restart left — whether the turn the agent may be in is the pending
@@ -242,10 +239,12 @@ func (m *Machine) sendPending(ctx context.Context) error {
 
 // answerAskFirstAfterDrop answers the question a restart armed for a delivery that is now gone
 // (askFirst), and every drop of a delivery runs it in the same step as the drop: sendPending's
-// two, and the three a round that is over makes through dropUpdateTask (leaveRound, endPodUpdate,
-// openPodUpdate's round switch). Left armed over nothing pending, the question would make the
-// claim's next task the running turn's — confirmed by a turn of another cause, never prompted,
-// and retired unsent by that turn's end — and the worker would never receive that task at all.
+// phase drop, and dropUpdateTask, which makes it of its own for the three drops a round that is
+// over makes through it (leaveRound, endPodUpdate, openPodUpdate's round switch) and for
+// sendPending's drop of a left round's ask. Left armed over nothing pending, the question would
+// make the claim's next task the running turn's — confirmed by a turn of another cause, never
+// prompted, and retired unsent by that turn's end — and the worker would never receive that
+// task at all.
 //
 // It asks what a send would have asked, and confirms nothing: no delivery is left to confirm, so
 // an agent the ask finds in a turn only moves the claim to working, with the turn marked one this
