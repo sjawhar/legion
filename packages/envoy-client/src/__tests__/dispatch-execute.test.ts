@@ -8262,6 +8262,21 @@ describe("executeDispatchTool", () => {
       ],
     ],
     [
+      "Plan.",
+      [
+        "plan.v1.md",
+        ...["alpha", "beta", "gamma", "delta", "omega", "kappa", "sigma", "theta"].map(
+          (n) => `plan.${n}-archive.md`
+        ),
+      ],
+      [
+        "plan.v1.md",
+        ...["beta", "theta", "sigma", "kappa", "omega", "delta", "gamma"].map(
+          (n) => `plan.${n}-archive.md`
+        ),
+      ],
+    ],
+    [
       "İİİİ-md",
       ["iiii.md", ...[0, 1, 2, 3, 4, 5, 6, 7].map((n) => `notes-${n}.md`)],
       [7, 6, 5, 4, 3, 2, 1, 0].map((n) => `notes-${n}.md`),

@@ -623,6 +623,15 @@ func TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII(t *testing.T) {
 				"plan-omega-archive.md", "plan-delta-archive.md", "plan-gamma-archive.md", "plan-alpha-archive.md"},
 		},
 		{
+			// Only the filename holds "plan.", and the slug is far: the slug's capped distance
+			// must not tie the old match with the newer, longer ones.
+			reference: "Plan.",
+			documents: documents("plan.v1.md", "plan.alpha-archive.md", "plan.beta-archive.md", "plan.gamma-archive.md",
+				"plan.delta-archive.md", "plan.omega-archive.md", "plan.kappa-archive.md", "plan.sigma-archive.md", "plan.theta-archive.md"),
+			want: []string{"plan.v1.md", "plan.beta-archive.md", "plan.theta-archive.md", "plan.sigma-archive.md", "plan.kappa-archive.md",
+				"plan.omega-archive.md", "plan.delta-archive.md", "plan.gamma-archive.md", "plan.alpha-archive.md"},
+		},
+		{
 			reference: "İİİİ-md",
 			documents: documents("iiii.md", "notes-0.md", "notes-1.md", "notes-2.md", "notes-3.md", "notes-4.md", "notes-5.md", "notes-6.md", "notes-7.md"),
 			want:      []string{"notes-7.md", "notes-6.md", "notes-5.md", "notes-4.md", "notes-3.md", "notes-2.md", "notes-1.md", "notes-0.md", "iiii.md"},

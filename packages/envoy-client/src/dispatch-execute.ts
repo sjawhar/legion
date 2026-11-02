@@ -1820,9 +1820,11 @@ function documentListLines(
 /** A reference compared with a document's slug and filename, ASCII letter case ignored: the smaller
  * edit distance of the two, and whether the document is close to it - within a third of the
  * reference's length (at least 2 edits), or one holding the other where the one held is at least 4
- * characters long, whose distance is then exactly their difference in length. Characters are code
- * points, as Go's runes are, and only ASCII letters are folded, since JavaScript and Go lowercase
- * other letters differently (`İ`) and Dispatch's `documentCloseness` must rank alike. */
+ * characters long, whose distance is then exactly their difference in length. A spelling more than
+ * `limit` edits away gives no distance (`boundedEditDistance` knows only that it is past `limit`),
+ * so it never ties a document close through its other spelling. Characters are code points, as
+ * Go's runes are, and only ASCII letters are folded, since JavaScript and Go lowercase other
+ * letters differently (`İ`) and Dispatch's `documentCloseness` must rank alike. */
 function documentCloseness(
   reference: string,
   slug: string,
@@ -1831,7 +1833,6 @@ function documentCloseness(
   const wanted = [...reference.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
   const limit = Math.max(2, Math.floor(wanted.length / 3));
   let distance = Number.POSITIVE_INFINITY;
-  let contained = false;
   for (const candidate of [slug, name]) {
     const label = [...candidate.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
     let edits = boundedEditDistance(wanted, label, limit);
@@ -1839,12 +1840,15 @@ function documentCloseness(
       (wanted.length >= 4 && label.join("").includes(wanted.join(""))) ||
       (label.length >= 4 && wanted.join("").includes(label.join("")))
     ) {
-      contained = true;
       edits = Math.abs(label.length - wanted.length);
+    } else if (edits > limit) {
+      continue;
     }
     distance = Math.min(distance, edits);
   }
-  return { distance, near: contained || distance <= limit };
+  return distance === Number.POSITIVE_INFINITY
+    ? { distance: limit + 1, near: false }
+    : { distance, near: true };
 }
 
 /** The Levenshtein distance between `a` and `b`, or `limit + 1` once it is known to be more. */

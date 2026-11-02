@@ -1364,27 +1364,32 @@ func documentsNearest(reference string, documents []model.Artifact) []model.Arti
 // documentCloseness compares a reference with a document's slug and filename, ASCII letter case
 // ignored: the smaller edit distance of the two, and whether the document is close to it - within
 // a third of the reference's length (at least 2 edits), or one holding the other where the one held
-// is at least 4 characters long, whose distance is then exactly their difference in length. Only
-// ASCII letters are folded because Go and JavaScript lowercase other letters differently, and
+// is at least 4 characters long, whose distance is then exactly their difference in length. A
+// spelling more than limit edits away gives no distance (boundedEditDistance knows only that it is
+// past limit), so it never ties a document that is close through its other spelling. Only ASCII
+// letters are folded because Go and JavaScript lowercase other letters differently, and
 // envoy-client's documentCloseness must rank alike.
 func documentCloseness(reference, slug, name string) (int, bool) {
 	wanted := []rune(asciiLower(reference))
 	limit := max(2, len(wanted)/3)
 	distance := -1
-	contained := false
 	for _, candidate := range []string{slug, name} {
 		label := []rune(asciiLower(candidate))
 		edits := boundedEditDistance(wanted, label, limit)
 		if (len(wanted) >= 4 && strings.Contains(string(label), string(wanted))) ||
 			(len(label) >= 4 && strings.Contains(string(wanted), string(label))) {
-			contained = true
 			edits = max(len(label)-len(wanted), len(wanted)-len(label))
+		} else if edits > limit {
+			continue
 		}
 		if distance < 0 || edits < distance {
 			distance = edits
 		}
 	}
-	return distance, contained || distance <= limit
+	if distance < 0 {
+		return limit + 1, false
+	}
+	return distance, true
 }
 
 // asciiLower lowercases the ASCII letters of text and leaves every other character as it is.
