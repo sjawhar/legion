@@ -192,9 +192,7 @@ func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, d
 		return err
 	}
 	sending := context.WithoutCancel(ctx)
-	if _, err := s.deliverMessageResuming(
-		sending, message, delivery, message.Author, nil, attempt, queueIfStopped,
-	); err != nil &&
+	if _, err := s.deliverMessageResuming(sending, message, delivery, message.Author, nil, attempt); err != nil &&
 		!errors.Is(err, errAttemptNotPending) {
 		return err
 	}
@@ -391,14 +389,13 @@ func (s *server) createStoredMessage(
 		// (sendHeldMessageOn) among them - means the message's delivery is under way there: the
 		// message is stored, so it is answered with the attempts as that sender has left them.
 		//
-		// createMessageInput.ConnectedOnly is the send's connectedOnly (refuseIfStopped): a
-		// request that asked for a connected session refuses a stopped one here rather than
-		// queueing for it - the model and effort switch, whose line applies to the session
-		// that runs it and would otherwise be applied at an unknown later time. Every other
-		// send queues.
-		attempt, err := s.deliverMessageResuming(
-			sending, message, delivery, actor, &thread, 1, input.ConnectedOnly,
-		)
+		// The send asks the listener for what attempt 1 recorded above
+		// (createMessageInput.ConnectedOnly): a request that asked for a connected session
+		// refuses a stopped one rather than queueing for it - the model and effort switch,
+		// whose line applies to the session that runs it and would otherwise be applied at an
+		// unknown later time. Every other send queues, and so does every later attempt of this
+		// message, which inherits the flag (insertMessageDeliveryAttempt).
+		attempt, err := s.deliverMessageResuming(sending, message, delivery, actor, &thread, 1)
 		switch {
 		case errors.Is(err, errAttemptNotPending):
 			deliveries, err := s.loadMessageDeliveries(sending, s.deps.Store.Pool, []string{message.ID})

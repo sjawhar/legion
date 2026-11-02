@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -33,12 +34,11 @@ func openKnown(t *testing.T, now func() time.Time) *KnownSessions {
 	return known
 }
 
-// matchedIDs is the session ids Match answers for topic.
+// matchedIDs is the session ids MatchEach visits for topic, sorted.
 func matchedIDs(known *KnownSessions, topic string) []string {
 	ids := []string{}
-	for _, record := range known.Match(topic) {
-		ids = append(ids, record.SessionID)
-	}
+	known.MatchEach(topic, func(record KnownSession) { ids = append(ids, record.SessionID) })
+	slices.Sort(ids)
 	return ids
 }
 
@@ -48,11 +48,10 @@ func TestKnownSessionsAnswerByIDAndByTopic(t *testing.T) {
 	known := openKnown(t, time.Now)
 	topics := []string{"notifications.agent.ses_known", "notifications.team.deploy-squad"}
 	if err := known.RecordWithin(context.Background(), KnownSession{
-		SessionID:        "ses_known",
-		Title:            "a known session",
-		Capabilities:     []string{"aside"},
-		Topics:           topics,
-		ClientInstanceID: "inst_one",
+		SessionID:    "ses_known",
+		Title:        "a known session",
+		Capabilities: []string{"aside"},
+		Topics:       topics,
 	}); err != nil {
 		t.Fatalf("record: %v", err)
 	}
@@ -60,17 +59,17 @@ func TestKnownSessionsAnswerByIDAndByTopic(t *testing.T) {
 	if !ok {
 		t.Fatal("Get answered no record for the session just written")
 	}
-	if record.Title != "a known session" || record.ClientInstanceID != "inst_one" || !slices.Equal(record.Topics, topics) {
-		t.Fatalf("record = %#v, want the written title, instance and topics", record)
+	if record.Title != "a known session" || !slices.Equal(record.Topics, topics) {
+		t.Fatalf("record = %#v, want the written title and topics", record)
 	}
 	if record.LastSeen <= 0 {
 		t.Fatalf("record.LastSeen = %d, want the write's own stamp", record.LastSeen)
 	}
 	if got := matchedIDs(known, "notifications.team.deploy-squad"); !slices.Equal(got, []string{"ses_known"}) {
-		t.Errorf("Match of the team topic = %v, want the session", got)
+		t.Errorf("MatchEach of the team topic = %v, want the session", got)
 	}
 	if got := matchedIDs(known, "notifications.team.other"); len(got) != 0 {
-		t.Errorf("Match of an unfollowed topic = %v, want none", got)
+		t.Errorf("MatchEach of an unfollowed topic = %v, want none", got)
 	}
 }
 
@@ -122,7 +121,7 @@ func TestKnownSessionsAnswerNoRecordPastTheRetention(t *testing.T) {
 		t.Error("Get answered a record older than the retention")
 	}
 	if got := matchedIDs(known, "notifications.team.deploy-squad"); len(got) != 0 {
-		t.Errorf("Match answered %v for a record older than the retention", got)
+		t.Errorf("MatchEach answered %v for a record older than the retention", got)
 	}
 	known.mu.RLock()
 	held := len(known.records)
@@ -145,9 +144,6 @@ func TestNilKnownSessionsAnswersNothingAndPanicsNowhere(t *testing.T) {
 	var known *KnownSessions
 	if record, ok := known.Get("ses_any"); ok || record.SessionID != "" {
 		t.Errorf("Get on a nil store = %#v, %v, want no record", record, ok)
-	}
-	if got := known.Match("notifications.team.deploy-squad"); len(got) != 0 {
-		t.Errorf("Match on a nil store = %v, want none", got)
 	}
 	known.MatchEach("notifications.team.deploy-squad", func(record KnownSession) {
 		t.Errorf("MatchEach on a nil store visited %#v", record)
@@ -359,14 +355,72 @@ func TestABucketOpenedAfterTheStartAnswersTheRecordsItHolds(t *testing.T) {
 	}
 }
 
+// A store whose first scan nats.go's idle timer ended holds only the records that scan
+// delivered, so it is no answer: Opened reads the watcher's completeness
+// (kvwatch.Watcher.Complete), not its readiness, which such a scan releases too, and until a
+// scan has delivered every record a publish's count is left out rather than counted against part
+// of the bucket. The watcher scans the bucket again (startWatch's kvwatch.WithRescan), and the
+// store reports its bucket open once that scan completes.
+func TestAStoreWhoseFirstScanTimedOutOpensOnlyOnceItsRescanCompletes(t *testing.T) {
+	client := setupNATS(t)
+	const topic = "notifications.team.timed-out-scan"
+	ids := []string{"ses_timeout_1", "ses_timeout_2", "ses_timeout_3"}
+	filling, err := OpenKnownSessions(client.Conn, WithKnownSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the store that fills the bucket: %v", err)
+	}
+	for _, id := range ids {
+		if err := filling.RecordWithin(context.Background(), KnownSession{SessionID: id, Topics: []string{topic}}); err != nil {
+			t.Fatalf("write the record of %s: %v", id, err)
+		}
+	}
+	filling.StopWatch()
+	raw, err := client.JS().KeyValue(bus.KnownSessionBucket)
+	if err != nil {
+		t.Fatalf("open the known-session bucket: %v", err)
+	}
+
+	// The store's own watcher, over a handle whose first watch stalls after one entry the way
+	// that makes nats.go's idle timer give up on the scan.
+	known := &KnownSessions{
+		now:     time.Now,
+		records: map[string]cachedKnown{},
+		topics:  store.NewTopicMatcher(),
+		stopped: make(chan struct{}),
+	}
+	t.Cleanup(known.StopWatch)
+	known.startWatch(bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(raw, 1)})
+	watcher := known.watch()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for !watcher.Ready() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !watcher.Ready() {
+		t.Fatal("the cache never became ready, so this test says nothing about a scan the idle timer ended")
+	}
+	if known.Opened() {
+		t.Fatal("the store reports its bucket open over a first scan the idle timer ended: a publish would count its recipients against the one record that scan delivered")
+	}
+
+	for !known.Opened() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !known.Opened() {
+		t.Fatal("the store never reported its bucket open: nothing completed a scan after the idle timer ended the first")
+	}
+	if got := matchedIDs(known, topic); !slices.Equal(got, ids) {
+		t.Fatalf("the store answered %v at the moment it reported its bucket open, want every record the bucket holds, %v", got, ids)
+	}
+}
+
 // knownSessionMemoryBound is what the records and the subject index of 100,000 sessions may cost
 // in memory. Each session here carries its agent subject, which no other session shares, and one
 // of ten team topics, which is the shape the store holds in production: one unique pattern per
 // session plus a handful of shared ones. The measurement on this machine (linux/amd64, go1.27)
-// was 89,254,392 bytes, 85.1 MiB, 892 bytes a record, and it moved by under 200 KiB over three
-// runs. The bound is 128 MiB: room for the allocator's own slack and for a Go release that grows
-// a map's header, while still failing a change that makes a record or an index node cost half as
-// much again.
+// was 84,756,680 bytes, 80.8 MiB, 847 bytes a record. The bound is 128 MiB: room for the
+// allocator's own slack and for a Go release that grows a map's header, while still failing a
+// change that makes a record or an index node cost half as much again.
 const knownSessionMemoryBound = 128 << 20
 
 // knownSessionMemoryRecords is the number of records the bound above is measured over: the order
@@ -388,12 +442,11 @@ func TestKnownSessionsMemoryForAHundredThousandRecords(t *testing.T) {
 	for i := range knownSessionMemoryRecords {
 		sessionID := fmt.Sprintf("ses_%024d", i)
 		known.applyLocked(sessionID, KnownSession{
-			SessionID:        sessionID,
-			Title:            fmt.Sprintf("session %d of the memory measurement", i),
-			Capabilities:     []string{"aside"},
-			Topics:           []string{"notifications.agent." + sessionID, fmt.Sprintf("notifications.team.squad-%d", i%10)},
-			ClientInstanceID: fmt.Sprintf("inst_%016d", i%1000),
-			LastSeen:         now,
+			SessionID:    sessionID,
+			Title:        fmt.Sprintf("session %d of the memory measurement", i),
+			Capabilities: []string{"aside"},
+			Topics:       []string{"notifications.agent." + sessionID, fmt.Sprintf("notifications.team.squad-%d", i%10)},
+			LastSeen:     now,
 		}, uint64(i+1))
 	}
 	known.mu.Unlock()

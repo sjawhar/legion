@@ -946,16 +946,20 @@ func main() {
 			slog.String("bucket", bus.KnownSessionBucket), slog.String("error", knownErr.Error()))
 	}
 
-	// The store's watcher fills the records in the background, so wait for its first scan before
-	// serving, as the two gates above do. Until it has delivered them this listener knows no
-	// stopped session: a send to one is the 404 this store exists to stop answering, GET
-	// /v1/registry/<id>?include_stopped=1 is that 404 too, and a publish's recipient count is
-	// sent low while the store is open, so the number means less than it names.
+	// The store's watcher fills the records in the background, so wait for a scan that delivered
+	// every one of them before serving, as the role claim gate above does
+	// (kvwatch.Watcher.WaitComplete, the state session.KnownSessions.Opened reads). Until that
+	// scan this listener knows no stopped session: a send to one is the 404 this store exists to
+	// stop answering, GET /v1/registry/<id>?include_stopped=1 is that 404 too, and a publish's
+	// recipient count would be sent low, so the number would mean less than it names.
 	//
 	// Bounded at 30s, as its neighbour is, and it fails open: the store answers from whatever the
-	// watcher has delivered, and the warn below says the cache may be partly filled. Nothing here
-	// stops a start. A store whose bucket is not open, and a nil one, wait for nothing: neither
-	// has a cache to fill, and a start must not spend this budget on a bucket it may not open.
+	// watcher has delivered, the counts stay out until Opened says the view is whole, and the
+	// warn below says the cache may be partly filled. Nothing here stops a start. A store whose
+	// bucket is not open, and a nil one, wait for nothing: neither has a cache to fill, and a
+	// start must not spend this budget on a bucket it may not open. A scan nats.go's idle timer
+	// ended is scanned again rather than waited out (session.KnownSessions.startWatch), so this
+	// gate ends on that rescan instead of spending the whole budget.
 	knownCacheReadyCtx, knownCacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := known.WaitForCacheReady(knownCacheReadyCtx); err != nil {
 		logger.Warn("known-session cache warm-up did not complete; the store serves from a partly filled cache, so a stopped session may read as unknown and a publish's recipient count low",
@@ -976,7 +980,25 @@ func main() {
 	// self-health monitor must not restart a listener over a cache no delivery reads. Both hooks
 	// are safe on a store whose bucket is not open, which keeps the connection for its next
 	// attempt, and on no store at all.
-	client.AddReconnectHook(func(conn *nats.Conn) error { return known.Rewatch(conn) })
+	//
+	// A failed Rewatch is logged and the hook answers nil, for the same reason the store is kept
+	// out of listenerCaches: an error here fails the whole hook run, which re-runs every hook on
+	// backoff, reports /healthz degraded after RepairGrace and writes the `envoy nats reconnect
+	// hooks have not succeeded` ERROR a metric filter alarms on - over a bucket whose grant was
+	// rolled back or which was deleted under its watcher, neither of which a delivery reads. What
+	// repairs it instead: a store whose bucket never opened is attempting it already
+	// (session.OpenKnownSessions, reopenUntilStopped), and a move this one failed is attempted
+	// again by the next connection event's hook run, on the connection the store keeps from this
+	// one. Until one of those lands, Opened answers false over a watcher that ended, so a
+	// publish's recipient count is left out rather than answered from a cache that stopped
+	// following the bucket.
+	client.AddReconnectHook(func(conn *nats.Conn) error {
+		if err := known.Rewatch(conn); err != nil {
+			logger.Warn("the known-session cache did not move to the recovered connection; this listener leaves a publish's recipient count out until a later reconnect moves it",
+				slog.String("bucket", bus.KnownSessionBucket), slog.String("error", err.Error()))
+		}
+		return nil
+	})
 	client.AddDrainHook(func(ctx context.Context) { known.EndWatch(ctx) })
 
 	deliver := session.Deliverer{

@@ -504,6 +504,57 @@ func TestTheModelSwitchToAStoppedSessionIsRefusedAndQueuesNothing(t *testing.T) 
 	}
 }
 
+// A refused switch keeps its refusal on every later attempt of it, whichever button the person
+// presses on the agent card: Retry sends it in the mode it was written in, Use BTW instead sends
+// it in another, and both ask the listener for a session that is running now, because the
+// message asked for one. Each attempt is settled failed with the listener's own reason and the
+// listener stores nothing, so no `/model` line waits for the session to run again.
+func TestARetryOfARefusedSwitchIsRefusedAgainAndQueuesNothing(t *testing.T) {
+	listener := stoppedAndLive(t)
+	handler, database := newTargetedMessageHandler(t, listener.url)
+
+	created := postAgentMessage(t, handler, "s1", map[string]any{
+		"body": "/model claude-opus", "delivery": "steer", "connected_only": true,
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("the switch: status=%d body=%s", created.Code, created.Body.String())
+	}
+	message := decodeBody[model.Message](t, created)
+
+	for _, press := range []struct {
+		name     string
+		delivery string
+	}{
+		{name: "Retry", delivery: "steer"},
+		{name: "Use BTW instead", delivery: "btw"},
+	} {
+		again := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries",
+			map[string]any{"delivery": press.delivery}, "alice")
+		if again.Code != http.StatusCreated {
+			t.Fatalf("%s: status=%d body=%s", press.name, again.Code, again.Body.String())
+		}
+		attempt := decodeBody[model.MessageDelivery](t, again)
+		if attempt.State != "failed" || attempt.Error == nil || *attempt.Error != "the session is stopped" {
+			t.Fatalf("%s answered %#v, want a failed attempt reading \"the session is stopped\"", press.name, attempt)
+		}
+	}
+
+	attempts := messageAttempts(t, database, message.ID)
+	if len(attempts) != 3 {
+		t.Fatalf("the switch's attempts = %#v, want three", attempts)
+	}
+	for _, attempt := range attempts {
+		if attempt.State != "failed" || !attempt.ConnectedOnly ||
+			attempt.Error == nil || *attempt.Error != "the session is stopped" {
+			t.Fatalf("attempt %d = %#v, want it failed, carrying connected_only, reading \"the session is stopped\"",
+				attempt.Attempt, attempt)
+		}
+	}
+	if sends := listener.sentTo("s1"); len(sends) != 0 {
+		t.Fatalf("the listener stored %d sends for the refused switch and its retries, want none", len(sends))
+	}
+}
+
 // The claim holder's liveness read stays live-only: a stopped session is not a live holder, so
 // it must read as no holder at all and the read must not ask for stopped sessions. A delivery's
 // read of the same session, beside it, finds it.

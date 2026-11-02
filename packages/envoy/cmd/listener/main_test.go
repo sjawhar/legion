@@ -261,12 +261,22 @@ func TestPublishHandler_RejectsAgentTopics(t *testing.T) {
 
 // A presence subject is no topic to publish on: it carries the listener's own check of whether a
 // session's plugin holds a NATS connection, which that plugin answers, so the route refuses a
-// publish naming one, the prefix itself included, before anything reaches the bus.
+// publish naming one, the prefix itself included, before anything reaches the bus. A wildcard
+// that reaches the presence space is refused with it (bus.ReachesPresenceSubject), whether it
+// covers one session's subject or every one of them: a publish carries one subject to publish
+// on, and no legitimate publish names a wildcard.
 func TestPublishHandler_RejectsPresenceSubjects(t *testing.T) {
 	// Validation runs before deps.client is used, so a minimal non-nil deps is enough.
 	handler := publishHandler(&listenerDeps{}, logging.New("test"))
 
-	for _, topic := range []string{bus.PresenceSubjectPrefix, bus.PresenceSubject("ses_abc123")} {
+	for _, topic := range []string{
+		bus.PresenceSubjectPrefix,
+		bus.PresenceSubject("ses_abc123"),
+		bus.PresenceSubjectPrefix + ">",
+		"notifications.envoy.*.ses_abc123",
+		"notifications.envoy.>",
+		"notifications.>",
+	} {
 		t.Run(topic, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish",

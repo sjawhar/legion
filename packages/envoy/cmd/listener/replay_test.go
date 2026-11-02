@@ -524,12 +524,15 @@ func TestInterestSubscribeLeavesOutEveryPrivateStreamSubject(t *testing.T) {
 	}
 }
 
-// Every presence subject is left out of a registration, the registering session's own included: a
-// plugin subscribes to its own presence subject on its own NATS connection and never registers it
-// as an interest, and a session registered on another session's would be handed the listener's
-// check for that session, which could make a stopped session read connected while every session
-// shares one NATS user. A team topic and the session's own agent subject are stored, and the
-// answer stays 200.
+// Every topic reaching a presence subject is left out of a registration, the registering
+// session's own included: a plugin subscribes to its own presence subject on its own NATS
+// connection and never registers it as an interest, and a session registered on another
+// session's would be handed the listener's check for that session, which could make a stopped
+// session read connected while every session shares one NATS user. A wildcard that reaches the
+// presence space without naming it goes the same way (bus.ReachesPresenceSubject), where the
+// prefix check this replaced stored it and left the session subscribed to every other session's
+// presence subject. A team topic and the session's own agent subject are stored, and the answer
+// stays 200.
 func TestInterestSubscribeLeavesOutEveryPresenceSubject(t *testing.T) {
 	rig := newReplayRig(t)
 	own := contracts.AgentSubject(replaySession)
@@ -538,6 +541,7 @@ func TestInterestSubscribeLeavesOutEveryPresenceSubject(t *testing.T) {
 		bus.PresenceSubject(replaySession),
 		bus.PresenceSubject("ses_other"),
 		bus.PresenceSubjectPrefix + ">",
+		"notifications.envoy.*." + replaySession,
 	}
 	answer := subscribeInterest(t, rig.mux, append([]string{teamTopic}, refused...))
 

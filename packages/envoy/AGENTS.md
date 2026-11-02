@@ -1069,6 +1069,8 @@ The send's own answer decides `queued`, not the registry read before it, so a se
 A create-message request that set `connected_only` is the one exception:
 the listener refuses its stopped target with `409` instead of storing for it, and the attempt records that refusal as its failure, `the session is stopped`.
 Dispatch's live view's model and effort switch is the one sender that sets it, because a `/model` or `/effort` line applies to the session that reads it, and one stored for a session that is not running would change that session's model at an unknown later time.
+The flag is the message's, not one send's:
+attempt 1 records what the request asked (`message_deliveries.connected_only`) and every later attempt of that message is opened with the first attempt's (`insertMessageDeliveryAttempt`), so the delivery sweep's resume, a repeat under the request's key, and a person's Retry or mode change from the agent card all ask the listener for a running session and are refused again.
 
 **A send that meets a listener take-over waits it out under the attempt it holds.**
 While the active listener pod is replaced its successor refuses connections, answers 503 (its starting gate's `{"error":"service starting"}`), or does not hold the session yet for a few seconds (INFRA-557's take-over target is under 10).

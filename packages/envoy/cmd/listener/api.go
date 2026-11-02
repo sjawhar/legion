@@ -518,11 +518,14 @@ func deliveryModeVerdict(sessionID string, entry session.SessionEntry, payload s
 // session last registered with, so a stopped session is judged by its own word exactly as a live
 // one is judged by its entry.
 //
-// A record carrying no capabilities at all is not a session that advertises nothing: it is one
-// recorded before the record held them, or one whose plugin declared none, and such a send is
-// accepted. The message is stored and reaches the session when it resumes, which is where the
-// mode is next judged - by the session itself. Refusing it here would turn a send to a resumable
-// session into a 403 on the strength of a field nobody filled in.
+// A record carrying no capabilities at all is one whose plugin declared none: KnownSession has
+// stored Capabilities since its first write, so there is no record that predates the field. Such
+// a send is accepted here, where the live path refuses the same mode-carrying send to the same
+// plugin (deliveryModeVerdict passes advertised true), because the message is stored and judged
+// where it can be judged by the session that reads it: the resumed session declares what it
+// takes when it registers again, and that registration can declare the mode this send carries.
+// Refusing it here would turn a send to a resumable session into a 403 on the strength of a
+// field nobody filled in.
 func stoppedDeliveryModeVerdict(sessionID string, record session.KnownSession, payload string) forwardVerdict {
 	return deliveryModeVerdictFor(sessionID, record.Title, record.Capabilities, len(record.Capabilities) > 0, payload)
 }
@@ -896,7 +899,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
-		if strings.HasPrefix(request.Topic, bus.PresenceSubjectPrefix) {
+		if bus.ReachesPresenceSubject(request.Topic) {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to presence subjects; "+bus.PresenceSubjectPrefix+" is the listener's own check of whether a session's plugin holds a NATS connection, not a topic to publish on")
 			return
 		}
@@ -1701,23 +1704,26 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// open, a fork parent's agent subject and any topic its envoy_subscribe took included. The
 		// registry drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
 		// earlier build stored with one is cleaned by this registration.
-		// A topic under bus.PresenceSubjectPrefix is left out the same way, whichever session's it
-		// is: a plugin subscribes to its own presence subject on its own NATS connection and never
-		// registers it as an interest, while a session registered on another session's presence
-		// subject would answer the listener's check for it and make a stopped session read
-		// connected, since every session shares one NATS user until dispatch://INFRA-840 gives each
-		// its own.
+		// A topic reaching a session's presence subject is left out the same way, whichever
+		// session's it is and whether it names that subject or only covers it as a wildcard does
+		// (bus.ReachesPresenceSubject): a plugin subscribes to its own presence subject on its own
+		// NATS connection and never registers it as an interest, while a session registered on
+		// another session's presence subject would answer the listener's check for it and make a
+		// stopped session read connected, since every session shares one NATS user until
+		// dispatch://INFRA-840 gives each its own. The private-subject check runs first, so a broad
+		// wildcard - notifications.>, notifications.envoy.> - is named by the private subject it
+		// reaches rather than by the presence space it also covers.
 		warnings := make([]string, 0)
 		topics := make([]string, 0, len(body.Topics)+1)
 		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
-			if strings.HasPrefix(topic, bus.PresenceSubjectPrefix) {
-				warnings = append(warnings, fmt.Sprintf("%s was not registered: it is a session's presence subject, which that session's own plugin subscribes to on its own NATS connection and no session registers as an interest",
-					topic))
-				continue
-			}
 			if bus.ReachesPrivateStreamSubject(body.SessionID, topic) {
 				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or the Legion controller lane), and of those a session registers only its own agent subject, %s",
 					topic, contracts.AgentSubject(body.SessionID)))
+				continue
+			}
+			if bus.ReachesPresenceSubject(topic) {
+				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a session's presence subject, which that session's own plugin subscribes to on its own NATS connection and no session registers as an interest",
+					topic))
 				continue
 			}
 			topics = append(topics, topic)
@@ -1770,11 +1776,10 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// (session.KnownSessions).
 		if delivery.recorded() {
 			if err := d.known.RecordWithin(ctx, session.KnownSession{
-				SessionID:        body.SessionID,
-				Title:            body.Title,
-				Capabilities:     body.Capabilities,
-				Topics:           item.Topics,
-				ClientInstanceID: body.ClientInstanceID,
+				SessionID:    body.SessionID,
+				Title:        body.Title,
+				Capabilities: body.Capabilities,
+				Topics:       item.Topics,
 			}); err != nil {
 				logger.Warn("listener known-session record not written",
 					slog.String("session_id", body.SessionID), slog.String("error", err.Error()))

@@ -145,10 +145,12 @@ func (s *server) resolveDeliveryTarget(ctx context.Context, route model.Route, d
 // advertisesDelivery reports whether target takes this delivery mode, by the rule the listener
 // applies to the same send (cmd/listener/api.go, stoppedDeliveryModeVerdict): its advertised
 // capabilities, except that a stopped session whose record carries none at all is accepted. Such
-// a record is not a session that advertises nothing - it is one stored before the record held
-// capabilities, or one whose plugin declared none - and refusing it here would refuse exactly
-// the sends a queued delivery exists for, on the strength of a field nobody filled in. The
-// message is stored, and the session judges the mode when it reads it.
+// a record is one whose plugin declared none - the listener's record has stored capabilities
+// since its first write, so none predates the field - and the same plugin is refused this mode
+// while it runs. It is accepted here because the message is stored and the mode is judged where
+// it can be: by the resumed session, whose next registration declares what it takes. Refusing it
+// here would refuse exactly the sends a queued delivery exists for, on the strength of a field
+// nobody filled in.
 func advertisesDelivery(target dispatchenvoy.Session, delivery string) bool {
 	if target.State == dispatchenvoy.SessionStateStopped && len(target.Capabilities) == 0 {
 		return true

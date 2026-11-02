@@ -269,9 +269,11 @@ type pendingMessageDelivery struct {
 	resolved ResolvedMention
 	urgency  *string
 	// connectedOnly is the attempt row's own connected_only, which the send this call makes
-	// asks the listener for (model.MessageDelivery.ConnectedOnly). A fresh attempt takes the
-	// request's; a resumed one takes the row's, so the delivery sweep and every repeat ask what
-	// the send that opened the attempt asked.
+	// asks the listener for (model.MessageDelivery.ConnectedOnly). Every attempt of a message
+	// carries the same flag - attempt 1 records what the request asked for
+	// (createStoredMessage) and every later attempt is inserted with attempt 1's
+	// (insertMessageDeliveryAttempt) - so a resumed attempt, a Retry and a mode change all ask
+	// the listener what the message asked for.
 	connectedOnly bool
 	frame         []byte
 }
@@ -338,7 +340,6 @@ func (s *server) recordPendingMessageDelivery(
 	resolved ResolvedMention,
 	replyThread *messageReplyThread,
 	resumeAttempt int,
-	connectedOnly bool,
 ) (pendingMessageDelivery, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -360,9 +361,11 @@ func (s *server) recordPendingMessageDelivery(
 	if err := tx.QueryRow(ctx, `select target from messages where id = $1 for no key update`, message.ID).Scan(&target); err != nil {
 		return pendingMessageDelivery{}, err
 	}
-	// A fresh attempt is opened with what this send asked for; a resumed one takes the row's
-	// own answer below, so a switch the sweep resumes still asks for a connected session.
-	pending := pendingMessageDelivery{resolved: resolved, connectedOnly: connectedOnly}
+	// Every attempt of a message asks the listener what the message asked for: a resumed one
+	// reads its row's flag below, and one this call opens is inserted with attempt 1's
+	// (insertMessageDeliveryAttempt), so a Retry or a mode change of a refused switch is
+	// refused again rather than stored for the stopped session.
+	pending := pendingMessageDelivery{resolved: resolved}
 	if resumeAttempt > 0 {
 		// A bound sender takes its own attempt or nothing. The row must still be pending, still
 		// in the mode this send resolved for, and free (nobody else inside the claim lease) -
@@ -385,7 +388,7 @@ func (s *server) recordPendingMessageDelivery(
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return s.openFirstMessageDeliveryAttempt(
-				ctx, tx, message, target, actor, resolved, replyThread, resumeAttempt, connectedOnly,
+				ctx, tx, message, target, actor, resolved, replyThread, resumeAttempt,
 			)
 		}
 		pending.connectedOnly = rowConnectedOnly
@@ -522,7 +525,9 @@ func (s *server) recordPendingMessageDelivery(
 // no attempt (sendHeldMessageOn) and the delivery sweep's resume of that keyed send, both of them
 // recoveries for a message an earlier release stored - and the message's
 // lock, which tx holds, makes whichever claims first open the attempt; the other then finds it
-// taken and sends nothing.
+// taken and sends nothing. The attempt it opens asks for no connected session: only a message
+// stored by a release older than message_deliveries.connected_only reaches here, and no such
+// message is a model or effort switch.
 func (s *server) openFirstMessageDeliveryAttempt(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -532,7 +537,6 @@ func (s *server) openFirstMessageDeliveryAttempt(
 	resolved ResolvedMention,
 	replyThread *messageReplyThread,
 	resumeAttempt int,
-	connectedOnly bool,
 ) (pendingMessageDelivery, error) {
 	if resumeAttempt != 1 {
 		return pendingMessageDelivery{}, errAttemptNotPending
@@ -549,7 +553,7 @@ func (s *server) openFirstMessageDeliveryAttempt(
 	if target != resolved.Target {
 		return pendingMessageDelivery{}, errStaleResolution
 	}
-	pending := pendingMessageDelivery{resolved: resolved, connectedOnly: connectedOnly}
+	pending := pendingMessageDelivery{resolved: resolved}
 	if err := s.insertMessageDeliveryAttempt(ctx, tx, message.ID, actor, resolved, &pending); err != nil {
 		return pendingMessageDelivery{}, err
 	}
@@ -610,6 +614,13 @@ const supersededByModeChangeText = "superseded by a retry in another mode; it ma
 // resolution was taken for, recording requestedBy - the actor this send carries - as who asked
 // for it. The message row is locked by the caller, so the highest attempt cannot move between
 // reading it and inserting beside it.
+//
+// connected_only is the message's own, read off its first attempt, never this send's: the
+// request that stored the message is the only one that asks for a session running now
+// (createStoredMessage), and a Retry or a mode change of a refused model or effort switch has
+// to ask the same, or the listener would store that switch for the stopped session and apply it
+// whenever it runs again. A message with no attempt at all - one an earlier release stored -
+// asks for nothing.
 func (s *server) insertMessageDeliveryAttempt(
 	ctx context.Context, tx pgx.Tx, messageID string, requestedBy model.Actor, resolved ResolvedMention,
 	pending *pendingMessageDelivery,
@@ -624,11 +635,15 @@ func (s *server) insertMessageDeliveryAttempt(
 		values (
 			$1,
 			(select coalesce(max(attempt), 0) + 1 from message_deliveries where message_id = $1),
-			$2, $3, 'pending', now(), $4, $5
+			$2, $3, 'pending', now(), $4,
+			coalesce(
+				(select connected_only from message_deliveries where message_id = $1 order by attempt limit 1),
+				false
+			)
 		)
-		returning attempt, claimed_at
-	`, messageID, resolved.Delivery, resolved.attemptSessionID, requester, pending.connectedOnly,
-	).Scan(&pending.attempt, &pending.claimedAt)
+		returning attempt, claimed_at, connected_only
+	`, messageID, resolved.Delivery, resolved.attemptSessionID, requester,
+	).Scan(&pending.attempt, &pending.claimedAt, &pending.connectedOnly)
 }
 
 // messageDeliveryReceipt is the message.delivery receipt an attempt row owes, read off that
@@ -686,14 +701,12 @@ func (s *server) completeMessageDelivery(
 	)
 }
 
-// The two values connectedOnly takes below, so a call site says which it means. Every delivery
-// queues for a session the listener knows and that is not running - the listener stores the
-// message and hands it over when the session runs again - except the model and effort switch,
+// queueIfStopped is what a comment mention's send asks of the listener (comment_delivery.go):
+// a session the listener knows and that is not running takes the message and is handed it when
+// it runs again. A message's own send asks what its first attempt recorded instead
+// (pendingMessageDelivery.connectedOnly), which is true for the model and effort switch alone,
 // whose whole meaning is that it applies now (createStoredMessage).
-const (
-	queueIfStopped  = false
-	refuseIfStopped = true
-)
+const queueIfStopped = false
 
 // deliverMessage records one delivery attempt of a targeted message and sends it to the
 // resolved session: the listener resolution first with nothing held, the attempt committed as
@@ -707,7 +720,7 @@ func (s *server) deliverMessage(
 	actor model.Actor,
 	replyThread *messageReplyThread,
 ) (model.MessageDelivery, error) {
-	return s.deliverMessageResuming(ctx, message, delivery, actor, replyThread, 0, queueIfStopped)
+	return s.deliverMessageResuming(ctx, message, delivery, actor, replyThread, 0)
 }
 
 // errAttemptNotPending reports that the attempt a bound sender owns is no longer its to send:
@@ -738,7 +751,6 @@ func (s *server) deliverMessageResuming(
 	actor model.Actor,
 	replyThread *messageReplyThread,
 	resumeAttempt int,
-	connectedOnly bool,
 ) (model.MessageDelivery, error) {
 	pending, err := resolveThenLock(ctx,
 		func(ctx context.Context) (ResolvedMention, error) {
@@ -749,7 +761,7 @@ func (s *server) deliverMessageResuming(
 			return s.resolveMentionTargets(ctx, []string{route}, delivery)[0], nil
 		},
 		func(ctx context.Context, resolved ResolvedMention) (pendingMessageDelivery, error) {
-			return s.recordPendingMessageDelivery(ctx, message, actor, resolved, replyThread, resumeAttempt, connectedOnly)
+			return s.recordPendingMessageDelivery(ctx, message, actor, resolved, replyThread, resumeAttempt)
 		},
 		errorf(http.StatusConflict, "MESSAGE_TARGET_CHANGED",
 			"the message's target changed while this delivery was being recorded"),
@@ -767,9 +779,10 @@ func (s *server) deliverMessageResuming(
 	var outcome sendOutcome
 	_, err = takeover.retry(ctx,
 		func() string {
-			// The attempt row's own flag, not this call's: a resumed attempt asks for what the
-			// send that opened it asked for, so the delivery sweep and every repeat refuse a
-			// stopped session for a switch they did not make themselves.
+			// The attempt row's own flag: every attempt of a message carries what the
+			// request that stored it asked for, so the delivery sweep, a repeat, a Retry
+			// and a mode change all refuse a stopped session for a switch they did not
+			// make themselves.
 			outcome = s.sendResolvedDelivery(
 				ctx, pending.resolved, message.Body, key, pending.urgency, pending.frame, pending.connectedOnly,
 			)

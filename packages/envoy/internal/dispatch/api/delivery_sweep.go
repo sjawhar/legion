@@ -216,9 +216,7 @@ func (s *server) resumeOwedDelivery(ctx context.Context, owed owedDelivery) erro
 	if owed.requestedBy != nil {
 		actor = *owed.requestedBy
 	}
-	if _, err := s.deliverMessageResuming(
-		ctx, message, owed.delivery, actor, nil, owed.attempt, queueIfStopped,
-	); err != nil &&
+	if _, err := s.deliverMessageResuming(ctx, message, owed.delivery, actor, nil, owed.attempt); err != nil &&
 		!errors.Is(err, errAttemptNotPending) {
 		return err
 	}

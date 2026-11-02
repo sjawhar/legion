@@ -231,6 +231,29 @@ func ReachesPrivateStreamSubject(sessionID, topic string) bool {
 	return topic != contracts.AgentSubject(sessionID) || strings.ContainsAny(sessionID, "*>")
 }
 
+// ReachesPresenceSubject reports whether topic reaches a session's presence subject: it overlaps
+// PresenceSubjectPrefix+">" under NATS wildcard rules (subjectsOverlap), so one session's literal
+// presence subject, the whole presence space, and every wildcard covering part of it
+// (notifications.envoy.*.<id>, notifications.envoy.>, notifications.>) count, where the prefix
+// check this replaced passed all but the first two and left the rule it stated true of literal
+// subjects alone.
+//
+// A wildcard that merely overlaps the presence space is held off it exactly as one that names it
+// is: what a subscription hears is decided by the subjects it matches, not by how it was spelled.
+// Its three callers differ only in what holding it off means for them, since notifications.> and
+// notifications.envoy.> are legitimate things for a plugin to subscribe to:
+//   - /v1/interests/subscribe leaves the topic out of the registration with a warning and stores
+//     the rest, never refusing the registration, because a released pi-envoy registers every
+//     subject it has open;
+//   - /v1/messages/publish refuses the request 400, because a publish carries one subject to
+//     publish on and no legitimate publish names a wildcard;
+//   - the live-topics lane skips the message, which is what it already did for every message it
+//     sees: those subjects are the literal ones a publisher used, where this and a prefix check
+//     agree.
+func ReachesPresenceSubject(topic string) bool {
+	return subjectsOverlap(topic, PresenceSubjectPrefix+">")
+}
+
 // StreamSubjects reports the durable notification subjects, excluding role lanes.
 func StreamSubjects() []string {
 	return slices.Clone(streamSubjects)

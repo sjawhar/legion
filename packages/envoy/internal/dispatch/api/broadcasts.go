@@ -524,7 +524,7 @@ func (s *server) deliverBroadcast(ctx context.Context, sends []broadcastSend, de
 				// own; the worker must then send nothing, because an attempt of its own would
 				// put a second frame on the session's subject. Of two senders that both found
 				// the attempt owed, the one that claims it sends and the other stops here.
-				_, err = s.deliverMessageResuming(sending, send.message, delivery, actor, nil, send.attempt, queueIfStopped)
+				_, err = s.deliverMessageResuming(sending, send.message, delivery, actor, nil, send.attempt)
 				if errors.Is(err, errAttemptNotPending) {
 					continue
 				}

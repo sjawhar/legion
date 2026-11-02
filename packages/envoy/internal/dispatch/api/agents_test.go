@@ -51,11 +51,14 @@ func TestAgentsListsLiveSessionsNewestFirstForHumans(t *testing.T) {
 	if _, leaked := rows[2]["port"]; leaked {
 		t.Fatal("port must not be exposed")
 	}
+	// The listener's row above carries topics, which envoy.Session does not hold, so the decode
+	// drops them before this answer is built: Dispatch reads a session's subscriptions through
+	// ListInterests, and this row must not carry them.
 	if _, leaked := rows[2]["topics"]; leaked {
 		t.Fatal("topics must not be exposed")
 	}
-	// The two fields of envoy.Session that only the stopped answer carries: the live list sends
-	// no state, and Sessions drops the topics it does send, so neither reaches this row.
+	// state is the one field of envoy.Session that only the stopped answer carries: the live list
+	// sends none, so it reaches no row here.
 	for index := range rows {
 		if _, leaked := rows[index]["state"]; leaked {
 			t.Fatalf("state must not be exposed: %v", rows[index])

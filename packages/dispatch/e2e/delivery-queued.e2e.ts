@@ -2,8 +2,10 @@ import { shortSessionId } from "@legion/contracts";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  BROADCAST_REFUSED,
   type FakeSession,
   getSentMessages,
+  refuseBroadcasts,
   setLiveSessions,
   setSessionRecord,
   setSessionSendState,
@@ -199,6 +201,69 @@ test("a broadcast keeps a session that stopped after it was ticked, and queues f
     await expect
       .poll(async () => (await sentTo()).sort())
       .toEqual([observer.session_id, planner.session_id].sort());
+  } finally {
+    await alice.close();
+  }
+});
+
+// The strip over the composer is where the sender watches the broadcast they just made, and a
+// copy the listener is holding for a stopped session is not a copy delivered. The strip counts
+// those on their own; before this change it read "Sent to 2 agents — delivered" while one of the
+// two was still waiting for its session to run.
+test("the broadcast strip counts a queued copy rather than calling the broadcast delivered", async ({
+  browser,
+}) => {
+  test.skip(test.info().project.name !== "chromium", "one browser proves the strip");
+  // The composer learns of a departure on its 15 s agent poll, which this row waits out.
+  test.setTimeout(60_000);
+  await setLiveSessions([planner, observer]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    await agents.getByRole("button", { name: "No Dispatch activity (2)" }).click();
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const sends = page.getByRole("region", { name: "Sends" });
+    const select = async () => {
+      for (const title of ["Planner", "Observer"]) {
+        await page.getByRole("checkbox", { name: `Select ${title} for broadcast` }).check();
+      }
+      await composer.getByRole("combobox", { name: "Delivery mode" }).selectOption("steer");
+    };
+
+    // One refused send first, which stays in the strip: with a second row the page keeps the
+    // Agents page rather than opening the broadcast it made, so the strip stays in view.
+    const refusal = await refuseBroadcasts(page);
+    await select();
+    await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Refused.");
+    await composer.getByRole("button", { name: "Send to 2" }).click();
+    const refused = sends.getByRole("listitem").filter({ hasText: "Refused." });
+    await expect(refused.getByRole("status")).toHaveText(
+      `Could not send to 2 agents: ${BROADCAST_REFUSED}`
+    );
+    refusal.allow();
+
+    await select();
+    await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Report status.");
+    // The Observer stops before the press: Envoy still knows it, so it stays a recipient and its
+    // copy is queued for it.
+    await setSessionStopped(observer.session_id, true);
+    await expect(
+      composer.getByRole("button", {
+        exact: true,
+        name: `${shortSessionId(observer.session_id)} ✕`,
+      })
+    ).toBeVisible({ timeout: 30_000 });
+    await composer.getByRole("button", { name: "Send to 2" }).click();
+
+    const sent = sends.getByRole("listitem").filter({ hasText: "Report status." });
+    await expect(sent.getByRole("status")).toHaveText(
+      "Sent to 2 agents — queued for 1 agent not running",
+      { timeout: 30_000 }
+    );
+    await expect(page).toHaveURL(/\/agents$/);
   } finally {
     await alice.close();
   }

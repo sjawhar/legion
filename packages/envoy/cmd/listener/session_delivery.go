@@ -359,11 +359,10 @@ func recordFollowedTopics(ctx context.Context, d *listenerDeps, sessionID string
 		return
 	}
 	if err := d.known.RecordWithin(ctx, session.KnownSession{
-		SessionID:        sessionID,
-		Title:            entry.Title,
-		Capabilities:     entry.Capabilities,
-		Topics:           topics,
-		ClientInstanceID: entry.ClientInstanceID,
+		SessionID:    sessionID,
+		Title:        entry.Title,
+		Capabilities: entry.Capabilities,
+		Topics:       topics,
 	}); err != nil {
 		logger.Warn("known-session record not written after an interest change",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))

@@ -30,7 +30,10 @@
 -- (api/messages.go, createMessageInput.ConnectedOnly). It is persisted because a later send of
 -- that attempt is made by someone else - the delivery sweep, or a repeat under the request's key -
 -- and a switch resumed without the flag would be stored for a stopped session and applied at an
--- unknown later time, which this issue's non-goals forbid. comment_deliveries gains nothing: a
+-- unknown later time, which this issue's non-goals forbid. It is also what a later attempt of the
+-- same message is opened with, read off the message's first attempt
+-- (api/message_delivery.go, insertMessageDeliveryAttempt), so a person's Retry or mode change of
+-- a refused switch is refused again rather than stored. comment_deliveries gains nothing: a
 -- comment's mention is never a switch, and no mention asks for a connected session. `not null
 -- default false` reads as every stored row's own answer, and a non-volatile default is written
 -- into the catalogue alone in Postgres 11 and later, so no row is rewritten.

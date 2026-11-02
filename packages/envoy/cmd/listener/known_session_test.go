@@ -103,6 +103,15 @@ func (r *knownRig) revision(t *testing.T, sessionID string) uint64 {
 	return entry.Revision()
 }
 
+// knownMatchedIDs is the session ids the known-session store's MatchEach visits for topic,
+// sorted, which is what a publish's recipient count reads it for (recipients.go).
+func knownMatchedIDs(known *session.KnownSessions, topic string) []string {
+	ids := []string{}
+	known.MatchEach(topic, func(record session.KnownSession) { ids = append(ids, record.SessionID) })
+	slices.Sort(ids)
+	return ids
+}
+
 // A registration writes the session's record with the topics the registration stored, the team
 // topic the consumer's filter drops among them: a record built from that filter would count no
 // subscriber of a team topic, which no stream subject captures.
@@ -124,20 +133,24 @@ func TestARegistrationWritesTheKnownSessionRecordWithTheRegisteredTopics(t *test
 	if filter := sessionConsumerFilter("ses_registered", record.Topics); slices.Contains(filter, team) {
 		t.Errorf("the consumer filter %v holds the team topic, so this test no longer proves the record carries what the filter drops", filter)
 	}
-	if record.Title != "a known session" || record.ClientInstanceID != "inst_one" || !slices.Equal(record.Capabilities, []string{"aside"}) {
-		t.Errorf("record = %#v, want the registration's title, instance id and capabilities", record)
+	if record.Title != "a known session" || !slices.Equal(record.Capabilities, []string{"aside"}) {
+		t.Errorf("record = %#v, want the registration's title and capabilities", record)
 	}
 	if record.LastSeen != rig.clock.UnixMilli() {
 		t.Errorf("record.LastSeen = %d, want the write's clock %d", record.LastSeen, rig.clock.UnixMilli())
 	}
-	if got := rig.known.Match(team); len(got) != 1 || got[0].SessionID != "ses_registered" {
-		t.Errorf("Match of the team topic = %#v, want the session just registered", got)
+	if got := knownMatchedIDs(rig.known, team); !slices.Equal(got, []string{"ses_registered"}) {
+		t.Errorf("MatchEach of the team topic = %v, want the session just registered", got)
 	}
 }
 
 // A clean stop keeps the record and its topics, and moves only its last_seen: a session that
 // stopped is still a recipient of the topics it followed, since Envoy keeps its messages for 72
-// hours and it can resume under the same id.
+// hours and it can resume under the same id. The stop here lands inside
+// KnownSessionRefreshAge of the registration, which is where a real one lands - a live session
+// rewrites its record at least that often - so the write a stop makes is the one the throttle
+// would skip, and a `last_seen` minutes before the stop is what a send to the stopped session
+// would then answer.
 func TestACleanStopKeepsTheKnownSessionRecordAndMovesLastSeen(t *testing.T) {
 	rig := setupKnownRig(t)
 	team := "notifications.team.deploy-squad"
@@ -147,7 +160,7 @@ func TestACleanStopKeepsTheKnownSessionRecordAndMovesLastSeen(t *testing.T) {
 		t.Fatal("the registration wrote no known-session record")
 	}
 
-	rig.clock = rig.clock.Add(session.KnownSessionRefreshAge + time.Minute)
+	rig.clock = rig.clock.Add(time.Minute)
 	recorder := httptest.NewRecorder()
 	deleteSessionHandler(rig.deps.sessions, rig.known, logging.New("test")).ServeHTTP(
 		recorder, httptest.NewRequest(http.MethodDelete, "/v1/sessions/ses_stopping", nil))
@@ -171,8 +184,8 @@ func TestACleanStopKeepsTheKnownSessionRecordAndMovesLastSeen(t *testing.T) {
 	if stopped.LastSeen <= registered.LastSeen {
 		t.Errorf("the stop left last_seen at %d, want it past the registration's %d", stopped.LastSeen, registered.LastSeen)
 	}
-	if got := rig.known.Match(team); len(got) != 1 || got[0].SessionID != "ses_stopping" {
-		t.Errorf("Match of the team topic after the stop = %#v, want the stopped session", got)
+	if got := knownMatchedIDs(rig.known, team); !slices.Equal(got, []string{"ses_stopping"}) {
+		t.Errorf("MatchEach of the team topic after the stop = %v, want the stopped session", got)
 	}
 }
 
@@ -298,8 +311,8 @@ func TestRemovingASessionsInterestsThroughTheAdminRouteEmptiesItsRecord(t *testi
 	if after.LastSeen != rig.clock.UnixMilli() {
 		t.Errorf("the record's last_seen = %d, want the removal's clock %d", after.LastSeen, rig.clock.UnixMilli())
 	}
-	if got := rig.known.Match(team); len(got) != 0 {
-		t.Errorf("the team topic still matches %#v, so a publish on it would count a session that no longer follows it", got)
+	if got := knownMatchedIDs(rig.known, team); len(got) != 0 {
+		t.Errorf("the team topic still matches %v, so a publish on it would count a session that no longer follows it", got)
 	}
 }
 
@@ -329,8 +342,8 @@ func TestTheRoutesServeAListenerWithNoKnownSessionStore(t *testing.T) {
 	if record, ok := deps.known.Get("ses_degraded"); ok {
 		t.Errorf("a listener with no known-session store answered %#v, want no record", record)
 	}
-	if got := deps.known.Match("notifications.team.deploy-squad"); len(got) != 0 {
-		t.Errorf("a listener with no known-session store matched %#v, want none", got)
+	if got := knownMatchedIDs(deps.known, "notifications.team.deploy-squad"); len(got) != 0 {
+		t.Errorf("a listener with no known-session store matched %v, want none", got)
 	}
 }
 

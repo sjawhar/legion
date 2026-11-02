@@ -101,11 +101,7 @@ type Session struct {
 	Host         string   `json:"host"`
 	Roles        []string `json:"roles"`
 	Capabilities []string `json:"capabilities"`
-	// Topics is the session's stored subscriptions, which only the stopped body carries here:
-	// Sessions drops the live list's copy of them (below), since Dispatch reads a session's
-	// topics through ListInterests and stores every row of that list in its route roster.
-	Topics   []string `json:"topics,omitempty"`
-	LastSeen int64    `json:"last_seen"`
+	LastSeen     int64    `json:"last_seen"`
 	// State is SessionStateConnected or SessionStateStopped, and only SessionIncludingStopped
 	// reads a body that carries it: every other route leaves the field out, so Session, Role
 	// and Sessions answer it empty. A stopped session carries no Dir, MachineID, Host or
@@ -137,15 +133,13 @@ type SendInput struct {
 // envelope id then names an envelope JetStream discarded.
 //
 // State is what the target was when the listener stored the message, SessionStateConnected or
-// SessionStateStopped; LastSeen, in unix milliseconds, is when a stopped target was last seen and
-// is zero for a connected one. A listener that predates both answers neither, which reads as a
-// connected target with no last-seen, exactly what every send meant before they existed.
+// SessionStateStopped. A listener that predates it answers none, which reads as a connected
+// target, exactly what every send meant before it existed.
 type SendResult struct {
 	EnvelopeID string
 	Recipient  string
 	Duplicate  bool
 	State      string
-	LastSeen   int64
 }
 
 // Client reads live session metadata from the Envoy listener.
@@ -218,6 +212,10 @@ func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 	if sessions == nil {
 		sessions = []Session{}
 	}
+	// The live list carries each session's topics, which this struct does not hold, so the decode
+	// drops them: Dispatch keeps every row of this answer in its route roster row
+	// (api/issue_route_status.go) and serves it from GET /api/v1/agents, and neither holds a
+	// session's subscriptions, which it reads through ListInterests instead.
 	for index := range sessions {
 		if sessions[index].Roles == nil {
 			sessions[index].Roles = []string{}
@@ -225,12 +223,6 @@ func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 		if sessions[index].Capabilities == nil {
 			sessions[index].Capabilities = []string{}
 		}
-		// The live list carries each session's topics, which nothing reads from this answer:
-		// Dispatch keeps every row of it in its route roster row (api/issue_route_status.go)
-		// and serves it from GET /api/v1/agents, and neither holds a session's subscriptions.
-		// This line is the only thing that keeps them out of that answer, whose row embeds
-		// this struct (api.agentResponse): dropping it leaks every session's subscriptions.
-		sessions[index].Topics = nil
 	}
 	return sessions, nil
 }
@@ -403,7 +395,7 @@ func (c *Client) Session(ctx context.Context, sessionID string) (Session, error)
 
 // SessionIncludingStopped is Session widened by one answer: a session the listener's live
 // registry holds no entry for and its known-session store holds a record of comes back as that
-// record, with State SessionStateStopped and the Title, Capabilities, Topics and LastSeen it
+// record, with State SessionStateStopped and the Title, Capabilities and LastSeen it
 // holds, rather than as ErrNotFound. It carries no port, host, machine or dir: the record holds
 // none, and a session that is not running has no address to be reached at.
 //
@@ -465,9 +457,6 @@ func (c *Client) readSession(ctx context.Context, sessionID string, includeStopp
 	if session.Roles == nil {
 		session.Roles = []string{}
 	}
-	if session.Topics == nil {
-		session.Topics = []string{}
-	}
 	return session, nil
 }
 
@@ -527,14 +516,13 @@ func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) 
 		Recipient  string `json:"recipient"`
 		Duplicate  bool   `json:"duplicate"`
 		State      string `json:"state"`
-		LastSeen   int64  `json:"last_seen"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		return SendResult{}, fmt.Errorf("%w: decode POST /v1/messages/send response: %v", ErrUnavailable, err)
 	}
 	return SendResult{
 		EnvelopeID: result.EnvelopeID, Recipient: result.Recipient, Duplicate: result.Duplicate,
-		State: result.State, LastSeen: result.LastSeen,
+		State: result.State,
 	}, nil
 }
 

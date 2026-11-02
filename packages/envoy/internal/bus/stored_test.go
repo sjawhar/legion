@@ -150,3 +150,32 @@ func TestReachesPrivateStreamSubjectBoundsInterests(t *testing.T) {
 		}
 	}
 }
+
+// What the three presence filters hold off the presence space (ReachesPresenceSubject): one
+// session's presence subject by name, the space itself, and every wildcard that covers part of
+// it, where the prefix check this replaced passed the wildcards. A topic beside the space, and
+// one whose third token is a different word, reaches none of it.
+func TestReachesPresenceSubjectCoversTheWildcardsAPrefixCheckPassed(t *testing.T) {
+	for topic, want := range map[string]bool{
+		PresenceSubject("ses_a"):           true,
+		PresenceSubjectPrefix:              true,
+		PresenceSubjectPrefix + ">":        true,
+		PresenceSubjectPrefix + "*":        true,
+		"notifications.envoy.*.ses_a":      true,
+		"notifications.envoy.>":            true,
+		"notifications.*.presence.ses_a":   true,
+		"notifications.>":                  true,
+		">":                                true,
+		"notifications.envoy.presence":     false,
+		"notifications.envoy.exceptions.>": false,
+		"notifications.envoy.*":            false,
+		"notifications.agent.ses_a":        false,
+		"notifications.team.x.>":           false,
+		"notifications.presence.ses_a":     false,
+		"notifications.envoy.presence2.x":  false,
+	} {
+		if got := ReachesPresenceSubject(topic); got != want {
+			t.Errorf("ReachesPresenceSubject(%q) = %v, want %v", topic, got, want)
+		}
+	}
+}
