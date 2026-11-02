@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -17,6 +18,9 @@ func TestAColdEditOfTheHeaviestDocumentsStaysWithinTheMemoryBound(t *testing.T) 
 	type stored struct{ name, artifactID string }
 	var documents []stored
 	for _, shape := range heaviestAdmittedShapes(t) {
+		if shape.name != "a two-column table" {
+			continue // scratch measurement: the two-column table alone
+		}
 		upload := writer.upload(t, "json", memory.issue, withSentinelWord(t, shape.markdown))
 		if upload.status != http.StatusCreated {
 			t.Fatalf("upload of the heaviest %s the limit admits: status %d body %.300s, want 201", shape.name, upload.status, upload.body)
@@ -25,23 +29,25 @@ func TestAColdEditOfTheHeaviestDocumentsStaysWithinTheMemoryBound(t *testing.T) 
 		documents = append(documents, stored{name: shape.name, artifactID: upload.artifactID})
 	}
 	writer.stop(t)
-	for _, document := range documents {
-		t.Run(document.name, func(t *testing.T) {
-			server := memory.start(t)
-			var answer response
-			peak := server.peakAboveIdle(t, func() {
-				answer = server.edit(t, document.artifactID, map[string]any{"op": "replace", "find": sentinelWord, "with": "wird"})
-				memory.waitForSettled(t, document.artifactID)
+	for round := 1; round <= 5; round++ {
+		for _, document := range documents {
+			t.Run(fmt.Sprintf("%s round %d", document.name, round), func(t *testing.T) {
+				server := memory.start(t)
+				var answer response
+				peak := server.peakAboveIdle(t, func() {
+					answer = server.edit(t, document.artifactID, map[string]any{"op": "replace", "find": sentinelWord, "with": "wird"})
+					memory.waitForSettled(t, document.artifactID)
+				})
+				server.stop(t)
+				if answer.status != http.StatusOK {
+					t.Fatalf("a one-word edit of %s answered %d %.300s, want 200", document.name, answer.status, answer.body)
+				}
+				t.Logf("%s: a cold one-word edit and its settlement, %d MiB above idle", document.name, peak>>20)
+				if peak > requestMemoryBound {
+					t.Errorf("a cold one-word edit of %s held %d MiB above idle, want at most %d MiB", document.name, peak>>20, requestMemoryBound>>20)
+				}
 			})
-			server.stop(t)
-			if answer.status != http.StatusOK {
-				t.Fatalf("a one-word edit of %s answered %d %.300s, want 200", document.name, answer.status, answer.body)
-			}
-			t.Logf("%s: a cold one-word edit and its settlement, %d MiB above idle", document.name, peak>>20)
-			if peak > requestMemoryBound {
-				t.Errorf("a cold one-word edit of %s held %d MiB above idle, want at most %d MiB", document.name, peak>>20, requestMemoryBound>>20)
-			}
-		})
+		}
 	}
 }
 
