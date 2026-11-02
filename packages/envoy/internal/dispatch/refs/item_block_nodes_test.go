@@ -65,12 +65,13 @@ func edgeSummaries(t *testing.T, tx pgx.Tx, query Query) []string {
 // nodeLoaders keys, written out so a change here cannot move them.
 var previousReleaseNodeKinds = []string{"artifact", "ask", "block", "comment", "component", "issue", "message", "session"}
 
-// A build that predates item blocks knows neither comment_block nor message_block: during the
-// rolling deploy, and after a rollback, it skips every item-block row as a node kind it does not
-// know (resolveNodes), and lists and counts each item's own mention once, rather than doubling a
-// count or failing a read. It sees exactly this because every row an item block writes is stored
-// under comment_block or message_block, never block, which it would resolve through
-// document_blocks. This build lists each block's edge in place of its item's.
+// A build that predates item blocks knows none of comment_block, message_block and ask_block:
+// during the rolling deploy, and after a rollback, it skips every item-block row as a node kind it
+// does not know (resolveNodes), and lists and counts each item's own mention once, rather than
+// doubling a count or failing a read. It sees exactly this because every row an item block writes
+// is stored under comment_block, message_block or ask_block, never block, which it would resolve
+// through document_blocks. This build lists each block's edge in place of its item's, an ask's
+// question part in place of the ask's own row.
 func TestAnOlderBuildSkipsItemBlockRows(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -86,12 +87,20 @@ func TestAnOlderBuildSkipsItemBlockRows(t *testing.T) {
 	}
 	comment := insertIndexedItem(t, tx, ItemComment, "CORE-1", "First cites dispatch://CORE-2.\n\nSecond cites dispatch://CORE-2 again.")
 	message := insertIndexedItem(t, tx, ItemMessage, "CORE-1", "Hello.\n\nSee dispatch://CORE-2.")
-	commentBlock := func(block string) string { return "comment/" + comment + "#" + block }
-	messageBlock := "message/" + message + "#b2"
+	commentBlock := func(block string) string { return itemBlockNodeID(ItemComment, comment, block) }
+	messageBlock := itemBlockNodeID(ItemMessage, message, "b2")
 	citer := insertIndexedItem(t, tx, ItemComment, "CORE-1", "See dispatch://CORE-1/comment/"+comment+"#b-b2.")
+	ask := insertAsk(t, tx, "CORE-1", "Ship dispatch://CORE-2 first?", model.AskOption{Label: "Yes"})
+	if _, err := ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, itemBlockServer); err != nil {
+		t.Fatalf("index the ask's own references: %v", err)
+	}
+	indexAskPartsAt(t, tx, ask, 1)
+	askBlock := itemBlockNodeID(ItemAsk, ask.ID, "b1")
+	insertIndexedItem(t, tx, ItemComment, "CORE-1", "See dispatch://CORE-1/ask/"+ask.ID+"#b-b1.")
 
 	incoming := Query{Direction: "in", Kind: "issue", ID: "CORE-2", Kinds: []string{"mentions"}}
 	if got, want := edgeSummaries(t, tx, incoming), []string{
+		"in mentions block:" + askBlock + "^ask:" + ask.ID,
 		"in mentions block:" + commentBlock("b1") + "^comment:" + comment,
 		"in mentions block:" + commentBlock("b2") + "^comment:" + comment,
 		"in mentions block:" + messageBlock + "^message:" + message,
@@ -101,26 +110,29 @@ func TestAnOlderBuildSkipsItemBlockRows(t *testing.T) {
 	if got := edgeSummaries(t, tx, Query{Direction: "out", Kind: "comment", ID: comment}); !slices.Equal(got, []string{"out mentions issue:CORE-2@b1", "out mentions issue:CORE-2@b2"}) {
 		t.Errorf("this build's comment links = %v; want the mention from b1 and from b2", got)
 	}
+	if got := edgeSummaries(t, tx, Query{Direction: "out", Kind: "ask", ID: ask.ID, Kinds: []string{"mentions"}}); !slices.Equal(got, []string{"out mentions issue:CORE-2@b1"}) {
+		t.Errorf("this build's ask links = %v; want the mention from its question part", got)
+	}
 	counts, err := BacklinkCounts(ctx, tx, "issue", []string{"CORE-2"}, nil)
 	if err != nil {
 		t.Fatalf("count CORE-2 backlinks: %v", err)
 	}
-	if want := map[string]int{"CORE-2": 3}; !reflect.DeepEqual(counts, want) {
+	if want := map[string]int{"CORE-2": 4}; !reflect.DeepEqual(counts, want) {
 		t.Errorf("this build's CORE-2 backlink count = %v; want %v", counts, want)
 	}
 
 	// Every end of an edge an item block wrote, and the refs row of the comment citing a block,
-	// is stored under comment_block or message_block, never block.
+	// is stored under comment_block, message_block or ask_block, never block.
 	var stored []string
 	if err := tx.QueryRow(ctx, `
 		select coalesce(array_agg(distinct kind order by kind), '{}') from (
-			select from_kind as kind from graph_edges where from_id like 'comment/%' or from_id like 'message/%'
-			union all select to_kind from graph_edges where to_id like 'comment/%' or to_id like 'message/%'
-			union all select to_kind from refs where to_id like 'comment/%' or to_id like 'message/%'
+			select from_kind as kind from graph_edges where from_id like 'comment/%' or from_id like 'message/%' or from_id like 'ask/%'
+			union all select to_kind from graph_edges where to_id like 'comment/%' or to_id like 'message/%' or to_id like 'ask/%'
+			union all select to_kind from refs where to_id like 'comment/%' or to_id like 'message/%' or to_id like 'ask/%'
 		) ends`).Scan(&stored); err != nil {
 		t.Fatalf("read the kinds item blocks are stored under: %v", err)
 	}
-	if want := []string{ItemComment.BlockKind(), ItemMessage.BlockKind()}; !slices.Equal(stored, want) {
+	if want := []string{ItemAsk.BlockKind(), ItemComment.BlockKind(), ItemMessage.BlockKind()}; !slices.Equal(stored, want) {
 		t.Errorf("item blocks are stored under the kinds %v; want %v", stored, want)
 	}
 	var cited string
@@ -131,8 +143,8 @@ func TestAnOlderBuildSkipsItemBlockRows(t *testing.T) {
 	// The previous release's resolveNodes, which skips a kind its nodeLoaders lacks, resolves
 	// every other end of those edges and no item block; this build resolves the blocks.
 	rows, err := tx.Query(ctx, `
-		select from_kind, from_id from graph_edges where from_kind in ('comment', 'message', 'comment_block', 'message_block')
-		union select to_kind, to_id from graph_edges where to_kind in ('issue', 'comment_block', 'message_block')`)
+		select from_kind, from_id from graph_edges where from_kind in ('comment', 'message', 'ask', 'comment_block', 'message_block', 'ask_block')
+		union select to_kind, to_id from graph_edges where to_kind in ('issue', 'comment_block', 'message_block', 'ask_block')`)
 	if err != nil {
 		t.Fatalf("read the edges' ends: %v", err)
 	}
@@ -157,7 +169,7 @@ func TestAnOlderBuildSkipsItemBlockRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve the ends: %v", err)
 	}
-	if got, want := resolved(current), []string{"comment", "comment_block", "issue", "message", "message_block"}; !slices.Equal(got, want) {
+	if got, want := resolved(current), []string{"ask", "ask_block", "comment", "comment_block", "issue", "message", "message_block"}; !slices.Equal(got, want) {
 		t.Errorf("this build resolves the kinds %v; want %v", got, want)
 	}
 	loaders := nodeLoaders
@@ -171,7 +183,7 @@ func TestAnOlderBuildSkipsItemBlockRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve the ends as the previous release: %v", err)
 	}
-	if got, want := resolved(older), []string{"comment", "issue", "message"}; !slices.Equal(got, want) {
+	if got, want := resolved(older), []string{"ask", "comment", "issue", "message"}; !slices.Equal(got, want) {
 		t.Errorf("the previous release resolves the kinds %v; want %v", got, want)
 	}
 }
@@ -207,5 +219,41 @@ func TestAnItemBlocksLinkReachesItsItem(t *testing.T) {
 	}
 	if len(citers) != 1 || citers[0].Kind != "comment" || citers[0].ID != comment {
 		t.Errorf("referenced-by = %#v; want the comment alone", citers)
+	}
+}
+
+// An ask's own refs rows are its question's alone, so a document linked only from one of its
+// options is an edge of ask_block_refs and of nothing else. The closure reads that table too, so
+// the document joins its issue's closure at the depth an item's own link has, with the ask as its
+// via - the rule every item's blocks follow.
+func TestAnAskOptionsLinkJoinsItsIssuesClosure(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin fixture transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	_, handbook := createReferenceArtifact(t, tx, "", "CORE", "handbook-md")
+	ask := insertAsk(t, tx, "CORE-1", "Which rollout do we take?",
+		model.AskOption{Label: "Staged", Description: "As dispatch://CORE/artifact/handbook-md lays out."})
+	indexAskPartsAt(t, tx, ask, 1)
+
+	var own int
+	if err := tx.QueryRow(ctx, `select count(*) from refs where from_kind = 'ask' and from_id = $1`, ask.ID).Scan(&own); err != nil {
+		t.Fatalf("count the ask's own refs rows: %v", err)
+	}
+	if own != 0 {
+		t.Fatalf("the ask holds %d refs rows of its own; the link is meant to be its option's alone", own)
+	}
+
+	members, truncated, err := Closure(ctx, tx, "CORE-1")
+	if err != nil {
+		t.Fatalf("read closure: %v", err)
+	}
+	if want := []Member{{RefKey: handbook, Depth: 1, Via: model.ReferenceVia{Kind: "ask", ID: ask.ID}}}; truncated || !reflect.DeepEqual(members, want) {
+		t.Errorf("closure = %#v (truncated %t); want %#v", members, truncated, want)
 	}
 }

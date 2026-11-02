@@ -258,11 +258,16 @@ func TestAKnownSessionStoreOpensItsDeniedBucketOnceTheGrantArrives(t *testing.T)
 	grant.Grant(t, knownBucketGrant()...)
 
 	deadline := time.Now().Add(30 * time.Second)
-	for known.watch() == nil && time.Now().Before(deadline) {
+	for !known.Opened() && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if known.watch() == nil {
+	if !known.Opened() {
 		t.Fatalf("the store did not open the bucket within 30s of the grant:\n%s", logged())
+	}
+	// Opened is the watcher's first pass delivered, and the line is written by the goroutine that
+	// waited for it, so the two are not ordered: wait for the line before counting it.
+	for !strings.Contains(logged(), "the known-session bucket is open") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
 	}
 	if err := known.RecordWithin(context.Background(), KnownSession{SessionID: denied, Topics: []string{topic}}); err != nil {
 		t.Fatalf("record once the grant arrived: %v", err)
