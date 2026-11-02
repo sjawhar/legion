@@ -17,13 +17,42 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
+// deferBlockIndexBlocks is the number of blocks above which a document write leaves the block
+// index to the block-index reconciliation instead of paying for it in the request. Not every
+// document defers: one of this many blocks or fewer is indexed by its own write, as every
+// document was.
+//
+// The in-request index costs about 46 µs a block on a two-core pod: refs.IndexBlocks writes two
+// rows a block, one in document_blocks and one in document_block_texts. At the bound itself a
+// write of a list of 1,999 blocks took 234, 239 and 252 ms against 144, 145 and 157 ms for the
+// same list one block longer, which defers - 92 ms for 2,000 blocks - and the same difference at
+// 5,000 blocks is 239 ms, 48 µs a block. The heavy write measured for sjawhar/legion#2519 agrees:
+// its 8,000-item list body is 8,001 blocks and spends 347 ms in IndexDocumentReferences, 43 µs a
+// block, of a request total of 939-1,130 ms against the 1 s that write is held to. A bullet list
+// is one block for the list and one for each item's paragraph; the list item itself is no block.
+//
+// The budget this holds the in-request index to is a tenth of that 1 s, 100 ms, which is well
+// inside the ±150 ms by which this pod moves the same byte-identical write, so the block index of
+// a document that stays inline is never what carries its write past the bound. 100 ms ÷ 48 µs a
+// block is 2,083 blocks, and the bound is 2,000 of them, the 92 ms measured above. A document of
+// 1,999 blocks is indexed by its own write and pays that there; one of 2,001 pays nothing in the
+// request, and its blocks reach the index out of it, through the block-index reconciliation,
+// which indexes every document owed one and runs every BlockIndexReconcileInterval, 30 s
+// (RunBlockIndexReconciliation, block_index.go). The settlement the write queues indexes them
+// only where it writes a version of its own, which it does only where the document changed after
+// that write (contentChangedSinceVersion, mutation.go), so an upload nothing follows is the
+// reconciliation's. The 8,000-item list pays nothing instead of 347 ms.
+const deferBlockIndexBlocks = 2000
+
 // IndexDocumentReferences indexes version's markdown, which the calling transaction has just
 // stored as the document's version (indexDocument): its references, each mention's excerpt and
 // its blocks, all from the rendering of the tree that transaction wrote: an upload's replacement,
 // or a seeded spec. A seed renders its tree once. An upload that changes the document renders it
 // twice - ReplaceText's render of the replacement, which is the version's markdown, and
 // applyLive's render of the fork, which the ledger records - so the excerpts and blocks are cut
-// from applyLive's render only when the two agree. It refuses a context that was not joined.
+// from applyLive's render only when the two agree. A document of more blocks than a write indexes
+// in its own request leaves them to the block-index reconciliation (deferBlockIndexBlocks). It
+// refuses a context that was not joined.
 func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -40,6 +69,16 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 			"artifact", artifactID, "version", version)
 		rendered = renderedTree{}
 	}
+	// Above deferBlockIndexBlocks the write indexes this version's references alone: migration
+	// 0122's trigger marked the document owed a block index (document_block_versions.version
+	// null) when the version's row was inserted, and nothing here settles that mark, so the
+	// block-index reconciliation (RunBlockIndexReconciliation) indexes the blocks and the
+	// mentions they hold out of the request.
+	if blocks := len(rendered.offsets); rendered.tree != nil && blocks > deferBlockIndexBlocks {
+		slog.Info("dispatch: a document version left its blocks to the block-index reconciliation: it holds more blocks than a write indexes in its own request",
+			"artifact", artifactID, "version", version, "blocks", blocks, "bound", deferBlockIndexBlocks)
+		rendered = renderedTree{}
+	}
 	return s.indexDocument(ctx, tx, artifactID, version, versionAt, markdown, rendered)
 }
 
@@ -47,10 +86,10 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 // which holds the document's owner row, from the render the version's markdown came from:
 // indexRenderedVersion with rendered's blocks. The blocks are rendered.offsets; GET …/blocks lists
 // one block per offset of the same renderer (renderedBlocks), so both list one set of blocks. A
-// version with no rendering - an upload whose replacement changed nothing, which writes no tree -
-// is indexUnrenderedVersion, which indexes no blocks: migration 0122's trigger left the document
-// owed when the version's row was inserted, for the block-index reconciliation, which reads the
-// document itself.
+// version with no rendering - an upload whose replacement changed nothing, which writes no tree,
+// or one whose blocks the write deferred (deferBlockIndexBlocks) - is indexUnrenderedVersion,
+// which indexes no blocks: migration 0122's trigger left the document owed when the version's row
+// was inserted, for the block-index reconciliation, which reads the document itself.
 func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, rendered renderedTree) (model.ReferenceChanges, error) {
 	if rendered.tree == nil {
 		return s.indexUnrenderedVersion(ctx, tx, artifactID, version, versionAt, markdown)

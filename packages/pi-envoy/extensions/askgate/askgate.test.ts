@@ -1,4 +1,5 @@
 import { afterAll, afterEach, describe, expect, jest, mock, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
@@ -4525,6 +4526,84 @@ describe("the literal grammar, widened to forms with no expansion", () => {
       "rg -n dispatch src",
     ])
       expect(core.nonLiteralCause(command)).toBeUndefined();
+  });
+
+  // A body written as `--body "$(cat <<'EOF' … EOF)"` is a command
+  // substitution, so every flag's value was an expansion the gate could not read and the write
+  // posted unreviewed with a warning the writer can miss. The text is written out in the command,
+  // so the gate reads it and reviews the write. The flag was never the discriminator: a literal
+  // `--body hi` was always read, and an unquoted delimiter still expands and still is not.
+  describe("a quoted here-document in a command substitution", () => {
+    const BODY = "Done.\nSee the note.\n\n- one\n- two";
+    const quoted = (flag: string, text: string) =>
+      `dispatch comment --issue X-1 ${flag} "$(cat <<'EOF'\n${text}\nEOF\n)"`;
+    /** What bash really hands the CLI for `command`, as argv. */
+    const bashArgv = (command: string) =>
+      execFileSync("bash", ["-c", command.replace(/^dispatch/, "printf '%s\\0'")], {
+        encoding: "utf8",
+      })
+        .split("\0")
+        .filter((word) => word !== "");
+    test("gives the CLI what bash gives it, for every flag that carries a body", () => {
+      for (const flag of ["--body", "--body-file", "--question", "--reason"])
+        expect(core.commandArgv(quoted(flag, BODY))).toEqual(bashArgv(quoted(flag, BODY)));
+    });
+    // Every form the gate reads as literal must give bash's own argv, or the gate reviews text
+    // that is not what is sent. Each body below sends a form that an earlier revision read and
+    // bash did not: a word split or a glob, a delimiter line bash ends earlier, a `cat` whose
+    // input is not the here-document, and a body whose quotes or parenthesis send a scan for the
+    // closing `)` past the end of the command.
+    test("every form it reads as literal matches bash, and no other is read", () => {
+      // [the command, whether the gate reads it]. A row the gate reads must also give bash's own
+      // argv; a row it refuses must be refused, since "not read" is half of what the fix claims.
+      for (const [command, read] of [
+        // Read: the shapes the fix is for.
+        [
+          `dispatch comment --issue X-1 --body "$(cat <<'EOF'\nIt's one, 1) two, a " quote\nEOF\n)"`,
+          true,
+        ],
+        [`dispatch comment --issue X-1 --body "$(cat <<"EOF"\nplain\nEOF\n)"`, true],
+        [`dispatch comment --issue X-1 --body "$(cat - <<'EOF'\nwith a dash\nEOF\n)"`, true],
+        [`dispatch comment --issue X-1 --body "$(cat <<-'EOF'\n\twith tabs\n\tEOF\n)"`, true],
+        // Not read: bash word-splits and globs an unquoted substitution.
+        [`dispatch comment --issue X-1 --body $(cat <<'EOF'\nok --issue Y-9\nEOF\n)`, false],
+        // Not read: bash removes the delimiter's quoting, so the body ends at `#$`.
+        [
+          `dispatch comment --issue X-1 --body "$(cat <<"#\\$"\nshown\n#$\necho SMUGGLED\n#$\n)"`,
+          false,
+        ],
+        // Not read: `cat` on its own line reads the shell's input, not the here-document.
+        [`dispatch comment --issue X-1 --body "$(cat\n<<'EOF'\nnot the body\nEOF\n)"`, false],
+        // Not read: bash refuses an unpaired backtick in the delimiter with a syntax error.
+        [`dispatch comment --issue X-1 --body "$(cat <<"A\`B"\nhi\nA\`B\n)"`, false],
+      ] as Array<[string, boolean]>) {
+        const argv = core.commandArgv(command);
+        if (read) {
+          expect(argv).toBeDefined();
+          expect(argv).toEqual(bashArgv(command));
+        } else {
+          expect(argv).toBeUndefined();
+        }
+      }
+    });
+    test("is in the literal grammar, so the write is reviewed", () => {
+      expect(core.scopedCommand(quoted("--body", BODY))).toBeDefined();
+      expect(core.nonLiteralCause(quoted("--body", BODY))).toBeUndefined();
+    });
+    test("an unquoted delimiter expands in the body, so it stays outside", () => {
+      const command = `dispatch comment --issue X-1 --body "$(cat <<EOF\nhi $USER\nEOF\n)"`;
+      expect(core.scopedCommand(command)).toBeUndefined();
+      // The value holds `$` over several lines, which is named before an expansion in a value.
+      expect(core.nonLiteralCause(command)?.cause).toBe("lines-expansion");
+    });
+    test("a command after the body is no here-document, and stays outside", () => {
+      const command = `dispatch comment --issue X-1 --body "$(cat <<'EOF'\nhi\nEOF\nid)"`;
+      expect(core.scopedCommand(command)).toBeUndefined();
+    });
+    test("a second operand reads a file, and stays outside", () => {
+      const command = `dispatch comment --issue X-1 --body "$(cat q.md <<'EOF'\nhi\nEOF\n)"`;
+      expect(core.scopedCommand(command)).toBeUndefined();
+    });
   });
 
   /** What the CLI prints for a gated write with no marker, built on consumeMarker's own reason. */

@@ -24,11 +24,13 @@ Extends docs/solutions/legion/a-conflict-round-that-changes-the-fingerprint-is-a
   `changes_requested`: `movesBack` (`packages/daemon/internal/workflow/engine.go`, `phaseIndex(to) <
   phaseIndex(from)`) calls `recordRound` for the tester's fail, a worker's backward move, and the
   move the daemon makes itself on a red CI verdict or a conflicting head (`TriggerChecksRed` from
-  Testing, Reviewing and AwaitingMerge, `workflow/table.go`), since main's #1850. A proof that keys
-  a handoff fact by round (`handoff_fact_commit ISSUE ROLE PHASE ROUND`, `scripts/e2e/lib/workflow.sh`:
-  `review_round` must equal `ROUND`, else the fact is empty and the check fails as "no … round N
-  handoff fact") must count the daemon's own moves in its expected round, not just the reviews the
-  proof scripted.
+  Testing, Reviewing and AwaitingMerge, `workflow/table.go`), since main's #1850. A proof that
+  keys a handoff assertion by round must count the daemon's own moves in its expected round, not
+  just the reviews the proof scripted. The helper was `handoff_fact_commit ISSUE ROLE PHASE ROUND`
+  (`scripts/e2e/lib/workflow.sh`): `review_round` had to equal `ROUND`, else the fact was empty
+  and the check failed as "no … round N handoff fact". Since sjawhar/legion#2354 a handoff is a
+  record on the Dispatch issue, and `assert_handoff_record ISSUE ROLE PHASE ROUND` keys it by
+  round the same way.
 - Say which "round" a number is. The proof's `round_line 1`, `round_correction_pushed 1` and
   `reviewer_decision 2` label the proof's own correction and count its reviews; the daemon's round
   after `ci-red-takeover` (one checks-red move back) is already 1 before the first review and 2
@@ -37,7 +39,8 @@ Extends docs/solutions/legion/a-conflict-round-that-changes-the-fingerprint-is-a
   `reviewer reviewing 2`, `assert_review_of_own_handoff … 2`, `assert_round_handoff … 2`,
   `implementer implementing 2`, `tester testing 2`); a comment at the first of them names the rule.
   When you add a move back to the engine, or a daemon-made move to a proof, walk every
-  `assert_handoff_committer`, `assert_round_handoff` and `assert_review_of_own_handoff` after it.
+  `assert_handoff_record` and `assert_round_handoff` after it. Those two replaced
+  `assert_handoff_committer` and `assert_review_of_own_handoff`, which read the handoff commit.
 - A proof reads the engine's live counter but types its expectation by hand: `review_round` queries
   the daemon's `phases` row, and nothing in the harness derives the expected number from the
   engine's rule. Until a helper counts the proof's own moves back, the hand-typed literals are the
