@@ -164,16 +164,9 @@ func (s *server) createReport(w http.ResponseWriter, r *http.Request) {
 	// A seeded spec never passed through a live edit (createIssue says why this is queued).
 	s.deps.Docs.ScheduleSettlement(inserted.specID)
 	s.publish(published...)
-	// Whether the agent's role has a holder right now, read with nothing held, as an issue read
-	// reads it, so the form can tell the reporter whether the agent was there to be woken.
-	var reach model.IssueRouteReach
-	if inserted.issue.Route != nil {
-		reach = s.routeRosterOrUnknown(ctx).reach(inserted.issue.Route)
-	}
-	WriteJSON(w, http.StatusCreated, struct {
-		model.Issue
-		model.IssueRouteReach
-	}{inserted.issue, reach})
+	// Whether the agent's role has a holder is the issue read's to answer (route_status): judging it
+	// here could write the shared roster row outside this keyed write's transaction.
+	WriteJSON(w, http.StatusCreated, inserted.issue)
 }
 
 // readReport reads a report's body - JSON, or multipart with its fields in a `report` part and

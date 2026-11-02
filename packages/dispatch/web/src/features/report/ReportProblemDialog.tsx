@@ -5,13 +5,14 @@ import {
   type DragEvent,
   type FormEvent,
   type ReactNode,
+  useEffect,
   useRef,
   useState,
 } from "react";
 import { Link } from "react-router-dom";
 
 import { ApiError, api, type WriteBounds } from "../../api/client";
-import { reportSettingsQuery } from "../../api/queries";
+import { issueQuery, reportSettingsQuery } from "../../api/queries";
 import type { ReportInput, ReportResponse } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
@@ -54,13 +55,13 @@ interface ReportPress {
   readonly pictures: readonly File[];
 }
 
-/** What the reporter is told about the agent once the report is filed with one asked. */
-function agentNote(report: ReportResponse): string | null {
-  const route = report.route;
-  if (route === null) {
+/** What the reporter is told about the agent once the report is filed with one asked: whether a
+ *  session held its role, as the new issue's read says (`route_status`), once it has. */
+function agentNote(route: string | null, status: string | null | undefined): string | null {
+  if (route === null || status === undefined) {
     return null;
   }
-  switch (report.route_status) {
+  switch (status) {
     case "live":
       return `The agent holding ${route} has it.`;
     case "no_holder":
@@ -108,11 +109,25 @@ export function ReportProblemDialog({
     open: true,
   });
   useCloseOnNavigation(true, onClose);
+  // The dialog opens before it knows reports are set up, on Close; the box takes focus once it
+  // shows, unless the reader has already moved focus elsewhere in the dialog.
+  useEffect(() => {
+    if (
+      configured &&
+      (document.activeElement === closeRef.current || document.activeElement === document.body)
+    ) {
+      fieldRef.current?.focus();
+    }
+  }, [configured]);
   const [body, setBody] = useState("");
   const [pictures, setPictures] = useState<readonly File[]>([]);
   const [refused, setRefused] = useState<readonly string[]>([]);
   const [askAgent, setAskAgent] = useState(false);
   const [filed, setFiled] = useState<ReportResponse | null>(null);
+  const filedIssue = useQuery({
+    ...issueQuery(filed?.key),
+    enabled: filed !== null && filed.route !== null,
+  });
   const submitGuard = useSubmitGuard();
   const mutation = useKeyedWrite({
     // The write store keeps one file with a write across a reload, so a report of one picture is
@@ -189,7 +204,7 @@ export function ReportProblemDialog({
       </p>
     );
   } else if (filed !== null) {
-    const note = agentNote(filed);
+    const note = agentNote(filed.route, filedIssue.data?.route_status);
     content = (
       <div className="space-y-2" role="status">
         <p className={`text-sm ${textSecondaryOnSurface}`}>

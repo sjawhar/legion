@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { ReportInput, ReportResponse, ReportSettings } from "../../api/types";
+import type { IssueDetails, ReportInput, ReportResponse, ReportSettings } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { ReportProblemDialog } from "./ReportProblemDialog";
 import type { ReportPageContext } from "./report-context";
@@ -20,14 +20,8 @@ function settings(project: string | null, agentRoute: string | null): ReportSett
   return { agent_route: agentRoute, project, updated_at: null, updated_by: null };
 }
 
-function filed(key: string, route: string | null, status: string | null): ReportResponse {
-  return {
-    key,
-    route,
-    route_holder: null,
-    route_status: status,
-    title: "The Send button overlaps the box",
-  } as unknown as ReportResponse;
+function filed(key: string, route: string | null): ReportResponse {
+  return { key, route, title: "The Send button overlaps the box" } as unknown as ReportResponse;
 }
 
 interface Sent {
@@ -38,7 +32,7 @@ interface Sent {
 function renderDialog(
   stored: ReportSettings,
   create: (input: ReportInput, pictures: readonly File[]) => Promise<ReportResponse> = async () =>
-    filed("CORE-12", null, null)
+    filed("CORE-12", null)
 ) {
   const read = spyOn(api, "getReportSettings").mockResolvedValue(stored);
   const sent: Sent[] = [];
@@ -88,10 +82,11 @@ test("with no project set, the dialog says reports are not set up and points to 
   }
 });
 
-test("with no agent set, the box to ask one is hidden", async () => {
+test("with no agent set, the box to ask one is hidden, and the box for the words has focus", async () => {
   const view = renderDialog(settings("CORE", null));
   try {
-    expect(await screen.findByLabelText("What went wrong")).toBeTruthy();
+    const field = await screen.findByLabelText("What went wrong");
+    await waitFor(() => expect(document.activeElement).toBe(field));
     expect(screen.queryByLabelText("Ask an agent to fix this")).toBeNull();
   } finally {
     view.unmount();
@@ -151,8 +146,13 @@ test("a pasted or dropped picture is listed and can be removed; text pastes as t
 
 test("with an agent set, ticking the box asks it, and the answer says whether it was there", async () => {
   const view = renderDialog(settings("CORE", "role:dispatch-fixer"), async () =>
-    filed("CORE-13", "role:dispatch-fixer", "no_holder")
+    filed("CORE-13", "role:dispatch-fixer")
   );
+  const read = spyOn(api, "getIssue").mockResolvedValue({
+    ...filed("CORE-13", "role:dispatch-fixer"),
+    route_holder: null,
+    route_status: "no_holder",
+  } as unknown as IssueDetails);
   try {
     const box = (await screen.findByLabelText("Ask an agent to fix this")) as HTMLInputElement;
     expect(box.checked).toBe(false);
@@ -162,8 +162,10 @@ test("with an agent set, ticking the box asks it, and the answer says whether it
     await waitFor(() => expect(view.sent).toHaveLength(1));
     expect(view.sent[0]?.input.ask_agent).toBe(true);
     expect(await screen.findByText(/No agent holds role:dispatch-fixer right now/)).toBeTruthy();
+    expect(read).toHaveBeenCalledWith("CORE-13");
   } finally {
     view.unmount();
+    read.mockRestore();
   }
 });
 

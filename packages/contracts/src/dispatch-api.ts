@@ -4264,8 +4264,9 @@ export interface ReportInput {
   readonly ask_agent: boolean;
 }
 
-/** What `POST /api/v1/reports` answers: the new issue, with whether its route reaches anyone. */
-export type ReportResponse = Issue & IssueRouteReach;
+/** What `POST /api/v1/reports` answers: the new issue. Whether its route reaches anyone is the
+ *  issue read's to say (`route_status`). */
+export type ReportResponse = Issue;
 
 /**
  * One of the Delivery page's session groups: a stable id, a name and the agent sessions it holds.

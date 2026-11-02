@@ -2180,7 +2180,7 @@ Each item below names a path with its method and identity, then its purpose.
   It writes, in one transaction, an issue labelled `report` in the project the report settings name, created by the reporter and given to that project's default assignee, each picture a file of the issue, and a spec holding the words, each picture inline, and where it happened:
   the page, this server's commit (`buildCommit`, as `/healthz` reports it), the page's build, the browser, the window and the reporter.
   With `ask_agent` the issue carries the settings' agent route from its first event, so its `issue.created`, a person's, is published to the role's holder, followed by each picture's `artifact.created`; a role nobody holds then drops the wake, and the issue keeps the route.
-  `201` the issue with `route_status`; `409 REPORTS_NOT_CONFIGURED` with no project set, `409 REPORTS_AGENT_NOT_CONFIGURED` for `ask_agent` with no agent set, `400 REPORT_INPUT` a field or file refused, `400 CAP_EXCEEDED` words past `DispatchBodyMax`.
+  `201` the issue (its read, `GET /api/v1/issues/{key}`, answers whether its route reaches anyone); `409 REPORTS_NOT_CONFIGURED` with no project set, `409 REPORTS_AGENT_NOT_CONFIGURED` for `ask_agent` with no agent set, `400 REPORT_INPUT` a field or file refused, `400 CAP_EXCEEDED` words past `DispatchBodyMax`.
 
 - `/api/v1/delivery/session-groups` (POST; cookie, trusted header, or bearer)
 
