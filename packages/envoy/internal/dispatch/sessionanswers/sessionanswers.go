@@ -27,13 +27,17 @@ import (
 //     the list holds what the follower, author and session routes delivered, and never what an
 //     issue's role: route delivered to a role topic, which names no session. It reads the partial
 //     index events_person_words (0145) for the window and filters the array on those rows.
-//   - S2 (message_ids' second arm): the session's sent message deliveries: targeted messages, direct
-//     or on an issue, and broadcast copies. It is an index-only scan of
-//     message_deliveries_session_created (0147), whose predicate is the arm's state = 'sent' and
-//     which carries message_id, so a cached generic plan chooses it over message_deliveries_session
-//     (0051, session_id alone) too.
-//   - S3 (mentioned): the session's sent comment deliveries, a mention's (comment_deliveries_session,
-//     0146).
+//   - S2 (message_ids' second arm): the session's message deliveries the listener took: targeted
+//     messages, direct or on an issue, and broadcast copies. `sent` is one it handed to the
+//     running session, `queued` one it stored for a session that is not running and hands over
+//     when it runs again (api/envoy_resolve.go, deliveryOutcome); both are words a person wrote
+//     that reach the session, so both are read. It is an index-only scan of
+//     message_deliveries_session_created (0147, rebuilt over both states by migration
+//     20261102020650, which also gave it `state` so the arm's own state test is answered from the
+//     index), and it carries message_id, the one column the arm returns, so a cached generic plan
+//     chooses it over message_deliveries_session (0051, session_id alone) too.
+//   - S3 (mentioned): the session's comment deliveries the listener took, a mention's
+//     (comment_deliveries_session, 0146), by the same two states.
 //
 // A delivery row's created_at is its transaction's now(), which for a first attempt can precede the
 // comment's or message's own clock_timestamp() created_at by as long as that transaction ran, so
@@ -69,7 +73,7 @@ const query = `
 	), mentioned as (
 		select cd.comment_id::text as id
 		from comment_deliveries cd
-		where cd.session_id = $1 and cd.state = 'sent' and cd.created_at >= $2 - interval '1 hour'
+		where cd.session_id = $1 and cd.state in ('sent', 'queued') and cd.created_at >= $2 - interval '1 hour'
 	), answer_ids as (
 		select distinct id from reached where type = 'ask.answered'
 	), answer_events as materialized (
@@ -89,7 +93,8 @@ const query = `
 		union
 		select md.message_id::text
 		from message_deliveries md
-		where md.session_id = $1 and md.state = 'sent' and md.created_at >= $2 - interval '1 hour'
+		where md.session_id = $1 and md.state in ('sent', 'queued')
+		  and md.created_at >= $2 - interval '1 hour'
 	)
 	select 'answer' as kind, a.id::text as id, (a.answer->>'at')::timestamptz as at,
 	       null::timestamptz as edited_at, null::jsonb as author, null::text as body, a.answer,

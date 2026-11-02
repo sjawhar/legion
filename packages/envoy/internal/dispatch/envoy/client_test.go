@@ -453,7 +453,7 @@ func TestSessionDecodesTheListenerRowAndFillsWhatItOmits(t *testing.T) {
 			want: Session{
 				SessionID: "s1", Title: "planner", Dir: "/w/legion", MachineID: "m1", Host: "h1",
 				Roles: []string{"legion-planner"}, Capabilities: []string{"aside", "btw"},
-				LastSeen: 1700000000001,
+				Topics: []string{"notifications.agent.s1"}, LastSeen: 1700000000001,
 			},
 		},
 		{
@@ -461,7 +461,7 @@ func TestSessionDecodesTheListenerRowAndFillsWhatItOmits(t *testing.T) {
 			body: `{"machine_id":"m1","host":"h1","dir":"/w/legion","title":"planner","last_seen":42}`,
 			want: Session{
 				SessionID: "s1", Title: "planner", Dir: "/w/legion", MachineID: "m1", Host: "h1",
-				Roles: []string{}, Capabilities: []string{}, LastSeen: 42,
+				Roles: []string{}, Capabilities: []string{}, Topics: []string{}, LastSeen: 42,
 			},
 		},
 	} {

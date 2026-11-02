@@ -23,11 +23,20 @@ type createMessageInput struct {
 	Body      string  `json:"body"`
 	InReplyTo *string `json:"in_reply_to"`
 	// InReplyToBlock is the id of the block of message InReplyTo the reply answers ("b2").
-	InReplyToBlock *string      `json:"in_reply_to_block"`
-	Target         *string      `json:"target"`
-	Delivery       *string      `json:"delivery"`
-	Urgency        *string      `json:"urgency"`
-	Actor          *model.Actor `json:"actor"`
+	InReplyToBlock *string `json:"in_reply_to_block"`
+	Target         *string `json:"target"`
+	Delivery       *string `json:"delivery"`
+	Urgency        *string `json:"urgency"`
+	// ConnectedOnly asks that this message reach a session that is running now or not at all:
+	// the send is made with the listener's connected_only, which refuses a session the listener
+	// knows and that is not running rather than storing the message for it, and the attempt
+	// records that refusal as its failure. Unset - every message but the Agents page's model and
+	// effort switch - a stopped session is a recipient whose attempt is recorded queued, and the
+	// listener hands it the message when it runs again. The switch sets it because its line
+	// applies to the session that reads it: queued, it would change a model at an unknown later
+	// time.
+	ConnectedOnly bool         `json:"connected_only"`
+	Actor         *model.Actor `json:"actor"`
 }
 
 type messageRead struct {
@@ -83,6 +92,10 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		Delivery       string  `json:"delivery"`
 		InReplyTo      *string `json:"in_reply_to"`
 		InReplyToBlock *string `json:"in_reply_to_block"`
+		// ConnectedOnly is the Agents page's model and effort switch asking for a session that
+		// is running now (createMessageInput.ConnectedOnly). Every other send from this page
+		// leaves it out and is queued for a stopped session.
+		ConnectedOnly bool `json:"connected_only"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -90,7 +103,8 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	target := "session:" + r.PathValue("session_id")
 	messageInput := createMessageInput{
-		Body: input.Body, InReplyTo: input.InReplyTo, InReplyToBlock: input.InReplyToBlock, Target: &target, Delivery: &input.Delivery,
+		Body: input.Body, InReplyTo: input.InReplyTo, InReplyToBlock: input.InReplyToBlock,
+		Target: &target, Delivery: &input.Delivery, ConnectedOnly: input.ConnectedOnly,
 	}
 	delivery, err := validateCreateMessage(&messageInput)
 	if err != nil {
@@ -178,7 +192,9 @@ func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, d
 		return err
 	}
 	sending := context.WithoutCancel(ctx)
-	if _, err := s.deliverMessageResuming(sending, message, delivery, message.Author, nil, attempt); err != nil &&
+	if _, err := s.deliverMessageResuming(
+		sending, message, delivery, message.Author, nil, attempt, queueIfStopped,
+	); err != nil &&
 		!errors.Is(err, errAttemptNotPending) {
 		return err
 	}
@@ -345,9 +361,10 @@ func (s *server) createStoredMessage(
 	// carries (pendingMessageDelivery), this request's own and a resumed one alike.
 	if message.Target != nil {
 		if _, err := tx.Exec(ctx, `
-			insert into message_deliveries (message_id, attempt, delivery, session_id, state, requested_by, urgency)
-			values ($1, 1, $2, '', 'pending', $3, $4)
-		`, message.ID, delivery, author, input.Urgency); err != nil {
+			insert into message_deliveries (message_id, attempt, delivery, session_id, state, requested_by,
+			                                urgency, connected_only)
+			values ($1, 1, $2, '', 'pending', $3, $4, $5)
+		`, message.ID, delivery, author, input.Urgency, input.ConnectedOnly); err != nil {
 			return model.Message{}, nil, err
 		}
 	}
@@ -373,7 +390,16 @@ func (s *server) createStoredMessage(
 		// owning attempt 1 - a repeat of a keyed send that found this message committed
 		// (sendHeldMessageOn) among them - means the message's delivery is under way there: the
 		// message is stored, so it is answered with the attempts as that sender has left them.
-		attempt, err := s.deliverMessageResuming(sending, message, delivery, actor, &thread, 1)
+		//
+		// A request that asked for a connected session refuses a stopped one here rather than
+		// queueing for it (createMessageInput.ConnectedOnly): the model and effort switch, whose
+		// line applies to the session that runs it and would otherwise be applied at an unknown
+		// later time. Every other send queues.
+		connected := queueIfStopped
+		if input.ConnectedOnly {
+			connected = refuseIfStopped
+		}
+		attempt, err := s.deliverMessageResuming(sending, message, delivery, actor, &thread, 1, connected)
 		switch {
 		case errors.Is(err, errAttemptNotPending):
 			deliveries, err := s.loadMessageDeliveries(sending, s.deps.Store.Pool, []string{message.ID})

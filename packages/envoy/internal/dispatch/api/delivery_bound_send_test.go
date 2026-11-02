@@ -144,7 +144,7 @@ func TestABoundSendTakesAnUnpinnedAttemptAndPinsTheSessionItsTargetResolvedTo(t 
 		t.Fatalf("open the unpinned attempt 1: %v", err)
 	}
 
-	attempt, err := direct.deliverMessageResuming(context.Background(), message, "steer", alice, nil, 1)
+	attempt, err := direct.deliverMessageResuming(context.Background(), message, "steer", alice, nil, 1, queueIfStopped)
 	if err != nil {
 		t.Fatalf("bound send of the unpinned attempt 1: %v", err)
 	}

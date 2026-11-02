@@ -14,8 +14,13 @@ import (
 
 type agentResponse struct {
 	envoy.Session
-	OpenAsks     int     `json:"open_asks"`
-	LastActivity *string `json:"last_activity"`
+	// The Agents page's row is a live session's: it exposes no topics, and the listener's live
+	// list carries no state, so envoy.Session's two fields for the stopped answer are hidden
+	// here rather than left to what that answer happens to hold.
+	Topics       []string `json:"-"`
+	State        string   `json:"-"`
+	OpenAsks     int      `json:"open_asks"`
+	LastActivity *string  `json:"last_activity"`
 }
 
 func (s *server) agentOpenAskCounts(ctx context.Context, sessionIDs []string) (map[string]int, error) {

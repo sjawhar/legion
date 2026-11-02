@@ -64,9 +64,20 @@ func (s *server) resolveMentionTargets(ctx context.Context, targets []string, de
 	return resolved
 }
 
-// sendResolvedDelivery sends one already-resolved delivery and reports what the listener did:
-// the envelope it minted, whether the stream already held the message, and the failure to
-// record otherwise.
+// sendOutcome is what one send of an already-resolved delivery did, as the attempt row and its
+// receipt record it: the envelope the listener minted, whether the stream already held the
+// message, whether the listener stored it for a stopped session rather than handing it to a
+// running one (queued), and the failure to record otherwise.
+type sendOutcome struct {
+	envelopeID *string
+	duplicate  bool
+	queued     bool
+	failure    string
+}
+
+// sendResolvedDelivery sends one already-resolved delivery and reports what the listener did.
+// connectedOnly asks the listener to refuse a stopped target rather than store the message for
+// it, which the model and effort switch alone sets (createStoredMessage).
 //
 // Every failure comes with a nil envelope. The dashboard reads a failed attempt row that carries
 // an envelope id as one its session answered with an error (rowAnsweredWithError in
@@ -83,12 +94,13 @@ func (s *server) resolveMentionTargets(ctx context.Context, targets []string, de
 // promise a safe retry next week.
 func (s *server) sendResolvedDelivery(
 	ctx context.Context, target ResolvedMention, body, idempotencyKey string, urgency *string, frame []byte,
-) (*string, bool, string) {
+	connectedOnly bool,
+) sendOutcome {
 	if target.ResolveError != "" {
-		return nil, false, target.ResolveError
+		return sendOutcome{failure: target.ResolveError}
 	}
 	if target.SessionID == nil {
-		return nil, false, "no live session"
+		return sendOutcome{failure: "no live session"}
 	}
 	expectsReply := "optional"
 	if target.Delivery == "btw" {
@@ -101,18 +113,23 @@ func (s *server) sendResolvedDelivery(
 		IdempotencyKey: idempotencyKey,
 		Urgency:        deref(urgency),
 		ExpectsReply:   expectsReply,
+		ConnectedOnly:  connectedOnly,
 	})
 	if errors.Is(err, dispatchenvoy.ErrReceiptTimeout) {
-		return nil, false, receiptTimeoutText
+		return sendOutcome{failure: receiptTimeoutText}
 	}
 	if err != nil {
-		return nil, false, deliveryErrorText(err)
+		return sendOutcome{failure: deliveryErrorText(err)}
 	}
+	// The listener's own word for what it did with the message: handed to a running session, or
+	// stored for one it knows that is not running. A listener that predates the field answers
+	// none, which reads as connected, exactly what every send meant before it existed.
+	queued := send.State == dispatchenvoy.SessionStateStopped
 	// A duplicate names an envelope JetStream discarded, so the attempt records none.
 	if send.Duplicate {
-		return nil, true, ""
+		return sendOutcome{duplicate: true, queued: queued}
 	}
-	return &send.EnvelopeID, false, ""
+	return sendOutcome{envelopeID: &send.EnvelopeID, queued: queued}
 }
 
 // receiptTimeoutText is the CAUSE a receipt timeout records: what happened, and the one fact
@@ -289,13 +306,11 @@ func (s *server) completeCommentDelivery(
 	recorded model.CommentDelivery,
 	actor model.Actor,
 	claim attemptClaim,
-	envelopeID *string,
-	duplicate bool,
-	deliveryError string,
+	outcome sendOutcome,
 ) (model.CommentDelivery, error) {
 	sent := recorded
-	sent.State, sent.Error = deliveryOutcome(deliveryError)
-	sent.Duplicate, sent.EnvelopeID = duplicate, envelopeID
+	sent.State, sent.Error = deliveryOutcome(outcome.failure, outcome.queued)
+	sent.Duplicate, sent.EnvelopeID = outcome.duplicate, outcome.envelopeID
 	return settleDeliveryAttempt(ctx, s, commentDeliveryReceipt(comment, actor, sent),
 		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, error) {
 			return scanCommentDelivery(tx.QueryRow(ctx, `
@@ -303,7 +318,8 @@ func (s *server) completeCommentDelivery(
 				where comment_id = $1 and target = $2 and attempt = $3
 				  and state = 'pending' and claimed_at = $4
 				returning `+commentDeliveryColumns,
-				comment.ID, sent.Target, claim.attempt, claim.claimedAt, envelopeID, sent.State, sent.Error, duplicate,
+				comment.ID, sent.Target, claim.attempt, claim.claimedAt,
+				sent.EnvelopeID, sent.State, sent.Error, sent.Duplicate,
 			))
 		},
 		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, bool, *string, error) {
@@ -496,20 +512,19 @@ func (s *server) deliverResolvedCommentMention(
 	// triple, so a retry of a send that already landed repeats its dedupe key and is recognised as
 	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what).
 	key := stored.ID + ":" + target.Target + ":" + target.Delivery
-	var envelopeID *string
-	var duplicate bool
+	var outcome sendOutcome
 	send := func() string {
-		var failure string
-		envelopeID, duplicate, failure = s.sendResolvedDelivery(ctx, target, stored.Body, key, nil, frame)
-		return failure
+		// A comment mention is never the model and effort switch, so it never asks for a
+		// connected target: a mention of a stopped session is queued for it.
+		outcome = s.sendResolvedDelivery(ctx, target, stored.Body, key, nil, frame, false)
+		return outcome.failure
 	}
-	var deliveryError string
 	if decided && claimed.pending.SessionID == nil {
 		// The resolution the comment's routes were decided on reached no session; its resolve
 		// error is this attempt's outcome, with nothing to try again.
-		deliveryError = send()
+		send()
 	} else {
-		deliveryError, err = takeover.retry(ctx, send, func() (bool, error) {
+		lastFailure, err := takeover.retry(ctx, send, func() (bool, error) {
 			// A pinned row is rechecked; with no session pinned yet the recipient is still the
 			// mention's target, resolved afresh rather than sent the resolve error the row holds.
 			var pinned *model.CommentDelivery
@@ -525,8 +540,11 @@ func (s *server) deliverResolvedCommentMention(
 		if err != nil {
 			return model.CommentDelivery{}, err
 		}
+		// retry answers the last try's failure, which is outcome.failure for every try it made;
+		// a renew that reported the attempt no longer this sender's ends the tries without one.
+		outcome.failure = lastFailure
 	}
-	return s.completeCommentDelivery(ctx, stored, recorded, actor, held, envelopeID, duplicate, deliveryError)
+	return s.completeCommentDelivery(ctx, stored, recorded, actor, held, outcome)
 }
 
 // mentionsDecideRoutes reports whether a comment.created event records that the comment's other
