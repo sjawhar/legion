@@ -87,12 +87,14 @@ rigs, and some of the workarounds are now history:
 - **A docs-only branch still runs the whole package workflow, flakes included.** A doc-comment
   change under `packages/contracts/src` matches `packages/contracts/**` in
   `.github/workflows/envoy-and-contracts.yaml`'s `dispatch` filter, so every push of the branch —
-  including the `.legion/`-only handoff pushes each phase makes — ran the seven-minute Dispatch
-  dashboard browser suite, which failed three consecutive attempts on one run with a different
+  including the `.legion/`-only handoff pushes each phase then made — ran the seven-minute
+  Dispatch dashboard browser suite, which failed three consecutive attempts on one run with a different
   fixed-timeout scenario each time (`doc.e2e.ts:105`, `inbox.e2e.ts:236`, `approval.e2e.ts:24`;
   filed as LEGION-94 with the four failure records). The rule held: re-run the failed job
   (`legion gh -- run rerun <run-id> --failed`), never push a commit to refresh CI. Budget the
-  round for it: five implementer rounds on a docs PR meant five full workflow runs.
+  round for it: five implementer rounds on a docs PR meant five full workflow runs. Since
+  sjawhar/legion#2354 a handoff is a record on the Dispatch issue, so every push of a branch
+  carries code and the round's push count is the round's code pushes.
 - **The scratch runner scrubs the pane's own identity.** A worker pane carries `LEGION_*`,
   `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`, `OMP_PROFILE`, and (on this box) a stale `LEGION_OMP_PATH`
   pointing at an rpcfix build whose natives fail to load under a fresh profile. The runner that

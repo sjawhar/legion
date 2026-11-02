@@ -1717,9 +1717,9 @@ and one that gave the key up meanwhile is `KEY_IN_FLIGHT` with `Retry-After: 1`,
 An `Expect: 100-continue` repeat is `KEY_IN_FLIGHT` at once, with nothing read.
 The key is claimed, and its answer recorded, on a context the client's leaving does not end, bounded at 10 s.
 
-Every other answer Dispatch gives before it has read a request's body - `KEY_INVALID`, the closed-issue upload refusal, `LOGIN_CHANGED`, a refused path parameter, a refusal before decoding - is written only once the rest of the body has been read and discarded, never spooled, up to the route's limit (26 MiB on the upload routes, 1 MiB on every other).
+Every other answer Dispatch gives before it has read a request's body - `KEY_INVALID`, the closed-issue upload refusal, `LOGIN_CHANGED`, a refused path parameter, a refusal before decoding - is written only once the rest of the body has been read and discarded, never spooled, up to the route's limit (26 MiB on the upload routes, 1,576,960 bytes - six times the 256 KiB handoff body cap, plus 4 KiB - on the handoff write, 1 MiB on every other).
 A browser that sends a whole upload before it reads the answer (WebKit, Firefox) otherwise met the connection's close as a reset and never saw the answer.
-A body past the limit is answered `413 CAP_EXCEEDED` (uploads) or `413 REQUEST_TOO_LARGE` in that answer's place, and the connection closes;
+A body past the limit is answered `413 CAP_EXCEEDED` (the upload routes and the handoff write) or `413 REQUEST_TOO_LARGE` in that answer's place, and the connection closes;
 a `401` is the one early answer that stands, since a caller nobody resolves is refused before any limit is judged.
 Both reads wait at most a minute for a body: one that stops arriving is given its answer with `Connection: close`.
 An `Expect: 100-continue` request answered early is never asked for its body: Dispatch sends no `100 Continue`, sends the answer and closes the connection.
@@ -1790,7 +1790,7 @@ A send to one session answers once its own attempt has settled, which keeps a pe
 a broadcast answers once its messages are committed, with its deliveries behind the answer.
 
 The layer reads a keyed body before its handler runs, spooling at most the route's own limit:
-26 MiB for the three upload routes (`POST /api/v1/issues/{key}/artifacts`, `/projects/{key}/artifacts`, `/agents/{session_id}/artifacts`), 1 MiB for every other.
+26 MiB for the three upload routes (`POST /api/v1/issues/{key}/artifacts`, `/projects/{key}/artifacts`, `/agents/{session_id}/artifacts`), 1,576,960 bytes for the handoff write (`POST /api/v1/issues/{key}/handoffs/{phase}`), 1 MiB for every other.
 A body past it runs unkeyed and its route refuses it.
 A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`;
 one Dispatch cannot spool to its temporary directory is Dispatch's own failure, a 5xx with the key echoed, which the client asks again.
@@ -2400,6 +2400,26 @@ Each item below names a path with its method and identity, then its purpose.
   Read under `GET /api/v1/messages/{id}`'s rule:
   a bearer reading a direct message names its session in `?session=` (`400 SESSION_REQUIRED`, `403 THREAD_FORBIDDEN`).
   While the message is owed a block index, `indexed` is `false` and `blocks` empty; the read writes nothing.
+
+- `/api/v1/issues/{key}/handoffs/{phase}` (POST; bearer (an agent session naming itself in `actor`))
+
+  Record the session's handoff for one phase of the issue, `{actor, body}`:
+  `body` is one JSON object as a string of at most `contracts.DispatchHandoffBodyMax` (262,144) bytes, stored exactly as sent, and the record is the phase's next version from 1, numbered under the issue's row lock.
+  A cookie caller is `403 HANDOFF_FORBIDDEN`, an actor that is not a session `400 ACTOR_KIND`, a phase that is not a lowercase slug or a body that is not one JSON object `400 HANDOFF_INPUT`, an over-cap body `413 CAP_EXCEEDED` naming the cap, and a closed issue `409 ISSUE_CLOSED`.
+  Answers `201 {id, issue_key, phase, version, author, created_at}` and appends `handoff.recorded` `{handoff_id, phase, version}` in the same transaction, which never carries the body and notifies no one.
+  A keyed write: a retry under the same `Idempotency-Key` is answered the first call's `201` and records no second version.
+
+- `/api/v1/issues/{key}/handoffs` (GET; cookie, trusted header, or bearer)
+
+  List the issue's handoffs, newest first, without their bodies; a closed issue's read too.
+
+- `/api/v1/issues/{key}/handoffs/{phase}/latest` (GET; cookie, trusted header, or bearer)
+
+  The phase's newest handoff with its body, byte for byte as written; `404 HANDOFF_NOT_FOUND` when it has none.
+
+- `/api/v1/handoffs/{id}` (GET; cookie, trusted header, or bearer)
+
+  One handoff by id with its body; `404 HANDOFF_NOT_FOUND` when there is none, `400 HANDOFF_ID_INPUT` for an id that is not a uuid.
 
 - `/api/v1/issues/{key}/artifacts` (GET, POST; cookie, trusted header, or bearer)
 

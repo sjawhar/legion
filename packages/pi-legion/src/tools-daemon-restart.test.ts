@@ -43,6 +43,9 @@ const context: SessionContext = {
 };
 
 const COMMIT = "210d53a9d1b109df97fbb5dd5041d659dbab1323";
+const HANDOFF_ID = "0f6d2c1e-7a3b-4e59-9c8d-2b1a6e4f3d70";
+/** The daemon's HANDOFF_NOT_NEW answer to the implementer naming its previous phase's record. */
+const NOT_NEW = `the implementer named handoff record ${HANDOFF_ID} for its previous phase of LEGION-208; write this phase's handoff with \`dispatch handoff-write --issue LEGION-208 --phase implement --body-file <file>\` before completing`;
 const stops: Array<() => void> = [];
 afterEach(() => {
   for (const stop of stops.splice(0)) stop();
@@ -149,7 +152,7 @@ function toolFor(
       throw new Error("no controller grant expected");
     },
     onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
-    handoffCommit: async () => COMMIT,
+    handoffReport: async () => ({ handoffId: HANDOFF_ID, handoffVersion: 1, commit: COMMIT }),
     resolveDocument: async () => {
       throw new Error("no document lookup expected");
     },
@@ -198,7 +201,7 @@ test("handoff_complete retries a connection the daemon closed before answering, 
   // The first attempt's three requests are closed unanswered, so the completion may have landed;
   // the daemon answers the repeat ALREADY_RECORDED, which it also answers when that attempt was
   // refused, so the tool claims no success and leaves the phase open.
-  const detail = `the implementer completion of phase implementing (round 0) at commit ${COMMIT} was already received; this call changed nothing`;
+  const detail = `the implementer completion of phase implementing (round 0) naming handoff record ${HANDOFF_ID} (implement version 1) was already received; this call changed nothing`;
   const live = liveDaemon({
     path: "/legion/v1/handoff/complete",
     status: 409,
@@ -227,7 +230,7 @@ test("handoff_complete retries a connection the daemon closed before answering, 
 });
 
 test("a 409 after refused connections only is passed on unmarked, since a refused request was never sent", async () => {
-  const detail = `the implementer reported commit ${COMMIT} for its previous phase of LEGION-208; write and commit this phase's handoff before completing`;
+  const detail = NOT_NEW;
   const live = liveDaemon({
     path: "/legion/v1/handoff/complete",
     status: 409,
@@ -317,10 +320,7 @@ test("a 409 from the daemon is its answer and is never retried", async () => {
   const live = liveDaemon({
     path: "/legion/v1/handoff/complete",
     status: 409,
-    body: {
-      error: `the implementer reported commit ${COMMIT} for its previous phase of LEGION-208; write and commit this phase's handoff before completing`,
-      code: "HANDOFF_NOT_NEW",
-    },
+    body: { error: NOT_NEW, code: "HANDOFF_NOT_NEW" },
   });
   const clock = virtualClock();
   const completed: string[] = [];
@@ -337,7 +337,7 @@ test("a 409 from the daemon is its answer and is never retried", async () => {
   expect(result.content).toEqual([
     {
       type: "text",
-      text: `POST /legion/v1/handoff/complete failed with 409 HANDOFF_NOT_NEW: the implementer reported commit ${COMMIT} for its previous phase of LEGION-208; write and commit this phase's handoff before completing`,
+      text: `POST /legion/v1/handoff/complete failed with 409 HANDOFF_NOT_NEW: ${NOT_NEW}`,
     },
   ]);
   expect(live.answered.filter((route) => route === "/legion/v1/handoff/complete")).toHaveLength(1);

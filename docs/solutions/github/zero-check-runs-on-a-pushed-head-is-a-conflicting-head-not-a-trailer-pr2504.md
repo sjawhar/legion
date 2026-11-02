@@ -25,7 +25,9 @@ them in this order, before you push anything else.
    sanctioned forward merge of the base; nothing about the commits is wrong.
 2. **Only then read the head commit's message** for `skip-checks: true` or a bracket keyword.
    GitHub reads that trailer on the **head of the push**, so a push that carries code commits
-   without it and ends on a handoff commit with it starts nothing for any of them.
+   without it and ends on a commit with it starts nothing for any of them. Before
+   sjawhar/legion#2354 that commit was a phase's handoff commit; since then a handoff is a record
+   on the Dispatch issue, no Legion push carries the trailer, and a head that does is a mistake.
 
 A push whose head carries no trailer and still produces no run is condition 1 by elimination: that
 elimination is cheaper than a second push.
@@ -33,7 +35,7 @@ elimination is cheaper than a second push.
 ## Evidence
 
 In sjawhar/legion#2504 a round ended with 0 check runs at its code head, and the first diagnosis
-was the trailer, because the branch's handoff commit carries one. Two further pushes made to test
+was the trailer, because the branch's handoff commit carried one. Two further pushes made to test
 that theory — an empty commit and a handoff commit, **neither carrying the trailer** — also
 produced 0 check runs, while the repository's Actions were demonstrably running for other branches
 in the same minutes. `gh pr view 2504 --json mergeable,mergeStateStatus` then answered
@@ -41,5 +43,6 @@ in the same minutes. `gh pr view 2504 --json mergeable,mergeStateStatus` then an
 `CI` and `PR Title` within a minute of the push.
 
 Both conditions are real in this repository, and both were in play in that round: the trailer rule
-holds for every push that carries code (end it on a commit without the trailer, and push the
-handoff separately), and a conflicting head is the one that makes the rule look broken.
+holds for every push that carries code (end it on a commit without the trailer), and a
+conflicting head is the one that makes the rule look broken. The handoff was then pushed
+separately; since sjawhar/legion#2354 it is a Dispatch record that no push carries.

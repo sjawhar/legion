@@ -51,8 +51,9 @@ second renumbers.
 **Superseded 2026-09-27 (LEGION-118):** a rebase rooted at the branch's fork point also rewrites
 another tree's branch when one is stacked on it; resolve with a forward merge instead, from the
 bookmark rather than `@` (`jj new legion/<KEY> main@origin -m "<message>"`,
-`skills/legion-worker/references/conflicts-and-rewrites.md`; a handoff split leaves `@` empty and undescribed, and `jj git
-push` refuses a commit with no description). What follows records the earlier mechanism: done in
+`skills/legion-worker/references/conflicts-and-rewrites.md`; `@` is often an empty, undescribed
+commit that `jj git push` refuses, as a handoff split left it before sjawhar/legion#2354). What
+follows records the earlier mechanism: done in
 the working copy after
 `jj rebase -s <first commit> -d main@origin`, then squashed into the first conflicted commit
 (`jj squash --from @ --into <it> -u -- <the two files>`), which cleared the conflict from all
@@ -73,7 +74,8 @@ fourteen descendants at once:
    daemon actually wrote. Main's own migration test keeps its input at N-1 and now ends at N+1.
 5. One composition test: an N-1 file with legacy values → both steps → N+1 objects, `.v(N-1).bak`
    byte-identical. It is the only test that exercises the two steps as a chain.
-6. Docs that name the step (`AGENTS.md`, handoff files) follow.
+6. Docs that name the step (`AGENTS.md`) and the phase handoff follow. Before sjawhar/legion#2354
+   the handoff was a file in the tree. It is a record on the Dispatch issue now.
 
 Then tsc, biome, the affected suites, and the guarded-code mutations again — the rebase touched
 the files they pin.

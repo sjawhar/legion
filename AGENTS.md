@@ -29,7 +29,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   `docs/deployment.md`, "The `runtime.tmux` block").
 
 - **Skills** — guide the architect and sequential phase workers.
-  Durable `.legion/<issue>/<phase>.json` handoffs are the recovery source of truth.
+  Each phase's handoff, a versioned record on its Dispatch issue (`dispatch handoff-write`, `dispatch handoff-read`), is the recovery source of truth.
 
 ## Tech Stack
 
@@ -217,6 +217,16 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   a session the table already holds byte for byte is not copied again, and one it holds with other content is refused and left as it is;
   `scripts/sessions-import-pods.sh` runs the copy in one worker-image pod per tree, finding each tree's volume and root Sandbox by legion-v10.0.0's labels and scheduling the pod as that Sandbox's pods were, and refuses a project on a later release, one with a Sandbox not Suspended, or one with a pod that has not ended (docs/kubernetes.md "Copying file sessions before turning it on")
 
+- `legion handoffs import [--config <legion.yaml>] [--dry-run]`
+
+  the one-time, re-runnable move of the workers' committed handoff files onto their Dispatch issues (sjawhar/legion#2354), from the daemon's own file (project, dispatch_url, dispatch_token_file, the implement App, daemon_url):
+  for every issue the running daemon's `GET /legion/v1/state` holds in a phase other than done, as the implement App, writes each `.legion/<KEY>/{plan,implement,test,review}.json` on `legion/<KEY>` to Dispatch as that phase's handoff record under `legion-daemon:<PROJECT>` when the phase's newest record is absent or is the import's and differs from the file, never above a worker's record, then, once every file is on Dispatch, removes all of `.legion/` in one commit with no trailer, moved there by a non-forced ref update (a branch that moved in between read again and retried, three times at most);
+  one line per issue and phase (`imported v<n>`, `unchanged`, `kept worker record v<n>`, `removed .legion/ at <sha>`, `no branch`, `failed: <why>`), then a count of each;
+  exit 1 on a failure, or on a Dispatch without the handoff routes, which stops the run at its first handoff call naming the route;
+  `--dry-run` reads everything and writes nothing;
+  a second run with nothing changed writes and pushes nothing;
+  run as a one-shot pod of the new release's worker image under the daemon's ServiceAccount with its environment and mounts, before the daemon rolls to the release and again after (docs/kubernetes.md "Moving the handoffs onto their Dispatch issues")
+
 - `legion probe-boot [--config <legion.yaml>]`
 
   runtime: kubernetes only — the part of the daemon's boot its worker pod can refuse, from the file and with no workflow:
@@ -324,7 +334,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 - `LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/claude-backend-tmux.sh`
 
   The Claude Code backend's devbox-only live proof:
-  an implementer `worker_backends` puts on claude registers its transcript, completes its phase through the `legion` MCP tool's handoff_complete with a pushed handoff commit, and resumes the same Claude Code session after its pane is killed;
+  an implementer `worker_backends` puts on claude registers its transcript, completes its phase through the `legion` MCP tool's handoff_complete with its handoff recorded on the Dispatch issue, and resumes the same Claude Code session after its pane is killed;
   LEGION_E2E_MODEL_ROUTE=key-file `LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file>` instead, for a devbox with no Hawk gateway, where that one key file serves the Claude Code pane too;
   with `LEGION_E2E_MODEL_BASE_URL=<gateway base URL>` as well, the key file holds a gateway key and both the Claude Code pane and (under key-file) the Oh My Pi agents call that Anthropic-compatible gateway, so no Anthropic key is needed (scripts/e2e/README.md)
 
@@ -406,9 +416,10 @@ Each item below names a task and where its code is, then notes on it.
 
   The rules a test must follow that the code does not show: unix socket paths in Go tests
 
-- Handoff ledger — `.legion/` on issue branch
+- Handoff records — `packages/envoy/internal/dispatch/api/handoffs.go`
 
-  Committed phase output; retro's last commit removes `.legion/<issue>/` before READY, so none reaches the default branch
+  Each phase's handoff, a versioned record on its Dispatch issue that the worker writes under its own session;
+  the daemon reads back the one a completion names (`packages/daemon/internal/api/handoff.go`)
 
 - Envoy event routing — `packages/envoy/`
 
@@ -441,7 +452,7 @@ Each item below names a task and where its code is, then notes on it.
 - Shared plugin interface — `packages/pi-shared/`
 
   `@legion/pi-shared`: the versioned in-process interface between the two plugins and the modules both bundle, among them the Legion modules pi-legion and claude-envoy's MCP server share:
-  the daemon client (`src/daemon-client.ts`), the claim boot (`src/legion-claim-core.ts`), the `legion` tool's phase ops (`src/legion-phase-ops.ts`), the handoff-commit lookup, and the endless reminder a phase worker whose turn ends with its phase open gets
+  the daemon client (`src/daemon-client.ts`), the claim boot (`src/legion-claim-core.ts`), the `legion` tool's phase ops (`src/legion-phase-ops.ts`), the handoff-record lookup (`src/handoff-record.ts`), and the endless reminder a phase worker whose turn ends with its phase open gets
   — its machine (`src/phase-stall.ts`), its runner (`src/phase-reminder.ts`) and the four `LEGION_STALL_*` numbers (`src/stall-limits.ts`), one copy for both harnesses.
   See `packages/pi-shared/AGENTS.md`
 
@@ -824,7 +835,7 @@ A registration of a newer version keeps the gate's approval of an older one, as 
 with `off` the root architect is told so in its system prompt and adds no approval step, a registration approves the gate whatever it held, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
 a changes request is still told to the architect, once, without closing the gate.
 Whether a human must approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it.
-Only retro's commits may sit above the reviewer's approved head, those that change `docs/solutions/` and its removal of `.legion/<issue>/`:
+Only retro's commits may sit above the reviewer's approved head, those that change `docs/solutions/`, beside the removal of `.legion/` files (GitHub's compare lists them `removed`) that `legion handoffs import` commits:
 READY compares the review round's recorded approved head with READY's head on GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming the paths;
 also a compare GitHub may have cut at its 300 files or that gives no file list, a head not built on the approved one, or an approved head GitHub does not know) and a round with no recorded approval (`READY_NOT_APPROVED`), so the change goes back to review.
 The merger sends its `READY` packet with its completion;
@@ -860,7 +871,7 @@ When a push or reopen moves the head past the one READY named, the head's own CI
 GitHub's own merge queue (`merge_group` trigger) is a repository setting Legion does not modify.
 No lifecycle labels exist; GitHub issues are never read or written by Legion.
 
-**Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are the phase-verdict artifacts.
+**Review signaling:** Native GitHub review API, tester status checks, and the handoff records on each Dispatch issue are the phase-verdict artifacts.
 No lifecycle labels carry worker state.
 
 **Testing gate:** Behavioral testing is mandatory after every implementation phase
@@ -869,7 +880,7 @@ No lifecycle labels carry worker state.
 ## Documentation
 
 - Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact.
-  A Legion planner's plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document on Dispatch; no Legion role commits a plan or spec file here.
+  A Legion planner's plan lives in its `plan` handoff record and the issue's `plan.md` document on Dispatch; no Legion role commits a plan or spec file here.
 
 - Learnings: `docs/solutions/<category>/<slug>-pr<number>.md`, `<number>` being the pull request's number (`skills/legion-retro/references/learnings.md`)
 

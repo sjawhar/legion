@@ -181,7 +181,7 @@ func TestAnOpenIssuesClaimsNeverSuspend(t *testing.T) {
 	check := openCheck(issues[4], "merged")
 	putProductionCheck(t, pool, records, check)
 
-	apply("forward", intake.HandoffComplete{Issue: forward, Role: claim.RolePlanner, Claim: "forward-planner", Generation: 1, Summary: "planned", Commit: "forward-plan"})
+	apply("forward", intake.HandoffComplete{Issue: forward, Role: claim.RolePlanner, Claim: "forward-planner", Generation: 1, Summary: "planned", HandoffRecord: "forward-plan", HandoffVersion: 1})
 	apply("backward", intake.BackwardMove{Issue: backward, Requester: claim.RoleImplementer, To: phase.Implementing, Reason: "rework"})
 	assertOpen("ordinary forward and backward transitions")
 

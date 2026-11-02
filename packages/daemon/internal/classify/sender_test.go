@@ -29,7 +29,7 @@ func lateAt(before, head, sender string, minute int) runFact {
 // GitHub delivers first.
 func TestASynchronizesSenderTellsTwoPushesOfTheSameTwoHeadsApart(t *testing.T) {
 	dev, app := record.ClassifiedPush{SHA: "h1", Before: "h0", Sender: "dev"}, record.ClassifiedPush{SHA: "h1", Before: "h0", ByReviewApp: true, Sender: "app"}
-	back := record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true, ByReviewApp: true, Sender: "app"}
+	back := record.ClassifiedPush{SHA: "h0", Before: "h1", ByReviewApp: true, Sender: "app"}
 	heads := []runFact{syncedAt("h0", "h1", "dev", 1), settles("h1", 2, "ci"), syncedAt("h1", "h0", "app", 2), settles("h0", 3, "ci"), syncedAt("h0", "h1", "app", 3), settles("h1", 4, "ci")}
 	const want = `fix=2 counted="h1" planned=true sendsBack=false run=false`
 	for _, tc := range []struct {
@@ -59,7 +59,7 @@ func TestASynchronizesSenderTellsTwoPushesOfTheSameTwoHeadsApart(t *testing.T) {
 func TestASynchronizeBackToTheRecordedHeadIsNoMove(t *testing.T) {
 	start := record.PullRequest{HeadSHA: "c6", CheckedHead: "c6", Failing: []string{"ci"}, Required: []string{"ci"},
 		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1, HeadUpdatedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
-	got := delivered(t, start, pushed(record.ClassifiedPush{SHA: "c5", Before: "c6", Forced: true, Sender: "dev"}), pushed(record.ClassifiedPush{SHA: "c6", Before: "c5", Sender: "dev"}),
+	got := delivered(t, start, pushed(record.ClassifiedPush{SHA: "c5", Before: "c6", Sender: "dev"}), pushed(record.ClassifiedPush{SHA: "c6", Before: "c5", Sender: "dev"}),
 		syncedAt("c5", "c6", "dev", 2), lateAt("c6", "c5", "dev", 1))
 	if got.FixAttempts != 1 || got.HeadSHA != "c6" || got.Run != nil {
 		t.Errorf("c6 pushed again: %s at %s, want fix=1 at c6 with no run open, as the release before", judged(got, "", ""), got.HeadSHA)
@@ -275,7 +275,7 @@ func TestALoopInASkippedGapIsReadAsTheReleaseBeforeReadsIt(t *testing.T) {
 	facts := []runFact{
 		pushed(record.ClassifiedPush{SHA: "c1", Before: "h1", ByReviewApp: true, Sender: "app"}),
 		pushed(record.ClassifiedPush{SHA: "c2", Before: "c1", Sender: "dev"}),
-		pushed(record.ClassifiedPush{SHA: "c1", Before: "c2", Forced: true, ByReviewApp: true, Sender: "app"}),
+		pushed(record.ClassifiedPush{SHA: "c1", Before: "c2", ByReviewApp: true, Sender: "app"}),
 		pushed(record.ClassifiedPush{SHA: "c3", Before: "c1", ByReviewApp: true, Sender: "app"}),
 		syncedAt("c1", "c3", "app", 4), syncedAt("c1", "c2", "dev", 2), syncedAt("c2", "c1", "app", 3), syncedAt("h1", "c1", "app", 1),
 	}
@@ -298,7 +298,7 @@ func TestALoopInASkippedGapIsReadAsTheReleaseBeforeReadsIt(t *testing.T) {
 func TestAMoveAfterAMissedResetInTheSameSecondIsAMove(t *testing.T) {
 	const dev = "dev"
 	t1, t2 := time.Date(2026, 10, 1, 0, 0, 1, 0, time.UTC), time.Date(2026, 10, 1, 0, 0, 2, 0, time.UTC)
-	reset := record.ClassifiedPush{Before: "h2", SHA: "h0", Sender: dev, Forced: true}
+	reset := record.ClassifiedPush{Before: "h2", SHA: "h0", Sender: dev}
 	for _, tc := range []struct {
 		name  string
 		reset []runFact

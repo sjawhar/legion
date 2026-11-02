@@ -32,19 +32,16 @@ type sentStep struct {
 // people's.
 var pushSenders = []string{"app", "alice", "bob"}
 
-// sentHistory is one random history with moves made again - fresh commits, forced returns that
-// undo the move before them, the same two heads pushed again - each push a random sender's, each
-// pair of heads changing the same paths and forced or not whenever it is pushed, as those are facts
-// of the two commits. Each synchronize but the last is delivered on time or late; with lose, one of
-// them is never delivered.
+// sentHistory is one random history with moves made again - fresh commits, returns that undo the
+// move before them, the same two heads pushed again - each push a random sender's. Each
+// synchronize but the last is delivered on time or late; with lose, one of them is never
+// delivered.
 func sentHistory(rng *rand.Rand, lose bool) []sentStep {
 	var steps []sentStep
 	cur := "h0"
-	flags := map[[2]string][2]bool{}
 	n := 3 + rng.IntN(6)
 	for k := 1; k <= n; k++ {
 		var to string
-		forced := false
 		var again []string
 		for _, s := range steps {
 			if s.push.Before == cur {
@@ -55,25 +52,19 @@ func sentHistory(rng *rand.Rand, lose bool) []sentStep {
 		case r == 0 && len(again) > 0:
 			to = again[rng.IntN(len(again))]
 		case r == 1 && len(steps) > 0:
-			to, forced = steps[len(steps)-1].push.Before, true
+			to = steps[len(steps)-1].push.Before
 		default:
-			to, forced = fmt.Sprintf("c%d", k), rng.IntN(4) == 0
+			to = fmt.Sprintf("c%d", k)
 		}
 		if to == cur {
-			to, forced = fmt.Sprintf("c%d", k), false
-		}
-		key := [2]string{cur, to}
-		f, ok := flags[key]
-		if !ok {
-			f = [2]bool{forced, rng.IntN(3) == 0}
-			flags[key] = f
+			to = fmt.Sprintf("c%d", k)
 		}
 		sender := pushSenders[rng.IntN(len(pushSenders))]
 		kind := onTime
 		if k < n && rng.IntN(2) == 0 {
 			kind = lateSync
 		}
-		steps = append(steps, sentStep{push: record.ClassifiedPush{Before: cur, SHA: to, Forced: f[0], HandoffOnly: f[1], ByReviewApp: sender == "app", Sender: sender}, sync: kind})
+		steps = append(steps, sentStep{push: record.ClassifiedPush{Before: cur, SHA: to, ByReviewApp: sender == "app", Sender: sender}, sync: kind})
 		cur = to
 	}
 	if lose {

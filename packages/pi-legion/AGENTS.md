@@ -90,14 +90,19 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 43's strict `consumers` on
-`GET /legion/v1/state` (the lag of the daemon's three durable consumers, each with what
+number is the one `DaemonAPIVersion` declares, last bumped by contract 45's handoff records
+(sjawhar/legion#2354: `handoff_complete` names the phase's Dispatch handoff record, `handoffId` and
+`handoffVersion`, and `GET /legion/v1/state` gives each phase its `handoffRecord`; a 44 plugin
+posts a commit and no record, and rejects `handoffRecord`), after contract 44's removal of
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` from a Claude Code role's start command and pane, after
+contract 43's strict `consumers`
+on `GET /legion/v1/state` (the lag of the daemon's three durable consumers, each with what
 waits, the oldest waiting message, the last handled, whether it is stalled and what NATS did not
 answer; a 42 plugin rejects it) and `repositories.withoutWebhookApp` (each served repository
-Dispatch's GitHub App is not known to be installed on), after contract 42's four `LEGION_STALL_*`
-numbers in every worker's environment, Claude Code's three variables in a Claude role's start
-command and the session its launcher keeps in the session table (the phase reminder's limits, read
-through `@legion/pi-shared`'s `stall-limits.ts`), after contract 41's controller start
+Dispatch's GitHub App is not known to be installed on), after contract 42's four
+`LEGION_STALL_*` numbers in every worker's environment, Claude Code's three variables in a Claude
+role's start command and the session its launcher keeps in the session table (the phase reminder's
+limits, read through `@legion/pi-shared`'s `stall-limits.ts`), after contract 41's controller start
 command (`legion controller start` ends the operator's Oh My Pi command line with
 `/legion-controller-start`, and this plugin sends the controller's start message from that
 command, never from `session_start`; "The controller's start turn" below), after contract 40's
@@ -461,29 +466,36 @@ A worker's phase ends through the `legion` tool's `handoff_complete`, never shel
 `src/tools.ts` carries it for every session but the root architect's (a phase worker, and a
 sub-architect, an architect whose issue is not its tree), running it on the phase-op executor
 every harness shares (`executePhaseOp` in `@legion/pi-shared/legion-phase-ops`) and closing the
-phase (`onPhaseCompleted`) only once it succeeded. A handoff is a committed file,
-`.legion/<issue>/<phase>.json`, that the worker writes with `write`, commits and pushes with plain
-`jj`. The operation finds the commit it reports in the pane first
-(`@legion/pi-shared/handoff-commit`, what `legion handoff complete` did): the issue's phase from
+phase (`onPhaseCompleted`) only once it succeeded. A file-backed phase (planning, implementing,
+testing, reviewing) ends with a handoff record on the Dispatch issue, which the worker writes with
+`dispatch handoff-write --issue <issue> --phase <word> --body-file <file>`, the body file under
+`$TMPDIR` rather than the workspace, whose every file jj snapshots; no handoff is a commit or a
+push. The operation finds
+what it reports in the pane first (`@legion/pi-shared/handoff-record`): the issue's phase from
 the daemon's state, the role from the session; for a file-backed phase the role works, the newest
-commit on the issue branch carrying the file, refused — posting nothing — while the file has an
-uncommitted change, is missing, is not committed on this branch, is carried by a commit another
-pane's `JJ_USER`/`JJ_EMAIL` authored, or is not yet on `legion/<issue>@origin` (push the issue
-branch, then complete again); for every other phase the commit the workspace stands on, `@-`. It
-then posts
-`POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The implementer's
-report on a look of its closed issue's production check is the one call that finds no commit: the
+record of the phase's word, read from the pane's Dispatch (the envoy.json its session reads),
+refused — posting nothing — when the phase has none (write it, then complete again) or Dispatch
+does not answer (complete again once it does); the implementer's implementing round also reports
+the commit `legion/<issue>@origin` names, refused while `@-` is not on that branch (push it, then
+complete again); retro, the merger's READY and every other phase report the commit the workspace
+stands on, `@-`. It then posts
+`POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, and `handoffId`,
+`handoffVersion` and `commit` where they apply). The implementer's
+report on a look of its closed issue's production check is the one call that finds neither: the
 operation reads the daemon's state first, and an implementer's call on an issue in `done` whose
 `check` is open is a check report, posted with its `verdict` (`pass`, `pending` or `fail`, required
 there; `pending` is refused on a phase completion) and `summary` alone, no handoff and no `commit`;
 the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
-(`packages/daemon/internal/api/handoff.go`). The daemon reads no
-handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
-reported for its previous phase); for the implementer's completion of implementing it reads the open
-pull request on `legion/<issue>` as the implement App, records one the webhook has not, and refuses
-`HANDOFF_NO_PULL_REQUEST` when there is none and the record holds none merged (naming a recorded
-pull request closed without merging, which is the architect's to decide), applying the completion
-unread when GitHub cannot be read;
+(`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
+and refuses, recording nothing, a completion that names no record (`HANDOFF_RECORD_REQUIRED`), a
+record Dispatch does not have (`HANDOFF_RECORD_NOT_FOUND`), a read Dispatch did not answer
+(`DISPATCH_READ_FAILED`), a record of another issue, phase or version (`HANDOFF_RECORD_MISMATCH`),
+one written by another session than the claim's (`HANDOFF_SESSION_MISMATCH`, the import's records
+included), and the one the role named for its previous phase (`HANDOFF_NOT_NEW`); for the
+implementer's completion of implementing it reads the open pull request on `legion/<issue>` as the
+implement App, records one the webhook has not, and refuses `HANDOFF_NO_PULL_REQUEST` when there
+is none and the record holds none merged (naming a recorded pull request closed without merging,
+which is the architect's to decide), applying the completion unread when GitHub cannot be read;
 and for the merger's `ready: true` it reads the pull request's
 head on GitHub and refuses a packet the workflow must not take on, each refusal named in the
 merger's role prompt
@@ -491,7 +503,8 @@ merger's role prompt
 `note` is the already-merged sentence, for a pull request merged before READY, or the by-hand note
 (`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
-pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
+pane. A predecessor's handoff is read with `dispatch handoff-read`, at the version the task's
+`Handoff:` line names (`--version <n>`). GitHub is the pane's
 `gh` and `git`, which read the role's App tokens from the gh bundle under `LEGION_GH_OWNERS_DIR`; no
 tool operation writes to GitHub for a role. Review threads are the pull request author's to
 resolve: the reviewer, whose review
@@ -583,7 +596,7 @@ closed.
 | OMP extension entry | `extensions/legion.ts` | The one entry; ships as `dist/legion.js` in `@sjawhar/pi-legion`. Inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment; in a Legion session it refuses to run without the Envoy plugin's interface (the section above). The Envoy entry is `../pi-envoy/extensions/envoy.ts` (`packages/pi-envoy/AGENTS.md`) |
 | Legion lifecycle modules | `src/` | Classification (`classify.ts`) and the claim session (`claim-session.ts`, an adapter over `@legion/pi-shared/legion-claim-core`; see Daemon contract), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`: the phase ops' schema fields, description template and executor are `@legion/pi-shared/legion-phase-ops`, beside which it serves the architect's and the controller's operations; its description, which `tools.test.ts` pins word for word, states no sentence on `read_record` or `request_backward_move`; every operation that writes mints its grant on `/grants` in-process and posts it with the request; nothing is written to the pane, and no tool call is wrapped or refused), and the recreated-workspace notice's Oh My Pi half (`workspace-recreated.ts`: how this host saves the notice in a session and tells its own copies apart; the notice itself is `@legion/pi-shared/workspace-recreated`, which the Claude Code host sends too). The phase-stall machine is not here: both harnesses run `@legion/pi-shared`'s (the section above) |
 | Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, the operator's controller's claim behind `/legion-controller-start` (`startCommand`, which sends the start message right before the role claim; see The controller's start turn), and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The `legion` tool's `set_status` mints through it (`mintGrant`) and posts the grant with its request. |
-| Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff-commit lookup (`handoff-commit`), the stale git lock note (`git-lock`), the recreated-workspace notice (`workspace-recreated`) and the endless phase reminder — its state machine (`phase-stall`), its runner (`phase-reminder`) and the four `LEGION_STALL_*` numbers (`stall-limits`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
+| Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff report (`handoff-record`), the stale git lock note (`git-lock`), the recreated-workspace notice (`workspace-recreated`) and the endless phase reminder — its state machine (`phase-stall`), its runner (`phase-reminder`) and the four `LEGION_STALL_*` numbers (`stall-limits`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, except `ENVOY_CONFIG_FILE`, which the file points at an envoy.json that holds no section before it imports the Envoy entry (the entry picks its file at module load) and `beforeEach` sets again, with `OMP_PROFILE` and `PI_CODING_AGENT_DIR` unset, so no caller's envoy.json reaches a pane; each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals, that `/legion-claim-controller` answers the sentence without exiting, and that `register_gate`'s lookup reads the envoy.json the Envoy entry chose |
 | Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts`, `extensions/controller-start-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The phase-stall and role-tools omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the endless phase reminder, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`). `controller-start-omp.test.ts` runs the operator's controller as `legion controller start` does, interactive Oh My Pi under a pseudo-terminal (the harness's `spawnInteractive`) with both entries by path and `/legion-controller-start` on its command line, against a stand-in gateway, daemon and Envoy listener and the real NATS server the role claim needs (`LEGION_TEST_NATS_URL`), over which it also sends the controller a role-lane card and a controller-topic notice: the start turn runs after startup and shows on screen, the operator can type during it, Esc interrupts it, the start message starts the first turn once, a card published the moment the role is claimed and a notice published the moment the controller topic is registered both reach the model after the start message, and a refused claim shows its warning and sends nothing |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch: `oracle`, the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`, `deep-worker`, and the planner's `plan-gap-analyst` and `plan-reviewer`. The root architect also runs the planner's two on its spec before every approval request. Each agent declares the name of its file, and its model only as role aliases. The planner's two carry `bash` and no edit or write tool. Oh My Pi has no per-agent command limit, so their prompts hold them to read-only commands |

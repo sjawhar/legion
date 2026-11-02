@@ -60,9 +60,10 @@ comments to name the new sites. Then prove the invariant held with the same grep
 
 ## 2. Expect the conflict everywhere, resolve it once, bottom-up
 
-jj marks every descendant of a conflicted commit as conflicted, so a 3-commit change with 8
-handoff commits above it shows 11 red rows. Only the first commit that touched each file needs a
-decision: `jj new <that commit>`, edit the file, `jj squash`. jj then auto-rebases the descendants
+jj marks every descendant of a conflicted commit as conflicted, so a long chain shows one red row
+per commit: before sjawhar/legion#2354 a 3-commit change with 8 handoff commits above it showed
+11 red rows. Only the first commit that touched each file needs a decision: `jj new <that
+commit>`, edit the file, `jj squash`. jj then auto-rebases the descendants
 and the same conflict disappears from all of them. Check with `jj log -r 'conflicts() & (main::@)'`
 after each squash; it should shrink, never grow. Two files here — `AGENTS.md` tables where both
 sides added a row after the same anchor — needed only "keep both rows", and the docs table order
@@ -108,8 +109,9 @@ for a genuine multi-commit rebase outside that step.
   undescribed working-copy commit, which `jj git push` refuses. A rebase or a squash into a pushed
   commit records the pushed tip first (*Rewriting pushed commits* in `skills/legion-worker/references/conflicts-and-rewrites.md`), so the push is refused
   if another role pushed in between.
-- A reviewer's handoff commit sits in the chain below yours; confirm it is an ancestor of your
-  commit with `jj log` before building on it, and mention it in the push summary.
+- Before sjawhar/legion#2354 a reviewer's handoff commit could sit in the chain below yours. You
+  confirmed it was an ancestor of your commit with `jj log` before building on it, and named it
+  in the push summary. A handoff is a record on the Dispatch issue now, so the chain is code.
 
 ## 6. `jj diff --from main --to <branch>` is not the pull request's diff once `main` moves again
 
@@ -128,8 +130,9 @@ overlapping files is `MERGEABLE` and needs no rebase for the merge queue to take
 ## Related
 
 - [handoff-file-conflicts-during-rebases](handoff-file-conflicts-during-rebases.md) — the
-  edit-and-squash, bottom-up mechanics, for the case where the conflicting file is a `.legion/`
-  handoff and one side is simply right.
+  edit-and-squash, bottom-up mechanics for a conflicting `.legion/` handoff file, where one side
+  was simply right. That note is superseded: a handoff is a Dispatch record and conflicts in no
+  rebase.
 - [conflicting-pr-gets-no-pull-request-ci](../github/conflicting-pr-gets-no-pull-request-ci.md) —
   why a `CONFLICTING` head has no CI to wait for.
 - [proving-a-pure-refactor-behind-an-interface](../architecture-patterns/proving-a-pure-refactor-behind-an-interface.md)

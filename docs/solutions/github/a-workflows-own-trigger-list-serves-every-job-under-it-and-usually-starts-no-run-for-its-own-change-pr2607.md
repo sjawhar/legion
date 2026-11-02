@@ -24,7 +24,7 @@ This is the third: the workflows it does not read at all, and the deletion direc
   Adding a job to a path-filtered router is usually gated; a workflow's own `on.push.paths` often is not, and a one-sided drift gate over the router says nothing about it.
 - A workflow's trigger list usually does not name its own file, its scripts or the guides it reads, so a change to the workflow starts no run of it on merge.
   An acceptance criterion that says "the first run of X after the merge" then has no event, no deadline and no owner.
-  Restate it as *the first run whose head has the merge commit as an ancestor*, name the event that will produce one, and record the baseline where a reader can reach it after the phase handoffs are deleted — the pull request body, not `.legion/`.
+  Restate it as *the first run whose head has the merge commit as an ancestor*, name the event that will produce one, and record the baseline where a reader of the merged repository can reach it — the pull request body, not a handoff, which lives on the Dispatch issue and not in the tree.
 
 ## Evidence (sjawhar/legion#2607, read at that head on 2026-10-31)
 
@@ -38,4 +38,4 @@ This is the third: the workflows it does not read at all, and the deletion direc
   The probe above was a throwaway script; the durable fix is a rule that reads `release.yaml`'s trigger, which is a repository change rather than a learning.
 - The missing event: `release.yaml`'s `on.push.paths` runs from `"package.json"` to `".github/workflows/worker-image.yaml"` and names no `.github/workflows/release.yaml`, no `AGENTS.md` and no `.github/scripts/**`.
   It lists a sibling workflow file and not its own, so a pull request that changes the release workflow starts no release run when it merges.
-  The spec's criterion named "the first `release.yaml` run on `main` after the merge"; planning restated it as the earliest run whose head has the merge commit as an ancestor, named the other pull request's merge as what will produce one, and put the tag-set baseline in the pull request body, which survives the removal of the handoff directory.
+  The spec's criterion named "the first `release.yaml` run on `main` after the merge"; planning restated it as the earliest run whose head has the merge commit as an ancestor, named the other pull request's merge as what will produce one, and put the tag-set baseline in the pull request body, which the merged pull request keeps.

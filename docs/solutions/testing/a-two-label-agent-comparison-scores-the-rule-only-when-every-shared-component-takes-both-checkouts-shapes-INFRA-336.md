@@ -52,11 +52,14 @@ the first implementing round made the field **required** in `TestHandoff`, the s
 tightening read on its own.
 
 The documented comparison for that scenario is `./rig.sh batch tester-proof 5 head base`, where
-`base` is a checkout of `main`, whose tester prompt asks for `completed` and never mentions
-`previousHandoff`. Every base-label run therefore failed the schema, which `testerProof` records
-as `proofProblems=["not a test handoff: … at previousHandoff"]` and scores `pass=false`. The
-comparison would have measured the prompt it varies rather than the tester-proof rule it exists to
-score.
+`base` is a checkout of `main`. Main's tester prompt then asked for `completed` and never
+mentioned `previousHandoff`. Every base-label run therefore failed the schema, which `testerProof`
+records as `proofProblems=["not a test handoff: … at previousHandoff"]` and scores `pass=false`.
+The comparison would have measured the prompt it varies rather than the tester-proof rule it
+exists to score. The shapes have moved twice since: main's prompt asked for `previousHandoff` and
+no `completed` after INFRA-336, and since sjawhar/legion#2354 a handoff is a versioned record on
+its Dispatch issue and asks for neither. The rule is the same at every move — the shared schema
+must read whatever shape any compared checkout's prompt produces.
 
 The tester caught it with a red test — a handoff body in the old shape, which the schema must
 read — and the fix was `previousHandoff: z.string().optional()` with the reason written into the

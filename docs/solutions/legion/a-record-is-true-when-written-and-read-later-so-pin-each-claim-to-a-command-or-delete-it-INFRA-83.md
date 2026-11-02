@@ -55,7 +55,7 @@ point of use or a check that runs when the referent moves.
 - **A deny-list over an open set is wrong by default; an allow-list is silent by default.** Round 11 excluded `Lagging` from the `merge-waiting` gate and left `Disappeared` to fail the same way. The fix that held names what may spend the notice (`waitingOnGitHub`: `Armed`, `Unmergeable`, `Merging`), so a wait type added later is silent rather than wrong. The reviewer asked for the **shape** rather than the answer; that is the difference between the two rounds.
 - **A fingerprint is an alarm, not a diagnosis.** When it moves, name the files whose diff moved and account for each. A changed fingerprint with three conflicts and five moved files leaves two unexplained, and an unexplained file is where a silent loss and a benign overlap look identical.
 - **Say which instrument did not run, and why.** An unrun check reported as unrun costs nothing; an unrun check left unmentioned is the absence this whole document is about.
-- **A body that grows a fixed amount per round has a round count at which the process fails.** Measured: 3,771 characters a round, against GitHub's 65,536 refusal — at which the body `PATCH` itself fails, so what breaks is the ability to update the record mid-round. Archiving round evidence into a pull-request comment moved it from 8.2 rounds to 10.4. Never link evidence into `.legion/<issue>/`: retro removes it at the merge, exactly when the record starts being read from outside the tree.
+- **A body that grows a fixed amount per round has a round count at which the process fails.** Measured: 3,771 characters a round, against GitHub's 65,536 refusal — at which the body `PATCH` itself fails, so what breaks is the ability to update the record mid-round. Archiving round evidence into a pull-request comment moved it from 8.2 rounds to 10.4. Before sjawhar/legion#2354, evidence linked into `.legion/<issue>/` was lost at the merge, because retro removed that directory exactly when the record starts being read from outside the tree. A handoff is a record on the Dispatch issue now and stays readable after the merge. Link evidence to a home that outlives the branch.
 
 ## Three instruments for three facts about a forward merge
 
@@ -105,6 +105,6 @@ the tester's bare gates lives in two homes. `prompts/roles/core/tester.md:13` wa
 `skills/legion-worker/references/pr-body.md:131` still reads *"the repository's CI green at the
 new head"* with no such clause, in the sentence that tells the tester what to write into its `E2E`
 line. The change about copies left a copy. It is reported to the architect rather than fixed here,
-because retro may commit only `docs/solutions/` and the handoff removal, and a correction above
-the approved head voids the approval — which is itself the lesson: **leave a round's width for the
-findings a retro makes, because retro cannot take them.**
+because retro may commit only `docs/solutions/` — before sjawhar/legion#2354 it also committed the
+handoff removal — and a correction above the approved head voids the approval. That is itself the
+lesson: **leave a round's width for the findings a retro makes, because retro cannot take them.**
