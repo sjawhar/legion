@@ -668,7 +668,7 @@ describe("the dispatch CLI", () => {
       expect(code, call.join(" ")).toBe(1);
       expect(stdout.split("\n").slice(0, 2)).toEqual([
         "dispatch artifact was not called: 1 problem",
-        `- content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph), and "rows.jsonl" is not a Markdown name. Upload the file unchanged with path (--path <file>) under the same name; content takes a name ending in .md or .markdown or with no extension.`,
+        `- content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph), and "rows.jsonl" is not a Markdown name. Upload the file under the same name with path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged; content takes a name ending in .md or .markdown or with no extension.`,
       ]);
     }
     expect(requests).toEqual([]);

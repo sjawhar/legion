@@ -8669,7 +8669,10 @@ describe("executeDispatchTool", () => {
     "size-table-rows.tsv",
     "mustfail.json",
     "notes.TXT",
-  ])("refuses inline content named %s before it sends anything, naming --path", async (name) => {
+    "rows.jsonl_",
+    "rows.jsonl ",
+    "отчёт.данные",
+  ])("refuses inline content named %j before it sends anything, naming --path", async (name) => {
     const requests: string[] = [];
     await expect(
       executeDispatchTool({
@@ -8686,7 +8689,7 @@ describe("executeDispatchTool", () => {
         }) as unknown as typeof fetch,
       })
     ).rejects.toThrow(
-      `${JSON.stringify(name)} is not a Markdown name. Upload the file unchanged with path (--path <file>) under the same name`
+      `${JSON.stringify(name)} is not a Markdown name. Upload the file under the same name with path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged`
     );
     expect(requests).toEqual([]);
   });
@@ -8697,7 +8700,8 @@ describe("executeDispatchTool", () => {
     "notes.markdown",
     "Design notes",
     "plan v1.2",
-  ])("sends inline content named %s as a Markdown document", async (name) => {
+    "notes v2. draft",
+  ])("sends inline content named %j as a Markdown document", async (name) => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       requests.push({ url: String(url), init: init ?? {} });

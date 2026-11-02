@@ -4261,8 +4261,9 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       await expectUnread("dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat");
     });
     // What Dispatch stores as a markdown document: an upload of inline text (`--content`,
-    // `--content-file`), whatever its name, or a `--path` file the CLI sends as text/markdown (its
-    // name ends in .md or .markdown); and the gate also reviews any upload whose name ends in .md.
+    // `--content-file`), which the CLI takes only under a name ending in .md or .markdown or with
+    // no extension, or a `--path` file the CLI sends as text/markdown (its name ends in .md or
+    // .markdown); and the gate also reviews any upload whose name ends in .md.
     fs.writeFileSync(path.join(work, "notes.txt"), "The person said: ship it on Friday.\n");
     fs.writeFileSync(path.join(work, "name-md.txt"), "brief.md\n");
     fs.writeFileSync(path.join(work, "name-png.txt"), "shot.png\n");
@@ -4297,12 +4298,9 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       ])
         await expectUnread(command);
     });
-    test("(l) inline text is a markdown document whatever its name, and so is a --path file named .md", async () => {
+    test("(l) inline text is a markdown document, and so is a --path file named .md", async () => {
       const g = bind({ env: STUB, cwd: work });
-      await g.bash(
-        "u14",
-        "dispatch artifact --issue DSP-1 --name shot.png --content-file notes.txt"
-      );
+      await g.bash("u14", "dispatch artifact --issue DSP-1 --name notes --content-file notes.txt");
       await g.bash("u15", "dispatch artifact --issue DSP-1 --name notes --path brief.md");
       expect(g.calls).toHaveLength(2);
       for (const call of g.calls) expect(call.user).toContain(uploadRule);
