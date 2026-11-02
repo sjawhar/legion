@@ -350,7 +350,8 @@ docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
 
 `e2e/seed.ts` empties its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
-The suite has seven projects. `chromium` runs every spec except the two plain-HTTP specs. `iphone`
+The suite has eleven projects. `chromium` runs every spec except the two plain-HTTP specs and the
+three the `-alone` projects below take. `iphone`
 runs, from those same specs, only the tests tagged `@phone` (written at the end of the test's or
 its `test.describe`'s title); which tests take the tag is in `packages/dispatch/AGENTS.md`, "Phone
 acceptance". An untagged test drops out of `iphone` with no failure. The iPhone project uses
@@ -377,6 +378,14 @@ upstream once a page has closed. `chromium-plain-http-sign-out` runs the sign-ou
 `e2e/keyed-writes.e2e.ts` on that same origin, where the browser has no `navigator.locks`, so a
 tab holds the person's writes for another tab's sign-out on a renewed lease rather than on that
 tab's lock.
+The last three projects run the rows whose claim is a wall-clock time, with the machine to
+themselves: `chromium-alone` runs `e2e/heavy-document-writes.e2e.ts` (a document write answers in
+under a second), `e2e/heavy-bodies.e2e.ts` and `e2e/nested-directive.e2e.ts` (a card draws without
+holding the main thread for a second), and `firefox-alone` and `webkit-alone` run
+`e2e/heavy-bodies.e2e.ts` in the other two engines. Each names every project before it in
+`dependencies` and caps its own workers at one, so Playwright starts them only after the rest of
+the run and takes one row at a time: four lanes on one machine make a second of wall clock
+unmeasurable. A project whose dependency has a failing row does not run at all.
 `bun run e2e:install` installs all three browsers.
 
 ## Phone check

@@ -5,8 +5,10 @@
 // browser, so it runs in one Playwright project and nowhere else: every project of a run shares
 // the one server process, so a second project would time these writes against a server that
 // already holds what each shape touches, and what the row says below about the first document
-// write of its shape would be false there (sjawhar/legion#2519).
-import { cpus } from "node:os";
+// write of its shape would be false there (sjawhar/legion#2519). That project is
+// `chromium-alone` (e2e/playwright.config.ts), which Playwright starts only once every other
+// project has finished and which runs one row at a time: a second read from the wall clock is a
+// second only where nothing else holds the machine (sjawhar/legion#2612).
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { expect, test } from "@playwright/test";
 import { createIssue, createIssueArtifact, createProject } from "./api";
@@ -139,208 +141,34 @@ async function anIdleServer(): Promise<{ key: string }> {
   return await seedIssue("Heavy documents");
 }
 
-/** One turn of the hog below: 20,000 integer steps, about a third of a millisecond, allocating
- *  nothing. Short enough that the answer to a write is never kept waiting by a turn in progress,
- *  long enough that the event loop around it costs nothing beside it. */
-const hogSteps = 20_000;
-
-/** One turn of the hog: arithmetic no runtime can elide and no allocation, so what it takes from
- *  the machine is processor time and nothing else. */
-function burnATurn(): void {
-  let step = 1;
-  for (let left = hogSteps; left > 0; left -= 1) {
-    step = (step * 48_271) % 2_147_483_647;
-  }
-  // A Lehmer generator seeded at 1 never reaches 0, and reading what it reached is what keeps a
-  // runtime from finding that the loop has no effect and dropping it.
-  if (step === 0) {
-    throw new Error("the hog's own arithmetic went wrong");
-  }
-}
-
-/** How long the hog asks for a core at a stretch, and how long it leaves the machine alone
- *  between stretches. A stretch is long enough for the machine's books, which move in steps of
- *  10 to 20 ms, to say something about it; the rest between them is what keeps the instrument
- *  from charging the write a quarter of a core for being measured (`Written` below). */
-const hogSliceMs = 80;
-const hogRestMs = 240;
-
-/** What the hog was given, and what the machine handed out in all, over the stretches the hog
- *  asked for a core - and how many cores it has to hand out. */
-interface Hogged {
-  readonly busy: number;
-  readonly cores: number;
-  readonly ours: number;
-}
-
-/** Back to the event loop and straight on again: the answer to a write in flight is read as it
- *  lands, and the process is never asleep when the scheduler looks at it. */
-function yieldToTheLoop(): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setImmediate(resolve);
-  return promise;
-}
-
-/** Asleep for `ms`, which is the hog's rest: here the write has the machine as it would with no
- *  instrument on it at all. */
-function rest(ms: number): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
-}
-
-/** Asks for a core in stretches for as long as `inFlight` says the write is, and answers the
- *  books for the stretches alone: what this process was given over them and what the machine
- *  handed out over the same stretches. A write the hog never got a whole stretch of answers
- *  nothing the books can speak for, which `write` reads as no share (`Written` below). */
-async function hogACore(inFlight: () => boolean): Promise<Hogged> {
-  let busy = 0;
-  let cores = 0;
-  let ours = 0;
-  while (inFlight()) {
-    const spentBefore = process.cpuUsage();
-    const handedOutBefore = handedOut();
-    const until = performance.now() + hogSliceMs;
-    while (inFlight() && performance.now() < until) {
-      burnATurn();
-      await yieldToTheLoop();
-    }
-    const spent = process.cpuUsage(spentBefore);
-    const machine = handedOut();
-    busy += machine.busy - handedOutBefore.busy;
-    cores = machine.cores;
-    ours += (spent.user + spent.system) / 1_000;
-    if (!inFlight()) {
-      break;
-    }
-    await rest(hogRestMs);
-  }
-  return { busy, cores, ours };
-}
-
-/** The processor time this machine has handed out since it started, over every core it has, and
- *  how many cores that is. Idle time is not handed out; everything else is, whoever got it. */
-function handedOut(): { busy: number; cores: number } {
-  const cores = cpus();
-  let busy = 0;
-  for (const core of cores) {
-    const { idle, ...running } = core.times;
-    busy += Object.values(running).reduce((all, spent) => all + spent, 0);
-  }
-  return { busy, cores: cores.length };
-}
-
 /**
- * What one write cost, told apart from the wall time the machine spent on the suite's other
- * lanes while it ran.
+ * What one write cost: the round trip this process timed, and what the API answered where it
+ * refused the body.
  *
  * A round trip timed from here counts two things, and only the first is the claim this row
  * makes: the work the server did on the write, and the wall time in which the machine ran
- * something else instead. One Playwright worker left the second near nothing. Four do not: every
- * lane holds a browser, a Dispatch server and a Postgres of its own, so the server under this
- * row shares CI's four cores with three other lanes, and this pod's two cores with them twice
- * over. In CI run 125366889641 the 8,000-item write, whose own work is 630-700 ms, answered in
- * 1,471 ms and red this row; four lanes on this pod have read 2,779 ms for that same write
- * (sjawhar/legion#2612).
+ * something else instead. One Playwright worker left the second near nothing. Four do not:
+ * every lane holds a browser, a Dispatch server and a Postgres of its own, so a server under
+ * four lanes shares CI's four cores with three other lanes, and this pod's two cores with them
+ * twice over. In CI run 125366889641 the 8,000-item write, whose own work is 630-700 ms,
+ * answered in 1,471 ms and red this row; four lanes on this pod have read 2,779 ms for that
+ * same write (sjawhar/legion#2612).
  *
- * So the round trip is paced into the milliseconds of a machine that would have given the write
- * a core, as the browser rows pace a main-thread hold into the milliseconds of a thread running
- * at its own best (`main-thread-hold.ts`). The instrument is a hog and the machine's own books.
- * While the write is in flight this process asks for a core in stretches of `hogSliceMs`, and
- * two numbers are read over those stretches: the processor time the machine gave this process
- * (`process.cpuUsage`) and the processor time it handed out in all (`os.cpus`). A machine the
- * suite's lanes have filled hands out every core it has, so the hog's share of all that time,
- * times the cores, is the share of one core a thread that wanted one was given - and that is
- * the share the goroutine parsing the body next door was given beside it. A write that took
- * 1,400 ms while the machine gave such a thread 45% of a core is 630 ms of work, and 630 ms is
- * what the absolute bound then holds.
- *
- * An instrument must not charge its subject for being measured, and this one is a thread that
- * wants a whole core beside a server that wants one too. It gives the machine back
- * `hogRestMs` between stretches, so three quarters of a write runs with no hog on the machine
- * at all, and the share it read over the stretches is then taken as the share over the write -
- * the suite's other lanes hold their load for whole tests, not for 80 ms at a time. And the
- * hog's own demand comes out of the figure (`shareOfACore`): what it read is the share with
- * itself on the machine, and what the write met is the share without it. With the machine to
- * itself that correction is what lifts a stretch's 86-96% to the whole core the write really
- * had, so the bound there holds the round trip as it always did.
- *
- * The share is read, never calibrated: no node is stood down for being slow, and a slow node's
- * own second is still a second. The two numbers are read together rather than the first alone
- * because a kernel's own accounting of processor time can undercount under load, and this
- * pod's does: a job of 505 ms of core time reads as 230 ms there while eight other threads
- * want the machine, and the machine, saturated, reports 1.43 of its 2 cores handed out. An
- * undercount that is in both numbers divides out of their ratio.
- *
- * The hog must want a whole core while it runs and must never sleep inside a stretch, because a
- * thread that sleeps is handed a core the moment it wakes however loaded the machine is: a
- * sampler that ran 3.2 ms every 50 ms read 57% of a machine that was giving this row's own
- * writes a third of it. It yields to the event loop between turns rather than sleeping, so the
- * answer to the write is read as it lands and the scheduler still sees a thread that wants to
- * run.
- *
- * What the share cannot see is that the server is a process of many threads where the hog is
- * one: a parse is one goroutine, but the Go runtime collects beside it, and a process keeping
- * two threads runnable is given more of a loaded machine than a thread keeping one. So the
- * share read here is the smaller one, and a bound held against it is the looser for that under
- * lanes, never the tighter: contention cannot push this figure up.
- *
- * A write the machine's books cannot speak for is paced by nothing at all. This pod's kernel
- * accounts processor time in steps of 10 to 20 ms - the three refusals here are answered in 4
- * to 27 ms with the machine to itself, and the shortest of them read as no processor time
- * whatever - so a write under `shareNeedsMs`, and one the books give no processor time at all,
- * is left unpaced and the bound holds its round trip, which for a write that short is the same
- * number and never the kinder one.
+ * So the row no longer runs beside three other lanes: it runs in `chromium-alone` (the file's
+ * head), which Playwright starts only once every other project has finished and which runs one
+ * row at a time. The machine is the server's, the round trip is its work, and the bound holds
+ * the number a writer waits, with nothing read off the machine and nothing corrected for. Two
+ * instruments that corrected for the lanes instead stood here - a hog asking for a core while
+ * the write was in flight, and the machine's own books beside it - and what they read was the
+ * kinder share: a server keeping several threads runnable is given more of a loaded machine
+ * than the one thread the hog kept, so the pace came out too low and the paced write too fast,
+ * which is a 1.4x regression passing. They are gone with the contention they corrected for.
  */
 interface Written {
-  /** What the write cost a writer: wall time from this process, which holds whatever the machine
-   *  did to the server while it ran. */
+  /** What the write cost a writer: the round trip from this process. */
   readonly took: number;
-  /** `took` in the milliseconds of a machine that would have given the write a core, which is
-   *  what the absolute bound holds. */
-  readonly paced: number;
   /** The error the API answered with, where it refused the body. */
   readonly refusal: unknown;
-  /** The share of a core the machine gave a thread that wanted one while the write was in
-   *  flight: 1 with nothing else on it, a third of that where the suite's other lanes took the
-   *  cores. Unread, and `undefined`, where the write was answered in less than `shareNeedsMs`
-   *  or the machine's books gave this process no processor time to read a share from. */
-  readonly speed: number | undefined;
-}
-
-/** The least a write may take for a share to be read from it, which is what this machine's own
- *  accounting of processor time needs to say anything: in steps of 10 to 20 ms, a tenth of this
- *  is the most a share read here is wrong by, and the writes the bound is about are 600 ms and
- *  more. */
-const shareNeedsMs = 100;
-
-/**
- * The share of a core the machine was giving a thread that wanted one while a write of `took`
- * was in flight, or `undefined` where its books say nothing a share can be read from.
- *
- * What the hog read is the share with the hog itself on the machine, and the write the row is
- * timing ran beside it. So the hog's own demand comes back out: a machine of `cores` giving a
- * thread that wants one `read` of it was sharing them between `cores / read` such threads, one
- * of which was the hog, and without it the rest would have had `cores / (cores / read - 1)`
- * each. On a machine with a core to spare that is more than one, and a whole core is all a
- * thread can be given, so it caps at 1 and the bound then holds the round trip itself.
- */
-function shareOfACore(took: number, { busy, cores, ours }: Hogged): number | undefined {
-  const read = Math.min(1, (ours * cores) / busy);
-  if (took < shareNeedsMs || !(read > 0)) {
-    return undefined;
-  }
-  const others = cores / read - 1;
-  return others <= 0 ? 1 : Math.min(1, cores / others);
-}
-
-/** What a write's cost reads as on a result and in a refusal: the round trip, and the share of
- *  a core it was paced by where one was read. */
-function howItRan({ speed, took }: Written): string {
-  return speed === undefined
-    ? `${Math.round(took)} ms, with no share of a core to be read from the machine's books`
-    : `${Math.round(took)} ms with the machine giving a thread that wanted a core ` +
-        `${Math.round(speed * 100)}% of one`;
 }
 
 /**
@@ -359,21 +187,19 @@ function howItRan({ speed, took }: Written): string {
  * write answers in under 1,000 ms: it is asserted on every row, stored or refused, under no
  * condition, and it is never skipped, widened or stood down for a slow node, because a second is
  * what the writer waits and CI's runners are where that is judged. What it is held against is
- * the round trip paced into the milliseconds of a machine that would have given the write a
- * core (`Written` above), since four lanes of this suite put four servers on one machine and the
- * wall time of a write there holds what the other three lanes took as surely as the work this
- * one did. A machine with nothing else on it gives a whole core, the share is 1, and the bound
- * is held against the round trip itself; the wall time and the share are annotated beside the
- * paced figure either way. The second bound is linearity: for each shape whose write is its
- * parse, the row writes that same shape at half its count, times that write exactly as it times
- * the body, and holds the body's write to no more than 3.5x it, so a parse whose cost grows
- * faster than the body it reads reds this row on any node, the fast ones CI runs on included,
- * where the body alone would still answer in time. The ratio is read from the two wall times
- * and no pace: they are two writes of one shape seconds apart on one machine, so a machine that
- * holds both back by the same share leaves their ratio where it was - 2.16x for the 8,000 items
- * at four lanes on this pod, in the run whose 2,779 ms red the absolute bound before it was
- * paced. Both numbers and the ratio between them are annotated before either bound is asserted,
- * so a run that reds reports what the body cost beside its half, whichever of the two bounds it
+ * the round trip itself, which is what a writer waits: the row runs with the machine to itself
+ * (`Written` above), so no share of it is read and nothing is corrected for, and the round trip
+ * is annotated beside the bound either way. The second bound is linearity: for each shape whose
+ * write is its parse, the row writes that same shape at half its count, times that write exactly
+ * as it times the body, and holds the body's write to no more than 3.5x it, so a parse whose cost
+ * grows faster than the body it reads reds this row on any node, the fast ones CI runs on
+ * included, where the body alone would still answer in time. The ratio stands on a machine that
+ * is not idle, which is what it was for: they are two writes of one shape seconds apart on one
+ * machine, so a machine that holds both back by the same share leaves their ratio where it was -
+ * 2.16x for the 8,000 items at four lanes on this pod, in the run whose 2,779 ms red the absolute
+ * bound back when this row ran beside the other lanes. Both numbers and the ratio between them
+ * are annotated before either bound is asserted, so a run that reds reports what the body cost
+ * beside its half, whichever of the two bounds it
  * was. The absolute bound is asserted first, because a write the node itself stalled - 1,986 ms
  * for a body that costs 750 ms here - is no measurement of how the cost grows, and reading
  * linearity out of one would name a regression that is not there.
@@ -418,32 +244,22 @@ test("a document write of each heavy body answers in under a second, stored or r
   // Twelve writes - one of every body, the warming write, and a half-size one after each of the
   // three bodies held to the ratio - are about 5 s of measured writing, and the emptied database
   // and fresh issue each of them starts from are about 100 ms more apiece: 6.6 to 7.6 s in
-  // Chromium on this pod with the machine to itself, and 13.6 to 19.6 s of it at four lanes,
-  // where every write waits on three other lanes as well. The deadline is the room a node
-  // slower than this one needs; nothing the row waits for is a tick of the server's own any
-  // more.
+  // Chromium on this pod with the machine to itself, which is what this row now always has
+  // (`Written` above). The deadline is the room a node slower than this one needs; nothing the
+  // row waits for is a tick of the server's own any more.
   test.setTimeout(90_000);
 
   /** Writes one body as a document of its own, into a fresh issue on a server left with no
-   *  settlement and no deferred block index of an earlier write, and answers what the write cost,
-   *  what the machine it ran on was running at, and what the API refused (`Written` above). */
+   *  settlement and no deferred block index of an earlier write, and answers what the write cost
+   *  and what the API refused (`Written` above). */
   async function write(body: string, name: string): Promise<Written> {
     const issue = await anIdleServer();
     const started = performance.now();
-    const answered = createIssueArtifact(issue.key, { content: body, name }, agent).then(
+    const refusal = await createIssueArtifact(issue.key, { content: body, name }, agent).then(
       () => undefined,
       (error: unknown) => error
     );
-    // The hog asks for a core in stretches for as long as the write is in flight, and what this
-    // process was given of what the machine handed out over those stretches is the share the
-    // machine was giving a thread that wanted one (`Written` above).
-    let inFlight = true;
-    const hog = hogACore(() => inFlight);
-    const refusal = await answered;
-    const took = performance.now() - started;
-    inFlight = false;
-    const speed = shareOfACore(took, await hog);
-    return { paced: took * (speed ?? 1), refusal, speed, took };
+    return { refusal, took: performance.now() - started };
   }
 
   for (const [index, row] of documentRows.entries()) {
@@ -464,8 +280,7 @@ test("a document write of each heavy body answers in under a second, stored or r
         type: `${row.name}: the first write of this shape in a fresh server`,
       });
     }
-    const written = await write(row.body, `heavy-${index}.md`);
-    const { paced, refusal, took } = written;
+    const { refusal, took } = await write(row.body, `heavy-${index}.md`);
     let half: number | undefined;
     if (row.half !== undefined) {
       // This row's own shape at half its count, written and timed as the body above it was, and
@@ -475,23 +290,16 @@ test("a document write of each heavy body answers in under a second, stored or r
       half = smaller.took;
     }
     // Every measurement is the run's evidence, kept on the result even when the row passes: what
-    // the write cost a writer, what it cost on a machine that would have given it a core, the
-    // share of one the machine was giving, and the growth the ratio holds - so a reader of a CI
-    // run sees the shape of the cost and not only that the row passed.
-    test.info().annotations.push(
-      {
-        description:
-          half === undefined
-            ? `${Math.round(took)} ms`
-            : `${Math.round(half)} ms at half this shape, ${Math.round(took)} ms whole, ` +
-              `${(took / half).toFixed(2)}x`,
-        type: `${row.name}: what the write cost`,
-      },
-      {
-        description: `${Math.round(paced)} ms, from ${howItRan(written)}`,
-        type: `${row.name}: what the write cost the server`,
-      }
-    );
+    // the write cost a writer and the growth the ratio holds, so a reader of a CI run sees the
+    // shape of the cost and not only that the row passed.
+    test.info().annotations.push({
+      description:
+        half === undefined
+          ? `${Math.round(took)} ms`
+          : `${Math.round(half)} ms at half this shape, ${Math.round(took)} ms whole, ` +
+            `${(took / half).toFixed(2)}x`,
+      type: `${row.name}: what the write cost`,
+    });
 
     if (row.stored) {
       expect(refusal, `${row.name}: the write was refused`).toBeUndefined();
@@ -501,10 +309,7 @@ test("a document write of each heavy body answers in under a second, stored or r
       expect(message, row.name).toContain(" failed: 400 ");
       expect(message, row.name).toContain('"code":"INVALID_MARKDOWN"');
     }
-    expect(
-      paced,
-      `${row.name}: the write took ${Math.round(paced)} ms (${howItRan(written)})`
-    ).toBeLessThan(1_000);
+    expect(took, `${row.name}: the write took ${Math.round(took)} ms`).toBeLessThan(1_000);
     if (half !== undefined) {
       expect(
         took,

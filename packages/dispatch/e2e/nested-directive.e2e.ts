@@ -29,8 +29,10 @@ test.beforeEach(async () => {
 
 /**
  * Opens the issue's Conversation tab as alice and measures what the page's own work holds the
- * main thread for while the comment card draws, in the milliseconds of a main thread running at
- * its own best (`main-thread-hold.ts`). The thread is left as a reader finds it, collapsed, so
+ * main thread for while the comment card draws, which is the longest gap between two ticks of
+ * the page's own heartbeat on a machine these rows have to themselves (`main-thread-hold.ts`,
+ * and the `chromium-alone` project this spec runs in). The thread is left as a reader finds it,
+ * collapsed, so
  * what the card draws is its two-line preview of the body (`ThreadCard`); the body is parsed
  * whole for that preview, which is where the freeze was. The record starts again when the page
  * first asks for the issue's comments, before that request goes out: the bundle has been
@@ -39,9 +41,10 @@ test.beforeEach(async () => {
  * is still pending, and the parser refused nothing.
  *
  * What the rows answer with is the parse's own cost: on an issue pod of two cores the hold is
- * about 50 ms with the parse in the worker, and 238 and 434 ms with the worker's threshold
- * raised past these bodies, so that the page parses them itself - against the 1,000 ms bound,
- * and against the minute and a quarter the tab was held for before the parser was fixed.
+ * 61 and 79 ms with the parse in the worker, and 312 to 444 ms over three runs with the
+ * worker's threshold raised past these bodies, so that the page parses them itself - against
+ * the 1,000 ms bound, and against the minute and a quarter the tab was held for before the
+ * parser was fixed.
  */
 async function holdUntilTheCommentDraws(browser: Browser, issueKey: string): Promise<Measured> {
   const alice = await asUser(browser, "alice");

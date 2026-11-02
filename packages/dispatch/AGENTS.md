@@ -1951,6 +1951,25 @@ rather than leaving the route unanswered, because Chromium sends a paused reques
 server once its page closes. They skip on an `https:` `PLAYWRIGHT_BASE_URL` as the two specs
 above do.
 
+The `chromium-alone`, `firefox-alone` and `webkit-alone` projects run the rows whose claim is a
+wall-clock time, with the machine to themselves. `chromium-alone` runs
+`e2e/heavy-document-writes.e2e.ts` (a document write of each heavy body answers in under a
+second), `e2e/heavy-bodies.e2e.ts` and `e2e/nested-directive.e2e.ts` (a card draws without
+holding the main thread for a second, both through `e2e/main-thread-hold.ts`); `firefox-alone`
+and `webkit-alone` run `e2e/heavy-bodies.e2e.ts`, which ran in those engines before, for the
+reasons given under `webkit` and `firefox` above. No project above them runs those three files,
+so each row runs once. Each of the three names every project before it in `dependencies`, so
+Playwright starts them only once the rest of the run has finished and runs them one after
+another, and each sets `workers: 1`, which caps that project's own workers while the run's own
+`workers` stays at the lane count: `dependencies` orders a project but does not stop its own
+rows running four at a time. Four lanes put four browsers, four Dispatch servers and four
+Postgres servers on one machine, and a second of wall clock there holds what the other three
+lanes took as surely as the work the row measured, so these rows are given the machine rather
+than a correction for sharing it (INFRA-317, sjawhar/legion#2612). A row that proves an absence
+over real time - that no request happens within a second - needs no such project: contention
+cannot make that claim false. A project whose dependency has a failing row does not run at all,
+so a red run leaves these rows unrun rather than measured beside a retry.
+
 ## Phone acceptance
 
 The `iphone` Playwright project uses Chromium with the iPhone 13 viewport,
