@@ -284,7 +284,7 @@ func TestThePassSettlesAHeadWhoseSettlementWasLost(t *testing.T) {
 				return
 			}
 			if _, err := intake.ApplyFact(context.Background(), pool, "api", "tester-pass", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleTester,
-				Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "test-1"}, w.handlers...); err != nil {
+				Claim: "test-claim", Summary: "tested", Verdict: "pass", HandoffRecord: "test-record", HandoffVersion: 1}, w.handlers...); err != nil {
 				t.Fatalf("apply the tester's pass: %v", err)
 			}
 			if got, _ := capturePhase(t, pool); got != phase.Reviewing {

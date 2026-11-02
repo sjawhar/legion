@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -214,23 +215,34 @@ func holdPortOn(t *testing.T, host string) int {
 	return port
 }
 
-// heldSocket holds a loopback port the kernel chooses and returns a descriptor of its own for the
-// listening socket, with that port: the socket stays listening once the listener is closed, so no
-// other process can take the port before whatever is handed the descriptor serves it. The
-// descriptor is closed when t ends, if its caller has not closed it first.
-func heldSocket(t *testing.T) (*os.File, int) {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+// takeSocket binds address, whose port may be 0 for one the kernel chooses, and returns a
+// descriptor of its own for the listening socket, with the port it holds: the socket stays
+// listening once the listener is closed, so no other process can take the port before whatever is
+// handed the descriptor serves it. A port another process holds is the bind's error.
+func takeSocket(address string) (*os.File, int, error) {
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		t.Fatalf("hold a loopback port: %v", err)
+		return nil, 0, err
 	}
+	port := listener.Addr().(*net.TCPAddr).Port
 	file, err := listener.(*net.TCPListener).File()
 	_ = listener.Close()
 	if err != nil {
-		t.Fatalf("take the held socket's descriptor: %v", err)
+		return nil, 0, fmt.Errorf("take the descriptor of %s: %w", address, err)
+	}
+	return file, port, nil
+}
+
+// heldSocket holds a loopback port the kernel chooses (takeSocket). The descriptor is closed when
+// t ends, if its caller has not closed it first.
+func heldSocket(t *testing.T) (*os.File, int) {
+	t.Helper()
+	file, port, err := takeSocket("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a loopback port: %v", err)
 	}
 	t.Cleanup(func() { _ = file.Close() })
-	return file, listener.Addr().(*net.TCPAddr).Port
+	return file, port
 }
 
 // rebindHeldPorts hands cfg a freshly held API port. A daemon that has stopped closed the
