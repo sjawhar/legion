@@ -213,6 +213,10 @@ function sleepUntil(at: number): Promise<void> {
   return promise;
 }
 
+// SLOW(>=2s): the stream is the measurement. Sixty frames 80 ms apart are 4.8 s of real time,
+// and that cadence is what puts a frame inside a paint of a 4,000-paragraph turn; the row's own
+// two guards red it where the window was never reached, so a shorter stream or a smaller turn
+// would leave it green while proving nothing (the comments above each number say so).
 test("a reader who opens the live view while a long turn streams is never shown a frame's text in front of the body", async ({
   browser,
 }) => {

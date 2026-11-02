@@ -19,7 +19,6 @@ import {
   nestedThenBlankLines,
   plainListSizes,
 } from "./heavy-bodies";
-import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 
 const agent = {
@@ -101,61 +100,51 @@ const documentRows: readonly DocumentRow[] = [
 ];
 
 /**
- * Resolves once this server owes nothing an earlier write left it: no settlement of a document
- * queued or running, and no document owed a block index.
+ * An emptied database and the issue the write that follows goes into: what "the server is
+ * otherwise idle" means here, and how a timed write is kept clear of the work the write before
+ * it left behind.
  *
- * A durable document write records the settlement it owes in `doc_settlements_pending` within its
- * own transaction, and the settlement that has read every update deletes that row in the
- * transaction committing its writes (`packages/envoy/internal/dispatch/docs/persistence.go`,
- * `clearSettlementPending`). A version of more than 2,000 blocks leaves its blocks to the
- * block-index reconciliation instead of indexing them in the request
- * (`deferBlockIndexBlocks`, `docs/reference_excerpts.go`), and migration 0122's trigger owes that
- * work by leaving `document_block_versions.version` null, which the reconciliation reads and sets
- * again when it has indexed the document (`docs/block_index.go`,
- * `RunBlockIndexReconciliation`). An empty `doc_settlements_pending` and no null version in
- * `document_block_versions` is therefore the server with neither piece of work outstanding.
+ * A durable document write leaves the server two pieces of work. The first is the document's own
+ * settlement, which the write records in `doc_settlements_pending` inside its own transaction
+ * (`packages/envoy/internal/dispatch/docs/persistence.go`) and the server runs a settle delay
+ * later - 250 ms under this harness (`DISPATCH_TEST_SETTLE_DELAY`, `e2e/run-server.sh`), in
+ * place of the document service's own 2 s - and which costs about what the write did. The
+ * second is the block index of a body of more than 2,000 blocks, which the write defers
+ * (`deferBlockIndexBlocks`, `docs/reference_excerpts.go`) and the block-index reconciliation
+ * indexes on a tick of its own, up to 30 s later (`docs/block_index.go`,
+ * `BlockIndexReconcileInterval`). Of the bodies here only the 8,000-item list and its 4,000-item
+ * half pass that bound - a list item is a block, so they hold 8,001 and 4,001 of them, against
+ * one for the bracket run, two for each lazy body and fifty for the 49 markers
+ * (`document_blocks` holds them all) - and the server says so as it writes them: "a document
+ * version left its blocks to the block-index reconciliation ... blocks=8001 bound=2000".
+ * Indexing 8,001 blocks is work that would otherwise land on whichever write the tick caught.
  *
- * The harness runs one worker against one database (`e2e/playwright.config.ts`) and
- * `resetDatabase` empties it before each row, so every owed row of either table is this row's own.
+ * `resetDatabase` ends both at once, in a fraction of a second: it quiesces the document service
+ * first, which stops every settle timer, ends the settlement each armed and waits out the ones
+ * in flight (`Quiesce`, `docs/service.go`), and then empties every table, which takes with it
+ * the row a deferred index is owed from - `document_block_versions.version` left null by
+ * migration 0122's trigger, which is what the reconciliation reads. A tick that lands beside the
+ * write which follows therefore finds nothing owed, and reads nothing else for it: every owed
+ * read goes through a partial index (`ReconcileBlockIndex`). Waiting those two ticks out instead
+ * was 41 s of the 50 s this row took in Chromium on this pod, one wait of 11 s and one of 30 s,
+ * and neither bought the row anything the emptied database does not (sjawhar/legion#2612).
+ *
+ * Each write therefore also writes into an issue of its own, holding no document - as the first
+ * write always did - so what the bounds below compare is twelve writes made under one state of
+ * the server rather than one that grows a document per write.
  */
-async function everythingOwedFinished(what: string): Promise<void> {
-  await expect
-    .poll(
-      () =>
-        sql(
-          "select (select count(*) from doc_settlements_pending) || ' settlements, ' || " +
-            "(select count(*) from document_block_versions where version is null) || ' block indexes'"
-        ),
-      {
-        intervals: [200],
-        message: `${what}: work queued before this write never finished`,
-        timeout: 60_000,
-      }
-    )
-    .toBe("0 settlements, 0 block indexes");
+async function anIdleServer(): Promise<{ key: string }> {
+  await resetDatabase();
+  return await seedIssue("Heavy documents");
 }
 
 /**
- * One write at a time, with the server otherwise idle. Each write leaves the server two pieces of
- * work, and both are waited out before the next write is timed. The first is the document's own
- * settlement, which the server runs two seconds later (the document service's own default
- * `settle`, `packages/envoy/internal/dispatch/docs/service.go`; `e2e/run-server.sh` sets no
- * `DISPATCH_TEST_SETTLE_DELAY`) and which costs about what the write did. The second is the block
- * index of a body of more than 2,000 blocks, which the write defers (`deferBlockIndexBlocks`,
- * `docs/reference_excerpts.go`) and the block-index reconciliation indexes on a tick of its own,
- * up to 30 s later (`docs/block_index.go`, `BlockIndexReconcileInterval`). Of the bodies here
- * only the 8,000-item list and its 4,000-item half pass that bound - a list item is a block, so
- * they hold 8,001 and 4,001 of them, against one for the bracket run, two for each lazy body and
- * fifty for the 49 markers (`document_blocks` holds them all) - and the server says so as it
- * writes them: "a document version left its blocks to the block-index reconciliation ...
- * blocks=8001 bound=2000". Indexing 8,001 blocks is work that would otherwise land on whichever
- * write the tick caught. `write` therefore waits for both to be finished before it starts its
- * clock - no settlement queued and no document owed a block index (`everythingOwedFinished`) -
- * the warming write and the half-size write included, and what the bounds below hold is one
- * write alone. Those two ticks are what the row now spends most of its time waiting for: about
- * 50 s of the 1.3 min it takes in Chromium on this pod. The twenty runs quoted further down were
- * measured before this wait took in the block index, so a tick of it could still land on a write
- * there.
+ * One write at a time, with the server otherwise idle: each write starts from an emptied
+ * database and an issue of its own (`anIdleServer` above), so neither the settlement nor the
+ * deferred block index the write before it left can run beside the one being timed - the
+ * warming write and the half-size write included - and what the bounds below hold is one write
+ * alone. The twenty runs quoted further down were measured while the row waited that work out
+ * instead, and a block-index tick could still land on a write there.
  *
  * So what a write costs while another document of the same server settles beside it is not
  * measured here: measured with these writes back to back it reached 1,322 ms, which
@@ -178,7 +167,7 @@ async function everythingOwedFinished(what: string): Promise<void> {
  * The body is written before its half on each of the three rows held to the ratio. On the two
  * that carry no `warm` - the 8,000 items and the bracket run - that body is the first document
  * write of its shape in the server process, which is what the absolute bound has always measured
- * over them, with nothing but the drain above before it. It is not the first parse of those
+ * over them, with nothing but an emptied database before it. It is not the first parse of those
  * bytes: in the one project this spec runs in, `heavy-bodies.e2e.ts` runs first on the same
  * server (one worker, files in name order) and creates comments holding the same two bodies,
  * whose create parses each of them once. The 49-marker row is the exception: `warm`
@@ -206,20 +195,25 @@ async function everythingOwedFinished(what: string): Promise<void> {
  * refused (406-1,746 ms here) but is refused at every size, so no reader ever stores it. Every
  * row keeps the absolute bound all the same.
  */
+// SLOW(>=2s): twelve real writes, eleven of them held to a second of their own and the warming
+// write to none, cost 5.2 s together on this pod - 0.6 to 1.2 s for each of the heaviest four.
+// What the row proves is what one such write costs a writer, so no write can come out of it.
+// What could is gone: it used to wait out two ticks of the block-index reconciliation, 41 s of
+// the 50 s it took here (`anIdleServer`).
 test("a document write of each heavy body answers in under a second, stored or refused", async () => {
   // Twelve writes - one of every body, the warming write, and a half-size one after each of the
-  // three bodies held to the ratio - each waiting out the settlement the write before it queued,
-  // two seconds and the settlement's own run, take the row from about 7 s to about 29 s; waiting
-  // out the block index the 8,000-item body and its half defer, a tick up to 30 s away apiece,
-  // takes it to 1.3 min here, past the default deadline. The deadline below is twice that, so a
-  // tick at the far end of its interval for both of them still leaves the row its measurements.
-  test.setTimeout(180_000);
-  const issue = await seedIssue("Heavy documents");
+  // three bodies held to the ratio - are about 5 s of measured writing, and the emptied database
+  // and fresh issue each of them starts from are about 100 ms more apiece: 6.0 to 6.8 s in
+  // Chromium on this pod, against the 50 s the two reconciliation ticks it used to wait out
+  // cost it. The deadline is the room a node slower than this one needs; nothing the row waits
+  // for is a tick of the server's own any more.
+  test.setTimeout(90_000);
 
-  /** Writes one body as a document of its own, with no settlement and no block index of an
-   *  earlier write running beside it, and answers what the write cost and refused. */
+  /** Writes one body as a document of its own, into a fresh issue on a server left with no
+   *  settlement and no deferred block index of an earlier write, and answers what the write cost
+   *  and refused. */
   async function write(body: string, name: string): Promise<{ refusal: unknown; took: number }> {
-    await everythingOwedFinished(name);
+    const issue = await anIdleServer();
     const started = performance.now();
     const refusal = await createIssueArtifact(issue.key, { content: body, name }, agent).then(
       () => undefined,

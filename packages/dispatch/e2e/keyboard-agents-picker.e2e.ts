@@ -194,6 +194,9 @@ test.describe("agents page", () => {
   // A message on its way to the server is addressed already, so its issue cannot change under it,
   // and the text the server is taking must never come back to the composer, enabled - one
   // Ctrl+Enter from sending it twice.
+  // SLOW(>=2s): the Agents page is mounted, a message is typed and held mid-flight, the help
+  // dialog is opened over it and the send is then let go - every step a keyboard round trip
+  // through WebKit, the engine whose own `change` dispatch this spec's picker rule rests on.
   test("a send in flight holds the picker, and the sent text never comes back", async ({
     browser,
   }) => {
@@ -385,6 +388,9 @@ test.describe("agents page", () => {
 
   // A message on its way is addressed, so Reply holds until the server answers, as the picker
   // does. A refusal hands back the draft that was sent, and Retry sends exactly that again.
+  // SLOW(>=2s): the Agents page is mounted over the keyboard seed, a message is typed key by key
+  // and sent, and both the send and the Retry after the refusal are read off the wire - two whole
+  // round trips, which is what "exactly what was refused" is read from.
   test("Reply holds while a send is out, and a refusal's Retry posts exactly what was refused", async ({
     browser,
   }) => {
@@ -588,6 +594,9 @@ test.describe("agents page", () => {
 
   // Cancel reply is the same address mutation in reverse. The send retains its direct reply
   // target until its refusal arrives, even when the click shares Send's task.
+  // SLOW(>=2s): the Agents page is mounted over the keyboard seed with a message already
+  // delivered to the agent, and the send and its refusal are each read off the wire; the press
+  // the row is about only exists while that send is out.
   test("a same-task Cancel reply keeps the direct reply it sent", async ({ browser }) => {
     await seedAgents();
     await createAgentMessage(plannerSession.session_id, {
@@ -779,6 +788,9 @@ test.describe("agents page", () => {
   // An issue comment reaches this agent only by mentioning it, so the reset a send makes seeds the
   // mention again, as a mount does - the next message is as addressed as the first. A direct
   // message already reaches its session, and its channel seeds nothing.
+  // SLOW(>=2s): three messages typed key by key and sent, each waited for on the wire - the row
+  // proves what every send seeds back into the composer, so none of the three can go - over
+  // WebKit's own keyboard dispatch, which is why this spec runs there.
   test("every message sent on an issue mentions the agent, and a direct one carries none", async ({
     browser,
   }) => {
@@ -798,13 +810,17 @@ test.describe("agents page", () => {
         if (request.method() !== "POST" || !/\/(comments|messages)$/.test(path)) return;
         sends.push({ ...keyedWrite(request), ok: response.ok(), path });
       });
+      // Typed, not filled: the composer tracks its mention and delivery as the keys arrive, and
+      // a `fill` of the same text sends neither (measured).
       const send = async (text: string) => {
         const before = sends.length;
         await field.click();
         await page.keyboard.press("End");
         await page.keyboard.type(text);
         await page.keyboard.press("Control+Enter");
-        await expect.poll(() => sends.length).toBe(before + 1);
+        await expect
+          .poll(() => sends.length, { intervals: [50, 50, 100, 200, 500] })
+          .toBe(before + 1);
       };
 
       await page.keyboard.press("j");
@@ -890,6 +906,9 @@ test.describe("agents page", () => {
   // A message on its way holds the picker and Reply of the row that sent it, and its draft, until
   // the server answers. A reader who leaves the page mid-send and comes back finds the row holding
   // the same send - the draft, the picker and Reply held - and its answer lands there.
+  // SLOW(>=2s): the held send has to survive the reader leaving and coming back, so the row
+  // drives the Agents page, the Inbox and the Agents page again from the keyboard before it
+  // lets the send go, each step a round trip through WebKit's own key handling.
   test("a row back after the reader left mid-send holds the send it left, which then lands there", async ({
     browser,
   }) => {

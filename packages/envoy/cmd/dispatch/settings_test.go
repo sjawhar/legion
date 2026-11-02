@@ -1644,6 +1644,36 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_MARK_WAIT": func(t *testing.T) {
+			const shortWait = 250 * time.Millisecond
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":     "1",
+				"DISPATCH_TEST_MARK_WAIT": shortWait.String(),
+			})
+			if boot.MarkWait != shortWait {
+				t.Errorf("DISPATCH_TEST_MARK_WAIT: MarkWait = %v, want %v", boot.MarkWait, shortWait)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_MARK_WAIT": invalid},
+					fmt.Sprintf("DISPATCH_TEST_MARK_WAIT=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_MARK_WAIT": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_UNRECORDED_MARK_TTL": func(t *testing.T) {
+			const shortTTL = 4 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":               "1",
+				"DISPATCH_TEST_UNRECORDED_MARK_TTL": shortTTL.String(),
+			})
+			if boot.UnrecordedMarkTTL != shortTTL {
+				t.Errorf("DISPATCH_TEST_UNRECORDED_MARK_TTL: UnrecordedMarkTTL = %v, want %v", boot.UnrecordedMarkTTL, shortTTL)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_UNRECORDED_MARK_TTL": invalid},
+					fmt.Sprintf("DISPATCH_TEST_UNRECORDED_MARK_TTL=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_UNRECORDED_MARK_TTL": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 		"DISPATCH_TEST_ROUTE_ROSTER_TTL": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{}); boot.RouteRosterTTL != 0 {
 				t.Errorf("DISPATCH_TEST_ROUTE_ROSTER_TTL unset: RouteRosterTTL = %v, want 0 (the server's own five seconds)", boot.RouteRosterTTL)
@@ -1664,6 +1694,27 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					fmt.Sprintf("DISPATCH_TEST_ROUTE_ROSTER_TTL=%q (expected a positive Go duration)", invalid))
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_ROUTE_ROSTER_TTL": "1m"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{}); boot.ListenerTakeoverWindow != 0 {
+				t.Errorf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW unset: ListenerTakeoverWindow = %v, want 0 (the server's own twelve seconds)", boot.ListenerTakeoverWindow)
+			}
+			const shortWindow = time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":                    "1",
+				"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": shortWindow.String(),
+			})
+			if boot.ListenerTakeoverWindow != shortWindow {
+				t.Errorf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW: ListenerTakeoverWindow = %v, want %v", boot.ListenerTakeoverWindow, shortWindow)
+			}
+			if options := appContextOptions(boot, routes.AppContextOptions{}); options.ListenerTakeoverWindow != shortWindow {
+				t.Errorf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW: the router is handed ListenerTakeoverWindow = %v, want %v", options.ListenerTakeoverWindow, shortWindow)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": invalid},
+					fmt.Sprintf("DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
 			const shortQuiet = 3 * time.Second
@@ -1724,6 +1775,23 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					}
 				}
 			})
+		},
+		"DISPATCH_TEST_EMBEDDER_OFF": func(t *testing.T) {
+			// Azure's own environment, the one shape that builds an embedder with no AWS SDK and
+			// no model service reachable, so the switch is what decides and not the credentials.
+			if boot := resolveWith(t, azureEmbedEnvironment(map[string]string{
+				"DISPATCH_TEST_HOOKS":        "1",
+				"DISPATCH_TEST_EMBEDDER_OFF": "1",
+			})); !boot.EmbedderOff {
+				t.Error("DISPATCH_TEST_EMBEDDER_OFF=1: EmbedderOff false")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_EMBEDDER_OFF": "true"}); boot.EmbedderOff {
+				t.Error("DISPATCH_TEST_EMBEDDER_OFF=true: EmbedderOff true, want only 1 to set it")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); boot.EmbedderOff {
+				t.Error("unset: EmbedderOff true")
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_EMBEDDER_OFF": "1"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 	}
 	for _, row := range settings {

@@ -126,10 +126,10 @@ type Deps struct {
 	// that reads two processes inside one answer's life needs no timing window.
 	RouteRosterTTL time.Duration
 	// ListenerTakeoverWindow replaces how long a sender keeps trying a listener that is being
-	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; neither
-	// routes.BuildAppContext nor cmd/dispatch sets it, so every deployment runs twelve seconds.
-	// Only this package's tests set another, so a send to a session that is gone settles without
-	// sleeping the production window.
+	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; a
+	// deployment leaves it zero, and only a test process sets another (cmd/dispatch:
+	// DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW, under the test hooks), so a send to a session that
+	// is gone settles without sleeping the production window.
 	ListenerTakeoverWindow time.Duration
 	// TestHookTimeout replaces how long a test hook waits for every process's acknowledgement
 	// (testHookTimeout, test_hooks_fanout.go). Zero keeps ten seconds; neither

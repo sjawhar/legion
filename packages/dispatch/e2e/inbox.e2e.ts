@@ -1,5 +1,7 @@
 import { expect, type Locator, test } from "@playwright/test";
 
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
 import { agentRow, setInterests, setLiveSessions } from "./agents";
 import {
   createArtifactAsk,
@@ -31,6 +33,7 @@ import {
 } from "./inbox-filter";
 import { askCard, askControls, inboxRow } from "./inbox-pane";
 import { resetDatabase, setCreatedAt } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -385,7 +388,11 @@ test("a later Inbox response clears a hidden ask's pending refresh @phone", asyn
     await closeAssigneeFilter(page);
     const hiddenCard = await askCard(page, hiddenAsk.id);
     await expect(hiddenCard.getByText("Fresh hidden reply.")).toBeVisible();
-    await page.waitForTimeout(300);
+    // A pending refresh would read the hidden ask the moment its card mounted, and nothing
+    // marks a read that never happens. A round trip the page issues after the card arrived is
+    // the barrier: its answer comes back only once the reads the card's arrival scheduled had
+    // left the page.
+    await page.evaluate(() => fetch("/api/v1/auth/whoami").then(({ status }) => status));
     await expect(hiddenCard.getByText("Fresh hidden reply.")).toBeVisible();
     // The marker was cleared by the later Inbox response, so no targeted read followed: the
     // marker and item 1 never both fire.
@@ -434,6 +441,8 @@ test("a quote-anchored inbox ask names and opens its document", async ({ browser
   }
 });
 
+// SLOW(>=2s): three seeded asks and a live session's interests waited for on the issue's event
+// list, an Inbox of three rows screenshotted, and the margin answer that empties one of them.
 test("inbox shows current asks and answers issue asks in the margin @phone", async ({
   browser,
 }, testInfo) => {
@@ -468,8 +477,10 @@ test("inbox shows current asks and answers issue asks in the margin @phone", asy
     ]),
   ]);
   await expect
-    .poll(async () =>
-      (await getIssueEvents(firstIssue.key)).some((event) => event.actor.id === "e2e-session")
+    .poll(
+      async () =>
+        (await getIssueEvents(firstIssue.key)).some((event) => event.actor.id === "e2e-session"),
+      { intervals: [50, 50, 100, 200, 500] }
     )
     .toBe(true);
 
@@ -494,7 +505,7 @@ test("inbox shows current asks and answers issue asks in the margin @phone", asy
     await alicePage.getByRole("button", { name: "Close navigation" }).click();
   }
 
-  await alicePage.goto(`/issues/${firstIssue.key}`);
+  await navigateInApp(alicePage, `/issues/${firstIssue.key}`);
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Open review panel (2 open asks)" }).click();
   }
@@ -505,11 +516,11 @@ test("inbox shows current asks and answers issue asks in the margin @phone", asy
   await newestAskCard.getByRole("button", { exact: true, name: "Answer" }).click();
   await expect(newestAskCard).toHaveCount(0);
   await expect
-    .poll(() => getAsk(newestAsk.id))
+    .poll(() => getAsk(newestAsk.id), { intervals: [50, 50, 100, 200, 500] })
     .toMatchObject({
       ask: { answer: { selected: ["Ship"], user: "alice" }, state: "answered" },
     });
-  await alicePage.goto("/");
+  await navigateInApp(alicePage, "/");
   await expect(inboxRows).toHaveCount(2);
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Open navigation" }).click();
@@ -526,7 +537,7 @@ test("inbox shows current asks and answers issue asks in the margin @phone", asy
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Text-only ask" },
     session
   );
-  await alicePage.goto("/");
+  await navigateInApp(alicePage, "/");
   const textOnlyCard = await askCard(alicePage, textOnlyAsk.id);
   // Select Other before entering the alternative answer, so the decision records no real option.
   await textOnlyCard.getByRole("radio", { name: "Other" }).check();
@@ -536,7 +547,7 @@ test("inbox shows current asks and answers issue asks in the margin @phone", asy
   await textOnlyCard.getByRole("button", { name: "Answer" }).click();
   await expect(textOnlyCard).toHaveCount(0);
   await expect
-    .poll(() => getAsk(textOnlyAsk.id))
+    .poll(() => getAsk(textOnlyAsk.id), { intervals: [50, 50, 100, 200, 500] })
     .toMatchObject({
       ask: {
         answer: {
@@ -558,10 +569,11 @@ test("inbox shows current asks and answers issue asks in the margin @phone", asy
     session
   );
   // A document has no assignee, so its question is nobody's: the reader's own list does not
-  // hold it, and the Unassigned filter is where it is listed.
+  // hold it, and the Unassigned filter is where it is listed. This visit stays cold, so that
+  // absence is read from the server rather than from the list the page already held.
   await alicePage.goto("/");
   await expect(inboxRow(alicePage, documentAsk.id)).toHaveCount(0);
-  await alicePage.goto("/?assignee=unassigned");
+  await navigateInApp(alicePage, "/?assignee=unassigned");
   const documentCard = await askCard(alicePage, documentAsk.id);
   await expect(documentCard).toContainText("Does this design need review?");
   // The document a question belongs to names the row it is listed on.
@@ -622,7 +634,7 @@ test("a clarification moves an ask under Waiting on agents until the asker hands
       session
     );
     await expect
-      .poll(() => getAsk(clarifying.id))
+      .poll(() => getAsk(clarifying.id), { intervals: [50, 50, 100, 200, 500] })
       .toMatchObject({ ask: { waiting_on: "agent" }, replies: [{}, { turn: "agent" }] });
     await page.reload();
     const waitingOnAgents = page.locator('[data-inbox-section="agent"]');
@@ -643,7 +655,9 @@ test("a clarification moves an ask under Waiting on agents until the asker hands
       { ask_id: clarifying.id, body: "The release candidate." },
       session
     );
-    await expect.poll(() => getAsk(clarifying.id)).toMatchObject({ ask: { waiting_on: "human" } });
+    await expect
+      .poll(() => getAsk(clarifying.id), { intervals: [50, 50, 100, 200, 500] })
+      .toMatchObject({ ask: { waiting_on: "human" } });
     await page.reload();
     await expect(page.getByRole("heading", { name: "Waiting on agents" })).toHaveCount(0);
     await expect(rows.nth(0)).toHaveAttribute("data-inbox-row", clarifying.id);
@@ -657,7 +671,8 @@ test("a clarification moves an ask under Waiting on agents until the asker hands
       { options: [{ label: "Ship" }, { label: "Hold" }], question: "Question-shaped response" },
       session
     );
-    await page.reload();
+    // No reload: the new ask reaches the open list on the event feed, and the card below is
+    // what waits for it.
     const questionCard = await askCard(page, questionShaped.id);
     await questionCard.getByLabel("Your answer").fill("How does this fit our release plan?");
     await questionCard.getByRole("button", { name: "Answer" }).click();
@@ -668,7 +683,7 @@ test("a clarification moves an ask under Waiting on agents until the asker hands
       "How does this fit our release plan?"
     );
     await expect
-      .poll(() => getAsk(questionShaped.id))
+      .poll(() => getAsk(questionShaped.id), { intervals: [50, 50, 100, 200, 500] })
       .toMatchObject({
         ask: { answer: null, state: "open" },
         replies: [{ body: "How does this fit our release plan?" }],
@@ -1173,6 +1188,9 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       });
     });
     const empty = page.getByText("Nothing needs you");
+    // The reconnect below waits a draw from [0, RECONNECT_SPREAD_MS) (`web/src/api/live-socket`),
+    // which the page's own clock spends.
+    await page.clock.install();
     await page.goto("/");
     await expect(empty).toBeVisible();
     await expect.poll(() => starts).toEqual([true]);
@@ -1197,6 +1215,17 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
     );
     forceGap = true;
     await disconnectLiveSockets();
+    // The jump repeats because the 1012 close may not have reached the page when the first one
+    // lands, and the second feed start is what says the page reconnected.
+    await expect
+      .poll(
+        async () => {
+          await page.clock.fastForward(RECONNECT_SPREAD_MS);
+          return starts.length;
+        },
+        { intervals: [50, 50, 100, 200, 500] }
+      )
+      .toBe(2);
     // The first start resumed from the sign-in check's head, which the log holds; the one after
     // the gap resumed above the head, so Dispatch could not replay what the page missed.
     await expect.poll(() => starts).toEqual([true, false]);
@@ -1368,7 +1397,7 @@ test("an agent's issue in a project with a default assignee reaches that person'
 
 test("the assignee filter takes several people and Unassigned, narrows its rows, and lives in the address", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const hers = await createIssue({ project: "CORE", title: "Alice's issue" });
   const hersAsk = await createAsk(hers.key, { question: "Alice's decision" }, session);
@@ -1423,12 +1452,6 @@ test("the assignee filter takes several people and Unassigned, narrows its rows,
       await expect(inboxRow(page, ask.id)).toBeVisible();
     }
     await expect(page.locator("[data-inbox-row]")).toHaveCount(4);
-    const shot = testInfo.outputPath(`inbox-assignee-filter-${testInfo.project.name}.png`);
-    await page.screenshot({ path: shot, fullPage: true });
-    await testInfo.attach(`the assignee filter on three picks (${testInfo.project.name})`, {
-      contentType: "image/png",
-      path: shot,
-    });
 
     // The address is the whole filter: a second browser opening it sees the same list.
     const second = await asUser(browser, "alice");
@@ -1442,7 +1465,7 @@ test("the assignee filter takes several people and Unassigned, narrows its rows,
     }
 
     // Negative control: an address naming nobody lists nothing, and refuses nothing.
-    await page.goto("/?assignee=nobody@example.invalid");
+    await navigateInApp(page, "/?assignee=nobody@example.invalid");
     await expect(page.getByText("Nothing matches this filter")).toBeVisible();
     await expect(page.locator("[data-inbox-row]")).toHaveCount(0);
     await expect(assigneeFilter(page)).toHaveText("Assignee · nobody@example.invalid");
@@ -1552,6 +1575,9 @@ test("the rail, the banner and an Agents card count the reader's own work, whate
     const page = await alice.newPage();
     // The rail's badge above `xl`, the compact header's on a phone: one count, one wording.
     const badge = (count: number) => page.getByText(new RegExp(`^Needs you ${count}$`)).first();
+    // The counts below follow the event feed, whose refetch the page holds to one per second
+    // (`MIN_REFETCH_INTERVAL_MS`): a page timer the page's own clock fires.
+    await page.clock.install();
     await page.goto("/");
     await expect(page.locator("[data-inbox-row]")).toHaveCount(2);
     await expect(badge(2)).toBeVisible();
@@ -1565,16 +1591,17 @@ test("the rail, the banner and an Agents card count the reader's own work, whate
     await expect(page.getByText(/^Blocked on you: 2 items/)).toBeVisible();
 
     // The Agents card says the same number about the same session.
-    await page.goto("/agents");
+    await navigateInApp(page, "/agents");
     const card = agentRow(page, session.actor.id);
     await expect(card.getByRole("link", { name: "Needs you 2" })).toBeVisible();
     await expect(badge(2)).toBeVisible();
 
     // One more issue assigned to her moves all three together.
     await patchIssue(theirs.key, { assignee: "alice" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(card.getByRole("link", { name: "Needs you 3" })).toBeVisible();
     await expect(badge(3)).toBeVisible();
-    await page.goto("/");
+    await navigateInApp(page, "/");
     await expect(page.getByText(/^Blocked on you: 3 items/)).toBeVisible();
     await expect(badge(3)).toBeVisible();
   } finally {

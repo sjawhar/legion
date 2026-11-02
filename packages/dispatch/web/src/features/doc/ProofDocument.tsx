@@ -52,7 +52,6 @@ import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
-import { installTypedBlocks } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
@@ -528,10 +527,10 @@ export function ProofDocument({
       editor = undefined;
       document = undefined;
     };
-    // The editor's place in the page - its typed blocks, the margin, search highlights, a block
-    // link - for as long as it is this effect's editor. It returns what undoes it.
+    // The editor's place in the page - the margin, search highlights, a block link - for as long
+    // as it is this effect's editor. It returns what undoes it. The typed-block node views are
+    // installed by `createEditor`, with the editor library they are written against.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
-      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
       let bound = true;
@@ -721,6 +720,7 @@ export function ProofDocument({
                     ? null
                     : connection.awareness,
                 heatMapMode: "hidden",
+                onAskBlockHosts: setAskBlockHosts,
                 onMarkAction: (action) => {
                   switch (action.kind) {
                     case "comment":

@@ -2,9 +2,10 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 import { baseUrl } from "./api";
 import { targetedListeners } from "./harness-listeners";
-import { harnessPorts, harnessVariables } from "./harness-ports";
+import { harnessPorts, harnessVariables, laneCount, workerCountVariable } from "./harness-ports";
 import { harnessProcessCount } from "./harness-processes";
 import { harnessSignIn } from "./harness-signin";
+import { measuring } from "./measure";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 
 // The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
@@ -67,6 +68,22 @@ function isListMode(argv: readonly string[]): boolean {
   return scanned.includes("--list");
 }
 
+// How many workers the command line asks for, if it does: `--workers <n>`, `--workers=<n>`,
+// `-j <n>` or `-j<n>`, read before a `--` separator as the list mode above is. A worker is a
+// lane, and e2e/run.ts started one harness per lane before Playwright, so a command line that
+// asks for another number is refused rather than quietly leaving a lane unused or putting two
+// workers on one lane's servers.
+function workersOnCommandLine(argv: readonly string[]): string | undefined {
+  const separator = argv.indexOf("--");
+  const scanned = separator === -1 ? argv : argv.slice(0, separator);
+  for (const [index, argument] of scanned.entries()) {
+    if (argument === "--workers" || argument === "-j") return scanned[index + 1];
+    if (argument.startsWith("--workers=")) return argument.slice("--workers=".length);
+    if (argument.startsWith("-j") && argument.length > 2) return argument.slice(2);
+  }
+  return undefined;
+}
+
 // This config starts no server. e2e/run.ts starts the harness (e2e/harness-start.ts) on ports
 // the OS chooses, exports the ports the servers report, and only then runs Playwright, so this
 // module, every worker that re-imports it, and every helper that reads a port at import see the
@@ -103,6 +120,20 @@ if (!reuseServers && (!listing || unset.length < targeted.length)) {
   );
 }
 
+// One worker per lane, and the lanes are e2e/run.ts's: a worker resolves its own harness from
+// `TEST_PARALLEL_INDEX` (e2e/harness-ports.ts), so a run with more workers than lanes would put
+// two workers on one lane's servers and database, which e2e/seed.ts truncates per row.
+const lanes = laneCount();
+const asked = workersOnCommandLine(process.argv);
+if (asked !== undefined && asked !== String(lanes)) {
+  throw new Error(
+    `This run has ${lanes} lane${lanes === 1 ? "" : "s"}, each a harness of its own, so ` +
+      `--workers ${asked} would not match: a worker reads the lane of its own index. Set ` +
+      `${workerCountVariable}=${asked} instead, which starts that many lanes and runs that many ` +
+      "workers."
+  );
+}
+
 // The default wait for asynchronous server and rendering readiness. A spec only sets its own
 // timeout when that deadline is its observable contract (the keyboard chord-expiry test).
 const expectTimeout = 15_000;
@@ -124,9 +155,17 @@ export default defineConfig({
   // The projects below that name no `testIgnore` of their own inherit this one.
   testIgnore: harnessProcessCount === 1 ? multiprocessSpecs : undefined,
   outputDir: "test-results",
-  fullyParallel: false,
-  workers: 1,
-  reporter: "list",
+  // Every row is independent: it empties its lane's database and fake listeners itself
+  // (e2e/seed.ts), and a worker never runs two rows at once, so rows of one file may run in
+  // different lanes. A file whose rows must run in order says so itself, with
+  // `test.describe.configure({ mode: "serial" })` and the reason.
+  fullyParallel: true,
+  workers: lanes,
+  // With E2E_MEASURE_FILE set, the timing fixture's reporter writes one row per test beside the
+  // list reporter's own output (e2e/measure-reporter.ts); without it the run is untouched.
+  reporter: measuring
+    ? [["list"], [fileURLToPath(new URL("./measure-reporter.ts", import.meta.url))]]
+    : "list",
   expect: { timeout: expectTimeout },
   use: {
     ...devices["Desktop Chrome"],

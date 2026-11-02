@@ -4,6 +4,7 @@ import { shownAgentRows } from "./agents";
 import { getInbox } from "./api";
 import { askCard, inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 import { seedWorkspace } from "./workspace";
 
@@ -13,6 +14,8 @@ test.beforeEach(async () => {
 
 // Every surface a human alone acts on has to come up non-empty from this one seed: an empty
 // Inbox, Agents page or broadcast would prove nothing about a change to it.
+// SLOW(>=2s): the whole workspace seed, the four surfaces it has to fill and three full-page
+// screenshots of them.
 test("the seeded workspace fills every human-only surface", async ({ browser }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the seeded workspace");
   const seeded = await seedWorkspace();
@@ -43,13 +46,13 @@ test("the seeded workspace fills every human-only surface", async ({ browser }, 
     // seed her own list leaves out; the Unassigned filter is where it is listed.
     await expect(inboxRow(page, seeded.asks.document)).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("workspace-inbox.png"), fullPage: true });
-    await page.goto("/?assignee=unassigned");
+    await navigateInApp(page, "/?assignee=unassigned");
     await expect(inboxRow(page, seeded.asks.document)).toContainText("Runbook");
 
     // Every session with Dispatch activity is an open row; the one Dispatch never heard from and
     // the one unseen for twenty minutes each sit under their own fold. A fold's rows follow the
     // open rows in the page's one list, mounted and hidden while it is closed.
-    await page.goto("/agents");
+    await navigateInApp(page, "/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const quiet = agents.getByRole("button", { name: "No Dispatch activity (1)" });
     const inactive = agents.getByRole("button", { name: "Inactive (1)" });
@@ -78,7 +81,7 @@ test("the seeded workspace fills every human-only surface", async ({ browser }, 
 
     // The broadcast keeps the order it was sent in, which is not alphabetical, and shows the one
     // answer it has.
-    await page.goto(`/agents/broadcasts/${seeded.broadcast.id}`);
+    await navigateInApp(page, `/agents/broadcasts/${seeded.broadcast.id}`);
     const broadcast = page.getByRole("region", { name: "Broadcast" });
     await expect(broadcast.getByRole("article")).toHaveText([/Tester/, /Observer/, /Planner/]);
     await expect(broadcast.getByText("1 of 3 answered")).toBeVisible();
@@ -86,7 +89,7 @@ test("the seeded workspace fills every human-only surface", async ({ browser }, 
 
     // The issue's Conversation holds the answered ask and, inside the mention's thread, the
     // mentioned session's reply.
-    await page.goto(`/issues/${seeded.issues.broadcastOrder}/conversation`);
+    await navigateInApp(page, `/issues/${seeded.issues.broadcastOrder}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
     await expect(turns.getByText("Ship the recipient-order fix?")).toBeVisible();
     const mention = turns

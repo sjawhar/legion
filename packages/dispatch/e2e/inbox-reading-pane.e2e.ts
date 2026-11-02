@@ -16,6 +16,7 @@ import {
 } from "./api";
 import { inboxList, inboxPane, selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 /**
@@ -144,14 +145,24 @@ interface Seed {
   plainAskId: string;
 }
 
+/** The block index lands about 150 ms after the write that asks for it (measured), which falls
+ *  inside Playwright's own 100/250/500 ladder: that ladder would not look again until a
+ *  quarter-second after the row was already there, and every row of this file pays the seed. */
+const INDEX_PROBE = { intervals: [50, 50, 100, 200, 500] };
+
 /** The Inbox row `match` names, once the server has indexed the block or opened the question. */
 async function indexedRow(match: (row: InboxRow) => boolean): Promise<InboxRow> {
-  await expect.poll(async () => (await getInbox()).some(match)).toBe(true);
-  const row = (await getInbox()).find(match);
-  if (row === undefined) {
+  let found: InboxRow | undefined;
+  await expect
+    .poll(async () => {
+      found = (await getInbox()).find(match);
+      return found !== undefined;
+    }, INDEX_PROBE)
+    .toBe(true);
+  if (found === undefined) {
     throw new Error("the seeded question left the Inbox before it was read");
   }
-  return row;
+  return found;
 }
 
 /**
@@ -163,106 +174,127 @@ async function indexedRow(match: (row: InboxRow) => boolean): Promise<InboxRow> 
 async function seedInbox(): Promise<Seed> {
   await createProject({ key: "PANE", name: "Pane rollout" });
 
-  const decisionIssue = await createIssue({
-    project: "PANE",
-    spec: decisionSpec,
-    title: "Rollout order",
-  });
-  await patchIssue(decisionIssue.key, { priority: 0 });
-  const decision = await indexedRow((row) => row.block_id === DECISION_BLOCK);
-
-  const approvalIssue = await createIssue({
-    project: "PANE",
-    spec: `# ${APPROVAL_HEADING}\n\n${PLACEHOLDER}\n`,
-    title: "Ledger rollout",
-  });
-  await patchIssue(approvalIssue.key, { priority: 1 });
-  const approvalArtifactId = approvalIssue.primary_artifact_id;
-  await editArtifact(
-    approvalArtifactId,
-    { ops: [{ after: "end", markdown: baselineBody, op: "insert" }], summary: "The rollout body" },
-    session
-  );
-  await editArtifact(
-    approvalArtifactId,
-    { ops: [{ find: PLACEHOLDER, op: "delete" }], summary: "Drop the placeholder" },
-    session
-  );
-  const atThree = await requestApproval(
-    approvalArtifactId,
-    { summary: "The ledger-first rollout." },
-    session
-  );
-  expect(atThree.version).toBe(3);
-  await answerAsk(
-    atThree.ask.id,
-    { expected_edited_at: null, selected: ["Approve"] },
-    { login: "alice" }
-  );
-  await editArtifact(
-    approvalArtifactId,
-    {
-      ops: [
-        { find: RETIRED_BLOCK, op: "delete" as const },
-        ...changedParagraphs.map(({ after, before }) => ({
-          find: before,
-          op: "replace" as const,
-          with: after,
-        })),
-      ],
-      summary: "The mirror-first rollout",
-    },
-    session
-  );
-  const atFour = await requestApproval(
-    approvalArtifactId,
-    { summary: "The mirror-first rollout." },
-    session
-  );
-  expect(atFour.version).toBe(4);
-
-  const firstApprovalIssue = await createIssue({
-    project: "PANE",
-    spec: "# Lease handover\n\nThe lease moves with the ledger, never with the mirror.\n",
-    title: "Lease handover",
-  });
-  await patchIssue(firstApprovalIssue.key, { priority: 2 });
-  const firstApproval = await requestApproval(
-    firstApprovalIssue.primary_artifact_id,
-    { summary: "The first handover draft." },
-    session
-  );
+  // Every question is its own issue or document, and the Inbox orders them by the priorities set
+  // here rather than by the order they were made, so each chain goes out beside the others
+  // instead of after them. Only the two that share priority 3 stay in order, and they are made in
+  // one chain of their own, since that tie is broken by which was made first.
+  const [decision, approval, firstApproval, { anchored, plain }, documentDecision] =
+    await Promise.all([
+      (async () => {
+        const issue = await createIssue({
+          project: "PANE",
+          spec: decisionSpec,
+          title: "Rollout order",
+        });
+        await patchIssue(issue.key, { priority: 0 });
+        const row = await indexedRow((indexed) => indexed.block_id === DECISION_BLOCK);
+        return { issueKey: issue.key, row };
+      })(),
+      (async () => {
+        const issue = await createIssue({
+          project: "PANE",
+          spec: `# ${APPROVAL_HEADING}\n\n${PLACEHOLDER}\n`,
+          title: "Ledger rollout",
+        });
+        await patchIssue(issue.key, { priority: 1 });
+        const artifactId = issue.primary_artifact_id;
+        await editArtifact(
+          artifactId,
+          {
+            ops: [{ after: "end", markdown: baselineBody, op: "insert" }],
+            summary: "The rollout body",
+          },
+          session
+        );
+        await editArtifact(
+          artifactId,
+          { ops: [{ find: PLACEHOLDER, op: "delete" }], summary: "Drop the placeholder" },
+          session
+        );
+        const atThree = await requestApproval(
+          artifactId,
+          { summary: "The ledger-first rollout." },
+          session
+        );
+        expect(atThree.version).toBe(3);
+        await answerAsk(
+          atThree.ask.id,
+          { expected_edited_at: null, selected: ["Approve"] },
+          { login: "alice" }
+        );
+        await editArtifact(
+          artifactId,
+          {
+            ops: [
+              { find: RETIRED_BLOCK, op: "delete" as const },
+              ...changedParagraphs.map(({ after, before }) => ({
+                find: before,
+                op: "replace" as const,
+                with: after,
+              })),
+            ],
+            summary: "The mirror-first rollout",
+          },
+          session
+        );
+        const atFour = await requestApproval(
+          artifactId,
+          { summary: "The mirror-first rollout." },
+          session
+        );
+        expect(atFour.version).toBe(4);
+        return { artifactId, askId: atFour.ask.id };
+      })(),
+      (async () => {
+        const issue = await createIssue({
+          project: "PANE",
+          spec: "# Lease handover\n\nThe lease moves with the ledger, never with the mirror.\n",
+          title: "Lease handover",
+        });
+        await patchIssue(issue.key, { priority: 2 });
+        return requestApproval(
+          issue.primary_artifact_id,
+          { summary: "The first handover draft." },
+          session
+        );
+      })(),
+      (async () => {
+        const anchoredIssue = await createIssue({
+          project: "PANE",
+          spec: "The mirror replays the ledger on a cold start.\n",
+          title: "Cold start",
+        });
+        await patchIssue(anchoredIssue.key, { priority: 3 });
+        const anchored = await createAsk(
+          anchoredIssue.key,
+          { anchor: { artifact: "spec", quote: ANCHOR_QUOTE }, question: ANCHORED_QUESTION },
+          session
+        );
+        const plainIssue = await createIssue({ project: "PANE", title: "Retry budget" });
+        await patchIssue(plainIssue.key, { priority: 3 });
+        const plain = await createAsk(
+          plainIssue.key,
+          { options: [{ label: "Yes" }, { label: "No" }], question: PLAIN_QUESTION },
+          session
+        );
+        return { anchored, plain };
+      })(),
+      (async () => {
+        await createProjectDocument("PANE", {
+          content: documentContent,
+          name: "mirror-runbook.md",
+        });
+        return indexedRow((indexed) => indexed.block_id === DOCUMENT_BLOCK);
+      })(),
+    ]);
   expect(firstApproval.version).toBe(1);
-
-  const anchoredIssue = await createIssue({
-    project: "PANE",
-    spec: "The mirror replays the ledger on a cold start.\n",
-    title: "Cold start",
-  });
-  await patchIssue(anchoredIssue.key, { priority: 3 });
-  const anchored = await createAsk(
-    anchoredIssue.key,
-    { anchor: { artifact: "spec", quote: ANCHOR_QUOTE }, question: ANCHORED_QUESTION },
-    session
-  );
-
-  const plainIssue = await createIssue({ project: "PANE", title: "Retry budget" });
-  await patchIssue(plainIssue.key, { priority: 3 });
-  const plain = await createAsk(
-    plainIssue.key,
-    { options: [{ label: "Yes" }, { label: "No" }], question: PLAIN_QUESTION },
-    session
-  );
-
-  await createProjectDocument("PANE", { content: documentContent, name: "mirror-runbook.md" });
-  const documentDecision = await indexedRow((row) => row.block_id === DOCUMENT_BLOCK);
 
   return {
     anchoredAskId: anchored.id,
-    approvalArtifactId,
-    approvalAskId: atFour.ask.id,
-    decisionAskId: decision.id,
-    decisionIssueKey: decisionIssue.key,
+    approvalArtifactId: approval.artifactId,
+    approvalAskId: approval.askId,
+    decisionAskId: decision.row.id,
+    decisionIssueKey: decision.issueKey,
     documentAskId: documentDecision.id,
     firstApprovalAskId: firstApproval.ask.id,
     plainAskId: plain.id,
@@ -321,6 +353,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): the six-question seed every row of this file reads, and two loads of the Inbox -
+// one per width the two columns have to hold.
 test("the Inbox shows a decision block in the reading pane and answers it in two taps", async ({
   browser,
 }) => {
@@ -449,7 +483,9 @@ test("the reading pane approves a version and marks what changed since the last 
     );
 
     // A first request has no approval to compare against, so the column marks nothing.
-    await page.goto(inboxAt(seed.firstApprovalAskId));
+    // The reader moves to it in the list, as a tap does: this row proves what the column marks,
+    // not what a cold load of its address draws.
+    await navigateInApp(page, inboxAt(seed.firstApprovalAskId));
     await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.firstApprovalAskId);
     await expect(pane.getByRole("region", { name: "Document version 1" })).toBeVisible();
     for (const mark of CHANGE_CLASSES) {
@@ -477,7 +513,8 @@ test("the reading pane shows an anchored question and a question in no document 
     await expect(anchoredCard).toContainText(ANCHOR_QUOTE);
     await expect(anchoredCard.locator("[data-ask-answer]")).toBeVisible();
 
-    await page.goto(inboxAt(seed.plainAskId));
+    // In-app again: the row proves the two shapes of card, not a load of either address.
+    await navigateInApp(page, inboxAt(seed.plainAskId));
     const plainCard = pane.getByTestId(`ask-${seed.plainAskId}`);
     await expect(plainCard).toContainText(PLAIN_QUESTION);
     await expect(plainCard.locator("[data-ask-answer]")).toBeVisible();
@@ -531,6 +568,8 @@ test("the arrow keys, j, k, Enter and ?item= drive the reading pane", async ({ b
   }
 });
 
+// SLOW(>=2s): the six-question seed every row of this file reads, and a load at each of the
+// three widths whose layout this row is about.
 test("the Inbox keeps today's card below 1280 px and in the drawer @phone", async ({ browser }) => {
   const seed = await seedInbox();
   const alice = await asUser(browser, "alice");

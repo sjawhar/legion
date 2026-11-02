@@ -5,6 +5,7 @@ import { createAsk, createIssue, createProject, patchIssue } from "./api";
 import { needsYouCards } from "./editor";
 import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 const session = { actor: { id: "e2e-polish", kind: "session" as const }, as: "agent" as const };
@@ -13,6 +14,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): five full-page screenshots are what this row leaves behind, one for each surface it
+// walks - the project list, its board, the Inbox, the issue's margin and the Agents page - and
+// laying out and shooting a whole page is the cost of each.
 test("project filters stay collapsed until needed and margin asks use the compact composer @phone", async ({
   browser,
 }, testInfo) => {
@@ -66,7 +70,7 @@ test("project filters stay collapsed until needed and margin asks use the compac
       fullPage: true,
     });
 
-    await page.goto("/");
+    await navigateInApp(page, "/");
     const inboxCard = page.getByTestId(`ask-${ask.id}`);
     await expect(inboxCard.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(inboxCard.getByLabel("Your answer")).toBeVisible();
@@ -75,7 +79,7 @@ test("project filters stay collapsed until needed and margin asks use the compac
       fullPage: true,
     });
 
-    await page.goto(`/issues/${issue.key}`);
+    await navigateInApp(page, `/issues/${issue.key}`);
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
     }
@@ -88,7 +92,7 @@ test("project filters stay collapsed until needed and margin asks use the compac
       path: testInfo.outputPath(`polish-margin-${viewport}.png`),
       fullPage: true,
     });
-    await page.goto("/agents");
+    await navigateInApp(page, "/agents");
     await expect(page.getByRole("region", { name: "Agents empty state" })).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath(`polish-agents-${viewport}.png`),
