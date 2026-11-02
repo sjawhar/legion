@@ -237,10 +237,11 @@ func (s *Sweeper) openDue(listed map[string][]githubapp.Delivery, floor, now tim
 // moment the back-fill that wrote it worked from (backfillIndex). A sweep that finds that moment
 // no further behind than Lookback reads only the window its index names; one that finds it
 // further behind, or finds no marker at all, reads every record the bucket holds once more. So
-// the whole-bucket read is one an hour at most for as long as the back-fills land: a back-fill
-// that left a record unindexed writes no marker, and a cursor carrying no `indexed` mark says a
-// build without the index has swept, so either has every sweep read the whole bucket until a
-// back-fill lands.
+// the whole-bucket read is one an hour at most for as long as the back-fills land. Two things
+// keep every sweep reading the whole bucket, and they end differently: a back-fill that left a
+// record unindexed writes no marker, which lasts until a back-fill lands; and a cursor carrying
+// no `indexed` mark says a build without the index has swept, which lasts until a sweep of this
+// build runs to its end and writes its own cursor (Sweep), whatever the marker says.
 const indexKey = "index"
 
 // indexMarker is what the marker holds: the moment the back-fill that wrote it worked from, which
@@ -303,7 +304,10 @@ func (s *Sweeper) backfillIndex(listed map[string][]githubapp.Delivery, now time
 		}
 		if stored.record.InFlight && now.Before(stored.record.claimEndsAt()) {
 			// A live claim is owed its entry and no record write, which would take the
-			// claimant's revision from it (indexClaimEnd).
+			// claimant's revision from it (indexClaimEnd). This test reads the sweep's own start,
+			// which is at or before the later reading decide's check takes, so a claim decide
+			// treats as live is live here too: judged on a clock that read later than decide's,
+			// this branch could rewrite a record decide still leaves to its claimant.
 			if err := s.indexClaimEnd(stored.guid, stored.record, now); err != nil {
 				s.Logger.Warn("webhook redelivery claim not back-filled into the index; the next sweep reads every record again",
 					"guid", stored.guid, "error", err)

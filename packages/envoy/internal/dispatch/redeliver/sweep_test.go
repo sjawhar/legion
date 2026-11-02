@@ -2049,7 +2049,7 @@ func TestABackfillLeavesALiveClaimToItsClaimant(t *testing.T) {
 		t.Fatalf("the sweep whose entry for the live claim was refused: %v", err)
 	}
 	if _, err := h.state.Get("index"); !errors.Is(err, natsgo.ErrKeyNotFound) {
-		t.Fatalf("reading the index marker gave %v, want %v: a back-fill whose entry for a live claim was refused marked the bucket, and nothing brings that delivery back", err, natsgo.ErrKeyNotFound)
+		t.Fatalf("reading the index marker gave %v, want %v: a back-fill whose entry for a live claim was refused marked the bucket, and nothing reads that record again for about 68 minutes", err, natsgo.ErrKeyNotFound)
 	}
 	if refused.Complete {
 		t.Fatalf("the sweep whose entry for the live claim was refused reported itself complete: %+v", refused)
