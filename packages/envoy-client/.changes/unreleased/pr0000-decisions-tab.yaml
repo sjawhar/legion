@@ -1,0 +1,2 @@
+kind: Added
+body: "A Dispatch dashboard URL of an issue's Decisions tab (`/issues/<key>/decisions`) resolves to the issue's `decisions.md`, `dispatch://<key>/artifact/decisions-md`."

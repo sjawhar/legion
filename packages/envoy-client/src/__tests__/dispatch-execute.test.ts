@@ -21,6 +21,7 @@ import { cliRefusals } from "../dispatch-cli";
 import type { ExecFn } from "../dispatch-cwd";
 import {
   type DispatchToolResult,
+  dispatchRefFromUrl,
   executeDispatchTool,
   positionText,
   resolveIssueDocumentId,
@@ -10749,6 +10750,17 @@ describe("executeDispatchTool", () => {
       "Body: Hi"
     );
     expect(requested).toContain(`/api/v1/issues/DSP-42/messages/${message}`);
+  });
+
+  // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
+  // whatever its fragment, as the SPA and the server read the same page.
+  test("maps the SPA's decisions page to the issue's decisions.md", () => {
+    const server = "http://dispatch.test";
+    for (const page of ["/issues/DSP-42/decisions", "/issues/DSP-42/decisions#b-ship-it"]) {
+      expect(dispatchRefFromUrl(`${server}${page}`, server)).toBe(
+        "dispatch://DSP-42/artifact/decisions-md"
+      );
+    }
   });
 
   test("resolves an 8-character ask id prefix against the issue's asks", async () => {

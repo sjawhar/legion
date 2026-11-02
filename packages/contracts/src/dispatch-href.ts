@@ -61,12 +61,21 @@ export function itemFromSearch(search: string): DispatchHrefItem | undefined | n
  * the fragment there is never a block of the comment. Any other fragment leaves the document or
  * item, and so does a document's version page whatever its fragment, a version's stored text
  * holding no block ids: the version of an issue's spec (`/spec?v=N`) is the spec's artifact at
- * that version.
+ * that version. The Decisions tab (`/issues/<key>/decisions`) is a view of the issue's
+ * `decisions.md`, so its page names that document, whatever its fragment.
  */
 export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] = [
   { href: "/issues/CORE-1", ref: "dispatch://CORE-1" },
   { href: "/issues/CORE-1/spec", ref: "dispatch://CORE-1/spec" },
   { href: "/issues/CORE-1/artifacts/notes-md", ref: "dispatch://CORE-1/artifact/notes-md" },
+  {
+    href: "/issues/CORE-1/decisions",
+    ref: "dispatch://CORE-1/artifact/decisions-md",
+  },
+  {
+    href: "/issues/CORE-1/decisions#b-ship-it",
+    ref: "dispatch://CORE-1/artifact/decisions-md",
+  },
   {
     href: "/issues/CORE-1/comments/11111111-1111-4111-8111-111111111111",
     ref: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111",

@@ -331,6 +331,17 @@ registerText("finished progress bar on surface", PROGRESS_FILL_DONE, SURFACE, 3)
 registerText("trust warning outline on surface", TRUST_WARNING_BORDER, SURFACE, 3);
 registerText("trust warning outline on canvas", TRUST_WARNING_BORDER, CANVAS, 3);
 
+/** A decision's `Unsure:` paragraph on the Decisions tab: amber text with an amber rule on its
+ * left, so a reader sees which of the agent's choices it was not sure of. The text is a 4.5:1
+ * pair on the panel's surface and the rule a 3:1 boundary against it. */
+export const DECISION_UNSURE_TEXT = pair(P.AMBER_800, P.AMBER_300);
+export const DECISION_UNSURE_BORDER = pair(P.AMBER_700, P.AMBER_400);
+export const decisionUnsureAccent =
+  "border-l-amber-700 dark:border-l-amber-400 text-amber-800 dark:text-amber-300";
+
+registerText("decision unsure text on surface", DECISION_UNSURE_TEXT, SURFACE);
+registerText("decision unsure rule on surface", DECISION_UNSURE_BORDER, SURFACE, 3);
+
 // ---------------------------------------------------------------------------------------------
 // Suggestion and version diffs
 // ---------------------------------------------------------------------------------------------

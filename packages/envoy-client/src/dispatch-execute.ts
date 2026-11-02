@@ -1091,9 +1091,10 @@ function readWithoutEvents(args: ToolArguments): string | undefined {
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
  * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
- * pages, project document pages (with their ?ask= / ?comment= deep links, which name the item
- * whatever the fragment), the `#b-<block id>` of a live document page or of an issue comment's or
- * message's page, which names that block, and the page of an upload an agent's conversation owns
+ * pages, the Decisions page (which names the issue's decisions.md), project document pages (with
+ * their ?ask= / ?comment= deep links, which name the item whatever the fragment), the
+ * `#b-<block id>` of a live document page or of an issue comment's or message's page, which names
+ * that block, and the page of an upload an agent's conversation owns
  * (`/agents/<session id>/artifacts/<slug>`).
  */
 export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
@@ -1122,7 +1123,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
       : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(
-    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
+    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children|decisions)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
   );
   if (issuePage) {
     const [, key = "", page, artifact, ask, comment, message] = issuePage;
@@ -1137,6 +1138,9 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
     if (page === "spec") return `dispatch://${key}/spec${blockOf("v")}`;
+    // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
+    // whatever its fragment.
+    if (page === "decisions") return `dispatch://${key}/artifact/decisions-md`;
     // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
     // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
