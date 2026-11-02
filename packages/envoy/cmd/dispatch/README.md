@@ -644,7 +644,7 @@ What the two processes share, and what each keeps to itself:
 
 - No leased background loop runs a pass beside another process's pass of the same loop.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose attempt lands inside another's pass finds it held and logs a skip.
-  The nine timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the outbox's daily document compaction, the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
+  The nine timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the hourly document compaction sweep (lease `document-compaction`, first tick at start, with or without NATS), the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
   — also record each pass in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
   — finds the period already served and logs the same skip: each runs once per period across the processes.
@@ -809,7 +809,7 @@ A process that finds it held tries again
   a key passes its window by the clock alone, and a delivery is owed because the process holding it died, which commits nothing to announce.
   It keeps the lease name the suggestion outcome sweep carried this work under, so during a roll the earlier release's pass and this one still exclude each other on it.
 
-Outside these classes, the outbox compacts daily (its publish scan is woken, never periodic: `outbox.Run`), the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay, the stale-room evictor and the events outbox) keep their own connections and keep-alive pings.
+Outside these classes, the document compaction sweep (lease `document-compaction`) runs every hour from a tick at start whether or not NATS is configured, the outbox's publish scan is woken, never periodic (`outbox.Run`), the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay, the stale-room evictor and the events outbox) keep their own connections and keep-alive pings.
 
 **One shared listener per process.**
 Every woken loop waits on one `pglisten.Hub` (owner `dispatch background wakes` in its log lines), which holds one connection from the store's listener pool and LISTENs on every loop's channel.
@@ -1330,6 +1330,13 @@ A caller presenting an access token the secrets broker issued signs a fresh proo
 the maintenance pass deletes every record past its proof's acceptance window beside the idempotency-key sweep.
 It is a new table that touches no row, which the release before it neither reads nor writes; its census answers `0`.
 
+Migration `20261028195714_doc_compaction_owed` creates `doc_compaction_owed`, the documents with rows a compaction could fold, which the hourly compaction sweep reads in place of a scan of `doc_updates`:
+every append names its document there in the statement that inserts its row once that row is not the document's first, and a compaction that leaves no row above its fold point, a rebuild, a delete and the sweep (for a document with no row after its first) remove it, each under the document's lock.
+It has no foreign key, so no append that names a document locks `artifacts`.
+Its one insert names every document holding more than one row; it reads `doc_updates` under `ACCESS SHARE` and writes only the table it creates, so `doc_updates`, which may be past the census's 1 GiB limit, is not a table it touches.
+The release before it neither reads nor writes the table: a document only that release appends to during the roll is compacted by the new release's queue on its next append or load.
+It refuses and rewrites no existing row; its census answers `0`.
+
 Migration `20261101143201_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, one row per name a process holds by renewing it (`duty.Hold`):
 the events outbox's publisher holds `dispatch-outbox` there (Running more than one process, above).
 `expires_at` is always the database's `now()` plus the hold's TTL, so a lapse is judged on the database's clock and never on two hosts' wall clocks, and `token` is free text the holder records, the outbox's host and process id.
@@ -1366,6 +1373,12 @@ The column is added with no default, so no row is rewritten, and the previous re
 The column takes `block_refs` `ACCESS EXCLUSIVE` and the view `graph_edges` `ACCESS EXCLUSIVE` for the migration's short transaction, so a block index write and a reference read wait behind it.
 It refuses and rewrites no row; its census answers `0`.
 No shipped block type declares a `block[]` attribute, so no pointer row exists for a build that does not know one to drop.
+
+Migration `20261101183525_graph_edges_ask_parts_and_block_pointers` re-states `graph_edges` once with the arms of both migrations of this release that wrote it.
+`20261101143211` added an ask's parts and `20261101144855` filtered the `block_refs` arm by `block_ref_listed`, each from `0142`'s arms, and timestamps sort them, so the later one replaced the view the earlier one wrote.
+This states every arm of both, and is the arm list a later migration re-states from.
+It creates nothing and reads no stored row; it refuses and rewrites no row, and its census answers `0`.
+It takes the view `ACCESS EXCLUSIVE` for its short transaction, as the two before it do.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1529,16 +1542,20 @@ It reads `DATABASE_URL` as the other subcommands do and runs no migration; with 
 Each document is read in one repeatable-read transaction, which stays open while the check renders the document at every checked update: tens of thousands of updates hold one snapshot for minutes, and an open snapshot on the primary holds back vacuum.
 On production, pass `--since` or point `DATABASE_URL` at a read replica.
 
-The oldest retained row is the base: compaction folds older history into it and a rebuild seeds the history there, so its own class is not checked and a version recorded before it is skipped.
+The oldest retained row is the base: compaction folds older history into it and a rebuild seeds the history there, so its own class is not checked and a version recording an update below it is compared with nothing.
+Compaction runs on its own, and no setting holds it off: a resident room's rows fold once 16 of them are older than two minutes or one is older than fifteen minutes, and an hourly sweep folds every document due that rule.
+So a version created inside the checked window can record an update a compaction has already folded into the base.
+The check counts those versions `versions_compacted` and prints a reason naming the base; a document's first version, recorded before any row of it was stored, names no update and is skipped as it always was.
+A document the counted versions leave with no version compared is `unchecked`, never clean, whatever classes the fold measured, and a document with versions at or above the base is clean only on what it compared.
 A history a prune rewrote after the base (a checkpoint standing, a gap, a version past the head or behind an earlier one) is refused.
-`--since` folds rows and versions created before that time without checking them, so history an earlier build wrote is not read as this build's: run it with the start of the window under test, while the rooms are resident and nothing is compacted.
+`--since` folds rows and versions created before that time without checking them, so history an earlier build wrote is not read as this build's: run it with the start of the window under test, and read `versions_compacted` for how much of that window a compaction folded away.
 
 The check holds only for one renderer: run it from the same commit as the Dispatch whose history it reads.
 A version an earlier build rendered (a change to `pmdoc`'s Markdown output) differs from this build's render of the same state.
 
-Output, every line starting `stored-order: `: one line per document (`<uuid> base=… updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… mismatches=…`, with `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`).
+Output, every line starting `stored-order: `: one line per document (`<uuid> base=… updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… versions_compacted=… mismatches=…`, with `compacted="<reason>"` for a document whose versions record updates below its base and `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`).
 It prints no document text.
-A document whose check compared no update and no version is `unchecked`, never clean.
+A document whose check compared no update and no version, one whose versions inside the window all sit below the base included, is `unchecked`, never clean.
 Exit 0 when every document checked is clean, 1 on any mismatch, refusal, read failure, missing `DATABASE_URL`, unchecked document `--artifact` names, or a run that checked no document at all (an empty database included), 2 on a usage error.
 So exit 0 always means the check compared something.
 
@@ -1559,7 +1576,7 @@ Each block of a document is a node of the graph too (migration `0121`; `packages
 Its reference is the document's with `#b-` and the block's id, percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
 `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`.
 Text cites a block only while its id holds at most 256 bytes decoded (`text.MaxBlockIDBytes`), and any node only while its target id, the id its edge is stored under (`text.TargetID`:
-an issue's key, a document's `<KEY or PROJECT>/<slug>`, a document block's `<KEY or PROJECT>/<slug>#<id>`, a comment's or message's block's `<item kind>/<item id>#<id>`, an ask's, a comment's or a message's id), holds at most 2048 bytes (`text.MaxTargetBytes`), since `refs` and `block_refs` hold it in B-tree keys and neither a slug nor an item id has a bound of its own:
+an issue's key, a document's `<KEY or PROJECT>/<slug>`, a document block's `<KEY or PROJECT>/<slug>#<id>`, a comment's or message's block's or an ask's part's `<item kind>/<item id>#<id>` (`ask/<ask uuid>#<part id>`), an ask's, a comment's or a message's id), holds at most 2048 bytes (`text.MaxTargetBytes`), since `refs` and `block_refs` hold it in B-tree keys and neither a slug nor an item id has a bound of its own:
 text citing past either is written with no edge.
 The bounds decide only what the graph indexes.
 Every write is taken whatever the length of a block id it names (a seeded spec, an upload, an `insert`, a rebuild, an accepted suggestion, a browser's edit);
@@ -1595,11 +1612,29 @@ A reply names the block it answers with `reply_to_block` (a comment) or `in_repl
 `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` list an item's current blocks.
 A comment or message an earlier build writes during the roll, or after a rollback, is owed its blocks (`owed_at`, set by the triggers of `0143` and `0144`), which the same block-index reconciliation indexes, at most 200 a tick, with no command run.
 
+An ask's parts are blocks too (migrations `20261101143211` and `20261101143212`):
+its question, each of its options and its current answer, in that order (`refs.AskParts`), each a text of its own rather than a span of one body, since an ask has no body — the question as the row holds it, an option as `<label> — <description>` or its label alone, and the answer as the one line an `ask.answered` summary renders it.
+What identifies a part is its type and its text, and for the answer part its answerer, so the same answer from another person is a part of its own (`askAnswerPart`).
+Parts are named `b1`, `b2`, … as an item's blocks are, and an edit keeps each id the same way, except that an answer is replaced rather than reworded:
+`itemblocks.Align` takes a variadic list of the types a new block replaces instead of rewording, and the ask's index passes the answer part's (`refs.AskAnswerPart`), where a comment's and a message's passes none.
+A later answer is a new part, so a reference to the answer it replaced reads `removed` where one to a reworded option reads `changed`.
+A part's reference is the ask's with `#b-` and the id: `dispatch://KEY/ask/<id>#b-<part>` or `dispatch://PROJECT/artifact/<slug>/ask/<id>#b-<part>`, and an ask's dashboard page with a `#b-` fragment names it too;
+pinned, `#b-<part>@v<N>` names a revision of the ask's parts, as a comment's block pins a revision of the comment, and reads the part as that revision held it.
+Its graph node is kind `block`, id `ask/<ask uuid>#<part id>`, whose `parent` is the ask;
+`graph_edges` stores it under the kind `ask_block`, which a build without ask parts skips as an unknown kind.
+An ask's detail read, its owner's ask list, the Inbox and the ask payloads the events route serves carry the part id of each option and of the answer, with the ask's `revision`, the number a pin names (`attachAskPartIDs`);
+a write's own response carries neither, nor does an ask the index has not reached, whose revision reads 0.
+An ask's own read lists the edges at its parts, each naming its part as `block`, and leaves out both its `replies_to` edges, its clarification thread, and its parts' `part_of` edges unless `?kind=` names them (`refs.AskBacklinkExclusions`).
+A reply names a part of an ask only when its request names the ask, `ask_id` with `reply_to_block`:
+a reply to a comment names a block of that comment, whether or not the comment's thread hangs under an ask, and so does the delivery callback `POST /api/v1/comments/{id}/reply`.
+A reference to a part no current revision of the ask holds is `404 NOT_FOUND` `no part "<part>" in ask <id>`.
+An ask any build writes is owed a part index (`20261101143212`'s trigger on `asks`), which the same block-index reconciliation drains.
+
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
 ```
 
-reparses every source and reconciles the index with the text (surviving edges keep their provenance, edges of deleted sources are removed), marks every document owed a block index and every comment and message owed a block index of its own blocks, which the server's block-index reconciliation then indexes, and prints `rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N items_owed=N`, `blocks_owed` being the documents it marked and `items_owed` the comments and messages.
+reparses every source and reconciles the index with the text (surviving edges keep their provenance, edges of deleted sources are removed), marks every document owed a block index and every comment, message and ask owed a block index of its own blocks, an ask's parts included, which the server's block-index reconciliation then indexes, and prints `rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N items_owed=N`, `blocks_owed` being the documents it marked and `items_owed` the comments, messages and asks.
 It reads `dispatch.server_url` from the envoy config the same way the server does and refuses an empty value:
 dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 
@@ -2278,12 +2313,12 @@ Each item below names a path with its method and identity, then its purpose.
   The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)).
   A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
   a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
-  and a mention a block of a comment or issue message holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message);
-  a document's, comment's or message's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read is listed once, under that block.
+  and a mention a block of a comment or issue message, or a part of an ask, holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or `ask/<uuid>#<part id>`, `node.parent` the comment, message or ask);
+  a document's, comment's, message's or ask's own read also lists the edges at its blocks, an ask's parts among them, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read, or a part of the ask read, is listed once, under that block.
   A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
-  pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
+  pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment, and for an ask's part, a revision of the ask's parts) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
   `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
-  `404` for a node that does not exist, a block no current version or revision holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's current one or that did not hold the block.
+  `404` for a node that does not exist, a block no current version or revision holds (unpinned; an ask's part is called a part, `no part "<part>" in ask <id>`, where a comment's and a message's is called a block) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's or the ask's current one or that did not hold the block.
   A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
   when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
 
@@ -2392,9 +2427,10 @@ Each item below names a path with its method and identity, then its purpose.
 
   Create a comment, root-level reply, or suggestion.
   An anchored comment uses the same quote-or-mark-ID shape as an ask; replies inherit their root's anchor and send none.
-  A reply may name the block of the comment `reply_to` names that it answers, `reply_to_block` (`b2`), checked against that comment before `reply_to` climbs to its thread's head:
-  `400 INVALID_COMMENT` without `reply_to`, for a block that comment does not hold now, and in an ask's thread.
-  The delivery callback `POST /api/v1/comments/{id}/reply` takes `reply_to_block` for a block of comment `{id}` the same way.
+  A reply may name the block of the comment `reply_to` names that it answers, `reply_to_block` (`b2`), checked against that comment before `reply_to` climbs to its thread's head, and against that comment even when the climb reaches an ask;
+  with `ask_id` instead of `reply_to` it names a part of that ask.
+  `400 INVALID_COMMENT` with neither `reply_to` nor `ask_id`, and for a block or part the named item does not hold now.
+  The delivery callback `POST /api/v1/comments/{id}/reply` takes `reply_to_block` for a block of comment `{id}`, never for a part of the ask its thread hangs under.
   A comment's record in its document's margin - its body and replies, or a suggestion's and its replacement - holds at most 256 KiB of text, and a document's margin 1 MiB:
   a comment, reply or suggestion that would leave either past its bound and bigger is `413 CAP_EXCEEDED`, naming the bound and both sizes.
   A quote anchor that would leave the marks on the document's text carrying more than 1 MiB of ids and authors, and more than they carried, is `413 CAP_EXCEEDED` too, as for an ask's.
