@@ -15,12 +15,14 @@ import (
 var testClaude = ClaudeLaunch{Binary: "/opt/claude/bin/claude", PluginDir: "/opt/legion/claude-envoy", Bun: "/opt/bun/bin/bun"}
 
 // The inner command of a Claude Code role: the bridge around `claude -p` in stream-json both ways
-// (--verbose, which stream-json output requires), every permission granted, only the configured MCP
-// server, both plugin directories, the session, and the one system prompt word every pane gets.
+// (--verbose, which stream-json output requires) re-emitting each user message it takes, every
+// permission granted, only the configured MCP server, both plugin directories, the session, and the
+// one system prompt word every pane gets.
 func TestClaudeInnerCommand(t *testing.T) {
 	parts := runtime.PromptParts{RolePromptPaths: []string{"/roles/implementer.md"}, Addressing: "Legion addressing: x"}
 	got := claudeInnerCommand("/opt/legion/legion", testClaude, "/state/claude/c/mcp.json", "11111111-2222-4333-8444-555555555555", false, parts)
 	want := "/opt/legion/legion claude-bridge -- /opt/claude/bin/claude -p --input-format stream-json --output-format stream-json --verbose" +
+		" --replay-user-messages" +
 		" --permission-mode bypassPermissions --strict-mcp-config --mcp-config /state/claude/c/mcp.json" +
 		" --plugin-dir /opt/legion/claude-envoy --plugin-dir /opt/legion/claude-envoy/legion" +
 		" --session-id 11111111-2222-4333-8444-555555555555 " +

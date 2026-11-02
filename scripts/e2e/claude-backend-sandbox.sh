@@ -119,6 +119,9 @@
 #   LEGION_E2E_MODEL_GATEWAY_AUDIENCE (required) as the audience of the projected ServiceAccount
 #   token that keys it; under `key-file`, {pod,models}-key-file.yml, which carry no projected token
 #   and read the same providers Secret's ANTHROPIC_API_KEY that the Claude lane uses.
+# - LEGION_E2E_POD_SERVICE_ACCOUNT (required, both routes) is the ServiceAccount the deployment's
+#   pods run as, substituted for the ${POD_SERVICE_ACCOUNT} placeholder in the run's copy of the
+#   chosen route's pod fixture (lib/pod-service-account.sh).
 # - LEGION_E2E_POD_REACHABILITY (required, `aws-private-ip` or `bridge`, above) is how the pods
 #   reach the devbox's services.
 # - LEGION_E2E_DAEMON_CONTAINER_MOUNTS (optional, bridge only) is a colon-separated list of absolute
@@ -256,6 +259,7 @@ bind_host=
 pod_dispatch_url=
 gateway=
 gateway_audience=
+pod_service_account=
 daemon_pid=
 dispatch_pid=
 listener_pid=
@@ -571,16 +575,18 @@ start_dispatch() {
 
 # write_pod_fixture writes the run's copy of the operator route's pod block: the chosen route's
 # fixture, its ConfigMap reference pointed at the run's own copy, the gateway's audience in place of
-# the placeholder under `gateway`, and the Claude lane's two non-credential variables added to its
+# the placeholder under `gateway`, LEGION_E2E_POD_SERVICE_ACCOUNT's ServiceAccount in place of the
+# placeholder under both routes, and the Claude lane's two non-credential variables added to its
 # env. The key itself is in none of it: a credential-shaped name in pod.env is refused by the
 # daemon, and provider_keys carries it instead.
 write_pod_fixture() {
-  local source=$operator_route/pod.yml placeholder='${MODEL_TOKEN_AUDIENCE}' pod added
+  local source=$operator_route/pod.yml placeholder='${MODEL_TOKEN_AUDIENCE}' account_placeholder='${POD_SERVICE_ACCOUNT}' pod added
   [ "$model_route" = gateway ] || source=$operator_route/pod-key-file.yml
   pod=$(<"$source")
   if [ "$model_route" = gateway ]; then
     pod=${pod//"$placeholder"/"$gateway_audience"}
   fi
+  pod=${pod//"$account_placeholder"/"$pod_service_account"}
   added=$(printf '  ANTHROPIC_MODEL: "%s"' "$claude_model")
   [ -z "$model_base_url" ] || added=$(printf '%s\n  ANTHROPIC_BASE_URL: "%s"' "$added" "$model_base_url")
   awk -v add="$added" '{ print } $0 == "env:" { print add }' <<<"$pod" |
@@ -592,6 +598,8 @@ write_pod_fixture() {
     grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" ||
       fail "$source has no token audience $placeholder to fill with the gateway's"
   fi
+  grep -qF "service_account: $pod_service_account" "$work/pod.yml" ||
+    fail "$source has no ServiceAccount $account_placeholder to fill with the run's"
   cp "$work/pod.yml" "$evidence/pod.yml"
 }
 # create_route_configmap is the operator's step before any pod runs: the chosen route's models.yml,
@@ -1097,6 +1105,8 @@ case "$image" in
 esac
 [ -n "$storage_class" ] ||
   fail "LEGION_E2E_STORAGE_CLASS is unset: name the StorageClass of the issue pod's disk (the cluster has no default to fall back on)"
+pod_service_account=$(bash "$root/scripts/e2e/lib/pod-service-account.sh") ||
+  fail "LEGION_E2E_POD_SERVICE_ACCOUNT is not a ServiceAccount name the operator route's pod.yml can carry (the reason is above)"
 [ -z "$priority_class" ] || [[ "$priority_class" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ && ${#priority_class} -le 253 ]] ||
   fail "LEGION_E2E_PRIORITY_CLASS must be a PriorityClass's name, not '$priority_class'"
 [ -n "$claude_key_file" ] ||

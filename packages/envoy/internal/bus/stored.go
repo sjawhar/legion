@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -91,9 +92,7 @@ func (c *Client) requestConfirmed(ctx context.Context, subject string, data []by
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	conn := c.Conn
-	c.mu.Unlock()
+	conn := c.currentConn()
 	inbox := conn.NewInbox()
 	replies, err := conn.SubscribeSync(inbox)
 	if err != nil {
@@ -154,4 +153,59 @@ func SubjectContains(pattern, subject string) bool {
 		}
 	}
 	return len(patternTokens) == len(subjectTokens)
+}
+
+// ReduceFilterSubjects returns subjects as a set of consumer filters no two of which overlap, which
+// JetStream requires of one consumer's filters, matching every subject any of them matched: a
+// subject another contains (SubjectContains) is dropped, and two that overlap without either
+// containing the other are replaced by their longest common prefix of whole tokens followed by `>`
+// (`>` alone when the first tokens differ), until no two overlap. `X` and `X.>` do not overlap (one
+// matches X alone, the other only what lies under X), so both stay. The result is sorted and holds
+// each subject once, so the same set always reduces to the same list.
+func ReduceFilterSubjects(subjects []string) []string {
+	reduced := slices.Clone(subjects)
+	for {
+		slices.Sort(reduced)
+		reduced = slices.Compact(reduced)
+		next, changed := reduceFilterPair(reduced)
+		if !changed {
+			return reduced
+		}
+		reduced = next
+	}
+}
+
+// reduceFilterPair applies ReduceFilterSubjects's rule to the first pair of subjects that overlap,
+// reporting false when none do.
+func reduceFilterPair(subjects []string) ([]string, bool) {
+	for i, a := range subjects {
+		for j := i + 1; j < len(subjects); j++ {
+			b := subjects[j]
+			switch {
+			case SubjectContains(a, b):
+				return slices.Delete(slices.Clone(subjects), j, j+1), true
+			case SubjectContains(b, a):
+				return slices.Delete(slices.Clone(subjects), i, i+1), true
+			case subjectsOverlap(a, b):
+				merged := commonTokenPrefix(a, b) + ">"
+				rest := slices.DeleteFunc(slices.Clone(subjects), func(s string) bool { return s == a || s == b })
+				return append(rest, merged), true
+			}
+		}
+	}
+	return subjects, false
+}
+
+// commonTokenPrefix is the tokens a and b begin with alike, up to the first that differs or is `>`,
+// with the dot after the last of them, or "" when their first tokens differ.
+func commonTokenPrefix(a, b string) string {
+	aTokens, bTokens := strings.Split(a, "."), strings.Split(b, ".")
+	var prefix strings.Builder
+	for index := 0; index < len(aTokens) && index < len(bTokens); index++ {
+		if aTokens[index] != bTokens[index] || aTokens[index] == ">" {
+			break
+		}
+		prefix.WriteString(aTokens[index] + ".")
+	}
+	return prefix.String()
 }

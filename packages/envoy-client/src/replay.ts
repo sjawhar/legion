@@ -19,6 +19,7 @@ import {
 } from "./delivery";
 import { subscriptionRemovedTopics } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
+import { EXCEPTION_TOPIC_PREFIX } from "./stream-topics";
 import {
   EnvoyApiError,
   type EnvoyClient,
@@ -268,7 +269,18 @@ export interface ReplayHost {
   writeSessionID?(): string | undefined;
   /** The subjects the session follows and wants replayed: its agent subject and its topics. */
   followedSubjects(): readonly string[];
-  /** Shows a stored frame; a throw is `failed`. It must run nothing a live frame would run. */
+  /**
+   * Shows a stored frame; a throw is `failed`. It must run nothing a live frame would run.
+   *
+   * A host that keeps a `DeliveryDedupe` claims the frame in it before it hands the frame over,
+   * as its live path does, and holds the claim until the frame is recorded (`shown`, settled once
+   * this resolves and the engine records it; `queued`, settled when the host records it) or the
+   * hand-off came to nothing (`suppressed`, `failed`, a throw: released). The engine's own
+   * `dedupe.pending` check runs before this call only, so without the claim a live copy that
+   * arrives while the host's write is open finds the frame neither pending nor in the ledger and
+   * is shown beside it. A frame the live path already holds is that path's to show and record:
+   * the host answers `queued` and the sweep leaves the stream's copy for a later one.
+   */
   deliver(frame: ReplayFrame): Promise<ReplayDeliveryOutcome>;
   /**
    * Shows a failure notice; a throw means it was not shown. A host that resolves `queued` records
@@ -306,9 +318,16 @@ export interface ReplayEngine {
   /**
    * Reads and shows what the stream stored after the cursors. One runs at a time; a call while
    * one runs queues at most one more, and every call resolves when the run it joined ends. It
-   * never rejects.
+   * never rejects. In consumer mode (`setConsumerMode`) it makes no replay call: it only tells
+   * the notices a restore brought back.
    */
   sweep(): Promise<void>;
+  /**
+   * Whether the listener confirmed consumer delivery for the session (its registration answered
+   * `delivery.mode` `consumer`): the session's consumer relays every stored subject, so sweeps
+   * stop calling `POST /v1/replay`. `false` (a `core` answer, or none) sweeps as before.
+   */
+  setConsumerMode(on: boolean): void;
   /**
    * Takes the host's followed subjects now: a new one is listed without a cursor (the next sweep
    * starts it at the stream's end, with no history), a dropped one loses its cursor. Persisted
@@ -431,6 +450,8 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   const answered = new Set<string>();
   let running: Promise<void> | undefined;
   let rerun: Promise<void> | undefined;
+  // The listener relays the stored stream to the session itself (`setConsumerMode`).
+  let consumerMode = false;
 
   const safely = (what: string, call: () => void) => {
     try {
@@ -747,6 +768,8 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       await flush(alive);
       if (!alive()) return;
     }
+    // The session's consumer delivers the stored stream; nothing is read here.
+    if (consumerMode) return;
 
     for (let page = 0; page < REPLAY_PAGES_PER_SWEEP; page += 1) {
       let handledAny = false;
@@ -951,6 +974,9 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
 
   return {
     sweep,
+    setConsumerMode(on) {
+      consumerMode = on;
+    },
     async followedChanged() {
       const alive = bind()?.alive;
       if (alive === undefined) return;
@@ -1087,9 +1113,6 @@ export function envoyNoticeText(fields: Readonly<Record<string, string>>): strin
   return encode({ envoy: fields });
 }
 
-/** The topic a failed delivery's report goes to is this prefix followed by the original topic. */
-const EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
-
 /**
  * The stream subjects whose topics carry one agent session's private payload: each session's
  * inbox, the Legion daemon's notices for a project's controller, and a failed delivery's report
@@ -1102,7 +1125,7 @@ const PRIVATE_STREAM_SUBJECTS = [
 ];
 
 /** Whether some subject matches both patterns, under NATS wildcard rules. */
-function subjectsOverlap(a: string, b: string): boolean {
+export function subjectsOverlap(a: string, b: string): boolean {
   const aTokens = a.split(".");
   const bTokens = b.split(".");
   for (let index = 0; index < aTokens.length && index < bTokens.length; index += 1) {

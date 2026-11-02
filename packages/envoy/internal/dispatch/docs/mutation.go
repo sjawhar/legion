@@ -23,6 +23,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 type versionWrite struct {
@@ -222,7 +224,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // and its answer, a comment's anchor - except a comment's or suggestion's margin record, which
 // runs in applyMargin. Both open and record their operation through the same steps
 // (openLiveOperation, recordLiveOperation), so two rules hold for every write by structure rather
-// than by its caller remembering them:
+// than by its caller remembering them, and a third for every write applyLive runs:
 //
 //   - It refuses a context Join did not return (errUnjoined), as SeedText and the version writes
 //     do: an unjoined write would reach no transaction to be weighed and appended in.
@@ -231,6 +233,9 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 //     (refuseUndecodable), before anything is appended. applyLive takes every measure of the
 //     growth weigh; a margin record, which leaves the rendering and the anchor marks as they
 //     were, is weighed by the margin bound alone (applyMargin).
+//   - applyLive refuses a write introducing a block pointer to a block of a type its attribute
+//     does not allow (refuseBlockPointers), before anything is appended. A margin record leaves
+//     the rendering, and so every pointer, as it was.
 //
 // It writes the transaction's fork of the room (see liveWrite), appends the update inside the
 // transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that
@@ -366,6 +371,12 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	}}); err != nil {
 		return err
 	}
+	// An agent's or API write is refused when a block pointer it introduces names a block of a
+	// type its attribute does not allow, compared with the tree before the write (nil when that
+	// tree was outside the schema: every pointer of a repair is introduced).
+	if err := refuseBlockPointers(ctx, op.tx, artifactID, tree.Node(), weighedFrom, offsets); err != nil {
+		return err
+	}
 	// The tree before the write has served every use it has, so it is let go before the record's
 	// decode check (LEGION-504).
 	before, weighedFrom = pmdoc.ValidDocument{}, nil
@@ -498,6 +509,19 @@ func joinedSchemaError(err error, start func() error) error {
 	return producedSchemaError(err)
 }
 
+// refuseBlockPointers refuses tree, the tree a write to artifactID leaves (rendered as offsets),
+// when a `block[]` pointer it introduces over prior names a block of a type the attribute does not
+// allow (pmdoc.CheckBlockPointers), each target's type read as the block index would hold it once
+// the write is indexed (refs.BlockTypes) in the write's transaction. The refusal is
+// pmdoc.ErrBlockPointer, which no schema refusal path (joinedSchemaError) reclassifies. A
+// browser's write (settlement) and the reconciliation never come here: what a browser wrote is
+// already stored, so it is never refused.
+func refuseBlockPointers(ctx context.Context, tx pgx.Tx, artifactID string, tree, prior *pmdoc.Node, offsets []pmdoc.BlockOffset) error {
+	return pmdoc.CheckBlockPointers(tree, prior, func(targets []text.Ref) (map[string][]string, error) {
+		return refs.BlockTypes(ctx, tx, artifactID, offsetBlocks(offsets), targets)
+	})
+}
+
 func mergeUpdates(updates [][]byte) ([]byte, error) {
 	switch len(updates) {
 	case 0:
@@ -520,7 +544,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if !joined {
 		return "", errUnjoined
 	}
-	tree, err := parseInput(markdown)
+	tree, read, err := parseWrittenReplacing(nil, markdown)
 	if err != nil {
 		return "", err
 	}
@@ -532,6 +556,10 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 		return "", err
 	}
 	if err := weighRendering("", canonical); err != nil {
+		return "", err
+	}
+	// A new document holds no pointer before this write, so every pointer it seeds is checked.
+	if err := refuseBlockPointers(ctx, tx, artifactID, tree, nil, offsets); err != nil {
 		return "", err
 	}
 	update, err := encodeDocumentTree(tree)
@@ -547,6 +575,10 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	// records it once the transaction commits (Ledger.creditRooms), so a seed that never commits
 	// leaves the document no state.
 	ledgerFrom(ctx).seeded(artifactID, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor)
+	// The parse read its markdown back already, to refuse a document that reads back otherwise;
+	// the rest of the request reads the rendering through that parse rather than making a second
+	// one of it (Ledger.ReadBackOf).
+	ledgerFrom(ctx).wroteReadBack(artifactID, read)
 	return canonical, nil
 }
 
@@ -567,6 +599,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	// document no room holds is read from the store under that lock (coldFork), which loads no
 	// room for the write.
 	var canonical string
+	var read pmdoc.WrittenReadBack
 	var unchanged bool
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, start pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
@@ -585,7 +618,8 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if repairing {
 			current = nil
 		}
-		target, err := parseReplacing(current, markdown)
+		var target *pmdoc.Node
+		target, read, err = parseWrittenReplacing(current, markdown)
 		if err != nil {
 			return err
 		}
@@ -708,12 +742,15 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		})
 		return updateErr
 	})
-	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
-		return canonical, nil
-	}
-	if err != nil {
+	// A write the document already held makes no change, and is as much a write that read its
+	// markdown back as one the fragment took.
+	if err != nil && !(unchanged && errors.Is(err, websocket.ErrNoChanges)) {
 		return "", wrapUnlessTooLarge(err, "replace live document")
 	}
+	// The parse read its markdown back already, to refuse a document that reads back otherwise;
+	// the rest of the request reads the rendering through that parse rather than making a second
+	// one of it (Ledger.ReadBackOf).
+	ledgerFrom(ctx).wroteReadBack(artifactID, read)
 	return canonical, nil
 }
 
@@ -1447,6 +1484,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
 		}
+		err = invalidBlockPointerOp(err)
 		if isEditRefusal(err) {
 			return EditOutcome{}, err
 		}
@@ -1507,6 +1545,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
 		}
+		err = invalidBlockPointerOp(err)
 		if isEditRefusal(err) {
 			return EditOutcome{}, err
 		}

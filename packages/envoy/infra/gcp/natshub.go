@@ -136,13 +136,14 @@ type NatsHubArgs struct {
 	SessionUser *SessionUserArgs `pulumi:"sessionUser,optional"`
 }
 
-// NATSUserArgs are one nkey user of the hub. Exactly one of machineId, dispatchMachineId, daemon,
-// and permissions selects the user's grant. nkey is named as aws:User names it, so a consumer
-// running both clouds spells a user alike.
+// NATSUserArgs are one nkey user of the hub. Exactly one of machineId, listenerMachineId,
+// dispatchMachineId, daemon, and permissions selects the user's grant. nkey is named as aws:User
+// names it, so a consumer running both clouds spells a user alike.
 type NATSUserArgs struct {
 	Name              string           `pulumi:"name"`
 	NKey              string           `pulumi:"nkey"`                       // the user's public key; never its seed
-	MachineID         *string          `pulumi:"machineId,optional"`         // permissions = core.HostPermissions(machineId)
+	MachineID         *string          `pulumi:"machineId,optional"`         // permissions = core.HostPermissions(machineId): the user a host's listener and its sessions share
+	ListenerMachineID *string          `pulumi:"listenerMachineId,optional"` // permissions = core.ListenerHostPermissions(listenerMachineId): a listener's own user, which no session shares
 	DispatchMachineID *string          `pulumi:"dispatchMachineId,optional"` // permissions = core.DispatchPermissions(dispatchMachineId): Dispatch's user; the id is the listener's beside it
 	Daemon            bool             `pulumi:"daemon,optional"`            // permissions = core.DaemonPermissions()
 	Permissions       *PermissionsArgs `pulumi:"permissions,optional"`       // explicit
@@ -448,9 +449,10 @@ type userKind struct {
 
 // userKinds is the one table of every kind of hub user. The machine-id entries also drive the
 // hub's seed scan, shared machine-id check, and duplicate-durable check.
-func userKinds(u NATSUserArgs) [4]userKind {
-	return [4]userKind{
+func userKinds(u NATSUserArgs) [5]userKind {
+	return [5]userKind{
 		{input: "machineId", id: u.MachineID, set: u.MachineID != nil, grant: core.HostPermissions},
+		{input: "listenerMachineId", id: u.ListenerMachineID, set: u.ListenerMachineID != nil, grant: core.ListenerHostPermissions},
 		{input: "dispatchMachineId", id: u.DispatchMachineID, set: u.DispatchMachineID != nil, fixed: core.DispatchDurables(), grant: core.DispatchPermissions},
 		{input: "daemon", set: u.Daemon, grant: func(string) core.Permissions { return core.DaemonPermissions() }},
 		{input: "permissions", set: u.Permissions != nil, grant: func(string) core.Permissions {
@@ -472,7 +474,7 @@ func selectedUserKind(where string, u NATSUserArgs) (userKind, error) {
 		selected = kind
 	}
 	if !selected.set {
-		return userKind{}, fmt.Errorf("%s: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions", where)
+		return userKind{}, fmt.Errorf("%s: name machineId, for its host's permission set, listenerMachineId, for a listener's own user, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions", where)
 	}
 	return selected, nil
 }
@@ -486,18 +488,19 @@ type listenerUser struct {
 
 // authorization maps a hub's users onto core's, for both hubs, gcp:NatsHub and
 // gcp:ClusteredNatsHub, so the two render one grant for the same users. Each of users is a keyed
-// user with a seed, whose permissions are its host's set when it names a machine id, Dispatch's
-// set when it names a Dispatch machine id, the daemon's set when daemon is true, and its own when
-// it names permissions. The listener's user follows them, named after the listener's machine id,
-// with the listener's set for that machine and a seed; the session user comes last, with the
-// session's set and no seed, as the authorization's noAuthUser. A hub needs users or a listener:
-// with the session user alone, no client could hold more than a session's grant, and no listener
-// could run. core validates the rest when it renders, a seed in a name or a rule entry first. Each
-// machine id, of either kind, passes core's shared machine-id rule and names a listener durable
-// and queue group. An id whose durable repeats another user's, of either kind, or the hub's own
-// listener's (bus.ListenerDurable turns a space into a hyphen, so "a b" and "a-b" collide) is
-// refused as a core.InputError naming the later input. The hub's own refusals name a user by its
-// index alone: they come before core has read the names, so quoting one could quote a seed.
+// user with a seed, whose permissions are its host's set when it names a machine id, the
+// listener-host set when it names a listener machine id, Dispatch's set when it names a Dispatch
+// machine id, the daemon's set when daemon is true, and its own when it names permissions. The
+// listener's user follows them, named after the listener's machine id, with the listener's set for
+// that machine and a seed; the session user comes last, with the session's set and no seed, as the
+// authorization's noAuthUser. A hub needs users or a listener: with the session user alone, no
+// client could hold more than a session's grant, and no listener could run. core validates the rest
+// when it renders, a seed in a name or a rule entry first. Each machine id, of any kind, passes
+// core's shared machine-id rule and names a listener durable and queue group. An id whose durable
+// repeats another user's, of any kind, or the hub's own listener's (bus.ListenerDurable turns a
+// space into a hyphen, so "a b" and "a-b" collide) is refused as a core.InputError naming the later
+// input. The hub's own refusals name a user by its index alone: they come before core has read the
+// names, so quoting one could quote a seed.
 func authorization(users []NATSUserArgs, l *listenerUser, session *SessionUserArgs) (core.Authorization, error) {
 	if len(users) == 0 && l == nil {
 		return core.Authorization{}, errors.New("users: at least one user is required, or a listener")

@@ -47,7 +47,7 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 }
 
 // withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: a
-// delivery config over d's stores with a dedupe cache, client.RequestCoreTo as the forward, a
+// delivery config over d's stores with a dedupe cache, startRoleForward(client) as the forward, a
 // logger and a delivered counter, and a confirmation record.
 func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
@@ -61,7 +61,7 @@ func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 	})
 	d.delivery = &listenerDeliveryHandlerConfig{
 		client:            d.client,
-		forwardRole:       d.client.RequestCoreTo,
+		forwardRole:       startRoleForward(d.client),
 		registry:          d.registry,
 		sessions:          d.sessions,
 		dedupeCache:       cache,

@@ -209,8 +209,8 @@ input:
 
 - an nkey seed (`bus.HoldsSeed`) in the hub's own name, first, then in any plain string input:
   `namespace`, `name`, `serviceName`, the images, `storageClassName`, `natsCpu`, `natsMemory`,
-  `priorityClassName`, an entry of any of the three namespace lists, a user's `machineId` or
-  `dispatchMachineId`, and, of `tailnet`, `serviceName`, `tailnetDnsName`, `tailscaleImage`, a tag,
+  `priorityClassName`, an entry of any of the three namespace lists, a user's `machineId`,
+  `listenerMachineId` or `dispatchMachineId`, and, of `tailnet`, `serviceName`, `tailnetDnsName`, `tailscaleImage`, a tag,
   and the listener's `image`, `seedSecretName`, `seedSecretKey`, `machineId`, `cpu`, `memory` and
   `allowedHosts` entries. The refusal names the input by its path and never its value. A seed in
   a user's name, a rule entry or an `nkey` is refused by the authorization, as for `gcp:NatsHub`;
@@ -1591,7 +1591,7 @@ The listener's outputs are `containerName` and `port`.
 | `containerName` | `envoy-listener` | The container's name. |
 | `port` | `9020` | The port the listener serves and the health check calls. |
 | `hostBridge` | unset | The address the listener delivers to this machine's sessions at: those registered through it, and those recording `machineId` as their host. Unset, the listener uses the host each session recorded, then `host.docker.internal`. Sessions that serve on the host's loopback are at `127.0.0.1`, since the container shares the host's network. |
-| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`: the listener also subscribes to every notification topic, so a session served on this machine receives a topic the stream does not store. Only for a NATS user holding `HostPermissions`, such as a `gcp:NatsHub` user with `machineId`; under any other grant the server refuses the subscription and the listener's start ends. See [Permission sets](#permission-sets). |
+| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`: the listener also subscribes to every notification topic, so a session served on this machine receives a topic the stream does not store. Only for a NATS user holding `HostPermissions` or `ListenerHostPermissions`, such as a `gcp:NatsHub` user with `machineId` or `listenerMachineId`; under any other grant the server refuses the subscription and the listener's start ends. See [Permission sets](#permission-sets). |
 | `seed` | unset | A secret: the nkey seed of the NATS user the listener connects as. May come from another resource or stack. |
 | `waitForHealthy` | `true` | Whether `pulumi up` waits on the container's health check. See [Readiness](#readiness). |
 | `watchdog` | unset | `{host}`: deploys the watchdog on that SSH address. See [The watchdog](#the-watchdog). |
@@ -2014,7 +2014,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
 | `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
 | `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to, at start and every 30 seconds after. Every Envoy program of the deployment carries the same value. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
-| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions`, since under any other grant the listener's start ends. |
+| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions` or `ListenerHostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
 | `natsServiceArn` | required | The NATS service's ARN. The component only orders its ECS service after it, so the listener rolls out after NATS, which by then holds the key the listener presents: pass the `NatsService`'s `serviceArn` output, not a literal. |
@@ -2822,7 +2822,9 @@ its refusals is a `core.InputError` naming the input it refuses: `authorization`
 Envoy's subjects. Each is a `core.Permissions`, a publish and a subscribe `Rules` that a user takes
 as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space as `-`.
 
-`ListenerPermissions(machineID)` is what `envoy-listener` needs as that machine. It publishes to:
+`ListenerPermissions(machineID)` is what `envoy-listener` needs as that machine. Every entry below
+but the session consumers' is the base `HostPermissions` and `DispatchPermissions` are built from.
+It publishes to:
 
 - every notification topic, `notifications.>`: the subjects of the `ENVOY_NOTIFICATIONS` stream,
   the role lanes, every exception lane, and the ad-hoc topics `/v1/messages/publish` sends over
@@ -2833,9 +2835,9 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`. The stored-message get is the
   read `POST /v1/replay` makes to return the retained notifications a session missed while its
   NATS subscription was down; it reads one stored message at a time and can create, change or
-  delete nothing. `HostPermissions` and `DispatchPermissions` hold it through
-  `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
-  what it missed only through the listener;
+  delete nothing. `HostPermissions` and `DispatchPermissions` hold it through those same base
+  entries; `SessionPermissions` does not, so a session holding that set alone reads what it missed
+  only through the listener;
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
   `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
   bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
@@ -2847,43 +2849,79 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 
-It subscribes to `_INBOX.>`, and to the role lanes in the machine's queue group,
-`notifications.role.> envoy-listener-<m>`.
+It subscribes to `_INBOX.>`, and to the role lanes in the queue group every listener shares,
+`notifications.role.> envoy-roles`, so each role message is forwarded once whichever machine's
+listener takes it, and in the machine's own group, `notifications.role.> envoy-listener-<m>`, which
+a listener of an earlier release subscribes in and a listener refused the shared group falls back
+to.
+
+After those entries, and in `ListenerPermissions` and `ListenerHostPermissions` alone, come the
+calls of the session consumers, one durable pull consumer per session named `s-<session id>`
+(`bus.SessionConsumers`), on any consumer of the stream: `$JS.API.CONSUMER.CREATE` (with and
+without a filter subject in its subject), `INFO`, `DELETE` and `MSG.NEXT` on
+`ENVOY_NOTIFICATIONS.*`, the acknowledgements `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`, and the stream's
+consumer list `$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, which a listener that starts relaying
+every session at once reads instead of one info per session (a grant without it costs that
+listener one info per session). A NATS wildcard is a whole token, so these entries reach every
+consumer of the stream, other listeners' durables and Dispatch's included, and let the listener
+create a push consumer that delivers the stream's messages to any subject. That reach is why only
+a user no session shares holds them: `HostPermissions` and `DispatchPermissions` keep the
+per-durable scope of the base entries above. A listener connecting as one of those users keeps its
+own durable alone; the server refuses its consumer calls, so it answers every registration that
+asks for consumer delivery `core` with reason `no_grant` (one probe and one refusal per ten-minute
+episode), and those sessions read on their own NATS subscriptions and catch up through
+`POST /v1/replay`.
 
 `SessionPermissions()` is what any agent session needs, with `*` for the session id. It publishes
-to `_INBOX.>`, for the receipt a role delivery waits for, and `agentstream.*.frames`, and
-subscribes to `notifications.>` and `agentstream.*.control`. It does not subscribe to `_INBOX.>`,
-so a client holding this set alone may answer a request but not make one: sessions that share one
-user holding it, as a `gcp:NatsHub`'s `sessionUser` does, would otherwise each receive every other
-session's replies, so request/reply from such a session is refused by design. A host's user,
-holding `HostPermissions`, subscribes to `_INBOX.>` for its listener.
+to `_INBOX.>`, for the receipt a role delivery waits for and the replies to a session consumer's
+relay frames, and `agentstream.*.frames`, and subscribes to `notifications.>`, which holds its relay
+subject `notifications.envoy.deliver.<session id>`, and `agentstream.*.control`. It does not
+subscribe to `_INBOX.>`, so a client holding this set alone may answer a request but not make one:
+sessions that share one user holding it, as a `gcp:NatsHub`'s `sessionUser` does, would otherwise
+each receive every other session's replies, so request/reply from such a session is refused by
+design. A host's user, holding `HostPermissions`, subscribes to `_INBOX.>` for its listener.
 
 `HostPermissions(machineID)` is the grant of a host's one NATS user, which its listener and every
-session on the host share: in each direction the listener's entries, then each of the session's
-the listener's lack. A `gcp:NatsHub` user with `machineId` holds it, and a hub's own `listener`
-holds `ListenerPermissions` for the hub's hostname. Sharing one user makes the host one trust
-domain: any process that reaches the server as it, a listener's own process or any session on the
-host, holds the whole grant above, host sessions included, since sessions run as the Unix user
+session on the host share: in each direction the listener's base entries, the session consumers'
+left out, then each of the session's the base lacks, so a listener connecting as this user serves
+its sessions over core NATS. A `gcp:NatsHub` user with `machineId` holds it, and a hub's own
+`listener` holds `ListenerPermissions` for the hub's hostname. Sharing one user makes the host one
+trust domain: any process that reaches the server as it, a listener's own process or any session on
+the host, holds the whole grant above, host sessions included, since sessions run as the Unix user
 that already reads the host's seed. This repository's listener and a session, connected as one
 user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
 2.10 and 2.15.1 servers, the listener's `/v1/replay` read of a send stored while its session had
-no subscription open and the session user's refusal of that JetStream read included; `AGENTS.md`
-in this directory says how.
+no subscription open and the session user's refusal of that JetStream read included, as are a
+session consumer the listener's user creates, pulls, acks, restarts and deletes, both of its role
+lane queue groups, and the session user's refusal of a consumer create; `AGENTS.md` in this
+directory says how.
 
-`HostPermissions` is also the one set under which a listener may set `ENVOY_SUBSCRIBE_ALL_TOPICS=1`
-(`host:Listener`'s and `aws:WebhookListener`'s `subscribeAllTopics`). The listener then holds a
-core subscription on `notifications.>` in its machine's queue group `envoy-listener-live-<m>`, so a
-session served on its machine receives a topic the stream does not store, which the set's plain
-`notifications.>` subscribe entry allows in any queue group. `ListenerPermissions` and
-`DispatchPermissions` subscribe only to the role lanes and `_INBOX.>`, so the server refuses that
-subscription, and the listener's start ends with exit 1 and an ERROR naming
-`ENVOY_SUBSCRIBE_ALL_TOPICS`. A `gcp:NatsHub`'s own `listener` and `gcp:Dispatch`'s listener
-therefore never set it, and neither component takes the input. Both outcomes are checked against
-the real servers above: the listener opted in as a user holding `HostPermissions` delivers an
-ad-hoc topic to a session's serving port with no refusal, and opted in as a user holding
-`ListenerPermissions` ends its start, the server's one refusal its subscription to
-`notifications.>`.
+`ListenerHostPermissions(machineID)` is the grant of a listener's own NATS user, one no session
+shares: `ListenerPermissions(machineID)`, the session consumers' calls included, then the plain
+`notifications.>` subscribe `ENVOY_SUBSCRIBE_ALL_TOPICS` needs. It is the one set under which a
+listener both keeps its sessions' consumers and subscribes to every notification topic. A
+`gcp:NatsHub` user with `listenerMachineId` holds it, for a listener whose process is the only
+thing holding that seed: a session connecting as it could create, pull and delete any session's
+consumer. A host whose sessions share the listener's user takes `machineId` and
+`HostPermissions` instead, and keeps its sessions on the core path. This repository's listener
+runs under this set, opted in, against the real servers below: it answers a registration
+`consumer`, relays a send on the session's relay subject, and pushes a topic the stream does not
+store to a session's serving port, with no refusal.
+
+`HostPermissions` and `ListenerHostPermissions` are the sets under which a listener may set
+`ENVOY_SUBSCRIBE_ALL_TOPICS=1` (`host:Listener`'s and `aws:WebhookListener`'s
+`subscribeAllTopics`). The listener then holds a core subscription on `notifications.>` in its
+machine's queue group `envoy-listener-live-<m>`, so a session served on its machine receives a
+topic the stream does not store, which the sets' plain `notifications.>` subscribe entry allows in
+any queue group. `ListenerPermissions` and `DispatchPermissions` subscribe only to the role lanes
+and `_INBOX.>`, so the server refuses that subscription, and the listener's start ends with exit 1
+and an ERROR naming `ENVOY_SUBSCRIBE_ALL_TOPICS`. A `gcp:NatsHub`'s own `listener` and
+`gcp:Dispatch`'s listener therefore never set it, and neither component takes the input. Both
+outcomes are checked against the real servers above: the listener opted in as a user holding
+`HostPermissions` delivers an ad-hoc topic to a session's serving port with no refusal, and opted
+in as a user holding `ListenerPermissions` ends its start, the server's one refusal its
+subscription to `notifications.>`.
 
 `DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
 notification stream's info request, its stored-message get
@@ -2901,8 +2939,9 @@ on the server gets, key-value reads and watch updates included, such as the list
 this set; its seed belongs to the daemon, not to a host or session.
 
 `DispatchPermissions(machineID)` is the grant of Dispatch's one NATS user, shared by
-`envoy-dispatch` and the listener beside it. It adds to `ListenerPermissions(machineID)` the info,
-filtered create, delete and acknowledgements of Dispatch's `delivery-events` and `delivery-jobs`
+`envoy-dispatch` and the listener beside it. It adds to the base entries of
+`ListenerPermissions(machineID)`, the session consumers' left out, the info, filtered create,
+delete and acknowledgements of Dispatch's `delivery-events` and `delivery-jobs`
 durables; the key-value calls for `envoy_webhook_redelivery`; publication of every session's
 agent-stream control subject; and subscription to every session's agent-stream frames. A
 `gcp:NatsHub` user with `dispatchMachineId` holds it. No session shares the user, so it holds none
@@ -2911,7 +2950,7 @@ Whatever holds its seed, `envoy-dispatch` or the listener beside it, can still r
 frames and send control to any session; its filtered create on `delivery-events` lets it create
 that durable on any filter, so it can read any retained notification; and, since NATS checks no
 push consumer's deliver subject against a grant, a consumer it creates can deliver any payload onto
-a session's frames. Its `_INBOX.>` subscription, `ListenerPermissions`'s, receives every reply any
+a session's frames. Its `_INBOX.>` subscription, the base grant's, receives every reply any
 client on the server gets, other listeners' durable push deliveries included. The real
 `envoy-dispatch` runs under that grant against nats-server 2.10 and 2.15.1 in
 `core/dispatch_permissions_live_test.go`, which also checks Dispatch's own user is refused a
