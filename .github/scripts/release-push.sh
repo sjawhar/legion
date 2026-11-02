@@ -468,22 +468,30 @@ lock=bun.lock
 
 # lock_set_version <package-dir> <version>: print the lockfile read on stdin
 # with the "version" line of its workspace entry for <package-dir> set to
-# <version>, every other line as it was. The entry is the line that is exactly
-# `    "<package-dir>": {` inside the top-level "workspaces" object, through its
-# closing `    }` line, and its version line the one line in it that is exactly
-# `      "version": "<anything>",` (a nested object's keys sit deeper). Text tools
-# only, never bun: a publish job holding credentials runs this. Exits 1, the
-# output then incomplete, unless the lockfile holds exactly one such entry with
-# exactly one such line.
+# <version>, every other byte as it was, a missing final newline included. The
+# entry is the line that is exactly `    "<package-dir>": {` inside the
+# top-level "workspaces" object, through its closing `    }` line, and its
+# version line the one line in it that is exactly `      "version":
+# "<anything>",` (a nested object's keys sit deeper). Both arguments reach awk
+# through its environment, which it reads literally, never through -v, which
+# would decode a backslash. A sentinel byte appended to the input marks its
+# end, so the last line is printed with a newline only when it had one. Text
+# tools only, never bun: a publish job holding credentials runs this. Exits 1,
+# its output not to be used, unless the lockfile holds exactly one such entry
+# with exactly one such line.
 lock_set_version() {
-  awk -v entry="    \"$1\": {" -v version="$2" '
+  { cat; printf '\001'; } | LOCK_ENTRY="    \"$1\": {" LOCK_VERSION=$2 awk '
     $0 == "  \"workspaces\": {" { workspaces = 1 }
     workspaces && /^  },?$/ { workspaces = 0 }
-    workspaces && $0 == entry { inside = 1; entries++ }
+    workspaces && $0 == ENVIRON["LOCK_ENTRY"] { inside = 1; entries++ }
     inside && /^    },?$/ { inside = 0 }
-    inside && /^      "version": "[^"]*",$/ { $0 = "      \"version\": \"" version "\","; lines++ }
-    { print }
-    END { exit !(entries == 1 && lines == 1) }'
+    inside && /^      "version": "[^"]*",$/ { $0 = "      \"version\": \"" ENVIRON["LOCK_VERSION"] "\","; lines++ }
+    NR > 1 { print last }
+    { last = $0 }
+    END {
+      printf "%s", substr(last, 1, length(last) - 1)
+      exit !(entries == 1 && lines == 1)
+    }'
 }
 
 # is_bump_change <changed> <package-dir>: true when <changed>, `git diff
@@ -1429,18 +1437,27 @@ case "$command" in
       fi
       # HEAD's parent is an older main commit (main moved since the checkout,
       # or the push lost the race): the bump is rebased onto main's tip and the
-      # next attempt checks it there. Main's manifest at or past this version
-      # needs nothing pushed (the header's push-main paragraph). A manifest
-      # main deleted, or one without a plain version, is left to the rebase
-      # below.
+      # next attempt checks it there. Main's manifest past this version needs
+      # nothing pushed, nor does main's manifest at this version when main's
+      # lockfile entry holds it too (the header's push-main paragraph); a
+      # lockfile still behind is left to the rebase, so a bump that corrects
+      # the lockfile alone is not dropped when main moves. A manifest main
+      # deleted, or one without a plain version, is left to the rebase below.
       main_version=$(git show "$upstream:$manifest" 2>/dev/null | jq -r .version 2>/dev/null) || main_version=""
+      reason=""
       if is_plain_version "$main_version" &&
         [ "$(printf '%s\n%s\n' "$version" "$main_version" | sort -V | tail -n 1)" = "$main_version" ]; then
-        if [ "$main_version" = "$version" ]; then
-          reason="main's $manifest already holds v$version, so this version bump has nothing to add."
-        else
+        if [ "$main_version" != "$version" ]; then
           reason="main's $manifest holds v$main_version, a later release than v$version, so this version bump is superseded."
+        else
+          main_lock=$(git rev-parse -q --verify "$upstream:$lock") || main_lock=""
+          set_lock=$(git show "$upstream:$lock" 2>/dev/null | lock_set_version "$package_dir" "$version" | git hash-object --stdin) || set_lock=""
+          if [ -n "$main_lock" ] && [ "$main_lock" = "$set_lock" ]; then
+            reason="main's $manifest and $lock already hold v$version, so this version bump has nothing to add."
+          fi
         fi
+      fi
+      if [ -n "$reason" ]; then
         echo "::notice title=Version bump not pushed::$reason"
         if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
           printf '**Version bump for %s v%s not pushed.** %s\n' "$package_dir" "$version" "$reason" >> "$GITHUB_STEP_SUMMARY"

@@ -477,6 +477,26 @@ check "origin/main's lockfile entry holds the version" "$(is "$(lock_version "$w
 check "origin/main's tip changes the lockfile alone" "$(is "$(git -C "$work/c2j/origin.git" diff --name-only main~1 main)" bun.lock)"
 
 echo
+echo "Case 2k: a bump of the lockfile alone lands when main moves before its push"
+# The manifest already at the version, so only the lockfile's entry tells the
+# bump from nothing; an unrelated commit on main must not make push-main drop it.
+setup "$work/c2k"
+set_version "$work/c2k/a" 1.0.1
+git -C "$work/c2k/a" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
+git -C "$work/c2k/a" push -q origin main
+git -C "$work/c2k/b" pull -q origin main
+set_lock_version "$work/c2k/b" 1.0.1
+git -C "$work/c2k/b" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
+change "$work/c2k/a" src/guard.js "feat: guard"
+git -C "$work/c2k/a" push -q origin main
+push_main "$work/c2k/b" 1.0.1
+check "push-main exits 0" "$(is "$rc" 0)"
+check "no notice says the bump was not pushed" "$(is "$(contains "$out" '^::notice title=Version bump not pushed')" false)"
+check "origin/main's lockfile entry holds the version" "$(is "$(lock_version "$work/c2k/origin.git" main)" 1.0.1)"
+check "origin/main still holds main's own commit" "$(git -C "$work/c2k/origin.git" cat-file -e main:src/guard.js && echo true || echo false)"
+check "clone is not left mid-rebase" "$(not_rebasing "$work/c2k/b")"
+
+echo
 echo "Case 2e: a merge commit over main's tip is refused, even one carrying only the bump"
 # Its first parent is the seed, its second main's tip, its tree the seed's plus
 # the bump: one commit main does not have, changing only the manifest against
@@ -644,7 +664,7 @@ GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z"
 check "the re-run's bump is a different commit from main's" "$([ "$(git -C "$work/c7/b" rev-parse HEAD)" != "$(git -C "$work/c7/origin.git" rev-parse main)" ] && echo true || echo false)"
 push_main "$work/c7/b" 1.0.1 "$work/c7/summary.md"
 check "push-main exits 0" "$(is "$rc" 0)"
-check "notice says main already holds the version" "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package.json already holds v1\.0\.1")"
+check "notice says main already holds the version" "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package.json and bun\.lock already hold v1\.0\.1")"
 check "origin/main holds the version" "$(is "$(origin_version "$work/c7")" 1.0.1)"
 check "origin/main has one bump commit, not two" "$(is "$(release_commits "$work/c7")" 1)"
 check "clone is not left mid-rebase" "$(not_rebasing "$work/c7/b")"
@@ -1076,6 +1096,39 @@ check "no entry in the lockfile: exits 1 naming the lockfile and the entry" \
   "$(is "$rc|$(contains "$out" '^::error::release-push.sh tag: bun\.lock holds no workspace entry "packages/pkg" with one "version" line, so the bump cannot set it to 1\.0\.1$')" '1|true')"
 check "no entry in the lockfile: nothing is committed, tagged or left behind" \
   "$(is "$(git -C "$clone" log -1 --format=%s)|$(git -C "$clone" tag -l)|$(git -C "$clone" status --porcelain)" "chore: rename the entry|| M packages/pkg/package.json")"
+# A lockfile whose last line has no newline keeps it so: the bump changes the one
+# line, push-main lands it, and a bump that also adds the newline is refused.
+setup "$work/t3"
+clone="$work/t3/a"
+printf '%s' "$(<"$clone/bun.lock")" > "$clone/bun.lock"
+git -C "$clone" commit -q -am "chore: a lockfile without a final newline"
+git -C "$clone" push -q origin main
+tag_run "$clone" 1.0.1 pkg-v1.0.1
+check "no final newline: tag exits 0" "$(is "$rc" 0)"
+check "no final newline: the bump changes one line of the lockfile, which still ends without a newline" \
+  "$(is "$(git -C "$clone" diff --numstat HEAD^ HEAD -- bun.lock)|$(git -C "$clone" show HEAD:bun.lock | tail -c 1)" "1	1	bun.lock|}")"
+deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main packages/pkg 1.0.1
+check "no final newline: push-main lands the bump" "$(is "$rc|$(lock_version "$work/t3/origin.git" main)" "0|1.0.1")"
+clone="$work/t3/b"
+git -C "$clone" pull -q origin main
+set_version "$clone" 1.0.2
+set_lock_version "$clone" 1.0.2
+printf '\n' >> "$clone/bun.lock"
+git -C "$clone" commit -q -am "chore: release pkg v1.0.2 [skip ci]"
+deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main packages/pkg 1.0.2
+check "no final newline: push-main refuses a bump that adds one" \
+  "$(is "$rc|$(contains "$out" "^::error::HEAD's bun\.lock differs from its parent's in more than the version line")" "1|true")"
+# A backslash in the package dir is taken literally: packages/pk\g is not packages/pkg.
+setup "$work/t4"
+clone="$work/t4/a"
+mkdir "$clone/packages/pk\\g"
+printf '{\n  "name": "pkg-backslash",\n  "version": "1.0.0"\n}\n' > "$clone/packages/pk\\g/package.json"
+git -C "$clone" add -A
+git -C "$clone" commit -q -m "feat: a package dir with a backslash"
+tag_run "$clone" 1.0.1 pkg-v1.0.1 'packages/pk\g' pkg-backslash
+check "a backslash in the package dir: tag refuses, finding no entry of that name" \
+  "$(is "$rc|$(contains "$out" 'bun\.lock holds no workspace entry "packages/pk\\g"')" "1|true")"
+check "a backslash in the package dir: packages/pkg's entry is untouched" "$(is "$(lock_version "$clone" HEAD)|$(git -C "$clone" diff --quiet -- bun.lock && echo clean)" "1.0.0|clean")"
 
 echo
 echo "Case: one publish job releases two packages from the run's commit"
@@ -1187,14 +1240,14 @@ GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z"
 check "re-run, pkg: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
 check "re-run, pkg: tag reuses its own tag" "$(contains "$tag_out" '^Tag pkg-v1\.0\.1 already exists for version 1\.0\.1; reusing it$')"
 check "re-run, pkg: push-main says main already holds the version" \
-  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package\.json already holds v1\.0\.1")"
+  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package\.json and bun\.lock already hold v1\.0\.1")"
 from_run "$pj/rerun"
 GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
   publish_package "$pj/rerun" packages/other other 2.0.1 other-v2.0.1
 check "re-run, other: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
 check "re-run, other: tag reuses its own tag" "$(contains "$tag_out" '^Tag other-v2\.0\.1 already exists for version 2\.0\.1; reusing it$')"
 check "re-run, other: push-main says main already holds the version" \
-  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/other/package\.json already holds v2\.0\.1")"
+  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/other/package\.json and bun\.lock already hold v2\.0\.1")"
 check "re-run: origin's main and tags are unchanged" "$(is "$(origin_refs)" "$refs")"
 
 # The control: the same re-run from one clone, without the detach between the packages.
