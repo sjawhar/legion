@@ -65,6 +65,34 @@ func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoi
 	return state, point, read, settles, nil
 }
 
+// clonePoint is readPoint for a live write's fork of the room (warmFork): where readPoint gives
+// the room's state encoded for its caller to decode, this gives the room's replica cloned under
+// the replica's lock with options, the document that decode would have built
+// (renderedReplica.clonePoint, forkOptions). The point, the drain, what it classifies and what
+// it arms are the read point's.
+//
+// It hands back a clone or an encoded state, never both: a replica holding no state has no
+// document to clone, and so has a room whose load listed no replica, whose state is taken under
+// its own lock at position 0 as readPoint takes it. Its caller decodes that state holding no
+// lock, as every fork read did before (buildFork). The caller holds no state lock and is not
+// inside a Yjs transaction on live.
+func (s *Service) clonePoint(room string, live *crdt.Doc, options ...crdt.DocOption) (*crdt.Doc, []byte, roomPoint, replicaRead, error) {
+	if live == nil {
+		return nil, nil, roomPoint{}, replicaRead{}, errDocUnloaded
+	}
+	point := roomPoint{cursor: s.cursorOf(live)}
+	replica := s.replicaOf(live)
+	if replica == nil {
+		return nil, crdt.EncodeStateAsUpdateV1(live, nil), point, replicaRead{}, nil
+	}
+	clone, copied, seq, read, settles := replica.clonePoint(room, live, options...)
+	point.seq = seq
+	if settles {
+		s.scheduleSettle(room)
+	}
+	return clone, copied, point, read, nil
+}
+
 // readTreeQuietly is readPointQuietly for a settlement's own read of the room
 // (readSettlementTree), which gives the tree the room's replica holds, read under the replica's
 // lock (renderedReplica.readTreePoint), where a read point gives the room's state encoded, which

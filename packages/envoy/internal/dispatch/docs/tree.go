@@ -351,7 +351,15 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 // that cleaned up would hold a state the room never held. A write's fork commits its own writes
 // locally, which never clean up.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems), crdt.WithFormatCleanup(false))...)
+	return crdt.New(documentCopyOptions(options...)...)
+}
+
+// documentCopyOptions is what newDocumentCopy builds a document with, for a caller that needs the
+// options rather than a document built from them: a write's fork, which is built from them both
+// by decoding a state into a new document (buildFork) and by cloning the room's replica
+// (renderedReplica.clonePoint), and the two must be the same document (forkOptions).
+func documentCopyOptions(options ...crdt.DocOption) []crdt.DocOption {
+	return append(options, crdt.WithMaxPendingItems(maxUpdateItems), crdt.WithFormatCleanup(false))
 }
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
@@ -733,6 +741,51 @@ func (r *renderedReplica) readPoint(room string, live *crdt.Doc) (state []byte, 
 		settles = settles || took
 	}
 	return crdt.EncodeStateAsUpdateV1(r.doc, nil), r.seq, replicaRead{mark: r.mark(), markdown: r.markdown}, settles
+}
+
+// clonePoint is readPoint for a caller that wants the room's state as a document of its own
+// rather than encoded: a live write's fork of the room (warmFork), which decoded the read
+// point's state into one. It locks, drains and loops over a replica holding no state exactly as
+// readPoint does, so it stands at the same commit position, classifies the same updates, and
+// returns the same seq, read and settles.
+//
+// Where the replica holds state the copy is r.doc cloned under mu with options, which must be
+// the options that decode built its document with (forkOptions): a clone is that document, byte
+// for byte in its encoding, its state vector and its delete set (crdt.Doc.Clone), since nothing
+// encodes or decodes the state. Clone takes r.doc's read lock, which is the order every read of
+// the replica takes - the replica's lock, then the document's, as the encode takes it - and it
+// must not run inside a transaction on r.doc, which only a holder of mu writes. A clone differs
+// from the decoded copy for one document alone, a source with an UndoManager attached, which
+// keeps the content of a deleted struct the decode collects; the replica has none.
+//
+// The trade is the hold, as readTreePoint's is: the whole copy runs under mu, where the encode
+// ran under it and the decode outside. BenchmarkWriteFork measures both on a two-core pod: on
+// its 200 KiB document the fork falls from about 185 ms, 50 MB and 585,000 allocations to about
+// 90 ms, 27 MB and 193,000, while the hold rises from the encode's 31 ms to the clone's whole
+// 90 ms; on its 51 KiB document the fork falls from about 50 ms, 13.6 MB and 157,000
+// allocations to about 22 ms, 7 MB and 51,000, with the hold rising from 8 ms to 22 ms. So the
+// room's update observer waits around three times as long for a write that costs half of what
+// it did and allocates a third.
+//
+// A replica holding no state has no document to clone, so the copy is taken from live encoded,
+// as readPoint takes it, and handed back to be decoded outside mu (buildFork), which is what a
+// fork of such a room did with it before. A caller gets the clone or that copy, never both.
+func (r *renderedReplica) clonePoint(room string, live *crdt.Doc, options ...crdt.DocOption) (clone *crdt.Doc, copied []byte, seq uint64, read replicaRead, settles bool) {
+	r.lockForUpdate()
+	defer r.mu.Unlock()
+	settles, _ = r.drainLocked(room)
+	for r.doc == nil {
+		state := crdt.EncodeStateAsUpdateV1(live, nil)
+		base, updates := r.log.Drain()
+		if base == nil && len(updates) == 0 {
+			// A replica holding no state rendered none, so nothing vouches for the copy's
+			// rendering; its mark still names the run of the replica the copy was taken in.
+			return nil, state, r.seq, replicaRead{mark: r.mark()}, settles
+		}
+		took, _ := r.takeLocked(room, base, updates)
+		settles = settles || took
+	}
+	return r.doc.Clone(options...), nil, r.seq, replicaRead{mark: r.mark(), markdown: r.markdown}, settles
 }
 
 // readTreePoint is readPoint for a caller that wants the room's tree rather than its state

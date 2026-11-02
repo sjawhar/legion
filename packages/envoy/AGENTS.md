@@ -572,19 +572,24 @@ Inside a write transaction, `docTree` and a version's capture take the write's o
 `heldTree` still reads the fork and returns a tree its reader owns.
 
 A read takes up to three locks, in one order:
-the room's state lock; then the replica's; then the live document's, for a copy's encode.
+the room's state lock; then the replica's; then the live document's, for a copy's encode or clone.
 A read of a resident room outside a write (`readLive`, through `holdLive`) only tries the replica's lock (`hold`), and its caller may hold the room's state lock.
 A version's capture, a settlement's read and a live write's fork read instead read the room at an exact commit position (`Service.readPoint`, `docs/flush.go`):
 an author the update observer credits after the capture's bound is numbered past it and stays pending for the next version, and every update through that position is stored before the version (`Ledger.flushThrough`).
 A settlement takes the replica's tree at that position rather than its state encoded (`Service.readTreeQuietly`, `renderedReplica.readTreePoint`), read under the replica's lock with `pmdoc.ReadUnshared`, since only a holder of that lock reads or writes the replica;
 it holds the lock for the walk rather than for an encode, and decodes nothing afterwards, where it used to decode that state into a document of its own to read one tree from it (`stateTree`), which was 9.67 GB of the 90 GB a 39-minute LINUX replay allocated (sjawhar/legion#2535).
 A room whose replica holds no state, or that lists none, has no tree to walk, so its copy is taken from the room itself and still decoded (`stateTree`), as every read of such a room was.
+A live write's fork takes the replica cloned at that position rather than its state encoded (`Service.clonePoint`, `renderedReplica.clonePoint`, over `crdt.Doc.Clone` in the pinned fork), under the replica's lock, where it encoded the replica under that lock and decoded those bytes into the write's own document (`readPoint`, `buildFork`);
+the clone is the document that decode built - byte for byte in its encoding, its state vector and its delete set - and is built with the options that decode used (`forkOptions`), so the fork a write runs on, versions and publishes is unchanged (`TestTheClonedForkMatchesTheReadPointsForkAcrossTheCorpus`, 710 fork pairs over the 142-document corpus, each compared again after a typed word and an appended paragraph).
+`BenchmarkWriteFork` prices the trade on a two-core pod: on a 200 KiB document the fork falls from about 185 ms, 50 MB and 585,000 allocations to about 90 ms, 27 MB and 193,000, and on a 51 KiB one from about 50 ms, 13.6 MB and 157,000 to about 22 ms, 7 MB and 51,000, while the whole copy now runs under the replica's lock, so the hold the update observer waits for rises from the encode's 31 ms to 90 ms, and from 8 ms to 22 ms.
+A room whose replica holds no state, or that lists none, has no document to clone, so its copy is taken from the room encoded and decoded outside the lock (`buildFork`), as every fork was.
+The cold fork, read from the store, stays a decode (`coldFork`).
 
 Three acquisitions block on the replica's lock (`lockForUpdate`) and classify each update they drain under it, which takes the room's state lock from inside it (`observeAskBlocksForUpdate`, `creditContentChange`, `queueUpdateClass`), nested the other way around:
-the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.readPoint`, `renderedReplica.readTreePoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/tree.go`.
+the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.readPoint`, `renderedReplica.readTreePoint`, `renderedReplica.clonePoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/tree.go`.
 This stays deadlock-free because of one rule for all three:
 their callers hold no room state lock and run inside no Yjs transaction, and only a Yjs transaction's own function holds a document's lock, taking neither of the others.
-So nothing waits on the state lock while one of them waits for the replica's, and the encode `readPoint` runs under the live document's lock never meets a held state lock.
+So nothing waits on the state lock while one of them waits for the replica's, and the encode `readPoint` runs under the live document's lock, like the clone `clonePoint` takes of the replica under its read lock, never meets a held state lock.
 Every other acquisition of the replica's lock only tries it, and never while holding the live document's lock:
 the caller of `readLive` or `holdLive` must not run inside a Yjs transaction on the document, since the copy encodes under that lock.
 A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads and holds the room:
@@ -623,14 +628,14 @@ see Critical conventions for what keeps those filters current.
 Writes to one room never meet each other unlocked.
 A browser's update reaches the room as ygo applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`, `crdt.ApplyUpdateV1`), so two browsers' updates take turns.
 `Server.Apply` holds no lock across its callback, so the service never walks the room's tree there:
-a write reads and writes its transaction's fork, and builds the fork from an encode taken under the lock (`forkLive`);
+a write reads and writes its transaction's fork, and builds the fork from the room's replica cloned under the replica's lock, or from an encode taken under the document's lock where no replica holds the room's state (`forkLive`, `warmFork`);
 the room has one writer slot (`openLiveWrite`); and a committed write reaches the room in a transaction and is read back through `readLive`.
 A helper that walks the room inside `Server.Apply` outside a transaction, as an unjoined write once did, races every peer's update; no production path does.
 `TestThreeBrowsersAndTheAPIEditOneRoomAtOnce` has three websocket peers type while the API edits the document, until 50 of its edits have overlapped their typing.
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason:
 whether the service builds the decoder (`newDocumentCopy`:
-the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's decode of an update it appends: a browser's, which no document here encoded (`appendUpdate`), and one whose header names no single client's item count (`refuseUpdateItemCap`)) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
+the copy, a write's fork where it is decoded rather than cloned (the clone is built with the same options, `forkOptions`), every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's decode of an update it appends: a browser's, which no document here encoded (`appendUpdate`), and one whose header names no single client's item count (`refuseUpdateItemCap`)) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
 ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.
 `TestTheStoreTakesOneBrowserUpdateItsRoomTook` is a browser's update the store decodes itself, which a check at ygo's default queue refuses, failing the room;

@@ -178,7 +178,7 @@ type liveWrite struct {
 }
 
 // forkReadMark is what a warm fork read found of the room replica (renderedReplica) just before it
-// encoded the room's state: the replica's epoch and foreign count, read without its lock
+// copied the room's state: the replica's epoch and foreign count, read without its lock
 // (renderedReplica.mark). warm says a replica stood behind the read at all; a mark that is not
 // warm vouches for nothing. A replica that later holds every logged commit at the same epoch and
 // foreign count (renderedReplica.standsAt) consumed nothing since but published live writes'
@@ -380,38 +380,42 @@ var errForkReleased = fmt.Errorf("%w: the transaction can no longer write this d
 // rebuildFork builds write's fork again, after an operation abandoned it (applyLive), on the state
 // the transaction's read found and with the transaction's own writes applied: the store's for a
 // cold fork, which the advisory lock the transaction holds keeps where that read found it, and the
-// room's for a warm one, only while the room still stands at the read point (errForkReleased
-// otherwise).
+// room's for a warm one, taken as the fork read takes it (clonePoint, warmFork) and only while
+// the room still stands at the read point (errForkReleased otherwise).
 //
 // The read point's own mark stays as the fork read left it (warmFork): the room has committed
 // nothing since that read, so a replica standing at the mark has consumed only this write's
 // published updates, which the rebuilt fork holds too. The replica's rendering does not survive,
 // since the fork holds those updates and the replica does not yet.
 func (s *Service) rebuildFork(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
-	var state []byte
+	var fork *crdt.Doc
 	if write.cold {
 		loaded, err := s.persistence.Load(ctx, write.artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 		}
-		state = loaded.Update
+		if fork, err = buildFork(write.clientID, loaded.Update); err != nil {
+			return nil, fmt.Errorf("fork live document: %w", err)
+		}
 	} else {
 		live := s.srv.GetDoc(write.artifactID)
 		if live == nil {
 			return nil, errForkReleased
 		}
-		read, point, _, err := s.readPoint(write.artifactID, live)
+		clone, state, point, _, err := s.clonePoint(write.artifactID, live, forkOptions(write.clientID)...)
 		if err != nil {
 			return nil, err
 		}
 		if point != write.point {
 			return nil, errForkReleased
 		}
-		state = read
-	}
-	fork, err := buildFork(write.clientID, state)
-	if err != nil {
-		return nil, fmt.Errorf("fork live document: %w", err)
+		// The clone is the fork where the replica held state; otherwise the room's own copy is
+		// decoded here, once the point has vouched for it, as the whole read did before.
+		if fork = clone; fork == nil {
+			if fork, err = buildFork(write.clientID, state); err != nil {
+				return nil, fmt.Errorf("fork live document: %w", err)
+			}
+		}
 	}
 	for _, update := range write.updates {
 		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
@@ -474,7 +478,10 @@ func (s *Service) roomBehindHead(live *crdt.Doc, head int64) bool {
 }
 
 // warmFork is readFork's fork of live, the room resident for write's document: the room as of an
-// exact commit position (readPoint), every update through which the write stores ahead of its own.
+// exact commit position (clonePoint), every update through which the write stores ahead of its
+// own. The fork is the room's replica cloned under the replica's lock, where the replica holds
+// state, and otherwise the copy that read took from the room itself, decoded holding no lock
+// (buildFork); either way it is the document that copy's decode builds (forkOptions).
 //
 // It records on write what that read found of the room replica (replicaRead): the replica's epoch
 // and foreign count at the position it copied (forkRead), and the replica's rendering of that very
@@ -492,13 +499,14 @@ func (s *Service) roomBehindHead(live *crdt.Doc, head int64) bool {
 // replica outlives the read.
 func (s *Service) warmFork(write *liveWrite, live *crdt.Doc) (*crdt.Doc, error) {
 	seq := write.state.creditSeq.Load()
-	state, point, read, err := s.readPoint(write.artifactID, live)
+	fork, state, point, read, err := s.clonePoint(write.artifactID, live, forkOptions(write.clientID)...)
 	if err != nil {
 		return nil, err
 	}
-	fork, err := buildFork(write.clientID, state)
-	if err != nil {
-		return nil, fmt.Errorf("fork live document: %w", err)
+	if fork == nil {
+		if fork, err = buildFork(write.clientID, state); err != nil {
+			return nil, fmt.Errorf("fork live document: %w", err)
+		}
 	}
 	// The instance once, rather than its hold and its cursor looked up one after the other: the
 	// two are halves of one *roomInstance, and a room evicted between the lookups would leave the
@@ -568,9 +576,18 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 	return fork, nil
 }
 
+// forkOptions is what a write's fork of a document is built with: client, whose items the
+// fork's own writes are, and the options every copy of a room's document takes
+// (newDocumentCopy). The two ways a fork is built take this one list, so they cannot drift: the
+// decode of a read point's state (buildFork) and the clone of the room's replica a warm fork
+// takes instead (renderedReplica.clonePoint), which must be the document that decode builds.
+func forkOptions(client crdt.ClientID) []crdt.DocOption {
+	return documentCopyOptions(crdt.WithClientID(client))
+}
+
 // buildFork is a write's fork of state, an encoded document state, whose items client authors.
 func buildFork(client crdt.ClientID, state []byte) (*crdt.Doc, error) {
-	fork := newDocumentCopy(crdt.WithClientID(client))
+	fork := crdt.New(forkOptions(client)...)
 	if len(state) == 0 {
 		return fork, nil
 	}
