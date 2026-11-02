@@ -2,12 +2,14 @@ package api
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 )
 
@@ -18,18 +20,28 @@ import (
 // write are theirs.
 
 // putUploadedFile writes an upload's bytes to the file store under sha before storeArtifact opens
-// its transaction, and answers the request itself when the store refuses. With no store, or for
-// a document, it writes nothing. It reports whether the upload may go on.
+// its transaction, and answers the request itself when the upload is refused or the store refuses
+// it. With no store, or for a document, it writes nothing. It reports whether the upload may go on.
 //
 // The object goes first: the bytes (up to maxArtifactBlobSize) cross the network to a store whose
 // wait nothing here bounds, and the transaction takes a pooled connection and the owner's row
-// lock, which every other writer of that issue queues behind. A store that refuses leaves no row
-// behind; anything that refuses after it (a closed issue, a kind mismatch, a new name past its
-// bound, a failed insert) leaves an object no row names, which a later upload of the same bytes
-// reuses. The row records the hash the object is keyed by and no bytes.
-func (s *server) putUploadedFile(w http.ResponseWriter, r *http.Request, kind, sha string, input artifactUploadInput) bool {
+// lock, which every other writer of that issue queues behind. So the refusals that transaction
+// makes are made first, from the pool and locking nothing (refuseUploadBeforeItsObject; an issue
+// that is closed or missing is refused before the body is read, refuseUploadToAClosedIssue):
+// nothing deletes an object, and one a refused upload left would be named by no row. Deleting it
+// on refusal instead is not safe, since the store is keyed by the bytes' hash and another version,
+// or another upload in flight, can name the same object. The transaction's own checks still
+// decide: an upload this check passes that a concurrent write then makes refusable (another
+// upload taking its name with another kind, the issue closing), or whose insert fails, leaves an
+// object no row names, which a later upload of the same bytes reuses. The row records the hash
+// the object is keyed by and no bytes.
+func (s *server) putUploadedFile(w http.ResponseWriter, r *http.Request, kind, sha string, input artifactUploadInput, target artifactTarget) bool {
 	if kind == "doc" || s.deps.Files == nil {
 		return true
+	}
+	if err := s.refuseUploadBeforeItsObject(r.Context(), target, input.name, kind); err != nil {
+		s.writeHandlerError(w, err)
+		return false
 	}
 	if err := s.deps.Files.Put(r.Context(), sha, input.contentType, input.content); err != nil {
 		slog.Error("dispatch: store an uploaded file", "sha256", sha, "size", len(input.content), "error", err)
@@ -37,6 +49,38 @@ func (s *server) putUploadedFile(w http.ResponseWriter, r *http.Request, kind, s
 		return false
 	}
 	return true
+}
+
+// refuseUploadBeforeItsObject answers, from the pool and locking nothing, the refusal
+// storeArtifact's transaction would make of a file or image upload to target under name: a
+// project that does not exist, an artifact the name or slug finds whose kind is not kind, or a new
+// artifact whose name or reference key is past its bound. It reads as that transaction reads, so
+// the two refuse alike whenever nothing writes the owner's artifacts between them.
+func (s *server) refuseUploadBeforeItsObject(ctx context.Context, target artifactTarget, name, kind string) error {
+	pool := s.deps.Store.Pool
+	if target.IssueKey == nil && target.Session == "" {
+		if _, err := s.loadProject(ctx, pool, target.Project); err != nil {
+			return err
+		}
+	}
+	artifact, err := lookupArtifactByNameOrSlug(ctx, pool, target, name)
+	if err == nil {
+		if artifact.Kind != kind {
+			return artifactKindMismatch(name, artifact, kind)
+		}
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if refusal := newArtifactNameRefusal(name); refusal != nil {
+		return refusal
+	}
+	slug, err := s.nextArtifactSlug(ctx, pool, target, name)
+	if err != nil {
+		return err
+	}
+	return newArtifactKeyRefusal(target, slug)
 }
 
 // serveFileVersion answers a file version's download under the download headers: the file's own

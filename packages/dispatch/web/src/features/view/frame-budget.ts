@@ -40,10 +40,19 @@ const slots = new Map<Element, FrameSlot>();
 /** The two observers, made with the first slot and dropped with the last. */
 let watchers: IntersectionObserver[] = [];
 
+/** Watches every slot's own box, made and dropped with those. A frame that starts, stops or is
+ *  given a height by its page resizes its slot, which moves every block under it, so the four
+ *  nearest the screen are not the four the last report ranked. Without it a block the reader is
+ *  looking at can wait forever behind one that has scrolled off, which is what a `view` block in
+ *  a reply did: the four frames above it shrank from their 400 px to the height their pages
+ *  reported after it registered, and nothing crossed either margin again, so the ranking that
+ *  left it out was never re-made (dispatch://INFRA-682). */
+let sizes: ResizeObserver | undefined;
+
 /**
  * How far the slot is from the screen, in pixels: zero while any of it is on screen. The ranking
- * pass reads it once per slot, and only when an observer reports a change, so scrolling alone
- * costs no layout read.
+ * pass reads it once per slot, and only when an observer reports a change — a block crossing
+ * either margin, or any slot's box changing size — so scrolling alone costs no layout read.
  */
 function distanceFromScreen(element: Element): number {
   const rectangle = element.getBoundingClientRect();
@@ -112,8 +121,11 @@ export function releaseViewFrame(element: Element): void {
   }
   if (last) {
     watchers = [];
+    sizes?.disconnect();
+    sizes = undefined;
     return;
   }
+  sizes?.unobserve(element);
   rankFrames();
 }
 
@@ -145,8 +157,10 @@ export function registerViewFrame(
       }),
     ];
   }
+  sizes ??= new ResizeObserver(rankFrames);
   for (const watcher of watchers) {
     watcher.observe(element);
   }
+  sizes.observe(element);
   return () => releaseViewFrame(element);
 }

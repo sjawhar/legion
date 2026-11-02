@@ -87,6 +87,12 @@ interface MarkedWindow extends Window {
   __viewData?: ViewDataMessage[];
 }
 
+/** Every height the block has given its frame, in order, as the Dispatch page's own window
+ *  records them for the height row. */
+interface HeightWindow extends Window {
+  __viewHeights?: number[];
+}
+
 /** The block whose caption is `caption`, in a document or in any body. */
 function viewBlock(page: Page, caption: string): Locator {
   return page.locator('section[data-proof-block-type="view"]').filter({ hasText: caption });
@@ -472,19 +478,45 @@ test("a view block's frame is 400 pixels until its page reports, then held to 10
         page: `dispatch://${fixture.issue}/artifact/heights-html`,
       })
     );
-    const frame = viewBlock(page, "A page that reports heights.").locator("iframe");
+    const block = viewBlock(page, "A page that reports heights.");
+    const frame = block.locator("iframe");
     const height = async () => Math.round((await frame.boundingBox())?.height ?? 0);
 
     await expect(frame).toBeVisible();
     expect(await height(), "A1: 400 pixels before the page reports a height").toBe(400);
+    // Every height the block gives the frame, recorded as it is given. Sampling for them
+    // instead is a race the row cannot win: the reports are a second apart, so each height
+    // stands for exactly one second, which is also the widest interval `expect.poll` settles
+    // into - a grid whose steps are as wide as the window can step over it entirely, and in
+    // WebKit, whose round-trips are slower, it did (sjawhar/legion#2647). The block writes each
+    // height on the frame's own element, so the page records them itself and the row reads the
+    // whole sequence.
+    await page.evaluate(() => {
+      const given: number[] = [];
+      (window as HeightWindow).__viewHeights = given;
+      const host = document.querySelector("[data-dispatch-view-frame]");
+      if (host === null) {
+        throw new Error("no view frame slot on the page");
+      }
+      new MutationObserver(() => {
+        const element = host.querySelector("iframe");
+        const applied =
+          element === null ? Number.NaN : Math.round(Number.parseFloat(element.style.height));
+        if (!Number.isNaN(applied) && given.at(-1) !== applied) {
+          given.push(applied);
+        }
+      }).observe(host, { attributeFilter: ["style"], attributes: true, subtree: true });
+    });
+    const given = () => page.evaluate(() => (window as HeightWindow).__viewHeights ?? []);
     await expect
-      .poll(height, { message: "A1: a reported 50 is held to 100", timeout: 10_000 })
-      .toBe(100);
-    await expect
-      .poll(height, { message: "A1: a reported 5,000 is held to 2,000", timeout: 10_000 })
-      .toBe(2_000);
+      .poll(given, {
+        message: "A1: a reported 50 is held to 100 and a reported 5,000 to 2,000",
+        timeout: 15_000,
+      })
+      .toEqual([100, 2_000]);
     await page.waitForTimeout(2_000);
-    expect(await height(), 'A1: a reported "abc" changes nothing').toBe(2_000);
+    expect(await given(), 'A1: a reported "abc" changes nothing').toEqual([100, 2_000]);
+    expect(await height(), "A1: and the frame is still 2,000 pixels tall").toBe(2_000);
   } finally {
     await alice.close();
   }

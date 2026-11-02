@@ -2,7 +2,7 @@
  * What a `view` block's page cannot do (dispatch://INFRA-682, A4, R5): it runs in an opaque
  * origin, it reaches no network, it reads nothing of the reader, it is given a height only for
  * its own frame, and a page that moves its frame away is sent nothing more and shown as such.
- * A browser that opens the page's address in a tab gets a download and no page.
+ * A browser that opens the page's address in a tab is answered an attachment, not a page.
  *
  * Each row that asks whether a page reached the network starts a recording server of its own
  * (`e2e/recording-origin.ts`) on a second loopback origin, which every one of these engines
@@ -357,8 +357,9 @@ setTimeout(() => { window.location.href = ${JSON.stringify(`${recorder.origin}/m
   }
 });
 
-test("a view block's page address opened in a tab is a download and no page", async ({
+test("a view block's page address opened in a tab is answered as an attachment", async ({
   browser,
+  browserName,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   const shown = `<!doctype html>
@@ -386,14 +387,40 @@ parent.postMessage({ type: "dispatch-view:ready" }, "*");
     const address = await frame.getAttribute("src");
     expect(address, "A4: the frame has the page route's address").toContain("/page");
 
-    // The same browser context, which has just loaded that address in a frame, opens it in a tab.
+    // The same browser context, which has just loaded that address in a frame, opens it in a
+    // tab. What Dispatch owns is the answer that navigation gets, and it is the same in every
+    // engine: `Content-Disposition: attachment`, so a conforming browser saves the file and runs
+    // none of it (`pageHeaders`, `internal/dispatch/api/artifact_files.go`). The frame's own load
+    // above is the control: the same address, with `Sec-Fetch-Dest: iframe`, is `inline` and did
+    // show its page, so `attachment` here is the header switching on that request and not a
+    // constant.
     const tab = await alice.newPage();
-    const downloaded = tab.waitForEvent("download");
+    const answer = tab.waitForResponse((response) => new URL(response.url()).pathname === address);
+    // Bounded, because the one engine that shows the page fires no such event at all.
+    const downloaded = tab.waitForEvent("download", { timeout: 10_000 }).catch(() => undefined);
     await tab.goto(address ?? "").catch(() => undefined);
+    expect(
+      (await answer).headers()["content-disposition"],
+      "A4: the address in a tab is answered as an attachment"
+    ).toBe("attachment");
+
+    // What the browser then does with that header is the browser's. Chromium and Firefox turn
+    // the navigation into a download and show nothing. Playwright's WebKit does not: its
+    // response policy asks only whether it can display the type, never reading
+    // Content-Disposition, so it renders an attachment whose type is `text/html` - which Safari
+    // itself does not do. The row holds the two engines that act on the header to acting on it,
+    // and holds WebKit to the header alone (sjawhar/legion#2647).
     const download = await downloaded;
-    expect(download.suggestedFilename(), "A4: the address in a tab is a download").not.toBe("");
-    await expect(tab.locator("#words"), "A4: and no page is shown").toHaveCount(0);
-    await download.delete();
+    if (browserName === "webkit") {
+      expect(download, "A4: Playwright's WebKit downloads no attachment it can display").toBe(
+        undefined
+      );
+    } else {
+      expect(download, "A4: the address in a tab is a download").not.toBe(undefined);
+      expect(download?.suggestedFilename(), "A4: with a name to save it under").not.toBe("");
+      await expect(tab.locator("#words"), "A4: and no page is shown").toHaveCount(0);
+      await download?.delete();
+    }
     await tab.close();
   } finally {
     await alice.close();
