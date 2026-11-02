@@ -86,6 +86,25 @@ func (rig *recipientRig) register(t *testing.T, sessionID string, topics []strin
 	}
 }
 
+// unsubscribe drops topics from sessionID through the real route, as the envoy_unsubscribe tool
+// does. The route is registered inline on the listener's mux, so this serves it through a mux of
+// its own built over the same dependencies.
+func (rig *recipientRig) unsubscribe(t *testing.T, sessionID string, topics []string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"session_id": sessionID, "topics": topics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerV1Routes(mux, rig.deps, "test-machine", logging.New("test"))
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(
+		http.MethodPost, "/v1/interests/unsubscribe", strings.NewReader(string(body))))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unsubscribe %s from %v: status=%d body=%s", sessionID, topics, recorder.Code, recorder.Body.String())
+	}
+}
+
 // stop ends sessionID the way a session that shuts down cleanly does, through the real route: its
 // session entry goes and its known-session record stays, moved to the store's clock.
 func (rig *recipientRig) stop(t *testing.T, sessionID string) {
@@ -234,6 +253,42 @@ func TestAPublishOnAStreamCapturedTopicCarriesTheCounts(t *testing.T) {
 	rig.register(t, recipientSender, []string{topic})
 	rig.register(t, "ses_watcher", []string{topic})
 	assertCounts(t, rig.publish(t, topic, "stream-1"), 1, 1)
+}
+
+// A session that leaves a topic stops being counted as a recipient of it. R1 counts the sessions
+// whose subscriptions match the topic at the publish, so an unsubscribe must take the topic out
+// of the session's known-session record as well as out of its interest row: the record is the
+// count's other store, and a stale one keeps telling a sender that a session gets a message it
+// has stopped following. A session that holds its own NATS connection (self_subscribed, the shape
+// both plugins register with whenever their relay subscription is not open) is the case to cover,
+// since a consumer-delivery session's record is rewritten by its refollow
+// (TestARefollowWritesTheKnownSessionRecord). After a clean stop nothing registers again, so a
+// record left stale here keeps the wrong count for the record's whole 30 days.
+func TestASessionThatUnsubscribesStopsBeingCounted(t *testing.T) {
+	rig := newRecipientRig(t)
+	const topic = "notifications.slack.channel.c-unsubscribed-count"
+	if !bus.StreamCaptures(topic) {
+		t.Fatalf("no stream subject captures %s, so this test no longer covers the stream-captured branch", topic)
+	}
+
+	rig.register(t, recipientSender, []string{topic})
+	rig.register(t, "ses_leaver", []string{topic})
+	assertCounts(t, rig.publish(t, topic, "unsubscribed-1"), 1, 1)
+
+	rig.clock = rig.clock.Add(session.KnownSessionRefreshAge + time.Minute)
+	rig.unsubscribe(t, "ses_leaver", []string{topic})
+	if interest, cached := rig.harness.registry.CachedInterest("ses_leaver"); cached && slices.Contains(interest.Topics, topic) {
+		t.Fatalf("ses_leaver's interest row still holds %q, so the unsubscribe did not take it", topic)
+	}
+	if record, known := rig.known.Get("ses_leaver"); known && slices.Contains(record.Topics, topic) {
+		t.Errorf("ses_leaver's known-session record still holds the unsubscribed %q: its topics are %v", topic, record.Topics)
+	}
+	assertCounts(t, rig.publish(t, topic, "unsubscribed-2"), 0, 0)
+
+	// The clean stop moves the record on without changing its topics, so a record left stale above
+	// is still counted once nothing registers again.
+	rig.stop(t, "ses_leaver")
+	assertCounts(t, rig.publish(t, topic, "unsubscribed-3"), 0, 0)
 }
 
 // A role topic carries neither count: its answer names the holder the message was forwarded to,
