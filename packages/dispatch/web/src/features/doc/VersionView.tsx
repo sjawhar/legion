@@ -6,7 +6,7 @@ import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
-import { fetchPicturePath } from "../refs/reference-target";
+import { watchPicturePath } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
@@ -115,8 +115,8 @@ export function VersionView({
         editor.destroy();
         return;
       }
-      installTypedBlocks(editor.view, blockSchema, setAskBlockHosts, (route) =>
-        fetchPicturePath(queryClient, route)
+      installTypedBlocks(editor.view, blockSchema, setAskBlockHosts, (route, onPicture) =>
+        watchPicturePath(queryClient, route, onPicture)
       );
       const embedded =
         highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);

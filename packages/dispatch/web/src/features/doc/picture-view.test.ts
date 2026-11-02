@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import { Schema } from "prosemirror-model";
-
 import { pictureClassName } from "../refs/DispatchPicture";
+import type { DispatchReferenceRoute } from "../refs/routes";
 import { pictureView } from "./picture-view";
 
 // Milkdown's `image` node: `src`/`alt`/`title` strings and a `toDOM` that writes them onto an
@@ -27,11 +27,32 @@ function picture(src: string, alt = "") {
 }
 
 const noCaret = () => {};
-/** A resolver for tests whose source pins a version or names no artifact: it is never called. */
-const noResolve = () => Promise.reject(new Error("resolvePicture called for a pinned source"));
+/** A watcher for tests whose source pins a version or names no artifact: it is never called. */
+const noWatch = () => {
+  throw new Error("watchPicture called for a pinned source");
+};
+
+/** A watcher the test drives: `report` sends the latest picture to the view, and `stopped`
+ *  counts the view's unsubscribes. */
+function fakeWatch(initial?: string) {
+  const fake = {
+    asked: [] as string[],
+    report: (_src: string | undefined) => {},
+    stopped: 0,
+    watch: (route: DispatchReferenceRoute, onPicture: (src: string | undefined) => void) => {
+      fake.asked.push(route.kind === "artifact" ? `${route.key}/${route.slug}` : route.kind);
+      fake.report = onPicture;
+      onPicture(initial);
+      return () => {
+        fake.stopped += 1;
+      };
+    },
+  };
+  return fake;
+}
 
 function wrapper(src: string, alt = ""): HTMLElement {
-  const { dom } = pictureView(picture(src, alt), document, noCaret, noResolve);
+  const { dom } = pictureView(picture(src, alt), document, noCaret, noWatch);
   if (!(dom instanceof HTMLElement) || dom.tagName !== "SPAN") {
     throw new Error(`the view's dom is not a wrapper span: ${(dom as Element).outerHTML}`);
   }
@@ -89,7 +110,7 @@ test("a leaf view: no contentDOM, no update, events on the picture kept", () => 
     () => {
       caretPlaced += 1;
     },
-    noResolve
+    noWatch
   );
 
   expect(view.contentDOM).toBeUndefined();
@@ -121,7 +142,7 @@ test("a version the browser cannot draw becomes a link to the artifact's page", 
     () => {
       caretPlaced += 1;
     },
-    noResolve
+    noWatch
   );
   const dom = view.dom as HTMLElement;
 
@@ -167,25 +188,20 @@ test("a source that names no artifact is a link at once", () => {
   expect(link.textContent).toBe("CORE-1 ask");
 });
 
-test("a source that pins no version is its link until the latest version is read, then that picture", async () => {
-  const asked: string[] = [];
-  const latest = Promise.withResolvers<string | undefined>();
+test("a source that pins no version is its link until the latest version is known, then follows it", () => {
+  const latest = fakeWatch();
   const view = pictureView(
     picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
     document,
     noCaret,
-    (route) => {
-      asked.push(route.kind === "artifact" ? `${route.key}/${route.slug}` : route.kind);
-      return latest.promise;
-    }
+    latest.watch
   );
   const dom = view.dom as HTMLElement;
 
-  expect(asked).toEqual(["CORE-1/shot-png"]);
+  expect(latest.asked).toEqual(["CORE-1/shot-png"]);
   expect(linkOf(dom).getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
-  latest.resolve("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
-  await latest.promise;
 
+  latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
   const img = pictureOf(dom);
   expect(img.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
   expect(img.getAttribute("alt")).toBe("shot.png");
@@ -194,31 +210,51 @@ test("a source that pins no version is its link until the latest version is read
   const press = new MouseEvent("mousedown", { bubbles: true, button: 0 });
   img.dispatchEvent(press);
   expect(view.stopEvent?.(press)).toBe(false);
+
+  // A new version uploaded while the document is open replaces the picture.
+  latest.report("/api/v1/issues/CORE-1/artifacts/shot-png/versions/4");
+  expect(pictureOf(dom).getAttribute("src")).toBe(
+    "/api/v1/issues/CORE-1/artifacts/shot-png/versions/4"
+  );
+  // A target that stops being a picture reads as its link again.
+  latest.report(undefined);
+  expect(dom.querySelector("img")).toBeNull();
+  expect(linkOf(dom).getAttribute("data-dispatch-href")).toBe(
+    "dispatch://CORE-1/artifact/shot-png"
+  );
+
+  view.destroy?.();
+  expect(latest.stopped).toBe(1);
 });
 
-test("a source that pins no version keeps its link when the target is no picture, or the view is gone", async () => {
-  const notes = pictureView(
-    picture("dispatch://CORE-1/artifact/notes-md", "notes.md"),
-    document,
-    noCaret,
-    () => Promise.resolve(undefined)
-  );
-  const destroyed = pictureView(
+test("a source that pins no version draws at once when its latest version is already known", () => {
+  const latest = fakeWatch("/api/v1/issues/CORE-1/artifacts/shot-png/versions/2");
+  const view = pictureView(
     picture("dispatch://CORE-1/artifact/shot-png", "shot.png"),
     document,
     noCaret,
-    () => Promise.resolve("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1")
+    latest.watch
   );
-  destroyed.destroy?.();
-  await Promise.resolve();
 
-  for (const view of [notes, destroyed]) {
-    const dom = view.dom as HTMLElement;
-    expect(dom.querySelector("img")).toBeNull();
-    expect(linkOf(dom).getAttribute("data-dispatch-href")).toMatch(
-      /^dispatch:\/\/CORE-1\/artifact\//
-    );
-  }
+  expect(pictureOf(view.dom as HTMLElement).getAttribute("src")).toBe(
+    "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"
+  );
+});
+
+test("destroying the view closes the full-size layer its picture opened", () => {
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"),
+    document,
+    noCaret,
+    noWatch
+  );
+  pictureOf(view.dom as HTMLElement).dispatchEvent(
+    new MouseEvent("click", { bubbles: true, button: 0, cancelable: true })
+  );
+  expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+
+  view.destroy?.();
+  expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
 });
 
 test("a plain click on a picture opens it at full size; a modified click does not", () => {
@@ -236,6 +272,9 @@ test("a plain click on a picture opens it at full size; a modified click does no
   expect(lightbox?.querySelector("img")?.getAttribute("src")).toBe(
     "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
   );
+  // A second click that reaches the picture while it is open opens no second layer.
+  img.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
+  expect(document.querySelectorAll('[data-testid="picture-lightbox"]')).toHaveLength(1);
   // A click anywhere on it closes it, and it leaves the page.
   lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
@@ -247,7 +286,7 @@ test("a picture from elsewhere, or a reference the grammar refuses, is drawn by 
     "logo.png",
     "dispatch://not a reference",
   ]) {
-    const view = pictureView(picture(source, "logo"), document, noCaret, noResolve);
+    const view = pictureView(picture(source, "logo"), document, noCaret, noWatch);
     const dom = view.dom as HTMLElement;
 
     expect(dom.tagName).toBe("IMG");

@@ -216,6 +216,12 @@ describe("Dispatch pictures", () => {
       );
       lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+
+      // Opened again, the layer goes with the body that opened it.
+      shot.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+      view.unmount();
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
     } finally {
       view.unmount();
     }

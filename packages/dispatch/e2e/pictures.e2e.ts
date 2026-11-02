@@ -46,6 +46,19 @@ async function expectDrawn(picture: Locator, src: string): Promise<void> {
     .toBeGreaterThan(0);
 }
 
+/** Waits for the full-size layer a click on a picture opened to show that picture's real pixels,
+ *  and answers the layer. */
+async function expectFullSize(page: Page, caption: string, src: string): Promise<Locator> {
+  const lightbox = page.getByRole("dialog", { name: caption });
+  const picture = lightbox.getByRole("img", { name: caption });
+  await expect(picture).toBeVisible();
+  await expect(picture).toHaveAttribute("src", src);
+  await expect
+    .poll(() => picture.evaluate((image: HTMLImageElement) => image.naturalWidth))
+    .toBeGreaterThan(0);
+  return lightbox;
+}
+
 /** The server's answer to the next `POST` to `path`; a row checks it is a success with
  *  `expectSucceeded`, so a refusal fails naming its status rather than timing out. */
 function posted(page: Page, path: string) {
@@ -192,9 +205,9 @@ test("a picture pasted into a direct message on the Agents page shows inline and
 
     // A click opens the picture at full size over the page, and a click on it closes it.
     await picture.click();
-    const lightbox = page.getByRole("dialog", { name: "shot.png" });
-    await expectDrawn(
-      lightbox.getByRole("img", { name: "shot.png" }),
+    const lightbox = await expectFullSize(
+      page,
+      "shot.png",
       `/api/v1/agents/${planner.session_id}/artifacts/shot-png/versions/1`
     );
     await lightbox.click();
@@ -272,8 +285,7 @@ test("a picture written into a spec draws in the editor and in a past version, w
 
     // A click on a picture in the editor opens it at full size; a click on it closes it.
     await documentEditor(page).getByRole("img", { name: "shot.png" }).click();
-    const lightbox = page.getByRole("dialog", { name: "shot.png" });
-    await expectDrawn(lightbox.getByRole("img", { name: "shot.png" }), src);
+    const lightbox = await expectFullSize(page, "shot.png", src);
     await lightbox.click();
     await expect(lightbox).toHaveCount(0);
 

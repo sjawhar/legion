@@ -45,24 +45,29 @@ function fallbackLink(
   return link;
 }
 
-/** The bytes route of a version-less picture's latest version, or undefined when its target is
- *  no picture the browser can draw (`fetchPicturePath` in `refs/reference-target.ts`, bound to the
- *  page's query client). */
-export type ResolvePicture = (route: DispatchReferenceRoute) => Promise<string | undefined>;
+/** Watches the bytes route of a version-less picture's latest version: calls its listener at once
+ *  and on every change, with undefined while the target is unread, unreadable or no picture the
+ *  browser can draw, and returns the function that stops (`watchPicturePath` in
+ *  `refs/reference-target.ts`, bound to the page's query client). */
+export type WatchPicture = (
+  route: DispatchReferenceRoute,
+  onPicture: (src: string | undefined) => void
+) => () => void;
 
 /**
  * The node view of Milkdown's `image` node. The browser cannot fetch `dispatch://`, so a picture
  * whose source names an artifact (`![shot.png](dispatch://KEY/artifact/shot-png@v1)`, the line a
  * pasted picture is written as) is drawn from the same-origin bytes route of the version it pins,
- * or, for a source written without `@vN`, of the latest version `resolvePicture` reads, with the
- * caption `pictureReference` reads (`refs/routes.ts`, the rule it shares with
- * `pictureSerializer`): the `alt`, or the artifact's slug when that is empty. The picture is at its
- * own size, scaled down to the column (`pictureClassName`), and a plain click opens it at full size
- * (`openPictureLightbox`). A version the browser cannot draw (a document, another file, a missing
- * version) errors, and the picture becomes `fallbackLink`; a version-less source shows that link
- * until its latest version is read, and keeps it when the target is no picture; a source that
- * names something other than an artifact is that link at once. `placeCaretAfter` puts the
- * editor's caret just after the node, which the link calls on a primary-button mousedown (the
+ * or, for a source written without `@vN`, of the latest version `watchPicture` reports - which
+ * follows a new version or a recovered read while the view lives - with the caption
+ * `pictureReference` reads (`refs/routes.ts`, the rule it shares with `pictureSerializer`): the
+ * `alt`, or the artifact's slug when that is empty. The picture is at its own size, scaled down to
+ * the column (`pictureClassName`), and a plain click opens it at full size
+ * (`openPictureLightbox`), a layer the view closes when it is destroyed. A version the browser
+ * cannot draw (a document, another file, a missing version) errors, and the picture becomes
+ * `fallbackLink`; a version-less source shows that link while no latest version is known, and a
+ * source that names something other than an artifact is that link at once. `placeCaretAfter` puts
+ * the editor's caret just after the node, which the link calls on a primary-button mousedown (the
  * comment in `fallbackLink` says why). Any other source - a picture on another website, a relative
  * path, a `dispatch://` string the reference grammar refuses - is drawn by the schema's own
  * `toDOM`, as today.
@@ -71,7 +76,7 @@ export function pictureView(
   node: ProseMirrorNode,
   document: Document,
   placeCaretAfter: () => void,
-  resolvePicture: ResolvePicture
+  watchPicture: WatchPicture
 ): NodeView {
   const picture = pictureReference(node.attrs);
   if (picture === undefined) {
@@ -85,7 +90,7 @@ export function pictureView(
   const dom = document.createElement("span");
   dom.dataset.dispatchDocPicture = buildDispatchReference(route);
   let link: HTMLAnchorElement | undefined;
-  let destroyed = false;
+  let lightbox: HTMLDialogElement | undefined;
   const showLink = () => {
     link = fallbackLink(route, document, placeCaretAfter);
     dom.replaceChildren(link);
@@ -102,20 +107,25 @@ export function pictureView(
     img.addEventListener("click", (event) => {
       if (!isPlainClick(event)) return;
       event.preventDefault();
-      openPictureLightbox(document, src, picture.caption);
+      lightbox = openPictureLightbox(document, src, picture.caption);
     });
     link = undefined;
     dom.replaceChildren(img);
     img.setAttribute("src", src);
   };
+  let stopWatching = () => {};
   if (named === undefined) {
     showLink();
   } else if (named.version !== undefined) {
     showPicture(artifactVersionPath(named.owner, named.slug, named.version));
   } else {
+    let shown: string | undefined;
     showLink();
-    void resolvePicture(route).then((src) => {
-      if (src !== undefined && !destroyed) showPicture(src);
+    stopWatching = watchPicture(route, (src) => {
+      if (src === shown) return;
+      shown = src;
+      if (src === undefined) showLink();
+      else showPicture(src);
     });
   }
   return {
@@ -131,7 +141,8 @@ export function pictureView(
       event.target instanceof Node &&
       link.contains(event.target),
     destroy: () => {
-      destroyed = true;
+      stopWatching();
+      lightbox?.close();
     },
   };
 }
@@ -140,10 +151,7 @@ export function pictureView(
  * `TextSelection` just after the node, the caret a primary-button mousedown on the fallback link
  * places first (the comment in `fallbackLink` says why). A changed `image` node is a new view (no
  * `update`), so the `node` captured here is current. */
-export function pictureNodeView(
-  view: EditorView,
-  resolvePicture: ResolvePicture
-): NodeViewConstructor {
+export function pictureNodeView(view: EditorView, watchPicture: WatchPicture): NodeViewConstructor {
   return (node, _view, getPos) =>
     pictureView(
       node,
@@ -155,6 +163,6 @@ export function pictureNodeView(
           view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + node.nodeSize))
         );
       },
-      resolvePicture
+      watchPicture
     );
 }

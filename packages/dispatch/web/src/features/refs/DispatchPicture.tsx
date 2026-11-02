@@ -50,7 +50,8 @@ export function collectPictureAnchors(root: HTMLElement): PictureAnchor[] {
 /** The block variant's `<img>`. A plain click opens it at full size; the listener is the
  *  element's own, so it runs before anything listening above the placeholder link (the browser's
  *  navigation, the body's link handling) and keeps the click from them. A modified click is the
- *  link's, which opens the artifact's page. */
+ *  link's, which opens the artifact's page. The layer it opened closes when the picture leaves
+ *  the page (a body re-rendered or gone, another page). */
 function BlockPicture({
   caption,
   onError,
@@ -64,14 +65,18 @@ function BlockPicture({
   useEffect(() => {
     const element = picture.current;
     if (element === null) return;
+    let lightbox: HTMLDialogElement | undefined;
     const open = (event: MouseEvent) => {
       if (!isPlainClick(event)) return;
       event.preventDefault();
       event.stopPropagation();
-      openPictureLightbox(element.ownerDocument, src, caption);
+      lightbox = openPictureLightbox(element.ownerDocument, src, caption);
     };
     element.addEventListener("click", open);
-    return () => element.removeEventListener("click", open);
+    return () => {
+      element.removeEventListener("click", open);
+      lightbox?.close();
+    };
   }, [caption, src]);
   return (
     <img
