@@ -15,6 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
 import type { LegionCapabilityRow } from "@legion/contracts/legion-api";
+import { deliverSubject } from "@legion/envoy-client/consumer-delivery";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { readSessionTitle } from "@legion/envoy-client/dispatch-session-state";
 import { noteInjectedUserTurn, noteTypedUserTurn } from "@legion/pi-shared/injected-user-turns";
@@ -42,10 +43,14 @@ import type {
 } from "@legion/pi-shared/pi-types";
 import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import { deliveryFor } from "@legion/pi-shared/test/omp-harness";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
 import { type CapabilityHost, ENVOY_TOOL_NAMES } from "../src/capability-report";
 import { classifySession } from "../src/classify";
+
+// The consumer answer every registration here is given is the harness's (`deliveryFor`), shared
+// with the tests that run the real binary.
 
 const natsConnections: {
   readonly name: string;
@@ -76,11 +81,24 @@ function recordWidget(key: string, lines: string[] | undefined): void {
   widgetCalls.push({ key, lines });
 }
 // @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports.
-const { nkeyAuthenticator, nkeys } = await import("nats");
+// The module's own namespace becomes the mock once `mock.module` runs, so the real exports are
+// taken off it first.
+const realNats = { ...(await import("nats")) };
+/**
+ * The address every fixture pane dials (`createPi`). `mock.module` replaces `nats` for the whole
+ * bun process, siblings in the same run included, and a real-binary suite beside this one talks
+ * to a real NATS server through it: a dial naming any other server is that suite's, and goes to
+ * the real module.
+ */
+const FIXTURE_NATS_HOST = "nats-under-test";
 mock.module("nats", () => ({
-  nkeyAuthenticator,
-  nkeys,
-  connect: async (options: { readonly name: string }) => {
+  ...realNats,
+  connect: async (options: { readonly name: string; readonly servers?: string | string[] }) => {
+    const servers =
+      typeof options.servers === "string" ? [options.servers] : (options.servers ?? []);
+    if (!servers.some((server) => server.includes(FIXTURE_NATS_HOST))) {
+      return realNats.connect(options);
+    }
     await natsConnectGates.get(options.name)?.();
     const endings: (() => void)[] = [];
     const connection = {
@@ -118,10 +136,6 @@ mock.module("nats", () => ({
       },
     };
   },
-  StringCodec: () => ({
-    decode: (data: Uint8Array) => new TextDecoder().decode(data),
-    encode: (text: string) => new TextEncoder().encode(text),
-  }),
 }));
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
@@ -725,6 +739,7 @@ async function claimPane(options: {
       machine_id: "machine",
       dir: workspace,
       topics: [claimToken],
+      ...deliveryFor(url.pathname, body, sessionId),
     });
   }) as typeof fetch;
 
@@ -1222,14 +1237,16 @@ describe("Legion OMP extension", () => {
     delete process.env.LEGION_ROLE;
     delete process.env.LEGION_CONTROLLER;
     delete process.env.LEGION_DAEMON_URL;
-    globalThis.fetch = (async (input) => {
+    globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
       requests.push({ path: url.pathname });
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
       return Response.json({
         session_id: "ses_plain",
         machine_id: "machine",
         dir: "/tmp/legion-workspace",
         topics: [],
+        ...deliveryFor(url.pathname, body, "ses_plain"),
       });
     }) as typeof fetch;
     const fixture = createPi();
@@ -2361,13 +2378,16 @@ describe("Legion OMP extension", () => {
     const listenerOnly = (sessionId: string): { readonly path: string }[] => {
       const requests: { readonly path: string }[] = [];
       process.env.ENVOY_URL = "http://envoy.test";
-      globalThis.fetch = (async (input) => {
-        requests.push({ path: new URL(input.toString()).pathname });
+      globalThis.fetch = (async (input, init) => {
+        const url = new URL(input.toString());
+        requests.push({ path: url.pathname });
+        const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
         return Response.json({
           session_id: sessionId,
           machine_id: "machine",
           dir: "/tmp/legion-workspace",
           topics: [],
+          ...deliveryFor(url.pathname, body, sessionId),
         });
       }) as typeof fetch;
       return requests;
@@ -2705,6 +2725,10 @@ async function launchedController(options: {
   readonly stateFixture?: string;
   /** Called with each request's path as the stub takes it, before it answers. */
   readonly onRequest?: (path: string) => void;
+  /** Tried for each request after it is recorded and before the stub's own routes: a `Response`
+   * it returns is the answer, so a test can refuse one listener call. A test cannot wrap the
+   * stub's `fetch` itself — the Envoy client captures it when the pane binds. */
+  readonly answer?: (path: string) => Response | undefined;
   /** The listener's answer to a `/v1/roles/set` for the controller role, in place of its own
    * registry's when it gives one. */
   readonly roleClaim?: () => Response | undefined | Promise<Response | undefined>;
@@ -2758,6 +2782,8 @@ async function launchedController(options: {
     const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
     requests.push({ path: url.pathname, body });
     options.onRequest?.(url.pathname);
+    const answered = options.answer?.(url.pathname);
+    if (answered !== undefined) return answered;
     if (url.pathname === "/legion/v1/claims/register") {
       return (await options.register?.(body)) ?? Response.json(registration);
     }
@@ -2822,6 +2848,7 @@ async function launchedController(options: {
       machine_id: "machine",
       dir: "/tmp/legion-workspace",
       topics: read === null ? [token] : [...(interests.get(session) ?? [])],
+      ...deliveryFor(url.pathname, body, session),
     });
   }) as typeof fetch;
 
@@ -2957,6 +2984,61 @@ async function startRefusedController(
   return { notices: value, errors };
 }
 
+/**
+ * Every topic the session follows now, as `envoy_whoami` reports them (`followed` in
+ * `extensions/envoy.ts`). A session holds no NATS subscription per topic any more (INFRA-771):
+ * its one consumer relays them all, built from the topics it registered, so what it follows and
+ * what its registration carries are the two places a notice lane shows.
+ */
+async function followedTopics(
+  fixture: { readonly tools: readonly RegisteredTool[] },
+  context: SessionContext
+): Promise<readonly string[]> {
+  const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
+  if (whoami === undefined) throw new Error("envoy_whoami was not registered");
+  const { details } = await whoami.execute("follows", {}, undefined, undefined, context);
+  const { topics } = details;
+  if (!Array.isArray(topics)) throw new Error("envoy_whoami reported no topics");
+  return topics.filter((topic): topic is string => typeof topic === "string");
+}
+
+/** The topic list of every call on `path` in `requests`, in order, for `sessionId` when given.
+ * One fetch stub serves every session a test launches, so the session is what tells two
+ * controllers' registrations apart. */
+function interestTopics(
+  requests: readonly DaemonRequest[],
+  path: "/v1/interests/subscribe" | "/v1/interests/unsubscribe",
+  sessionId?: string
+): string[][] {
+  const lists: string[][] = [];
+  for (const request of requests) {
+    if (request.path !== path) continue;
+    const body = request.body as { readonly session_id?: unknown; readonly topics?: unknown };
+    if (sessionId !== undefined && body?.session_id !== sessionId) continue;
+    if (!Array.isArray(body?.topics)) continue;
+    lists.push(body.topics.filter((topic): topic is string => typeof topic === "string"));
+  }
+  return lists;
+}
+
+/** What the session's newest registration told the listener it follows: the filter its consumer
+ * is built from, and so everything that can be delivered to it. `[]` when it registered nothing. */
+function registeredTopics(
+  requests: readonly DaemonRequest[],
+  sessionId?: string
+): readonly string[] {
+  return interestTopics(requests, "/v1/interests/subscribe", sessionId).at(-1) ?? [];
+}
+
+/** The topics of every unregistration the session sent, in order: what it asked the listener to
+ * take out of its interest, and so out of its consumer's filter. */
+function unregisteredTopics(
+  requests: readonly DaemonRequest[],
+  sessionId?: string
+): readonly string[][] {
+  return interestTopics(requests, "/v1/interests/unsubscribe", sessionId);
+}
+
 describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // Oh My Pi holds every send a session_start handler makes and drains them at the end of its
   // startup, and an Envoy card starts its own turn, so a role claim made there would let a card
@@ -3002,13 +3084,16 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // first-turn slot to an Envoy notice. The start command's claim sends the start message once the
   // registration is in, right before the role claim, so neither the role's lane nor the controller
   // topic can deliver anything ahead of it: a card the listener forwards as soon as it records the
-  // role can reach the session before the role claim's answer does. The startup-turn mark is set
-  // sent right before the send.
-  test("/legion-controller-start sends LEGION_CONTROLLER_START_MESSAGE once, after the registration and before the role claim and the controller-topic subscribe, marking the start turn sent before it", async () => {
+  // role can reach the session before the role claim's answer does, and a notice on the controller
+  // topic reaches the session once the registration naming that topic builds its consumer. The
+  // startup-turn mark is set sent right before the send.
+  test("/legion-controller-start sends LEGION_CONTROLLER_START_MESSAGE once, after the registration and before the role claim and the controller topic's registration, marking the start turn sent before it", async () => {
     const topic = "notifications.legion.omp.controller";
     const message = "Legion controller start: follow skill://legion-controller's start procedure";
     const sentAtRegister: string[][] = [];
     const sentAtRoleClaim: string[][] = [];
+    /** What had been sent, and the startup-turn mark, at each registration carrying the topic. */
+    const atTopicRegistration: { sent: string[]; mark: unknown }[] = [];
     const controller = await launchedController({
       sessionId: "ses_controller_start",
       startMessage: message,
@@ -3017,21 +3102,22 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
           sentAtRegister.push([...controller.sentUserMessages]);
         }
         if (path === "/v1/roles/set") sentAtRoleClaim.push([...controller.sentUserMessages]);
+        // The request is recorded before this runs, so the newest registration is this one.
+        if (
+          path === "/v1/interests/subscribe" &&
+          registeredTopics(controller.requests).includes(topic)
+        ) {
+          atTopicRegistration.push({
+            sent: [...controller.sentUserMessages],
+            mark: envoyPluginInterface().startupTurn,
+          });
+        }
       },
     });
-    const atSubscribe: { sent: string[]; mark: unknown }[] = [];
-    natsSubscribeObserver = (subject) => {
-      if (subject === topic) {
-        atSubscribe.push({
-          sent: [...controller.sentUserMessages],
-          mark: envoyPluginInterface().startupTurn,
-        });
-      }
-    };
     const context = controller.context("ses_controller_start");
     await controller.handlers.get("session_start")?.({}, context);
     expect(controller.sentUserMessages).toEqual([]);
-    expect(atSubscribe).toEqual([]);
+    expect(atTopicRegistration).toEqual([]);
 
     const before = Date.now();
     expect(await runStartCommand(controller, context)).toEqual([]);
@@ -3039,9 +3125,13 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
     expect(sentAtRegister).toEqual([[]]);
     expect(sentAtRoleClaim).toEqual([[message]]);
-    expect(atSubscribe).toEqual([
+    expect(atTopicRegistration).toEqual([
       { sent: [message], mark: { session: "ses_controller_start", sentAt: expect.any(Number) } },
     ]);
+    // The topic is the session's to be delivered on from that registration: it follows it, and
+    // the listener's record of it — the consumer's filter — names it.
+    expect(await followedTopics(controller, context)).toContain(topic);
+    expect(registeredTopics(controller.requests, "ses_controller_start")).toContain(topic);
     expect(controller.sentUserMessages).toEqual([message]);
     expect(controller.sentUserMessageOptions).toEqual([undefined]);
     expect(envoyPluginInterface().startupTurn).toEqual({
@@ -3228,34 +3318,31 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   });
 
   // The start message goes out once per process: a claim that throws after the start is sent
-  // (here, the controller-topic subscribe) says so, and a retried claim sends nothing more. Forcing
-  // the subscribe itself to throw (rather than a connect envoy.ts's own session_start handler
-  // retries quietly in the background) needs the same technique the subscription-opening tests
-  // below use: close the connection envoy.ts already opened eagerly, from the registration's own
-  // callback, so ensureConnection() inside subscribe() dials again — only then does a rejected dial
-  // reach subscribeNotice uncaught.
-  test("a start command whose controller-topic subscribe throws after the send warns that the start message was sent, and a retried claim subscribes and sends one start message in total", async () => {
-    let subscribeAttempts = 0;
+  // (here, the controller topic's registration) says so, and a retried claim sends nothing more.
+  // The registration is the subscription: a session takes every topic it follows from the one
+  // consumer the listener builds for it out of the topics it registered (INFRA-771), so a
+  // listener that refuses the registration carrying the topic is what makes the subscribe throw.
+  // A failed dial is not: envoy.ts retries it quietly in the background, and nothing of it
+  // reaches subscribeNotice.
+  test("a start command whose controller-topic subscribe throws after the send warns that the start message was sent, and a retried claim registers the topic and sends one start message in total", async () => {
+    const topic = "notifications.legion.omp.controller";
+    // The listener refuses the first registration that carries the topic, and takes the next. A
+    // 409 is the client's one-shot refusal; it retries a 5xx once, which would hide the failure.
+    let refused = false;
     const controller = await launchedController({
       sessionId: "ses_controller_subscribe_retry",
-      register: () => {
-        const live = natsConnections.find(
-          (candidate) => candidate.name === "omp-ses_controller_subscribe_retry"
-        );
-        if (live !== undefined) live.closed = true;
-        natsConnectGates.set("omp-ses_controller_subscribe_retry", async () => {
-          subscribeAttempts += 1;
-          if (subscribeAttempts === 1) throw new Error("nats: connection refused");
-        });
-        return undefined;
+      answer: (path) => {
+        // The request is recorded before this runs, so the newest registration is this one.
+        if (refused || path !== "/v1/interests/subscribe") return;
+        if (!registeredTopics(controller.requests).includes(topic)) return;
+        refused = true;
+        return Response.json({ error: "this registration was not requested" }, { status: 409 });
       },
     });
 
-    const { notices } = await startRefusedController(
-      controller,
-      controller.context("ses_controller_subscribe_retry")
-    );
-    expect(notices).toEqual([claimRefusedAfterSend("nats: connection refused")]);
+    const context = controller.context("ses_controller_subscribe_retry");
+    const { notices } = await startRefusedController(controller, context);
+    expect(notices).toEqual([claimRefusedAfterSend("this registration was not requested")]);
     // The start was sent before the role claim, which went through; then the subscribe threw.
     expect(controller.sentUserMessages).toEqual([
       "Legion controller start: follow skill://legion-controller",
@@ -3264,6 +3351,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       session: "ses_controller_subscribe_retry",
       sentAt: expect.any(Number),
     });
+    // Nothing of the refused subscription is left behind: the session does not follow a topic
+    // the listener never took, so no consumer of its would carry it.
+    expect(await followedTopics(controller, context)).not.toContain(topic);
 
     // Retried in the same session and process: /legion-claim-controller re-enters claim()
     // directly, as a lost-claim recovery would.
@@ -3271,14 +3361,18 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       (command) => command.name === "legion-claim-controller"
     );
     if (claimCommand === undefined) throw new Error("controller claim command was not registered");
-    await claimCommand.handler(
-      "",
-      commandContext(controller.context("ses_controller_subscribe_retry"))
-    );
+    const requestsBeforeRetry = controller.requests.length;
+    await claimCommand.handler("", commandContext(context));
 
-    expect(natsConnections.flatMap((connection) => connection.subjects)).toContain(
-      "notifications.legion.omp.controller"
-    );
+    // This time the registration lands, so the topic is in the filter the listener builds the
+    // session's consumer from, and the session follows it.
+    expect(await followedTopics(controller, context)).toContain(topic);
+    expect(
+      registeredTopics(
+        controller.requests.slice(requestsBeforeRetry),
+        "ses_controller_subscribe_retry"
+      )
+    ).toContain(topic);
     expect(controller.sentUserMessages).toEqual([
       "Legion controller start: follow skill://legion-controller",
     ]);
@@ -3368,7 +3462,10 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
     expect(registrations()).toHaveLength(2);
     expect(controller.holder()).toBe("ses_controller_role_refused");
-    expect(natsConnections.flatMap((connection) => connection.subjects)).toContain(
+    expect(await followedTopics(controller, context)).toContain(
+      "notifications.legion.omp.controller"
+    );
+    expect(registeredTopics(controller.requests, "ses_controller_role_refused")).toContain(
       "notifications.legion.omp.controller"
     );
     expect(controller.sentUserMessages).toEqual([
@@ -4330,22 +4427,26 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     });
   });
 
-  test("subscribes to its project's controller topic", async () => {
+  test("subscribes to its project's controller topic: it follows it and registers it with the listener", async () => {
+    const topic = "notifications.legion.omp.controller";
     const controller = await launchedController({ sessionId: "ses_controller_notices" });
-    await startOperatorController(controller, controller.context("ses_controller_notices"));
+    const context = controller.context("ses_controller_notices");
+    await startOperatorController(controller, context);
 
-    expect(natsConnections.flatMap((connection) => connection.subjects)).toContain(
-      "notifications.legion.omp.controller"
-    );
+    // The registration is the subscription: the listener builds the session's one consumer from
+    // the topics it registered, and nothing else is delivered to it (INFRA-771).
+    expect(await followedTopics(controller, context)).toContain(topic);
+    expect(registeredTopics(controller.requests, "ses_controller_notices")).toContain(topic);
   });
 
-  test("closes its controller-topic subscription once a later controller takes the role", async () => {
+  test("closes its controller-topic subscription once a later controller takes the role: it unregisters the topic, and the later controller keeps its own", async () => {
     const topic = "notifications.legion.omp.controller";
     const first = await launchedController({ sessionId: "ses_controller_first" });
     const ticks: (() => void)[] = [];
     const refused = Promise.withResolvers<void>();
+    const firstContext = first.context("ses_controller_first");
     await startOperatorController(first, {
-      ...first.context("ses_controller_first"),
+      ...firstContext,
       setInterval: (callback) => ticks.push(callback),
       ui: {
         notify: (message) => {
@@ -4353,26 +4454,27 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         },
       },
     });
+    expect(await followedTopics(first, firstContext)).toContain(topic);
     // A later `legion controller start`: a second session registers and takes the role. It is
     // another process, so this one's record of the session it bootstrapped does not apply to it.
     envoyPluginInterface().bootstrappedSession.file = undefined;
     const second = createPi();
     legionExtension(second.pi);
-    await startOperatorController(second, first.context("ses_controller_second"));
+    const secondContext = first.context("ses_controller_second");
+    await startOperatorController(second, secondContext);
 
     // The first session's next heartbeat finds the role held by the second and is refused.
     for (const tick of ticks) tick();
     await refused.promise;
 
-    const firstConnection = natsConnections.find(
-      (candidate) => candidate.name === "omp-ses_controller_first"
-    );
-    const secondConnection = natsConnections.find(
-      (candidate) => candidate.name === "omp-ses_controller_second"
-    );
-    expect(firstConnection?.unsubscribed).toEqual([topic]);
-    expect(secondConnection?.subjects).toContain(topic);
-    expect(secondConnection?.unsubscribed).toEqual([]);
+    // The replaced session takes the topic out of its interest, so the listener drops it from
+    // the filter its consumer is built on and nothing more is relayed to it on the lane.
+    expect(unregisteredTopics(first.requests, "ses_controller_first")).toEqual([[topic]]);
+    expect(await followedTopics(first, firstContext)).not.toContain(topic);
+    // The session that took the role keeps the lane: registered, followed, and never handed back.
+    expect(registeredTopics(first.requests, "ses_controller_second")).toContain(topic);
+    expect(await followedTopics(second, secondContext)).toContain(topic);
+    expect(unregisteredTopics(first.requests, "ses_controller_second")).toEqual([]);
   });
 
   test("a replaced controller that is resumed takes no controller wakes", async () => {
@@ -4397,9 +4499,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     // The first session's process died, and the session is resumed within the listener's reap
     // window: its transcript records the role claim, which the listener now refuses it.
     envoyPluginInterface().bootstrappedSession.file = undefined;
-    // Only the resumed instance connects from here on; the first instance's connections came
+    // Only the resumed instance registers from here on; the first instance's registrations came
     // before this point.
-    const connectionsBeforeResume = natsConnections.length;
+    const requestsBeforeResume = first.requests.length;
     const resumed = createPi();
     legionExtension(resumed.pi);
     const context = first.context("ses_controller_first");
@@ -4424,30 +4526,34 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
             JSON.stringify({ session_id: "ses_controller_first", role: first.token, soft: true })
       )
     ).toHaveLength(1);
-    const resumedConnections = natsConnections.slice(connectionsBeforeResume);
-    expect(resumedConnections.flatMap((connection) => connection.subjects)).toContain(
-      "notifications.agent.ses_controller_first"
+    // The registration the resumed session makes is the filter its consumer is built from: it
+    // names its own agent subject and not the lane, so no controller wake is relayed to it. The
+    // lane comes back into the follow set from the listener's registry, as any stored interest
+    // does, and a registration leaves out every topic the session holds no role for
+    // (`reachesPrivateStreamSubject`), which is also what the listener refuses it.
+    const resumedRegistration = registeredTopics(
+      first.requests.slice(requestsBeforeResume),
+      "ses_controller_first"
     );
-    expect(resumedConnections.flatMap((connection) => connection.subjects)).not.toContain(topic);
+    expect(resumedRegistration).toContain("notifications.agent.ses_controller_first");
+    expect(resumedRegistration).not.toContain(topic);
   });
 
   // The daemon tells the controller it launches the project's Slack channels as
-  // LEGION_SLACK_CHANNELS, always set, empty for none. That session subscribes to each channel's
-  // mention topic for as long as it holds the controller role and registers none with the listener,
-  // and a resume drops any Slack topic an earlier session registered for a channel the list does
-  // not name before it restores the rest. So a resumed controller hears the list it is launched
-  // with and no other: a channel taken off the project, or given to another project's controller,
-  // is not heard here again. Any other controller hears no Slack channel at all, whatever it
-  // inherited: only the daemon's can reply in Slack.
+  // LEGION_SLACK_CHANNELS, always set, empty for none. That session follows each channel's
+  // mention topic for as long as it holds the controller role, and registers it with the listener
+  // for that long: the listener builds the session's one consumer out of the topics it
+  // registered, so that registration is the only way a mention reaches it (INFRA-771). The end of
+  // the role hands every one of them back. A resume drops any Slack topic an earlier session
+  // registered for a channel the list does not name before it restores the rest. So a resumed
+  // controller hears the list it is launched with and no other: a channel taken off the project,
+  // or given to another project's controller, is not heard here again. Any other controller
+  // hears no Slack channel at all, whatever it inherited: only the daemon's can reply in Slack.
   describe("the project's Slack channels", () => {
     const mention = (channel: string) => `notifications.slack.*.${channel}.mention`;
-    const slackSubjects = (connections: typeof natsConnections) =>
-      connections.flatMap((connection) =>
-        connection.subjects.filter(
-          (subject) =>
-            subject.startsWith("notifications.slack.") && !connection.unsubscribed.includes(subject)
-        )
-      );
+    /** The Slack topics among `topics`, in the order they were given in. */
+    const slackAmong = (topics: readonly string[]) =>
+      topics.filter((topic) => topic.startsWith("notifications.slack."));
     const registeredSlack = (requests: DaemonRequest[]) =>
       requests.filter(
         (request) =>
@@ -4496,20 +4602,61 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       return resumed;
     };
 
-    test("the daemon's controller subscribes to each channel's mentions while it holds its role, and registers none", async () => {
-      const before = natsConnections.length;
+    test("the daemon's controller registers each channel's mentions while it holds its role, and once the role ends unregisters them with its lane and registers neither again", async () => {
+      const lane = "notifications.legion.omp.controller";
       const controller = await daemonController("ses_controller_slack", "C00000000,G00000001");
+      const ticks: (() => void)[] = [];
+      const refused = Promise.withResolvers<void>();
+      const context = controller.context("ses_controller_slack");
       await controller.handlers.get("session_start")?.(
         {},
-        controller.context("ses_controller_slack")
+        {
+          ...context,
+          setInterval: (callback) => ticks.push(callback),
+          ui: {
+            notify: (message) => {
+              if (message.includes("this session no longer holds it")) refused.resolve();
+            },
+          },
+        }
       );
 
       expect(controller.exits).toEqual([]);
-      expect(slackSubjects(natsConnections.slice(before))).toEqual([
+      const held = registeredTopics(controller.requests, "ses_controller_slack");
+      expect(slackAmong(held)).toEqual([mention("C00000000"), mention("G00000001")]);
+      expect(held).toContain(lane);
+      expect(slackAmong(await followedTopics(controller, context))).toEqual([
         mention("C00000000"),
         mention("G00000001"),
       ]);
-      expect(registeredSlack(controller.requests)).toEqual([]);
+
+      // Another session takes the controller role, and this one's next heartbeat is refused.
+      envoyPluginInterface().bootstrappedSession.file = undefined;
+      const second = createPi();
+      legionExtension(second.pi);
+      await second.handlers.get("session_start")?.({}, controller.context("ses_controller_other"));
+      for (const tick of ticks) tick();
+      await refused.promise;
+      // Every continuation of that heartbeat settles before the next macrotask: the role's end
+      // closes its topics and hands them back there.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      // One more heartbeat, which registers whatever the session holds now.
+      const requestsBeforeEnd = controller.requests.length;
+      for (const tick of ticks) tick();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      // The role's lane and its channels go back to the listener together, and the registration
+      // that follows carries neither: the session's consumer takes no mention and no wake again.
+      expect(unregisteredTopics(controller.requests, "ses_controller_slack")).toEqual([
+        [lane, mention("C00000000"), mention("G00000001")],
+      ]);
+      const afterEnd = registeredTopics(
+        controller.requests.slice(requestsBeforeEnd),
+        "ses_controller_slack"
+      );
+      expect(afterEnd).toContain("notifications.agent.ses_controller_slack");
+      expect(afterEnd).not.toContain(lane);
+      expect(slackAmong(afterEnd)).toEqual([]);
     });
 
     test("a resumed controller takes the list it is launched with: a removed channel, and every channel of an emptied list, are no longer heard", async () => {
@@ -4520,11 +4667,16 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         ["G00000001", [mention("G00000001")]],
         ["", []],
       ] as const) {
-        const before = natsConnections.length;
+        const before = first.requests.length;
         await resume(first, "ses_controller_slack_resume", channels);
-        expect(slackSubjects(natsConnections.slice(before))).toEqual([...want]);
+        // What the resumed process registered, which is what its consumer is filtered on.
+        const registered = registeredTopics(
+          first.requests.slice(before),
+          "ses_controller_slack_resume"
+        );
+        expect(registered).toContain("notifications.agent.ses_controller_slack_resume");
+        expect(slackAmong(registered)).toEqual([...want]);
       }
-      expect(registeredSlack(first.requests)).toEqual([]);
     });
 
     // A Slack topic subscribed by hand is registered with the listener, which restores it at every
@@ -4546,15 +4698,17 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       );
       expect(registeredSlack(first.requests)).toHaveLength(1);
 
-      const before = natsConnections.length;
       const requestsBefore = first.requests.length;
       await resume(first, "ses_controller_slack_old", "");
 
-      const resumedSubjects = natsConnections
-        .slice(before)
-        .flatMap((connection) => connection.subjects);
-      expect(resumedSubjects).not.toContain(old);
-      expect(resumedSubjects).toContain(kept);
+      // What the resumed process registered: its consumer's filter, so the one list that decides
+      // what reaches it. The dropped Slack topic is not on it; the session's other interest is.
+      const resumed = registeredTopics(
+        first.requests.slice(requestsBefore),
+        "ses_controller_slack_old"
+      );
+      expect(resumed).not.toContain(old);
+      expect(resumed).toContain(kept);
       const unsubscribed = first.requests
         .slice(requestsBefore)
         .filter((request) => request.path === "/v1/interests/unsubscribe");
@@ -4566,10 +4720,10 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       ]);
     });
 
-    // A Slack topic the listener restores is a plain subscription, which outlives the controller
+    // A Slack topic the listener restores is a plain interest, which outlives the controller
     // role, so a resumed controller drops every one, a listed channel's team-qualified topic
-    // included, and hears its channels only through the subscriptions its role owns: once another
-    // session takes the role, no Slack subscription of the old session stays open.
+    // included, and registers its channels only through the topics its role owns: once another
+    // session takes the role, the old session registers no Slack topic at all.
     test("a resume drops a listed channel's persisted Slack interest too, so losing the role leaves no Slack subscription", async () => {
       const persisted = "notifications.slack.T00000000.C00000000.mention";
       const first = await daemonController("ses_controller_slack_owned", "");
@@ -4587,7 +4741,6 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       envoyPluginInterface().bootstrappedSession.file = undefined;
       process.env.LEGION_SLACK_CHANNELS = "C00000000";
       const requestsBefore = first.requests.length;
-      const before = natsConnections.length;
       const ticks: (() => void)[] = [];
       const refused = Promise.withResolvers<void>();
       const resumed = createPi();
@@ -4611,11 +4764,13 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
           },
         }
       );
-      // The resumed process's own connections, not the first process's, which a test keeps open.
-      const owned = natsConnections
-        .slice(before)
-        .filter((connection) => connection.name === "omp-ses_controller_slack_owned");
-      expect(slackSubjects(owned)).toEqual([mention("C00000000")]);
+      // What the resumed process registered, which is what its own consumer is filtered on: the
+      // listed channel's role-owned topic, and no restored one.
+      const owned = () =>
+        slackAmong(
+          registeredTopics(first.requests.slice(requestsBefore), "ses_controller_slack_owned")
+        );
+      expect(owned()).toEqual([mention("C00000000")]);
       expect(
         first.requests
           .slice(requestsBefore)
@@ -4631,23 +4786,32 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       const second = createPi();
       legionExtension(second.pi);
       await second.handlers.get("session_start")?.({}, first.context("ses_controller_slack_other"));
+      const requestsBeforeEnd = first.requests.length;
       for (const tick of ticks) tick();
       await refused.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      // One more heartbeat registers whatever the session holds once the role has ended.
+      for (const tick of ticks) tick();
+      await new Promise<void>((resolve) => setImmediate(resolve));
 
-      expect(slackSubjects(owned)).toEqual([]);
+      // The role's end hands back everything it owned: its lane and the listed channel's topic.
+      expect(unregisteredTopics(first.requests.slice(requestsBeforeEnd))).toEqual([
+        ["notifications.legion.omp.controller", mention("C00000000")],
+      ]);
+      expect(owned()).toEqual([]);
     });
 
     test("an operator's controller hears no Slack channel, whatever LEGION_SLACK_CHANNELS it inherited", async () => {
       process.env.LEGION_SLACK_CHANNELS = "C00000001";
-      const before = natsConnections.length;
       const controller = await launchedController({ sessionId: "ses_controller_operator_slack" });
-      await startOperatorController(
-        controller,
-        controller.context("ses_controller_operator_slack")
-      );
+      const context = controller.context("ses_controller_operator_slack");
+      await startOperatorController(controller, context);
 
       expect(controller.exits).toEqual([]);
-      expect(slackSubjects(natsConnections.slice(before))).toEqual([]);
+      const registered = registeredTopics(controller.requests, "ses_controller_operator_slack");
+      expect(registered).toContain("notifications.legion.omp.controller");
+      expect(slackAmong(registered)).toEqual([]);
+      expect(slackAmong(await followedTopics(controller, context))).toEqual([]);
     });
 
     for (const [name, channels, why] of [
@@ -4682,7 +4846,11 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     }
   });
 
-  test("a controller whose role ends while its topic subscription is opening does not keep it", async () => {
+  // The subscription is the registration that carries the lane (INFRA-771), and the registration
+  // needs the connection the session's relay subject rides on: here that connection is still
+  // being redialled when a later controller takes the role. What the role's end leaves behind is
+  // what this proves: the lane handed back to the listener, and in no registration after it.
+  test("a controller whose role ends while its topic subscription is opening hands the lane back, and no registration after it carries the lane", async () => {
     const topic = "notifications.legion.omp.controller";
     const ticks: (() => void)[] = [];
     const refused = Promise.withResolvers<void>();
@@ -4702,8 +4870,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         return undefined;
       },
     });
+    const firstContext = first.context("ses_controller_first");
     const starting = startOperatorController(first, {
-      ...first.context("ses_controller_first"),
+      ...firstContext,
       setInterval: (callback) => ticks.push(callback),
       ui: {
         notify: (message) => {
@@ -4722,30 +4891,33 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     await refused.promise;
     connectGate.resolve();
     await starting;
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
-    const firstSubjects = natsConnections
-      .filter((candidate) => candidate.name === "omp-ses_controller_first")
-      .flatMap((connection) =>
-        connection.subjects.filter((subject) => !connection.unsubscribed.includes(subject))
-      );
-    expect(firstSubjects).not.toContain(topic);
-    expect(
-      first.requests.filter(
-        (request) =>
-          request.path === "/v1/interests/subscribe" && JSON.stringify(request.body).includes(topic)
-      )
-    ).toEqual([]);
+    expect(await followedTopics(first, firstContext)).not.toContain(topic);
+    expect(unregisteredTopics(first.requests, "ses_controller_first")).toEqual([[topic]]);
+    // The heartbeats that follow register what the session still holds, and the lane is not on
+    // that list: the listener builds its consumer without it, so no wake reaches it again.
+    const requestsBefore = first.requests.length;
+    for (const tick of ticks) tick();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const next = registeredTopics(first.requests.slice(requestsBefore), "ses_controller_first");
+    expect(next).toContain("notifications.agent.ses_controller_first");
+    expect(next).not.toContain(topic);
   });
 
-  test("a controller whose role ends while its dropped topic waits to resubscribe does not take it back", async () => {
+  // A session that lost its role stops following its lane and hands it back. The machinery that
+  // brings a session's inbound back after a dropped connection — the redial, and the
+  // registration that follows it — must not bring the lane back with it (INFRA-771).
+  test("a controller whose role ended does not take its lane back when its dropped connection reconnects", async () => {
     const topic = "notifications.legion.omp.controller";
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "1";
     try {
       const first = await launchedController({ sessionId: "ses_controller_first" });
       const ticks: (() => void)[] = [];
       const refused = Promise.withResolvers<void>();
+      const firstContext = first.context("ses_controller_first");
       await startOperatorController(first, {
-        ...first.context("ses_controller_first"),
+        ...firstContext,
         setInterval: (callback) => ticks.push(callback),
         ui: {
           notify: (message) => {
@@ -4753,57 +4925,52 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
           },
         },
       });
-      // The connection dies; each subject's pump retries (the agent subject's and the topic's),
-      // and both reconnects wait on the gate.
-      const connectGate = Promise.withResolvers<void>();
-      const reconnecting = Promise.withResolvers<void>();
-      let reconnects = 0;
-      natsConnectGates.set("omp-ses_controller_first", () => {
-        reconnects += 1;
-        if (reconnects === 2) reconnecting.resolve();
-        return connectGate.promise;
-      });
-      natsConnections.find((candidate) => candidate.name === "omp-ses_controller_first")?.drop();
-      await reconnecting.promise;
-      // Meanwhile a later `legion controller start` takes the role, and the first session's
-      // heartbeat is refused.
+      // A later `legion controller start` takes the role, and the first session's heartbeat is
+      // refused: the lane goes back to the listener.
       envoyPluginInterface().bootstrappedSession.file = undefined;
       const second = createPi();
       legionExtension(second.pi);
       await startOperatorController(second, first.context("ses_controller_second"));
       for (const tick of ticks) tick();
       await refused.promise;
-      connectGate.resolve();
-      // Every continuation of the reconnect settles before the next macrotask; then one more
-      // heartbeat registers whatever the session holds.
-      const settled = Promise.withResolvers<void>();
-      setImmediate(settled.resolve);
-      await settled.promise;
-      for (const tick of ticks) tick();
-      const registered = Promise.withResolvers<void>();
-      setImmediate(registered.resolve);
-      await registered.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unregisteredTopics(first.requests, "ses_controller_first")).toEqual([[topic]]);
+      // Everything the reconnect and the heartbeats register from here on.
+      const requestsAfterEnd = first.requests.length;
 
+      // The connection dies; the pump carrying the session's relay subject redials and opens it
+      // again, and the heartbeat that follows registers what the session holds.
+      const relaySubject = deliverSubject("ses_controller_first");
+      const reopened = Promise.withResolvers<void>();
+      natsSubscribeObserver = (subject) => {
+        if (subject === relaySubject) reopened.resolve();
+      };
+      natsConnections.find((candidate) => candidate.name === "omp-ses_controller_first")?.drop();
+      await reopened.promise;
+      for (const tick of ticks) tick();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      // The session is on a live connection again, taking its relay subject, and the lane is
+      // neither followed nor in the registration the listener builds its consumer from.
       const openSubjects = natsConnections
         .filter((candidate) => candidate.name === "omp-ses_controller_first" && !candidate.closed)
         .flatMap((connection) =>
           connection.subjects.filter((subject) => !connection.unsubscribed.includes(subject))
         );
-      expect(openSubjects).toContain("notifications.agent.ses_controller_first");
-      expect(openSubjects).not.toContain(topic);
-      expect(
-        first.requests.filter(
-          (request) =>
-            request.path === "/v1/interests/subscribe" &&
-            JSON.stringify(request.body).includes(topic)
-        )
-      ).toEqual([]);
+      expect(openSubjects).toContain(relaySubject);
+      expect(await followedTopics(first, firstContext)).not.toContain(topic);
+      const next = registeredTopics(first.requests.slice(requestsAfterEnd), "ses_controller_first");
+      expect(next).toContain("notifications.agent.ses_controller_first");
+      expect(next).not.toContain(topic);
     } finally {
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
     }
   });
 
-  test("a controller whose role ends during a failing reconnect keeps the topic closed through every later retry, and a resume does not get it back", async () => {
+  // The role ends first; then the session's connection dies and every redial fails for a while.
+  // Neither the retries nor the resume that follows may bring the lane back into what the
+  // session registers, which is the one list its consumer is built from (INFRA-771).
+  test("a controller whose role ended keeps its lane out of every later retry's registration, and a resume does not get it back", async () => {
     const topic = "notifications.legion.omp.controller";
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "1";
     try {
@@ -4827,19 +4994,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
           },
         },
       });
-      // The connection dies, and both pumps' retries wait on a reconnect that will fail.
-      const failingConnect = Promise.withResolvers<void>();
-      const reconnecting = Promise.withResolvers<void>();
-      let reconnects = 0;
-      natsConnectGates.set("omp-ses_controller_first", () => {
-        reconnects += 1;
-        if (reconnects === 2) reconnecting.resolve();
-        return failingConnect.promise;
-      });
-      natsConnections.find((candidate) => candidate.name === "omp-ses_controller_first")?.drop();
-      await reconnecting.promise;
-      // A later `legion controller start` takes the role, and the heartbeat is refused while the
-      // reconnect is in flight.
+      // A later `legion controller start` takes the role, and this session's heartbeat is
+      // refused: the lane goes back to the listener.
       envoyPluginInterface().bootstrappedSession.file = undefined;
       const second = createPi();
       legionExtension(second.pi);
@@ -4847,17 +5003,33 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       replaced = true;
       for (const tick of ticks) tick();
       await refused.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unregisteredTopics(first.requests, "ses_controller_first")).toEqual([[topic]]);
+      const requestsAfterEnd = first.requests.length;
 
-      // The reconnect fails, each retry schedules the next on the long interval, and the next
-      // reconnect succeeds.
+      // The connection dies, and the redial fails.
+      const failingConnect = Promise.withResolvers<void>();
+      const reconnecting = Promise.withResolvers<void>();
+      natsConnectGates.set("omp-ses_controller_first", () => {
+        reconnecting.resolve();
+        return failingConnect.promise;
+      });
+      natsConnections.find((candidate) => candidate.name === "omp-ses_controller_first")?.drop();
+      await reconnecting.promise;
+      await refused.promise;
+      // Each retry schedules the next on the long interval, and the next reconnect succeeds.
+      const relaySubject = deliverSubject("ses_controller_first");
+      const reopened = Promise.withResolvers<void>();
+      natsSubscribeObserver = (subject) => {
+        if (subject === relaySubject) reopened.resolve();
+      };
       jest.useFakeTimers();
-      const reconnected = Promise.withResolvers<void>();
-      natsConnectGates.set("omp-ses_controller_first", async () => reconnected.resolve());
+      natsConnectGates.set("omp-ses_controller_first", async () => undefined);
       failingConnect.reject(new Error("nats: connection refused"));
       for (let turn = 0; turn < 50; turn++) await Promise.resolve();
       jest.advanceTimersByTime(60_000);
       jest.useRealTimers();
-      await reconnected.promise;
+      await reopened.promise;
       const settled = Promise.withResolvers<void>();
       setImmediate(settled.resolve);
       await settled.promise;
@@ -4871,20 +5043,19 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         .flatMap((connection) =>
           connection.subjects.filter((subject) => !connection.unsubscribed.includes(subject))
         );
-      expect(openSubjects).toContain("notifications.agent.ses_controller_first");
-      expect(openSubjects).not.toContain(topic);
-      expect(
-        first.requests.filter(
-          (request) =>
-            request.path === "/v1/interests/subscribe" &&
-            JSON.stringify(request.body).includes(topic)
-        )
-      ).toEqual([]);
+      expect(openSubjects).toContain(relaySubject);
+      const afterRetries = registeredTopics(
+        first.requests.slice(requestsAfterEnd),
+        "ses_controller_first"
+      );
+      expect(afterRetries).toContain("notifications.agent.ses_controller_first");
+      expect(afterRetries).not.toContain(topic);
 
       // The replaced session is resumed in a new process: nothing in the registry brings the
-      // topic back.
+      // lane back into what it registers.
       envoyPluginInterface().bootstrappedSession.file = undefined;
-      const connectionsBeforeResume = natsConnections.length;
+      const requestsBeforeResume = first.requests.length;
+
       const resumed = createPi();
       legionExtension(resumed.pi);
       const context = first.context("ses_controller_first");
@@ -4900,11 +5071,12 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       expect(notices).toEqual([
         claimRefused("POST /legion/v1/claims/register failed with 403: Invalid boot token"),
       ]);
-      const resumedSubjects = natsConnections
-        .slice(connectionsBeforeResume)
-        .flatMap((connection) => connection.subjects);
-      expect(resumedSubjects).toContain("notifications.agent.ses_controller_first");
-      expect(resumedSubjects).not.toContain(topic);
+      const resumedRegistration = registeredTopics(
+        first.requests.slice(requestsBeforeResume),
+        "ses_controller_first"
+      );
+      expect(resumedRegistration).toContain("notifications.agent.ses_controller_first");
+      expect(resumedRegistration).not.toContain(topic);
     } finally {
       jest.useRealTimers();
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
@@ -4943,30 +5115,24 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     test(`keeps its controller topic open across /new and /resume when ${order} handles the switch first`, async () => {
       const topic = "notifications.legion.omp.controller";
       const controller = await launchedController({ sessionId: "ses_controller_before", order });
-      await startOperatorController(controller, controller.context("ses_controller_before"));
-      // A subject is open while it was subscribed more often than unsubscribed on a live connection.
-      const openSubjects = () =>
-        natsConnections
-          .filter((connection) => !connection.closed)
-          .flatMap((connection) =>
-            [...new Set(connection.subjects)].filter(
-              (subject) =>
-                connection.subjects.filter((candidate) => candidate === subject).length >
-                connection.unsubscribed.filter((candidate) => candidate === subject).length
-            )
-          );
-      expect(openSubjects()).toContain(topic);
+      const before = controller.context("ses_controller_before");
+      await startOperatorController(controller, before);
+      // The topic is open while the session follows it and the newest registration under the
+      // session's own id carries it: the listener builds that session's consumer from that list,
+      // so a switch that dropped either would leave the controller deaf on its lane.
+      const openFor = async (sessionId: string, context: SessionContext) => {
+        expect(await followedTopics(controller, context)).toContain(topic);
+        const registered = registeredTopics(controller.requests, sessionId);
+        expect(registered).toContain(`notifications.agent.${sessionId}`);
+        expect(registered).toContain(topic);
+      };
+      await openFor("ses_controller_before", before);
 
-      for (const [reason, sessionId] of [
-        ["new", "ses_controller_new"],
-        ["resume", "ses_controller_resumed"],
-      ] as const) {
-        await controller.handlers.get("session_switch")?.(
-          { reason },
-          controller.context(sessionId, `/tmp/${sessionId}.jsonl`)
-        );
-        expect(openSubjects()).toContain(`notifications.agent.${sessionId}`);
-        expect(openSubjects()).toContain(topic);
+      for (const sessionId of ["ses_controller_new", "ses_controller_resumed"] as const) {
+        const reason = sessionId === "ses_controller_new" ? "new" : "resume";
+        const context = controller.context(sessionId, `/tmp/${sessionId}.jsonl`);
+        await controller.handlers.get("session_switch")?.({ reason }, context);
+        await openFor(sessionId, context);
       }
     });
   }

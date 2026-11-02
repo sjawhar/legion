@@ -1,6 +1,6 @@
 # Envoy client
 
-Shared HTTP transport, tool contract, inbound delivery renderer, and missed-message replay for Envoy
+Shared HTTP transport, tool contract, inbound delivery renderer, and consumer delivery for Envoy
 hosts. pi-envoy and claude-envoy consume these modules rather than maintaining host-specific
 envelope parsers.
 
@@ -29,7 +29,7 @@ only moved a version, or a version nobody named — before a host can steer or r
 inbox, as well as events authored by the reader's own session. It does not skip on `notify`,
 which answers whether to wake the owner's route and is false for every event an agent wrote: a
 session that subscribed to an issue's topic subscribed for exactly that activity. A frame with no
-`quiet` was published before Dispatch stated it and is judged by `notify`, so a replay of the 72
+`quiet` was published before Dispatch stated it and is judged by `notify`, so a frame from the 72
 hours the stream still holds shows no receipts.
 
 ## Consumer delivery
@@ -38,124 +38,90 @@ hours the stream still holds shows no receipts.
 listener's relay of its durable consumer ("Session consumers" in `packages/envoy/AGENTS.md`). A
 host makes one per session, subscribes its `subject` (`notifications.envoy.deliver.<session id>`)
 before it registers, passes `registration()` as the registration's `delivery` field, and gives the
-registration's answer and the topics it carried to `answered`, which returns `consumer` or `core`,
-records the stored topics the listener relays (`relays`, `relaying`) and puts the replay engine in
-or out of consumer mode. It hands `receive` each relay message. The delivery decodes the frame's
+registration's answer and the topics it carried to `answered`, which returns `consumer`, the one
+mode there is, and
+records the stored topics the listener relays (`relays`, `relaying`). It hands `receive` each relay message. The delivery decodes the frame's
 `Envoy-*` headers (`decodeRelayFrame`), answers `received` on the frame's reply subject before any
 host work, and hands the host the frames one at a time in stream order
 (`ConsumerDeliveryHost.deliver`): the next waits until `deliver` returns or the host calls
 `release`, `done` or `nak`. The host calls `done` once it wrote the frame, or skipped or refused
 it, and `nak` when the session cannot take it; `progress` goes out every 20 s until then. A frame
-whose `deliver` throws is answered `nak`, and from its third delivery `done`, with the replay
-ledger's `liveFailed` showing its failure notice instead. A frame the replay ledger holds, one on
-a subject no followed topic matches, and one stored more than 2 s before its topic was followed
-(`setFollowed`) whose subject no replay cursor on the frame's stream followed from below the
-frame's sequence either (`since`) are answered `done` and never handed over. A frame delivered
+whose `deliver` throws is answered `nak`, and from its third delivery `done`, with the delivery
+ledger's `liveFailed` showing its failure notice instead. A frame the ledger holds, one on
+a subject no followed topic matches, and one stored before its topic was followed (`setFollowed`)
+are answered `done` and never handed over. A frame delivered
 before, or stored before the current epoch began, is `late`, and a host runs no side turn for it.
 `beginEpoch` starts a new epoch for each new NATS connection. `resumePoint` is the stream id and
 the sequence below which the session holds nothing unwritten; `snapshot` and `restore` carry it
 and the follow times across a restart, and the `persist` option is offered a snapshot whenever it
-changed, so a host writes only changes. A session with no resume point of its own, one moving
-from the core path, registers the lowest cursor the replay ledger holds over its agent subject
-and the followed topics the stream stores: its first consumer starts there instead of at the
-stream's end, so nothing stored while it was away is acked away unshown. Such a session has no
-follow times either, so every topic it follows is stamped at the resume time; the replay cursors
-are what say it followed the topic before then, so its frames are shown and not dropped.
+changed, so a host writes only changes. A session with no resume point of its own has its first
+consumer created at the stream's end, so it is shown nothing published before it registered.
 A registration answer that reports a gap
 or names another stream, and a frame that carries `Envoy-Gap`, call the host's `gap` once. `close`
-answers every unsettled frame, and every later one, `nak`, and leaves consumer mode.
-`streamStores` (`@legion/envoy-client/stream-topics`) says whether the stream stores a topic, so a
-host knows which of its subscriptions the relay carries. On `core` a host runs the replay engine
-below, and `setConsumerMode(true)` stops its `POST /v1/replay` calls while the relay serves the
-session.
+answers every unsettled frame, and every later one, `nak`.
+`streamStores` (`@legion/envoy-client/stream-topics`) says whether the stream stores a topic; the
+listener refuses to register a `notifications.` topic it does not, so every followed topic is one
+the relay carries.
 
-## Missed messages
+## The delivery ledger
 
-`createReplayEngine` (`@legion/envoy-client/replay`) is the core fallback's recovery, for a
-listener that answers `core` and for a plugin of an earlier release: it shows a session, once,
-each message the notification stream stored on a subject it follows while its own NATS
-subscription was down. A
+`createDeliveryLedger` (`@legion/envoy-client/delivery-ledger`) is what keeps a frame from being
+shown twice: the session's consumer redelivers everything it has not acknowledged, and the ledger
+holds what the host already wrote. A
 host makes one per session process and hands it its live path's `createDeliveryDedupe`, the
-listener client and callbacks (`ReplayHost`): the session id, the followed subjects, how to show
-a stored frame (as a card that runs nothing), a failure notice and a one-time notice, and how to
-persist a change. `sweep()` asks the listener's `POST /v1/replay` for each followed subject's
-messages after its cursor, merges them by stream sequence and hands the host each frame neither
-path showed; it never rejects, and one runs at a time with at most one queued behind it. A
-subject with no cursor starts at the stream's end, so a new follow brings up no history. Role
-forwards are passed over: on this path, role messages stay live only.
+listener client and callbacks (`DeliveryLedgerHost`): the session id, the followed subjects, how
+to show a failure notice and a one-time notice, and how to
+persist a change. Role forwards reach a session as stored copies on its own subject, so they go
+through the ledger like any other frame.
 
 The ledger holds the identity of each frame the session finished with (its `event_id`, and its
-`dedupe_key` when that names its event, `replayLedgerIdentity`), each expiring 72 hours after it
-was recorded, at most 20,000, the oldest dropped first. A host's live path calls
-`recordDelivered` once the host wrote the frame to the session's record, before it settles the
+`dedupe_key` when that names its event, `ledgerIdentity`), each expiring 72 hours after it
+was recorded, at most 20,000, the oldest dropped first. A host calls
+`recordDelivered` once it wrote the frame to the session's record, before it settles the
 claim, and drops a frame `delivered` finds. A `createDeliveryDedupe` claim is settled (`settle()`)
 once the host is done with the frame, shown or not, or released as before; until then `pending()`
-reads it true, and a sweep leaves that frame's stored copy for a later sweep rather than show it
-beside the live one. A host that hands a stored frame, or a failure notice, on without having
+reads it true. A host that hands a frame, or a failure notice,
+on without having
 written it yet (Oh My Pi holds a card sent mid-turn until the turn takes it) claims the frame and
-answers `queued`: nothing is recorded and its subjects' cursors stay before it, so a process that
-ends first shows it after the restart, until the host calls `recordDelivered` and settles the
+answers `queued`: nothing is recorded, so a process that
+ends first is sent it again after the restart, until the host calls `recordDelivered` and settles the
 claim once written. `recordDeliveredFor(sessionID, frame)` records the same way for the session a
 frame was delivered in while the host shuts down: it writes while the host's optional
 `writeSessionID()` still names that session, once `sessionID()` already answers none, and the
 ledger holds the frame from the call on (Oh My Pi records every BTW's event id so, before its side
 turn and before any reply is posted).
 
-The state holds each followed subject's `since` and `after`, the stream's `id` (`stream_id`, the
-`envoy_stream_id` the listener answers as `stream.id`) and `created` time, and the one-time
-notices raised but not told yet (`notices`);
+The state holds the topics the session follows, so a host can follow them again after the
+listener reaped its interests;
 `restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the
-state at any age. A write carries the state only when it changed; a sweep that handled no message
-and only moved its cursors to the stream's end goes with the next write, or once the state last
-written is an hour old (`REPLAY_STATE_REFRESH_MS`). A frame the host fails to show is retried, and
-on its third failure the host shows a notice naming it instead (`showFailureNotice`); a host whose
-live path failed a frame calls `liveFailed(followed, envelope, error, receivedAt)`, which shows
-that notice at once unless a sweep will show the stream's copy, which it will not for a frame
-received before its subject's cursor started (a new follow, a new session, or a reset after a
-stream recreation), since that cursor can start past it. A host stamps `receivedAt` when the
-subscription yielded the frame: `readArrivals(subscription)` (`@legion/envoy-client/delivery`)
-reads a subscription as its messages arrive and yields each, in order, with that time, so a frame
-queued behind a slow delivery is not stamped late. A replayed removal closes a topic only
-when `followedBefore(topic, seq)`; `replaySuppressed` says which rendered frames a replay does
-not show, `replayedText`, `failureNoticeFields` and `replayNoticeFields` word the cards, and
+state at any age. A write carries the state only when it changed. A frame the host fails to show is answered `nak` and sent again, and
+on its third delivery the host shows a notice naming it instead (`showFailureNotice`); a host whose
+delivery path failed a frame outside the relay calls `liveFailed(followed, envelope, error,
+receivedAt)`, which shows that notice at once. `failureNoticeFields` words that card, and
 `envoyNoticeText` renders a notice's fields under `envoy:` in TOON, so a sender's summary that
-holds a newline stays inside its own field. The session is
-told once when the stream was recreated, when it moved back, when its cursor fell behind the
-stream's oldest message (older than 72 hours), and when the listener does not replay (404) or
-cannot (503 `REPLAY_UNAVAILABLE`, 401, 403). A stream is recreated when its `id` differs from the
-stored one; a `created` that moved under the same id is a restore (or, after a clustered restore,
-a later leader election), not a recreation. An
-answer without an id (an older listener) is judged by `created`, and a state stored before ids
-takes the answer's id. A stream that is not recreated has moved back when any cursor's `after` is
-past the stream's `last_seq`: restored from a backup older than the cursors, or re-added empty
-from its exported configuration, which keeps the id, so its sequences restarted below them.
-Nothing tells which of its messages the session was shown, so every followed subject's `after`
-becomes `first_seq - 1` (each `since` stays) and the sweep reads everything the stream holds
-again: the ledger passes over what the session was already shown (a restore keeps event ids),
-what was published after the restore is shown, and the session is told once (`stream_moved_back`)
-that messages may be shown again and that any published between the backup and the restore are
-missing. A message may be shown twice; none is lost. A recreation's cursor reset, a moved-back
-stream's cursor rewind, and a retention gap's cursor move are written at once, with their notice
-in `notices`, which is dropped once told: a session that ends before telling it tells it once at
-its first sweep after the restart. Work started for one session stops, writing nothing, once
+holds a newline stays inside its own field. Work started for one session stops, writing nothing, once
 `sessionID()` names another.
 
-The host policy both plugins share sits beside the engine, so each host keeps only how it shows a
-card, how it warns, and how it persists. `replayFollowedSubjects(ownAgentSubject, topics,
-heldForRole?)` is what a host's `followedSubjects()` answers: its own agent subject and every
-topic it follows but a role lane, a subject it holds for a role, and a topic reaching a private
-stream subject (`reachesPrivateStreamSubject`, which a host's registration applies too: another
-session's agent subject, a failed-delivery lane on an agent subject, the Legion controller lane,
-or a wildcard reaching one, the listener's own rule, `privateStreamSubjects` and
-`ReachesPrivateStreamSubject` in `packages/envoy/internal/bus/stream.go`). `rememberedTopics(state)`
-is what a restore follows again from a persisted state: every
-subject but agent subjects and role lanes. `closeReplayedRemoval(frame, host)` acts on a replayed
-`subscription.removed` naming the session: it closes each topic the session followed before the
-frame was stored (`followedBefore`, through the host's `close`), then starts the host's
-`unregister` of the closed topics from the listener's registry and waits on it and on the host's
-`followedChanged`. `routeReplayNotice(notice, {warn, card})` sends a one-time notice where its kind
-belongs: `not_served` and `unavailable` are a warning, `stream_recreated`, `stream_moved_back` and
-`retention_gap` a card rendered by `envoyNoticeText`.
+The host policy both plugins share sits in `@legion/envoy-client/stream-topics`, so each host keeps
+only how it shows a card, how it warns, and how it persists. `replayFollowedSubjects(
+ownAgentSubject, topics, heldForRole?)` is what a host's `followedSubjects()` answers, which is
+what a restart follows again: its own agent subject and every topic it follows but a role lane, a
+subject it holds for a role, and a topic reaching a private stream subject.
+`reachesPrivateStreamSubject(ownAgentSubject, topic, roles?)` is the listener's own rule,
+`privateStreamSubjects` and `ReachesPrivateStreamSubject` in
+`packages/envoy/internal/bus/stream.go`, which a host's registration applies too: another session's
+agent subject, a failed-delivery lane on an agent subject or a team topic, a controller notice lane
+of a project whose controller role `roles` does not name, or a wildcard reaching one. A session
+holding that role registers its own project's lane, since its consumer is the only way the notice
+reaches it (`controllerNoticeRole` names the role a lane is for). `rememberedTopics(topics)` is what
+a restore follows again from a persisted state: every subject but agent subjects and role lanes.
+`streamDeliversNothing(topic)` is the topic a registration must not carry: a `notifications.` topic
+no stream subject captures and no role lane, which the listener leaves out of the row it stores,
+naming it in a warning. `uncapturedTopicRefusal(topic, sessionID)` is that warning's own wording,
+which a host's subscribe tool refuses such a topic with when a caller names it by hand. The
+sentence is `@legion/contracts`'s, re-exported here: `packages/contracts/scripts/gen-go.ts` emits
+it as the `contracts.UncapturedTopicRefusal` the listener's warning returns, so a reword reaches
+both languages from one place.
 
 ## NATS connection
 
@@ -227,9 +193,9 @@ deletes the registration a successor instance made under the same session id, an
 deletes the entry as before. The answer says whether the entry stayed, and the call resolves
 `void` because no caller acts on it: a deregistering client has nothing to retry either way.
 
-`replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
-listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on
-`EnvoyApiError.code`.
+`subscribe`'s answer carries the registration's `delivery` field; a registration the listener can
+give no consumer is refused by name, and its reason (`no_grant`, `consumer_error`,
+`not_requested`, `invalid_session_id`) is on `EnvoyApiError`.
 
 ## envoy.json
 

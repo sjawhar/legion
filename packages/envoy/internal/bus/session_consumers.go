@@ -74,12 +74,12 @@ func sessionConsumerNameOf(sessionID string) (string, error) {
 // SessionConsumers manages the stream's session consumers, one durable pull consumer per session
 // (SessionConsumerName), and pulls their messages, on a connection of its own (ConnectSessionConsumers).
 //
-// Each consumer's info, create and delete are requests the bus confirms as RequestCoreTo confirms its
-// forward (requestConfirmed), so a call the NATS user may not make returns ErrConsumerNotGranted as
-// soon as the server refuses it; the jetstream package's own requests wait out their whole timeout
-// for an answer a refused request never gets. The configuration and the answers are the jetstream
-// package's types. A pull (SessionPull) sends its own pull requests, so starting one costs no API
-// call.
+// Each consumer's info, create and delete are requests the bus confirms as a role forward's
+// publish is confirmed (requestConfirmed), so a call the NATS user may not make returns
+// ErrConsumerNotGranted as soon as the server refuses it; the jetstream package's own requests
+// wait out their whole timeout for an answer a refused request never gets. The configuration and
+// the answers are the jetstream package's types. A pull (SessionPull) sends its own pull
+// requests, so starting one costs no API call.
 type SessionConsumers struct {
 	client *Client
 	// ackWait is SessionConsumerAckWait, shortened by a test that waits out a redelivery.

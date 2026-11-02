@@ -93,25 +93,16 @@ func TestDrainDoesNotReconnect(t *testing.T) {
 }
 
 // A drain lets a role-lane delivery finish its forward. The listener's role handler forwards each
-// message to the holder with RequestCoreTo, which opens a receipt subscription per forward; a
-// connection that is already draining refuses new subscriptions, so the delivery subscriptions
-// drain first, while the connection still accepts them. One message is in the handler when the
-// drain starts and one is queued behind it; both forwards reach the holder, on its agent subject,
-// which the stream stores and acknowledges as a forward needs.
+// message to the holder with StartRequestStoredTo, which opens a reply subscription per forward;
+// a connection that is already draining refuses new subscriptions, so the delivery subscriptions
+// drain first, while the connection still accepts them. Each handler sleeps before it forwards,
+// so both forwards are published after the drain has begun; both are stored on the holder's agent
+// subject, which the stream captures and acknowledges as a forward needs.
 func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
 	_, uri := startNATS(t)
-	holder := testnats.Connect(t, uri)
-	t.Cleanup(holder.Close)
+	publisher := testnats.Connect(t, uri)
+	t.Cleanup(publisher.Close)
 	holderSubject := contracts.AgentSubject("drain-holder")
-	if _, err := holder.Subscribe(holderSubject, func(message *natsgo.Msg) {
-		time.Sleep(150 * time.Millisecond)
-		_ = message.Respond(nil)
-	}); err != nil {
-		t.Fatalf("holder subscribe: %v", err)
-	}
-	if err := holder.Flush(); err != nil {
-		t.Fatalf("holder flush: %v", err)
-	}
 
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
@@ -122,7 +113,8 @@ func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
 	started := make(chan struct{}, 2)
 	if _, err := client.SubscribeCore("notifications.role.drain-test", func(message *natsgo.Msg) {
 		started <- struct{}{}
-		forwards <- client.RequestCoreTo(holderSubject, contracts.Envelope{
+		time.Sleep(150 * time.Millisecond)
+		forward, err := client.StartRequestStoredTo(holderSubject, contracts.Envelope{
 			EventID:       "evt-" + string(message.Data),
 			Source:        "agent",
 			SourceEventID: "source-" + string(message.Data),
@@ -130,6 +122,11 @@ func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
 			DedupeKey:     "drain-" + string(message.Data),
 			IssuedAt:      contracts.NowMillis(),
 		}, 2*time.Second)
+		if err != nil {
+			forwards <- err
+			return
+		}
+		forwards <- forward.Wait()
 	}, "drain-test"); err != nil {
 		t.Fatalf("role subscribe: %v", err)
 	}
@@ -137,11 +134,11 @@ func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
 		t.Fatalf("flush role subscription: %v", err)
 	}
 	for _, body := range []string{"first", "second"} {
-		if err := holder.Publish("notifications.role.drain-test", []byte(body)); err != nil {
+		if err := publisher.Publish("notifications.role.drain-test", []byte(body)); err != nil {
 			t.Fatalf("publish %s: %v", body, err)
 		}
 	}
-	if err := holder.Flush(); err != nil {
+	if err := publisher.Flush(); err != nil {
 		t.Fatalf("flush publishes: %v", err)
 	}
 	select {
@@ -172,7 +169,7 @@ func TestAPublishAfterDrainDoesNotReconnect(t *testing.T) {
 	if err := client.Drain(5 * time.Second); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-	err := client.PublishCore(contracts.Envelope{
+	err := client.Publish(contracts.Envelope{
 		EventID:       "evt-after-drain",
 		Source:        "agent",
 		SourceEventID: "source-after-drain",

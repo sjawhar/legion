@@ -58,33 +58,6 @@ func TestMatch_FiltersByMachineID(t *testing.T) {
 	}
 }
 
-// MatchAll is Match without the machine filter: a sender confirming delivery to every subscribed
-// session must find the ones registered through another machine's listener, by an exact topic or
-// a wildcard alike, and none whose patterns miss the topic.
-func TestMatchAll_ReturnsMatchingSessionsOnEveryMachine(t *testing.T) {
-	r := cachedRegistry(map[string]Interest{
-		"ses_b_exact": {SessionID: "ses_b_exact", MachineID: "machine-B", Topics: []string{"notifications.team.deploy"}},
-		"ses_a_star":  {SessionID: "ses_a_star", MachineID: "machine-A", Topics: []string{"notifications.team.*"}},
-		"ses_a_other": {SessionID: "ses_a_other", MachineID: "machine-A", Topics: []string{"notifications.team.review"}},
-		"ses_b_chev":  {SessionID: "ses_b_chev", MachineID: "machine-B", Topics: []string{"notifications.slack.>", "notifications.>"}},
-		"ses_b_slack": {SessionID: "ses_b_slack", MachineID: "machine-B", Topics: []string{"notifications.slack.>"}},
-	})
-
-	got := r.MatchAll("notifications.team.deploy")
-	ids := make([]string, len(got))
-	for i, item := range got {
-		ids[i] = item.SessionID
-	}
-	want := []string{"ses_a_star", "ses_b_chev", "ses_b_exact"}
-	if strings.Join(ids, ",") != strings.Join(want, ",") {
-		t.Fatalf("MatchAll(notifications.team.deploy) = %v, want %v in SessionID order", ids, want)
-	}
-
-	if got := r.MatchAll("notifications.agent.ses_x.extra.tokens"); len(got) != 1 || got[0].SessionID != "ses_b_chev" {
-		t.Fatalf("MatchAll of a topic only notifications.> matches = %v, want [ses_b_chev]", got)
-	}
-}
-
 func TestMatch_WildcardPatterns(t *testing.T) {
 	r := cachedRegistry(map[string]Interest{
 		"ses_exact":   {SessionID: "ses_exact", MachineID: "m1", Topics: []string{"notifications.github.sjawhar.legion.pr"}},
@@ -216,7 +189,7 @@ func TestMergeForUpsert_SuccessfulGetMergesTopics(t *testing.T) {
 	}
 	item := Interest{SessionID: "ses_x", MachineID: "m1", Dir: "/workspace"}
 
-	result, err := mergeForUpsert(cur, nil, item, []string{"topic.c"}, 42)
+	result, err := mergeForUpsert(cur, nil, item, 42, InterestPlan{Topics: []string{"topic.c"}})
 	if err != nil {
 		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
 	}
@@ -241,7 +214,7 @@ func TestMergeForUpsert_ErrKeyNotFoundCreatesNewEntry(t *testing.T) {
 		Dir:       "/workspace",
 	}
 
-	result, err := mergeForUpsert(Interest{}, natsgo.ErrKeyNotFound, item, []string{"topic.fresh"}, 100)
+	result, err := mergeForUpsert(Interest{}, natsgo.ErrKeyNotFound, item, 100, InterestPlan{Topics: []string{"topic.fresh"}})
 	if err != nil {
 		t.Fatalf("ErrKeyNotFound must be treated as new entry, not propagated: %v", err)
 	}
@@ -267,7 +240,7 @@ func TestMergeForUpsert_TransientErrorRefusesToWrite(t *testing.T) {
 		Dir:       "/workspace",
 	}
 
-	_, err := mergeForUpsert(Interest{}, transient, item, []string{"topic.heartbeat"}, 99)
+	_, err := mergeForUpsert(Interest{}, transient, item, 99, InterestPlan{Topics: []string{"topic.heartbeat"}})
 	if err == nil {
 		t.Fatal("transient KV error MUST be returned, not silently swallowed")
 	}
@@ -288,7 +261,7 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	// listener config and matches cur, but heartbeat body sends only agent topic.
 	item := Interest{SessionID: "ses_x", MachineID: "example-host-mx", Dir: "/home/ubuntu/example-repo/rl-eval/default"}
 
-	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x"}, 200)
+	result, err := mergeForUpsert(cur, nil, item, 200, InterestPlan{Topics: []string{"notifications.agent.ses_x"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -313,8 +286,11 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 
 // A row stored before the listener refused topics reaching a private stream subject keeps them
 // until the session's next registration, which drops them: another session's agent subject, a
-// failed-delivery lane wildcard, a Legion controller lane and notifications.> go, while the
-// session's own agent subject, the issue topic it followed and the topic it registers now stay.
+// failed-delivery lane wildcard, a controller notice lane of a project whose controller role the
+// session does not hold and notifications.> go, while the session's own agent subject, the issue
+// topic it followed and the topic it registers now stay. The lane stays for the session whose
+// claims name that project's controller role, since the row is the filter of the consumer those
+// notices now reach it through.
 func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
 	cur := Interest{
 		SessionID: "ses_x",
@@ -329,14 +305,25 @@ func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testin
 		},
 	}
 	item := Interest{SessionID: "ses_x", MachineID: "m1"}
+	registered := []string{"notifications.agent.ses_x", "notifications.github.acme.widgets.pr.7.>"}
+	kept := []string{"notifications.agent.ses_x", "notifications.dispatch.issue.KEY-1.>", "notifications.github.acme.widgets.pr.7.>"}
 
-	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x", "notifications.github.acme.widgets.pr.7.>"}, 7)
-	if err != nil {
-		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
-	}
-	want := []string{"notifications.agent.ses_x", "notifications.dispatch.issue.KEY-1.>", "notifications.github.acme.widgets.pr.7.>"}
-	if !slices.Equal(result.Topics, want) {
-		t.Fatalf("merged topics = %v, want %v", result.Topics, want)
+	for name, tc := range map[string]struct {
+		roles []string
+		want  []string
+	}{
+		"no role":                  {want: kept},
+		"another project's":        {roles: []string{"legion-OTHER-controller"}, want: kept},
+		"the project's controller": {roles: []string{"legion-ACME-controller"}, want: append(slices.Clone(kept), "notifications.legion.ACME.controller")},
+	} {
+		result, err := mergeForUpsert(cur, nil, item, 7, InterestPlan{Roles: tc.roles, Topics: registered})
+		if err != nil {
+			t.Fatalf("%s: mergeForUpsert returned unexpected error: %v", name, err)
+		}
+		want := slices.Sorted(slices.Values(tc.want))
+		if !slices.Equal(result.Topics, want) {
+			t.Fatalf("%s: merged topics = %v, want %v", name, result.Topics, want)
+		}
 	}
 }
 
@@ -1191,6 +1178,157 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	}
 	if len(item.Topics) != 2 || item.Topics[0] != "topic.a" || item.Topics[1] != "topic.c" {
 		t.Fatalf("expected [topic.a topic.c], got %v", item.Topics)
+	}
+}
+
+// A heartbeat whose body leaves out the controller notice lane its row holds keeps that lane in
+// both the plan and the row written from it: PlanInterest reads the session's roles for the
+// stored row as well as for the topics the registration names, so the filter the listener builds
+// from the plan and the row its write stores are one set. Until INFRA-771's review the route read
+// the roles for the body's topics alone, so such a heartbeat dropped the lane from the filter
+// while the write, reading them again for the row, kept it in the row.
+func TestPlanInterestKeepsTheControllerLaneAHeartbeatOmits(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	const (
+		sessionID = "ses_controller"
+		role      = "legion-acme-controller"
+		lane      = "notifications.legion.acme.controller"
+	)
+	own := contracts.AgentSubject(sessionID)
+	if _, err := reg.SetRole(sessionID, "m1", role, false); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		held, err := reg.RolesHeldBy(sessionID)
+		return err == nil && slices.Contains(held, role)
+	})
+	ctx := context.Background()
+	registered, err := reg.PlanInterest(ctx, sessionID, []string{lane, own})
+	if err != nil {
+		t.Fatalf("plan the registration that names the lane: %v", err)
+	}
+	if !slices.Contains(registered.Topics, lane) {
+		t.Fatalf("planned topics %v, want the lane %s the holder registered", registered.Topics, lane)
+	}
+	if _, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, registered); err != nil {
+		t.Fatalf("write the registration: %v", err)
+	}
+
+	heartbeat, err := reg.PlanInterest(ctx, sessionID, []string{own})
+	if err != nil {
+		t.Fatalf("plan the heartbeat that omits the lane: %v", err)
+	}
+	if !slices.Contains(heartbeat.Topics, lane) {
+		t.Fatalf("planned topics %v after a heartbeat that omits the lane, want it kept: they are the consumer's filter", heartbeat.Topics)
+	}
+	stored, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, heartbeat)
+	if err != nil {
+		t.Fatalf("write the heartbeat: %v", err)
+	}
+	if !slices.Equal(stored.Topics, heartbeat.Topics) {
+		t.Fatalf("stored topics %v, want the planned %v: the row and the filter built from the plan must name one set", stored.Topics, heartbeat.Topics)
+	}
+}
+
+// storedInterest reads sessionID's row from the interest bucket itself, which is what the next
+// registration, the reaper and every other listener read, rather than from this registry's cache.
+func storedInterest(t *testing.T, conn *natsgo.Conn, sessionID string) Interest {
+	t.Helper()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	kv, err := js.KeyValue(bus.InterestBucket)
+	if err != nil {
+		t.Fatalf("open %s: %v", bus.InterestBucket, err)
+	}
+	entry, err := kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read %s's stored row: %v", sessionID, err)
+	}
+	var item Interest
+	if err := json.Unmarshal(entry.Value(), &item); err != nil {
+		t.Fatalf("decode %s's stored row: %v", sessionID, err)
+	}
+	return item
+}
+
+// A registration's write stores its plan at the revision the plan was read at and is refused when
+// the bucket holds another, so an unsubscribe that lands between the two is not undone: its
+// caller plans again from the row the bucket now holds and writes that
+// (PlanInterestAfterConflict, which the listener's registration route calls in the loop that also
+// filters the session's consumer on each plan). Seconds pass in that window: the route plans
+// first, then creates or re-filters the consumer, each bus call waiting up to 5 s, and writes the
+// plan after (cmd/listener's subscribeHandler). Until INFRA-771's review the write read the row
+// again and merged the plan into it unconditionally, so a topic the unsubscribe had removed was
+// written back by the plan that had read it, and the row only ever grew from there; the likeliest
+// trigger is the daemon's fire-and-forget unsubscribe at the end of a role racing the next
+// heartbeat.
+func TestUpsertPlannedKeepsAnUnsubscribeThatOutranItsPlan(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	const (
+		sessionID = "ses_unsubscribe_race"
+		followed  = "notifications.dispatch.issue.KEY-1.>"
+	)
+	own := contracts.AgentSubject(sessionID)
+	ctx := context.Background()
+	registration, err := reg.PlanInterest(ctx, sessionID, []string{followed, own})
+	if err != nil {
+		t.Fatalf("plan the registration that follows the issue: %v", err)
+	}
+	first, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, registration)
+	if err != nil {
+		t.Fatalf("write the registration that follows the issue: %v", err)
+	}
+	if !slices.Contains(first.Topics, followed) {
+		t.Fatalf("stored topics %v, want the issue topic the registration named", first.Topics)
+	}
+
+	// The heartbeat plans the row as it stands, the issue topic its body leaves out included.
+	plan, err := reg.PlanInterest(ctx, sessionID, []string{own})
+	if err != nil {
+		t.Fatalf("plan the heartbeat: %v", err)
+	}
+	if !slices.Contains(plan.Topics, followed) {
+		t.Fatalf("planned topics %v, want the issue topic the row holds", plan.Topics)
+	}
+	// The unsubscribe lands while the route is still giving the session its consumer.
+	if err := reg.Remove(ctx, sessionID, []string{followed}); err != nil {
+		t.Fatalf("unsubscribe from the issue topic: %v", err)
+	}
+
+	if _, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, plan); !errors.Is(err, ErrInterestPlanConflict) {
+		t.Fatalf("the write of a plan the unsubscribe outran answered %v, want %v", err, ErrInterestPlanConflict)
+	}
+	again, err := reg.PlanInterestAfterConflict(ctx, sessionID, plan.Requested)
+	if err != nil {
+		t.Fatalf("plan the heartbeat again after the refused write: %v", err)
+	}
+	answered, err := reg.UpsertPlanned(ctx, Interest{SessionID: sessionID, MachineID: "m1"}, again)
+	if err != nil {
+		t.Fatalf("write the heartbeat the second plan decided: %v", err)
+	}
+	if slices.Contains(answered.Topics, followed) {
+		t.Fatalf("the write answered topics %v; the unsubscribe removed %s, so the registration must not write it back", answered.Topics, followed)
+	}
+	stored := storedInterest(t, conn, sessionID)
+	if slices.Contains(stored.Topics, followed) {
+		t.Fatalf("the stored row holds topics %v; the unsubscribe removed %s, and nothing removes it a second time", stored.Topics, followed)
+	}
+	if !slices.Contains(stored.Topics, own) {
+		t.Fatalf("the stored row holds topics %v, want the session's own agent subject %s the heartbeat named", stored.Topics, own)
 	}
 }
 

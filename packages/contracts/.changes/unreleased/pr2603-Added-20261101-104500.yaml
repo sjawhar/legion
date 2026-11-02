@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+  Legion's controller notice lane and role token, and the sentence a caller that names a notification topic nothing is ever delivered on is told (`uncapturedTopicRefusal`), are written once here and emitted into the Envoy listener's Go by `scripts/gen-go.ts`, so neither is copied by hand on either side.
+time: 2026-11-01T10:45:00.000000000Z
+custom:
+  Issue: pr2603

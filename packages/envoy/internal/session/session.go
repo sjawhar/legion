@@ -36,11 +36,13 @@ var ErrWrongMachine = errors.New("session belongs to a different machine")
 var ErrNoSessionRecord = errors.New("no session record")
 
 // ErrNoPushTarget is returned when a session entry exists and carries nothing this listener can
-// push to: no serve port, and not self-subscribed. That is the record a session writes when it
-// registers before its server has bound its serve port, and binding the port rewrites it, so
-// re-reading it answers the same thing only until that write lands - a caller may wait the port
-// out rather than give the message up, and the listener's delivery does, deferring such a message
-// for its whole retry window (cmd/listener/unplaceable_delivery.go).
+// push to: no serve port, and no consumer of its own holding this message
+// (SessionEntry.ConsumerRelaysStored). That is the record a session writes when it registers
+// before its server has bound its serve port, and binding the port rewrites it, so re-reading it
+// answers the same thing only until that write lands - a caller may wait the port out rather than
+// give the message up, and the listener's delivery does, deferring such a message for its whole
+// retry window (cmd/listener/unplaceable_delivery.go). It is also the record of a session an
+// earlier build left on the deleted core receive path, which no path reaches now.
 var ErrNoPushTarget = errors.New("no reachable push target")
 
 var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
@@ -115,20 +117,11 @@ func (d Deliverer) Resolve(item contracts.Envelope, interest store.Interest, ent
 	if entry.ConsumerRelaysStored(storedSubject, storedSeq) {
 		// The session's consumer holds this stored message, and the listener that owns the session
 		// relays it from there, serving port or not: the durable path pushes nothing and reports
-		// nothing for it. A topic the stream does not store reaches the session as before (the
-		// live lane's push to a serving port; a session's own subscription, which is where a team
-		// or other ad-hoc topic still arrives). A durable message stored below the consumer's
-		// start is in no consumer, so it is pushed below as for a session with none.
+		// nothing for it. A topic the stream does not store reaches a serving port through the
+		// live lane's push, and reaches a portless session on no path of its own. A durable
+		// message stored below the consumer's start is in no consumer, so it is pushed below as
+		// for a session with none.
 		return DeliveryResult{Skipped: true, Relayed: true}, nil
-	}
-	if entry.SelfSubscribed && entry.Port == 0 {
-		// A portless session on the core path, the rollout fallback of "Session consumers" in
-		// packages/envoy/AGENTS.md: it has no consumer of its own (an older plugin, or a listener
-		// with no session-consumer grant), there is nothing to push to, and the message reaches it
-		// on its own NATS subscription. So this is a delivered outcome, not ErrNoPushTarget: only
-		// the push this listener would have made is skipped. A session on consumer delivery took
-		// the branch above and takes this message from its consumer.
-		return DeliveryResult{Skipped: true}, nil
 	}
 	if entry.Port > 0 {
 		// Only the owning listener delivers to a session: every listener on the bus reads each
@@ -141,6 +134,12 @@ func (d Deliverer) Resolve(item contracts.Envelope, interest store.Interest, ent
 		}
 		return DeliveryResult{Push: true, Entry: *entry}, nil
 	}
+	// An entry with no serving port whose consumer does not hold this message is unreachable: a
+	// session receives through its own consumer alone, and a registration the listener can give
+	// none is refused with nothing written (cmd/listener's subscribeHandler), so such an entry is
+	// one the previous build wrote for a session on the core path. ErrNoPushTarget raises one
+	// delivery exception per stored message for it, which is the honest answer: a silent skip
+	// would hide a session that receives nothing (dispatch://INFRA-771).
 	return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoPushTarget, interest.SessionID)
 }
 

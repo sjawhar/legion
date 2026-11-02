@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-771",
+  "completed": "2026-11-01T23:58:15Z",
+  "pullRequest": "sjawhar/legion#2603",
+  "round": 8,
+  "previousHandoff": "338b5f1a293d38849c1eb3da5fad8342f97ac26b",
+  "codeHead": "7b9c47fbf9ed",
+  "answeredReviewRound3": [
+    "Important 1 (after a CAS conflict the consumer filter and the row disagree): subscribeHandler now plans, filters the session's consumer and writes in one loop, bounded by store.InterestPlanAttempts, and answers only once the topics it filtered on are the topics the row holds. store.Registry.UpsertPlanned is one compare-and-swap that reports ErrInterestPlanConflict, and store.Registry.PlanInterestAfterConflict is the route's re-plan from the row the bucket now holds. Two ways filter and row can part are covered, not one: the refused write the review named, and the write that stores nothing because another writer's row already holds the plan (store.interestRow's unchanged path) and so answers a row wider than the filter. The review's own case produces the second, which a loop that handled only the refusal would still have left short; the test below failed against that narrower loop.",
+    "Important 2 (the serving-port client API is dead after the merge): subscribeServingPort, ServingPortSubscribeResult and parseServingPortSubscribeAnswer are deleted from @legion/envoy-client, with pi-envoy's notUsed stub, the SubscribeResult doc, the subscribe-body comment and envoy-client's pr2603 changelog fragment corrected. A grep for the three names over the tree finds nothing outside dist/.",
+    "Minor (the two duplicates the merge left): the second stored-exception block in cmd/listener/delivery.go is deleted, and loadtest/README.md's old Consumer delivery section with it; nothing under loadtest/ names LOADTEST_SESSION_DELIVERY or -session-delivery any more.",
+    "Minor (prose that still said a registration refuses an uncaptured topic): corrected in cmd/listener/session_delivery.go, the three live_topics_test.go comments, packages/pi-envoy/AGENTS.md and the pull request body's Change bullet.",
+    "Minor (other stale text): contracts/src/dispatch-api.ts no longer describes hosts that subscribe over core NATS or @legion/envoy-client/replay, contracts/src/envelope.ts and scripts/gen-go.ts the same with generated.go regenerated (bun run check:go clean), envoy-client/src/transport.ts's 'Live NATS subscriptions' reworded, and scripts/e2e/lib/session-settings-services.ts names pi-envoy's extension in place of the deleted packages/envoy-plugin/src/server.ts.",
+    "Minor (the presence-grant docs claimed a sender): infra/core/permissions.go, envoy/AGENTS.md, infra/README.md, infra/docs/nats-hub.md and the envoy fragment now say the grant is ahead of dispatch://INFRA-626, which will send the probe, that nothing in this tree publishes or subscribes to the subject, and that the shared-user risk begins when that change lands.",
+    "Minor (the explicit-subscribe refusal copied in both plugins): one envoy-client helper, refuseUncapturedTopics, which both tools call; subscribeRefusesTopic and the uncapturedTopicRefusal re-export had no caller left outside the module and are unexported, with the module's own test driving the helper that throws.",
+    "Minor (ReachesNoSession checked twice under two comments, with a one-line wrapper): splitUncapturedTopics asks it once per topic before the plan and hands the warning loop the set it dropped; uncapturedTopicWarning is deleted and its callers use contracts.UncapturedTopicRefusal.",
+    "Minor (a test that regex-parses Go source): the rows are packages/envoy/internal/bus/testdata/private-stream-subjects.json, which the Go test and the TypeScript mirror both read, each refusing a read of fewer than its 37 rows.",
+    "Minor (the consumer-delivery answer built seven more times in tests): one builder, consumerDelivery in @legion/envoy-client/test/subscribe-answer, which all seven stand-ins now call."
+  ],
+  "proof": [
+    {
+      "criterion": "Review round 3's important 1: after a write that does not store the plan it filtered on, the registration filters again, so the consumer's filter and the stored row name one set and a topic the registration answered 200 for is delivered.",
+      "surface": "packages/envoy/cmd/listener against a real nats-server in the test process: the listener's /v1 routes, its session-consumer manager and the stream, with the second registration driven inside the first's window through sessionDelivery.beforeRegister, the seam the window needs.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -run TestSessionConsumerFiltersAgainWhenItsWriteLosesTheCompareAndSwap ./cmd/listener/",
+      "observed": "ok in 0.559 s. The case: a heartbeat H and an envoy_subscribe S plan at one revision; S runs whole inside H's window, filters on {T, C} and stores them; H's own filter call then sets the filter back to {T} and its write stores nothing, since the row already holds its plan. The assertions are that the stored row holds C, that the consumer's filters equal sessionConsumerFilter of that row, and that a message published on C is pending for the consumer.",
+      "headSha": "7b9c47fbf9ed6b0b1f8d35d7bbaa1e7e6ba26c0b",
+      "negativeControl": "The pre-fix behaviour, restored in place (agreed = true after the first write, so the route ends on it): the same case fails by name — 'consumer filters [notifications.agent.ses_cas_refilter notifications.dispatch.issue.CAS-1.>], want [... CAS-1.> ... CAS-2.>]'. The edit was reverted from a copy of the file and gofmt reports nothing."
+    },
+    {
+      "criterion": "The store's half of important 1: UpsertPlanned is one compare-and-swap that reports the conflict, and an unsubscribe that lands between a plan and its write is still not undone when the caller plans again.",
+      "surface": "packages/envoy/internal/store against a real nats-server in the test process, which is where both review agents reproduced the race.",
+      "command": "cd packages/envoy && go test -count=1 -run TestUpsertPlanned ./internal/store/ ; then the whole package",
+      "observed": "ok in 0.386 s, and the whole store package ok in 32.4 s. TestUpsertPlannedKeepsAnUnsubscribeThatOutranItsPlan now drives what the route drives: the plan's write is refused ErrInterestPlanConflict, PlanInterestAfterConflict plans from the row the bucket holds, and the write of that plan neither answers nor stores the topic the unsubscribe removed.",
+      "headSha": "7b9c47fbf9ed6b0b1f8d35d7bbaa1e7e6ba26c0b",
+      "negativeControl": "The test fails on the old store the moment the re-plan is taken out of it and not put in its caller: run against the round-7 store it reports 'write the heartbeat whose plan the unsubscribe outran' with the conflict unhandled, which is how the change to one compare-and-swap was caught in the first place."
+    },
+    {
+      "criterion": "Nothing of the change regressed under the round's edits: the listener, the stores, the grant, the generated contract and every TypeScript package.",
+      "surface": "The repository's own suites in this issue's pod, with its test PostgreSQL and a real nats-server.",
+      "command": "cd packages/envoy && go vet ./... && DISPATCH_TEST_DATABASE_URL=$LEGION_TEST_PG_DSN go test -count=1 -timeout 30m ./cmd/listener/ && go test -count=1 ./internal/store/ ./internal/bus/; cd infra && go test -count=1 ./core/; cd ../../contracts && bun run check:go; then bun test in contracts, pi-shared, envoy-client, claude-envoy and pi-envoy, and bunx biome check .",
+      "observed": "vet clean; cmd/listener ok 830.818 s; internal/store ok 32.4 s; internal/bus ok 361.8 s; infra/core ok 6.3 s; check:go clean, so the regenerated generated.go is what the generator writes; contracts 406 pass, pi-shared 94 pass, envoy-client 1,304 pass 10 skip, claude-envoy 263 pass 13 skip, pi-envoy 1,750 pass 40 skip, pi-legion's legion-role-claim 1 pass; biome 0 errors (2 warnings and 2 infos, all main's, in dist-fresh.test.ts and handoff-commit.ts).",
+      "headSha": "7b9c47fbf9ed6b0b1f8d35d7bbaa1e7e6ba26c0b",
+      "negativeControl": "The suites found this round's own mistakes before the push: TestUpsertPlannedKeepsAnUnsubscribeThatOutranItsPlan went red the moment the store stopped re-planning, and the new listener case went red against the loop that handled the refused write alone. Both are recorded above."
+    },
+    {
+      "criterion": "The change still delivers every event once to a real Oh My Pi session and a real Claude Code session, through every disruption, with this round's loop and the deleted client in place.",
+      "surface": "scripts/e2e/envoy-session-delivery.sh in this issue's pod: natsd with JetStream, two Envoy listeners, envoy-dispatch on the pod's test PostgreSQL, a real Oh My Pi session on this checkout's packed pi-envoy and a real Claude Code session under legion claude-bridge, each reaching NATS through a cuttable socat proxy.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && SESSION_DELIVERY_EVIDENCE_DIR=/legion/scratch/tmp/impl-round8/e2e bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "exit 0 in 348 s, 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)'. All six disruption windows, every expected cell 1 and no '!' mark, both sessions registered delivery consumer, and the closing order assertion naming the twelve comments of LIVE-1 it compared in each transcript, in stream order. The table is committed at .legion/INFRA-771/evidence/envoy-session-delivery-TABLES.md, refreshed from this run.",
+      "headSha": "7b9c47fbf9ed6b0b1f8d35d7bbaa1e7e6ba26c0b",
+      "negativeControl": "Round 4's control, unchanged in script and in meaning: the same proof against the build before this change (--build-from f41a4d8c) exits 1 with 'FAIL sessions: session pi does not report consumer delivery, \"delivery\":null'. Within this run the per-marker counts are their own control: a second copy of any marker fails the step."
+    },
+    {
+      "criterion": "Both plugins' real-session paths still register, follow and receive with the shared refusal helper and the shared answer builder in place.",
+      "surface": "The packages' own real-process suites: a real Oh My Pi binary against stand-in gateways, listeners and Dispatch, and a real nats-server.",
+      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:36223 bun test extensions/card-delivery-omp.test.ts; cd ../pi-legion && the same for extensions/controller-start-omp.test.ts",
+      "observed": "card-delivery-omp 10 pass, 0 fail, 116 expect() calls in 89 s; controller-start-omp 17 pass, 0 fail, 81 expect() calls in 229 s.",
+      "headSha": "7b9c47fbf9ed6b0b1f8d35d7bbaa1e7e6ba26c0b",
+      "negativeControl": "Round 7's control stands for the card suite and was not repeated: with the plugin subscribing the wrong relay subject that file fails in 38 s. For this round's own change, the shared builder is what every stand-in listener answers with, and a stand-in that answered without a delivery object fails in parseSubscribeAnswer, which is how round 7 found the two pi-legion rigs."
+    },
+    {
+      "criterion": "The pull request's file set against main is this change's alone after the round's edits.",
+      "surface": "The diff from the merge base of main and this head.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj diff --from 'fork_point(main@origin | 7b9c47fbf9ed)' --to 7b9c47fbf9ed --summary",
+      "observed": "185 paths, where round 7 left 181. Four joined and none left: packages/contracts/src/dispatch-api.ts and src/envelope.ts, both text only; packages/envoy-client/test/subscribe-answer.ts, the shared answer builder; and packages/envoy/internal/bus/testdata/private-stream-subjects.json, the shared fixture.",
+      "headSha": "7b9c47fbf9ed6b0b1f8d35d7bbaa1e7e6ba26c0b",
+      "negativeControl": "The comparison is made against the merge base, not against main's tip: a straight diff from main@origin reads 215 paths, because main has moved on since this branch merged it, and those 30 extra paths are main's own later work rather than anything of this change."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/cmd/listener/api.go: the plan-filter-write loop, splitUncapturedTopics, uncapturedTopicWarning deleted.",
+    "packages/envoy/cmd/listener/session_delivery.go: the beforeRegister seam, and the corrected refuses/drops sentence.",
+    "packages/envoy/cmd/listener/session_delivery_test.go: TestSessionConsumerFiltersAgainWhenItsWriteLosesTheCompareAndSwap.",
+    "packages/envoy/cmd/listener/delivery.go: the duplicated stored-exception block removed.",
+    "packages/envoy/cmd/listener/api_test.go, live_topics_test.go: the contract sentence in place of the wrapper, and the corrected comments.",
+    "packages/envoy/internal/store/kv.go, interest.go, kv_test.go: one compare-and-swap, PlanInterestAfterConflict, InterestPlanAttempts exported, and the race test driving the route's sequence.",
+    "packages/envoy/internal/bus/stored_test.go and internal/bus/testdata/private-stream-subjects.json: the shared fixture.",
+    "packages/envoy/infra/core/permissions.go, infra/README.md, infra/docs/nats-hub.md, packages/envoy/AGENTS.md: the presence grant stated as a grant ahead of its sender.",
+    "packages/envoy/loadtest/README.md: the duplicated section removed.",
+    "packages/envoy-client/src/transport.ts: the serving-port client deleted.",
+    "packages/envoy-client/src/stream-topics.ts and its test: refuseUncapturedTopics, with its predicate and the re-export private.",
+    "packages/envoy-client/test/subscribe-answer.ts and package.json: the shared consumer-delivery answer builder and its export.",
+    "packages/pi-envoy/extensions/envoy.ts, envoy.test.ts, src/registration-state.test.ts, AGENTS.md; packages/claude-envoy/src/envoy-channel-server.ts and four tests; packages/pi-legion/extensions/legion-role-claim.test.ts: the shared helper and builder, and the stub removed.",
+    "packages/contracts/src/dispatch-api.ts, src/envelope.ts, src/subject.ts, scripts/gen-go.ts and packages/envoy/internal/contracts/generated.go: the stale core-NATS text.",
+    "scripts/e2e/lib/session-settings-services.ts: the deleted package no longer named."
+  ],
+  "trickyParts": [
+    "The review's case does not produce the refused write it names. Its two registrations plan at one revision, but by the time the first one writes, the second's row already holds everything its plan would add, so store.interestRow reports the write unchanged and UpsertPlanned stores nothing and answers the row that is there — no compare-and-swap conflict at all. A loop that re-planned only on ErrInterestPlanConflict therefore left the filter exactly as the review described, which the new test showed on its first run. The loop's condition is the invariant itself, that the topics filtered on are the topics the row holds, and both ways of parting them end it.",
+    "The test needs a write to land between a registration's plan and its consumer call, a window no caller can reach from outside, so sessionDelivery gained beforeRegister beside the now clock it already carries for its backoff: nil in production, and the one hook the case sets. The inner registration runs that hook too, so the guard is a plain flag; a sync.Once whose Do is re-entered from inside its own call never returns, which cost one ten-minute test timeout."
+  ],
+  "deviations": [
+    "The review's important 1 proposed moving the plan, register and write loop into the handler, which this does, and the store side proposed dropping InterestPlan.Requested and the fromBucket plan with it. Both stay: the route's re-plan is PlanInterestAfterConflict, which plans from the bucket for exactly the reason the store's own loop did, and Requested is what it plans from."
+  ],
+  "openQuestions": [
+    "INFRA's daemon and every issue pod restart onto a new image (Oh My Pi 18.13.3, pi-envoy 14.0.0, plugin contract 44) within minutes of this handoff. Every byte of this round is pushed: code at 7b9c47fbf9ed on legion/INFRA-771, the pull request body and all twelve thread replies on GitHub. Nothing of this round is in a rescue branch.",
+    "Round 7's unexplained single listener-suite failure did not recur: the suite ran green at this round's head (ok 830.818 s)."
+  ],
+  "discoveredComplexity": [
+    "A registration's consumer filter and its interest row are two writes to two stores with a multi-second bus call between them, and keeping them equal is not a property of either write: it is a loop condition over both. Stating it that way — end when what was filtered equals what is stored — covers the refused write, the write that stores nothing, and whatever third way a future writer finds to land in that window."
+  ]
+}

@@ -47,8 +47,8 @@ type subscribeBody struct {
 	// written empty, clearing any id a previous registration stored, since the entry is built
 	// fresh from this body.
 	ClientInstanceID string `json:"client_instance_id"`
-	// Delivery asks for consumer delivery (subscribeDelivery); absent from an older plugin's
-	// registration, which stays on the core path.
+	// Delivery asks for consumer delivery (subscribeDelivery). A registration with no serving port
+	// that carries none, an older plugin's, is refused (sessionDelivery.register).
 	Delivery *subscribeDelivery `json:"delivery"`
 }
 

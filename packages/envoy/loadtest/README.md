@@ -21,7 +21,7 @@ same step before and after its change, and compares the two rows.
 | `refs.go` | The reference seed: the plan of 1,000 cited documents and their citations, the writes, the shape check (`refs-shape`) and the answer fetch (`refs-fetch`) |
 | `run.go` | One step: its phases (the window, the dashboard streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
 | `sessions.go` | The simulated sessions: their NATS subscriptions and receipts, their listener registrations and heartbeats |
-| `relay.go` | Consumer delivery of the simulated sessions (`LOADTEST_SESSION_DELIVERY=consumer`): relay frames, their replies and receipts, `relay-frames.csv`, and the pull-request spy |
+| `relay.go` | Consumer delivery of the simulated sessions, the only way a session is delivered to: relay frames, their replies and receipts, `relay-frames.csv`, and the pull-request spy |
 | `backlog.go` | `loadgen backlog`: the publisher of a session backlog, for the listener restart (The listener restart, below) |
 | `restartreport.go` | `loadgen restart-report`: one restart run's backlog times and duplicate verdicts |
 | `events.go` | The five write kinds, the event mix and each write's plan |
@@ -114,7 +114,6 @@ same step before and after its change, and compares the two rows.
 | `LOADTEST_GOMAXPROCS` | nproc | Dispatch's `GOMAXPROCS` (`run-step.sh --replay --gomaxprocs`). |
 | `LOADTEST_REPLAY_ISSUE` | unset | The issue the replay's bundle and seed parts are file artifacts of. `stack.sh replay-get` and a `run-step.sh --replay` step require it and refuse before they start without it; the manifest names no issue. To find it, search Dispatch for the bundle parts' name before `.tar.zst` (the manifest's `bundle.parts[].file`; for this manifest, `dispatch search --query 'linux-replay-2026-10-26'`): among the hits is that issue's comment naming the parts. A search for the manifest's file name does not find it. |
 | `DISPATCH_URL`, `DISPATCH_TOKEN_FILE` | unset | Read by `stack.sh replay-get` alone, in its own shell, to download the replay's parts. |
-| `LOADTEST_SESSION_DELIVERY` | `core` | `consumer` has the sessions take their messages from the listener's relay of their consumers (Consumer delivery, below). `stack.sh loadgen` passes it to `loadgen run` (`-session-delivery`). |
 | `LOADTEST_NO_RESUME` | unset | `1`, under consumer delivery, leaves the resume point out of every registration's `delivery`, as a plugin sends that never wrote a frame. `stack.sh loadgen` passes it to `loadgen run`. |
 
 Every process listens on `127.0.0.1`. The default ports follow `LOADTEST_ROOT`: the root's block
@@ -278,8 +277,8 @@ packages/envoy/loadtest/restart-step.sh <name> [--events 40] [--sessions 1000] [
 `--warm-at`, `--kill-at` and `--down` are whole seconds; `--duration`, `--backlog-over` and
 `--warm-over` are durations as Go reads them. Any other flag goes to `run-step.sh`.
 
-The step is a `run-step.sh` step under consumer delivery, which the script sets
-(`LOADTEST_SESSION_DELIVERY=consumer`). Its defaults are the series' `step-10x` row with a 300 s
+The step is a `run-step.sh` step under consumer delivery, as every step is: every session asks
+for a consumer of its own. Its defaults are the series' `step-10x` row with a 300 s
 window. Counted from the window start (`meta.json` `window_start`):
 
 | When | What happens |
@@ -590,37 +589,38 @@ the same wrap. A step with fewer than 1,000 sessions touches only the first N is
 - Each session registers with the listener as the pi plugin does: `POST /v1/interests/subscribe`,
   `self_subscribed: true`, port 0. It sends a heartbeat every 90 s. The heartbeats of all sessions
   are spread evenly.
-- Each session subscribes over core NATS to its agent topic (`notifications.agent.<session>`) and
-  to the topics of its five issues (`notifications.dispatch.issue.<key>.>`). The sessions share 50
-  NATS connections. `run.log` records the subscriptions (N × 6 expected), the sessions registered
-  and the registration errors.
+- A session subscribes nothing over core NATS: it is delivered to by the relay of its own
+  consumer alone, so a core subscription here would count copies no plugin receives. The sessions
+  share 50 NATS connections. `run.log` records the subscriptions (one relay subject per session,
+  N expected), the sessions registered and the registration errors.
 
 #### Consumer delivery
 
-With `LOADTEST_SESSION_DELIVERY=consumer` (or `loadgen run -session-delivery consumer`), each
-session also does what the pi plugin does in consumer mode:
+Each session does what the pi plugin does, since a session receives only what its own consumer
+holds:
 
 - It subscribes its relay subject, `notifications.envoy.deliver.<session>`, before it registers.
 - Its registration carries `delivery: {consumer: true, epoch}`, with one random epoch per NATS
   connection. The run reads each answer's `delivery.mode`. `summary.json`
-  `sessions.delivery` counts the sessions whose last answer was `consumer`, and those whose last
-  answer was `core`, by reason. A step whose sessions answered `core` measured the core path.
+  `sessions.delivery` counts the sessions whose last answer was `consumer`, those whose last
+  answer named no consumer, and those that got no answer at all. The listener refuses a
+  registration it can give no consumer, so such a refusal is counted among the registration
+  errors, and a step with any session not on consumer delivery measured a path that delivers
+  nothing to it.
 - It answers each relay frame `received`, then `done`, on the frame's reply subject. The frame is
   the session's receipt: the first frame of each stream sequence counts, matched to its write by
-  the event id in the payload as a core receipt is. A frame of a sequence that the session has
-  received already counts as a duplicate, not as a receipt.
-- It keeps its core subscriptions. While the listener relays the session, a core copy is not
-  counted; on the agent topic it answers the empty lane receipt when it has a reply subject.
+  the event id in the payload. A frame of a sequence that the session has received already counts
+  as a duplicate, not as a receipt.
 
 A relay frame carries the stream's store time of the event (`Envoy-Stored-At`). The **delivery
 latency from publish** is the receipt time minus that time, over the same receipts as the other
-latencies (`events.delivery_ms_from_publish`). A core receipt has no such time. Each relay frame
-is a row of `relay-frames.csv` in the step directory.
+latencies (`events.delivery_ms_from_publish`). Each relay frame is a row of `relay-frames.csv` in
+the step directory.
 
-In both modes, `loadgen` subscribes `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` on a
-connection of its own and counts the pull requests on the stream's consumers, those of session
-consumers (`s-<session>`) apart. The 5 s sampler also reads NATS `/jsz`: the JetStream consumers
-and API requests.
+`loadgen` subscribes `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` on a connection of its own
+and counts the pull requests on the stream's consumers, those of session consumers
+(`s-<session>`) apart. The 5 s sampler also reads NATS `/jsz`: the JetStream consumers and API
+requests.
 
 ### Event kinds
 
@@ -1446,9 +1446,8 @@ not 0. `TABLES.md` repeats this under the table when a row has the mark.
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
 | `step` | name | The step name, with the mark `(commit rows not read)` as in the first table. | `config.step`, `events.commits_error` |
-| `session delivery asked` | text | `core` or `consumer` (Consumer delivery, above). | `config.session_delivery` |
-| `sessions on consumer / core` | count | The sessions whose last registration answered `consumer`, then `core`, with each core reason and its count. `-` on the core path. | `sessions.delivery` |
-| `delivery ms from publish p50 / p99` | ms | Delivery latency from publish, over the issue-topic receipts of primary events that carry the store time. `-` on the core path, and when the commit rows were not read. | `events.delivery_ms_from_publish` |
+| `sessions on consumer / without one` | count | The sessions whose last registration answered `consumer`, then those whose answer named no consumer or that got none. `-` when the step wrote no delivery summary. | `sessions.delivery` |
+| `delivery ms from publish p50 / p99` | ms | Delivery latency from publish, over the issue-topic receipts of primary events that carry the store time. `-` when the commit rows were not read. | `events.delivery_ms_from_publish` |
 | `delivery ms from arrival p50 / p99` | ms | As in the first table. | `events.delivery_ms_from_arrival` |
 | `issue-topic receipts lost` | count | Expected minus got. | `events.missing` |
 | `relay frames / duplicates / redelivered` | count | The relay frames, those of a sequence already received, and those with `Envoy-Delivered` above 1. | `sessions.delivery` |

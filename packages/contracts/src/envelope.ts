@@ -64,7 +64,7 @@ const mintedDedupeKey = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
  * all, because its producer can give two distinct events one: the MCP bridge's content hash
  * (LEGION-423), the Go daemon's outbox row id, which restarts with each new store (LEGION-426).
  * The stream decides its MsgId by the same rule (`contracts.DedupeKeyNamesTheUpstreamEvent`), and
- * every host that subscribes over core NATS decides its own dedupe by this one.
+ * every host decides its own dedupe by this one.
  */
 export function dedupeKeyNamesItsEvent(envelope: {
   readonly source?: string | undefined;

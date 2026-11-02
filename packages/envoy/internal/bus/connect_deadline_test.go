@@ -17,7 +17,7 @@ func (deadlinePassedContext) Deadline() (time.Time, bool) { return time.Now().Ad
 // ensureConnWithContext takes a nil error to mean a connection it can use, and calling JetStream
 // on a nil one panics the process. Seen in a loaded package run of
 // TestPublishBoundsReconnectWhenNATSUnavailable, as a nil pointer dereference in
-// (*nats.Conn).JetStream under PublishCoreTo.
+// (*nats.Conn).JetStream under that test's core publish.
 func TestADialPastItsDeadlineReturnsAnError(t *testing.T) {
 	conn, err := connectWithContext(deadlinePassedContext{context.Background()}, "deadline-test", []string{"nats://127.0.0.1:1"}, nil, nil, nil, nil, nil, nil)
 	if err == nil {

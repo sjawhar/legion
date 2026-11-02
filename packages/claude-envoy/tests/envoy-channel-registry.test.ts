@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { rm } from "node:fs/promises"
+import { uncapturedTopicRefusal } from "@legion/contracts"
 import { EnvoyApiError } from "@legion/envoy-client/transport"
 import { startChannelSession } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
@@ -17,40 +18,57 @@ import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
 
+/**
+ * A person's removal of this session's subscriptions, as its own consumer's relay delivers it:
+ * every frame, a live removal included, reaches the session that way now.
+ */
+function relayRemoval(nats: FakeNats, event: string, topics: readonly string[], seq = 1): void {
+  nats.emitRelay("ses_claude", {
+    subject: directSubject,
+    seq,
+    reply: `_INBOX.${event}`,
+    raw: JSON.stringify({
+      event_id: event,
+      source: "dispatch",
+      topic: directSubject,
+      issued_at: 1,
+      payload_summary: "DSP-3 subscription removed",
+      payload: JSON.stringify({
+        issue_key: "DSP-3",
+        type: "subscription.removed",
+        actor: { kind: "user", id: "alice" },
+        payload: { session_id: "ses_claude", by: { kind: "user", id: "alice" }, topics },
+      }),
+    }),
+  })
+}
+
 test("drops local topics named by a human Dispatch subscription removal", async () => {
-  const nats = new FakeNats()
+  const calls: string[] = []
+  const nats = new FakeNats(calls)
   const stateDirectory = await scratchState()
   const session = await startChannelSession(
     sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
       connection: nats,
+      client: recordingClient(calls),
     }),
   )
   const topic = "notifications.dispatch.issue.DSP-3.>"
 
   try {
     await session.follow([topic])
-    nats.emit(
-      directSubject,
-      JSON.stringify({
-        event_id: "remove-1",
-        source: "dispatch",
-        payload: JSON.stringify({
-          issue_key: "DSP-3",
-          type: "subscription.removed",
-          actor: { kind: "user", id: "alice" },
-          payload: {
-            session_id: "ses_claude",
-            by: { kind: "user", id: "alice" },
-            topics: [topic],
-          },
-        }),
-      }),
+    relayRemoval(nats, "remove-1", [topic])
+    await waitFor(
+      async () => !session.topics().includes(topic),
+      "the removed topic to leave the session",
     )
-    await settled()
 
-    expect(nats.unsubscribed).toEqual([
-      "notifications.dispatch.issue.DSP-3",
-      "notifications.dispatch.issue.DSP-3.>",
+    // Both the base and the wildcard leave the session, and the removal's own registry write
+    // names the topic it named; the heartbeat's reconciliation takes the rest of the entry back
+    // in line with what the session follows.
+    expect(session.topics()).toEqual([directSubject])
+    expect(calls.filter((call) => call.startsWith("unsubscribe"))).toEqual([
+      "unsubscribe ses_claude notifications.dispatch.issue.DSP-3.>",
     ])
   } finally {
     await session.shutdown()
@@ -87,13 +105,9 @@ test("a resumed server rebuilds the interests its session id already registered 
 
   try {
     expect(subscribes).toEqual([[directSubject, "notifications.dispatch.issue.DSP-3", issueTopic]])
-    // The relay subject (consumer delivery) is subscribed, never registered as a topic.
-    expect([...nats.subscriptions.keys()]).toEqual([
-      "notifications.envoy.deliver.ses_claude",
-      directSubject,
-      "notifications.dispatch.issue.DSP-3",
-      issueTopic,
-    ])
+    // The relay subject (consumer delivery) is the whole subscription set: a registered topic is
+    // what the session's consumer is filtered on, never a subscription of its own.
+    expect([...nats.subscriptions.keys()]).toEqual(["notifications.envoy.deliver.ses_claude"])
     expect(await session.follow([issueTopic])).toEqual([])
   } finally {
     await session.shutdown()
@@ -186,24 +200,8 @@ test("a registration in flight when Dispatch removes a subscription cannot write
     held = undefined
     // Dispatch removes the topic from the entry itself, then tells the session.
     entry.delete(removed)
-    nats.emit(
-      directSubject,
-      JSON.stringify({
-        event_id: "remove-2",
-        source: "dispatch",
-        payload: JSON.stringify({
-          issue_key: "DSP-3",
-          type: "subscription.removed",
-          actor: { kind: "user", id: "alice" },
-          payload: {
-            session_id: "ses_claude",
-            by: { kind: "user", id: "alice" },
-            topics: [removed],
-          },
-        }),
-      }),
-    )
-    await settled()
+    relayRemoval(nats, "remove-2", [removed])
+    await waitFor(async () => !session.topics().includes(removed), "the removal to be taken")
     release.resolve()
     await following
     await waitFor(async () => !entry.has(removed), `${removed} to stay out of the entry`)
@@ -250,23 +248,7 @@ test("a registry removal that fails is reconciled by the next heartbeat, without
   try {
     await session.follow([staysRemoved, reFollowed])
     failNextUnsubscribe = true
-    nats.emit(
-      directSubject,
-      JSON.stringify({
-        event_id: "remove-reconcile",
-        source: "dispatch",
-        payload: JSON.stringify({
-          issue_key: "DSP-3",
-          type: "subscription.removed",
-          actor: { kind: "user", id: "alice" },
-          payload: {
-            session_id: "ses_claude",
-            by: { kind: "user", id: "alice" },
-            topics: [staysRemoved, reFollowed],
-          },
-        }),
-      }),
-    )
+    relayRemoval(nats, "remove-reconcile", [staysRemoved, reFollowed])
     await waitFor(async () => !failNextUnsubscribe, "the removal's own registry write to fail once")
     // Both are already out of local state; re-follow one before any heartbeat
     // reconciles. A stale retry replaying the failure-time topic list would strip
@@ -564,22 +546,70 @@ test("a Dispatch subscription removal that names no topics removes nothing", asy
   try {
     await session.follow([topic])
     calls.length = 0
-    nats.emit(
-      directSubject,
-      JSON.stringify({
-        event_id: "remove-empty",
-        source: "dispatch",
-        payload: JSON.stringify({
-          issue_key: "DSP-3",
-          type: "subscription.removed",
-          actor: { kind: "user", id: "alice" },
-          payload: { session_id: "ses_claude", by: { kind: "user", id: "alice" }, topics: [] },
-        }),
-      }),
+    relayRemoval(nats, "remove-empty", [])
+    await waitFor(
+      async () => nats.repliesOn("_INBOX.remove-empty").includes("done"),
+      "the removal frame's done",
     )
-    await settled()
     expect(calls.filter((call) => call.includes("unsubscribe"))).toEqual([])
     expect(session.topics()).toEqual([directSubject, topic])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+// A topic the stream captures nothing of is left out of every registration
+// (`registrationTopics`), since the listener stores none: it drops such a topic from the row and
+// names it in a warning (INFRA-771). It is followed all the same when it came back from the
+// interest row a resume reads, and `follow`, which is the tool's call and nothing else, refuses
+// one its caller named itself, in the listener's own words.
+test("never registers a topic no stream subject captures, however it was followed", async () => {
+  const calls: string[] = []
+  const nats = new FakeNats(calls)
+  const stateDirectory = await scratchState()
+  const subscribes: Array<readonly string[]> = []
+  const client = recordingClient(calls, {
+    getInterest: async () => ({
+      ...noInterest(),
+      // The row an earlier build left: it expanded `notifications.team.>` to the bare base
+      // beside it, which this build's stream captures nothing of.
+      topics: [directSubject, "notifications.team", "notifications.team.deploys"],
+    }),
+    subscribe: async (input) => {
+      subscribes.push(input.topics)
+      return noInterest()
+    },
+  })
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      client,
+    }),
+  )
+
+  try {
+    // The bare base came back with the row and is followed; no registration carried it.
+    expect(session.topics()).toEqual([
+      directSubject,
+      "notifications.team",
+      "notifications.team.deploys",
+    ])
+    expect(subscribes).toEqual([[directSubject, "notifications.team.deploys"]])
+
+    // The caller named the uncaptured topic itself, so the call is refused by name, in the one
+    // sentence the listener's own warning is generated from, and follows nothing of that call.
+    await expect(
+      session.follow(["notifications.lxspec.probe", "notifications.team.>"]),
+    ).rejects.toThrow(uncapturedTopicRefusal("notifications.lxspec.probe", "ses_claude"))
+    expect(session.topics()).not.toContain("notifications.lxspec.probe")
+
+    expect(await session.follow(["notifications.team.>"])).toEqual(["notifications.team.>"])
+    expect(subscribes.at(-1)).toEqual([
+      directSubject,
+      "notifications.team.deploys",
+      "notifications.team.>",
+    ])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

@@ -16,7 +16,7 @@ import (
 // the client dialled to replace a closed one, can end after the stop with role messages the server
 // has already routed to the subscription it made. None of them is discarded with that
 // subscription. While Drain is still taking the subscriptions it drains, the deliveries finish with
-// the rest, before the connection drains, so each forward can still subscribe its receipt inbox.
+// the rest, before the connection drains, so each forward can still subscribe its reply inbox.
 // Once Drain has taken its last, the connection's drain lets them finish.
 func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 	for _, tc := range []struct {
@@ -34,20 +34,14 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 				t.Fatalf("connect: %v", err)
 			}
 			defer client.Close()
-			// The holder's agent subject, which the stream stores and acknowledges as a forward needs.
+			// The holder's agent subject, which the stream stores and acknowledges as a forward
+			// needs; no session subscribes it (INFRA-771), so the acknowledgement is the only
+			// reply.
 			holderSubject := contracts.AgentSubject("drain-late-bind-holder")
-			holder := testnats.Connect(t, uri)
-			defer holder.Close()
-			if _, err := holder.Subscribe(holderSubject, func(msg *nats.Msg) { _ = msg.Respond(nil) }); err != nil {
-				t.Fatalf("subscribe the holder: %v", err)
-			}
-			if err := holder.Flush(); err != nil {
-				t.Fatalf("flush the holder: %v", err)
-			}
 
 			// The handler forwards each role message to the holder, as the listener's role lane
 			// does, once the drain is under way. Late, the connection is already draining, which
-			// refuses the receipt inbox, so it only records the delivery.
+			// refuses the reply inbox, so it only records the delivery.
 			release := make(chan struct{})
 			releaseHandlers := sync.OnceFunc(func() { close(release) })
 			defer releaseHandlers()
@@ -61,7 +55,11 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 				if tc.late {
 					return
 				}
-				if err := client.RequestCoreTo(holderSubject, contracts.Envelope{EventID: "drain-late-bind"}, 2*time.Second); err != nil {
+				forward, err := client.StartRequestStoredTo(holderSubject, contracts.Envelope{EventID: "drain-late-bind"}, 2*time.Second)
+				if err == nil {
+					err = forward.Wait()
+				}
+				if err != nil {
 					forwardErr.Store(err.Error())
 					return
 				}

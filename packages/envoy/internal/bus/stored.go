@@ -78,7 +78,7 @@ func (c *Client) NextStoredMessage(ctx context.Context, subject string, seq uint
 }
 
 // requestConfirmed sends data to subject as a request and returns its one reply. The publish is
-// confirmed as RequestCoreTo's is (publishConfirmed), so a request the server refuses under the
+// confirmed as a forward's publish is (publishConfirmed), so a request the server refuses under the
 // connection's publish permissions returns ErrPublishDenied at once; a plain request would wait
 // out its whole deadline, since core NATS answers a denied publish to no one but the async error
 // callback. One publishConfirmed cannot confirm for another reason still waits for its reply, and

@@ -15,8 +15,9 @@ type HandleAgentReason uint8
 
 const (
 	// ReasonNone is every outcome that is none of the three causes below: a push that landed, a
-	// self-subscribed skip (the session reads the message off its own subscription), and a
-	// session another listener owns (ErrWrongMachine), which both paths answer as OwnedElsewhere:
+	// skip for a message the session's own consumer holds, which the relay of that consumer
+	// delivers (DeliveryResult.Relayed), and a session another listener owns (ErrWrongMachine),
+	// which both paths answer as OwnedElsewhere:
 	// that listener delivers the message, so this one has no cause to report.
 	ReasonNone HandleAgentReason = iota
 	// ReasonNoSessionRecord is a session the resolution found no record of. A caller holding a

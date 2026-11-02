@@ -132,108 +132,99 @@ async function startChannelServer(
   }
 }
 
-// Both rollout states: the listener grant of this checkout, where the session registers for a
-// consumer and the listener relays it, and the grant every hub carries until its NATS user is
-// replaced, where the registration is answered core and the session runs on the core path. The
-// SIGTERM test below belongs to neither, so it runs once, with the current grant.
-for (const listenerGrant of ["current", "before-session-consumers"] as const) {
-  const onCorePath = listenerGrant === "before-session-consumers"
-  describe.skipIf(!envoyStackEnabled)(
-    onCorePath
-      ? "the channel server against a real natsd and an Envoy listener whose grant predates session consumers"
-      : "the channel server against a real natsd and Envoy listener",
-    () => {
-      let stack: EnvoyStack | undefined
-      beforeAll(async () => {
-        stack = await startEnvoyStack({ listenerGrant })
-      }, 120_000)
-      afterAll(async () => {
-        await stack?.stop()
-      }, 60_000)
+// One rollout state is left: every listener gives the session a consumer and relays it. A
+// listener that can give none refuses the registration, which `envoy-client`'s own stack tests
+// cover; there is no core path to fall back to here.
+describe.skipIf(!envoyStackEnabled)(
+  "the channel server against a real natsd and Envoy listener",
+  () => {
+    let stack: EnvoyStack | undefined
+    beforeAll(async () => {
+      stack = await startEnvoyStack()
+    }, 120_000)
+    afterAll(async () => {
+      await stack?.stop()
+    }, 60_000)
 
-      test(onCorePath
-        ? "a session whose NATS path freezes on the core path is shown the message sent during the freeze once, as a replay, within 60 s"
-        : "a session whose NATS path freezes subscribes its relay subject again on the new connection within 60 s, registers a new epoch, and shows each message once", async () => {
-        if (stack === undefined) throw new Error("the Envoy stack did not start")
-        const { envoyUrl } = stack
-        const { proxy, sessionID, channel, waitFor, stop } = await startChannelServer(
-          stack,
-          "ses_stall",
+    test("a session whose NATS path freezes subscribes its relay subject again on the new connection within 60 s, registers a new epoch, and shows each message once", async () => {
+      if (stack === undefined) throw new Error("the Envoy stack did not start")
+      const { envoyUrl } = stack
+      const { proxy, sessionID, channel, waitFor, stop } = await startChannelServer(
+        stack,
+        "ses_stall",
+      )
+      try {
+        const started = Date.now()
+        await waitFor(
+          async () => (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok,
+          started + 30_000,
+          "the session's registration",
         )
-        try {
-          const started = Date.now()
-          await waitFor(
-            async () => (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok,
-            started + 30_000,
-            "the session's registration",
-          )
-          // The bundle runs from this checkout, outside Claude Code's plugin cache.
-          const registration = {
-            session_id: sessionID,
-            plugin: "@sjawhar/claude-envoy",
-            plugin_version: "source",
-          }
-          expect(await (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).json()).toMatchObject(
-            registration,
-          )
-          expect(await (await fetch(`${envoyUrl}/v1/sessions`)).json()).toContainEqual(
-            expect.objectContaining(registration),
-          )
-          await runFreezeScenario({
-            label: onCorePath ? "claude-envoy stall (core path)" : "claude-envoy stall",
-            stack,
-            sessionID,
-            proxy,
-            shown: (marker) => channel.filter((content) => content.includes(marker)),
-            waitFor,
-          })
-        } finally {
-          await stop()
+        // The bundle runs from this checkout, outside Claude Code's plugin cache.
+        const registration = {
+          session_id: sessionID,
+          plugin: "@sjawhar/claude-envoy",
+          plugin_version: "source",
         }
-      }, 120_000)
+        expect(await (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).json()).toMatchObject(
+          registration,
+        )
+        expect(await (await fetch(`${envoyUrl}/v1/sessions`)).json()).toContainEqual(
+          expect.objectContaining(registration),
+        )
+        await runFreezeScenario({
+          label: "claude-envoy stall",
+          stack,
+          sessionID,
+          proxy,
+          shown: (marker) => channel.filter((content) => content.includes(marker)),
+          waitFor,
+        })
+      } finally {
+        await stop()
+      }
+    }, 120_000)
 
-      if (onCorePath) return
-      test("a session whose redial once hung still exits on SIGTERM", async () => {
-        if (stack === undefined) throw new Error("the Envoy stack did not start")
-        const { envoyUrl } = stack
-        const { server, proxy, sessionID, waitFor, stop } = await startChannelServer(
-          stack,
-          "ses_stall_exit",
+    test("a session whose redial once hung still exits on SIGTERM", async () => {
+      if (stack === undefined) throw new Error("the Envoy stack did not start")
+      const { envoyUrl } = stack
+      const { server, proxy, sessionID, waitFor, stop } = await startChannelServer(
+        stack,
+        "ses_stall_exit",
+      )
+      try {
+        const started = Date.now()
+        await waitFor(
+          async () =>
+            (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok &&
+            proxy.connections[0]?.subscribedAt !== undefined,
+          started + 30_000,
+          "the session's registration and first subscription",
         )
-        try {
-          const started = Date.now()
-          await waitFor(
-            async () =>
-              (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok &&
-              proxy.connections[0]?.subscribedAt !== undefined,
-            started + 30_000,
-            "the session's registration and first subscription",
-          )
-          // The first redial after the freeze hangs (accepted, never answered); the next forwards.
-          proxy.stallNext(1)
-          const frozenAt = proxy.freeze()
-          await waitFor(
-            () =>
-              proxy.connections.some(
-                (opened) => opened.acceptedAt >= frozenAt && opened.subscribedAt !== undefined,
-              ),
-            frozenAt + RECOVERY_BOUND_MS,
-            "the session to subscribe again after the hung redial",
-          )
-          const signalledAt = Date.now()
-          server.kill("SIGTERM")
-          const outcome = await Promise.race([
-            server.exited.then(() => "exited"),
-            Bun.sleep(15_000).then(() => "running"),
-          ])
-          console.log(
-            `claude-envoy stall exit: SIGTERM -> ${outcome} after ${((Date.now() - signalledAt) / 1000).toFixed(1)} s`,
-          )
-          expect(outcome).toBe("exited")
-        } finally {
-          await stop()
-        }
-      }, 120_000)
-    },
-  )
-}
+        // The first redial after the freeze hangs (accepted, never answered); the next forwards.
+        proxy.stallNext(1)
+        const frozenAt = proxy.freeze()
+        await waitFor(
+          () =>
+            proxy.connections.some(
+              (opened) => opened.acceptedAt >= frozenAt && opened.subscribedAt !== undefined,
+            ),
+          frozenAt + RECOVERY_BOUND_MS,
+          "the session to subscribe again after the hung redial",
+        )
+        const signalledAt = Date.now()
+        server.kill("SIGTERM")
+        const outcome = await Promise.race([
+          server.exited.then(() => "exited"),
+          Bun.sleep(15_000).then(() => "running"),
+        ])
+        console.log(
+          `claude-envoy stall exit: SIGTERM -> ${outcome} after ${((Date.now() - signalledAt) / 1000).toFixed(1)} s`,
+        )
+        expect(outcome).toBe("exited")
+      } finally {
+        await stop()
+      }
+    }, 120_000)
+  },
+)

@@ -1,7 +1,9 @@
 // A NATS server stand-in over TCP for tests that drive the real `nats` client:
 // INFO on connect, PONG for PING, SUB/UNSUB/PUB recorded, and PUB fanned out
 // to every matching subscription (the publishing client's own included, as the
-// real server does). Subjects match exactly or by a `.>` suffix.
+// real server does). Subjects match exactly or by a `.>` suffix. A listener's relay of a
+// session's durable consumer is `deliverRelay`: one HMSG with the relay headers and a reply
+// inbox, which is how every message reaches a session.
 
 import type { Socket, TCPSocketListener } from "bun"
 
@@ -88,6 +90,45 @@ export class FakeNatsServer {
       for (const [sid, pattern] of socket.data.subscriptions) {
         if (!matches(pattern, subject)) continue
         socket.write(`MSG ${subject} ${sid} ${Buffer.byteLength(payload)}\r\n${payload}\r\n`)
+      }
+    }
+  }
+
+  /**
+   * The owning listener relays one stored message to `sessionID`'s relay subject, as it relays
+   * that session's durable consumer: the relay headers, and a reply inbox the session answers
+   * `received`, `done` or `nak` on.
+   */
+  deliverRelay(
+    sessionID: string,
+    frame: {
+      readonly subject: string
+      readonly seq: number
+      readonly payload: string
+      readonly reply: string
+      readonly delivered?: number
+      readonly storedAt?: string
+      readonly streamID?: string
+    },
+  ): void {
+    const subject = `notifications.envoy.deliver.${sessionID}`
+    const headers = [
+      "NATS/1.0",
+      `Envoy-Subject: ${frame.subject}`,
+      `Envoy-Stream-Seq: ${frame.seq}`,
+      `Envoy-Stream-Id: ${frame.streamID ?? "stream-1"}`,
+      `Envoy-Delivered: ${frame.delivered ?? 1}`,
+      `Envoy-Stored-At: ${frame.storedAt ?? new Date().toISOString()}`,
+      "",
+      "",
+    ].join("\r\n")
+    const total = Buffer.byteLength(headers) + Buffer.byteLength(frame.payload)
+    for (const socket of this.clients) {
+      for (const [sid, pattern] of socket.data.subscriptions) {
+        if (!matches(pattern, subject)) continue
+        socket.write(
+          `HMSG ${subject} ${sid} ${frame.reply} ${Buffer.byteLength(headers)} ${total}\r\n${headers}${frame.payload}\r\n`,
+        )
       }
     }
   }

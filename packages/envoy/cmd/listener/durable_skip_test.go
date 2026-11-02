@@ -14,7 +14,7 @@ import (
 
 // The durable matches a stored message's subject against this machine's interests (the registry's
 // subject index) before it decodes the message, and acknowledges at once one no session needs from
-// it: on a subject nobody here follows, on one only a session that takes stored messages itself
+// it: on a subject nobody here follows, on one only a session whose own consumer holds the message
 // follows (counted as its skipped delivery), or on the agent subject of another listener's session.
 // A followed subject, and the agent subject of a session nobody has, are decoded as before. Every
 // message here is undecodable, so a decode shows as the handler's decode failure.
@@ -23,11 +23,11 @@ func TestSubjectIndexAcksADurableMessageNoSessionNeedsBeforeDecodingIt(t *testin
 		return nil, errors.New("unexpected prompt_async request")
 	}))
 	harness.registerTarget(t, "ses_core", "notifications.dispatch.issue.FOLLOWED-1.>")
-	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_self", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.SELF-1.*"}); err != nil {
-		t.Fatalf("register the self-subscribed session's interest: %v", err)
+	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_relayed", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.SELF-1.*"}); err != nil {
+		t.Fatalf("register the relayed session's interest: %v", err)
 	}
-	if err := harness.sessions.Put("ses_self", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
-		t.Fatalf("register the self-subscribed session: %v", err)
+	if err := harness.sessions.Put("ses_relayed", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine", Delivery: session.DeliveryConsumer, Epoch: "e"}); err != nil {
+		t.Fatalf("register the relayed session: %v", err)
 	}
 	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_elsewhere", MachineID: "other-machine"}, []string{contracts.AgentSubject("ses_elsewhere")}); err != nil {
 		t.Fatalf("register another listener's session: %v", err)
@@ -46,7 +46,7 @@ func TestSubjectIndexAcksADurableMessageNoSessionNeedsBeforeDecodingIt(t *testin
 		}
 	}
 	if body := deliveredMetrics(t, harness); !strings.Contains(body, `test_messages_delivered{delivery_status="skipped"} 1`) {
-		t.Fatalf("delivery metrics %s, want the self-subscribed session's delivery skipped once", body)
+		t.Fatalf("delivery metrics %s, want the relayed session's delivery skipped once", body)
 	}
 
 	for want, subject := range []string{

@@ -2,13 +2,14 @@ import { expect, jest, test } from "bun:test"
 import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer"
 import type { Interest, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
+  ChannelBrokerMessage,
+  ChannelConnection,
   ChannelConnectionStatus,
-  ChannelForwarderConnection,
-  ChannelInboundMessage,
   ChannelTopicSubscription,
-} from "../src/channel-forwarder"
+} from "../src/channel-topics"
 import {
   CHANNEL_CAPABILITIES,
   type ChannelNotification,
@@ -17,13 +18,13 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
-import { emptyReplay, type FakeClient } from "./channel-session-harness"
+import type { FakeClient } from "./channel-session-harness"
 
-class IdleNats implements ChannelForwarderConnection {
+class IdleNats implements ChannelConnection {
   subscribe(): ChannelTopicSubscription {
     return {
       unsubscribe: () => undefined,
-      async *[Symbol.asyncIterator](): AsyncGenerator<ChannelInboundMessage> {},
+      async *[Symbol.asyncIterator](): AsyncGenerator<ChannelBrokerMessage> {},
     }
   }
 
@@ -63,9 +64,12 @@ function interest(): Interest {
   }
 }
 
-/** The listener's answer to a registration: the interest, and the core delivery mode. */
+/** The listener's answer to a registration: the interest, and this session's own consumer. */
 function registered(): SubscribeResult {
-  return { ...interest(), delivery: { mode: "core", reason: "not_answered" } }
+  return {
+    ...interest(),
+    delivery: consumerDelivery("ses_current"),
+  }
 }
 
 test("reasserts a role claimed after channel startup on the next heartbeat", async () => {
@@ -84,7 +88,6 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
       return { claimed: true, interest: interest() }
     },
     getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
-    replay: emptyReplay,
   }
   let session: ChannelSession | undefined
 

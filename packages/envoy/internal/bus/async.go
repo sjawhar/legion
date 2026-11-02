@@ -15,7 +15,7 @@ import (
 
 // publishAcknowledgementTimeout bounds each send of a publish window (Client.Window): its wait for
 // a connection, a core send's flush and confirmation, and a JetStream send's acknowledgement (the
-// stream context's PublishAsyncTimeout). Publish and PublishCoreTo take publishBound instead.
+// stream context's PublishAsyncTimeout). Publish takes publishBound instead.
 const publishAcknowledgementTimeout = 5 * time.Second
 
 // ErrUnavailable is wrapped by the outcome of a window's send that NATS did not take because of
@@ -47,7 +47,7 @@ type Sender interface {
 // outcome decided before anything was sent is in the channel when PublishAsync returns: a refusal
 // (ErrRefused), or ErrUnavailable. Otherwise the answer comes within publishAcknowledgementTimeout:
 // a JetStream acknowledgement (the JetStream context's PublishAsyncTimeout), or a core publish's
-// own flush, confirmed as PublishCoreTo confirms one (confirmFlushed). A JetStream acknowledgement
+// own flush, confirmed as PublishCoreContext confirms one (confirmFlushed). A JetStream acknowledgement
 // of a duplicate with no sequence (ErrNotStored) has the envelope sent once more without its
 // MsgId, as Publish does, and that send's acknowledgement, within another such timeout, answers
 // for it (sendJetStream). The stream does not deduplicate a copy sent without its MsgId: it

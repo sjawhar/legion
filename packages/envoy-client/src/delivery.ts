@@ -126,32 +126,6 @@ export async function postDeliveryReply(
   });
 }
 
-/**
- * Whether an inbound frame is a forwarded role lane waiting for a receipt on `reply`. The
- * listener forwards a role-lane event to the holder's direct subject as a core request with
- * the envelope's `topic` still the role topic, and reports a missing receipt as a failed
- * delivery. Every other frame on the direct subject — a Dispatch author route, a peer
- * envoy_send — is a JetStream publish whose reply inbox belongs to the server's PubAck; an
- * empty receipt there fails the publisher with `nats: invalid jetstream publish response`.
- * `reply` is absent as `""` (nats.js's getter) or `undefined` (a host that omits the field).
- */
-export function expectsLaneReceipt<
-  Frame extends {
-    readonly subject: string;
-    readonly directSubject: string;
-    readonly envelopeTopic: string | undefined;
-    readonly reply: string | undefined;
-  },
->(frame: Frame): frame is Frame & { readonly reply: string } {
-  return (
-    frame.reply !== undefined &&
-    frame.reply !== "" &&
-    frame.subject === frame.directSubject &&
-    frame.envelopeTopic !== undefined &&
-    frame.envelopeTopic !== frame.directSubject
-  );
-}
-
 /** A message a subscription yielded, and when it arrived. */
 export interface Arrival<Message> {
   readonly message: Message;
@@ -238,8 +212,8 @@ export type DedupeIdentity = z.infer<typeof DedupeIdentitySchema>;
 /**
  * What one claim recorded. `release` undoes exactly that, and only once. `settle` says the host is
  * done with the frame without undoing the record: it was handed over, or the host chose not to
- * show it. Until one of the two, the frame is pending (`DeliveryDedupe.pending`), and a replay
- * sweep leaves the stream's copy for later rather than show it beside the live one.
+ * show it. Until one of the two, the frame is pending (`DeliveryDedupe.pending`), and a card the
+ * ledger asks for on that same frame waits for the delivery in flight rather than stand beside it.
  */
 export interface DeliveryClaim {
   release(): void;
@@ -248,17 +222,18 @@ export interface DeliveryClaim {
 
 /**
  * A host's record of the frames it handed its agent, which drops a repeat. The whole promise it is
- * part of is stated once, on `DELIVERY_DUPLICATE_WINDOW_MS` in `@legion/contracts`; every host that
- * subscribes over core NATS (the Oh My Pi extension, the Claude Code channel) keeps one.
+ * part of is stated once, on `DELIVERY_DUPLICATE_WINDOW_MS` in `@legion/contracts`; every host the
+ * listener relays a consumer to (the Oh My Pi extension, the Claude Code channel) keeps one.
  *
  * A host claims a frame before anything it awaits, so a repeat that arrives while the first is
- * still being delivered (on an overlapping subscription, or behind a Dispatch reply in flight) is
- * already a repeat. It releases the claim when its agent was not handed the frame after all: the
- * hand-off threw, or the host answered the frame with an error instead (a BTW whose side turn
- * failed, a frame it could not read). Dispatch records that attempt failed, and a same-mode
- * re-send of it must then reach the agent. Otherwise it settles the claim once it is done with the
- * frame, shown or not: a claim left open reads as `pending` forever, and a replay sweep then never
- * moves its stream cursor past that frame.
+ * still being delivered (a frame the relay delivers again because the first delivery was never
+ * answered, or behind a Dispatch reply in flight) is already a repeat. It releases the claim when
+ * its agent was not handed the frame after all: the hand-off threw, or the host answered the frame
+ * with an error instead (a BTW whose side turn failed, a frame it could not read). Dispatch records
+ * that attempt failed, and a same-mode re-send of it must then reach the agent. Otherwise it
+ * settles the claim once it is done with the frame, shown or not: a claim left open reads as
+ * `pending` forever, and a card the ledger raises for that frame then waits on a delivery that
+ * ended.
  */
 export interface DeliveryDedupe {
   /**
@@ -270,8 +245,9 @@ export interface DeliveryDedupe {
   /**
    * Whether a claim of the frame is still being delivered: neither settled nor released. A claim
    * of its event id, or of a key that names its event, is that frame's claim, by the same identity
-   * rule `claim` drops a repeat by. A settled claim says nothing of whether the frame was shown: a
-   * host that shows it records that in the replay ledger, which a replay sweep reads first.
+   * rule `claim` drops a repeat by. A settled claim says nothing of whether the frame was shown:
+   * what was shown is in the delivery ledger (`DeliveryLedger.delivered`), which the card the
+   * ledger raises reads first.
    */
   pending(frame: DedupeIdentity): boolean;
 }
@@ -302,8 +278,9 @@ const DELIVERY_EVENT_ID_LIMIT = 10_000;
  * A key is recorded only when it names its event (`dedupeKeyNamesItsEvent` in `@legion/contracts`),
  * for `DELIVERY_DUPLICATE_WINDOW_MS`, the window the retry promise is made for. Any other key is not
  * a dedupe key, and dropping on it would lose a distinct event that shares it. A frame's event id
- * is recorded whatever its key: distinct events never share one, so it recognises the second copy
- * of a frame that arrived on two subscriptions, which a key that does not name its event cannot.
+ * is recorded whatever its key: distinct events never share one, so it recognises a frame the
+ * relay delivered again after an unanswered delivery, which a key that does not name its event
+ * cannot.
  *
  * A key is kept no longer than the window, because a repeat never refreshes it and every claim
  * first evicts the keys past the window, so the record holds at most the keys the host was handed

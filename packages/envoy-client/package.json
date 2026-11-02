@@ -24,6 +24,11 @@
       "bun": "./src/delivery.ts",
       "default": "./dist/delivery.js"
     },
+    "./delivery-ledger": {
+      "types": "./src/delivery-ledger.ts",
+      "bun": "./src/delivery-ledger.ts",
+      "default": "./dist/delivery-ledger.js"
+    },
     "./dispatch-config": {
       "types": "./src/dispatch-config.ts",
       "bun": "./src/dispatch-config.ts",
@@ -109,11 +114,6 @@
       "bun": "./src/nats-connection.ts",
       "default": "./dist/nats-connection.js"
     },
-    "./replay": {
-      "types": "./src/replay.ts",
-      "bun": "./src/replay.ts",
-      "default": "./dist/replay.js"
-    },
     "./secret-file": {
       "types": "./src/secret-file.ts",
       "bun": "./src/secret-file.ts",
@@ -151,6 +151,10 @@
       "types": "./test/stall-scenario.ts",
       "bun": "./test/stall-scenario.ts"
     },
+    "./test/subscribe-answer": {
+      "types": "./test/subscribe-answer.ts",
+      "bun": "./test/subscribe-answer.ts"
+    },
     "./tool-contract": {
       "types": "./src/tool-contract.ts",
       "bun": "./src/tool-contract.ts",
@@ -163,7 +167,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/askgate-marker.ts src/askgate-new-asks.ts src/consumer-delivery.ts src/delivery.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-directory.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/envoy-config.ts src/envoy-settings.ts src/errors.ts src/machine.ts src/nats-connection.ts src/replay.ts src/secret-file.ts src/session-answers.ts src/session-settings.ts src/slack-post.ts src/stream-topics.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/askgate-marker.ts src/askgate-new-asks.ts src/consumer-delivery.ts src/delivery.ts src/delivery-ledger.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-directory.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/envoy-config.ts src/envoy-settings.ts src/errors.ts src/machine.ts src/nats-connection.ts src/secret-file.ts src/session-answers.ts src/session-settings.ts src/slack-post.ts src/stream-topics.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ bin/ test/"

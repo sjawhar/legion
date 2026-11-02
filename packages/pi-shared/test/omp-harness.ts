@@ -9,6 +9,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import { Terminal } from "@xterm/headless";
 import { linkOmpNatives } from "./omp-natives";
 
@@ -83,26 +84,114 @@ export function serveStandin(
   return { requests, base: `http://127.0.0.1:${server.port}` };
 }
 
+/** The stream the stand-in listener's answers and relay frames name, one for every case here. */
+export const STANDIN_STREAM_ID = "standin-stream";
+
 /**
- * A NATS address that closes every connection as it opens, held for the case: the Envoy
- * extension takes it as a NATS server, so its Legion claim goes ahead, and its every connect fails,
- * so the session takes no inbound delivery. Returns the `nats://` URL.
+ * The delivery answer a listener gives a registration it can give a consumer: the session's own
+ * relay subject, which is the one path a message reaches it by (INFRA-771). A registration
+ * answered without one is refused in the client (`parseSubscribeAnswer`), as the listener's own
+ * refusal is, and leaves the session deaf until a later registration is accepted.
  */
-export function refusingNats(cleanup: Cleanup): string {
-  const listener = Bun.listen({
-    hostname: "127.0.0.1",
-    port: 0,
-    socket: {
-      open(socket) {
-        socket.end();
-      },
-      data() {},
+export interface ConsumerDeliveryAnswer {
+  readonly mode: "consumer";
+  readonly subject: string;
+  readonly stream_id: string;
+  readonly gap: boolean;
+}
+
+/**
+ * What a registration answer carries beyond the interest: the consumer, on
+ * `/v1/interests/subscribe`, and nothing on any other listener route, which answers an interest
+ * alone. The session is the one the request names, `fallbackSessionID` when it names none.
+ */
+export function deliveryFor(
+  pathname: string,
+  body: { readonly session_id?: unknown } | undefined,
+  fallbackSessionID: string
+): { readonly delivery?: ConsumerDeliveryAnswer } {
+  if (pathname !== "/v1/interests/subscribe") return {};
+  const named = typeof body?.session_id === "string" ? body.session_id : fallbackSessionID;
+  return {
+    delivery: {
+      mode: "consumer",
+      subject: deliverSubject(named === "" ? fallbackSessionID : named),
+      stream_id: STANDIN_STREAM_ID,
+      gap: false,
     },
-  });
-  cleanup.push(async () => {
-    listener.stop(true);
-  });
-  return `nats://127.0.0.1:${listener.port}`;
+  };
+}
+
+/** What a relay frame needs of a NATS connection; `nats`'s `NatsConnection` is one. */
+export interface RelayConnection {
+  request(
+    subject: string,
+    payload: Uint8Array,
+    options: { readonly timeout: number; readonly headers: RelayFrameHeaders }
+  ): Promise<unknown>;
+}
+
+/** What a relay frame needs of a NATS header set; `nats`'s `headers()` makes one. */
+export interface RelayFrameHeaders {
+  set(name: string, value: string): void;
+}
+
+/** One frame of the stand-in stream, as `sendRelayFrame` sends it. */
+export interface RelayFrame {
+  readonly connection: RelayConnection;
+  /** Makes an empty header set; `nats`'s `headers` is one. */
+  readonly newHeaders: () => RelayFrameHeaders;
+  /** The session the listener relays to, which the deliver subject names. */
+  readonly sessionID: string;
+  /** The subject the stream stored the message on, which the frame carries. */
+  readonly subject: string;
+  readonly payload: Uint8Array;
+  /** Where the stream stored it; one case is one stream, so its frames are ordered by this. */
+  readonly seq: number;
+  /** When the stream stored it, RFC 3339; now by default. */
+  readonly storedAt?: string;
+  /** Which delivery of the frame this is; the first by default. */
+  readonly delivered?: number;
+  /** How long the frame is offered before this fails; 30 s by default. */
+  readonly withinMs?: number;
+  /** A run that ended: its error fails the wait at once, rather than at the deadline. */
+  readonly stopped?: { readonly error?: unknown };
+}
+
+/**
+ * Sends one frame as the listener's relay of a session's consumer sends it: the stored subject,
+ * sequence, stream and time in its headers (`decodeRelayFrame`), on the session's deliver
+ * subject. Sent as a request, whose answer is the session's own `received`: until that session
+ * has subscribed the subject the server reports no responder, so the frame goes again, as the
+ * one frame it is, and a copy of a frame the session already holds is answered and never shown
+ * twice (`createConsumerDelivery`). Answers the session's reply.
+ */
+export async function sendRelayFrame(frame: RelayFrame): Promise<unknown> {
+  const deadline = Date.now() + (frame.withinMs ?? 30_000);
+  for (;;) {
+    const headers = frame.newHeaders();
+    headers.set(RelayHeader.subject, frame.subject);
+    headers.set(RelayHeader.streamSeq, String(frame.seq));
+    headers.set(RelayHeader.streamID, STANDIN_STREAM_ID);
+    headers.set(RelayHeader.delivered, String(frame.delivered ?? 1));
+    headers.set(RelayHeader.storedAt, frame.storedAt ?? new Date().toISOString());
+    try {
+      return await frame.connection.request(deliverSubject(frame.sessionID), frame.payload, {
+        timeout: 1_000,
+        headers,
+      });
+    } catch (error) {
+      if (frame.stopped?.error !== undefined) throw frame.stopped.error;
+      if (Date.now() > deadline) {
+        throw new Error(
+          `${frame.sessionID} took no relay frame on ${frame.subject}: ${String(error)}`
+        );
+      }
+      // A real clock, deliberately: a session that has not yet subscribed its deliver subject
+      // emits no signal here — the server only answers the next send with no responder.
+      await Bun.sleep(100);
+    }
+  }
 }
 
 /**
@@ -492,6 +581,12 @@ export interface LegionPaneOptions {
    * lower-cased.
    */
   readonly name: string;
+  /**
+   * The NATS server the pane runs against, as `ENVOY_NATS_URL`: a real one (the caller's
+   * `LEGION_TEST_NATS_URL`), since the session's relay subject lives on it and a session without
+   * one can register nothing and so claim nothing.
+   */
+  readonly nats: string;
   /** `LEGION_ROLE`. */
   readonly role: string;
   /** `LEGION_TREE`. */
@@ -549,12 +644,13 @@ export interface LegionPane {
 /**
  * Runs one Legion pane on the real Oh My Pi until its run settles: the Legion and Envoy
  * extensions from this checkout, booted against a stand-in for the daemon's claim and grant
- * routes and the Envoy listener, and a NATS address that refuses every connection
- * (`refusingNats`: the Envoy extension then takes no inbound delivery, and the role claim, which a
- * session with no NATS server refuses, is two listener calls), with a stand-in model gateway that
- * answers the pane's turns from `replies`. The daemon's assignment arrives as the RPC `prompt`.
- * Nothing in a pane runs `legion` from bash (LEGION-631), so no stand-in `legion` is on its PATH:
- * `bin` holds what `prepare` put there.
+ * routes and the Envoy listener, and the NATS server `options.nats` names, with a stand-in model
+ * gateway that answers the pane's turns from `replies`. The server is real: a session's only
+ * inbound is the consumer the listener builds for it, which it is relayed on its own relay
+ * subject, so a pane with no NATS server holds no relay subject, every registration of its fails
+ * saying so, and its Legion claim fails with it (INFRA-771). The daemon's assignment arrives as
+ * the RPC `prompt`. Nothing in a pane runs `legion` from bash (LEGION-631), so no stand-in
+ * `legion` is on its PATH: `bin` holds what `prepare` put there.
  */
 export async function runLegionPane(
   binary: string,
@@ -639,11 +735,16 @@ export async function runLegionPane(
       return Response.json({ error: `no stand-in route ${url.pathname}` }, { status: 404 });
     }
     // The Envoy listener: registration, the role claim, and any read answer with an interest.
+    // A session takes its messages from its own consumer, relayed on its own deliver subject: a
+    // registration answered without one leaves the session deaf, which the plugin refuses rather
+    // than accept, and with it every claim the pane makes (INFRA-771).
+    const sessionID = typeof body.session_id === "string" ? body.session_id : "";
     return Response.json({
-      session_id: typeof body.session_id === "string" ? body.session_id : "",
+      session_id: sessionID,
       machine_id: `${name}-machine`,
       dir: workspace,
       topics: [],
+      ...deliveryFor(url.pathname, body, sessionID),
     });
   });
   await writeStandinProfile(home, base);
@@ -668,7 +769,7 @@ export async function runLegionPane(
       bin,
       env: {
         ENVOY_URL: base,
-        ENVOY_NATS_URL: refusingNats(cleanup),
+        ENVOY_NATS_URL: options.nats,
         ...(options.dispatch
           ? { DISPATCH_URL: base, DISPATCH_TOKEN: `${name}-dispatch-token` }
           : {}),

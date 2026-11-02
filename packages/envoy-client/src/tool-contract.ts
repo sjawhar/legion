@@ -14,10 +14,11 @@ const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
 
 const STORED_DELIVERY =
-  "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " +
-  "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " +
-  "once from the durable consumer its listener relays to it, also one that was away or restarted. " +
-  "Team and other ad-hoc topics are live only.";
+  "Every notification topic is stored (agent, dispatch, github, slack, legion, ghostwispr, " +
+  "whatsapp, team; a role message reaches its holder as a stored copy on the holder's agent " +
+  "topic), and reaches each subscribed session once from the durable consumer its listener " +
+  "relays to it, also one that was away or restarted. A 200 means the stream stored the message " +
+  "for each subscribed session's consumer, not that any recipient has read it.";
 
 const TOPIC_GUIDE =
   "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " +
@@ -156,7 +157,7 @@ export type ToolSpec = {
 export const envoyToolSpecs = [
   {
     name: "envoy_subscribe",
-    description: `Subscribe this session to Envoy notification topics. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
+    description: `Subscribe this session to Envoy notification topics. A notifications. topic no stream subject captures is refused by name: nothing would store it, so you would receive nothing on it; subscribe to a notifications.team.<name> topic instead. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to."),
     }),
@@ -195,7 +196,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message gets an error when no session holds the role, when the holder refuses the message, and when the forward is not stored within four seconds. Its 200 says the stream stored the forward for the holder's consumer. It does not say that the holder read it. A team topic (such as notifications.team.deploy-squad.all) is stored like every other, so a session subscribed to it that was away still receives it when it returns, and one that subscribes after you publish does not. A notifications. topic no stream subject captures is refused by name: nothing would store it. ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },

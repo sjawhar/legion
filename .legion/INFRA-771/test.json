@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-771",
+  "completed": "2026-11-01T21:30:00Z",
+  "round": 7,
+  "headTested": "338b5f1a293d",
+  "codeHeadTested": "fb97b493f7ad",
+  "previousHandoff": "326eb680c8b3",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 6's two failures are answered and I drove each on the surface it broke on: the listener now drops an uncaptured topic from a registration with one warning and answers 200, where it refused 400 (proof entry 2), and the load test's numbers are in the pull request body with a run of its own, every figure of which I checked against that run's record on this pod's disk (proof entry 3). The merge of main is clean by the file-set check as well as by content: my own comparison gives the implementer's figures exactly, and both files that joined the diff have a reason (proof entry 1). The rest of the round's claims hold where I could drive them: the presence subject is captured by no stream, allowed to a session on a real nats-server, and carries its risk line (proof entry 4); both pi-legion rigs, the controller suite, card delivery, claude-envoy and the permissions package pass (proof entry 5); and go test ./cmd/listener passed three times out of three, so the implementer's lost case did not repeat here (proof entry 6)."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The architect's item 1: the file set across the merge of main, the implementer's figures confirmed independently, both joined files explained, and the files taken whole equal main's copies.",
+      "surface": "The branch's history read at this head and at the head before the merge, against main's merge commit 0642a37a.",
+      "command": "jj diff --from <merge-base> --to <head> --name-only for the head before the merge (d5a918b1, merge-base c656fc4f) and for this head (338b5f1a, merge-base 0642a37a); then comm over the two sorted sets; then a sha256 comparison of a sample of the files that left the diff against main's copies",
+      "observed": "614 paths before, 181 after, 435 gone, 2 joined - the implementer's figures exactly, computed from the repository rather than read from the comment. The two joined are explained: bun.lock, whose only change is four lines, the workspace versions of @sjawhar/pi-envoy and @sjawhar/pi-legion moving from 13.11.1 and 15.7.1 to 14.2.0 and 16.3.0, which is the lock catching up with the package.json files main itself already carries at those versions (so the branch's lock agrees with main's manifests where main's lock trails them, and nobody on this branch authored it: the merge did); and packages/pi-legion/extensions/legion-background-subagent-omp.test.ts, which this round moved off the old contract - its rig now relays one frame on the session's deliver subject with the stored subject, sequence, stream and time in a header, where it used to publish on the session's agent subject, which is the second rig the round names. Of the 435 that left the diff, a sample of 12 is byte-identical to main's copy (sha256 of each at 0642a37a and at this head), which is what taken-whole means; the other 423 are identical by construction, since a file that differs from main cannot be absent from the diff against main.",
+      "headSha": "338b5f1a293d",
+      "negativeControl": "The comparison is run in both directions: comm -23 gives the 435 that left and comm -13 the 2 that joined, so a file appearing on one side only would have shown rather than being hidden in a count, and the 12 sampled hashes are read at both revisions rather than asserted from the diff's own output."
+    },
+    {
+      "criterion": "Round 6's failure 1 answered, and the architect's item 2: the listener drops an uncaptured topic from a registration with a warning, as it drops a private one, so an older plugin's session still registers.",
+      "surface": "An envoy-listener and a nats-server with JetStream, both built from this head, driven with curl.",
+      "command": "curl -X POST http://127.0.0.1:37300/v1/interests/subscribe with {\"topics\":[\"notifications.team\",\"notifications.team.deploy-squad\"],\"delivery\":{\"consumer\":true,\"epoch\":\"e1\"}} and with the stale topic alone",
+      "observed": "Both answered 200. The first registers notifications.agent.<id> and notifications.team.deploy-squad with one warning, 'notifications.team was not registered: no stream subject captures it, so nothing would be delivered to ses_old_build on it; follow a notifications.team.<name> topic instead', and carries the consumer answer with its relay subject. The second, the stale topic alone, registers only the session's own agent subject, with the same one warning and the same consumer answer. That is the architect's decision: an uncaptured topic is dropped exactly as a private one is, and the registration stands.",
+      "headSha": "338b5f1a293d",
+      "negativeControl": "Round 6's measurement on the same two bodies is the control: at 27c6c9af each was answered 400 'no stream subject captures notifications.team …' and nothing was written, which is the refusal this round removes."
+    },
+    {
+      "criterion": "Round 6's failure 2 answered, and the architect's item 3: the load test's numbers in the body against the run's own record.",
+      "surface": "The run's evidence directory on this pod's disk, /legion/scratch/tmp/dispatch-loadtest/runs/step-1x-round7, read against the figures the pull request body states.",
+      "command": "jq over summary.json for the receipt, consumer and duplicate counts; then wc -l, a distinct count of (session, stream_seq), a count of rows marked duplicate and a count of rows with delivered > 1 over relay-frames.csv",
+      "observed": "Every figure in the body holds. summary.json: events.issue_topic_receipts 2580 against events.expected_issue_topic_receipts 2580; sessions.delivery.consumer_sessions 400, no_consumer_sessions 0, duplicates 0; resources.js_consumers_max 404. relay-frames.csv: 3156 rows beside its header, 3156 distinct (session, stream_seq) pairs, 0 rows marked duplicate and 0 with delivered greater than 1. So the body's '400 sessions on a consumer, 0 without one', '2,580 / 2,580', '3,156 relay frames, 0 duplicates' and '404 JetStream consumers' are each the record's own number, and a receipt is one frame.",
+      "headSha": "338b5f1a293d",
+      "negativeControl": "The distinct count is the control on the frame count: were any message relayed twice, the row count would exceed the distinct (session, stream_seq) count, and it does not - both read 3156 - which is the same property the duplicate column reports as 0."
+    },
+    {
+      "criterion": "The architect's item 4: no stream captures the presence subject, a session may subscribe it, and the risk line is written down.",
+      "surface": "packages/envoy/infra/core's own test for the stream half, and a real nats-server running the configuration core.Authorization{…}.Render renders for core.SessionPermissions as no_auth_user for the grant half.",
+      "command": "cd packages/envoy/infra && go test -count=1 -run TestSessionPresenceSubjectIsStoredByNoStream ./core/ ; then natsd -c <rendered session.conf> -js -p 37422 and a credential-free client subscribing the presence, relay, control, notifications.>, notifications.agent.* and exception subjects",
+      "observed": "PASS: the test requires bus.StreamCaptures false for notifications.envoy.presence.ses_probe and for a longer form of it. On the server the rendered session grant subscribes exactly [notifications.envoy.deliver.*, notifications.envoy.presence.*, agentstream.*.control]: notifications.envoy.presence.ses_probe, notifications.envoy.deliver.ses_probe and agentstream.ses_probe.control are allowed, while notifications.>, notifications.agent.* and notifications.envoy.exceptions.> are each refused with a server permissions violation. The risk is written where a reader meets it: packages/envoy/AGENTS.md:3488 and :3609-3610 say a session user may subscribe to every session's presence probe and so 'can answer another session's presence probe, so a stopped session reads as live', beside the same statement for the relay subject. A registration naming the presence subject is a separate matter and behaves as the new rule says: POST /v1/interests/subscribe with notifications.envoy.presence.<id> answers 200 and drops it with the uncaptured-topic warning, since no stream delivers it.",
+      "headSha": "338b5f1a293d",
+      "negativeControl": "The three refusals in the same connection as the three allowances: the grant that admits the presence probe still refuses notifications.>, notifications.agent.* and the exception lanes, so acceptance 6's narrowing is not widened by this subject."
+    },
+    {
+      "criterion": "The architect's item 5: both pi-legion rigs, the controller suite, card delivery, claude-envoy, the permissions package and the live proof at this head.",
+      "surface": "Each package's own suite, the two real-session rigs against a real Oh My Pi binary and a real nats-server, and the live delivery proof on the full stack in this issue's pod.",
+      "command": "LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:37222 bun test for pi-legion's extensions/legion-background-subagent-omp.test.ts and extensions/controller-start-omp.test.ts and pi-envoy's extensions/card-delivery-omp.test.ts; bun test in packages/claude-envoy; bun run typecheck in packages/pi-legion; go test -count=1 ./core/ in packages/envoy/infra; SESSION_DELIVERY_EVIDENCE_DIR=… bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "legion-background-subagent-omp.test.ts 1 pass, 0 fail (the rig this round moved onto the relay); controller-start-omp.test.ts 17 pass, 0 fail; card-delivery-omp.test.ts 10 pass, 0 fail; claude-envoy 263 pass, 13 skip, 0 fail across 38 files; pi-legion's typecheck clean, so the TS2345 on legion-phase-stall-omp.test.ts:745 that made CI's pi-legion lane red at d5a918b1 is gone; packages/envoy/infra ./core/ ok in 16.241s. The live proof: exit 0, 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)', six windows, every count 1, with 'issue order compared in pi (12 comments): LDT0744-001Z@seq4:line17 …' and the same twelve for cc.",
+      "headSha": "338b5f1a293d",
+      "negativeControl": "The previous head's own CI is the control for the typecheck: job 124817094242 at d5a918b1 failed at the step 'Typecheck pi-legion' with that exact TS2345, and the same command is clean here."
+    },
+    {
+      "criterion": "The architect's item 6: go test ./cmd/listener three times, naming any failure.",
+      "surface": "The listener's own package built from this head, against the pod's test Postgres.",
+      "command": "cd packages/envoy && for i in 1 2 3; do DISPATCH_TEST_DATABASE_URL=\"$LEGION_TEST_PG_DSN\" go test -count=1 -timeout 30m ./cmd/listener/; done",
+      "observed": "Three runs, three passes: ok github.com/sjawhar/envoy/cmd/listener 1234.119s, then 823.490s, then 814.246s. No case failed and none was lost, so the 19:29Z failure the architect names did not repeat in three runs here. The first run's longer time is this pod's own load: the live proof and two real-session suites were running beside it.",
+      "headSha": "338b5f1a293d",
+      "negativeControl": "None to run: three green runs cannot prove the flake absent, only that it did not recur, and this entry says exactly that rather than calling it fixed."
+    }
+  ],
+  "notes": [
+    "Lanes: every lane at this head is unread. The code head is fb97b493 (338b5f1a is the handoff commit and carries skip-checks), and its run 41346827710 was queued with 22 jobs still queued when the round ended; I waited for none. The newest settled run on the branch remains 41294560423 at d5a918b1, which failed on pi-legion's typecheck alone - the TS2345 this round fixes, clean here - and the last fully green CI this pull request has had is 41267115926 at 2035ccf3. So no lane of mine confirms this head; what I can say of it is what I drove.",
+    "No -race run in this round or any earlier one; any future one goes as CGO_ENABLED=1 go test -race -timeout <bound> …, since these pods default CGO_ENABLED=0.",
+    "Leftover check: `ps -eo pid,args | grep -v grep | grep -E 'envoy-session-delivery|natsd|envoy-listener|envoy-dispatch|omp --mode rpc|claude-bridge|socat|held-port|testerprobe|go test|sleep 2'` read by its lines and not its status; the three processes it listed were ended by exact pid and the last read listed nothing.",
+    "The throwaway Go program that renders a grant into a nats-server configuration was written and deleted again, and both go.work.sum files it touched were restored; jj status is clean before this handoff.",
+    "Still open from round 1, not a failure: a session may register the wildcard interest notifications.team.> and the listener puts that wildcard into its consumer filter, so one session durably receives every team topic."
+  ]
+}

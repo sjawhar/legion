@@ -1604,21 +1604,21 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  *
  * - The notification stream stores such a frame under a MsgId of its dedupe key and topic, so it
  *   keeps one copy and answers the repeat as a duplicate, which the attempt records as
- *   `duplicate`. That protects a session the listener pushes to from the stream. It does not
- *   protect a session that subscribes over core NATS: JetStream's check applies to the stream's
- *   copy only, and a core subscriber is handed every publish, repeats included.
- * - Each host that subscribes over core NATS (the Oh My Pi extension, the Claude Code channel)
- *   hands its agent at most one frame per such key inside this window, through
- *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`. A frame the host answered with an
- *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
- *   key and a same-mode re-send of it reaches the agent.
+ *   `duplicate`. Every session is reached from that stored copy — by the relay of its own
+ *   consumer, or by the listener's push to its serve port — so the stream's check sits between
+ *   the bus and each of them.
+ * - Each host hands its agent at most one frame per such key inside this window, through
+ *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`, which catches a repeat the
+ *   stream's own window no longer holds. A frame the host answered with an error instead (a BTW
+ *   whose side turn failed) was never handed over, so the host releases its key and a same-mode
+ *   re-send of it reaches the agent.
  *
  * It fails in three places. A host's `createDeliveryDedupe` holds its keys in memory, so a host
  * that keeps nothing else and restarts after the first frame landed has forgotten it, and a Retry
  * reaches that agent a second time; that is ordinary, not rare: `claude --resume` starts a new
  * channel process on the same conversation, and a Sandbox pod resumes its session in a new
- * process. pi-envoy and claude-envoy, from the releases that carry `@legion/envoy-client/replay`,
- * also keep a ledger of the frames their session was handed (pi-envoy in the session's
+ * process. pi-envoy and claude-envoy, from the releases that carry
+ * `@legion/envoy-client/delivery-ledger`, also keep a ledger of the frames their session was handed (pi-envoy in the session's
  * transcript, claude-envoy in a file per session id) and drop a repeat it holds after a restart,
  * for 72 hours and up to 20,000 frames; only a crash between the hand-over and the ledger write
  * still lets that Retry through. Older plugins still forget, and the dashboard cannot tell which

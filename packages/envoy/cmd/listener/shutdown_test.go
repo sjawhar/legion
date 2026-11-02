@@ -26,10 +26,11 @@ var errorLine = regexp.MustCompile(`"level":"ERROR"|level=ERROR|^\d{4}/\d{2}/\d{
 
 // A SIGTERM is an ordered shutdown, not a failure: the listener stops HTTP, drains NATS and exits,
 // and nothing on that path is an error or a reconnect. The listener is stopped with role-lane
-// traffic in flight, as a production listener is: a holder on its own connection answers each
-// receipt after 150 ms and a role message arrives every 100 ms, so at the signal one forward is
-// in its handler and more are queued behind it. Each must reach the holder: the forward opens a
-// receipt subscription, which a connection that is already draining refuses. The drain also
+// traffic in flight, as a production listener is: a holder on its own connection takes each
+// forward and a role message arrives every 10 ms, so at the signal one forward is in its handler
+// and more are queued behind it. Each must reach the stream: the forward opens a reply
+// subscription for the stream's acknowledgement, which a connection that is already draining
+// refuses. The drain also
 // closes the session registry's KV watcher, which logs at ERROR if the registry still expects
 // it, and looks like a lost connection to the bus client, whose recovery would re-dial NATS.
 // Whether a goroutine logs before the exit is a race, so the test stops the real binary several
@@ -48,13 +49,10 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 
 		role := "sigterm-test-" + strconv.Itoa(run)
 		sessionID := "ses_sigterm_holder_" + strconv.Itoa(run)
-		postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+sessionID+`","topics":[],"self_subscribed":true}`)
+		postListener(t, listener.port, "/v1/interests/subscribe", consumerRegistration(sessionID, "epoch-1"))
 		postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+sessionID+`","role":"`+role+`"}`)
 		holder := testnats.Connect(t, uri)
-		if _, err := holder.Subscribe(contracts.AgentSubject(sessionID), func(message *natsgo.Msg) {
-			time.Sleep(150 * time.Millisecond)
-			_ = message.Respond(nil)
-		}); err != nil {
+		if _, err := holder.Subscribe(contracts.AgentSubject(sessionID), func(*natsgo.Msg) {}); err != nil {
 			t.Fatalf("run %d: holder subscribe: %v", run, err)
 		}
 		if err := holder.Flush(); err != nil {
@@ -68,7 +66,7 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 				select {
 				case <-stopTraffic:
 					return
-				case <-time.After(100 * time.Millisecond):
+				case <-time.After(10 * time.Millisecond):
 				}
 				item := contracts.Envelope{
 					EventID:        "evt-sigterm-" + strconv.Itoa(run) + "-" + strconv.Itoa(index),

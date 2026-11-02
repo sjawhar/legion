@@ -35,6 +35,7 @@ mock.module("nats", () => ({
   }),
 }));
 
+import { consumerDelivery } from "@legion/envoy-client/test/subscribe-answer";
 import { hostAgentRegistryMock } from "@legion/pi-shared/test/host-registry";
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
@@ -176,6 +177,9 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
         machine_id: "test",
         dir: "/tmp",
         topics: body.topics,
+        // A session receives only what its own consumer holds (INFRA-771), so every
+        // registration asks the listener for one, and one answered without it is refused.
+        delivery: consumerDelivery(body.session_id, { streamID: "legion-role-claim-stream" }),
       });
     }
     return Response.json({ session_id: sessionID, machine_id: "test", dir: "/tmp", topics: [] });

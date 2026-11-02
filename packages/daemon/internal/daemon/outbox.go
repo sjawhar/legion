@@ -649,6 +649,10 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // queued again from the answer by the re-hold policy (reholdNotice, notice_exceptions.go) and the
 // row finishes; when the listener could not forward it at all (`delivery_failed`), as when the hub
 // is down, the row retries on its backoff as any failed publish does, so an outage drops nothing.
+// A listener of this release answers no `receipt_timeout`: no session confirms a forward any
+// more, and every forward its stream did not store is `delivery_failed` (dispatch://INFRA-771).
+// The reason is handled here because a listener of the deployed, older build answers it until
+// that rollout finishes.
 // A holder that does not advertise the notice's delivery mode (notify.ErrRefusedByHolder) refuses
 // every attempt until another session holds the role, and a forward the listener's own NATS grant
 // denies (notify.ErrPublishDenied) is denied on every attempt until an operator changes the grant,

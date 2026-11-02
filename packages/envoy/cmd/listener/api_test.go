@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1125,7 +1126,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	})
 
 	t.Run("live holder is returned", func(t *testing.T) {
-		startStandIn(t, uri, "ses_holder", always)
+		startStandIn(t, uri, "ses_holder")
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`))
 		handler.ServeHTTP(recorder, request)
@@ -1646,6 +1647,7 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
+		consumers:  setupSessionConsumers(t),
 		streamName: "notifications",
 		streamInfo: inspector,
 	}
@@ -1654,6 +1656,7 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
 		"session_id":"ses_subscriber",
 		"self_subscribed":true,
+		"delivery":{"consumer":true,"epoch":"e"},
 		"topics":["notifications.github.example-org.example-repo.pr","notifications.github.example-org.example-repo.pr.>"]
 	}`))
 	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
@@ -1688,6 +1691,7 @@ func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
+		consumers:  setupSessionConsumers(t),
 		streamName: "notifications",
 		streamInfo: inspector,
 	}
@@ -1696,6 +1700,7 @@ func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
 		"session_id":"ses_subscriber",
 		"self_subscribed":true,
+		"delivery":{"consumer":true,"epoch":"e"},
 		"topics":["notifications.github.example-org.example-repo.pr.>"]
 	}`))
 	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
@@ -1718,7 +1723,7 @@ func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
 func TestSubscribeHandlerWritesAnUnchangedInterestOnce(t *testing.T) {
 	const calls = 5
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	state := &listenerDeps{registry: registry, sessions: sessions}
+	state := &listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}
 	conn := testnats.Connect(t, testnats.URL(t))
 	t.Cleanup(conn.Close)
 	js, err := conn.JetStream()
@@ -1750,6 +1755,7 @@ func TestSubscribeHandlerWritesAnUnchangedInterestOnce(t *testing.T) {
 			"session_id":"ses_steady",
 			"dir":"/work/steady",
 			"self_subscribed":true,
+			"delivery":{"consumer":true,"epoch":"e"},
 			"topics":["notifications.team.steady"]
 		}`)))
 		if recorder.Code != http.StatusOK {
@@ -1801,15 +1807,12 @@ func TestSubscribeHandlerWarnsWhenAGitHubTopicSpellsARepositoryWithADot(t *testi
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	inspector := &fakeStreamInfo{info: &nats.StreamInfo{State: nats.StreamState{Subjects: map[string]uint64{"notifications.github.example-org.example-repo.pr.1": 1}}}}
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions, streamName: "notifications", streamInfo: inspector}
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: setupSessionConsumers(t), streamName: "notifications", streamInfo: inspector}
 	warnings := func(t *testing.T, topic string) []string {
 		t.Helper()
-		body, err := json.Marshal(map[string]any{"session_id": "ses_subscriber", "self_subscribed": true, "topics": []string{topic}})
-		if err != nil {
-			t.Fatal(err)
-		}
+		body := consumerRegistration("ses_subscriber", "e", topic)
 		recorder := httptest.NewRecorder()
-		subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(body))))
+		subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("subscribe %s: status %d, body %s", topic, recorder.Code, recorder.Body.String())
 		}
@@ -1863,6 +1866,7 @@ func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
+		consumers:  setupSessionConsumers(t),
 		streamName: "notifications",
 		streamInfo: lookup,
 	}
@@ -1871,6 +1875,7 @@ func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
 		"session_id":"ses_subscriber",
 		"self_subscribed":true,
+		"delivery":{"consumer":true,"epoch":"e"},
 		"topics":["notifications.github.example-org.example-repo.pr.>"]
 	}`))
 	responded := make(chan struct{})
@@ -1926,7 +1931,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	}
 	routeClient.Close()
 
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
@@ -2483,6 +2488,51 @@ func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
 	}
 }
 
+// A publish to a notifications. topic no stream subject captures is refused by name, and nothing
+// is published: a session reads only what its own consumer holds, so the message would reach
+// nobody, now or later, and no retry of the same topic could change that. A team topic, which
+// the stream stores, is accepted on the same route.
+func TestPublishHandlerRefusesAnUncapturedNotificationTopicByName(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	publish := func(topic string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		publishHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello"}`)))
+		return recorder
+	}
+	for _, topic := range []string{"notifications.lxspec.probe.all", "notifications.teamx.deploy", bus.ExceptionTopicPrefix + "notifications.github.acme.widgets.pr.1"} {
+		t.Run(topic, func(t *testing.T) {
+			probe, err := client.Conn.SubscribeSync(topic)
+			if err != nil {
+				t.Fatalf("subscribe topic probe: %v", err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			if err := client.Conn.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			recorder := publish(topic)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var response apiError
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("decode 400 body: %v", err)
+			}
+			if !strings.Contains(response.Error, topic) || !strings.Contains(response.Error, "no stream subject captures") ||
+				!reflect.DeepEqual(response.Expected, []string{"topic"}) {
+				t.Fatalf("400 body = %+v, want it to name %s and the topic field", response, topic)
+			}
+			if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
+				t.Fatalf("a refused publish must publish nothing: %v", err)
+			}
+		})
+	}
+	if recorder := publish("notifications.team.captured"); recorder.Code != http.StatusOK {
+		t.Fatalf("a team topic: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 // A dispatch envelope's dedupe key is recognised by every host as the Dispatch event it names, and
 // Dispatch's outbox numbers its keys in sequence, so a key a caller chose there would make a host
 // drop the real event when it arrives. The key is still the caller's on any other source.
@@ -2691,11 +2741,11 @@ func TestMessageHandlersUseFirstNonEmptyLine(t *testing.T) {
 }
 func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
 
 	for _, body := range []string{
-		`{"session_id":"ses_capable","topics":[],"self_subscribed":true,"capabilities":["aside","btw"]}`,
-		`{"session_id":"ses_legacy","topics":[],"self_subscribed":true}`,
+		`{"session_id":"ses_capable","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"},"capabilities":["aside","btw"]}`,
+		`{"session_id":"ses_legacy","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"}}`,
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(
@@ -2734,11 +2784,11 @@ func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
 // per-session route, trimmed. A registration from a plugin predating the fields lists neither key.
 func TestSubscribeHandlerStoresAndListsThePluginAndItsVersion(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	state := &listenerDeps{registry: registry, sessions: sessions}
+	state := &listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}
 	handler := subscribeHandler(state, "test-machine", logging.New("test"))
 	for _, body := range []string{
-		`{"session_id":"ses_versioned","topics":[],"self_subscribed":true,"plugin":" @sjawhar/pi-envoy ","plugin_version":" 11.0.0 "}`,
-		`{"session_id":"ses_unversioned","topics":[],"self_subscribed":true}`,
+		`{"session_id":"ses_versioned","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"},"plugin":" @sjawhar/pi-envoy ","plugin_version":" 11.0.0 "}`,
+		`{"session_id":"ses_unversioned","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"}}`,
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)))
@@ -2780,6 +2830,68 @@ func TestSubscribeHandlerStoresAndListsThePluginAndItsVersion(t *testing.T) {
 	}
 }
 
+// The production reading of "how many sessions are still on the core path" is taken from these
+// two routes, so each says how the listener delivers to every session it reports: the consumer
+// path by name (session.DeliveryConsumer), the core path as the empty string under a key that is
+// always written. A row with no "delivery" key at all is then a listener older than the field,
+// which that reading must not count as a session on the core path.
+func TestSessionRoutesReportEachSessionsDeliveryMode(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	state := &listenerDeps{registry: registry, sessions: sessions}
+	for id, entry := range map[string]session.SessionEntry{
+		"ses_relayed": {
+			Port:      4242,
+			MachineID: "test-machine",
+			Dir:       "/test/ses_relayed",
+			Delivery:  session.DeliveryConsumer,
+			Epoch:     "epoch-1",
+		},
+		"ses_core": {Port: 4243, MachineID: "test-machine", Dir: "/test/ses_core"},
+	} {
+		if err := sessions.Put(id, entry); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+	}
+
+	list := httptest.NewRecorder()
+	sessionsHandler(registry, sessions).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("GET /v1/sessions: status %d %s, want 200", list.Code, list.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.NewDecoder(list.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode GET /v1/sessions: %v", err)
+	}
+	byID := map[string]map[string]any{}
+	for _, row := range rows {
+		byID[row["session_id"].(string)] = row
+	}
+	for id, want := range map[string]string{"ses_relayed": session.DeliveryConsumer, "ses_core": ""} {
+		row, listed := byID[id]
+		if !listed {
+			t.Fatalf("GET /v1/sessions did not list %s: %v", id, rows)
+		}
+		got, present := row["delivery"]
+		if !present || got != want {
+			t.Fatalf("the row of %s reports delivery %#v (key present %v), want %q under a key that is always there",
+				id, got, present, want)
+		}
+
+		answer := sessionEntryRoute(t, state, id)
+		if answer.Code != http.StatusOK {
+			t.Fatalf("GET /v1/registry/%s: status %d %s, want 200", id, answer.Code, answer.Body.String())
+		}
+		var single map[string]any
+		if err := json.Unmarshal(answer.Body.Bytes(), &single); err != nil {
+			t.Fatalf("decode GET /v1/registry/%s: %v", id, err)
+		}
+		if got, present := single["delivery"]; !present || got != want {
+			t.Fatalf("GET /v1/registry/%s reports delivery %#v (key present %v), want %q under a key that is always there",
+				id, got, present, want)
+		}
+	}
+}
+
 // A session on a serving port is reached at the host its registration records, so a registration
 // whose host could move the delivery to another authority or path is refused before anything is
 // written: neither the session's interests nor its session entry appear. The same registration
@@ -2787,7 +2899,7 @@ func TestSubscribeHandlerStoresAndListsThePluginAndItsVersion(t *testing.T) {
 // which nothing dials, is stored as it came.
 func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
 	subscribe := func(t *testing.T, body map[string]any) *httptest.ResponseRecorder {
 		t.Helper()
 		encoded, err := json.Marshal(body)
@@ -2828,12 +2940,418 @@ func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
 	if _, err := sessions.Get("ses_no_host"); err != nil {
 		t.Fatalf("the registration without a host wrote no session entry: %v", err)
 	}
-	recorder = subscribe(t, map[string]any{"session_id": "ses_no_port", "topics": []string{}, "self_subscribed": true, "host": "example-host:80"})
+	recorder = subscribe(t, map[string]any{"session_id": "ses_no_port", "topics": []string{}, "self_subscribed": true, "host": "example-host:80", "delivery": map[string]any{"consumer": true, "epoch": "e"}})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("the registration with no port: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 	}
 	if entry, err := sessions.Get("ses_no_port"); err != nil || entry.Host != "example-host:80" {
 		t.Fatalf("the registration with no port stored %+v, %v; want its host as it came", entry, err)
+	}
+}
+
+// A registration naming a notifications. topic no stream subject captures keeps every other
+// topic: that topic is left out of the stored row and named in a warning, and the answer stays
+// 200. The session would otherwise hold an interest that delivers nothing, since its consumer
+// carries only what the stream stored; refusing the whole registration would leave it no
+// consumer at all. A role lane is no such topic: its holder registers it and the listener
+// forwards it over core NATS. A team topic and a topic outside notifications. are stored as they
+// always were.
+func TestSubscribeHandlerDropsAnUncapturedNotificationTopicByName(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
+	subscribe := func(t *testing.T, sessionID string, topics ...string) *httptest.ResponseRecorder {
+		t.Helper()
+		encoded, err := json.Marshal(map[string]any{"session_id": sessionID, "topics": topics, "self_subscribed": true, "delivery": map[string]any{"consumer": true, "epoch": "e"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(encoded))))
+		return recorder
+	}
+	for index, topic := range []string{"notifications.lxspec.probe.all", "notifications.teamx.deploy", bus.DeliverSubject("ses_other")} {
+		t.Run(topic, func(t *testing.T) {
+			sessionID := fmt.Sprintf("ses_uncaptured_%d", index)
+			recorder := subscribe(t, sessionID, "notifications.team.kept", topic)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var answer interestSubscribeAnswer
+			if err := json.NewDecoder(recorder.Body).Decode(&answer); err != nil {
+				t.Fatalf("decode the answer: %v", err)
+			}
+			want := []string{contracts.AgentSubject(sessionID), "notifications.team.kept"}
+			if !slices.Equal(answer.Topics, want) {
+				t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+			}
+			if len(answer.Warnings) != 1 || answer.Warnings[0] != contracts.UncapturedTopicRefusal(topic, sessionID) {
+				t.Fatalf("warnings = %q, want only %q", answer.Warnings, contracts.UncapturedTopicRefusal(topic, sessionID))
+			}
+			stored, err := registry.Get(context.Background(), sessionID)
+			if err != nil {
+				t.Fatalf("read the stored interest: %v", err)
+			}
+			if !slices.Equal(stored.Topics, want) {
+				t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+			}
+			if _, err := sessions.Get(sessionID); err != nil {
+				t.Fatalf("the registration wrote no session entry: %v", err)
+			}
+		})
+	}
+
+	recorder := subscribe(t, "ses_captured", "notifications.team.kept", contracts.RoleTopicPrefix+"reviewer", "team.bridge.>")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	stored, err := registry.Get(context.Background(), "ses_captured")
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	want := []string{contracts.AgentSubject("ses_captured"), contracts.RoleTopicPrefix + "reviewer", "notifications.team.kept", "team.bridge.>"}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+}
+
+// interestSession is the session the three registration tests below register topics for, and
+// interestIssueTopic a Dispatch issue topic it follows.
+const (
+	interestSession    = "ses_interests"
+	interestIssueTopic = "notifications.dispatch.issue.KEY-1.>"
+)
+
+// interestRig is a listener's /v1 routes over the test's own notification stream, with topics
+// already registered for interestSession.
+type interestRig struct {
+	deps *listenerDeps
+	mux  *http.ServeMux
+}
+
+func newInterestRig(t *testing.T, topics ...string) *interestRig {
+	t.Helper()
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, map[string][]string{interestSession: topics}, nil)
+	deps := &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}
+	mux := http.NewServeMux()
+	registerV1Routes(mux, deps, "test-machine", logging.New("test"))
+	return &interestRig{deps: deps, mux: mux}
+}
+
+// interestSubscribeAnswer is the part of a /v1/interests/subscribe answer these tests read.
+type interestSubscribeAnswer struct {
+	Topics   []string `json:"topics"`
+	Warnings []string `json:"warnings"`
+}
+
+// subscribeInterest registers topics for interestSession through /v1/interests/subscribe, requires
+// a 200, and returns the answer.
+func subscribeInterest(t *testing.T, mux *http.ServeMux, topics []string) interestSubscribeAnswer {
+	t.Helper()
+	body, err := json.Marshal(subscribeBody{SessionID: interestSession, Topics: topics, SelfSubscribed: true,
+		Delivery: &subscribeDelivery{Consumer: true, Epoch: "e"}})
+	if err != nil {
+		t.Fatalf("marshal subscribe: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(body))))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("subscribe status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var answer interestSubscribeAnswer
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode subscribe answer %s: %v", recorder.Body.String(), err)
+	}
+	return answer
+}
+
+// A registration naming topics that reach another session's inbox stores the rest of it and names
+// each topic it left out: a wildcard over the agent subjects, another session's agent subject, and
+// notifications.> are not stored, while the session's own agent subject and an issue topic are.
+// The registration is not refused whole, since a released pi-envoy registers a fork parent's agent
+// subject with the rest of what it follows.
+func TestInterestSubscribeStoresOnlyTopicsThatCannotReachAnotherSessionsInbox(t *testing.T) {
+	rig := newInterestRig(t)
+	own, other := contracts.AgentSubject(interestSession), contracts.AgentSubject("ses_other")
+	refused := []string{"notifications.agent.>", "notifications.agent.*", other, "notifications.>"}
+	answer := subscribeInterest(t, rig.mux, append([]string{own, interestIssueTopic}, refused...))
+	if want := []string{own, interestIssueTopic}; !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	if len(answer.Warnings) != len(refused) {
+		t.Fatalf("warnings = %q, want one naming each of %v", answer.Warnings, refused)
+	}
+	for index, topic := range refused {
+		if !strings.HasPrefix(answer.Warnings[index], topic+" was not registered") {
+			t.Fatalf("warning %d = %q, want it to name %s as not registered", index, answer.Warnings[index], topic)
+		}
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if want := []string{own, interestIssueTopic}; !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+}
+
+// Every private stream subject is left out of a registration, not only the agent subjects: a
+// failed-delivery lane carries the undelivered message's payload and the session it was for (the
+// session's own lane included), and a Legion controller notice lane is for the session holding
+// that project's controller role, which this one does not, so neither is stored, nor is a
+// wildcard reaching them (notifications.envoy.>). A GitHub topic, a team topic and the session's
+// own agent subject are stored, and the answer stays 200.
+func TestInterestSubscribeLeavesOutEveryPrivateStreamSubject(t *testing.T) {
+	rig := newInterestRig(t)
+	own := contracts.AgentSubject(interestSession)
+	githubTopic, teamTopic := "notifications.github.acme.widgets.pr.7.>", "notifications.team.x.>"
+	refused := []string{
+		bus.ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+		bus.ExceptionTopicPrefix + own,
+		"notifications.legion.ACME.controller",
+		"notifications.envoy.>",
+	}
+	answer := subscribeInterest(t, rig.mux, append([]string{githubTopic, teamTopic, own}, refused...))
+
+	// Stored topics are kept sorted.
+	want := []string{own, githubTopic, teamTopic}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	// The GitHub topic may draw its own unwired-repository warning; only the ones left out are
+	// named as not registered.
+	notRegistered := make([]string, 0, len(refused))
+	for _, warning := range answer.Warnings {
+		if topic, _, found := strings.Cut(warning, " was not registered"); found {
+			notRegistered = append(notRegistered, topic)
+		}
+	}
+	if !slices.Equal(notRegistered, refused) {
+		t.Fatalf("warnings = %q, want exactly %v named as not registered", answer.Warnings, refused)
+	}
+}
+
+// A registration naming a topic no stream subject captures keeps the rest of itself: the topic
+// is left out, the answer stays 200 and one warning names it, as a private stream subject beside
+// it is handled. The body here is the one a session on an older plugin build sends during the
+// rollout of INFRA-771: its stored row holds the bare notifications.team that build expanded
+// notifications.team.> to, so it registers that topic beside the team topic it follows, and a
+// refusal would leave it with no session consumer at all, at every heartbeat.
+func TestInterestSubscribeDropsAnUncapturedTopicAndStoresTheRest(t *testing.T) {
+	rig := newInterestRig(t)
+	own := contracts.AgentSubject(interestSession)
+	const stale, team = "notifications.team", "notifications.team.deploy-squad"
+
+	answer := subscribeInterest(t, rig.mux, []string{stale, team})
+
+	want := []string{own, team}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	if len(answer.Warnings) != 1 || answer.Warnings[0] != contracts.UncapturedTopicRefusal(stale, interestSession) {
+		t.Fatalf("warnings = %q, want only %q", answer.Warnings, contracts.UncapturedTopicRefusal(stale, interestSession))
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+}
+
+// A registration whose every named topic is one no stream subject captures is answered 200 too,
+// with the session's own agent subject stored and nothing else: the session is registered, so its
+// consumer is created and its entry written, and the warning tells it what was left out.
+func TestInterestSubscribeStoresOnlyTheAgentSubjectWhenEveryTopicIsUncaptured(t *testing.T) {
+	rig := newInterestRig(t)
+	own := contracts.AgentSubject(interestSession)
+	const stale = "notifications.team"
+
+	answer := subscribeInterest(t, rig.mux, []string{stale})
+
+	if want := []string{own}; !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	if len(answer.Warnings) != 1 || answer.Warnings[0] != contracts.UncapturedTopicRefusal(stale, interestSession) {
+		t.Fatalf("warnings = %q, want only %q", answer.Warnings, contracts.UncapturedTopicRefusal(stale, interestSession))
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if want := []string{own}; !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	if _, err := rig.deps.sessions.Get(interestSession); err != nil {
+		t.Fatalf("the registration wrote no session entry: %v", err)
+	}
+}
+
+// The two kinds of topic a registration drops are told apart: one reaching another session's
+// inbox and one no stream subject captures each draw their own warning, naming themselves, and
+// the topics the listener does store are stored.
+func TestInterestSubscribeWarnsAboutAnUncapturedTopicAndAPrivateOneTogether(t *testing.T) {
+	rig := newInterestRig(t)
+	own, other := contracts.AgentSubject(interestSession), contracts.AgentSubject("ses_other")
+	const stale, team = "notifications.team", "notifications.team.deploy-squad"
+
+	answer := subscribeInterest(t, rig.mux, []string{stale, other, team})
+
+	want := []string{own, team}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	if len(answer.Warnings) != 2 {
+		t.Fatalf("warnings = %q, want one for %s and one for %s", answer.Warnings, stale, other)
+	}
+	if answer.Warnings[0] != contracts.UncapturedTopicRefusal(stale, interestSession) {
+		t.Fatalf("warning for %s = %q, want %q", stale, answer.Warnings[0], contracts.UncapturedTopicRefusal(stale, interestSession))
+	}
+	if !strings.HasPrefix(answer.Warnings[1], other+" was not registered: it reaches a private stream subject") {
+		t.Fatalf("warning for %s = %q, want it named as reaching a private stream subject", other, answer.Warnings[1])
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+}
+
+// The controller notice lane of the project whose controller role a session holds is the one
+// private stream subject its registration stores: a Legion controller receives those notices from
+// its own consumer, whose filter is built from the stored topics, and no longer from a core
+// subscription of its own (INFRA-771). The lane is answered, stored and routed by the listener's
+// fan-out (Registry.Match), with the issue topic the session also follows.
+func TestInterestSubscribeStoresTheControllerLaneOfTheRoleTheSessionHolds(t *testing.T) {
+	rig := newInterestRig(t)
+	own := contracts.AgentSubject(interestSession)
+	const (
+		role = "legion-ACME-controller"
+		lane = "notifications.legion.ACME.controller"
+	)
+	claimRoles(t, rig.deps.registry, interestSession, role)
+	awaitRoles(t, rig.deps.registry, interestSession, role)
+
+	answer := subscribeInterest(t, rig.mux, []string{lane, interestIssueTopic})
+
+	want := []string{own, interestIssueTopic, lane, contracts.RoleTopicPrefix + role}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	for _, warning := range answer.Warnings {
+		if strings.HasPrefix(warning, lane+" was not registered") {
+			t.Fatalf("warnings = %q, want the lane of the role the session holds registered", answer.Warnings)
+		}
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	if !slices.ContainsFunc(rig.deps.registry.Match("test-machine", lane), func(item store.Interest) bool { return item.SessionID == interestSession }) {
+		t.Fatalf("Match(%s) misses %s: the stored lane must reach its controller", lane, interestSession)
+	}
+}
+
+// A controller's registration is held to its own project and to that one lane: another project's
+// controller notice lane, another session's agent subject, a failed-delivery lane and a wildcard
+// over the family are left out of it with the warning each other session gets, since the stored
+// topics are the filter of a consumer that would otherwise hand this controller another project's
+// notices or another session's messages.
+func TestInterestSubscribeLeavesAControllerEveryPrivateSubjectButItsOwnLane(t *testing.T) {
+	rig := newInterestRig(t)
+	own, other := contracts.AgentSubject(interestSession), contracts.AgentSubject("ses_other")
+	const (
+		role = "legion-ACME-controller"
+		lane = "notifications.legion.ACME.controller"
+	)
+	claimRoles(t, rig.deps.registry, interestSession, role)
+	awaitRoles(t, rig.deps.registry, interestSession, role)
+	refused := []string{
+		"notifications.legion.OTHER.controller",
+		"notifications.legion.>",
+		"notifications.legion.*.controller",
+		other,
+		bus.ExceptionTopicPrefix + own,
+	}
+
+	answer := subscribeInterest(t, rig.mux, append([]string{lane}, refused...))
+
+	want := []string{own, lane, contracts.RoleTopicPrefix + role}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	notRegistered := make([]string, 0, len(refused))
+	for _, warning := range answer.Warnings {
+		if topic, _, found := strings.Cut(warning, " was not registered"); found {
+			notRegistered = append(notRegistered, topic)
+		}
+	}
+	if !slices.Equal(notRegistered, refused) {
+		t.Fatalf("warnings = %q, want exactly %v named as not registered", answer.Warnings, refused)
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	// The fan-out is asked for the literal subjects a message can be published on; the two
+	// wildcards above are topics a registration names, never subjects.
+	for _, subject := range []string{"notifications.legion.OTHER.controller", other, bus.ExceptionTopicPrefix + own} {
+		if matched := rig.deps.registry.Match("test-machine", subject); len(matched) != 0 {
+			t.Fatalf("Match(%s) = %v, want no session", subject, matched)
+		}
+	}
+}
+
+// A row an earlier build stored with topics reaching a private stream subject loses them at the
+// session's next registration, not only the topics that registration names: after one heartbeat
+// the row holds the session's own agent subject, the issue topic it followed and the topic it
+// registers now, and the listener's fan-out (Registry.Match) stops handing it another session's
+// failed-delivery lane and the Legion controller's notices.
+func TestInterestSubscribeCleansAStoredRowOfTopicsReachingPrivateStreamSubjects(t *testing.T) {
+	const githubTopic = "notifications.github.acme.widgets.pr.7.>"
+	own, other := contracts.AgentSubject(interestSession), contracts.AgentSubject("ses_other")
+	lane := bus.ExceptionTopicPrefix + other
+	controller := "notifications.legion.ACME.controller"
+	rig := newInterestRig(t, bus.ExceptionTopicPrefix+">", controller, other, interestIssueTopic)
+	for _, subject := range []string{lane, controller, other} {
+		if !slices.ContainsFunc(rig.deps.registry.Match("test-machine", subject), func(item store.Interest) bool { return item.SessionID == interestSession }) {
+			t.Fatalf("Match(%s) before the heartbeat misses %s: the seeded row must reach it", subject, interestSession)
+		}
+	}
+
+	answer := subscribeInterest(t, rig.mux, []string{own, githubTopic})
+
+	want := []string{own, interestIssueTopic, githubTopic}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	for _, subject := range []string{lane, controller, other} {
+		if matched := rig.deps.registry.Match("test-machine", subject); len(matched) != 0 {
+			t.Fatalf("Match(%s) = %v, want no session after the heartbeat", subject, matched)
+		}
 	}
 }
 

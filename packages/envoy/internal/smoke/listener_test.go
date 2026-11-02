@@ -202,7 +202,10 @@ func TestSmoke(t *testing.T) {
 	})
 
 	t.Run("subscribe_and_verify", func(t *testing.T) {
-		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.test.smoke"],"port":8080}`
+		// A notifications.team.<name> topic is one the stream stores; the route leaves out of the
+		// row a notifications. topic no stream subject captures, with a warning naming it, since
+		// nothing would be delivered on it.
+		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.team.smoke"],"port":8080}`
 		resp, err := apiRequest(http.MethodPost, baseURL+"/v1/interests/subscribe", subBody)
 		if err != nil {
 			t.Fatalf("POST /v1/interests/subscribe: %v", err)

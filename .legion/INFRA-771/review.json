@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-771",
+  "previousHandoff": "8192b377682e49bdc99bcef295d130de3d5aeff8",
+  "round": 3,
+  "headReviewed": "8b2034a07f09e790d873308e48986173bf4b4cf8",
+  "codeHead": "fb97b493f7ad",
+  "base": "main (merge base 0642a37a)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 8,
+  "roundTwoFindings": "Fixed: I1 (one envoy-client filter, registrationTopics, applied by registerWithRelay in both plugins; the listener also drops an uncaptured topic with a warning), I3 (relay frames are the only receipts), and every round-2 minor except the ones carried below. I2 is fixed for the row (compare-and-swap at the plan's revision, three plans, Create at revision 0) and not for the consumer filter (important 1).",
+  "forwardMerge": "fb97b493 lost nothing of main that either review agent found (a three-way merge-file against #2446's head 705f0032 was compared with the head; DrainSubscription/ReleaseFailed match main; #2599's OpenCode removals hold). It left two duplicates: a dead second copy of the stored-exception block in cmd/listener/delivery.go:264-270 and the old Consumer delivery section of loadtest/README.md:625-650.",
+  "presence": "notifications.envoy.presence.* in SessionPermissions opens no path to a transcript: no publisher or subscriber exists in the tree, no stream captures it, /v1/messages/publish refuses it and no registration can carry it. Its docs say a listener sends the probe, which no listener does yet.",
+  "ci": "Required set on main: ci-ok, pr-title (rulesets). CI run 41346827710 at code head fb97b493 completed success at 22:29Z, ci-ok success; pr-title success in run 41347094668. Compare fb97b493...8b2034a0 changes only .legion/INFRA-771/.",
+  "thermonuclear": "Both run once at fb97b493: thermonuclear-deep-review CHANGES (1 medium, 5 minor), thermonuclear-code-quality CHANGES (2 important, 6 minor). Every kept finding was checked against the code by the reviewer.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/cmd/listener/api.go:1571, :1582; packages/envoy/internal/store/kv.go:695-722", "description": "The consumer filter is set from the first plan and never set again after UpsertPlanned re-plans on a CAS conflict and stores a different row, so the filter and the row disagree, breaking interest.go's own promise. With two registrations of one session racing (a heartbeat and an envoy_subscribe; or an abandoned request whose consumer update still lands) the row can say C is followed while the filter lacks C, and messages on C are skipped until the next heartbeat. Move the bounded plan/register/write loop into subscribeHandler (the store's write then a single CAS of the planned row returning a conflict), or hold the session lock across plan, filter and write."},
+    {"severity": "important", "file": "packages/envoy-client/src/transport.ts:109-119, :174-186, :402-406, :530-533; packages/pi-envoy/src/registration-state.test.ts:183", "description": "main deleted packages/envoy-plugin, so subscribeServingPort, ServingPortSubscribeResult and parseServingPortSubscribeAnswer have no caller; every fake EnvoyClient must stub them. Delete them and fix the SubscribeResult doc and the envoy-client pr2603 fragment that describes the method."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:264-270", "description": "The merge duplicated the origin/StreamCaptures PublishStoredAs block; the second copy cannot run."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/README.md:625-650", "description": "The merge brought back the old Consumer delivery section (LOADTEST_SESSION_DELIVERY, 'It keeps its core subscriptions'); the correct section is 597-623."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/session_delivery.go:423; live_topics_test.go:225,450,546; packages/pi-envoy/AGENTS.md:342; PR body", "description": "Prose still says /v1/interests/subscribe refuses an uncaptured topic; since d5a918b1 it drops it with a warning."},
+    {"severity": "minor", "file": "packages/contracts/src/dispatch-api.ts:1606-1622; contracts/src/envelope.ts:67; contracts/scripts/gen-go.ts:203; envoy-client/src/transport.ts:188-191; scripts/e2e/lib/session-settings-services.ts:11", "description": "Stale: hosts that subscribe over core NATS, @legion/envoy-client/replay, 'Live NATS subscriptions', the deleted packages/envoy-plugin/src/server.ts."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md:3609; packages/envoy/infra/README.md:2877-2881; packages/envoy/infra/docs/nats-hub.md:187", "description": "Presence grant docs say a listener sends the probe (none does in this tree) and nats-hub.md says a session user reads no other notification topic, which the grant contradicts."},
+    {"severity": "minor", "file": "packages/pi-envoy/extensions/envoy.ts:3618-3631; packages/claude-envoy/src/envoy-channel-server.ts:1368-1380", "description": "The explicit-subscribe refusal is copied again in both plugins; one envoy-client helper that throws."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go:1447-1462, :1515-1559", "description": "uncapturedTopicWarning only wraps contracts.UncapturedTopicRefusal and ReachesNoSession is evaluated in two passes with two comments saying the same; split once before PlanInterest."},
+    {"severity": "minor", "file": "packages/envoy-client/src/__tests__/stream-topics.test.ts:109-173; claude-envoy tests (envoy-role-claim:71, envoy-role-reassertion:70, legion-pane-mcp:61, channel-session-harness:330); pi-envoy/extensions/envoy.test.ts:1053,16050; pi-legion/extensions/legion-role-claim.test.ts:181", "description": "The TS test regex-parses Go test source (share a JSON fixture instead), and the consumer delivery answer is built seven more times in tests (one builder in envoy-client test/)."}
+  ]
+}

@@ -16,15 +16,27 @@ import {
 // shows when the host fires `session_stop`, how it turns the returned follow-up into the next turn,
 // what the model is sent, and that the transcript keeps the state a resumed worker restores.
 // LEGION_TEST_OMP names the binary: the fork pin in the repository's .omp-pin, which
-// CI's pi-envoy job installs; on the devbox, `mise where <pin>`/bin/omp. A run without one skips,
-// except on GitHub Actions, where a skip would hide the only run of the check on the host that
-// ships it (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export CI=true).
+// CI's pi-envoy job installs; on the devbox, `mise where <pin>`/bin/omp. LEGION_TEST_NATS_URL
+// names the NATS server each pane runs against: a session's only inbound is the consumer the
+// listener builds for it, relayed on its own relay subject, so a pane with no NATS server
+// registers nothing and claims nothing (INFRA-771). A run without both skips, except on GitHub
+// Actions, where a skip would hide the only run of the check on the host that ships it
+// (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export CI=true).
 // It is also the only check that the run-end nudge's hidden self-check starts no run: the nudge
 // treats any `agent_start` after a settle as a newer run and withholds its steer, so a host that
 // counted the side turn as a run would silence the nudge with every unit test still green.
 // The WAITING self-check case below fails if that ever changes.
 const omp = process.env.LEGION_TEST_OMP;
+const natsUrl = process.env.LEGION_TEST_NATS_URL;
 const onActions = process.env.GITHUB_ACTIONS === "true";
+const skip = (omp === undefined || natsUrl === undefined) && !onActions;
+
+/** The binary and NATS server a case runs against; throws on GitHub Actions without them. */
+function setup(): { readonly binary: string; readonly nats: string } {
+  if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+  if (natsUrl === undefined) throw new Error("LEGION_TEST_NATS_URL is unset on GitHub Actions");
+  return { binary: omp, nats: natsUrl };
+}
 
 /** The implementer pane the phase-stall cases run, with what its stand-in daemon recorded and
  * its transcript's phase-stall entries. */
@@ -192,16 +204,17 @@ interface PaneOptions
  * worker leaves it before completing, so the pane's `handoff_complete` finds the carrying commit.
  */
 async function stallPane(
-  binary: string,
+  run: { readonly binary: string; readonly nats: string },
   replies: readonly Reply[],
   options: PaneOptions = {}
 ): Promise<StallPane> {
   let handoffCommit = "";
   const pane = await runLegionPane(
-    binary,
+    run.binary,
     replies,
     {
       name: "stall",
+      nats: run.nats,
       role: "implementer",
       tree: "STALL-1",
       issue: "STALL-2",
@@ -294,11 +307,10 @@ async function stallPane(
   };
 }
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a turn that ends on a legion tool call written as text is reminded that it did not run, and the next turn's real legion tool call posts the completion",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const pane = await stallPane(omp, [
+    const pane = await stallPane(setup(), [
       [
         {
           type: "text",
@@ -364,12 +376,11 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a worker that keeps settling is reminded at the end of every turn, past the architect threshold, until its handoff_complete closes the phase",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
     const pane = await stallPane(
-      omp,
+      setup(),
       [
         [{ type: "text", text: "Pushed the change." }],
         [{ type: "text", text: "Still pushing." }],
@@ -412,15 +423,15 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a WAITING reply buys its quiet wait, and the reminder comes again when the wait is over",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const run = setup();
     // Every request the stand-in served, with the moment it was served: the proposition is that
     // nothing reached the session until the wait was over, and only elapsed time shows it.
     const seen: { readonly path: string; readonly at: number }[] = [];
     const pane = await stallPane(
-      omp,
+      run,
       [
         [{ type: "text", text: "Pushed the change.\nWAITING: CI on the pull request." }],
         [
@@ -474,13 +485,13 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a run of unanswered reminders tells the issue's architect over Envoy, retried under its own key until the listener takes it, and never again",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const run = setup();
     let publishes = 0;
     const pane = await stallPane(
-      omp,
+      run,
       [
         [{ type: "text", text: "Pushed the change." }],
         [{ type: "text", text: "Still pushing." }],
@@ -537,12 +548,12 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a real tool call between reminders puts the count back to zero, so the architect of a working worker is not told",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const run = setup();
     const pane = await stallPane(
-      omp,
+      run,
       [
         [{ type: "text", text: "Pushed." }],
         [{ type: "text", text: "Still pushing." }],
@@ -578,12 +589,12 @@ const MOVED_ON = {
   issues: { "STALL-2": { ...STALL_STATE.issues["STALL-2"], phase: "reviewing" } },
 };
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a worker whose record has already moved past its phase is reminded of nothing: its run settles where it is",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const run = setup();
     const pane = await stallPane(
-      omp,
+      run,
       // A second reply is scripted so a turn that should not happen shows up as a turn rather
       // than as the gateway's "no reply scripted" refusal.
       [
@@ -608,13 +619,13 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a record that moves on between reminders stops them: the reminder its timer carried is never sent",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const run = setup();
     let reads = 0;
     const pane = await stallPane(
-      omp,
+      run,
       [
         [{ type: "text", text: "Pushed the change." }],
         [{ type: "text", text: "Still pushing." }],
@@ -653,12 +664,12 @@ test.skipIf(omp === undefined && !onActions)(
 // replies calls no tool, so it owes none: those two together are why the nudge cannot nudge
 // itself. If either changed, an ordinary session would nudge itself to the per-period cap after
 // every settle. This is what a pin bump is re-run against.
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a PROCEEDING self-check leaves an ask-free stop with no visible turn at all",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const run = setup();
     const pane = await stallPane(
-      omp,
+      run,
       // A second reply is scripted so a turn that should not happen shows up as a turn rather
       // than as the gateway's "no reply scripted" refusal.
       [[{ type: "text", text: "Done." }], [{ type: "text", text: "Understood." }]],
@@ -684,13 +695,13 @@ test.skipIf(omp === undefined && !onActions)(
   180_000
 );
 
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a WAITING self-check with a held ask runs exactly one nudge and lists the ask",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const run = setup();
     const heldQuestion = "Which deployment window should I use?";
     const pane = await stallPane(
-      omp,
+      run,
       [[{ type: "text", text: "Done." }], [{ type: "text", text: "Understood." }]],
       {
         legion: false,
@@ -726,12 +737,12 @@ test.skipIf(omp === undefined && !onActions)(
 // result wakes the session into the next turn. Nothing in the plugin decides this, which is
 // exactly why only the real binary can say it: a pin that stopped deferring would remind a
 // working worker that it has done nothing, with every unit test still green.
-test.skipIf(omp === undefined && !onActions)(
+test.skipIf(skip)(
   "a turn that ends while the session waits on its own background job gets no reminder, and the job's result wakes it",
   async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const run = setup();
     const pane = await stallPane(
-      omp,
+      run,
       [
         [call("bash", { command: "sleep 4; echo background-done", async: true })],
         [{ type: "text", text: "I started the build; I will be woken when it is done." }],

@@ -5,6 +5,7 @@ import {
   type DeliveryAnswer,
   EnvoyApiError,
   newClientInstanceID,
+  parseSubscribeAnswer,
 } from "../transport";
 
 type RecordedFetch = {
@@ -35,6 +36,18 @@ function jsonResponse(body: unknown): Response {
 }
 
 describe("EnvoyClient", () => {
+  const CONSUMER: DeliveryAnswer = {
+    mode: "consumer",
+    subject: "notifications.envoy.deliver.ses_sender",
+    stream_id: "stream-1",
+    gap: false,
+  };
+  const DELIVERY_REQUEST = {
+    consumer: true,
+    epoch: "epoch-1",
+    resume: { stream_id: "stream-1", seq: 41 },
+  } as const;
+
   test("posts a subscription using the listener request shape", async () => {
     const recorded = recordFetch([
       jsonResponse({
@@ -42,6 +55,7 @@ describe("EnvoyClient", () => {
         machine_id: "host-a",
         dir: "/work",
         topics: ["notifications.agent.ses_sender"],
+        delivery: CONSUMER,
       }),
     ]);
     const client = createEnvoyClient({ baseUrl: "http://127.0.0.1:39121/", fetch: recorded.fetch });
@@ -53,6 +67,7 @@ describe("EnvoyClient", () => {
       port: 13381,
       title: "Envoy QA",
       driving: true,
+      delivery: DELIVERY_REQUEST,
       clientInstanceID: "0f8c2b1a4d6e7f90",
       plugin: PLUGIN,
     });
@@ -63,7 +78,7 @@ describe("EnvoyClient", () => {
       dir: "/work",
       topics: ["notifications.agent.ses_sender"],
       updated_at: undefined,
-      delivery: { mode: "core", reason: "not_answered" },
+      delivery: CONSUMER,
     });
     expect(recorded.requests).toHaveLength(1);
     expect(recorded.requests[0]?.method).toBe("POST");
@@ -75,6 +90,7 @@ describe("EnvoyClient", () => {
       port: 13381,
       title: "Envoy QA",
       driving: true,
+      delivery: DELIVERY_REQUEST,
       client_instance_id: "0f8c2b1a4d6e7f90",
       host: machineID(),
       plugin: "@sjawhar/pi-envoy",
@@ -89,6 +105,7 @@ describe("EnvoyClient", () => {
         machine_id: "host-a",
         dir: "/work",
         topics: ["notifications.agent.ses_sender"],
+        delivery: CONSUMER,
       }),
     ]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
@@ -100,6 +117,7 @@ describe("EnvoyClient", () => {
       port: 13381,
       title: "Envoy QA",
       driving: true,
+      delivery: DELIVERY_REQUEST,
       plugin: PLUGIN,
     });
 
@@ -113,30 +131,59 @@ describe("EnvoyClient", () => {
       port: 13381,
       title: "Envoy QA",
       driving: true,
+      delivery: DELIVERY_REQUEST,
       host: machineID(),
       plugin: "@sjawhar/pi-envoy",
       plugin_version: "11.0.0",
     });
   });
 
-  test("asks for consumer delivery and reads each delivery answer", async () => {
+  test("asks for consumer delivery and reads the consumer answer", async () => {
     const interest = {
       session_id: "ses_sender",
       machine_id: "host-a",
       dir: "/work",
       topics: ["notifications.agent.ses_sender"],
     };
-    const consumer: DeliveryAnswer = {
-      mode: "consumer",
-      subject: "notifications.envoy.deliver.ses_sender",
-      stream_id: "stream-1",
-      gap: false,
+    const recorded = recordFetch([jsonResponse({ ...interest, delivery: CONSUMER })]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.subscribe({
+      sessionID: "ses_sender",
+      directory: "/work",
+      topics: ["notifications.agent.ses_sender"],
+      port: 0,
+      title: "",
+      driving: false,
+      selfSubscribed: true,
+      delivery: DELIVERY_REQUEST,
+      plugin: PLUGIN,
+    });
+
+    expect(result.delivery).toEqual(CONSUMER);
+    // The registration carries the plugin beside the delivery request.
+    expect(await recorded.requests[0]?.json()).toMatchObject({
+      self_subscribed: true,
+      delivery: DELIVERY_REQUEST,
+      plugin: "@sjawhar/pi-envoy",
+      plugin_version: "11.0.0",
+    });
+  });
+
+  // A session receives only what its own consumer holds, so an answer naming no consumer fails
+  // the registration here rather than leaving the session registered and deaf.
+  test("fails a registration whose answer names no consumer, with the listener's reason", async () => {
+    const interest = {
+      session_id: "ses_sender",
+      machine_id: "host-a",
+      dir: "/work",
+      topics: ["notifications.agent.ses_sender"],
     };
     const recorded = recordFetch([
-      jsonResponse({ ...interest, delivery: consumer }),
-      jsonResponse({ ...interest, delivery: { mode: "core", reason: "no_grant" } }),
       jsonResponse(interest),
+      jsonResponse({ ...interest, delivery: { mode: "core", reason: "no_grant" } }),
       jsonResponse({ ...interest, delivery: { mode: "push" } }),
+      jsonResponse({ ...interest, delivery: 7 }),
     ]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
     const register = () =>
@@ -148,26 +195,51 @@ describe("EnvoyClient", () => {
         title: "",
         driving: false,
         selfSubscribed: true,
-        delivery: { consumer: true, epoch: "epoch-1", resume: { stream_id: "stream-1", seq: 41 } },
+        delivery: DELIVERY_REQUEST,
         plugin: PLUGIN,
       });
 
-    expect((await register()).delivery).toEqual(consumer);
-    expect((await register()).delivery).toEqual({ mode: "core", reason: "no_grant" });
-    // A listener of an earlier release answers no `delivery`: core.
-    expect((await register()).delivery).toEqual({ mode: "core", reason: "not_answered" });
-    // A mode this build does not know does not fail the registration: core.
-    expect((await register()).delivery).toEqual({
-      mode: "core",
-      reason: "unreadable_answer",
+    // A listener of an earlier release answers no `delivery` field at all.
+    await expect(register()).rejects.toThrow(/answered no delivery for ses_sender/);
+    await expect(register()).rejects.toThrow(/answered delivery mode core \(no_grant\)/);
+    await expect(register()).rejects.toThrow(/answered delivery mode push/);
+    await expect(register()).rejects.toThrow(/cannot read/);
+  });
+
+  test("parseSubscribeAnswer throws on an absent, core or unreadable delivery answer", () => {
+    const interest = {
+      session_id: "ses_sender",
+      machine_id: "host-a",
+      dir: "/work",
+      topics: ["notifications.agent.ses_sender"],
+    };
+
+    expect(parseSubscribeAnswer({ ...interest, delivery: CONSUMER })).toEqual({
+      ...interest,
+      updated_at: undefined,
+      delivery: CONSUMER,
     });
-    // The registration carries the plugin beside the delivery request.
-    expect(await recorded.requests[0]?.json()).toMatchObject({
-      self_subscribed: true,
-      delivery: { consumer: true, epoch: "epoch-1", resume: { stream_id: "stream-1", seq: 41 } },
-      plugin: "@sjawhar/pi-envoy",
-      plugin_version: "11.0.0",
-    });
+    expect(() => parseSubscribeAnswer(interest)).toThrow(
+      "the listener answered no delivery for ses_sender: it predates session consumers, and a session receives only what its own consumer holds"
+    );
+    expect(() => parseSubscribeAnswer({ ...interest, delivery: null })).toThrow(
+      /answered no delivery/
+    );
+    expect(() =>
+      parseSubscribeAnswer({ ...interest, delivery: { mode: "core", reason: "not_requested" } })
+    ).toThrow(
+      "the listener gave ses_sender no consumer: it answered delivery mode core (not_requested), and a session receives only what its own consumer holds"
+    );
+    expect(() => parseSubscribeAnswer({ ...interest, delivery: "consumer" })).toThrow(
+      "the listener gave ses_sender no consumer: it answered a delivery field this build cannot read, and a session receives only what its own consumer holds"
+    );
+    // A consumer answer missing the subject the relay arrives on is unreadable too.
+    expect(() =>
+      parseSubscribeAnswer({
+        ...interest,
+        delivery: { mode: "consumer", stream_id: "s", gap: false },
+      })
+    ).toThrow(/answered delivery mode consumer/);
   });
 
   test("expands a concrete trailing wildcard for subscribe and unsubscribe", async () => {
@@ -179,6 +251,7 @@ describe("EnvoyClient", () => {
         machine_id: "host-a",
         dir: "/work",
         topics: [base, wildcard],
+        delivery: CONSUMER,
       }),
       new Response("ok"),
     ]);
@@ -191,6 +264,7 @@ describe("EnvoyClient", () => {
       port: 0,
       title: "",
       driving: true,
+      delivery: DELIVERY_REQUEST,
       plugin: PLUGIN,
     });
     await client.unsubscribe({ sessionID: "ses_sender", topics: [wildcard] });
@@ -210,6 +284,7 @@ describe("EnvoyClient", () => {
         machine_id: "host-a",
         dir: "/work",
         topics: [wildcard],
+        delivery: CONSUMER,
       }),
     ]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
@@ -221,6 +296,7 @@ describe("EnvoyClient", () => {
       port: 0,
       title: "",
       driving: true,
+      delivery: DELIVERY_REQUEST,
       plugin: PLUGIN,
     });
 
@@ -239,6 +315,7 @@ describe("EnvoyClient", () => {
           port: 0,
           title: "",
           driving: true,
+          delivery: DELIVERY_REQUEST,
           plugin: PLUGIN,
         })
       ).rejects.toThrow("concrete base");
@@ -605,6 +682,30 @@ describe("EnvoyClient", () => {
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions");
   });
 
+  test("keeps each session's delivery mode apart from a listener that reports none", async () => {
+    const row = {
+      machine_id: "host-a",
+      dir: "/work",
+      port: 13381,
+      title: "Envoy QA",
+      topics: [],
+      self_subscribed: false,
+    };
+    const relayed = { ...row, session_id: "ses_relayed", delivery: "consumer" };
+    // A listener that reports delivery writes the key for every session, so "" is the core path
+    // and an absent key is a listener older than the field: a measurement of how much traffic is
+    // still on core counts them differently, and neither may become the other here.
+    const core = { ...row, session_id: "ses_core", delivery: "" };
+    const unreported = { ...row, session_id: "ses_unreported" };
+    const recorded = recordFetch([jsonResponse([relayed, core, unreported])]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const sessions = await client.listSessions();
+
+    expect(sessions).toEqual([relayed, core, unreported]);
+    expect(sessions.map((session) => session.delivery)).toEqual(["consumer", "", undefined]);
+  });
+
   test("normalizes non-success responses into a typed API error", async () => {
     const recorded = recordFetch([new Response("invalid role", { status: 400 })]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
@@ -858,80 +959,6 @@ describe("EnvoyClient", () => {
       if (previous === undefined) delete process.env.ENVOY_TOKEN;
       else process.env.ENVOY_TOKEN = previous;
     }
-  });
-
-  test("asks for a replay in the listener's request shape and parses its answer", async () => {
-    const answer = {
-      stream: { created: "2026-10-01T00:00:00Z", first_seq: 3, last_seq: 9 },
-      subjects: [
-        {
-          subject: "notifications.agent.ses_a",
-          messages: [
-            {
-              seq: 7,
-              subject: "notifications.agent.ses_a",
-              time: "2026-10-26T12:00:00.5Z",
-              data: "{}",
-            },
-          ],
-          next_after: 9,
-          more: false,
-        },
-        {
-          subject: "notifications.team.deploy",
-          messages: [],
-          next_after: 0,
-          more: false,
-          refused: "not_retained",
-        },
-      ],
-    };
-    const recorded = recordFetch([jsonResponse(answer)]);
-    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
-
-    const result = await client.replay({
-      sessionID: "ses_a",
-      subjects: [
-        { subject: "notifications.agent.ses_a", after: 4 },
-        { subject: "notifications.team.deploy" },
-      ],
-      maxMessages: 50,
-    });
-
-    expect(result).toEqual(answer);
-    expect(recorded.requests[0]?.method).toBe("POST");
-    expect(recorded.requests[0]?.url).toBe("http://listener/v1/replay");
-    expect(await recorded.requests[0]?.json()).toEqual({
-      session_id: "ses_a",
-      subjects: [
-        { subject: "notifications.agent.ses_a", after: 4 },
-        { subject: "notifications.team.deploy" },
-      ],
-      max_messages: 50,
-    });
-  });
-
-  // A replay runs again on the session's next trigger, and a listener that cannot replay must be
-  // reported at once, so a 503 is not sent a second time.
-  test("gives up a replay at its first 503, with the listener's status and code", async () => {
-    const recorded = recordFetch([
-      Response.json(
-        { code: "REPLAY_UNAVAILABLE", error: "nats: permissions violation" },
-        { status: 503 }
-      ),
-      Response.json({ error: "unexpected second request" }, { status: 500 }),
-    ]);
-    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
-
-    const failure = await client
-      .replay({ sessionID: "ses_a", subjects: [{ subject: "notifications.agent.ses_a" }] })
-      .catch((error: unknown) => error);
-
-    expect(failure).toBeInstanceOf(EnvoyApiError);
-    expect((failure as EnvoyApiError).details.status).toBe(503);
-    expect((failure as EnvoyApiError).code).toBe("REPLAY_UNAVAILABLE");
-    expect((failure as EnvoyApiError).message).toBe("nats: permissions violation");
-    expect(recorded.requests).toHaveLength(1);
   });
 });
 

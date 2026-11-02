@@ -25,8 +25,9 @@
 # restart serves the same port. Only a --build-from listener that takes no ENVOY_LISTEN_FD binds a
 # number, a port picked free below the kernel's ephemeral range, which its restart binds again. At
 # setup each session is told (one model turn) to follow the issue topic
-# notifications.dispatch.issue.<KEY>.> and to hold a role of its own; the listener's registry is
-# then read to show both. Then six windows run, one disruption each, with every event of the window
+# notifications.dispatch.issue.<KEY>.> and the run's own team topic
+# notifications.team.live-delivery-<run>, and to hold a role of its own; the listener's registry is
+# then read to show them. Then six windows run, one disruption each, with every event of the window
 # published while the disruption holds:
 #
 #   a  both sessions SIGKILLed and resumed under the same id (omp --resume <session file>; the
@@ -46,6 +47,9 @@
 #   issue  two Dispatch comments on the followed issue
 #   role   POST /v1/messages/publish to each session's role; a core NATS publish of an Envoy
 #          envelope on notifications.role.<role>, which the listeners' role lane forwards
+#   team   POST /v1/messages/publish to the team topic both sessions follow, one event for both:
+#          the stream stores notifications.team.>, so each session's own consumer holds it until
+#          the session is back (window a kills both sessions, and both must still count it once)
 # The listener sends go to listener `dispatch`, and to `shared` in window d.
 #
 # After each window, up to SESSION_DELIVERY_SETTLE_S for every marker to reach its session, then
@@ -59,8 +63,8 @@
 # published.
 #
 #   bash scripts/e2e/envoy-session-delivery.sh [--disruptions a,b,c,d,e,f]
-#       [--build-from <rev> [--expect-lost <agent,issue,role>]] [--plugins-from <rev>]
-#       [--listener-grant current|before-session-consumers] [--resume-plugins-from <rev>]
+#       [--build-from <rev> [--expect-lost <agent,issue,role,team>]] [--plugins-from <rev>]
+#       [--resume-plugins-from <rev>]
 #       [--second-followed-issue]
 #
 # --build-from <rev> builds the listener, pi-envoy, claude-envoy and the `legion` bridge from <rev>
@@ -91,20 +95,6 @@
 # first, and publishes one more comment there in every window. Two followed issue topics and a
 # role put more than one cursor in the plugin's ledger, so a resume must take each frame on the
 # topic it was stored for, and no cursor of another topic may rescue or drop it.
-#
-# --listener-grant before-session-consumers runs both listeners as a NATS user whose grant is the
-# listener grant from before session consumers (packages/envoy-client/test/listener-grant.ts
-# renders it: infra/core ListenerPermissions without the session-consumer entries and without the
-# shared role-lane queue), so every registration that asks for a consumer is answered
-# `core`/`no_grant` and every session runs on the core path — the path a hub runs until its NATS
-# user is replaced. natsd then reads a configuration of the run's own: an nkey user per listener,
-# each with that grant, and `no_auth_user` for everyone else (the sessions, Dispatch, this
-# script's own NATS clients), which may publish and subscribe to anything. The run prints, after
-# the sessions have registered and again with the table, each listener's answer to a registration
-# asking for a consumer (one of the run's own, under a session id nothing else uses, removed
-# again: `core`/`no_grant`), each listener's "sessions stay on core delivery" line, the session
-# entries (none recording consumer delivery) and the stream's consumers (the two listener
-# durables, no `s-<session>`), and fails when any of that is untrue.
 #
 # Inputs (required ones refuse to start without them):
 #   LEGION_TEST_PG_DSN            required: a loopback Postgres with pgvector, as
@@ -171,7 +161,6 @@ build_from=""
 plugins_from=""
 resume_plugins_from=""
 second_followed_issue=""
-listener_grant=current
 expect_lost=""
 disruptions="a,b,c,d,e,f"
 while (($#)); do
@@ -180,7 +169,6 @@ while (($#)); do
   --plugins-from) [ $# -ge 2 ] || refuse "--plugins-from needs a revision"; plugins_from=$2; shift 2 ;;
   --resume-plugins-from) [ $# -ge 2 ] || refuse "--resume-plugins-from needs a revision"; resume_plugins_from=$2; shift 2 ;;
   --second-followed-issue) second_followed_issue=1; shift ;;
-  --listener-grant) [ $# -ge 2 ] || refuse "--listener-grant needs current or before-session-consumers"; listener_grant=$2; shift 2 ;;
   --expect-lost) [ $# -ge 2 ] || refuse "--expect-lost needs a list of kinds"; expect_lost=$2; shift 2 ;;
   --disruptions) [ $# -ge 2 ] || refuse "--disruptions needs a list"; disruptions=$2; shift 2 ;;
   -h | --help) usage; exit 0 ;;
@@ -188,8 +176,8 @@ while (($#)); do
   esac
 done
 [[ "$disruptions" =~ ^[a-f](,[a-f])*$ ]] || refuse "--disruptions takes letters a-f separated by commas, not '$disruptions'"
-[[ -z "$expect_lost" || "$expect_lost" =~ ^(agent|issue|role)(,(agent|issue|role))*$ ]] ||
-  refuse "--expect-lost takes agent, issue and role separated by commas, not '$expect_lost'"
+[[ -z "$expect_lost" || "$expect_lost" =~ ^(agent|issue|role|team)(,(agent|issue|role|team))*$ ]] ||
+  refuse "--expect-lost takes agent, issue, role and team separated by commas, not '$expect_lost'"
 [[ -z "$expect_lost" || -n "$build_from" ]] || refuse "--expect-lost applies only with --build-from"
 [[ -z "$expect_lost" || ",$disruptions," == *",a,"* ]] || refuse "--expect-lost judges disruption a, which --disruptions leaves out"
 [[ -z "$plugins_from" || -z "$build_from" ]] ||
@@ -198,8 +186,6 @@ done
   refuse "--resume-plugins-from names the tree the sessions start on; do not give it with --build-from or --plugins-from"
 [[ -z "$resume_plugins_from" || ",$disruptions," == *",a,"* ]] ||
   refuse "--resume-plugins-from upgrades the sessions at disruption a, which --disruptions leaves out"
-[[ "$listener_grant" == current || "$listener_grant" == before-session-consumers ]] ||
-  refuse "--listener-grant takes current or before-session-consumers, not '$listener_grant'"
 
 [ -n "${LEGION_TEST_PG_DSN:-}" ] ||
   refuse "LEGION_TEST_PG_DSN is required: a loopback Postgres with pgvector (postgres://<user>@127.0.0.1:<port>/<db>?sslmode=disable). The run starts no database; docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md starts one without root."
@@ -521,26 +507,8 @@ note "pi-envoy $(jq -r .version "$work/pi-envoy/package.json"); claude-envoy $(j
 
 # ---- services ---------------------------------------------------------------------------------
 begin services
-# natsd binds the ports the kernel chooses (-p -1, -m -1) and reports both in its log. With the
-# grant from before session consumers it also reads a configuration of the run's own: an nkey user
-# per listener holding that grant, and `no_auth_user` for every other client
-# (packages/envoy-client/test/listener-grant.ts renders both, and each listener's seed, which only
-# it reads; the seed is never an argument or a printed value).
-nats_config=()
-declare -A listener_seed=()
-if [[ "$listener_grant" == before-session-consumers ]]; then
-  (cd -- "$repo_root" && isolated_exec "" HOME="$work/bun-home" TMPDIR="$work" -- \
-    bun packages/envoy-client/test/listener-grant.ts --config "$work/nats.conf" \
-    --seed-dir "$work/seeds" --machine shared --machine dispatch) >"$work/logs/listener-grant.log" 2>&1 ||
-    fail "the pre-session-consumer grant did not render; see $work/logs/listener-grant.log"
-  nats_config=(-c "$work/nats.conf")
-  for name in shared dispatch; do
-    listener_seed[$name]="$work/seeds/$name.seed"
-    [ -s "${listener_seed[$name]}" ] || fail "no seed for listener $name in $work/seeds"
-  done
-  note "the listeners hold the grant from before session consumers ($work/nats.conf); every other client presents no credential"
-fi
-(isolated_exec "" HOME="$work/nats-home" -- "$work/bin/natsd" -p -1 -m -1 -js -store_dir "$work/nats-store" "${nats_config[@]}") \
+# natsd binds the ports the kernel chooses (-p -1, -m -1) and reports both in its log.
+(isolated_exec "" HOME="$work/nats-home" -- "$work/bin/natsd" -p -1 -m -1 -js -store_dir "$work/nats-store") \
   >"$work/logs/natsd.log" 2>&1 &
 pid[natsd]=$!
 nats_port="" monitor_port=""
@@ -570,13 +538,12 @@ dispatch_url="http://127.0.0.1:${dispatch_port}"
 listener_ready() { curl -fsS --max-time 2 "$(listener_url "$1")/healthz" | jq -e '.status == "healthy"'; }
 start_listener() {
   local name=$1
-  local -a serve=("$work/bin/envoy-listener") seed=()
+  local -a serve=("$work/bin/envoy-listener")
   if ((listener_held == 1)); then
     serve=(python3 "$held_port" exec --from "$work/ports/keep-listener-$name.sock" --fd-env ENVOY_LISTEN_FD -- "${serve[@]}")
   fi
-  [[ -z "${listener_seed[$name]:-}" ]] || seed=(NATS_NKEY_SEED_FILE="${listener_seed[$name]}")
   (isolated_exec "" HOME="$work/listener-$name-home" PORT="${listener_port[$name]}" ENVOY_LISTEN_HOST=127.0.0.1 \
-    ENVOY_MACHINE_ID="$name" NATS_URLS="$nats_url" "${seed[@]}" -- "${serve[@]}") \
+    ENVOY_MACHINE_ID="$name" NATS_URLS="$nats_url" -- "${serve[@]}") \
     >>"$work/logs/listener-$name.log" 2>&1 &
   pid[listener-$name]=$!
   await "listener-$name" "$work/logs/listener-$name.log" 90 listener_ready "$name"
@@ -669,6 +636,10 @@ declare -A sid=() transcript=() launches=() role=() home=()
 run_id="$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
 role[pi]="live-delivery-pi-${run_id}"
 role[cc]="live-delivery-cc-${run_id}"
+# The one team topic both sessions follow. notifications.team.> is a stream subject, so a message
+# published to it while a session is down waits in that session's own consumer until it returns.
+readonly team_topic="notifications.team.live-delivery-${run_id}"
+note "the run's team topic is ${team_topic}; the setup prompt makes both sessions follow it"
 readonly pi_note="This session is an automated delivery test. Do exactly what the user's first message says, using the Envoy tools it names. After that, answer every message and every Envoy card with the single word ok, and call no tools."
 readonly cc_note="This session is an automated delivery test. Do exactly what the user's first message says, using the Envoy tools it names. After that, answer every message with exactly one line, WAITING for test events, and call no tools."
 natives=$HOME/.omp/natives
@@ -767,7 +738,7 @@ registered() { curl -fsS --max-time 5 "$(listener_url shared)/v1/registry/$1" >/
 follows_and_holds() {
   local label=$1
   curl -fsS --max-time 5 "$(listener_url shared)/v1/interests/${sid[$label]}" |
-    jq -e --args '(.topics // []) as $t | all($ARGS.positional[]; . as $want | $t | index($want) != null)' "$issue_topic" ${second_topic:+"$second_topic"} >/dev/null &&
+    jq -e --args '(.topics // []) as $t | all($ARGS.positional[]; . as $want | $t | index($want) != null)' "$issue_topic" "$team_topic" ${second_topic:+"$second_topic"} >/dev/null &&
     curl -fsS --max-time 5 "$(listener_url shared)/v1/roles/${role[$label]}" |
     jq -e --arg s "${sid[$label]}" '.holder == $s' >/dev/null
 }
@@ -778,42 +749,24 @@ session_view() {
     "$(curl -fsS --max-time 5 "$(listener_url shared)/v1/roles/${role[$1]}" | jq -c . 2>/dev/null)"
 }
 
-# core_path_shown WHEN: with --listener-grant before-session-consumers, the four readings that
-# say every session runs the core path, printed under WHEN and each a failure when it is untrue:
-# each listener answers a registration asking for a session consumer `core`/`no_grant` (a
-# registration of the run's own, under a session id nothing else uses, removed again), and logged
-# once that its user may not manage session consumers; no session entry records consumer delivery;
-# and the stream carries the two listener durables and no session consumer (`s-<session>`). It is
-# a no-op on the current grant.
-core_path_shown() {
-  [[ "$listener_grant" == before-session-consumers ]] || return 0
-  local when=$1 name probe answer lines consumers entries answers=""
-  for name in shared dispatch; do
-    probe="ses_grantprobe$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-    answer=$(curl -sS --max-time 10 -X POST -H 'Content-Type: application/json' \
-      -d "$(jq -nc --arg s "$probe" '{session_id: $s, self_subscribed: true, topics: [],
-        delivery: {consumer: true, epoch: "probe"}}')" \
-      "$(listener_url "$name")/v1/interests/subscribe" | jq -c '.delivery' 2>/dev/null) ||
-      fail "listener $name refused the grant probe ($when)"
-    curl -sS --max-time 10 -X DELETE "$(listener_url "$name")/v1/sessions/$probe" >/dev/null || true
-    [[ "$answer" == '{"mode":"core","reason":"no_grant"}' ]] ||
-      fail "listener $name answered a registration asking for a consumer $answer, want core/no_grant ($when)"
-    answers+="$name $answer; "
-    lines=$(grep -c 'sessions stay on core delivery until the grant carries them' "$work/logs/listener-$name.log" || true)
-    ((lines >= 1)) || fail "listener $name never logged that its user may not manage session consumers ($when)"
-  done
-  consumers=$(curl -fsS --max-time 5 "${nats_monitor}/jsz?consumers=true" |
-    jq -r '[.account_details[]?.stream_detail[]? | select(.name == "ENVOY_NOTIFICATIONS") | .consumer_detail[]?.name] | sort | join(" ")') ||
-    fail "could not read the stream's consumers from natsd's monitor ($when)"
+# session_delivery_shown WHEN: both sessions take their messages from a session consumer of their
+# own, printed under WHEN and a failure when it is untrue. The listener reports `delivery` on every
+# row of GET /v1/sessions, written always and never omitempty: "consumer" for a session its own
+# consumer holds the stored messages of, empty for one no consumer was given. A registration that
+# can be given no consumer is refused before anything is written, so a registered session that does
+# not read "consumer" is one this run would otherwise count deliveries for without proving which
+# path carried them.
+session_delivery_shown() {
+  local when=$1 label entries
   entries=$(curl -fsS --max-time 5 "$(listener_url shared)/v1/sessions" |
-    jq -c '[.[] | {session_id, delivery: (.delivery // "core")}]') ||
+    jq -c --arg pi "${sid[pi]}" --arg cc "${sid[cc]}" \
+      '[.[] | select(.session_id == $pi or .session_id == $cc) | {session_id, delivery}]') ||
     fail "could not read the session entries ($when)"
-  note "core path ($when): registrations answered ${answers}stream consumers [${consumers}]; session entries ${entries}"
-  [[ "$consumers" == *"listener-shared"* && "$consumers" == *"listener-dispatch"* ]] ||
-    fail "the stream does not carry both listener durables ($when): [${consumers}]"
-  [[ " $consumers " != *" s-"* ]] || fail "a session consumer exists on the core path ($when): [${consumers}]"
-  jq -e 'all(.[]; .delivery == "core")' >/dev/null <<<"$entries" ||
-    fail "a session entry records consumer delivery on the core path ($when): ${entries}"
+  note "session delivery ($when): ${entries}"
+  for label in pi cc; do
+    jq -e --arg s "${sid[$label]}" 'any(.[]; .session_id == $s and .delivery == "consumer")' >/dev/null <<<"$entries" ||
+      fail "session $label (${sid[$label]}) does not report consumer delivery ($when): ${entries}"
+  done
 }
 
 begin sessions
@@ -823,7 +776,7 @@ setup_prompt() {
   local label=$1 subscribe=envoy_subscribe role_set=envoy_role_set
   [[ "$label" == pi ]] || { subscribe=mcp__legion__envoy_subscribe; role_set=mcp__legion__envoy_role_set; }
   local topics
-  topics=$(jq -nc --args '$ARGS.positional' "$issue_topic" ${second_topic:+"$second_topic"})
+  topics=$(jq -nc --args '$ARGS.positional' "$issue_topic" "$team_topic" ${second_topic:+"$second_topic"})
   jq -nc --arg m "Call ${subscribe} with topics ${topics}. Then call ${role_set} with role \"${role[$label]}\". Then reply with the single word ok." \
     '{type: "prompt", id: "setup", message: $m}'
 }
@@ -834,7 +787,7 @@ note "pi: $(session_view pi)"
 await cc "$(err_log cc)" 300 follows_and_holds cc
 transcript[cc]=$(cc_transcript) || fail "Claude Code wrote no transcript for ${sid[cc]} under ${home[cc]}/config/projects"
 note "cc: $(session_view cc); transcript ${transcript[cc]}"
-core_path_shown "both sessions registered"
+session_delivery_shown "both sessions registered"
 
 # ---- publishing -------------------------------------------------------------------------------
 seq=0
@@ -885,7 +838,8 @@ stored_comments() {
 }
 
 # The window's events, in this order: Dispatch's writes (when Dispatch is up), the listener sends,
-# then the role publishes. publish_dispatch and publish_rest split them for window e.
+# the role publishes, then the team publish. publish_dispatch and publish_rest split them for
+# window e.
 publish_dispatch() {
   local d=$1 label answer text body expected n
   for n in 1 2; do
@@ -947,6 +901,11 @@ publish_rest() {
       LIVE_SUBJECT="notifications.role.${role[$label]}" LIVE_ENVELOPE="$envelope" -- bun -e "$core_publish_js") 2>&1) || true
     record "$d" role core-publish "$label" 1 "$answer"
   done
+  next_marker
+  text=$(text_for "$d" team "POST /v1/messages/publish to listener $via")
+  answer=$(listener_post "$via" /v1/messages/publish "$(jq -nc --arg t "$team_topic" --arg m "$text" \
+    '{topic: $t, source: "agent", source_session: "envoy-session-delivery", message: $m}')")
+  record "$d" team team-publish "pi cc" 1 "$answer"
 }
 
 # ---- counting ---------------------------------------------------------------------------------
@@ -1107,14 +1066,13 @@ transcript[cc]=$(cc_transcript) || true
 
 # ---- the table --------------------------------------------------------------------------------
 begin table
-core_path_shown "the windows are over"
+session_delivery_shown "the windows are over"
 tally
 bad=0
 lost_ok=1
 table="$work/table.txt"
 {
-  printf 'build: listener and bridge %s; plugins %s; listener grant %s\n' \
-    "$tree_label" "$plugins_label" "$listener_grant"
+  printf 'build: listener and bridge %s; plugins %s\n' "$tree_label" "$plugins_label"
   printf '%-22s %-6s %-17s %-14s %4s %4s\n' disruption kind event marker pi cc
   while IFS=$'\t' read -r m d kind source sessions expected; do
     row=""

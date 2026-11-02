@@ -111,16 +111,22 @@ describe("envoyToolSpecs", () => {
     expect(publish?.description).toContain("id for dedupe and at for freshness");
     for (const description of [subscribe?.description, publish?.description]) {
       expect(description).toContain(
-        "reach each subscribed session once from the durable consumer its listener relays to it, also one that was away or restarted"
+        "reaches each subscribed session once from the durable consumer its listener relays to it, also one that was away or restarted"
       );
-      expect(description).toContain("Team and other ad-hoc topics are live only.");
+      // A team topic is stored like every other one, and a 200 says the stream stored it.
+      expect(description).toContain("whatsapp, team;");
+      expect(description).toContain(
+        "A 200 means the stream stored the message for each subscribed session's consumer, not that any recipient has read it."
+      );
+      expect(description).not.toContain("live only");
     }
-    expect(publish?.description).toContain("errs naming each session that did not confirm");
+    // Every way a role publish ends in an error: no holder (404), the holder's refusal (403),
+    // and the window the listener spends waiting for the stream (504).
     expect(publish?.description).toContain(
-      "a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions"
+      "A role message gets an error when no session holds the role, when the holder refuses the message, and when the forward is not stored within four seconds."
     );
     expect(publish?.description).toContain(
-      "a role message errs when its holder did not confirm it within the listener's window"
+      "A notifications. topic no stream subject captures is refused by name: nothing would store it."
     );
   });
 });

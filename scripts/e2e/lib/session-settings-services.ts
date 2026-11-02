@@ -6,6 +6,13 @@ import { connect } from "nats";
 import { agentStreamControlSubject } from "../../../packages/contracts/src/agent-stream";
 import { expect, PERSON, type Rig, sleep, until } from "./session-settings-common";
 
+/** The delivery every client this rig registers asks for: the session consumer a session is
+ *  delivered through, under one epoch for this driver process, as a plugin mints one per NATS
+ *  connection (packages/pi-envoy/extensions/envoy.ts). A registration that asks for no consumer and
+ *  names no serving port is refused `409 {"reason":"not_requested"}`, with nothing written for it
+ *  (dispatch://INFRA-771). */
+const DELIVERY_REQUEST = { consumer: true, epoch: crypto.randomUUID() } as const;
+
 export interface StoredMessage {
   readonly id: string;
   readonly body: string;
@@ -118,9 +125,13 @@ export class Services {
     return sessions.some((row) => row.session_id === session && row.last_seen >= since);
   }
 
-  /** Registers an Envoy client of the run's own, as any session on the bus registers. */
+  /** Registers an Envoy client of the run's own, as any session on the bus registers: it asks for
+   *  the session consumer every registration is given or refused for. The client only sends and is
+   *  listed, so the relay subject the answer names is nothing it reads; `#listener` fails the run
+   *  unless the listener answered 200. */
   async registerClient(session: string): Promise<void> {
     await this.#listener("/v1/interests/subscribe", {
+      delivery: DELIVERY_REQUEST,
       dir: this.#rig.work,
       self_subscribed: true,
       session_id: session,

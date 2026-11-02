@@ -9,17 +9,13 @@ import {
   decodeRelayFrame,
   deliverSubject,
   FOLLOW_CLOCK_ALLOWANCE_MS,
+  inboundUnavailable,
   RELAY_PROGRESS_INTERVAL_MS,
   type RelayMessage,
   type RelayReply,
-  registeredWithoutRelay,
+  registerWithRelay,
 } from "../consumer-delivery";
-import {
-  createReplayEngine,
-  type ReplayEngine,
-  type ReplaySnapshot,
-  type ReplayState,
-} from "../replay";
+import { createDeliveryLedger, type DeliveryLedger, type LedgerSnapshot } from "../delivery-ledger";
 
 const SESSION = "ses_a";
 const AGENT = "notifications.agent.ses_a";
@@ -83,22 +79,17 @@ function fakeTimers(clock: { now: number }) {
   };
 }
 
-function replayEngine(clock: { now: number }, written: { snapshot?: ReplaySnapshot } = {}) {
-  return createReplayEngine({
+function deliveryLedger(clock: { now: number }, written: { snapshot?: LedgerSnapshot } = {}) {
+  return createDeliveryLedger({
     host: {
       sessionID: () => SESSION,
       followedSubjects: () => [AGENT],
-      deliver: async () => "shown",
       showFailureNotice: async () => undefined,
       failureNoticeFailed: () => undefined,
-      notify: () => undefined,
       log: () => undefined,
       write(change) {
         written.snapshot = change.snapshot();
       },
-    },
-    transport: {
-      replay: () => Promise.reject(new Error("no replay call is expected")),
     },
     now: () => clock.now,
   });
@@ -107,9 +98,7 @@ function replayEngine(clock: { now: number }, written: { snapshot?: ReplaySnapsh
 function setup(
   options: {
     readonly clock?: { now: number };
-    readonly ledger?: Pick<ReplayEngine, "delivered">;
-    /** The replay state the ledger reports: the cursors the core path left. */
-    readonly state?: ReplayState;
+    readonly ledger?: Pick<DeliveryLedger, "delivered">;
   } = {}
 ) {
   const clock = options.clock ?? { now: T0 };
@@ -119,15 +108,10 @@ function setup(
   const running: Promise<void>[] = [];
   const gaps: ConsumerGapNotice[] = [];
   // The failure notices shown through the ledger (`liveFailed`).
-  const failed: Array<{
-    readonly subject: string;
-    readonly eventID: string | undefined;
-    readonly receivedAt: number;
-  }> = [];
+  const failed: Array<{ readonly eventID: string | undefined }> = [];
   const logs: string[] = [];
-  // The snapshots the host was asked to write, and every `setConsumerMode` the ledger was told.
+  // The snapshots the host was asked to write.
   const persisted: ConsumerDeliverySnapshot[] = [];
-  const consumerMode: boolean[] = [];
   const state = {
     deliver: (_frame: ConsumerFrame): void | Promise<void> => undefined,
   };
@@ -146,11 +130,9 @@ function setup(
     publish: (reply, body) => replies.push([reply, body]),
     ledger: {
       delivered: (identity) => options.ledger?.delivered(identity) ?? false,
-      liveFailed: async (followed, envelope, _error, receivedAt) => {
-        failed.push({ subject: followed, eventID: envelope.event_id, receivedAt });
+      liveFailed: async (envelope) => {
+        failed.push({ eventID: envelope.event_id });
       },
-      state: () => options.state ?? { subjects: {} },
-      setConsumerMode: (on) => consumerMode.push(on),
     },
     persist: (snapshot) => {
       persisted.push(snapshot);
@@ -180,7 +162,6 @@ function setup(
     delivery,
     settled,
     persisted,
-    consumerMode,
   };
 }
 
@@ -286,7 +267,7 @@ describe("replies", () => {
 
     expect(repliesTo(replies, "_INBOX.a")).toEqual(["received", "nak"]);
     expect(repliesTo(replies, "_INBOX.c")).toEqual(["received", "done"]);
-    expect(failed).toEqual([{ subject: AGENT, eventID: "evt-1", receivedAt: T0 }]);
+    expect(failed).toEqual([{ eventID: "evt-1" }]);
   });
 
   test("closing the session answers nak for every unsettled frame and any later one", () => {
@@ -362,8 +343,8 @@ describe("hand-off order", () => {
 describe("frames already written", () => {
   test("a frame the restored ledger holds is answered done and not handed over", async () => {
     const clock = { now: T0 };
-    const persisted: { snapshot?: ReplaySnapshot } = {};
-    const before = replayEngine(clock, persisted);
+    const persisted: { snapshot?: LedgerSnapshot } = {};
+    const before = deliveryLedger(clock, persisted);
     const first = setup({ clock, ledger: before });
     first.state.deliver = async (frame) => {
       await before.recordDelivered({ event_id: `evt-${frame.streamSeq}` });
@@ -374,7 +355,7 @@ describe("frames already written", () => {
     expect(repliesTo(first.replies, "_INBOX.7")).toEqual(["received", "done"]);
 
     // The process restarts; the relay restarts at the ack floor and sends the frame again.
-    const after = replayEngine(clock);
+    const after = deliveryLedger(clock);
     after.restore(persisted.snapshot ?? { ledger: [] });
     const second = setup({ clock, ledger: after });
     second.delivery.receive(relay({ seq: 7, delivered: 2, reply: "_INBOX.7b" }));
@@ -528,18 +509,14 @@ describe("resume point", () => {
 describe("gaps", () => {
   test("a gap the answer reports is told once, not again by the frame after it", () => {
     const { delivery, gaps } = setup();
-    const mode = delivery.answered(
-      {
-        mode: "consumer",
-        subject: deliverSubject(SESSION),
-        stream_id: STREAM,
-        gap: true,
-      },
-      [AGENT]
-    );
+    delivery.answered({
+      mode: "consumer",
+      subject: deliverSubject(SESSION),
+      stream_id: STREAM,
+      gap: true,
+    });
     delivery.receive(relay({ seq: 1, gap: true }));
 
-    expect(mode).toBe("consumer");
     expect(gaps.map((notice) => notice.kind)).toEqual(["retention_gap"]);
   });
 
@@ -561,258 +538,77 @@ describe("gaps", () => {
       stream_id: STREAM,
       gap: false,
     } as const;
-    delivery.answered(consumer, [AGENT]);
-    delivery.answered(consumer, [AGENT]);
+    delivery.answered(consumer);
+    delivery.answered(consumer);
 
     expect(gaps.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
     expect(delivery.resumePoint()).toBeUndefined();
   });
 
-  test("a core answer tells nothing", () => {
-    const { delivery, gaps } = setup();
-    delivery.restore({ resume: { stream_id: "stream-old", seq: 90 }, follows: {} });
-
-    expect(delivery.answered({ mode: "core", reason: "no_grant" }, [AGENT])).toBe("core");
-    expect(gaps).toEqual([]);
-  });
-
-  // A session moving from the core path registers the resume its ledger's cursors seed
-  // (`seededResume`), which names the stream those cursors were read on. When the listener
-  // answers on another stream, that one was replaced: its consumer starts at the new stream's
-  // end, and the messages the cursors still owed it are gone.
-  test("an answer naming another stream than the seeded resume's is told once", () => {
-    const { delivery, gaps } = setup({
-      state: { stream_id: "stream-old", subjects: { [AGENT]: { since: 2, after: 9 } } },
-    });
-    const answer = (stream: string) =>
-      ({
-        mode: "consumer",
-        subject: deliverSubject(SESSION),
-        stream_id: stream,
-        gap: false,
-      }) as const;
-
-    expect(delivery.registration().resume).toEqual({ stream_id: "stream-old", seq: 9 });
-    delivery.answered(answer("stream-new"), [AGENT]);
-    delivery.answered(answer("stream-new"), [AGENT]);
-
-    expect(gaps.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
-  });
-
-  test("an answer naming the seeded resume's own stream tells nothing", () => {
-    const { delivery, gaps } = setup({
-      state: { stream_id: "stream-old", subjects: { [AGENT]: { since: 2, after: 9 } } },
-    });
-
-    delivery.registration();
-    delivery.answered(
-      { mode: "consumer", subject: deliverSubject(SESSION), stream_id: "stream-old", gap: false },
-      [AGENT]
-    );
-
-    expect(gaps).toEqual([]);
-  });
-
   // The listener starts the relay before it writes the registration's answer, and the relay's
-  // frames come over NATS apart from that HTTP answer, so the first frame from the new stream can
-  // arrive before the answer that names it. The replacement is still told, once.
-  test("a frame from another stream than the seeded resume's, before the answer, is told once", () => {
-    const { delivery, gaps } = setup({
-      state: { stream_id: "stream-old", subjects: { [AGENT]: { since: 2, after: 9 } } },
-    });
+  // frames come over NATS apart from that HTTP answer, so the first frame of the stream that
+  // replaced the one the session resumed on can arrive before the answer naming it. The
+  // replacement is still told, once.
+  test("a frame from another stream than the resume point's, before the answer, is told once", () => {
+    const { delivery, gaps } = setup();
+    delivery.restore({ resume: { stream_id: "stream-old", seq: 9 }, follows: {} });
 
     delivery.registration();
     delivery.receive(relay({ seq: 1, streamID: "stream-new" }));
-    delivery.answered(
-      { mode: "consumer", subject: deliverSubject(SESSION), stream_id: "stream-new", gap: false },
-      [AGENT]
-    );
+    delivery.answered({
+      mode: "consumer",
+      subject: deliverSubject(SESSION),
+      stream_id: "stream-new",
+      gap: false,
+    });
     delivery.receive(relay({ seq: 2, streamID: "stream-new" }));
 
     expect(gaps.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
   });
 
-  test("a frame from the seeded resume's own stream, before the answer, tells nothing", () => {
-    const { delivery, gaps } = setup({
-      state: { stream_id: "stream-old", subjects: { [AGENT]: { since: 2, after: 9 } } },
-    });
+  test("a frame from the resume point's own stream, before the answer, tells nothing", () => {
+    const { delivery, gaps } = setup();
+    delivery.restore({ resume: { stream_id: "stream-old", seq: 9 }, follows: {} });
 
     delivery.registration();
     delivery.receive(relay({ seq: 10, streamID: "stream-old" }));
-    delivery.answered(
-      { mode: "consumer", subject: deliverSubject(SESSION), stream_id: "stream-old", gap: false },
-      [AGENT]
-    );
+    delivery.answered({
+      mode: "consumer",
+      subject: deliverSubject(SESSION),
+      stream_id: "stream-old",
+      gap: false,
+    });
 
     expect(gaps).toEqual([]);
   });
 });
 
-describe("the move from the core path to consumer delivery", () => {
-  const CONSUMER = {
-    mode: "consumer",
-    subject: deliverSubject(SESSION),
-    stream_id: STREAM,
-    gap: false,
-  } as const;
+describe("what the registration resumes at", () => {
+  test("nothing before the session has taken a frame: the consumer starts at the stream's end", () => {
+    const { delivery } = setup();
 
-  test("with no snapshot, the registration resumes at the lowest cursor the sweeps left", () => {
-    const { delivery } = setup({
-      state: {
-        stream_id: STREAM,
-        subjects: { [AGENT]: { since: 2, after: 12 }, [ISSUE_TOPIC]: { since: 3, after: 7 } },
-      },
-    });
-
-    expect(delivery.registration().resume).toEqual({ stream_id: STREAM, seq: 7 });
+    expect(delivery.registration()).not.toHaveProperty("resume");
   });
 
-  test("a cursor of a topic the stream does not store is not one the relay resumes at", () => {
-    const { delivery } = setup({
-      state: {
-        stream_id: STREAM,
-        subjects: { [AGENT]: { after: 12 }, "notifications.team.alpha": { after: 1 } },
-      },
-    });
-
-    expect(delivery.registration().resume).toEqual({ stream_id: STREAM, seq: 12 });
-  });
-
-  test("a subject no sweep has read yet, and a state without a stream, seed nothing", () => {
-    const unread = setup({ state: { stream_id: STREAM, subjects: { [AGENT]: {} } } });
-    const older = setup({
-      state: { stream_created: "2026-10-01T00:00:00Z", subjects: { [AGENT]: { after: 4 } } },
-    });
-
-    expect(unread.delivery.registration()).not.toHaveProperty("resume");
-    expect(older.delivery.registration()).not.toHaveProperty("resume");
-  });
-
-  test("the session's own resume point is the one registered once it has taken a frame", () => {
-    const { delivery, handed } = setup({
-      state: { stream_id: STREAM, subjects: { [AGENT]: { after: 7 } } },
-    });
+  test("the session's own resume point once it has taken a frame", () => {
+    const { delivery, handed } = setup();
     delivery.receive(relay({ seq: 20 }));
     handed[0]?.done();
 
     expect(delivery.registration().resume).toEqual({ stream_id: STREAM, seq: 20 });
   });
 
-  test("a message stored past the cursor is shown once, and the ledger is in consumer mode", () => {
-    const { delivery, handed, consumerMode } = setup({
-      state: { stream_id: STREAM, subjects: { [AGENT]: { after: 7 } } },
-    });
+  // A removal the stream kept while the session was away must not close a topic the session
+  // followed again since (`closeReplayedRemoval`).
+  test("a topic counts as followed before a frame only when the follow predates it", () => {
+    const { delivery, clock } = setup();
+    delivery.setFollowed([ISSUE_TOPIC]);
+    clock.now = T0 + MINUTE;
 
-    const registration = delivery.registration();
-    expect(registration.resume).toEqual({ stream_id: STREAM, seq: 7 });
-    delivery.answered(CONSUMER, [AGENT]);
-    // The listener creates the consumer at the resume point plus one: message 8 is relayed.
-    delivery.receive(relay({ seq: 8 }));
-    delivery.receive(relay({ seq: 8, delivered: 2 }));
-
-    expect(seqs(handed)).toEqual([8]);
-    expect(consumerMode).toEqual([true]);
-  });
-
-  test("a consumer answer relays the stored topics it carried, and a core one none", () => {
-    const { delivery, consumerMode } = setup();
-
-    delivery.answered(CONSUMER, [AGENT, ISSUE_TOPIC, "notifications.team.alpha"]);
-    expect(delivery.relaying()).toBe(true);
-    expect(delivery.relays(AGENT)).toBe(true);
-    expect(delivery.relays(ISSUE_TOPIC)).toBe(true);
-    expect(delivery.relays("notifications.team.alpha")).toBe(false);
-
-    delivery.answered({ mode: "core", reason: "not_answered" }, [AGENT, ISSUE_TOPIC]);
-    expect(delivery.relaying()).toBe(false);
-    expect(delivery.relays(ISSUE_TOPIC)).toBe(false);
-    expect(consumerMode).toEqual([true, false]);
-  });
-
-  test("the relay closing leaves consumer mode and relays nothing", () => {
-    const { delivery, consumerMode } = setup();
-    delivery.answered(CONSUMER, [AGENT, ISSUE_TOPIC]);
-
-    delivery.close();
-
-    expect(delivery.relaying()).toBe(false);
-    expect(consumerMode).toEqual([true, false]);
-  });
-
-  // A session that ran the released plugin comes back with the core path's cursors and no
-  // consumer snapshot, so `setFollowed` stamps every topic it follows at the resume time and the
-  // follow times say nothing about what it was owed. The cursors are what say since which
-  // sequence it followed each topic, so the comments stored while it was away are shown.
-  describe("a session resuming with cursors and no snapshot", () => {
-    const ROLE_TOPIC = "notifications.role.reviewer";
-    const UNFOLLOWED = "notifications.dispatch.issue.OTHER-1.comment";
-    const RESUMED = T0 + 60 * MINUTE;
-    const state: ReplayState = {
-      stream_id: STREAM,
-      subjects: {
-        [AGENT]: { since: 2, after: 9 },
-        [ISSUE_TOPIC]: { since: 3, after: 12 },
-        [ROLE_TOPIC]: { since: 1, after: 1 },
-      },
-    };
-
-    /** The session back an hour later, following again what its cursors hold. */
-    const resumed = () => {
-      const session = setup({ clock: { now: RESUMED }, state });
-      session.delivery.setFollowed([AGENT, ISSUE_TOPIC, ROLE_TOPIC]);
-      session.delivery.answered(CONSUMER, [AGENT, ISSUE_TOPIC, ROLE_TOPIC]);
-      return session;
-    };
-
-    test("it seeds at the lowest stored cursor, and every topic is stamped at the resume", () => {
-      const { delivery } = resumed();
-
-      // The role topic's cursor is the lowest, but the stream stores no role lane, so the agent
-      // subject's is the seed.
-      expect(delivery.registration().resume).toEqual({ stream_id: STREAM, seq: 9 });
-      expect(delivery.snapshot().follows).toEqual({
-        [ISSUE_TOPIC]: RESUMED,
-        [ROLE_TOPIC]: RESUMED,
-      });
-    });
-
-    test("a comment stored while it was away, past its topic's cursor, is shown once", () => {
-      const { delivery, handed, replies } = resumed();
-
-      delivery.receive(relay({ seq: 20, subject: ISSUE, storedAt: T0 }));
-      delivery.receive(relay({ seq: 20, subject: ISSUE, storedAt: T0, delivered: 2 }));
-      handed[0]?.done();
-
-      expect(seqs(handed)).toEqual([20]);
-      expect(repliesTo(replies, "_INBOX.20.1")).toEqual(["received", "done"]);
-    });
-
-    test("a role forward stored on the agent subject while it was away is shown once", () => {
-      const { delivery, handed } = resumed();
-
-      delivery.receive(relay({ seq: 21, storedAt: T0, eventID: "evt-role-forward" }));
-      delivery.receive(relay({ seq: 21, storedAt: T0, delivered: 2, eventID: "evt-role-forward" }));
-
-      expect(seqs(handed)).toEqual([21]);
-    });
-
-    test("a comment stored at its topic's cursor, which the sweeps handled, stays dropped", () => {
-      const { delivery, handed, replies } = resumed();
-
-      delivery.receive(relay({ seq: 3, subject: ISSUE, storedAt: T0 }));
-
-      expect(seqs(handed)).toEqual([]);
-      expect(repliesTo(replies, "_INBOX.3.1")).toEqual(["received", "done"]);
-    });
-
-    test("a topic followed on neither path stays dropped", () => {
-      const { delivery, handed, replies } = resumed();
-
-      delivery.receive(relay({ seq: 30, subject: UNFOLLOWED, storedAt: T0 }));
-
-      expect(seqs(handed)).toEqual([]);
-      expect(repliesTo(replies, "_INBOX.30.1")).toEqual(["received", "done"]);
-    });
+    expect(delivery.followedBefore(ISSUE_TOPIC, T0 + MINUTE)).toBe(true);
+    expect(delivery.followedBefore(ISSUE_TOPIC, T0 - FOLLOW_CLOCK_ALLOWANCE_MS)).toBe(true);
+    expect(delivery.followedBefore(ISSUE_TOPIC, T0 - FOLLOW_CLOCK_ALLOWANCE_MS - 1)).toBe(false);
+    expect(delivery.followedBefore("notifications.team.alpha", T0 + MINUTE)).toBe(false);
   });
 });
 
@@ -847,32 +643,88 @@ describe("persisting the snapshot", () => {
   });
 });
 
-describe("a registration that asked for no relay", () => {
-  test("leaves the core path on through the delivery open for it", () => {
-    const { delivery, consumerMode } = setup();
-    const modes: boolean[] = [];
-    delivery.answered(
-      { mode: "consumer", subject: deliverSubject(SESSION), stream_id: STREAM, gap: false },
-      [AGENT, ISSUE_TOPIC]
-    );
+describe("one registration", () => {
+  const UNCAPTURED = "notifications.team";
+  const TEAM = "notifications.team.deploys";
 
-    registeredWithoutRelay({ setConsumerMode: (on) => modes.push(on) }, delivery, [
-      AGENT,
-      ISSUE_TOPIC,
-    ]);
+  /** A relay that records what a registration stamped on it. */
+  function fakeRelay() {
+    const followed: string[][] = [];
+    return {
+      followed,
+      setFollowed: (topics: Iterable<string>) => followed.push([...topics]),
+      registration: () => ({ consumer: true, epoch: "epoch-1" }) as const,
+    };
+  }
 
-    expect(delivery.relaying()).toBe(false);
-    expect(delivery.relays(ISSUE_TOPIC)).toBe(false);
-    // The delivery is the one that tells its own ledger; the caller's is not written past it.
-    expect(consumerMode).toEqual([true, false]);
-    expect(modes).toEqual([]);
+  test("carries the topics the listener will store, and takes the answer", async () => {
+    const relay = fakeRelay();
+    const told: string[] = [];
+    const answers: string[] = [];
+    const sent: { topics: readonly string[]; epoch: string }[] = [];
+
+    const result = await registerWithRelay({
+      relay,
+      ownAgentSubject: AGENT,
+      // The bare base a stored row or a transcript brings back: the listener stores it for no
+      // session and warns about it, so it never goes out (INFRA-771 review).
+      followed: [TEAM, UNCAPTURED, "notifications.agent.ses_b"],
+      outage: inboundUnavailable((why) => told.push(why)),
+      send: (topics, delivery) => {
+        sent.push({ topics, epoch: delivery.epoch });
+        return Promise.resolve("registered");
+      },
+      answered: (answer) => answers.push(answer),
+    });
+
+    expect(sent).toEqual([{ topics: [AGENT, TEAM], epoch: "epoch-1" }]);
+    expect(relay.followed).toEqual([[AGENT, TEAM]]);
+    expect([result, answers, told]).toEqual(["registered", ["registered"], []]);
   });
 
-  test("with no delivery open, the ledger alone leaves consumer mode", () => {
-    const modes: boolean[] = [];
+  test("a session holding no relay subject registers nothing and is told once", async () => {
+    const told: string[] = [];
+    const outage = inboundUnavailable((why) => told.push(why));
+    const sent: unknown[] = [];
+    const register = () =>
+      registerWithRelay({
+        relay: undefined,
+        ownAgentSubject: AGENT,
+        followed: [TEAM],
+        outage,
+        send: (topics) => {
+          sent.push(topics);
+          return Promise.resolve("registered");
+        },
+        answered: () => undefined,
+      });
 
-    registeredWithoutRelay({ setConsumerMode: (on) => modes.push(on) }, undefined, [AGENT]);
+    await expect(register()).rejects.toThrow("holds no relay subject");
+    // The second outage tick says nothing more: the session was told once.
+    await expect(register()).rejects.toThrow("holds no relay subject");
+    expect(sent).toEqual([]);
+    expect(told).toEqual([
+      "this session holds no relay subject, so the listener can give it no consumer and it can receive nothing",
+    ]);
+  });
 
-    expect(modes).toEqual([false]);
+  test("a refused registration tells the session once and takes no answer", async () => {
+    const relay = fakeRelay();
+    const told: string[] = [];
+    const answers: string[] = [];
+
+    await expect(
+      registerWithRelay({
+        relay,
+        ownAgentSubject: AGENT,
+        followed: [TEAM],
+        outage: inboundUnavailable((why) => told.push(why)),
+        send: () => Promise.reject(new Error("no_grant")),
+        answered: (answer: string) => answers.push(answer),
+      })
+    ).rejects.toThrow("no_grant");
+
+    expect(relay.followed).toEqual([[AGENT, TEAM]]);
+    expect([answers, told]).toEqual([[], ["no_grant"]]);
   });
 });

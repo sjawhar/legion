@@ -355,3 +355,20 @@ export type Subject =
   | SlackThreadSubject
   | GhostWisprSubject
   | WhatsappSubject;
+
+/**
+ * What a caller that named `topic` is told when nothing would ever be delivered to `sessionID` on
+ * it: a `notifications.` topic no stream subject captures and no role lane
+ * (`bus.ReachesNoSession` in packages/envoy/internal/bus, `streamDeliversNothing` in
+ * `@legion/envoy-client`). The listener leaves such a topic out of a registration and names it in
+ * this warning (`splitUncapturedTopics` in packages/envoy/cmd/listener/api.go, which names it with
+ * `contracts.UncapturedTopicRefusal` `scripts/gen-go.ts` emits from this builder), and each
+ * plugin's explicit subscribe refuses such a topic in the same words (`envoy_subscribe` in
+ * pi-envoy, `follow` in claude-envoy, both through `uncapturedTopicRefusal` in
+ * `@legion/envoy-client`). So a caller reads one sentence wherever it is told: a registration
+ * carries topics nobody typed — a stored row, a restored transcript — and is answered with a
+ * warning, where a tool call is a caller asking for this one topic by name.
+ */
+export function uncapturedTopicRefusal(topic: string, sessionID: string): string {
+  return `${topic} was not registered: no stream subject captures it, so nothing would be delivered to ${sessionID} on it; follow a notifications.team.<name> topic instead`;
+}
