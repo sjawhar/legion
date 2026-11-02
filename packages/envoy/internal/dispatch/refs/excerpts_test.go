@@ -326,7 +326,7 @@ func TestAMentionLeftOwedAnExcerptNotifies(t *testing.T) {
 	}
 }
 
-// A version write names the targets whose excerpt it moved (ReplaceDocumentCounted): a version
+// A version write names the targets whose excerpt it moved (RecordExcerpts): a version
 // that rewrites the block a kept mention sits in moves that mention's excerpt and no other's, and
 // one that writes the same excerpts again moves nothing.
 func TestRecordExcerptsReportsTheMentionsWhoseExcerptMoved(t *testing.T) {

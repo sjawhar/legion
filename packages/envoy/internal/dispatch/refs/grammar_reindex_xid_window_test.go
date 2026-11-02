@@ -15,9 +15,9 @@ import (
 // source's owner and text under that owner's lock, the comment's block index, the edges the
 // comment holds - and everything it plans comes first, with no transaction id held, and its writes
 // go as one batch (the index's statements, the replacement's, the owed row's delete). The owner
-// lock tests above show that the pass holds no transaction id while it waits for the lock; this
-// one shows it holds none through the reads and the planning that follow the lock, which is what
-// an xid window measures.
+// lock test (owner_lock_test.go) shows that the pass holds no transaction id while it waits for
+// the lock; this one shows it holds none through the reads and the planning that follow the
+// lock, which is what an xid window measures.
 //
 // The rig (storetest.XidTracer) fits this pass as it fits the API's routes and the document
 // service's own transactions: the pass runs under a marked context on a traced pool, and the rig

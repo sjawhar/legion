@@ -43,8 +43,9 @@ import (
 //
 // A writer that runs its operations in a transaction of its own, which no caller joined, carries
 // no `tx` and marks its ledger `ownTx` instead: a settlement (settleRoomWithin) and the block-id
-// backfill (backfillBlockIDs) are the two. Such a ledger queues its writes all the same (writer),
-// and its writer runs the queue before it commits. Those are the ledgers document operations run
+// backfill (backfillBlockIDs) are the two. A settlement's ledger queues its writes all the same
+// (writer), and the settlement runs the queue before it commits; the backfill's sets no writer,
+// so its writes run at once (write, store.RunWrite). Those are the ledgers document operations run
 // under: every operation that writes a document either joins its caller's transaction or runs in
 // the transaction of one of those two writers. A background pass with no document operation
 // queues its writes on a bare ledger (queueWrites).

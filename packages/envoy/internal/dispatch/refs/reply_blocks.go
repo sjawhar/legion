@@ -19,14 +19,14 @@ import (
 // (owed_at set by an older build's write, or by rebuild-refs), or indexed from another body than
 // the stored one. It indexes as ReindexOwedItem does: the blocks and the mentions each holds, and
 // for a comment or an issue message its own refs, at the time its body was written; a direct
-// message writes no mention. A reply that names a block of the item calls it first, so the block
-// it names is one of the item's current body; the block-index reconciliation drains owed items
-// through it (IndexOwedItemBlocks). The caller holds the item's owner, the reconciliation
-// included, and a reply holds the message row it answers; the index takes the state row after
-// them. It reports whether the item was owed and so indexed. It is PlanItemIfOwed and Queue back
-// to back, the queued statements run at once as a batch of their own; a transaction that decides
-// before it writes plans the repair and queues it in its write phase, reading the blocks it
-// leaves from the plan (ItemRepair.Block).
+// message writes no mention. The block-index reconciliation drains owed items through it
+// (IndexOwedItemBlocks); a reply that names a block of an owed item plans the same index
+// (PlanItemIfOwed) and writes it before its own writes. The caller holds the item's owner, the
+// reconciliation included, and a reply holds the message row it answers; the index takes the
+// state row after them. It reports whether the item was owed and so indexed. It is PlanItemIfOwed
+// and Queue back to back, the queued statements run at once as a batch of their own; a
+// transaction that decides before it writes plans the repair and queues it in its write phase,
+// reading the blocks it leaves from the plan (ItemRepair.Block).
 func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) (bool, error) {
 	repair, err := PlanItemIfOwed(ctx, tx, kind, itemID, serverURL)
 	if err != nil {

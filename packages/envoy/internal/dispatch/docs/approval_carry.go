@@ -438,7 +438,7 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 // own clock, and this one is the created_at of the ask.answered event appended here and of the
 // review the carry writes beside it. The update and the append are one step (write); the event
 // carries the row as the step leaves it, after the move this version write queued before it, which
-// set the request's edited_at (rewriteApprovalAsk). Where the step is queued, the ledger records
+// set the request's edited_at (RewriteApprovalAsk). Where the step is queued, the ledger records
 // the request closed, so nothing later in the transaction answers it again.
 func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, ask *model.Ask, actor model.Actor, reason string, sink func(model.Event)) error {
 	answeredAt, err := transactionNow(ctx, tx)

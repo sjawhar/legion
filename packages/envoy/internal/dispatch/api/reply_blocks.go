@@ -130,7 +130,7 @@ func queueReplyParentMessageLock(b *store.WriteBatch, id string) {
 }
 
 // lockReplyParentMessage takes queueReplyParentMessageLock's lock at once, in a transaction that
-// writes as it goes (the accept route).
+// writes as it goes (replyMessage, a session's reply to a message delivery).
 func lockReplyParentMessage(ctx context.Context, tx pgx.Tx, id string) error {
 	return store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
 		queueReplyParentMessageLock(b, id)

@@ -22,14 +22,15 @@ import (
 // document defers: one of this many blocks or fewer is indexed by its own write, as every
 // document was.
 //
-// The in-request index costs about 46 µs a block on a two-core pod: refs.IndexBlocks writes two
-// rows a block, one in document_blocks and one in document_block_texts. At the bound itself a
-// write of a list of 1,999 blocks took 234, 239 and 252 ms against 144, 145 and 157 ms for the
-// same list one block longer, which defers - 92 ms for 2,000 blocks - and the same difference at
-// 5,000 blocks is 239 ms, 48 µs a block. The heavy write measured for sjawhar/legion#2519 agrees:
-// its 8,000-item list body is 8,001 blocks and spends 347 ms in IndexDocumentReferences, 43 µs a
-// block, of a request total of 939-1,130 ms against the 1 s that write is held to. A bullet list
-// is one block for the list and one for each item's paragraph; the list item itself is no block.
+// The in-request index costs about 46 µs a block on a two-core pod: refs.BlockIndexing.Queue
+// writes two rows a block, one in document_blocks and one in document_block_texts. At the bound
+// itself a write of a list of 1,999 blocks took 234, 239 and 252 ms against 144, 145 and 157 ms
+// for the same list one block longer, which defers - 92 ms for 2,000 blocks - and the same
+// difference at 5,000 blocks is 239 ms, 48 µs a block. The heavy write measured for
+// sjawhar/legion#2519 agrees: its 8,000-item list body is 8,001 blocks and spends 347 ms in
+// IndexDocumentReferences, 43 µs a block, of a request total of 939-1,130 ms against the 1 s that
+// write is held to. A bullet list is one block for the list and one for each item's paragraph; the
+// list item itself is no block.
 //
 // The budget this holds the in-request index to is a tenth of that 1 s, 100 ms, which is well
 // inside the ±150 ms by which this pod moves the same byte-identical write, so the block index of

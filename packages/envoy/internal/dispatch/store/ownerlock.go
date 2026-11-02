@@ -11,9 +11,10 @@ import (
 // ownerLockNamespace is the first key of every owner lock ("OWNR"). Postgres keeps the two-key
 // advisory key space apart from the single-key one, and within it the other namespaces of this
 // module are the copy locks' (docs.copiedAsksLockNamespace, "COPY"), the duty leases'
-// (duty.leaseNamespace, "LOOP") and the hashtext of a name (the dependency, repository-mapping
-// and delivery session-group locks), none of which is this value, so an owner lock never waits on
-// one of those whatever its owner hashes to.
+// (duty.leaseNamespace, "LOOP"), the API's test hooks' (api.testHookLockNamespace, "HOOK") and
+// the hashtext of a name (the dependency, repository-mapping and delivery session-group locks),
+// none of which is this value, so an owner lock never waits on one of those whatever its owner
+// hashes to.
 const ownerLockNamespace int32 = 0x4F574E52
 
 // OwnerKind names what owns a collaboration: an issue, a document no issue owns (a project

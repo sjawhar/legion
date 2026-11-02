@@ -31,13 +31,6 @@ import (
 // unchanged, so the route answers it as it would a statement run at once. A write a transaction
 // no ledger joined makes - one that writes outside a route's two phases, as the claim cycle's
 // does - runs at once instead, through store.RunWrite.
-//
-// The delivery replies are the writing routes that take no such phases: the comment delivery's
-// callback (POST /api/v1/comments/{id}/reply) and a session's reply to a message delivery (POST
-// /api/v1/messages/{id}/reply) write as they go, each statement at the point they make it, and
-// join no ledger, so they hold a transaction id from their first write. They queue nothing here,
-// and the one write they make before their own - the index a replied-to item is owed - runs at
-// once with them (replyBlockOf).
 
 // queueExec queues one statement whose result nothing reads. Its failure comes back unwrapped, as
 // tx.Exec's would.

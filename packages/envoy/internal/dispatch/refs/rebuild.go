@@ -298,8 +298,7 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // excludes nothing the owner lock does not. Everything it writes is read and planned first, under
 // that lock and with no transaction id held - a comment's or a message's block index
 // (ReadItemIndex, PlanItemIndex) and the references the text cites (PlanReplace) - and its writes
-// then go as one batch, in that order with the owed row's delete last (store.RunWrite), as every
-// Dispatch write transaction runs.
+// then go as one batch, in that order with the owed row's delete last (store.RunWrite).
 //
 // Dropping that row lock leaves no deadlock with the trigger that writes the owed row: the
 // trigger fires on the edit's update of the text, in the edit's write phase, under the owner lock

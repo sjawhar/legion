@@ -707,11 +707,11 @@ func OwedItemBlocks(ctx context.Context, q Queryer, limit int) ([]OwedItemBlock,
 // needs none, since nothing ever rewrites a message's body. It takes no item row: a row lock would
 // assign the transaction a transaction id to hold through everything it reads and plans, and
 // under the owner lock it excludes nothing the owner lock does not. Reading and planning come
-// first and its writes follow back to back (IndexItemIfOwed), as every Dispatch write transaction
-// runs. A new block and a new mention take the time the item's body was written: a comment's
-// coalesce(edited_at, created_at), a message's created_at. An item a write site indexed since it
-// was listed is no longer owed and is left alone; one deleted since, before the lock or while it
-// waited, took its state row with it (on delete cascade), so nothing is owed.
+// first and its writes follow back to back (IndexItemIfOwed). A new block and a new mention take
+// the time the item's body was written: a comment's coalesce(edited_at, created_at), a message's
+// created_at. An item a write site indexed since it was listed is no longer owed and is left
+// alone; one deleted since, before the lock or while it waited, took its state row with it (on
+// delete cascade), so nothing is owed.
 func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, serverURL string) (bool, error) {
 	tables, err := item.Kind.tables()
 	if err != nil {
