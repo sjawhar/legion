@@ -336,10 +336,10 @@ func TestAnInjectedSidecarLeavesAPodOfTheEarlierLayout(t *testing.T) {
 // A running issue pod of the layout before one container — exactly one container per workflow
 // role — is a pod a pod created now is not: every role recorded there is StaleAddress, before its
 // launcher's state is read, so the supervisor repoints each uncharged. The first relaunch replaces
-// it even when it is an installing launch, which alone keeps a drifted pod, and the replacement is
-// a fresh pod on the configured image, so that launch installs nothing; the pod it makes runs one
-// container, the siblings' old processes read as the daemon's replacement (Displaced), and a
-// sibling resumes into the same new pod.
+// it even when it is an installing launch, which keeps only a pod whose image alone drifted, and
+// the replacement is a fresh pod on the configured image, so that launch installs nothing; the
+// pod it makes runs one container, the siblings' old processes read as the daemon's replacement
+// (Displaced), and a sibling resumes into the same new pod.
 func TestAnIssuePodOfTheEarlierLayoutIsStaleForEveryRoleAndReplacedByTheNextLaunch(t *testing.T) {
 	g := newRig(t, nil)
 	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)

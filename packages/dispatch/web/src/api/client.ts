@@ -63,6 +63,8 @@ import type {
   EditCommentInput,
   Event,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   InboxRow,
   Issue,
   IssueAskRow,
@@ -1175,6 +1177,17 @@ export class DispatchApiClient {
    *  with its deliveries and its replies. */
   listIssueMessages(key: string): Promise<MessageRead[]> {
     return this.json<MessageRead[]>(`/api/v1/issues/${pathSegment(key)}/messages`);
+  }
+
+  /** `GET /api/v1/issues/{key}/handoffs`: every phase handoff of the issue, newest first, without
+   *  its body. */
+  listHandoffs(key: string): Promise<HandoffSummary[]> {
+    return this.json<HandoffSummary[]>(`/api/v1/issues/${pathSegment(key)}/handoffs`);
+  }
+
+  /** `GET /api/v1/handoffs/{id}`: one handoff with the body its session wrote. */
+  getHandoff(id: string): Promise<Handoff> {
+    return this.json<Handoff>(`/api/v1/handoffs/${pathSegment(id)}`);
   }
 
   listArtifacts(key: string): Promise<Artifact[]> {

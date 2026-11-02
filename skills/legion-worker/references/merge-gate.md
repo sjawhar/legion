@@ -6,15 +6,15 @@ building READY. Every path it cites is in sjawhar/legion.
 
 The order, in full: the tester's evidence green → the reviewer's approval of the head → the
 architect's acceptance, in `accepting` → retro → the merger's READY → the merge, which closes the
-issue → the implementer's production check, after the close. The approved
-head carries the issue's handoffs, `.legion/<issue>/`; retro's last commit removes them from the
-head that merges (dispatch://LEGION-605), since a squash merge commits that head merged into
-the default branch and nothing there reads a handoff, and READY refuses a head that still
-carries them. After the approval, only retro's commits leave it standing on their own: those that
-change only `docs/solutions/`, and that removal (*Retro*, below). A conflict-forced merge goes back
-to the reviewer for a confirmation or a new round, as the fingerprint decides (*The reviewer*,
-below, and `skill://legion-worker/references/conflicts-and-rewrites.md`), unless READY refused
-it, and any other change to the head voids it.
+issue → the implementer's production check, after the close. Every handoff is a record on the
+Dispatch issue, never a commit, so the head that merges carries none. After the approval, only
+retro's commits leave it standing on their own: those that change only `docs/solutions/`
+(*Retro*, below); READY also lets through a file under `.legion/` that GitHub's compare lists as
+removed, the commit `legion handoffs import` makes to remove the directory where handoffs lived
+before they moved to Dispatch. A conflict-forced merge goes back to the reviewer for a
+confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
+`skill://legion-worker/references/conflicts-and-rewrites.md`), unless READY refused it, and any
+other change to the head voids it.
 
 ## The reviewer
 
@@ -22,17 +22,14 @@ it, and any other change to the head voids it.
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   waits for each one's result with `wait`, since each runs as a job of its own, and records the
-  verdict from what those results say. The CI it reads is the checks that stand for the code
-  under review: those GitHub ran for the newest push of the branch that started `pull_request`
-  workflows, when every commit above that push's head changes only `.legion/<issue>/` (GitHub
-  starts no workflow run for a head whose commit message carries `skip-checks: true`, which every
-  handoff-only push before retro does; retro's push carries no such line, so its head does get
-  GitHub's workflow runs of its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and
-  `<headRefOid>` from `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The
-  required set is the base branch's rulesets' required checks and its branch protection's, when it
-  has any. Both branch endpoints take the base as a URL path, each segment escaped and each `/`
-  kept (a raw `#` or `%` reads another branch), built in the same command from the name GitHub
-  returns, never pasted or carried over from an earlier command:
+  verdict from what those results say. The CI it reads is the head's own checks: no handoff is a
+  commit, so every push to the branch is work whose head gets GitHub's workflow runs of its own.
+  With `<o>/<r>`, `<n>`, `<base>` and `<headRefOid>` from
+  `gh pr view <n> --json baseRefName,headRefOid`, two reads. The required set is the
+  base branch's rulesets' required checks and its branch protection's, when it has any. Both
+  branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`
+  or `%` reads another branch), built in the same command from the name GitHub returns, never
+  pasted or carried over from an earlier command:
 
   ```bash
   base=$(gh pr view <n> -R <o>/<r> --json baseRefName -q .baseRefName) && \
@@ -41,23 +38,15 @@ it, and any other change to the head voids it.
     echo protection: && gh api "repos/<o>/<r>/branches/$base_path" --jq '.protection.required_status_checks.checks[].context'
   ```
 
-  A read GitHub refuses stops the command there, and is reported to the architect, never guessed. The CI head, the head of the
-  branch's newest `pull_request` run
-  (`gh api 'repos/<o>/<r>/actions/runs?branch=<headRefName>&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'`,
-  newest first). That commit's check-runs
-  (`gh api repos/<o>/<r>/commits/<ci head>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
+  A read GitHub refuses stops the command there, and is reported to the architect, never guessed.
+  The head's check-runs
+  (`gh api repos/<o>/<r>/commits/<headRefOid>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
   every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
-  as passing for a required check). And the compare proving only `.legion/<issue>/` changed since,
-  `<issue>` being your `LEGION_ISSUE` (another issue's `.legion/` is code to the daemon and READY)
-  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '{handoffsOnly: ([.files[] | .filename, (.previous_filename // empty)] | all(startswith(".legion/<issue>/"))), files: (.files | length)}'`
-  prints `handoffsOnly` `true`; `false` means code was pushed since CI ran, so wait for the new
-  push's runs and read the CI head again). GitHub's compare lists at most 300 files for the whole
-  comparison, so `files` at 300 is a comparison GitHub cut at its cap and `handoffsOnly` decides
-  nothing: tell the architect and do not approve. A required check
+  as passing for a required check). A required check
   `queued` or `in_progress`: wait. One `completed` as `cancelled`, or absent: re-run that run's
   failed and cancelled jobs, once, then wait — never the whole run, which runs again every job that
-  succeeded too. Find the run and job at the CI head: the head's runs
-  (`gh api 'repos/<o>/<r>/actions/runs?head_sha=<ci head>&per_page=100' --jq '.workflow_runs[] | [.id, .name, .event, .status, .conclusion] | @tsv'`),
+  succeeded too. Find the run and job at the head: the head's runs
+  (`gh api 'repos/<o>/<r>/actions/runs?head_sha=<headRefOid>&per_page=100' --jq '.workflow_runs[] | [.id, .name, .event, .status, .conclusion] | @tsv'`),
   then each candidate run's jobs
   (`gh api repos/<o>/<r>/actions/runs/<run-id>/jobs --jq '.jobs[] | [.id, .name, .status, .conclusion] | @tsv'`).
   A cancelled job: `gh run rerun <run-id> --failed`, which GitHub applies to the run's failed and
@@ -65,11 +54,8 @@ it, and any other change to the head voids it.
   `--job <job-id>` alone: under a routing workflow, re-running only the final job reads the
   cancelled results again and stays red. GitHub refuses a re-run while an attempt of that run is
   still in progress: wait for it. When no
-  run at the CI head holds the job, or nothing will run it (a check only a commit status reports, a
-  workflow another repository defines), tell the architect and do not approve. `gh pr checks <n>`
-  is not the read: it reads only the current head, which
-  at a handoff head shows only the `pr-title` runs the review events start (measured on
-  sjawhar/legion#1944 at 0220b94fc2 on 2026-10-14).
+  run at the head holds the job, or nothing will run it (a check only a commit status reports, a
+  workflow another repository defines), tell the architect and do not approve.
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
@@ -96,13 +82,13 @@ it, and any other change to the head voids it.
 - **Fix a prose-only finding yourself** — wording, a count, a tense, a citation — in your own
   commit on the pull request, and list it in your review. Send the work back only for a finding
   that touches code or behaviour. Push the fix **before** you submit the round's review, and
-  review the head that push made. A change pushed above the head you approved leaves the approval
-  standing for nothing: the round goes stuck and your architect is told (`ApprovalStands` in
-  `packages/daemon/internal/classify/decisions.go`, `stuckApprovedOtherCode` in
-  `packages/daemon/internal/workflow/review.go`, and the cases "the approval, then a code push"
-  and "a push since the approved head changed code, then an approval of the head" in
-  `packages/daemon/internal/workflow/review_test.go`). That push carries no `skip-checks: true`
-  line, so GitHub runs the branch's workflows on it. Wait for that head's required checks to be
+  review the head that push made. A push above the head you approved leaves the approval
+  standing for nothing, since any push may change code: the round goes stuck and your architect
+  is told (`ApprovalStands` in `packages/daemon/internal/classify/decisions.go`,
+  `stuckApprovedOtherCode` in `packages/daemon/internal/workflow/review.go`, and the cases "the
+  approval, then a push" and "a push, then the approval of the head before it" in
+  `packages/daemon/internal/workflow/review_test.go`). GitHub runs the branch's workflows on that
+  push, as on every push. Wait for that head's required checks to be
   green, and approve only then. The daemon sends nothing back for a red at a head the review App
   pushed (`PlannedRed` in `classify/decisions.go`), so your own read is the only one. A red you
   approve over reaches nobody: the tree runs on to the merge, where GitHub holds the pull request
@@ -110,22 +96,22 @@ it, and any other change to the head voids it.
   `REQUEST_CHANGES` when the code is at fault, and your own commit to fix when your prose broke
   it. The architect reads your prose commits at its acceptance (*The architect's acceptance*,
   below), and that read is no new round. A round after a READY refusal is the one exception. Its
-  approval needs the tester's `E2E` line to name the head with only `.legion/<issue>/` changed since. So
-  there you fix no prose yourself, and you name each prose finding in a `REQUEST_CHANGES`.
+  approval needs the tester's `E2E` line to name the head, or an ancestor with only files under
+  `.legion/` removed since. So there you fix no prose yourself, and you name each prose finding in
+  a `REQUEST_CHANGES`.
 
-A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
-and takes this order: read CI as above; write, commit and push the handoff; submit the review of
-the head that push made, by its SHA; then complete. A red at the code is a `REQUEST_CHANGES`
-naming the check, never an approval. A request for changes does not wait, since it stands
-whatever CI says and the issue leaves reviewing with it. The approval waits on nothing at a
-handoff-only commit either: it ends the round whatever CI says there, since the round reads no CI
-verdict, and a red the daemon reads later — at that commit or any above it — is the code's red
+A reviewer's phase ends with its completion, not with its review. Every round records a handoff
+and takes this order: read CI as above; write the handoff and record it with
+`dispatch handoff-write`; submit the review of the head, by its SHA; then complete. A red at the
+code is a `REQUEST_CHANGES` naming the check, never an approval. A request for changes does not
+wait, since it stands whatever CI says and the issue leaves reviewing with it. The approval waits
+on nothing either: it ends the round whatever CI says at the head it names, since the round reads
+no CI verdict, and a red the daemon reads later — at that head or any above it — is the code's red
 and resumes the implementer from wherever the issue is (reviewing, retro or merging) without the
-reviewer. A head your own push changed beyond `.legion/<issue>/` is the exception. The daemon marks it a
-planned red and sends nothing back for it, so wait for its checks yourself (*Fix a prose-only
-finding yourself*, above). A review of a head the handoff push then replaces names a head the pull
-request no longer has. The daemon moves the issue once both are in — the decision GitHub reports
-and your completion, in either order — so a review posted without a completion leaves the issue in
+reviewer. A head your own push changed is the exception. The daemon marks it a planned red and
+sends nothing back for it, so wait for its checks yourself (*Fix a prose-only finding yourself*,
+above). The daemon moves the issue once both are in — the decision GitHub reports and your
+completion, in either order — so a review posted without a completion leaves the issue in
 reviewing until you finish.
 
 ## The architect's acceptance
@@ -143,27 +129,26 @@ reviewing until you finish.
   controller takes it"). The acceptance asks no `Production:` line of anyone: that line is written
   after the close (*The production check after the close*, below).
   CI red at the head in `accepting` returns the issue to `implementing` as it does in review. A
-  head the review App pushed beyond `.legion/<issue>/` is the exception: the daemon marks it a planned red
-  and acts on it nowhere, and GitHub holds the merge under the base branch's own rules.
+  head the review App pushed is the exception: the daemon marks it a planned red and acts on it
+  nowhere, and GitHub holds the merge under the base branch's own rules.
 
 ## Retro
 
-- **Retro's commits do not void the reviewer's approval.** Retro's commits above the approved
-  head, its `docs/solutions/` learnings and its last commit removing `.legion/<issue>/`
-  (`skill://legion-retro` gives the steps), leave the approval standing, and the tree goes to the
-  merger — never back to the tester or reviewer. Anything else above the approved head does void
-  it: READY is refused `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the
-  architect, who has it send the head back to review instead of completing, the move's reason
-  naming the refusal's code and what it found. A conflict merge pushed above the approved head
-  with no review round after it brings the base's paths above that head, so READY refuses it the
-  same way; one sent back through `implementing` by the conflict procedure gets its confirmation
-  before READY runs. A READY refusal's return reaches the reviewer as a new round, never a
-  fingerprint confirmation. Every approval goes through the architect's acceptance to retro
-  again, so each retro ends with the removal again.
-- **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
+- **Retro's commits do not void the reviewer's approval.** Retro's `docs/solutions/` commits above
+  the approved head (`skill://legion-retro` gives the steps) leave the approval standing, and the
+  tree goes to the merger — never back to the tester or reviewer. Anything else above the approved
+  head does void it, except the handoff import's removal of `.legion/` files: READY is refused
+  `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the architect, who has it send
+  the head back to review instead of completing, the move's reason naming the refusal's code and
+  what it found. A conflict merge pushed above the approved head with no review round after it
+  brings the base's paths above that head, so READY refuses it the same way; one sent back through
+  `implementing` by the conflict procedure gets its confirmation before READY runs. A READY
+  refusal's return reaches the reviewer as a new round, never a fingerprint confirmation. Retro
+  removes nothing, and a retro with no learnings pushes nothing.
+- **Retro brings the PR body's path-derived content up to date before it completes.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
   each class of path, read by a required check), retro recomputes for the whole diff at its head
-  and writes into the live body before its push (`skill://legion-retro`), since the merger
+  and writes into the live body before its push, or before it completes when it pushes nothing (`skill://legion-retro`), since the merger
   reports a stale body rather than rewriting it. A body edit changes no commit, so the approval
   stands.
 

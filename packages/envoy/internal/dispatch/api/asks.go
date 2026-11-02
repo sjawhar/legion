@@ -70,6 +70,10 @@ func validateAskQuestion(question string) error {
 	return nil
 }
 
+// validateAskOptions checks the options a write sends, trims each label, and empties each
+// option's id. An option's id is read-only: it is the part the index minted for that option
+// (attachAskPartIDs), so a caller sending an option back as it read it neither mints a part id
+// nor moves one, and the id never reaches the ask's row.
 func validateAskOptions(options []model.AskOption) error {
 	if len(options) > maxAskOptions {
 		return countExceededError("CAP_EXCEEDED", "options", len(options), maxAskOptions)
@@ -85,6 +89,7 @@ func validateAskOptions(options []model.AskOption) error {
 		}
 		seen[label] = struct{}{}
 		options[index].Label = label
+		options[index].ID = ""
 	}
 	return nil
 }
@@ -238,6 +243,13 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		}
 	}
 	askChanges, err := s.replaceReferences(r.Context(), tx, "ask", ask.ID, ask.Question)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The ask's parts, beside the ask's own references: the row is in, so its state row comes
+	// after it, and the event below names what both moved.
+	askChanges, err = s.indexAskParts(r.Context(), tx, ask, ask.CreatedAt, askChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -466,6 +478,13 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	ask.EditedAt = timestampPtr(&editedAt)
 	askChanges, err := s.replaceEditedReferences(documentCtx, tx, "ask", ask.ID, previous.Question, ask.Question)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The edit writes the question and the options, so it is a revision of the ask's parts:
+	// index them at the edited_at the row took, and name what they moved beside the rest.
+	askChanges, err = s.indexAskParts(documentCtx, tx, ask, editedAt, askChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -761,8 +780,9 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The ask read is the one caller that serialises the count; the write paths load the row
-	// only to check its owner and answer from their own re-read, so they do not pay for it.
-	if err := attachAskBacklinkCounts(r.Context(), s.deps.Store.Pool, []*model.Ask{&ask}); err != nil {
+	// only to check its owner and answer from their own re-read, so they do not pay for it. The
+	// same goes for the part ids of its options and of its answer, and its part revision.
+	if err := attachAskReadFields(r.Context(), s.deps.Store.Pool, []*model.Ask{&ask}); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -953,9 +973,10 @@ var (
 )
 
 // queryOwnerAsks returns an owner's asks, oldest first, filtered by state ("all",
-// "open", or "answered"), each with its opening event id, its block document, and
-// WaitingOn when open. The newest reply in each ask's thread is returned keyed by
-// ask id; an ask nobody has replied to has no entry.
+// "open", or "answered"), each with its opening event id, its block document, the part ids of its
+// options and answer with its part revision (attachAskPartIDs), and WaitingOn when open. The
+// newest reply in each ask's thread is returned keyed by ask id; an ask nobody has replied to has
+// no entry. The issue detail's `open_asks` and the issue's own ask list read through it.
 func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, state string) ([]model.Ask, map[string]model.AskLastReply, error) {
 	var query, value string
 	switch {
@@ -1009,7 +1030,7 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
 		return nil, nil, err
 	}
-	if err := attachAskBacklinkCounts(ctx, q, askPointers); err != nil {
+	if err := attachAskReadFields(ctx, q, askPointers); err != nil {
 		return nil, nil, err
 	}
 	return asks, replies, nil

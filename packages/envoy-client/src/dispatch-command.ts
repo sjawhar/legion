@@ -22,6 +22,8 @@ import { messageFor } from "./errors";
  *   `--options-json <json>` for a list whose labels hold ": " themselves, which `commandLine`
  *   writes for such a list so every list round-trips;
  * - any other object or array: `--<field>-json <json>` and `--<field>-json-file <path>`.
+ * A JSON flag's help lists the keys of its object, or of each item of its list, from the same
+ * schema, with each key's type, whether it is required, and its description (`shapeLines`).
  * Every command also takes `--help` and `--dry-run`.
  */
 
@@ -34,6 +36,8 @@ interface FieldInfo {
   readonly required: boolean;
   readonly description?: string;
   readonly values?: readonly string[];
+  /** The keys a JSON value of this field takes, as help lines (`shapeLines`); empty for none. */
+  readonly shape: readonly string[];
 }
 
 type FlagAction =
@@ -167,6 +171,7 @@ function fieldKinds(spec: DispatchToolSpec): ReadonlyMap<string, FieldInfo> {
       required: required.has(field),
       ...(description === undefined ? {} : { description }),
       ...(values === undefined ? {} : { values }),
+      shape: inner === undefined ? [] : shapeLines(inner, ""),
     });
   }
   return fields;
@@ -201,6 +206,66 @@ function kindOf(field: string, node: JsonSchemaNode): Kind {
     default:
       return "json";
   }
+}
+
+/** `node` without null: its one member that is not null, or undefined when more than one is. */
+function withoutNull(node: JsonSchemaNode): JsonSchemaNode | undefined {
+  const members = (node.anyOf ?? [node]).filter((member) => member.type !== "null");
+  return members.length === 1 ? members[0] : undefined;
+}
+
+/** What a value of `node` is, in the words the help uses: `text`, `integer`, `a|b`, … */
+function typeName(node: JsonSchemaNode): string {
+  if (node.anyOf !== undefined) return node.anyOf.map(typeName).join(" or ");
+  if (node.enum !== undefined) return node.enum.map(String).join("|");
+  switch (node.type) {
+    case "string":
+      return "text";
+    case "integer":
+    case "number":
+    case "boolean":
+    case "null":
+      return node.type;
+    case "object":
+      return "object";
+    case "array":
+      return node.items === undefined ? "list" : `list of ${pluralTypeName(node.items)}`;
+    default:
+      return "any JSON";
+  }
+}
+
+function pluralTypeName(node: JsonSchemaNode): string {
+  if (node.type === "object") return "objects";
+  if (node.type === "integer") return "integers";
+  if (node.type === "number") return "numbers";
+  return typeName(node);
+}
+
+/**
+ * The keys of an object `node`, or of each item of an array `node` of objects: a heading, then one
+ * line per key, `<key> (<required; ><type>): <description>`, with the keys of a key that is itself
+ * an object or a list of objects under it, indented. Empty for any other node. `indent` leads the
+ * heading; each key is two spaces further in.
+ */
+function shapeLines(node: JsonSchemaNode, indent: string): string[] {
+  const item = node.type === "array" ? node.items : undefined;
+  const properties = (item ?? node).properties;
+  if (properties === undefined) return [];
+  const required = new Set((item ?? node).required ?? []);
+  return [
+    `${indent}${item === undefined ? "Its keys:" : "Each item's keys:"}`,
+    ...Object.entries(properties).flatMap(([key, child]) => {
+      const about = [required.has(key) ? "required" : undefined, typeName(child)]
+        .filter((part) => part !== undefined)
+        .join("; ");
+      const inner = withoutNull(child);
+      return [
+        `${indent}  ${key} (${about})${child.description === undefined ? "" : `: ${child.description}`}`,
+        ...(inner === undefined ? [] : shapeLines(inner, `${indent}    `)),
+      ];
+    }),
+  ];
 }
 
 function singular(field: string): string {
@@ -250,10 +315,17 @@ function flagTable(tool: string, fields: ReadonlyMap<string, FieldInfo>): Map<st
         field,
         action: "json",
         value: "<json>",
-        text: `Every option as a JSON list of {label, description?}, in place of --${singular(name)}.`,
+        text: [`Every option as a JSON list, in place of --${singular(name)}.`, ...info.shape].join(
+          "\n"
+        ),
       });
     } else if (kind === "json") {
-      add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
+      add(`--${name}-json`, {
+        field,
+        action: "json",
+        value: "<json>",
+        text: [about, ...info.shape].filter((line) => line !== "").join("\n"),
+      });
       add(`--${name}-json-file`, {
         field,
         action: "json-file",
@@ -555,7 +627,9 @@ export function commandHelp(tool: string): string {
     "",
     "Flags:",
     ...commandFlagTable(tool).flatMap((row) =>
-      row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, `      ${row.text}`]
+      row.text === ""
+        ? [`  ${row.flag}`]
+        : [`  ${row.flag}`, ...row.text.split("\n").map((line) => `      ${line}`)]
     ),
     "",
     `Example: ${commandLine(tool, surface.spec.example as Record<string, unknown>)}`,
