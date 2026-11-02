@@ -14,6 +14,7 @@ import type { ArtifactUploadResponse, CredentialRecord } from "../web/src/api/ty
 import { type FakeSession, setLiveSessions } from "./agents";
 import {
   baseUrl,
+  createArtifactGrant,
   createBroadcast,
   createComment,
   createIssue,
@@ -25,6 +26,7 @@ import {
   publishAgentStreamFrame,
   putArchitectureSource,
   syncArchitectureSource,
+  uploadIssueFile,
   userHeaders,
 } from "./api";
 import { seedDeliveryFixture } from "./delivery-seed";
@@ -131,6 +133,7 @@ const shown = {
   issue: "Roll out two builds",
   issueArtifact: "These notes track the rollout.",
   spec: "Both builds serve every page.",
+  viewCaption: "Attempts of the canary.",
 };
 
 /** The list the issue message carries under its diagram, long enough that the page parses the
@@ -146,6 +149,23 @@ const longList = "- a rollout step\n".repeat(longListItems);
 /** The issue message's flowchart, from one node to the other, which draws only once the Mermaid
  *  renderer's worker has run. */
 const diagram = { from: "Canary", to: "Rollout" };
+
+/** The `view` block's page file and the data file a grant gives it. The page is the skill's own
+ *  minimal page (skills/dispatch-view), as e2e/view-block.e2e.ts takes it: it loads nothing from
+ *  the network, so the only chunks the block's visit asks for are the dashboard's own. Both are
+ *  uploaded as files, since a JSON upload is stored as markdown, which is a document, and a
+ *  `view` block reads no document (e2e/api.ts, `uploadFile`). */
+const viewPage = {
+  name: "rollout-chart.html",
+  text: readFileSync(
+    new URL("../../../skills/dispatch-view/minimal-page.html", import.meta.url),
+    "utf8"
+  ),
+};
+const viewData = {
+  name: "rollout-data.json",
+  text: JSON.stringify([{ label: "attempts", value: 7 }]),
+};
 
 /** Who posts the issue message: an agent, as messages are. */
 const messageAuthor = {
@@ -198,13 +218,16 @@ interface Seeded {
   readonly document: string;
   readonly issue: string;
   readonly issueArtifact: string;
+  readonly pageFile: string;
+  readonly viewDocument: string;
 }
 
 /** What every route needs to show its own content rather than an empty or missing state: a
  *  project with an architecture source, an issue with a spec, a child, a comment, a message
- *  holding a Mermaid diagram and a document artifact, a project document, a live session with a
- *  broadcast, a replayed conversation and a picture, a credential record, and the delivery
- *  timeline's runs. */
+ *  holding a Mermaid diagram and a document artifact, a page file with a data file granted to
+ *  it and a document whose `view` block names the pair, a project document, a live session
+ *  with a broadcast, a replayed conversation and a picture, a credential record, and the
+ *  delivery timeline's runs. */
 async function seedEveryRoute(): Promise<Seeded> {
   await setLiveSessions([session]);
   await createProject({ key: "CORE", name: "Core" });
@@ -232,6 +255,27 @@ async function seedEveryRoute(): Promise<Seeded> {
   const issueArtifact = await createIssueArtifact(issue.key, {
     content: `# Rollout notes\n\n${shown.issueArtifact}\n`,
     name: "rollout-notes.md",
+  });
+  // What a `view` block rests on: the page a block shows, a data file, and a grant of the one
+  // to the other. Only a person writes a grant (`POST /api/v1/artifacts/{id}/grants` answers a
+  // bearer `403 HUMAN_ONLY`), so this write is alice's, as every other call of e2e/api.ts here
+  // is, and she is the login the walk browses as.
+  const pageFile = await uploadIssueFile(issue.key, {
+    content: viewPage.text,
+    name: viewPage.name,
+    type: "text/html; charset=utf-8",
+  });
+  const dataFile = await uploadIssueFile(issue.key, {
+    content: viewData.text,
+    name: viewData.name,
+    type: "application/json",
+  });
+  const pageRef = `dispatch://${issue.key}/artifact/${pageFile.artifact.slug}`;
+  const dataRef = `dispatch://${issue.key}/artifact/${dataFile.artifact.slug}`;
+  await createArtifactGrant(pageFile.artifact.id, dataRef);
+  const viewDocument = await createProjectDocument("CORE", {
+    content: `:::view{page="${pageRef}" data="${dataRef}"}\n${shown.viewCaption}\n:::\n`,
+    name: "rollout-view.md",
   });
   const document = await createProjectDocument("CORE", {
     content: `# Handbook\n\n${shown.document}\n`,
@@ -285,6 +329,8 @@ async function seedEveryRoute(): Promise<Seeded> {
     document: document.artifact.slug,
     issue: issue.key,
     issueArtifact: issueArtifact.artifact.slug,
+    pageFile: pageFile.artifact.slug,
+    viewDocument: viewDocument.artifact.slug,
   };
 }
 
@@ -416,6 +462,20 @@ function visits(seed: Seeded): readonly Visit[] {
       url: `${issue}/artifacts/${seed.issueArtifact}`,
     },
     {
+      // A page file's own artifact view, which is the one place "Data this page may read" shows:
+      // the panel's body is a chunk of its own, loaded once the gate says yes, and the gate is a
+      // person (`useIsHuman`) looking at an issue's or a project's page file
+      // (features/artifacts/ArtifactGrantsPanel.tsx). The walk browses as alice, a person, and
+      // this file is the issue's `.html`, so the chunk is fetched here and nowhere else.
+      loads: ["artifact-grants"],
+      route: "/issues/:key/*",
+      shows: (page) => {
+        const grants = page.getByRole("region", { name: "Data this page may read" });
+        return [grants, grants.getByText(viewData.name, { exact: true })];
+      },
+      url: `${issue}/artifacts/${seed.pageFile}`,
+    },
+    {
       route: "/issues/:key/*",
       shows: (page) => [page.getByRole("list", { name: "Issue activity" })],
       url: `${issue}/activity`,
@@ -455,6 +515,22 @@ function visits(seed: Seeded): readonly Visit[] {
       route: "/projects/:key/documents/:slug",
       shows: (page) => openDocument(page, shown.document),
       url: `/projects/CORE/documents/${seed.document}`,
+    },
+    {
+      // The document's one `view` block. Its renderer is a chunk of its own, fetched as the
+      // block's shell is drawn (features/view/ViewPortals.tsx), and nothing of the frame starts
+      // with it: the frame runs only once the budget says the block is near the screen
+      // (features/view/frame-budget.ts). So the landmark is the shell and the caption beside it,
+      // which the editor drew before the chunk was asked for and which are there either way.
+      loads: ["editor", "view-block"],
+      route: "/projects/:key/documents/:slug",
+      shows: (page) => [
+        ...openDocument(page, shown.viewCaption),
+        page
+          .locator('section[data-proof-block-type="view"]')
+          .filter({ hasText: shown.viewCaption }),
+      ],
+      url: `/projects/CORE/documents/${seed.viewDocument}`,
     },
     {
       route: "/credentials/:recordId",
