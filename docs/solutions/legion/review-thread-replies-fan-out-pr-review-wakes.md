@@ -56,15 +56,16 @@ architect was doing with the tree at that moment.
 
 - **Expect and ignore them.** An empty-body `pr-review` with `state: commented` from the PR's own
   implementer or reviewer App is a thread reply, not a round. The verdict arrives as the one
-  `pr-review` whose body is non-empty and whose state is `changes_requested`, `commented` (a
-  clean round while `.legion/` is still on the head), or `approved`. Do not re-read the PR or
-  re-run anything on the empty ones.
+  `pr-review` whose body is non-empty and whose state is `changes_requested`, `commented` or
+  `approved`. Before sjawhar/legion#2354 a clean round was `commented` while `.legion/` was still
+  on the head, and the approval named the deletion head. Do not re-read the PR or re-run anything
+  on the empty ones.
 - **Reply to threads immediately before the push, not spread across the round.** The wakes land
   in a burst that way and the following `pr-review`/`ci-green` pair is the signal; interleaving
   replies with other work turns each into a separate interruption for the active role.
 - **Resumed with no assignment: read the catch-up, then go idle.** A wake is not an assignment.
   A worker resumed by a `pr-review` (or any event) whose catch-up shows its own phase already
-  reported — its handoff committed, `phases[issue]` not naming it, no `pendingAssignment` — has
+  reported — its handoff recorded, `phases[issue]` not naming it, no `pendingAssignment` — has
   nothing to do: it reads the catch-up, answers any direct question in it, and stops. It never
   calls `handoff_complete` again, re-pushes, or re-reviews; a second completion for the same
   phase is a duplicate the daemon answers 409 at best and a wrong `phases` write at worst. The

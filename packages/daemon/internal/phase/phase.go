@@ -1,6 +1,8 @@
 // Package phase owns the issue workflow phase vocabulary.
 package phase
 
+import "github.com/sjawhar/legion/daemon/internal/claim"
+
 // Phase is the issue's position in the daemon's transition table — the state it sits in, not the
 // role working it (`workers` is keyed by role). The daemon advances it from facts it observes; no
 // agent chooses it. The order is the transition table's own.
@@ -31,30 +33,25 @@ var All = []Phase{
 	AwaitingMerge, Done, Held,
 }
 
-// HandoffFile is the handoff a phase ends with, .legion/<issue>/<word>.json, and whether it ends
-// with one its role writes and commits: the planner's, the implementer's implementing rounds, the
+// Handoff is the word of the Dispatch handoff record a phase ends with, the role that writes it,
+// and whether the phase ends with one: the planner's, the implementer's implementing rounds, the
 // tester's, and the reviewer's, each under the word its role's prompt spells
-// (internal/prompts/roles/*.md), which the `legion` tool's `handoff_complete` finds the carrying
-// commit of (packages/pi-shared/src/handoff-commit.ts). Retro and the merger's READY write none,
-// and report the commit they stand on; accepting is the architect's sign-off, no handoff at all.
-func HandoffFile(p Phase) (string, bool) {
+// (internal/prompts/roles/*.md), the phase of the record whose newest version the `legion` tool's
+// `handoff_complete` reads and names (packages/pi-shared/src/handoff-record.ts). The writer is the
+// role the workflow starts on the phase (workflow.RoleFor, whose tests tie the two). Retro and the
+// merger's READY write none, and report the commit they stand on; accepting is the architect's
+// sign-off, no handoff at all.
+func Handoff(p Phase) (word string, writer claim.Role, ok bool) {
 	switch p {
 	case Planning:
-		return "plan", true
+		return "plan", claim.RolePlanner, true
 	case Implementing:
-		return "implement", true
+		return "implement", claim.RoleImplementer, true
 	case Testing:
-		return "test", true
+		return "test", claim.RoleTester, true
 	case Reviewing:
-		return "review", true
+		return "review", claim.RoleReviewer, true
 	default:
-		return "", false
+		return "", "", false
 	}
-}
-
-// FileBacked says whether a phase ends with a handoff file its role writes and commits
-// (HandoffFile).
-func FileBacked(p Phase) bool {
-	_, ok := HandoffFile(p)
-	return ok
 }
