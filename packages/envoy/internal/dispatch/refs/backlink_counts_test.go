@@ -18,7 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/explaintest"
 )
 
-// backlinkFixture is one graph that fills every arm of graph_edges: each of the view's 23 arms
+// backlinkFixture is one graph that fills every arm of graph_edges: each of the view's 26 arms
 // emits at least one edge over it, and every node kind nodeLoaders resolves has a node with an
 // inbound edge. The three tests below read it, so a count, its plan and the view's own shape are
 // all held to the same rows.
@@ -228,6 +228,37 @@ func newBacklinkFixture(t *testing.T) backlinkFixture {
 		values ('CORE-1', '{"kind":"user","id":"alice"}', 'about that paragraph', $1)
 	`, messageBlock)
 
+	// ask_blocks: a part's part_of its ask; ask_block_refs: a link a part holds; a reply naming
+	// a part in comments.replies_to_block, which the view tells from a reply to a comment's
+	// block by the node id's prefix.
+	partedAsk := scanFixture(t, tx, "create the ask that holds parts", `
+		insert into asks (issue_key, author, question)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', 'a question in parts?')
+		returning id::text
+	`)
+	askPart := "ask/" + partedAsk + "#b1"
+	for _, part := range []struct {
+		id       string
+		position int
+	}{{id: "b1", position: 0}, {id: "b2", position: 1}} {
+		execFixture(t, tx, "index ask part "+part.id, `
+			insert into ask_blocks (ask_id, block_id, node_id, position, type, text_sha256, excerpt,
+			                        made_at, changed_revision, changed_at)
+			values ($1::uuid, $2, 'ask/' || $1 || '#' || $2, $3, 'paragraph', 'sha', 'excerpt', now(), 1, now())
+		`, partedAsk, part.id, part.position)
+	}
+	execFixture(t, tx, "cite CORE-1 from an ask part", `
+		insert into ask_block_refs (ask_id, block_id, from_node, to_kind, to_id, kind)
+		values ($1::uuid, 'b1', $2, 'issue', 'CORE-1', 'mentions')
+	`, partedAsk, askPart)
+	// The ask's own mention of the issue its part cites: the part's edge is counted and the
+	// ask's own is not, as a comment's blocks hold the comment's own.
+	insertReference(t, tx, "ask", partedAsk, "issue", "CORE-1")
+	execFixture(t, tx, "reply to an ask part", `
+		insert into comments (issue_key, author, body, ask_id, replies_to_block)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', 'about that part', $1::uuid, $2)
+	`, partedAsk, askPart)
+
 	// refs: the mention arm. The reply comment holds no blocks, so each of its mentions is
 	// counted where it is written; the document's and the message's are each held by a block of
 	// theirs and counted there instead.
@@ -242,6 +273,7 @@ func newBacklinkFixture(t *testing.T) backlinkFixture {
 		{"block", notesBlock},
 		{"comment_block", commentBlock},
 		{"message_block", messageBlock},
+		{"ask_block", askPart},
 	} {
 		insertReference(t, tx, "comment", citingComment, target[0], target[1])
 	}
@@ -279,38 +311,62 @@ func scanFixture(t *testing.T, tx pgx.Tx, what, statement string, args ...any) s
 	return id
 }
 
-// backlinkCountOracle is the statement BacklinkCounts ran before it read each arm through its own
-// index: the whole graph_edges view, filtered and grouped. It is held here as a literal, copied
-// from main rather than built from this package's helpers, on purpose - built from the helpers,
-// a change to the count's own builders would move the oracle and the count together and the
-// comparison would pass whatever either said. $1 is the target kind, $2 the ids, $3 the node
-// kinds this build reads; $4, when the statement carries backlinkCountOracleExcluded, is the
-// excluded edge kinds.
-const backlinkCountOracle = `select g.to_id, count(*)::int from graph_edges g
-where g.to_kind = $1 and g.to_id = any($2) and g.from_kind = any($3)
+// backlinkCountOracle is the first arm of the count main runs over the whole graph_edges view,
+// the reading the arms of this package's count must add up to: the view, filtered and grouped.
+// It is held here as a literal, copied from main rather than built from this package's helpers,
+// on purpose - built from the helpers, a change to the count's own builders would move the
+// oracle and the count together and the comparison would pass whatever either said. $1 is the
+// target kind, $2 the ids, $3 the node kinds this build reads; $4, when the statement carries
+// backlinkCountOracleExcluded, is the excluded edge kinds.
+const backlinkCountOracle = `select g.to_id from graph_edges g
+where g.to_kind = $1 and g.to_id = any($2)`
+
+// backlinkCountOracleAtItsBlocks is the oracle's second arm for each item kind: an edge at one
+// of the item's current blocks, counted as the item's own, since the item's own read lists it.
+// The block kind and the item's tables are written out per kind for the reason the first arm is.
+var backlinkCountOracleAtItsBlocks = map[string]string{
+	"comment": `select part.comment_id::text from graph_edges g
+	join comment_blocks part on part.node_id = g.to_id and part.position is not null
+	where g.to_kind = 'comment_block' and part.comment_id::text = any($2)`,
+	"message": `select part.message_id::text from graph_edges g
+	join message_blocks part on part.node_id = g.to_id and part.position is not null
+	where g.to_kind = 'message_block' and part.message_id::text = any($2)`,
+	"ask": `select part.ask_id::text from graph_edges g
+	join ask_blocks part on part.node_id = g.to_id and part.position is not null
+	where g.to_kind = 'ask_block' and part.ask_id::text = any($2)`,
+}
+
+// backlinkCountOracleNarrow is what each arm of the oracle carries: the source-kind filter and
+// the probe that keeps an item's own mention out of the count where one of its blocks holds a
+// link of any kind to the same target, written out as the rest of the oracle is.
+const backlinkCountOracleNarrow = `
+  and g.from_kind = any($3)
   and not (g.kind = 'mentions' and (
-    (g.from_kind = 'artifact' and exists (select 1 from block_refs b where b.to_kind = g.to_kind and b.to_id = g.to_id and b.kind = g.kind and b.artifact_id::text = g.from_id))
-    or (g.from_kind = 'comment' and exists (select 1 from comment_block_refs b where b.to_kind = g.to_kind and b.to_id = g.to_id and b.kind = g.kind and b.comment_id::text = g.from_id))
-    or (g.from_kind = 'message' and exists (select 1 from message_block_refs b where b.to_kind = g.to_kind and b.to_id = g.to_id and b.kind = g.kind and b.message_id::text = g.from_id))))`
+    (g.from_kind = 'artifact' and exists (select 1 from block_refs b where b.to_kind = g.to_kind and b.to_id = g.to_id and b.artifact_id::text = g.from_id))
+    or (g.from_kind = 'comment' and exists (select 1 from comment_block_refs b where b.to_kind = g.to_kind and b.to_id = g.to_id and b.comment_id::text = g.from_id))
+    or (g.from_kind = 'message' and exists (select 1 from message_block_refs b where b.to_kind = g.to_kind and b.to_id = g.to_id and b.message_id::text = g.from_id))
+    or (g.from_kind = 'ask' and exists (select 1 from ask_block_refs b where b.to_kind = g.to_kind and b.to_id = g.to_id and b.ask_id::text = g.from_id))))`
 
 // backlinkCountOracleExcluded is the oracle's exclusion predicate, the one part of the statement
 // a caller's exclusions add.
 const backlinkCountOracleExcluded = `
   and not (g.kind = any($4))`
 
-const backlinkCountOracleGroup = `
-group by g.to_id`
-
-// oracleBacklinkCounts counts the inbound edges of ids over the whole view (backlinkCountOracle).
+// oracleBacklinkCounts counts the inbound edges of ids over the whole view (backlinkCountOracle),
+// with the edges at a counted item's own current blocks (backlinkCountOracleAtItsBlocks).
 func oracleBacklinkCounts(t *testing.T, q Queryer, toKind string, ids, excludeKinds []string) map[string]int {
 	t.Helper()
-	statement := backlinkCountOracle
+	narrow := backlinkCountOracleNarrow
 	args := []any{toKind, ids, nodeKinds}
 	if len(excludeKinds) > 0 {
-		statement += backlinkCountOracleExcluded
+		narrow += backlinkCountOracleExcluded
 		args = append(args, excludeKinds)
 	}
-	rows, err := q.Query(context.Background(), statement+backlinkCountOracleGroup, args...)
+	arms := backlinkCountOracle + narrow
+	if atBlocks, ok := backlinkCountOracleAtItsBlocks[toKind]; ok {
+		arms += "\nunion all\n" + atBlocks + narrow
+	}
+	rows, err := q.Query(context.Background(), `select id, count(*)::int from (`+arms+`) e (id) group by id`, args...)
 	if err != nil {
 		t.Fatalf("count %s backlinks over the view: %v", toKind, err)
 	}
@@ -591,16 +647,19 @@ var graphViewArms = []graphViewArm{
 	{table: "document_blocks", fromKind: "block", kind: "part_of", toKind: "artifact"},
 	{table: "comment_blocks", fromKind: "comment_block", kind: "part_of", toKind: "comment"},
 	{table: "message_blocks", fromKind: "message_block", kind: "part_of", toKind: "message"},
+	{table: "ask_blocks", fromKind: "ask_block", kind: "part_of", toKind: "ask"},
 	{table: "comment_block_refs", fromKind: "comment_block"},
 	{table: "message_block_refs", fromKind: "message_block"},
+	{table: "ask_block_refs", fromKind: "ask_block"},
 	{table: "comments", fromKind: "comment", kind: "replies_to", toKind: "comment_block"},
+	{table: "comments", fromKind: "comment", kind: "replies_to", toKind: "ask_block"},
 	{table: "messages", fromKind: "message", kind: "replies_to", toKind: "message_block"},
 }
 
 // The view cannot gain an arm the count does not know. graph_edges' own text is parsed back into
 // one descriptor per arm and held to graphViewArms, and graphViewArms is held to the count's
 // declarations: every literal-kind arm to an entry of backlinkArms, every column-kind arm to one
-// of the four tables mentionBacklinkArms reads, and every literal source kind to a kind
+// of the five tables mentionBacklinkArms reads, and every literal source kind to a kind
 // nodeLoaders resolves, which is what makes BacklinkCounts' source filter on the refs arm alone
 // exact.
 func TestTheGraphViewGainsNoArmTheBacklinkCountDoesNotKnow(t *testing.T) {
@@ -631,7 +690,7 @@ func TestTheGraphViewGainsNoArmTheBacklinkCountDoesNotKnow(t *testing.T) {
 		}
 	}
 	mentionTables := map[string]bool{}
-	for _, arm := range mentionBacklinkArms("issue", nil) {
+	for _, arm := range mentionBacklinkArms(backlinkTarget{kind: "issue"}, nil) {
 		match := regexp.MustCompile(`\bfrom (\w+)`).FindStringSubmatch(arm)
 		if match == nil {
 			t.Fatalf("a mention arm names no table: %s", arm)
