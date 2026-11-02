@@ -2,50 +2,42 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-879",
-  "previousHandoff": "94489002a1329ffc43c27c9dc5bd834a45c57a91",
-  "round": "review round 1: the reviewer's three threads, all answered and resolved",
+  "previousHandoff": "e0ed8f326a762612900bfa14b8ba33712b78b3b7",
+  "round": "testing round 2's failure: no CI had run at the code head, because the push that carried the code ended in a commit marked skip-checks. No code changed in this round.",
   "proof": [
     {
-      "criterion": "Thread PRRT_kwDORFy7ds6ygtJo (Important) — the dead branches the removal left on the machine page are gone, and the page still renders and decides a machine login.",
-      "surface": "Dispatch's browser suite: a real chromium against the real Dispatch server and the real secrets broker, which drives /credentials/machine through the code lookup and the Approve button.",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://legion_test@127.0.0.1:5433/e2e_879_r2?sslmode=disable PATH=\"$PWD/node_modules/.bin:$PATH\" bun run build:web && bun e2e/run.ts -- playwright test --config e2e/playwright.config.ts e2e/inbox.e2e.ts e2e/machine-login.e2e.ts --project chromium -g 'credential record path|machine-login'",
-      "observed": "3 passed (11.1s): 'the machine-login page finds a pending login by its typed code and Approve decides it on the broker', and both 'credential record path' rows. CredentialRecordFacts now renders Kind (the literal 'Machine login'), Identifiers, Lifetime, Requested, Expires, Policy version, Approver, the reason and the approving sentence; the Enrollment fact, the Worker slot fact, the Session fact and its useAgents call are gone, as is the record.kind === \"launcher_credential\" half of the last condition.",
-      "headSha": "d4ee12282c97d45bf34b831a04a6f5fc260b5e6d",
-      "negativeControl": "The same machine-login spec is the control for the removal: it drives the only route that produces a CredentialRecord (POST /v1/machine-logins/lookup), so a fact the page still needed would have gone missing there. Beside it, `bun test web/src/features/credentials` → 45 pass 0 fail, with MachineLoginPage.test.tsx and MachineLoginPage.decided.test.tsx unmodified."
+      "criterion": "The tester's one failure — the plan's last acceptance row, CI at the head. The head that carries this change's code must have a GitHub workflow run.",
+      "surface": "GitHub Actions on sjawhar/legion, at the pull request's head.",
+      "command": "gh api repos/sjawhar/legion/commits/<head>/check-runs --jq .total_count; gh run list --repo sjawhar/legion --branch legion/INFRA-879 --limit 8 --json databaseId,headSha,workflowName,status",
+      "observed": "Before this round: `0` check runs at e0ed8f326a762612900bfa14b8ba33712b78b3b7, and the newest runs on the branch were all at 37217008e370, the reviewer's handoff commit. The cause is this implementer's own mistake in round 1: the push that moved the branch from 37217008e370 to e0ed8f326a76 carried two code commits (e4b102ab7020 and d4ee12282c97, six files outside `.legion/INFRA-879/`) under a head whose message ended `skip-checks: true`, which GitHub honours for the whole push, so it started no run. This round's push ends in a head with no such line, and `gh api repos/sjawhar/legion/commits/<new head>/check-runs` then names the runs GitHub started at it.",
+      "headSha": "pending the push this handoff is committed in; recorded in the completion summary",
+      "negativeControl": "The reading before the push is the control: the same command at e0ed8f326a762612900bfa14b8ba33712b78b3b7 answered `0`, and at 37217008e370 — the last head pushed without the trailer — GitHub had started both `CI` and `PR Title`."
     },
     {
-      "criterion": "Thread PRRT_kwDORFy7ds6ygtJr (Minor) — waitingOn's two switches are one, with the page as a suffix, and every one of the six sentences is byte for byte what it was.",
-      "surface": "cmd/agent-secrets' own tests, which build the real binary and run it against a fake broker over HTTP, under four pending fixtures and with AGENT_SECRETS_APPROVE_URL both set and unset.",
-      "command": "cd packages/envoy && go test -count=1 ./cmd/agent-secrets/ -run 'Pending|WaitsOn'",
-      "observed": "ok github.com/sjawhar/envoy/cmd/agent-secrets 22.298s. gofmt -l prints nothing; go build ./... and go vet ./cmd/agent-secrets/ are clean.",
-      "headSha": "d4ee12282c97d45bf34b831a04a6f5fc260b5e6d",
-      "negativeControl": "TestAPendingRequestWithoutABrokerPageNamesItsApproverAlone pins the three no-page sentences by exact string, and pendingSentences pins the three with a page; a suffix in the wrong place, or a tail moved before the page, fails one of the two. The eight fixture subtests run each wording under both values of AGENT_SECRETS_APPROVE_URL."
-    },
-    {
-      "criterion": "Thread PRRT_kwDORFy7ds6ygtJt (Minor) — the first browser row's title says what it checks, and the acceptance command still selects exactly the two rows.",
-      "surface": "Playwright's own test listing, then the run itself.",
-      "command": "cd packages/dispatch && PATH=\"$PWD/node_modules/.bin:$PATH\" bunx playwright test --config e2e/playwright.config.ts e2e/inbox.e2e.ts --project chromium -g 'credential record path' --list",
-      "observed": "Total: 2 tests in 1 file — 'credential record path › a pending secret request with no approve_url is listed, counted, and renders an unlinked row' and 'credential record path › opens the Inbox'. Both pass in the run above.",
-      "headSha": "d4ee12282c97d45bf34b831a04a6f5fc260b5e6d",
-      "negativeControl": "The -g filter is the control: with the describe missing, the retitled row drops out of the selection and the listing reads one test rather than two."
+      "criterion": "This repository is public, so no text of the branch or of the pull request names a Tailscale MagicDNS host. `.github/scripts/check-private-names.sh` is the gate in the lint job, and `.github/scripts/check-pr-text.sh` the one in `pr-title`.",
+      "surface": "The repository's own checks, run here over the tree, and GitHub's own run of the pull-request half.",
+      "command": "bash .github/scripts/check-private-names.sh; gh run view 41375117864 --repo sjawhar/legion --log-failed; gh api repos/sjawhar/legion/pulls/2649 --jq .body | grep -c '<the host>'",
+      "observed": "The tree check printed five findings, all in `.legion/INFRA-879/test.json` (lines 23, 24, 25, 64, 65), and the `pr-title` run at 37217008e370 had already failed with `body:28: names a Tailscale MagicDNS host`. Both are fixed here: the handoff's five lines now read `secrets.<tailnet>.ts.net` and `dispatch.<tailnet>.ts.net`, the placeholder the repository's rule names, with every other word of the tester's evidence as it was; and the pull request's body carries the same placeholder. After the fix the tree check prints `no file or path names the private deployment repository or the company, and no text names a private internal host or a Tailscale MagicDNS host (7080 files in the repository)`, and the title, every commit message, every comment and every review of the pull request hold the host nowhere (`gh api` over `issues/2649/comments`, `pulls/2649/comments` and `pulls/2649/reviews` selected none).",
+      "headSha": "pending the push this handoff is committed in",
+      "negativeControl": "The run that failed is the control for the body half: `pr-title` run 41375117864 at 37217008e370 ended `##[error]body:28: names a Tailscale MagicDNS host`, so the check does see that text and the edit is what clears it. For the tree half, the same script printed the five findings before the edit and none after, over the same 7080 files."
     }
   ],
   "filesChanged": [
-    "packages/dispatch/web/src/features/credentials/CredentialRecordFacts.tsx: the Kind fact is the literal 'Machine login'; the Enrollment, Worker slot and Session facts, the useAgents call and three imports go; the last condition keeps only record.state === \"pending\"; the doc comment says the lookup returns machine logins alone.",
-    "packages/dispatch/web/src/features/credentials/CredentialSessionLines.tsx and session.ts: the Inbox row is their one caller, and the prose says so.",
-    "packages/dispatch/AGENTS.md: the session-lines citation, the machine page's facts list, and the enrollment.slot sentence, which moved into the grants paragraph, the one surface that still renders a slot.",
-    "packages/envoy/cmd/agent-secrets/main.go: waitingOn is one switch with the page as a suffix, and its doc comment says so.",
-    "packages/dispatch/e2e/inbox.e2e.ts: both rows are in test.describe(\"credential record path\", …), the first retitled."
+    ".legion/INFRA-879/test.json: the five lines of the tester's A1 and A4 evidence that spelled the deployment's Tailscale host now spell `<tailnet>`; nothing else of that handoff is touched.",
+    ".legion/INFRA-879/implement.json: this round's handoff.",
+    "No file outside `.legion/INFRA-879/` changed in this round."
   ],
   "trickyParts": [
-    "CredentialRecord.enrollment and .session stay on the TypeScript type although nothing reads them now: the broker still sends both fields on every record (buildRecordResponse), so the type is the response shape, which is the reason the reviewer itself gave for keeping RequestStatus.RecordID in Go. CredentialRecord.approve_url was different and was deleted: the broker no longer sends it at all.",
-    "Running the browser rows in this pod: a database of your own (createdb … e2e_879_r2) for DATABASE_URL, `cd packages/contracts && bun run build` first (Playwright resolves @legion/contracts through Node's conditions and reads dist/), packages/dispatch/node_modules/.bin on PATH, and the spec file written before --project, since a spec after it is read as a second project name."
+    "The push that carries this handoff deliberately has no `skip-checks: true` line, although it touches only `.legion/INFRA-879/`. The trailer is what left the code with no CI: GitHub honours it for the whole push, and the two code commits rode under it. A head without it is the only way to get a run onto a branch whose code is already pushed, short of rewriting a pushed commit, and the architect asked for exactly this.",
+    "The daemon classifies a push by the paths its commits touch rather than by the trailer, so this push is still a handoff push to the daemon; the trailer's only reader is GitHub."
   ],
-  "deviations": [],
+  "deviations": [
+    "One line of `skill://legion-worker`'s push rule is not followed, on the architect's instruction: a push that touches only `.legion/<issue>/` normally ends its head with `skip-checks: true`, and this one does not."
+  ],
   "openQuestions": [
-    "One test of packages/dispatch fails in this pod and is not this change's: web/src/features/agents/AgentsPage.test.tsx, 'a live-view send out when the page reloads is sent again under its key and shown again', fails on await screen.findByRole after a lazy chunk loads. It fails the same way with app.tsx restored to the base 05d6578981a4 (84 pass 1 fail, three runs), and the full suite passed 3091/0 twice earlier today on this branch, so it is timing-sensitive under load rather than broken by this pull request. It touches nothing under features/credentials. Reported to the architect; no fix attempted here."
+    "`packages/dispatch`'s `web/src/features/agents/AgentsPage.test.tsx` — 'a live-view send out when the page reloads is sent again under its key and shown again' — fails in this pod with `app.tsx` restored to the base as well as at the head, and the full suite passed 3091/0 twice earlier on this branch. The architect is sending it to the controller; nothing was changed for it here. CI's own run of that suite, which this round finally starts, is the next reading of it."
   ],
   "discoveredComplexity": [
-    "The reviewer fixed one prose count itself, in c305b7423f90 (packages/envoy/AGENTS.md: relaysDecisions covers nine routes); that commit is in this branch below this round's two."
+    "The tester's `notes` records that the plan's decision D3 names a secret the broker refuses (`AGENT_SECRETS_LEGION_E2E_APPROVAL`); the name that exists is `LEGION_E2E_APPROVAL`, and both rounds of A1 ran with it. The plan is a Dispatch document, not a file of this branch, so nothing here changes it."
   ]
 }
