@@ -200,7 +200,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if replace {
 		switch {
 		case live:
-			suspended, err := r.suspendDisplacing(bounded, s, pod.UID)
+			suspended, err := r.suspendDisplacing(bounded, s, pod.UID, launchReplacement)
 			if err != nil {
 				return fail("suspend its sandbox", err)
 			}
@@ -1007,20 +1007,47 @@ func labelPatchPath(key string) string {
 
 // displacedAnnotation names, on a Sandbox, the uid of the last live pod of it the daemon replaced
 // (relaunch). A process recorded in that pod ended by the daemon's own act once the pod is going
-// (evaluate's displaced). It lives with the Sandbox, so a restarted daemon reads it as well.
-const displacedAnnotation = "legion.dev/displaced-pod"
+// (evaluate's displaced). It lives with the Sandbox, so a restarted daemon reads it as well. Both
+// acts that replace a live pod write it: the roles of a pod a launch replaced are the daemon's own
+// ends as much as the roles of one an update round replaced.
+//
+// roundDisplacedAnnotation names the pod a Sandbox was suspended to replace for its update round,
+// and only ReplacePod writes it. It is what tells the round's own replacement, in flight between
+// its suspension and the pod's end, from a launch's replacement of the same pod, which takes the
+// pod's disk with whatever its workers have not pushed: the two are the same suspension naming the
+// same pod under displacedAnnotation, and only the round's may be read as a pod that is there and
+// has not drifted (PodDrift).
+const (
+	displacedAnnotation      = "legion.dev/displaced-pod"
+	roundDisplacedAnnotation = "legion.dev/round-displaced-pod"
+)
+
+// replacementKind is which of the two acts that replace a live pod a suspension is made for: a
+// launch that cannot use the pod it found, or the update round of that pod, once it is over.
+type replacementKind bool
+
+const (
+	launchReplacement replacementKind = false
+	roundReplacement  replacementKind = true
+)
 
 // suspendDisplacing sets the Sandbox read as s Suspended and names uid on it as the live pod that
 // suspension replaces (displacedAnnotation), in one JSON merge patch: the API server applies both
 // or neither, so a refused suspension names no pod, and a merge patch sets the one annotation key
-// whatever other annotations the Sandbox carries, or none. It carries s's uid, which the API server
-// refuses to change on a live object, so a Sandbox deleted and recreated in between is never
-// written: the fence recordAddresses keeps. It returns the Sandbox as the patch left it, the one
-// copy that carries the name: a migrating launch reads it from there onto the Sandbox it creates
-// in its place (replaceSupersededSandbox).
-func (r *Runtime) suspendDisplacing(ctx context.Context, s *sandbox, uid types.UID) (*sandbox, error) {
+// whatever other annotations the Sandbox carries, or none. A round's replacement names uid under
+// the round's own mark in that same write (roundDisplacedAnnotation, roundReplacement), which a
+// launch's replacement never writes. It carries s's uid, which the API server refuses to change
+// on a live object, so a Sandbox deleted and recreated in between is never written: the fence
+// recordAddresses keeps. It returns the Sandbox as the patch left it, the one copy that carries
+// the name: a migrating launch reads it from there onto the Sandbox it creates in its place
+// (replaceSupersededSandbox).
+func (r *Runtime) suspendDisplacing(ctx context.Context, s *sandbox, uid types.UID, kind replacementKind) (*sandbox, error) {
+	annotations := map[string]string{displacedAnnotation: string(uid)}
+	if kind == roundReplacement {
+		annotations[roundDisplacedAnnotation] = string(uid)
+	}
 	body, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{"uid": string(s.UID), "annotations": map[string]string{displacedAnnotation: string(uid)}},
+		"metadata": map[string]any{"uid": string(s.UID), "annotations": annotations},
 		"spec":     map[string]any{"operatingMode": modeSuspended},
 	})
 	if err != nil {

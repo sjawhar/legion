@@ -218,13 +218,15 @@ func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
 // over the pod it was opened on and a round whose pod went with the work on its disk, which only
 // the caller can tell its workers of (runtime.ErrPodGone, internal/daemon's groupDrift).
 //
-// The one suspended Sandbox that is not gone is the one this round's own ReplacePod suspended:
-// it names the locator's own pod as the pod it displaced (displacedAnnotation, suspendDisplacing)
-// and it is waiting that pod out. Such a pod is answered for as a pod that is there and has not
-// drifted — no reasons and no error — so a sweep that reads the Sandbox between the suspension
-// and the pod's end ends the round as the replacement it is. Any other suspended Sandbox is some
-// other act's: an operator's suspension, a launch that is replacing the pod, a tree moved on, and
-// nothing the round decides over such a pod is true.
+// The one suspended Sandbox that is not gone is the one this round's own ReplacePod suspended: it
+// names the locator's own pod under the mark only that act writes (roundDisplacedAnnotation,
+// suspendDisplacing) and it is waiting that pod out. Such a pod is answered for as a pod that is
+// there and has not drifted — no reasons and no error — so a sweep that reads the Sandbox between
+// the suspension and the pod's end ends the round as the replacement it is. Any other suspended
+// Sandbox is some other act's: an operator's suspension, a tree moved on, or a launch replacing
+// the pod, which names it as displaced too (displacedAnnotation) and takes its disk with whatever
+// the workers have not pushed. Nothing the round decides over such a pod is true, and the round
+// that was opened on it ends as a round whose pod went.
 //
 // The sweep asks this of every claim of the deployment at every tick, so the steady state — a
 // Sandbox running and a pod built from the configuration the runtime still has — costs one read
@@ -260,8 +262,8 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 		return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, runtime.ErrPodGone)
 	}
 	if mode, _, _ := unstructured.NestedString(u.Object, "spec", "operatingMode"); mode == modeSuspended {
-		displaced, _, _ := unstructured.NestedString(u.Object, "metadata", "annotations", displacedAnnotation)
-		if displaced != k.Locator.Sandbox.PodUID {
+		round, _, _ := unstructured.NestedString(u.Object, "metadata", "annotations", roundDisplacedAnnotation)
+		if round != k.Locator.Sandbox.PodUID {
 			return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, runtime.ErrPodGone)
 		}
 		// This round's own replacement, between its suspension and the pod's end: the pod is
@@ -290,7 +292,10 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 // replaces, and nothing more — under the pod's launch turn, the Suspended patch that names the
 // replaced pod on the Sandbox in the same write (suspendDisplacing), then the wait for the pod's
 // end — so every role still running there is reported ended by the daemon's own act (Displaced)
-// and resumed uncharged on its session, as it is for a pod a launch replaces.
+// and resumed uncharged on its session, as it is for a pod a launch replaces. That one patch
+// names the pod under the round's own mark as well (roundDisplacedAnnotation, roundReplacement),
+// which no launch writes: it is what a sweep reading the Sandbox before the pod ends tells this
+// replacement by, where a launch's replacement of the same pod is a pod gone (PodDrift).
 //
 // It creates and provisions nothing: the first of those resumes finds the Sandbox Suspended and
 // provisions a fresh pod from the current configuration, which is the launch path a replacement
@@ -335,7 +340,7 @@ func (r *Runtime) ReplacePod(ctx context.Context, k runtime.Known, due func(cont
 	if err := due(ctx); err != nil {
 		return err
 	}
-	if _, err := r.suspendDisplacing(ctx, s, v.pod.UID); err != nil {
+	if _, err := r.suspendDisplacing(ctx, s, v.pod.UID, roundReplacement); err != nil {
 		return fmt.Errorf("replace %s's pod: suspend its sandbox: %w", k.Claim, err)
 	}
 	if _, err := r.awaitPodGone(ctx, s); err != nil {
