@@ -3062,7 +3062,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
 - No path NAKs a message whose `no_holder` notice could not be published:
   an exception no publish took is logged `listener exception publish failed` and nothing else, and the one outcome that reads that failure is the fan-out's refusal, which clears the attempt record it had written (`exceptionFailureClearsAttempt`) and still acknowledges the message.
   That cause is deferred, and so is a bucket read that did not answer, which says nothing about the session:
-  it leaves no entry, and an attempt with no entry reports `session.ErrNoSessionRecord`, which holds the window open for it.
+  it leaves no entry, and the registry path answers an attempt with no entry as undelivered and carrying no error at all (`internal/session/handler.go` drops `session.ErrNoSessionRecord` there), which is the shape that holds the window open (`cmd/listener/delivery.go`, the undelivered, error-free result `unplaceableAgentDelivery` takes).
   What is given up at once is a core delivery or a message whose JetStream metadata cannot be read, which nothing would redeliver or bound.
   The interest path's own failures never reach that branch: they NAK with an error and are counted `failed`.
   A fanout delivery that fails to a session that is live is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window);

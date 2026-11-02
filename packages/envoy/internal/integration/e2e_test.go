@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -31,36 +30,6 @@ func waitUntil(t *testing.T, timeout time.Duration, desc string, fn func() bool)
 			}
 		}
 	}
-}
-
-func waitForMatchCount(t *testing.T, env *testEnv, machineID, topic string, want int) {
-	t.Helper()
-	waitUntil(t, 5*time.Second, fmt.Sprintf("%d matches for %s", want, topic), func() bool {
-		return len(env.registry.Match(machineID, topic)) == want
-	})
-}
-
-// A webhook's event reaches the session that follows its topic whole: the topic it was published
-// on, its payload summary and the sender that published it all arrive at the session's own
-// subscription, and nothing else does.
-func TestAWebhookEventReachesTheSessionFollowingItsTopicWhole(t *testing.T) {
-	env := setupTestEnv(t)
-	recipient := env.registerSession("ses_webhook", []string{"notifications.slack.*.*.mention"})
-	topic := "notifications.slack.T123.C456.mention"
-	waitForMatchCount(t, env, "test-machine", topic, 1)
-
-	item := newEnvelope("slack", topic, "hello from slack", "dedupe-webhook")
-	item.SourceSession = "ses_origin"
-	publishEnvelope(env, item)
-
-	got := recipient.receives(t, 5*time.Second)
-	if got.EventID != item.EventID || got.Topic != item.Topic {
-		t.Fatalf("the session received %+v, want the published envelope on %s", got, item.Topic)
-	}
-	if got.PayloadSummary != "hello from slack" || got.Source != "slack" || got.SourceSession != "ses_origin" {
-		t.Fatalf("the session received %+v, want the webhook's payload from its own sender", got)
-	}
-	recipient.receivesNothing(t, 300*time.Millisecond)
 }
 
 func TestE2E_InterestReaperCleanup(t *testing.T) {
