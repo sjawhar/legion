@@ -1,0 +1,5 @@
+kind: Added
+body: The fixture `fixtures/envoy-session-no-interests.json` states the `GET /v1/sessions` row of a live session with no interest record, no role claim and no capability, before and after the listener began writing an empty `topics` list.
+time: 2026-11-02T23:02:42.228877361Z
+custom:
+    Issue: pr2694

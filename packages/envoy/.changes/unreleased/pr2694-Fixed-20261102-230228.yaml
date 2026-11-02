@@ -1,0 +1,5 @@
+kind: Fixed
+body: The listener answers `topics` as an empty list, never `null`, for a session that has no interest record, in every row of `GET /v1/sessions` and in `GET /v1/registry/<session_id>`.
+time: 2026-11-02T23:02:28.219021839Z
+custom:
+    Issue: pr2694

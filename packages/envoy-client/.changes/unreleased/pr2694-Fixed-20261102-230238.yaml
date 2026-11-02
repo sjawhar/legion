@@ -1,0 +1,5 @@
+kind: Fixed
+body: A session row's `topics`, `roles` and `capabilities` read a `null` or an absent key as an empty list, so `listSessions` no longer refuses the whole list for one session that has no interest record. `SessionInfo` now always carries the three lists. A wrong element type is still refused.
+time: 2026-11-02T23:02:38.348127477Z
+custom:
+    Issue: pr2694
