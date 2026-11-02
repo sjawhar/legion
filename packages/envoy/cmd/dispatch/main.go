@@ -520,6 +520,7 @@ func main() {
 			Leases:          leases,
 			RoleClaims:      holders,
 			Sessions:        holders,
+			KeptLanes:       natsClient,
 			PublishFailures: outboxPublishFailures,
 		})
 		outboxStopped = make(chan struct{})

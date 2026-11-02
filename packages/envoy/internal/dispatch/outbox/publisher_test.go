@@ -133,7 +133,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 		case dest.forward.err != nil:
 			answer = failedAnswer(dest.forward.err)
 		default:
-			answer = dest.forward.send(ctx, deps, sender, routed)
+			answer = dest.forward.send(ctx, deps, sender, routed, newKeptHandovers())
 		}
 		if err := <-answer; err != nil && !errors.Is(err, bus.ErrRefused) {
 			failures = append(failures, fmt.Errorf("%s %q: %w", dest.label, dest.id, err))

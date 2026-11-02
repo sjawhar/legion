@@ -101,10 +101,12 @@ func newRoleRigOn(t *testing.T, url string, client *bus.Client, conn *natsgo.Con
 }
 
 // deps is the outbox's dependencies as cmd/dispatch wires them: role routes resolved through
-// roles.Buckets on the outbox's own client.
+// roles.Buckets on the outbox's own client, and that client the reader of a role's kept lane and
+// its drain cursor, which a keep's handover makes its pass over (Deps.KeptLanes).
 func (r *roleRig) deps() Deps {
 	holders := roles.NewBuckets(r.client)
-	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders}
+	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders,
+		KeptLanes: r.client}
 }
 
 // claim makes holder role's holder, registered with entry, as a session plugin's registration

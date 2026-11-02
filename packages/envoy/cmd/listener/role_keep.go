@@ -61,23 +61,20 @@ const roleKeepPublishWindow = 2 * time.Second
 // claim it serves. A handover's pass takes it for the lane-head read it opens with
 // (handOverKeptRole, readKeptLaneHead), the one read of that lane a pass makes, which it hands
 // to the walk it starts (walkKeptRole).
-const roleKeepDrainWindow = 60 * time.Second
+//
+// It is roleKeepClaimWindow, the window a walk's claim holds a lane for, because a walk's life
+// and its claim's are the same span seen from two sides: a walk must not outlive its own claim,
+// and a claim must not outlive the walk that wrote it. Being one duration, it is written once, in
+// the package both writers of a kept lane read it from (bus.KeptRoleClaimWindow).
+const roleKeepDrainWindow = roleKeepClaimWindow
 
 // roleKeepClaimWindow is how long one walk's claim of a kept copy holds that role's lane against
-// the walks of the other listeners of the deployment (roleKeepCursor.Claiming). It is
-// roleKeepDrainWindow because that is the whole of a walk's life: a claim younger than it may
-// still belong to a walk that is forwarding that copy right now, which another must not forward a
-// second time, and a claim older than it belongs to a walk whose context has ended, so the copy it
-// claimed is free for the next one to forward. A walk that ends on a forward it could not make
-// does not wait this out: it releases its claim (roleKeepLaneCursor.release).
-//
-// The age is one listener's clock against the time the stream stored the cursor, which is the
-// server's: this window assumes the two are within a minute of each other, which a deployment
-// whose hosts run NTP holds to by orders of magnitude. A listener an hour out of step drops every
-// copy as past roleKeepWindow anyway, and a clock that runs ahead costs one live claim taken over
-// early - the duplicate the design already accepts - so no walk spends a round trip on the
-// stream's own time.
-const roleKeepClaimWindow = roleKeepDrainWindow
+// the walks of the other listeners of the deployment, and against the handover Dispatch's outbox
+// makes behind a keep of its own: both judge a claim by the one rule
+// (bus.KeptRoleCursor.ClaimOutstanding). It is this package's name for bus.KeptRoleClaimWindow,
+// whose doc says what the window buys, what it assumes of the two clocks it compares, and why it
+// is the whole of a walk's life (roleKeepDrainWindow).
+const roleKeepClaimWindow = bus.KeptRoleClaimWindow
 
 // roleKeepDrainRetryPause is how long a handover waits before its next walk when the one before it
 // failed: a read, a cursor write or a forward that did not answer. It is short because the copies
@@ -128,21 +125,6 @@ const roleKeptDeliveryStatus = "kept"
 // when the copy could not be kept, beside the answer each gives when nothing was kept.
 const roleKeepFailedLine = "listener kept role message publish failed"
 
-// roleKeepCursor is the body of a role's drain cursor: the two numbers that say how far that
-// role's kept lane has been drained. Kept is the stream sequence on the role's kept subject the
-// lane is finished with - every copy up to it was forwarded, dropped as expired or passed over -
-// and the walk starts at the copy after it. Claiming is a copy one walk has claimed and not yet
-// confirmed delivered, 0 when none is outstanding: a walk writes it before it forwards that
-// copy and clears it with the same write that moves Kept past the copy, so a walk that ends
-// between the two leaves Kept short of the copy and the next walk reads that copy again. A claim
-// is also the lane's lock until it is older than roleKeepClaimWindow, whose doc says what that
-// buys. It is the listener's own small body rather than an envelope, published with
-// bus.Client.PublishCursorAt.
-type roleKeepCursor struct {
-	Kept     uint64 `json:"kept"`
-	Claiming uint64 `json:"claiming"`
-}
-
 // roleKeepLaneCursor is one walk's hold on a role's drain cursor: everything each write of it
 // needs - the role, the holder the walk forwards to, the cursor's subject - and the sequence the
 // next compare-and-swap must name, which every write keeps itself. A walk writes the cursor three
@@ -165,7 +147,7 @@ type roleKeepLaneCursor struct {
 // owns this role's lane now, which is nothing wrong, so it is logged at debug here and ends the
 // walk as roleKeepLaneBusy where the write is read (roleKeepWriteFailed). Every other failure is
 // the error it is, and neither moves the sequence this hold names next.
-func (c *roleKeepLaneCursor) write(ctx context.Context, cursor roleKeepCursor) error {
+func (c *roleKeepLaneCursor) write(ctx context.Context, cursor bus.KeptRoleCursor) error {
 	body, err := json.Marshal(cursor)
 	if err != nil {
 		return fmt.Errorf("encode role %s's kept-lane cursor at %d: %w", c.role, cursor.Kept, err)
@@ -190,7 +172,7 @@ func (c *roleKeepLaneCursor) write(ctx context.Context, cursor roleKeepCursor) e
 // answers nobody: a release the cursor refused or failed leaves a claim the next walk takes over
 // once roleKeepClaimWindow has passed, so it is logged at debug and changes nothing the walk says.
 func (c *roleKeepLaneCursor) release(ctx context.Context, kept uint64) {
-	if err := c.write(ctx, roleKeepCursor{Kept: kept}); err != nil {
+	if err := c.write(ctx, bus.KeptRoleCursor{Kept: kept}); err != nil {
 		c.cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain could not release its claim",
 			slog.String("role", c.role),
 			slog.String("session_id", c.holder),
@@ -622,7 +604,7 @@ type keptLaneHead struct {
 	// whose cursor has never been written.
 	cursorSeq uint64
 	// cursor is the drain cursor's body, its zero value for a lane that has never been drained.
-	cursor roleKeepCursor
+	cursor bus.KeptRoleCursor
 	// written is the time the stream stored the cursor, which is how old the claim it carries
 	// is; the zero time when there is no cursor.
 	written time.Time
@@ -640,6 +622,10 @@ type keptLaneHead struct {
 // on. A lane the cursor has already been advanced past ends on the second read, as a
 // cursor-first read would. A role whose lane has never been drained holds no cursor, and comes
 // back the zero keptLaneHead its fields describe.
+//
+// The cursor is read through bus.Client.ReadKeptRoleCursor, which Dispatch's outbox reads it
+// through as well (internal/dispatch/outbox/role.go, keptCopyLeadsTheLane), so the two writers
+// of a role's kept lane decode one body one way and neither carries a second copy of it.
 func readKeptLaneHead(ctx context.Context, client *bus.Client, role string) (keptLaneHead, error) {
 	last, err := client.LastStoredMessage(ctx, bus.KeptRoleSubject(role))
 	if errors.Is(err, nats.ErrMsgNotFound) {
@@ -648,20 +634,17 @@ func readKeptLaneHead(ctx context.Context, client *bus.Client, role string) (kep
 	if err != nil {
 		return keptLaneHead{}, fmt.Errorf("read role %s's kept lane: %w", role, err)
 	}
-	head := keptLaneHead{last: last.Sequence}
-	stored, err := client.LastStoredMessage(ctx, bus.KeptRoleCursorSubject(role))
-	if err != nil && !errors.Is(err, nats.ErrMsgNotFound) {
-		return keptLaneHead{}, fmt.Errorf("read role %s's kept-lane cursor: %w", role, err)
+	stored, err := client.ReadKeptRoleCursor(ctx, role)
+	if err != nil {
+		return keptLaneHead{}, err
 	}
-	if err == nil {
-		if err := json.Unmarshal(stored.Data, &head.cursor); err != nil {
-			return keptLaneHead{}, fmt.Errorf("read role %s's kept-lane cursor stored at %d: %w", role, stored.Sequence, err)
-		}
-		head.cursorSeq = stored.Sequence
-		head.written = stored.Time
-	}
-	head.left = head.cursor.Kept < head.last
-	return head, nil
+	return keptLaneHead{
+		last:      last.Sequence,
+		cursorSeq: stored.Sequence,
+		cursor:    stored.Cursor,
+		written:   stored.Written,
+		left:      stored.Cursor.Kept < last.Sequence,
+	}, nil
 }
 
 // walkKeptRole is one walk of role's kept lane for holder. It walks the copies stored after the
@@ -724,10 +707,11 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 	defer cancel()
 
 	// A copy another walk holds a claim of is that walk's to forward, so this one leaves the
-	// lane to it rather than forwarding the copy a second time; the claim is read only here,
-	// where it can be judged against the walk that wrote it, so now is asked for once per copy
-	// in the walk below and once more only while a claim is outstanding.
-	if head.cursor.Claiming != 0 && now().Sub(head.written) < roleKeepClaimWindow {
+	// lane to it rather than forwarding the copy a second time; the claim is judged by the rule
+	// both writers of a kept lane judge one by (bus.KeptRoleCursor.ClaimOutstanding), which
+	// reads the clock only while a claim is named, so now is asked for once per copy in the walk
+	// below and once more only while a claim is outstanding.
+	if head.cursor.ClaimOutstanding(head.written, now) {
 		cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain left the lane to the drain holding a claim",
 			slog.String("role", role),
 			slog.String("session_id", holder),
@@ -769,7 +753,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 		}
 		item, report, forwardable := judgeKeptRoleCopy(cfg, role, holder, entry, stored, now, seen)
 		if !forwardable {
-			if err := lane.write(ctx, roleKeepCursor{Kept: stored.Sequence}); err != nil {
+			if err := lane.write(ctx, bus.KeptRoleCursor{Kept: stored.Sequence}); err != nil {
 				result.end, err = roleKeepWriteFailed(err)
 				return result, err
 			}
@@ -778,7 +762,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 			report()
 			continue
 		}
-		if err := lane.write(ctx, roleKeepCursor{Kept: kept, Claiming: stored.Sequence}); err != nil {
+		if err := lane.write(ctx, bus.KeptRoleCursor{Kept: kept, Claiming: stored.Sequence}); err != nil {
 			result.end, err = roleKeepWriteFailed(err)
 			return result, err
 		}
@@ -809,7 +793,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 			result.end = roleKeepDrainFailed
 			return result, fmt.Errorf("forward role %s's kept message %s to %s: %w", role, item.EventID, holder, forwarded)
 		}
-		if err := lane.write(ctx, roleKeepCursor{Kept: stored.Sequence}); err != nil {
+		if err := lane.write(ctx, bus.KeptRoleCursor{Kept: stored.Sequence}); err != nil {
 			result.unconfirmed = true
 			result.end, err = roleKeepWriteFailed(err)
 			return result, err

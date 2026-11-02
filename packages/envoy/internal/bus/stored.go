@@ -63,6 +63,97 @@ func (c *Client) LastStoredMessage(ctx context.Context, subject string) (StoredM
 	}{LastFor: subject})
 }
 
+// KeptRoleClaimWindow is how long one walk's claim of a kept copy holds that role's kept lane
+// against every other writer of the lane (KeptRoleCursor.Claiming, KeptRoleCursor.ClaimOutstanding):
+// the walks of the other listeners of the deployment, and the handover Dispatch's outbox makes
+// behind a keep of its own (internal/dispatch/outbox/role.go, keptCopyLeadsTheLane). A claim
+// younger than it may still belong to a walk that is forwarding that copy right now, which
+// nothing else must forward a second time, and a claim older than it belongs to a walk whose
+// context has ended, so the copy it claimed is free for the next walk to forward.
+//
+// It lives here, in the one package both writers of a kept lane import, because two durations
+// meant to be equal are how two writers of a lane drift apart. The listener bounds one walk of a
+// lane by it too (cmd/listener/role_keep.go, roleKeepDrainWindow): a walk must not outlive its
+// own claim, or a second walk would take a copy over while this one is still forwarding it, and a
+// claim must not outlive the walk that wrote it, or a lane would stay held longer than the work
+// behind the claim.
+//
+// The age is one process's clock against the time the stream stored the cursor, which is the
+// server's: this window assumes the two are within a minute of each other, which a deployment
+// whose hosts run NTP holds to by orders of magnitude. A listener an hour out of step drops every
+// copy as past its own keep window anyway, and a clock that runs ahead costs one live claim taken
+// over early - the duplicate the design already accepts - so no reader spends a round trip on the
+// stream's own time.
+const KeptRoleClaimWindow = 60 * time.Second
+
+// KeptRoleCursor is the body of a role's drain cursor (KeptRoleCursorSubject): the two numbers
+// that say how far that role's kept lane has been drained. Kept is the stream sequence on the
+// role's kept subject the lane is finished with - every copy up to it was forwarded, dropped as
+// expired or passed over - and a walk starts at the copy after it. Claiming is a copy one walk
+// has claimed and not yet confirmed delivered, 0 when none is outstanding: a walk writes it
+// before it forwards that copy and clears it with the same write that moves Kept past the copy,
+// so a walk that ends between the two leaves Kept short of the copy and the next walk reads that
+// copy again. A claim is also the lane's lock while it is outstanding (ClaimOutstanding).
+//
+// The listener's drain is its only writer, which writes it with Client.PublishCursorAt as this
+// small body rather than an envelope (cmd/listener/role_keep.go, roleKeepLaneCursor). It lives
+// here because Dispatch's outbox reads it as well, to tell whether the copy it has just kept is
+// the one that lane's drain would hand over next (internal/dispatch/outbox/role.go,
+// keptCopyLeadsTheLane): a body each package spelled out for itself would decode a drifted tag as
+// zero, which reads as a lane drained to its start and leads every handover astray.
+type KeptRoleCursor struct {
+	Kept     uint64 `json:"kept"`
+	Claiming uint64 `json:"claiming"`
+}
+
+// ClaimOutstanding reports whether the copy this cursor claims is still one walk's to forward: a
+// claim is outstanding while it names a copy and is younger than KeptRoleClaimWindow. written is
+// the time the stream stored the cursor, which is how old the claim it carries is.
+//
+// now is the reader's clock rather than a time already read, and it is called only while a claim
+// is named at all: the listener's walk reads its clock once per copy it judges and once more for
+// the claim it found, which a lane nothing claims must not be charged for (walkKeptRole).
+func (c KeptRoleCursor) ClaimOutstanding(written time.Time, now func() time.Time) bool {
+	return c.Claiming != 0 && now().Sub(written) < KeptRoleClaimWindow
+}
+
+// StoredKeptRoleCursor is a role's drain cursor as the stream holds it (Client.ReadKeptRoleCursor).
+type StoredKeptRoleCursor struct {
+	// Cursor is the cursor's body, its zero value for a lane that has never been drained.
+	Cursor KeptRoleCursor
+	// Sequence is the stream sequence of the cursor message itself, which the next
+	// compare-and-swap write of the cursor must name (Client.PublishCursorAt); 0 for a lane
+	// whose cursor has never been written.
+	Sequence uint64
+	// Written is the time the stream stored the cursor, which is how old the claim it carries is
+	// (KeptRoleCursor.ClaimOutstanding); the zero time when there is no cursor.
+	Written time.Time
+}
+
+// ReadKeptRoleCursor reads role's drain cursor: the one read of it both writers of that role's
+// kept lane make - the listener's pass over the lane (cmd/listener/role_keep.go,
+// readKeptLaneHead) and the handover behind Dispatch's outbox's own keep
+// (internal/dispatch/outbox/role.go, keptCopyLeadsTheLane) - so that the two decode one body one
+// way. A lane no walk has written a cursor for is no error but the zero StoredKeptRoleCursor its
+// fields describe: every copy on such a lane is past its cursor.
+//
+// Its errors are LastStoredMessage's, named with the role and wrapped, and a cursor body no read
+// can decode is one of them.
+func (c *Client) ReadKeptRoleCursor(ctx context.Context, role string) (StoredKeptRoleCursor, error) {
+	stored, err := c.LastStoredMessage(ctx, KeptRoleCursorSubject(role))
+	if errors.Is(err, nats.ErrMsgNotFound) {
+		return StoredKeptRoleCursor{}, nil
+	}
+	if err != nil {
+		return StoredKeptRoleCursor{}, fmt.Errorf("read role %s's kept-lane cursor: %w", role, err)
+	}
+	read := StoredKeptRoleCursor{Sequence: stored.Sequence, Written: stored.Time}
+	if err := json.Unmarshal(stored.Data, &read.Cursor); err != nil {
+		return StoredKeptRoleCursor{}, fmt.Errorf("read role %s's kept-lane cursor stored at %d: %w", role, stored.Sequence, err)
+	}
+	return read, nil
+}
+
 // KeptRoleLanes reports the role of every kept lane the notification stream still holds a copy on
 // (KeptRoleSubject), sorted, so each is read once and two passes over an unchanged stream read the
 // same list. It is the listener's backstop over the lanes nobody is draining: a role whose kept

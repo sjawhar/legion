@@ -581,6 +581,80 @@ func TestACopyKeptForARoleClaimedUnderTheKeepWaitsBehindTheCopiesOnItsLane(t *te
 	}
 }
 
+// Two events of one issue kept in one batch, with the role claimed under the first of the two
+// keeps, both reach that holder in that scan and in their own order. A keep is keyed on the
+// role's topic, no holder being known when the batch planned its chains, so the keeps of one role
+// sit on one chain and are sent in turn, and the handover behind each of them is what carries its
+// copy to the session that claimed the role meanwhile (handOverKept).
+//
+// The first handover forwards its copy and writes no cursor - the lane and its cursor stay the
+// listener's - so that copy is still the first on the lane past the cursor when the second keep
+// lands. What tells the second handover that the copy in front of it is one this batch has
+// already delivered is the batch's own record of its handovers (keptHandovers), read beside the
+// cursor: without it the second copy declines, no drain follows (the claimant's own drain read
+// the lane before either copy was on it and ended), and the holder takes the issue's later events
+// straight from the batches after this one while this copy waits for the listener's sweep.
+//
+// Nothing sweeps and nothing drains here - no listener runs in this test - so the two handovers
+// are the only way either copy can reach the holder.
+func TestTwoCopiesKeptForOneRoleClaimedUnderTheFirstKeepReachTheHolderInOrder(t *testing.T) {
+	rig := newRoleRig(t)
+	const role, holder = "kept-twice-under-one-claim", "ses_claimed_under_the_first_keep"
+	const key = "T-1"
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	recv := rig.receiver(t, holder, true)
+	first := rig.routedEvent(t, key, role, model.Actor{Kind: "user", ID: "alice"})
+	second := appendEvent(t, rig.database, rig.broker, model.Event{
+		IssueKey: new(key), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: "b7d3c6a1-0f52-4a39-8e77-9c4215db60fa", IssueKey: new(key), Body: "the issue's second event"},
+	})
+	claimed := make(chan error, 1)
+	publisher := claimedUnderTheKeep(rig.client, func() {
+		claimed <- rig.claimUnder(role, holder, session.SessionEntry{SelfSubscribed: true})
+	})
+
+	started := time.Now()
+	holding(t, rig.publisherOn(publisher)).scan(context.Background(), unfenced{})
+	scanned := time.Since(started)
+
+	if err := <-claimed; err != nil {
+		t.Fatalf("the claim made under the first keep: %v", err)
+	}
+	firstKey, secondKey := fmt.Sprintf("dispatch-%d", first.ID), fmt.Sprintf("dispatch-%d", second.ID)
+	for _, event := range []struct {
+		id  int64
+		key string
+	}{{first.ID, firstKey}, {second.ID, secondKey}} {
+		if publishedAt(t, rig.database, event.id) == nil {
+			attempts, failure, _ := eventState(t, rig.database, event.id)
+			t.Fatalf("%s was not published: attempt_count %d, publish_error %v", event.key, attempts, failure)
+		}
+	}
+	received := recv.received()
+	if len(received) != 2 || received[0].EventID != firstKey || received[1].EventID != secondKey {
+		t.Fatalf("the holder received %d forwards (%v) in the scan that kept both copies, want %s and then %s: the second copy is the one the batch's own handover record frees",
+			len(received), eventIDs(received), firstKey, secondKey)
+	}
+	// Both copies stay on the lane, each with no kept_at of its own: the cursor and the drain
+	// remain the authority for a holder that claims later, which is why the record of what this
+	// batch handed over is the batch's and not the lane's.
+	if copies := keptCopies(t, rig.client, role); len(copies) != 2 || copies[0].EventID != firstKey || copies[1].EventID != secondKey {
+		t.Fatalf("role %s's kept lane holds %v, want %s before %s, both left where the drain would read them",
+			role, eventIDs(copies), firstKey, secondKey)
+	}
+	subject := contracts.AgentSubject(holder)
+	stored := storedMsgIDs(t, rig.conn, subject)
+	forwards := []string{
+		bus.ForwardMsgID(contracts.RoleForwardDedupePrefix+firstKey, subject),
+		bus.ForwardMsgID(contracts.RoleForwardDedupePrefix+secondKey, subject),
+	}
+	if !slices.Equal(stored, forwards) {
+		t.Fatalf("the stream holds %v on %s, want both handovers under the ids the drain's own forwards of them would carry: %v",
+			stored, subject, forwards)
+	}
+	t.Logf("the holder had both copies of the issue when the scan that kept them returned, %s after it began; nothing drained the lane and nothing swept it.", scanned)
+}
+
 // eventIDs is the event id of each envelope, for a failure that reports what a holder received.
 func eventIDs(received []contracts.Envelope) []string {
 	ids := make([]string, 0, len(received))
