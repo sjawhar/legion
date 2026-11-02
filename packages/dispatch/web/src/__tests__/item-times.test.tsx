@@ -7,9 +7,9 @@ import { MemoryRouter } from "react-router-dom";
 import { api } from "../api/client";
 import type { Ask, AskRead, Comment, IssueClaim, Message, MessageRead } from "../api/types";
 import { ConversationTab } from "../features/conversation/ConversationTab";
-import { ReplyTurn } from "../features/conversation/ReplyTurn";
 import { AskCard } from "../features/inbox/AskCard";
 import { ClaimChip } from "../features/issue/ClaimChip";
+import { PinnedTab } from "../features/margin/PinnedTab";
 import { ThreadCard } from "../features/margin/ThreadCard";
 import { KeymapProvider } from "../features/shell/KeymapProvider";
 import { commentDeliveryFields } from "./comment-fixture";
@@ -266,19 +266,27 @@ test("an answered ask's asked and answered times both link to the ask", async ()
   }
 });
 
-test("a reply with no address of its own, such as a direct message's, shows a plain time", () => {
+test("a pinned conversation's time in the margin links to the conversation", () => {
   const view = renderWith(
-    <ol>
-      <ReplyTurn
-        at={messageReplyAt}
-        author={{ id: "alice", kind: "user" }}
-        body="A direct reply"
-        turnID="message:direct-1"
-      />
-    </ol>
+    <PinnedTab
+      conversations={[
+        {
+          at: askedAt,
+          author: { id: "alice", kind: "user" },
+          body: "Which option should ship?",
+          id: "ask:ask-1",
+          kind: "ask",
+        },
+      ]}
+      events={[]}
+      issueKey="CORE-1"
+      onUnpin={() => {}}
+      onUnpinConversation={() => {}}
+      pinnedIds={["ask:ask-1"]}
+    />
   );
   try {
-    expect(linkOfTime(messageReplyAt)).toBeNull();
+    expect(linkOfTime(askedAt)).toBe("/issues/CORE-1/asks/ask-1");
   } finally {
     view.unmount();
   }

@@ -145,7 +145,8 @@ opens the document.
 
 The time shown on a comment, a reply, a message, an ask, and an answer, such as **5 minutes ago**,
 is a link to that item, as a comment's time is on GitHub. It is a link wherever the item is shown:
-an issue's Conversation tab, the Inbox, a document's margin, a decision block, and the Agents page.
+an issue's Conversation tab, the Inbox, a document's margin and its Pinned tab, a decision block,
+and the Agents page.
 
 - Choose the time to go to the item. Dispatch scrolls to it, highlights it, and puts its address in
   the address bar. A comment or question beside a document, or a decision block, opens on that

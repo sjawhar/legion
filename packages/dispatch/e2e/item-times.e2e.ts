@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { createComment, createIssue, createMessage, createProject } from "./api";
+import { createComment, createIssue, createMessage, createProject, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -65,6 +65,13 @@ test("a reply's time puts the reply's address in the address bar and marks it, o
   }
 });
 
+const decisionSpec = [
+  "# Instruments",
+  ...Array.from({ length: 30 }, (_, index) => `Paragraph ${index}.`),
+  "The astrolabe measures altitude.",
+  ":::ask{#mirror}\nWhich mirror is out of true?\n\n- [ ] Horizon\n- [ ] Index\n:::",
+].join("\n\n");
+
 // On a document the times of the threads beside it and of its decision blocks keep the reader on
 // the document: each lands on the document's own address for that item, which is where the
 // item's own address redirects, and the document is never opened again on the way.
@@ -72,13 +79,11 @@ test("a margin comment's time and a decision block's time keep the reader on the
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const spec = [
-    "# Instruments",
-    ...Array.from({ length: 30 }, (_, index) => `Paragraph ${index}.`),
-    "The astrolabe measures altitude.",
-    ":::ask{#mirror}\nWhich mirror is out of true?\n\n- [ ] Horizon\n- [ ] Index\n:::",
-  ].join("\n\n");
-  const issue = await createIssue({ project: "CORE", spec, title: "Astrolabe calibration" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: decisionSpec,
+    title: "Astrolabe calibration",
+  });
   const comment = await createComment(issue.key, {
     anchor: { artifact: "spec", quote: "astrolabe" },
     body: "Calibrate it against the horizon.",
@@ -91,8 +96,10 @@ test("a margin comment's time and a decision block's time keep the reader on the
     const doc = page.locator(".dispatch-doc").first();
     await expect(doc.getByText("The astrolabe measures altitude.")).toBeVisible();
 
+    // The time shows once the card is open; opening it leaves the address as it was.
     const card = page.locator(`article[data-margin-item="${comment.id}"]`);
     await card.click();
+    await expect(page).toHaveURL(`/issues/${issue.key}/spec`);
     const commentTime = card.getByRole("link").filter({ has: page.locator("time") });
     await expect(commentTime).toHaveAttribute(
       "href",
@@ -106,12 +113,51 @@ test("a margin comment's time and a decision block's time keep the reader on the
     await expect(card).toHaveAttribute("aria-current", "true");
     await expect(doc).toHaveAttribute("data-e2e-before-click", "");
 
-    const askTime = doc.getByRole("link").filter({ has: page.locator("time") });
+    // From an address that carries a query, the block's own time still highlights the block.
+    const block = doc.locator('[data-block-id="mirror"]');
+    await expect(block.locator(".dispatch-mark-pulse")).toHaveCount(0);
+    const askTime = block.getByRole("link").filter({ has: page.locator("time") });
     await expect(askTime).toHaveAttribute("href", new RegExp(`^/issues/${issue.key}/asks/`));
     await askTime.click();
     await expect(page).toHaveURL(`/issues/${issue.key}/spec#b-mirror`);
+    await expect(doc.locator('[data-block-id="mirror"].dispatch-mark-pulse')).toHaveCount(1);
     await expect(doc).toHaveAttribute("data-e2e-before-click", "");
     await expect(page.getByText("Loading issue…")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+// A closed issue's document is read-only, and its editor opens a link in its text in a new tab
+// itself. A decision block's time is the page's to follow: the reader stays in this tab.
+test("a decision block's time in a read-only document stays in the tab", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: decisionSpec,
+    title: "Astrolabe calibration",
+  });
+  await patchIssue(issue.key, { status: "done" });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    const doc = page.locator(".dispatch-doc").first();
+    await expect(doc.getByText("The astrolabe measures altitude.")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Document editor" })).toHaveAttribute(
+      "contenteditable",
+      "false"
+    );
+    const askTime = doc
+      .locator('[data-block-id="mirror"]')
+      .getByRole("link")
+      .filter({ has: page.locator("time") });
+    await expect(askTime).toHaveAttribute("href", new RegExp(`^/issues/${issue.key}/asks/`));
+    await askTime.click();
+    await expect(page).toHaveURL(`/issues/${issue.key}/spec#b-mirror`);
+    await expect(doc.locator('[data-block-id="mirror"].dispatch-mark-pulse')).toHaveCount(1);
+    expect(context.pages()).toHaveLength(1);
   } finally {
     await context.close();
   }
