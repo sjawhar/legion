@@ -96,7 +96,7 @@ func lateClosed(head string, at time.Time) intake.Fact {
 // request's updated_at, so one older than the newest applied is a late redelivery and changes
 // nothing: it neither moves the head back nor reopens or closes the pull request against a newer
 // close or reopen. The decision belongs to the reviewer round, rather than the pull request,
-// because the reviewer's handoff push itself moves the head; lifecycle observations leave it until
+// because a push after the review moves the head; lifecycle observations leave it until
 // the round ends. An event at the same clock applies (GitHub's clock is to the second, so two real
 // events can share one), and so does one that carries no clock.
 func TestALatePullRequestEventChangesNothing(t *testing.T) {

@@ -218,7 +218,7 @@ func TestAnAgentsArtifactLookupsReadTheSessionIndex(t *testing.T) {
 	}
 
 	for _, lookup := range []struct{ statement, query, second string }{
-		{"agent_artifact_by_name", agentArtifactByNameSQL, "shot.png"},
+		{"agent_artifact_by_name_or_slug", agentArtifactByNameOrSlugSQL, "shot.png"},
 		{"agent_artifact_slug_taken", agentArtifactSlugTakenSQL, "shot-png"},
 	} {
 		if custom := explain(lookup.query, agentSession, lookup.second); !planReadsIndex(t, custom, "artifacts_session_id") {

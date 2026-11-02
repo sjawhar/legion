@@ -17,8 +17,8 @@ import (
 )
 
 // readSettlement is the required-checks pass's read of the check runs on the head of pr, an open
-// pull request no CI settlement stands for (classify.Settled), at the head its settlement would be
-// of (classify.WorkflowHead). Envoy's listener settles a head from its check_run webhooks, and a
+// pull request no CI settlement stands for (classify.Settled). Envoy's listener settles a head
+// from its check_run webhooks, and a
 // delivery it lost, a run GitHub sent with no pull request named (which the listener never
 // records), or a record it marked overflowed leaves the head with no settlement and the issue with
 // no CI verdict. The read is one request per hundred runs, and only while no settlement stands.
@@ -39,7 +39,7 @@ func (w *workflowRuntime) readSettlement(ctx, read context.Context, github githu
 	if classify.Settled(pr) {
 		return false
 	}
-	head := classify.WorkflowHead(pr)
+	head := pr.HeadSHA
 	runs, err := github.CheckRuns(read, head)
 	if err != nil {
 		if ctx.Err() != nil {

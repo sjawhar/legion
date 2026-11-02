@@ -22,8 +22,8 @@ Each admitted issue gets an architect, which writes the spec, splits the work an
 only you can answer. Once you approve the spec, the daemon runs the phase workers in turn: planner,
 implementer, tester, reviewer and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session, in a tmux
 pane on one host or in an [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
-pod on Kubernetes, and each phase commits a handoff under `.legion/` on the issue branch for a
-restarted agent to recover from. The daemon writes the issue's status back to Dispatch as it moves
+pod on Kubernetes, and each phase records a handoff on the issue in Dispatch for the next role,
+and a restarted agent, to read. The daemon writes the issue's status back to Dispatch as it moves
 from Todo through In Progress, Testing, Needs Review and Retro to Done. The architect accepts the
 reviewed change, the merger posts `READY` on the issue and submits the merge, the pull request
 merges under the repository's own rules and closes the issue, and the implementer then checks the
