@@ -70,15 +70,9 @@ type liveOperation struct {
 	// them (liveWrite.forkRead), copied when the fork is read: a later fork read in the same
 	// operation (a joined read's) must not pair this operation's rendering with another read's
 	// counters (publishedRendering).
-	read forkReadMark
-	// wasClocks and wasDeletes are the fork's content clocks and deletes as the operation found
-	// them, which say whether its updates moved the fork at all (forkHeld, applyLive). They are
-	// unset for an operation that never reads them, whose write always moves the fork
-	// (applyMargin).
-	wasClocks  crdt.StateVector
-	wasDeletes *crdt.IDSet
-	updates    [][]byte
-	recorded   bool
+	read     forkReadMark
+	updates  [][]byte
+	recorded bool
 	// panicked is whether the operation's change panicked (change), which abandon releases the
 	// fork for whatever updates holds.
 	panicked bool
@@ -112,23 +106,21 @@ func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liv
 // abandon, deferred once the operation is open, undoes what an operation that changed the fork but
 // does not reach its record leaves on its write: the fork holds changes its transaction never
 // recorded, so it goes, and the next operation builds it again on the state the transaction's read
-// found (forkLive). An operation whose updates left the fork as it was (wasClocks, wasDeletes)
-// changed nothing, so the fork stays as the next operation's; so does one that read neither,
-// which always moves the fork (applyMargin). One whose change panicked is never kept on the
-// strength of its updates holding every change it made: ygo emits a panicking transaction's
-// update, except when its phase 2 fails before handing the update on (buildPhase2, or a type
-// observer it fires first), which leaves the fork holding a change no update carries, so such a
-// fork has moved and goes, and the rendering a joined read would take of it (liveWrite.rendering)
-// goes with it, neither of them describing what the transaction records.
+// found (forkLive). An operation that made no update and did not panic changed nothing, since ygo
+// emits an update only for a transaction that changes the document, so the fork stays as the next
+// operation's. One whose change panicked always goes: ygo emits a panicking transaction's update,
+// except when its phase 2 fails before handing the update on (buildPhase2, or a type observer it
+// fires first), which leaves the fork holding a change no update carries, so its updates cannot
+// say what it left. The rendering a joined read would take of the fork (liveWrite.rendering) goes
+// with it, neither of them describing what the transaction records; a panicked change that left
+// the fork as it was costs only that rebuild.
 func (op *liveOperation) abandon() {
 	if !op.panicked && (op.recorded || len(op.updates) == 0) {
 		return
 	}
-	if op.wasDeletes == nil || !forkHeld(op.wasClocks, op.wasDeletes, op.fork) {
-		// The rendering describes that fork, so it goes with it (releaseFork), which covers an
-		// operation that recorded the rendering and then failed to version.
-		op.write.releaseFork()
-	}
+	// The rendering describes that fork, so it goes with it (releaseFork), which covers an
+	// operation that recorded the rendering and then failed to version.
+	op.write.releaseFork()
 	// A stamp this failed operation ran (stampAskBlockIDs, registerStampedAskBlocks) staged its
 	// renamed ids and any carried-forward authors on these before refusal - a later operation of
 	// the same transaction must not inherit them as its own.
@@ -241,9 +233,8 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that
 // does not commit never reaches the room, a browser or a version's authors. It returns
 // websocket.ErrNoChanges, as the room's Apply does for a write that wrote nothing, when mutate
-// left the fork as it was, even through a transaction: ygo hands the fork's observers an update
-// for every transaction, one that changes nothing included. It returns ErrServiceUnavailable when
-// the room its slot is on failed before its append.
+// left the fork as it was: ygo emits an update only for a transaction that changes the document.
+// It returns ErrServiceUnavailable when the room its slot is on failed before its append.
 //
 // mutate is handed the fork and current, the fork's tree as the operation starts, which applyLive
 // reads anyway to weigh the write against: every mutate starts from it (startTree, editTree) rather
@@ -307,26 +298,17 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		}
 		return startErr
 	}
-	// What says the write changed the fork is the fork itself, read on either side of mutate: its
-	// state vector and its delete set, since a deletion advances no clock (forkHeld). The updates
-	// the fork emits cannot say it, for they include one for a transaction that changes nothing.
-	// They say it for an operation that fails too, which keeps a fork it left as it was (abandon).
-	// applyMargin reads neither: a marks-map Set always adds an item, so its write always moves the
-	// fork, and the two whole-store walks would buy it nothing.
-	op.wasClocks, op.wasDeletes = fork.StateVector(), crdt.DeleteSetFromDoc(fork)
+	// What says the write changed the fork is its updates: ygo emits one only for a transaction
+	// that adds or deletes something.
 	margin, mutateErr := op.change(func() error {
 		return mutate(fork, before, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
 	})
 	if mutateErr != nil {
 		return joinedSchemaError(mutateErr, start)
 	}
-	// A write whose transactions changed nothing writes nothing. Appended, its empty update would
-	// refresh the anchors and mark the document owing a settlement again (markUpdateOwed), which
-	// every repair pass over a closed issue would then sweep. Its updates are dropped, so the fork,
-	// which it left as it was, is kept.
-	if len(op.updates) > 0 && forkHeld(op.wasClocks, op.wasDeletes, fork) {
-		op.updates = nil
-	}
+	// A write whose transactions changed nothing made no update and writes nothing. Appended, an
+	// empty update would refresh the anchors and mark the document owing a settlement again
+	// (markUpdateOwed), which every repair pass over a closed issue would then sweep.
 	if len(op.updates) == 0 {
 		return websocket.ErrNoChanges
 	}

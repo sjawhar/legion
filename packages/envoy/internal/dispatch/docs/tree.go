@@ -227,25 +227,25 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 // it stands, read inside that transaction, which holds the document's lock, and reports whether it
 // changed the tree; only a changed tree is written. A repair computed on a tree read before the
 // transaction and written back would revert whatever another writer wrote after that read
-// (LEGION-479). It returns the tree as the transaction left it and whether edit changed it.
-func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, bool, error) {
+// (LEGION-479). It returns the tree as the transaction left it; whether the transaction changed the
+// document is the update ygo emits for it, or its absence.
+func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, error) {
 	fragment := doc.GetXmlFragment(fragmentName)
 	var live *pmdoc.Node
-	changed := false
 	err := doc.TransactE(func(transaction *crdt.Transaction) error {
 		var readErr error
 		if live, readErr = treeOfTransaction(transaction, fragment); readErr != nil {
 			return readErr
 		}
-		if changed = edit(live); !changed {
+		if !edit(live) {
 			return nil
 		}
 		return pmdoc.Update(transaction, fragment, live)
 	}, origin)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return live, changed, nil
+	return live, nil
 }
 
 func renderTree(tree *pmdoc.Node) (string, error) {
@@ -369,9 +369,9 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // to the live document instead took in every commit since the last one rendered: a published
 // write's observer that ran first counted a browser's edit in its own change, which credits no
 // one, and the browser's own observer then found nothing changed and credited no one either. The
-// update an observer is handed cannot stand in for the log: each update carries the room's whole
-// delete set, so the later update applied first deletes what the earlier one replaced while its
-// own insertions wait for the earlier one's - a tree no transaction left.
+// update an observer is handed cannot stand in for the log: the later of two updates applied first
+// deletes what its transaction deleted while its own insertions wait for the earlier one's - a
+// tree no transaction left.
 //
 // The observer renders the replica after an update only when it can neither know the update is a
 // margin write's publish into the room its fork was warm-built from (liveWriteOrigin.marginOnly
@@ -382,11 +382,10 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // read copied (readPoint): a replica still at both has consumed, through that read, every commit
 // the fork was read from, and since then only published live writes' commits, which under the
 // writer slot are this write's earlier updates, which the fork holds too - so the replica after
-// the update is the fork after the operation, and rendering is deterministic over one state. ygo
-// puts the
-// room's whole delete set in every update, so an update means that only on the room instance the
-// fork was read from: a cold fork, read from the store, records no rendering, and a room reloaded
-// since the read has a replica of its own at another epoch. An update already in the room
+// the update is the fork after the operation, and rendering is deterministic over one state. That
+// holds only on the room instance the fork was read from: a cold fork, read from the store, holds
+// what the room may not and records no rendering, and a room reloaded since the read has a replica
+// of its own at another epoch. An update already in the room
 // (liveWriteOrigin.inRoom) has a version at or below the head its room instance's load folded
 // (roomInstance.loadedHead), so the loaded document held it, and the replica, which starts from the
 // room as of its first logged commit, holds the load: applying it changed nothing. Nothing makes
@@ -789,8 +788,8 @@ func listResident(listing *sync.Map, live *crdt.Doc, value any) {
 // never waits for that lock: the update observer takes it for each peer update before ygo
 // broadcasts the update to the room's other browsers, so a read queued behind it would stall their
 // keystrokes for its walk, and every read queued behind that one too. It opens no transaction on
-// live, since ygo hands the room's persistence an update for every transaction it commits, even one
-// that only reads. The caller must not hold live's document lock - be inside a Yjs transaction on
+// live, which would hold live's document lock, and so every browser's update to the room, for the
+// whole walk. The caller must not hold live's document lock - be inside a Yjs transaction on
 // it - since the copy encodes under that lock, and read must not keep doc past its return.
 func (s *Service) readLive(room string, live *crdt.Doc, read func(doc *crdt.Doc)) error {
 	doc, release, err := s.holdLive(room, live)

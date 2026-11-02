@@ -611,10 +611,9 @@ func TestStoredOrderRemeasuredClassMovesCreditAndSettlement(t *testing.T) {
 
 // soakTyping is typeIntoDocument's peer - a paragraph inserted at the start, a word typed into it,
 // the paragraph deleted, each its own update, a random time up to gap apart, kept within keepUp's
-// lead of the room - that sends nothing while paused is set. Each update ygo encodes carries the
-// document's whole delete set, so every stored row costs the check more than the one before it;
-// a soak pauses its peers while it checks, so the rows a round stores do not grow with the time its
-// checks take.
+// lead of the room - that sends nothing while paused is set. Every stored row costs the check
+// more than the one before it, so a soak pauses its peers while it checks, and the rows a round
+// stores do not grow with the time its checks take.
 func soakTyping(t *testing.T, service *Service, serverURL, artifactID string, gap time.Duration, paused *atomic.Bool) {
 	t.Helper()
 	peer := connectPeer(t, serverURL, artifactID, "alice")

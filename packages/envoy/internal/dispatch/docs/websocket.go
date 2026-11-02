@@ -148,9 +148,10 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	// The update's suppression slot is consumed whatever its class says, since slots are taken in
 	// order. The class decides when the observer recorded one: a published write's and a
 	// repair's are queued stored, and a browser update whose bytes match a repair's - a deletion
-	// leaves an update that carries no struct, only the room's delete set, which is what a repair
-	// that wrote nothing leaves as well - takes that repair's slot while its own class is not
-	// stored, and is stored all the same; the repair's own update then finds its class stored.
+	// leaves an update that carries no struct, only its own deletes, so a browser's deletion of
+	// the items a repair deleted leaves the repair's bytes - takes that repair's slot while its own
+	// class is not stored, and is stored all the same; the repair's own update then finds its
+	// class stored.
 	suppressed := a.service.consumeSuppressedPersistence(room, update)
 	if class.stored.Load() || (suppressed && !found) || a.service.roomFailed(room) {
 		return nil

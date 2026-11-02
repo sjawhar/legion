@@ -337,8 +337,8 @@ func (s *Service) queueUpdateClass(room string, update []byte, class documentUpd
 // transaction's observers after the transaction has released the document's lock, so two peers'
 // updates reach persistence in the order their read loops hand them on, which need not be the
 // order the room recorded them in; the order they are stored in is the room's all the same
-// (flushThrough). Two commits that change nothing encode alike, so a class already handed is
-// never taken a second time.
+// (flushThrough). Two commits can encode alike - a browser's deletion and a repair's of the same
+// items - so a class already handed is never taken a second time.
 func (s *Service) consumeUpdateClass(room string, update []byte) (*queuedClass, *roomState, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {

@@ -819,8 +819,7 @@ func TestRenderReuseAServiceCommitAfterTheForkReadIsRendered(t *testing.T) {
 }
 
 // E7. A room evicted and reloaded between the write's fork read and its publish has a replica of
-// its own, at another epoch, so the write's rendering is never taken there, though the write's
-// update, which deletes text, carries the old instance's whole delete set. Reloaded before the
+// its own, at another epoch, so the write's rendering is never taken there. Reloaded before the
 // write's append, the room renders the update; reloaded after its commit, the room's load already
 // holds it - and with a browser's edit the new replica's foreign count is the fork read's, so only
 // the epoch tells the two apart.

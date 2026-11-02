@@ -539,7 +539,12 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 	ctx := context.Background()
-	// A write the room's update observer sees, which makes its replica.
+	// A write the room's update observer sees, which makes its replica. The room is resident first,
+	// so the write forks it and its publish is a commit of the room's: a cold write's publish loads
+	// a room that already holds the write, and a transaction that changes nothing commits nothing.
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatal(err)
+	}
 	if err := joinedProjectMark(service, artifactID, "projection", MarkRecord{
 		Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 	}, model.Actor{Kind: "user", ID: "bob"}); err != nil {

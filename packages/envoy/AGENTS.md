@@ -255,8 +255,7 @@ Each repair is read and written in one Yjs transaction, which holds the document
 the tree settlement reconciled was read before its database work, and writing that tree would revert an edit a peer made since (LEGION-479).
 Each repair's update is held from the room's own persistence by a suppression slot of its own (`applySuppressed`;
 ygo's persistence worker is handed each update on its own), and every path releases it: a slot nothing finishes holds the worker at the room's next update.
-A repair reports whether its transaction wrote anything;
-one that wrote nothing still committed that transaction, and ygo hands the worker an update for it too (the document's delete set), so its slot is finished with that update and the worker takes it rather than storing it.
+A repair whose transaction changed nothing commits no update (ygo calls no update observer for a transaction that changes nothing, `reearth/ygo#350`), so its slot is cancelled, as the slot of a repair that ran no transaction is.
 A settlement that wrote into the room renders its version from the document as it stands after the repairs (`readSettlementTree`, `liveTree`), so a peer's edit made since its read is in that version too.
 A settlement that wrote nothing into the room and repaired nothing in the tree it read versions the rendering it made of that read, offsets included, and renders no second time;
 it renders again when a stamp's tree replaced the read, when it read the document again after a write, or when `reconcileAskBlocks` repaired the read in place (`changedTree`), so nothing but `reconcileAskBlocks` may change that read.
@@ -427,7 +426,7 @@ The version a settlement that writes none leaves the document at is the one it f
 An update that changes only what no rendering carries therefore versions no document by that route:
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's `id` when it opens the document, and each ordered list item's `label` and `listType` on the first keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits the text it covers.
 A margin record changes the marks map alone, never the text, so its transactional write (`applyMargin`) records `false` without rendering the document again, and the room's update observer keeps its rendering for the publish of one whose fork was built from that same room (`liveWriteOrigin.marginOnly`).
-One forked from the store (`coldFork`) can carry deletes the room never took, since ygo encodes an update with its document's whole delete set, so its publish is rendered as any other update is.
+One forked from the store (`coldFork`) was not built from that room, so its publish is rendered as any other update is; the update carries only its own transaction's deletes (`reearth/ygo#350`), so it brings the room the margin record and none of the text the store holds and the room lacks.
 Routes that write a version on request do so whatever changed, so each can write a version whose markdown equals the previous one's and stale an approval pinned to it:
 an upload to an existing document (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`) always inserts one;
 `POST /artifacts/{id}/versions` and accepting a suggestion always name one through `NamedVersion`;
@@ -587,7 +586,7 @@ A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s su
 a room looked up again with `GetDoc` once that Apply returned can have been evicted in between.
 
 The replica's lock is the one a room's browsers wait on.
-The update observer takes it for every peer update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only once the observer has returned (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go`), so a read holding the replica for its walk holds every other browser's copy of the keystroke.
+The update observer takes it for every peer update that changes the document (`renderedReplica.observe`; ygo calls no observer for one that changes nothing), and ygo broadcasts the update to the room's other browsers only once the observer has returned (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go`), so a read holding the replica for its walk holds every other browser's copy of the keystroke.
 A read therefore only tries the lock, and reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads never queue behind each other or ahead of a waiting observer.
 `BenchmarkKeystrokeBesideReads` measures the wait:
 a keystroke's transaction and the observer's whole turn with the replica - the drain of the room's update log, the update applied to the replica and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads.
@@ -712,8 +711,8 @@ It renders the replica for that only when it cannot know the rendering otherwise
 A margin write's publish into the room instance its fork was warm-built from changes no text (`liveWriteOrigin.marginOnly`, the margin record paragraph above), so it is unchanged.
 A published live write's update carries its operation's rendering, taken when the replica still stands at the epoch and foreign-commit count the operation's fork read found before it encoded the room:
 the replica has then consumed nothing since that read but published writes' commits, which under the writer slot are this write's own earlier updates, so after the update it is the fork the write rendered.
-ygo encodes the room's whole delete set in every update, so that holds only on the room instance the fork was read from:
-a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch;
+That holds only on the room instance the fork was read from:
+a cold fork, read from the store, holds what the room may not and carries no rendering, and a reloaded room's replica has a fresh epoch;
 for the same reason a margin write forked cold, or published into a replaced room, is not taken as margin-only.
 And an update whose version is at or below the head the room instance's load folded (`roomInstance.loadedHead`) is already in the replica, which starts from the room as of its first commit, so applying it changes nothing:
 a cold write's publish into the room its own publish loaded is never rendered.
@@ -721,7 +720,7 @@ So every committed update is classified, and its authors credited, exactly once,
 Catching the replica up to the room instead took in every commit since the last one rendered:
 when a published write's observer ran first, it counted a browser's edit in its own change, which credits no one, and the browser's own observer then found nothing changed, so the browser was on no version and in no pending row.
 The update an observer is handed cannot stand in for the log:
-two transactions' observers run concurrently in either order, and each update carries the room's whole delete set.
+two transactions' observers run concurrently in either order, and the later update applied first deletes what its own transaction deleted while its insertions wait for the earlier one's.
 The log records the room's state as of just before its first transaction since the load, which the replica starts from, so a room that is only read holds no replica;
 a replica that cannot apply an update starts again from a fresh base at the room's next commit (`UpdateLog.Reset`), and counts the updates it could not place as content changes.
 A repair's update is applied and rendered like any other, so the update after it is measured against the room it left, but its class is recorded by its own observer.

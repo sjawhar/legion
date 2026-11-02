@@ -418,27 +418,24 @@ var errRoomReplaced = errors.New("document room was replaced")
 
 // applySuppressed writes one repair - settlement's, or the block-id backfill's - into room's live
 // document under a suppression slot of its own: mutate writes at most one transaction, tagged with
-// the origin it is handed, and reports whether that transaction changed the document. The room's
-// persistence worker is handed each transaction's update on its own, so a slot matches exactly
-// one. It returns the slot with the update when the transaction changed the document, and
-// otherwise neither, having released the slot: a slot left queued holds the worker at the room's
-// next update. A repair computed against the document as it stands finds nothing to write when
-// another writer has made it unnecessary since the caller read the document (LEGION-479), and its
-// transaction still reports an update, the document's delete set, which ygo reports for every
-// transaction it commits. The slot is finished with that update, so the worker takes it with the
-// slot rather than storing it. A mutation that ran no transaction leaves nothing to match, and its
-// slot is cancelled. One that fails after its transaction ran returns the slot and the update with
-// its error: what it wrote is in the room, so its caller discards the slot and fails the room.
+// the origin it is handed. The room's persistence worker is handed each transaction's update on its
+// own, so a slot matches exactly one. It returns the slot with the update when the transaction
+// changed the document, and otherwise neither, having released the slot: a slot left queued holds
+// the worker at the room's next update. A repair computed against the document as it stands finds
+// nothing to write when another writer has made it unnecessary since the caller read the document
+// (LEGION-479), and a transaction that changes nothing commits no update (ygo calls no update
+// observer for it), so its slot is cancelled, as a mutation that ran no transaction's is. One that
+// fails after its transaction ran returns the slot and the update with its error: what it wrote is
+// in the room, so its caller discards the slot and fails the room.
 //
 // A repair is written only into want, the document its caller read, when want is not nil: one
 // written into a replacement the room loaded since would be versioned from want, which never got
 // it. It is written only into the document the room holds while no close of the room is under
 // way, and it holds off those closes until its transaction's update is in the room's persistence
 // (roomServer). A refused repair writes nothing and returns errRoomReplaced.
-func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.Doc, mutate func(doc *crdt.Doc, origin any) (bool, error)) (*suppressSlot, []byte, error) {
+func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.Doc, mutate func(doc *crdt.Doc, origin any) error) (*suppressSlot, []byte, error) {
 	slot := s.prepareSuppressedPersistence(room)
 	origin := &identityClosureOrigin{slot: slot}
-	wrote := false
 	updates, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		if want != nil && doc != want {
 			return errRoomReplaced
@@ -451,9 +448,7 @@ func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.D
 			return errRoomReplaced
 		}
 		defer release()
-		var mutateErr error
-		wrote, mutateErr = mutate(doc, origin)
-		return mutateErr
+		return mutate(doc, origin)
 	})
 	if len(updates) == 0 {
 		s.cancelSuppressedPersistence(room, slot)
@@ -461,10 +456,6 @@ func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.D
 	}
 	if err == nil && len(updates) > 1 {
 		err = fmt.Errorf("a repair wrote %d updates, want one", len(updates))
-	}
-	if err == nil && !wrote {
-		s.finishSuppressedPersistence(slot, updates[0])
-		return nil, nil, nil
 	}
 	return slot, updates[0], err
 }
@@ -1162,7 +1153,7 @@ func ArtifactVersionEventPayload(
 func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, []stampedAsk, error) {
 	minted := 0
 	var stamped []stampedAsk
-	tree, _, err := rewriteLive(doc, origin, func(live *pmdoc.Node) bool {
+	tree, err := rewriteLive(doc, origin, func(live *pmdoc.Node) bool {
 		before := askBlockOrder(live)
 		minted = pmdoc.EnsureBlockIDsCount(live)
 		if minted > 0 && len(before) > 0 {
@@ -1578,11 +1569,10 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// with the settlement's other appends, after the reconciliation (storeRepair).
 	var stamp []byte
 	if pmdoc.BlockIDRepairCount(read) > 0 {
-		slot, update, err := s.applySuppressed(ctx, room, doc, func(doc *crdt.Doc, origin any) (bool, error) {
-			var minted int
+		slot, update, err := s.applySuppressed(ctx, room, doc, func(doc *crdt.Doc, origin any) error {
 			var stampErr error
-			reconciled, minted, renamed, stampErr = stampBlockIDs(doc, origin)
-			return minted > 0, stampErr
+			reconciled, _, renamed, stampErr = stampBlockIDs(doc, origin)
+			return stampErr
 		})
 		keep(slot, update)
 		if err != nil {
@@ -2291,14 +2281,14 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	// holds that instance: the backfill appends a durable version of its own below, and a room
 	// that did not take it in would stand behind the head and be refused its next write.
 	var cursor *roomCursor
-	slot, update, err := s.applySuppressed(backfillCtx, artifactID, nil, func(doc *crdt.Doc, origin any) (bool, error) {
+	slot, update, err := s.applySuppressed(backfillCtx, artifactID, nil, func(doc *crdt.Doc, origin any) error {
 		cursor = s.cursorOf(doc)
 		read, err := s.liveTree(artifactID, doc)
 		if err != nil {
-			return false, err
+			return err
 		}
 		if pmdoc.BlockIDRepairCount(read) == 0 {
-			return false, nil
+			return nil
 		}
 		if s.afterBackfillRead != nil {
 			s.afterBackfillRead(artifactID)
@@ -2306,10 +2296,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		_, minted, stampRenamed, err := stampBlockIDs(doc, origin)
 		report.Stamped = minted
 		renamed = stampRenamed
-		if err != nil {
-			return false, err
-		}
-		return minted > 0, nil
+		return err
 	})
 	if slot == nil {
 		if err != nil {
