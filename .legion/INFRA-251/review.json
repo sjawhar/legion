@@ -2,28 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-251",
-  "previousHandoff": "395494600965e47836fad5be69443fcf006b5423",
-  "headReviewed": "the handoff push above 04a8d9a079e7 (code head 79fd47725984)",
-  "completed": "2026-11-02T06:02:03Z",
-  "decision": "changes_requested",
-  "round": "narrowed round (architect): 418b4320 (the devbox proof follows spec v5, the key-file base URL, the libs' setupVersion) and the merge 79fd4772",
+  "previousHandoff": "6be66536e8fd90ddda47ca053c52ec07a1802dc1",
+  "headReviewed": "the handoff push above 94ce1a5fba97 (code head 67e3bbc66d49)",
+  "completed": "2026-11-02T06:17:00Z",
+  "decision": "approved",
+  "round": "narrowed round (architect): only review 5732651189's five items, fixed in 67e3bbc6",
   "critical": 0,
-  "important": 1,
-  "minor": 4,
+  "important": 0,
+  "minor": 0,
   "accepted": [
-    "The merge 79fd4772 leaves the change's diff unchanged: the unchanged-diff fingerprint is 14538e1082c245e0 at 418b4320 and at 79fd4772.",
-    "Tree 5's set-back check fails when the park stands. When the daemon sets the status back, it passes: the log fields match engine.go:268-269, and the set-back is written as legion-daemon:<project> (client.go daemonActor). park_seq5 is read before the PATCH. No later checkpoint assumes tree 5 is parked.",
-    "The key-file route checks LEGION_E2E_MODEL_BASE_URL with model_base_url_refusal and passes it as --base-url, and the gateway route refuses it.",
-    "setupVersion is a real top-level setting of the pinned 18.13.3 (CURRENT_SETUP_VERSION n0 = 2). The libs change nothing for the other proofs beyond skipping the wizard."
+    "The three route libs write `startup:` / `setupWizard: false` in place of `setupVersion: 2`. startup.setupWizard is a boolean setting of the pinned 18.13.3 (default true). Each heredoc has one `startup:` key. A key-file profile rendered here parses to startup {setupWizard: false} with no setupVersion. The libs' 47 tests pass, and bash -n passes. The tester saw no wizard even at setupVersion 0 with this key, and saw the wizard without it.",
+    "The box-login comment no longer names the pinned build.",
+    "README trees-parked now describes tree 5's write and its set-back before the questions, as the script does them.",
+    "The blank line before ## dispatch-user-turns.sh is back.",
+    "model-endpoint.sh's header and README's lib/model-endpoint.sh section name parked-decision-devbox.sh."
   ],
-  "keyFindings": [
-    {"severity": "important", "file": "scripts/e2e/lib/install-key-file-model-route.sh:318 (and install-model-gateway.sh:388, install-box-login-route.sh:211)", "description": "setupVersion: 2 stops the wizard only while the build's CURRENT_SETUP_VERSION is 2. On a pin that adds a setup step, every proof's panes hang at the wizard again, with no error. The same build has startup.setupWizard (boolean), and selectSetupScenes returns no scenes when it is false, whatever the version; record-casts.sh:166-169 already writes it. Write `startup:\\n  setupWizard: false`, and fix the comments and the README sentences at 4466, 4552 and 4590."},
-    {"severity": "minor", "file": "scripts/e2e/lib/install-box-login-route.sh:208", "description": "The comment says 'the pinned Oh My Pi … 2 in that build', but box-login runs the operator's own build, not .omp-pin."},
-    {"severity": "minor", "file": "scripts/e2e/README.md:2877", "description": "trees-parked gives the order wrong: the script PATCHes tree 5 (line 714) before the three parks finish and before the questions (740-742), but the README says the questions come 'then' and that tree 5 is 'also' set."},
-    {"severity": "minor", "file": "scripts/e2e/README.md:2951", "description": "The blank line before '## dispatch-user-turns.sh' was dropped, so the heading follows a code fence directly."},
-    {"severity": "minor", "file": "scripts/e2e/lib/model-endpoint.sh:3", "description": "The header comment, and README 4559, list who sources model-endpoint.sh, but leave out parked-decision-devbox.sh, which now sources it (line 74)."}
-  ],
-  "providers": "Verified from each run's own turns in the session store: DeepReview29 (54 assistant turns) and CodeQuality29 (30), all anthropic / claude-opus-5-5.",
-  "dispatch": "dispatch answers was refused three times (ECONNREFUSED), at 05:5xZ and at 06:0xZ; nothing in this round depends on a person's answer.",
-  "ci": "CI head 820465bf (only .legion/INFRA-251/test.json above it), read 2026-11-02T06:02Z: queued behind a backlog (changes success, the rest queued). A request for changes does not wait on CI."
+  "keyFindings": [],
+  "thermonuclear": "Not run: the delta is a test-profile config key in three e2e libs and prose, no runtime code. The pair at 79fd4772 covered the rest of the round.",
+  "ci": "CI head b3475694 (only .legion/INFRA-251/test.json above it): queued at 06:16Z; the approval waits for ci-ok and pr-title green there."
 }
