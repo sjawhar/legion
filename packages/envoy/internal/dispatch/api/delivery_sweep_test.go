@@ -88,10 +88,11 @@ type sweepRoute struct {
 	path func(issue, document string) string
 	body map[string]any
 	// atCommit is a write answered as soon as it commits, its delivery behind the answer: the
-	// broadcast. Every other route answers once its own attempt has settled.
+	// broadcast and a comment's mentions, which the mention sender delivers after the response.
+	// Every other route answers once its own attempt has settled.
 	atCommit bool
-	// comment says the attempt is a comment mention's, keyed <comment id>:<target>:<mode>; any
-	// other is a message's, keyed <message id>:<mode>.
+	// comment says the attempt is a comment mention's, keyed <comment id>:<target>:<the mention's
+	// mode>; any other is a message's, keyed <message id>:<mode>.
 	comment bool
 }
 
@@ -119,14 +120,16 @@ var sweepRoutes = map[string]sweepRoute{
 		body: map[string]any{
 			"body": "@s1 look", "delivery": "steer", "mentions": []map[string]string{{"target": "session:s1"}},
 		},
-		comment: true,
+		atCommit: true,
+		comment:  true,
 	},
 	"a document comment's mention": {
 		path: func(_, document string) string { return "/api/v1/artifacts/" + document + "/comments" },
 		body: map[string]any{
 			"body": "@s1 look", "delivery": "steer", "mentions": []map[string]string{{"target": "session:s1"}},
 		},
-		comment: true,
+		atCommit: true,
+		comment:  true,
 	},
 }
 
@@ -258,10 +261,10 @@ func TestTheDeliverySweepFinishesEveryDeliveringRouteOnce(t *testing.T) {
 	}
 }
 
-// A comment's mentions are delivered on a context its client cannot cancel, a write sent without a
-// key included (a keyed one's whole run is detached already): a client that gives up while a
-// mention is being sent leaves that send to finish, and its attempt settles as what the listener
-// answered rather than as cut off or pending.
+// A comment's mentions are sent after the comment's response, on the server's lifetime rather
+// than on the request (comment_mention_sender.go): a client that is answered and drops its
+// connection while a mention is still being sent leaves that send to finish, and its attempt
+// settles as what the listener answered rather than as cut off or pending.
 func TestACommentsMentionFinishesWhenItsClientGivesUp(t *testing.T) {
 	for name, path := range map[string]func(issue, document string) string{
 		"an issue comment":   sweepRoutes["a comment's mention"].path,
@@ -307,11 +310,13 @@ func TestACommentsMentionFinishesWhenItsClientGivesUp(t *testing.T) {
 				}
 				gaveUp <- err
 			}()
+			// The comment is answered as soon as it commits, with its attempt pending; the send
+			// that reaches the listener is the mention sender's, behind that answer.
+			if err := <-gaveUp; err != nil {
+				t.Fatalf("the comment was not answered before its mention's send: %v", err)
+			}
 			<-sending
 			abort()
-			if err := <-gaveUp; err == nil {
-				t.Fatal("the client was answered before it gave up")
-			}
 			letProceed()
 			deadline := time.Now().Add(10 * time.Second)
 			var state string
@@ -556,7 +561,9 @@ func TestTheDeliverySweepSettlesWhatItCannotSend(t *testing.T) {
 	sendableMention := decodeBody[struct {
 		ID string `json:"id"`
 	}](t, posted).ID
-	// Its attempt as a sender that died inside the send leaves it.
+	// Its own mention send runs after the comment's response; once it has settled, the test leaves
+	// the attempt as a sender that died inside the send leaves it.
+	settledCommentDeliveries(t, database, sendableMention)
 	rig.exec(`
 		update comment_deliveries set state = 'pending', envelope_id = null,
 		       claimed_at = now() - interval '5 minutes', created_at = now() - interval '5 minutes'
@@ -635,7 +642,9 @@ func TestTheDeliverySweepSettlesWhatItCannotSend(t *testing.T) {
 // INFRA-258. The sweep sends exactly the attempt it found owed. A delivery a card retry
 // overtook while its first sender still held it has two pending attempts once both senders die,
 // and the sweep owes only the retry's, the latest: it sends that one, in its own mode and to its
-// own session, and never the older attempt in its place, which stays the retry's to answer.
+// own session, and never the older attempt in its place. A mention's older attempt is then the
+// retry's to answer, and its sender settles it superseded once its own send has landed
+// (supersedeOvertakenAttempts); a message's is left as it stands.
 func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 	t.Run("a comment's mention", func(t *testing.T) {
 		listener, sends := newBroadcastListener(t, agentSessions)
@@ -650,6 +659,9 @@ func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 		comment := decodeBody[struct {
 			ID string `json:"id"`
 		}](t, posted).ID
+		// The comment's own mention send runs after its response; it has to have settled before the
+		// test can leave its attempt pending as a dead sender's.
+		settledCommentDeliveries(t, database, comment)
 		// The first attempt in steer, and the card's retry in btw, both left by senders that died.
 		rig.exec(`
 			update comment_deliveries set state = 'pending', envelope_id = null,
@@ -660,18 +672,26 @@ func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, claimed_at, created_at)
 			values ($1, 'session:s1', 2, 'btw', 's1', 'pending', now() - interval '5 minutes', now() - interval '5 minutes')
 		`, comment)
-		before := len(keysOf(sends))
+		before := keysOf(sends)
 		if err := served.resumeOwedDeliveries(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if keys := keysOf(sends); len(keys) != before+1 || !slices.Contains(keys, comment+":session:s1:btw") {
-			t.Fatalf("the sweep sent %v after the comment's own send, want the retry's attempt alone, in btw", keys)
+		// Every attempt of one mention sends under its one key - the mention's target and the
+		// mode the comment recorded on it, not attempt 2's btw - so which attempt the sweep sent
+		// shows in the rows below - attempt 2 sent, attempt 1 superseded by it - rather than in
+		// the key.
+		want := slices.Concat(before, []string{comment + ":session:s1:steer"})
+		slices.Sort(want)
+		if keys := keysOf(sends); !equalStrings(keys, want) {
+			t.Fatalf("the sweep sent %v after the comment's own send, want %v: the retry's attempt alone", keys, want)
 		}
 		if states := rig.count(`
 			select count(*) from comment_deliveries
-			where comment_id = $1 and (attempt, state) in ((1, 'pending'), (2, 'sent'))
-		`, comment); states != 2 {
-			t.Fatalf("after the sweep the attempts are not the first pending and the retry's sent")
+			where comment_id = $1 and ((attempt, state) = (2, 'sent')
+			  or (attempt, state, error) = (1, 'failed', $2))
+		`, comment, mentionSupersededError); states != 2 {
+			t.Fatalf("after the sweep the attempts are not the retry's sent and the one it overtook " +
+				"settled superseded by it")
 		}
 	})
 	t.Run("a message", func(t *testing.T) {

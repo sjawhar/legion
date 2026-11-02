@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-606",
+  "round": 25,
+  "previousHandoff": "138b2a202af19ec84f40fb04881f5943d1b5506e",
+  "headTested": "2a806f3659b64304d8bd5052badffc277d71de97",
+  "handoffHead": "338ca86c0616e1d899f27c86f645e938055c7b0c",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round25-tar-gz (r25.md, both claimant logs and the failing run's work directory, both restart TABLES.md, pg samples); dispatch://INFRA-606/artifact/infra606-tester-round25-checkpoint-md",
+  "implementerProof": {
+    "verdict": "rejected",
+    "how": "The implementer's round-25 proofs cover the api package; the repository's own live proof of the claimant path, run on the real binary, fails two mention cases at this head and passes them on main (failure below)."
+  },
+  "failures": [
+    {
+      "criterion": "A comment mentioning a session whose send fails settles that attempt failed, so the claimant's or follower's own copy is published (scripts/e2e/dispatch-claimant-delivery.sh, mention-failed-claimant and mention-failed-follower).",
+      "evidence": "DATABASE_URL=<scratch> DISPATCH_BIN=<envoy-dispatch built from 338ca86c, vcs.modified=false> bash scripts/e2e/dispatch-claimant-delivery.sh: 13 ok and 'FAIL mention-failed-claimant: comment 5fb26805-...'s mention delivery row was still pending 10s after its 201', and the same for mention-failed-follower (comment 12b7e629-...). The fake listener answers every send to that session 404 while its registry read still finds it; its log shows no send at all, and Dispatch logged no warning. The same script with envoy-dispatch built from main f0fe8da8 passes every case. Round 24 at b29a1a0a passed all 15. So the merge of main's listener take-over (#2446) with this PR's post-response mention sender leaves a mention to a session the listener refuses pending past 10 s and unsent. Not yet re-run, because the pod restart was announced at 23:47Z; the failing run's work directory is in the evidence."
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "The merge's file set and per-file diff from b29a1a0a, explained.",
+      "surface": "round-shape.py v3 and each head's name-only diff against its merge base",
+      "command": "python3 round-shape.py b29a1a0aac06a503b066e7b6121326af46ef2477 2a806f3659b64304d8bd5052badffc277d71de97 2406; jj diff --name-only from each head's merge base",
+      "observed": "32 files differ in their own diff (list in the checkpoint). The file set goes from 117 to 120. Appearing: comment_mention_takeover_test.go, delivery_bound_send_test.go and listener_takeover_test.go, which are main's #2446 tests that this PR now edits, plus 20261101180039_comment_fallback_copies.up/.census. Disappearing: 0161_comment_fallback_copies.up/.census, the rename. The changelog set is the same five pr2406 fragments, so no fold-consumed fragment came back. store/pool.go changed only in comments.",
+      "headSha": "2a806f3659b6",
+      "negativeControl": "The same tool lists 20 differing files between 25206ba7 and 253a1afc."
+    },
+    {
+      "criterion": "The migration's name follows the store README, store passes on a fresh database, an upgrade from main applies it once; the deploy test passes.",
+      "surface": "store, pgmigrate and api tests against a superuser Postgres 16; the load stack's main-seeded database after the head's boot",
+      "command": "go test -p 1 ./internal/dispatch/store/ ./internal/pgmigrate/...; select from schema_migrations; go test -run TestAMentionThePreviousBuildDeliveredIsDroppedAsARepeatAfterTheDeploy -count=2",
+      "observed": "20261101180039 is a UTC timestamp later than main's newest, 20261101144855, as internal/dispatch/store/README.md requires. Store (TestMigrationSetTakesNumbersThenTimestamps included) and pgmigrate pass on a fresh database. The main-seeded database holds 20261101180039 once, with comment_fallback_copies present. The deploy test passes 2 of 2.",
+      "headSha": "2a806f3659b6",
+      "negativeControl": "Round 22 recorded the deploy test failing with 45530037's key."
+    },
+    {
+      "criterion": "Restart with 50 resuming sockets, paired base and head on one seed.",
+      "surface": "The load-test restart scenario on a seed made by main f0fe8da8, base then head back to back, --rng-seed 1",
+      "command": "run-step.sh r25-base (LOADTEST_DISPATCH_COMMIT=f0fe8da8) then r25-head, each --events 4 --sessions 400 --requests 60 --live 50 --live-resume 1 --live-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms --rng-seed 1; pg_stat_activity sampled each second",
+      "observed": "Base / head: restart 39.6 / 40.6 s; 50 / 50 reconnects, gap p50 53.6 / 59.3 s; frames replayed per stale reconnect 12,589 on main (unbounded) against 4 p50 and 26 max here; GET /ws/live answered other than 101 0 / 1 times; 500s on any route 4,523 / 4,203, all request contexts that timed out on the same read routes; Dispatch CPU-s in the minute after 15.75 / 13.89. Peak Dispatch backends sampled 85 across both runs (800 samples). Round 24's /ws/live 500 storm did not recur.",
+      "headSha": "2a806f3659b6",
+      "negativeControl": "The base run is the control: main replays a stale socket's whole backlog."
+    },
+    {
+      "criterion": "Suites and the stream proof.",
+      "surface": "Go suites; horizon.sh resume on the head binary",
+      "command": "go test -p 1 outbox, deliveryaudit, events, api delivery and stream groups; horizon.sh h25-resume resume",
+      "observed": "outbox, deliveryaudit and events pass; the api groups give 422 PASS and 1 SKIP. Resume across a held insert: replay_complete true, then the held id and the comment, in order.",
+      "headSha": "2a806f3659b6",
+      "negativeControl": "Round 17's base build skipped the held id."
+    }
+  ],
+  "notes": [
+    "The cross-deploy exception the reviewer had named (a resend of an attempt the previous build opened by a Retry in another mode) is stated in the changelog fragment pr2406-Changed-20261028-113305.yaml and AGENTS.md. I did not reproduce it this round.",
+    "CI at 2a806f36, read 23:47Z: ci-filters failure (not read further), dispatch and envoy-go in progress; every other lane success. ci-ok, dispatch and envoy-go are unread.",
+    "The pod restart was announced at 23:47Z. No load run was in flight. The stack's processes are left to the restart."
+  ]
+}

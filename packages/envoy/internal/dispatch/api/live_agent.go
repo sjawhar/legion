@@ -78,23 +78,19 @@ func (s *server) startAgentSubscription(ctx context.Context, stream liveStreamer
 // has ended, on its own or because ctx did.
 func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer, sub, sessionID string) {
 	source := s.deps.AgentStream
-	frames := make(chan agentstream.Frame, agentStreamBuffer)
-	// behind closes once a frame found the buffer full; dropped once the relay ended this viewer,
-	// which only the in-memory source's test hook does (agentstream.Memory.Drop): a session's own
-	// frame is never nil. The e2e suite has no other way to make a page rebuild its transcript from a
-	// second replay.
-	behind, dropped := make(chan struct{}), make(chan struct{})
-	var behindOnce, droppedOnce sync.Once
+	queue := newAgentStreamQueue()
+	// queue.overflow closes once a frame would take the view past its budget; dropped once the
+	// relay ended this viewer, which only the in-memory source's test hook does
+	// (agentstream.Memory.Drop): a session's own frame is never nil. The e2e suite has no other way
+	// to make a page rebuild its transcript from a second replay.
+	dropped := make(chan struct{})
+	var droppedOnce sync.Once
 	unsubscribe, err := source.Subscribe(sessionID, func(frame agentstream.Frame) {
 		if frame == nil {
 			droppedOnce.Do(func() { close(dropped) })
 			return
 		}
-		select {
-		case frames <- frame:
-		default:
-			behindOnce.Do(func() { close(behind) })
-		}
+		queue.push(frame)
 	})
 	if err != nil {
 		endAgentAfterFailure(ctx, stream, sub, "subscribe to the session's frames", err)
@@ -143,11 +139,11 @@ func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer
 		return
 	}
 
-	// endedBy is why the view has ended, or "": it fell behind far enough to lose a frame, or the
+	// endedBy is why the view has ended, or "": it fell past its budget and lost a frame, or the
 	// relay dropped it as a lost connection does.
 	endedBy := func() string {
 		select {
-		case <-behind:
+		case <-queue.overflow:
 			return liveEndedBehind
 		default:
 		}
@@ -161,13 +157,15 @@ func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer
 	rearm := time.NewTicker(s.agentWatchInterval)
 	defer rearm.Stop()
 	for {
-		var frame agentstream.Frame
+		var frames []agentstream.Frame
+		var size int
 		select {
 		case <-ctx.Done():
 			return
-		case <-behind:
+		case <-queue.overflow:
 		case <-dropped:
-		case frame = <-frames:
+		case <-queue.wake:
+			frames, size = queue.take()
 		case <-rearm.C:
 			if err := source.Watch(sessionID); err != nil {
 				stopRelay()
@@ -190,16 +188,19 @@ func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer
 			}
 			continue
 		}
-		// A frame goes only while nothing has ended the view: draining what is buffered after the
-		// frame the full buffer lost would stitch a gap into the middle of the conversation, and the
+		// A frame goes only while nothing has ended the view: sending what was queued after the
+		// frame the budget lost would stitch a gap into the middle of the conversation, and the
 		// page's subscribe replays it whole, which is the honest answer.
 		if reason := endedBy(); reason != "" {
 			_ = stream.SendWait(ctx, liveEnded(sub, reason))
 			return
 		}
-		if !send(agentEventFrame, frame) {
-			return
+		for _, frame := range frames {
+			if !send(agentEventFrame, frame) {
+				return
+			}
 		}
+		queue.release(size)
 	}
 }
 

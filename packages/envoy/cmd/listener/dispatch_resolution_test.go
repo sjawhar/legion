@@ -399,7 +399,7 @@ func decodeRigBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {
 	return value
 }
 
-// rigDelivery is one mention's attempt row, as the comment create answers it.
+// rigDelivery is one mention's attempt row, as the comment's read answers it.
 type rigDelivery struct {
 	Target    string  `json:"target"`
 	Delivery  string  `json:"delivery"`
@@ -409,6 +409,7 @@ type rigDelivery struct {
 }
 
 type rigComment struct {
+	ID         string        `json:"id"`
 	Deliveries []rigDelivery `json:"deliveries"`
 }
 
@@ -461,8 +462,10 @@ type rigFailure struct {
 	Error string `json:"error"`
 }
 
-// mention posts one comment mentioning sessionID and returns what the create answered.
-func (rig *dispatchRig) mention(t *testing.T, issueKey, sessionID, body string) rigComment {
+// mention posts one comment mentioning sessionID and returns its mention's attempt once settled.
+// The create answers with the attempt pending and the mention sender settles it after that, on
+// the server's lifetime, so the comment is read back until the attempt carries its outcome.
+func (rig *dispatchRig) mention(t *testing.T, issueKey, sessionID, body string) rigDelivery {
 	t.Helper()
 	created := rig.asHuman(t, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
 		"body":     body,
@@ -474,10 +477,26 @@ func (rig *dispatchRig) mention(t *testing.T, issueKey, sessionID, body string) 
 			sessionID, created.Code, created.Body.String())
 	}
 	comment := decodeRigBody[rigComment](t, created)
-	if len(comment.Deliveries) != 1 {
-		t.Fatalf("the comment's deliveries = %#v, want the one mention's attempt", comment.Deliveries)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		read := rig.asHuman(t, http.MethodGet, "/api/v1/comments/"+comment.ID, nil)
+		if read.Code != http.StatusOK {
+			t.Fatalf("read the comment: status=%d body=%s", read.Code, read.Body.String())
+		}
+		stored := decodeRigBody[struct {
+			Comment rigComment `json:"comment"`
+		}](t, read).Comment
+		if len(stored.Deliveries) != 1 {
+			t.Fatalf("the comment's deliveries = %#v, want the one mention's attempt", stored.Deliveries)
+		}
+		if stored.Deliveries[0].State != "pending" {
+			return stored.Deliveries[0]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the mention's attempt is still pending: %#v", stored.Deliveries[0])
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return comment
 }
 
 // A person mentions a session the listener Dispatch asks has not refilled into its cache. Before
@@ -492,8 +511,7 @@ func TestDispatchMentionResolvesASessionTheCacheHasNotRefilled(t *testing.T) {
 	planner := rig.registerSession(t, "ses_planner", "Planner")
 	key := rig.issueKey(t, "A mention while the cache refills")
 
-	comment := rig.mention(t, key, planner.id, "Please take this one.")
-	attempt := comment.Deliveries[0]
+	attempt := rig.mention(t, key, planner.id, "Please take this one.")
 	if attempt.State != "sent" || attempt.Error != nil ||
 		attempt.SessionID == nil || *attempt.SessionID != planner.id {
 		t.Fatalf("the mention's attempt = %#v, want it sent to %s with no failure", attempt, planner.id)
@@ -574,7 +592,7 @@ func TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer(t *testing.T) {
 	planner.noFrame(t)
 	tester.noFrame(t)
 
-	attempt := rig.mention(t, key, planner.id, "Please take this one.").Deliveries[0]
+	attempt := rig.mention(t, key, planner.id, "Please take this one.")
 	if attempt.State != "failed" || attempt.Error == nil {
 		t.Fatalf("the mention's attempt = %#v, want it failed with a recorded cause", attempt)
 	}

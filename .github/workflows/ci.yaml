@@ -856,6 +856,9 @@ jobs:
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/internal/dispatch/text/testdata/**'
+              # model's MentionSweepWindow is contracts.DeliveryDuplicateWindow, so internal/contracts
+              # is in pmdoc's closure too, its tests' testdata with it.
+              - 'packages/envoy/internal/contracts/**'
             # The API race job. internal/dispatch/api's lock_level_test.go:120-133 walks every
             # non-test .go file under packages/envoy (event_insert_guard_test.go:32 and
             # review_write_guard_test.go:44 use the same walk), so this filter keeps the wide root

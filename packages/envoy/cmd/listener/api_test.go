@@ -2553,6 +2553,30 @@ func TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey(t *testing.T) {
 	}
 }
 
+// Dispatch's outbox keys the copy of a comment it publishes to a session whose mention failed by
+// contracts.AgentSendDedupeKey, so a host that holds the mention drops the copy; that holds only
+// while the listener keys the mention's send by the same function, byte for byte.
+func TestSendHandler_KeysASendByAgentSendDedupeKey(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	const idempotencyKey = "00000000-0000-0000-0000-000000000001:role:reviewer:steer"
+	recorder := httptest.NewRecorder()
+	sendHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(
+		`{"target_session":"ses_target","source":"dispatch","message":"ship it","idempotency_key":"`+idempotencyKey+`"}`,
+	)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response contracts.Envelope
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if want := contracts.AgentSendDedupeKey("ses_target", idempotencyKey); response.DedupeKey != want {
+		t.Fatalf("send dedupe_key = %q, want %q", response.DedupeKey, want)
+	}
+}
+
 func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 	mux := http.NewServeMux()
 	// No known route is requested, so no store is read.

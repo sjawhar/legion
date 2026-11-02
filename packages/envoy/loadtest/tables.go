@@ -217,6 +217,9 @@ func renderTables(steps []stepData) string {
 	liveTable(&md, steps)
 	ungrantedTable(&md, steps)
 	xidTable(&md, steps)
+	reconnectsTable(&md, steps)
+	restartTable(&md, steps)
+	mentionsTable(&md, steps)
 	routesTable(&md, steps)
 	replayTable(&md, steps)
 	return md.String()
@@ -558,6 +561,108 @@ func routesTable(md *markdown, steps []stepData) {
 			cells = append(cells, fmt.Sprintf("%s (%s/%s)", pair(r.LatencyMs, p50, p99, 0), num(float64(r.Failures), 0), num(float64(r.Count), 0)))
 		}
 		md.row(cells...)
+	}
+}
+
+// kib renders bytes as KiB.
+func kib(bytes float64) string { return num(bytes/1024, 0) }
+
+// scaled is st with every value divided by d, for a column in a larger unit.
+func scaled(st stat, d float64) stat {
+	return stat{N: st.N, P50: st.P50 / d, P90: st.P90 / d, P99: st.P99 / d, Max: st.Max / d}
+}
+
+// reconnectsTable is the live reconnects table: one row per step and reconnect kind.
+func reconnectsTable(md *markdown, steps []stepData) {
+	md.line("\n## Live reconnects\n")
+	md.line("The reconnects of the resuming dashboard live sockets (-live-resume) whose dial started in the window, by the resume they subscribed with: all, last_id (the last event id received), stale (max(id) - %d, at the restart), no_id (none). Replayed: the frames at or below the event log's max(id) read just before the dial. A reconnect whose events_start says `replay_complete: false` refetches the dashboard's routes once.\n", staleBacklog)
+	cells := []string{"step", "kind", "reconnects (complete)", "after restart", "failed attempts", "gap s p50 / max",
+		"events_start ms p50 / max", "replayed frames per reconnect p50 / max", "replayed KiB per reconnect p50 / max",
+		"replayed KiB total", "replay ms p50 / max", "refetches", "refetch requests (failures)", "refetch KiB", "refetch ms p50 / p99"}
+	md.header(cells...)
+	for _, s := range steps {
+		r := s.sum.LiveReconnects
+		if r == nil {
+			md.emptyRow(s.label(), len(cells))
+			continue
+		}
+		for _, kind := range append([]string{"all"}, reconnectKinds...) {
+			g, ok := r.Groups[kind]
+			if !ok && kind != "all" {
+				continue
+			}
+			md.row(s.label(), kind, fmt.Sprintf("%s (%s)", num(float64(g.Reconnects), 0), num(float64(g.Complete), 0)),
+				num(float64(g.AfterRestart), 0), num(float64(g.FailedAttempts), 0), pair(scaled(g.GapMs, 1000), p50, smax, 1),
+				pair(g.StartMs, p50, smax, 0), pair(g.ReplayFrames, p50, smax, 0), pair(scaled(g.ReplayBytes, 1024), p50, smax, 0),
+				kib(float64(g.ReplayBytesTotal)), pair(g.ReplayMs, p50, smax, 0), num(float64(g.Refetches), 0),
+				fmt.Sprintf("%s (%s)", num(float64(g.RefetchRequests), 0), num(float64(g.RefetchFailures), 0)),
+				kib(float64(g.RefetchBytes)), pair(g.RefetchMs, p50, p99, 0))
+		}
+	}
+}
+
+// restartTable is the restart table: one row per step.
+func restartTable(md *markdown, steps []stepData) {
+	md.line("\n## Restart\n")
+	md.line("Dispatch restarted by stack.sh restart-dispatch at -restart-at into the window. CPU-seconds from the restart's start (Dispatch stopping) to 60 s after it, Dispatch's across its old and new pid; per 5 s from the restart's start.\n")
+	cells := []string{"step", "restart at s", "restart s (stop to /healthz)", "pid old → new", "Dispatch CPU-s in 60 s",
+		"Dispatch CPU-s per 5 s", "Postgres CPU-s in 60 s", "Postgres CPU-s per 5 s", "error"}
+	md.header(cells...)
+	for _, s := range steps {
+		r := s.sum.Restart
+		if r == nil {
+			md.emptyRow(s.label(), len(cells))
+			continue
+		}
+		opt := func(v *float64) string {
+			if v == nil {
+				return "-"
+			}
+			return num(*v, 2)
+		}
+		list := func(vs []float64) string {
+			if len(vs) == 0 {
+				return "-"
+			}
+			out := make([]string, len(vs))
+			for i, v := range vs {
+				out[i] = num(v, 2)
+			}
+			return strings.Join(out, " ")
+		}
+		errText := "-"
+		if r.Error != "" {
+			errText = mdCell(r.Error)
+		}
+		md.row(s.label(), num(r.AtS, 0), num(r.DurationS, 1), fmt.Sprintf("%d → %d", r.OldPID, r.NewPID),
+			opt(r.DispatchCPUS), list(r.DispatchCPUSPer5s), opt(r.PostgresCPUS), list(r.PostgresCPUSPer5s), errText)
+	}
+}
+
+// mentionsTable is the comment mentions table: one row per step.
+func mentionsTable(md *markdown, steps []stepData) {
+	md.line("\n## Comment mentions\n")
+	md.line("Comment writes (comment, anchored, reply) with -mention-frac: write ms p50 / p99 over the 2xx ones, then 2xx / offered. Window: the writes scheduled in the window. After restart: the writes sent from the restart's start to 60 s after it.\n")
+	cells := []string{"step", "mention share / sessions per comment", "window with mentions", "window without mentions",
+		"after restart with mentions", "after restart without mentions"}
+	md.header(cells...)
+	group := func(g mentionGroup) string {
+		if g.Offered == 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%s (%s / %s)", pair(g.WriteMs, p50, p99, 0), num(float64(g.OK2xx), 0), num(float64(g.Offered), 0))
+	}
+	for _, s := range steps {
+		m := s.sum.CommentMentions
+		if m == nil {
+			md.emptyRow(s.label(), len(cells))
+			continue
+		}
+		after := []string{"-", "-"}
+		if m.AfterRestart != nil {
+			after = []string{group(m.AfterRestart.With), group(m.AfterRestart.Without)}
+		}
+		md.row(s.label(), fmt.Sprintf("%s%% / %d", num(100*m.Frac, 0), m.PerComment), group(m.Window.With), group(m.Window.Without), after[0], after[1])
 	}
 }
 

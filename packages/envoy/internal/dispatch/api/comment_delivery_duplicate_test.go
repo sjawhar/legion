@@ -71,8 +71,9 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "The mention landed; the answer did not.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
-	if len(comment.Deliveries) != 1 || comment.Deliveries[0].State != "failed" {
-		t.Fatalf("first attempt = %#v, want it recorded failed once every try missed its receipt", comment.Deliveries)
+	deliveries := settledCommentDeliveries(t, database, comment.ID)
+	if len(deliveries) != 1 || deliveries[0].State != "failed" {
+		t.Fatalf("first attempt = %#v, want it recorded failed once every try missed its receipt", deliveries)
 	}
 	listenerState.Lock()
 	listenerState.answering = true

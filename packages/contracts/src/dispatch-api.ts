@@ -1594,10 +1594,13 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * promise that a same-mode Retry "won't deliver it twice". This comment is where that promise is
  * stated; every other place that relies on it points here.
  *
- * Dispatch keys a send by message and mode (`<message>:<mode>`, `<comment>:<target>:<mode>`), the
- * same for every attempt, and the listener makes that key, scoped to the recipient
- * (`agent.<session>.<key>`), the envelope's `dedupe_key`. A same-mode Retry of a send that already
- * landed therefore repeats that frame's dedupe key, and only that: the listener mints a new
+ * Dispatch keys a targeted message's send by message and mode (`<message>:<mode>`) and a comment
+ * mention's by comment, target and the mode the comment recorded on that mention
+ * (`<comment>:<target>:<the mention's mode>`, whatever mode each attempt went in), the same for
+ * every attempt, and the listener makes that key, scoped to the recipient
+ * (`agent.<session>.<key>`), the envelope's `dedupe_key`. A Retry of a send that already landed -
+ * in the same mode, or in any mode at all for a mention - therefore repeats that frame's dedupe
+ * key, and only that: the listener mints a new
  * `event_id` for every send. Two things recognise the repeat inside this window, both only for a
  * key that names its event (`dedupeKeyNamesItsEvent` in `envelope.ts`, which every Dispatch key
  * does), and a recipient is protected by whichever of them sits between it and the bus:
@@ -1625,7 +1628,9 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * one a session runs. The stream stores a re-send of an attempt the session answered with an
  * error no more than any other repeat, so a session the listener pushes to never receives it, and
  * its attempt reads as a duplicate. The dashboard therefore offers no same-mode Retry for such an
- * attempt and points at a mode change, which is a new key; sending that Retry under a new key is
+ * attempt and points at a mode change, which is a new key for a targeted message - a comment
+ * mention's mode change repeats the mention's one key, so it delivers nothing once an attempt of
+ * that mention reached the session; sending that Retry under a new key is
  * LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT` keys, forgetting the oldest
  * past it, so a re-send of a key it was handed before that many later ones reaches the agent
  * again. The limit is two and a half times what the whole stream stored in

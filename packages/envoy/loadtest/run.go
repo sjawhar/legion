@@ -50,6 +50,17 @@ type runConfig struct {
 	routes       routeMix
 	human        float64
 	live         int
+	// liveResume makes each dashboard live socket reopen as the dashboard does, subscribing with
+	// since its last event id, and records each reconnect; liveStale sockets resume once, at the
+	// restart, from staleBacklog below the event log's max(id).
+	liveResume bool
+	liveStale  int
+	// restartAt is when, into the window, stackSh restarts Dispatch; 0 for no restart.
+	restartAt time.Duration
+	stackSh   string
+	// mentionFrac of the comment writes mention mentions live sessions.
+	mentionFrac float64
+	mentions    int
 	// dashboard is the dashboard stream the build under test serves, probed once before the
 	// window (probeDashboard): dashboardLive or dashboardSSE.
 	dashboard string
@@ -92,6 +103,11 @@ func runLoad(args []string) error {
 	routeFlag := fs.String("route-mix", "", "route-mix file (default: the committed "+defaultRouteMixName+")")
 	human := fs.Float64("human", 0.1, "share of writes made by a person")
 	live := fs.Int("live", -1, "dashboard live sockets (default max(1, round(requests/30)))")
+	liveResume := fs.Bool("live-resume", false, "each dashboard live socket reopens subscribing with since its last event id, after the dashboard's backoff, and its reconnects are recorded")
+	liveStale := fs.Int("live-stale", 0, fmt.Sprintf("live sockets that reopen once, at the restart, with since %d below the event log's max(id) (needs -live-resume and -restart-at)", staleBacklog))
+	restartAt := fs.Duration("restart-at", 0, "restart Dispatch (stack.sh restart-dispatch) this long into the window; 0 restarts nothing")
+	mentionFrac := fs.Float64("mention-frac", 0, "share of comment writes that mention -mentions live sessions")
+	mentions := fs.Int("mentions", 3, "sessions each mentioning comment mentions")
 	rngSeed := fs.Uint64("rng-seed", 1, "seed of the event and request schedules")
 	natsConns := fs.Int("nats-conns", 50, "NATS connections the sessions share")
 	out := fs.String("out", "", "output directory (required)")
@@ -157,6 +173,16 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-session-delivery must be %s or %s, not %q", sessionDeliveryCore, sessionDeliveryConsumer, *delivery)
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
+	case *restartAt < 0 || *restartAt >= *duration:
+		return fmt.Errorf("-restart-at must be 0 (no restart) or inside the window (less than -duration)")
+	case *mentionFrac < 0 || *mentionFrac > 1 || !finite(*mentionFrac):
+		return fmt.Errorf("-mention-frac must be between 0 and 1")
+	case *mentionFrac > 0 && (*mentions < 1 || *mentions > maxMentions || *mentions > *sessions-1):
+		return fmt.Errorf("-mentions must be 1 to %d, and less than -sessions (a comment mentions sessions other than its author)", maxMentions)
+	}
+	stackSh := os.Getenv("LOADTEST_STACK_SH")
+	if *restartAt > 0 && (ef.allowForeign || stackSh == "") {
+		return fmt.Errorf("-restart-at restarts the local stack's Dispatch through stack.sh: run loadgen under `stack.sh loadgen` (it sets LOADTEST_STACK_SH), without -allow-foreign")
 	}
 	if *out == "" {
 		return fmt.Errorf("-out is required")
@@ -196,6 +222,9 @@ func runLoad(args []string) error {
 	if *live < 0 {
 		*live = max(1, int(math.Round(*requests/30)))
 	}
+	if *liveStale < 0 || *liveStale > *live || (*liveStale > 0 && (!*liveResume || *restartAt == 0)) {
+		return fmt.Errorf("-live-stale must be 0 to -live (%d), and needs -live-resume and -restart-at", *live)
+	}
 	if *name == "" {
 		*name = filepath.Base(filepath.Clean(*out))
 	}
@@ -206,7 +235,9 @@ func runLoad(args []string) error {
 		ep: ep, allowForeign: ef.allowForeign, name: *name, out: *out, seedPath: *seedPath,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
-		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, sessionDelivery: *delivery,
+		human: *human, live: *live, liveResume: *liveResume, liveStale: *liveStale,
+		restartAt: *restartAt, stackSh: stackSh, mentionFrac: *mentionFrac, mentions: *mentions,
+		rngSeed: *rngSeed, natsConns: *natsConns, sessionDelivery: *delivery,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 		replay: rs,
 	}, sf)
@@ -289,18 +320,24 @@ type summaryConfig struct {
 	// Dashboard is the dashboard stream those live streams ran on: live (one socket per tab on
 	// /ws/live) or sse (GET /api/v1/events, a build before that route was removed). The harness
 	// probes the build under test once before the window (probeDashboard).
-	Dashboard string   `json:"dashboard"`
-	EventMix  eventMix `json:"event_mix"`
-	RouteMix  string   `json:"route_mix"`
-	Human     float64  `json:"human"`
-	WarmupS   float64  `json:"warmup_s"`
-	DurationS float64  `json:"duration_s"`
-	GraceS    float64  `json:"grace_s"`
-	RNGSeed   uint64   `json:"rng_seed"`
-	NATSConns int      `json:"nats_conns"`
+	Dashboard  string   `json:"dashboard"`
+	EventMix   eventMix `json:"event_mix"`
+	RouteMix   string   `json:"route_mix"`
+	Human      float64  `json:"human"`
+	WarmupS    float64  `json:"warmup_s"`
+	DurationS  float64  `json:"duration_s"`
+	GraceS     float64  `json:"grace_s"`
+	RNGSeed    uint64   `json:"rng_seed"`
+	NATSConns  int      `json:"nats_conns"`
+	LiveResume bool     `json:"live_resume"`
+	LiveStale  int      `json:"live_stale"`
 	// SessionDelivery is the delivery the sessions asked for (-session-delivery): core or
 	// consumer. sessions.delivery says how many got consumer delivery.
 	SessionDelivery string `json:"session_delivery"`
+	// RestartAtS is -restart-at in seconds; 0 for no restart.
+	RestartAtS  float64 `json:"restart_at_s"`
+	MentionFrac float64 `json:"mention_frac"`
+	Mentions    int     `json:"mentions"`
 	// MarkerNonce is the run's marker nonce (markerTag): every marker the run wrote starts with it,
 	// and the run counts only the commit rows that carry it.
 	MarkerNonce string `json:"marker_nonce"`
@@ -328,6 +365,11 @@ type summary struct {
 	Sessions        sessionsSummary   `json:"sessions"`
 	Live            liveSummary       `json:"live"`
 	LiveBytes       int64             `json:"live_bytes"`
+	// LiveReconnects is nil without -live-resume, Restart without -restart-at and
+	// CommentMentions without -mention-frac, and each is nil in a summary.json from before it.
+	LiveReconnects  *reconnectSummary `json:"live_reconnects"`
+	Restart         *restartSummary   `json:"restart"`
+	CommentMentions *mentionSummary   `json:"comment_mentions"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
@@ -366,9 +408,13 @@ type metaFile struct {
 	SeedMeta             json.RawMessage `json:"seed_meta,omitempty"`
 	Stack                string          `json:"stack"`
 	PGDirect             bool            `json:"pg_direct"`
-	AllowForeign         bool            `json:"allow_foreign"`
-	PIDs                 map[string]int  `json:"pids"`
-	MarkerNonce          string          `json:"marker_nonce"`
+	// EnvoyRTT is the round trip of the latency proxy Dispatch's ENVOY_URL went through
+	// (run-step.sh --envoy-rtt, stack.json envoy_rtt); "" when Dispatch reached the listener
+	// directly.
+	EnvoyRTT     string         `json:"envoy_rtt"`
+	AllowForeign bool           `json:"allow_foreign"`
+	PIDs         map[string]int `json:"pids"`
+	MarkerNonce  string         `json:"marker_nonce"`
 	// Replay is the replay's inputs, build and heap-profile times under -source replay.
 	Replay *replayMetaRecord `json:"replay,omitempty"`
 }
@@ -383,16 +429,25 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d session-delivery=%s marker-nonce=%s",
-		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, cfg.sessionDelivery, formatNonce(nonce))
+	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d live-resume=%t live-stale=%d restart-at=%s mention-frac=%.2f mentions=%d rng-seed=%d session-delivery=%s marker-nonce=%s",
+		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human,
+		cfg.live, cfg.liveResume, cfg.liveStale, cfg.restartAt, cfg.mentionFrac, cfg.mentions, cfg.rngSeed, cfg.sessionDelivery, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
 	}
 	lg.Printf("guard: NATS, Dispatch and the listener are the stack's own (%s)", cfg.ep.stack)
+	if cfg.liveStale > 0 {
+		if err := checkStaleBacklog(ctx, cfg.ep.pg); err != nil {
+			return err
+		}
+	}
 	dashboard, dashURL, err := probeDashboard(ctx, cfg.ep.dispatch)
 	if err != nil {
 		return err
+	}
+	if dashboard == dashboardSSE && cfg.liveResume {
+		return fmt.Errorf("-live-resume needs the live socket: the Dispatch at %s serves the SSE feed (%s), which the harness reads without resuming", redactURL(cfg.ep.dispatch), ssePath)
 	}
 	cfg.dashboard = dashboard
 	lg.Printf("dashboard: %d %s stream(s) on %s", cfg.live, dashboard, redactURL(dashURL))
@@ -422,7 +477,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
-	live := st.startDashboard(ctx, dashURL)
+	live := st.startDashboard(ctx, dashURL, a)
 	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
 	var reqs *requestLoad
 	var requestsDone <-chan struct{}
@@ -432,6 +487,9 @@ func execute(cfg runConfig, sf seedFile) error {
 		reqs, requestsDone = st.runRequests(ctx, a)
 	}
 	pr := st.startProbes(ctx, ns.pulls)
+	if st.restart != nil {
+		go st.restart.run(ctx, pr.smp, lg)
+	}
 
 	<-eventsDone
 	<-requestsDone
@@ -440,6 +498,10 @@ func execute(cfg runConfig, sf seedFile) error {
 	pr.wait()
 	cancel()
 	pr.waitSampler()
+	live.wait()
+	if st.restart != nil {
+		<-st.restart.done
+	}
 	ns.close()
 	ns.envelopes.write(cfg.out, lg)
 	if ns.relay != nil {
@@ -467,7 +529,7 @@ func execute(cfg runConfig, sf seedFile) error {
 }
 
 // step is what a run's phases share: the configuration, the seed, the log, the marker nonce, the
-// session topology and, once it opens, the window.
+// session topology and, once it opens, the window and the restart.
 type step struct {
 	cfg      runConfig
 	sf       seedFile
@@ -478,6 +540,8 @@ type step struct {
 	watchers [][]int   // by issue, the sessions that watch it
 	// start is when the generators start; the window runs from winStart to winEnd.
 	start, winStart, winEnd time.Time
+	// restart is the restart of Dispatch at -restart-at into the window; nil without it.
+	restart *restarter
 	// replay is the replay's run state under -source replay.
 	replay *replayRun
 }
@@ -508,50 +572,85 @@ func (st *step) issueTopic(i int) string {
 	return "notifications.dispatch.issue." + st.sf.Issues[i].Key + ".>"
 }
 
-// openWindow starts the generators' clock at start: the window opens after the warm-up.
+// openWindow starts the generators' clock at start: the window opens after the warm-up. The
+// restart of -restart-at is due that long after the window opens.
 func (st *step) openWindow(start time.Time) {
 	st.start = start
 	st.winStart = start.Add(st.cfg.warmup)
 	st.winEnd = st.winStart.Add(st.cfg.duration)
+	if st.cfg.restartAt > 0 {
+		st.restart = &restarter{stackSh: st.cfg.stackSh, at: st.winStart.Add(st.cfg.restartAt), done: make(chan struct{}),
+			sum: restartSummary{AtS: st.cfg.restartAt.Seconds()}}
+	}
 }
 
 func (st *step) inWindow(t time.Time) bool { return inWindow(t, st.winStart, st.winEnd) }
 
 func inWindow(t, winStart, winEnd time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
 
-// liveSockets is what the dashboard's streams read, live sockets or SSE streams: their bytes and
-// the event frames that arrived in the window.
-type liveSockets struct {
-	bytes  atomic.Int64
-	frames *collector[liveFrame]
+// dashboard is the step's dashboard streams, live sockets or SSE streams (probeDashboard), the
+// event frames of theirs that arrived in the window, and the routes a reconnect's refetch issues.
+type dashboard struct {
+	sockets *liveSockets
+	frames  *collector[liveFrame]
+	refetch []route
+	head    *eventHead
+	done    sync.WaitGroup
 }
 
 // startDashboard opens the dashboard's streams on url, as many as -live: the live sockets of a
-// build that serves /ws/live, else the SSE streams of one that serves GET /api/v1/events
-// (probeDashboard). Each stream subscribes to the event feed as a dashboard tab does and
-// reconnects a second after it ends, until ctx ends. Every event frame is timed on arrival
-// (readLive, readSSE).
-func (st *step) startDashboard(ctx context.Context, url string) *liveSockets {
-	ls := &liveSockets{frames: newCollector[liveFrame](1 << 14)}
-	// A browser offers permessage-deflate, and Dispatch accepts it.
-	dialer := &websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true}
+// build that serves /ws/live (liveSockets.run), else the SSE streams of one that serves GET
+// /api/v1/events (probeDashboard, followSSE). Each stream subscribes to the event feed as a
+// dashboard tab does, until ctx ends. Every event frame is timed on arrival (readLive, readSSE),
+// and those that arrive in the window are kept. With -live-resume each live socket reopens as the
+// dashboard does, and each reconnect whose subscription did not replay in full refetches the
+// dashboard's routes through a.
+func (st *step) startDashboard(ctx context.Context, url string, a *api) *dashboard {
+	d := &dashboard{frames: newCollector[liveFrame](1 << 14), refetch: refetchRoutes(st.cfg.routes), head: &eventHead{url: st.cfg.ep.pg}}
+	onFrame := func(f liveFrame) {
+		if st.inWindow(time.Unix(0, f.at)) {
+			d.frames.add(f)
+		}
+	}
+	d.sockets = &liveSockets{
+		url: url,
+		// A browser offers permessage-deflate, and Dispatch accepts it.
+		dialer: &websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true},
+		nonce:  st.nonce, retry: time.Second, seed: st.cfg.rngSeed,
+		resume: st.cfg.liveResume, stale: st.cfg.liveStale,
+		head:         d.head.read,
+		restartBegun: func() bool { return st.restart != nil && st.restart.begun.Load() },
+		frame:        onFrame,
+	}
+	if st.cfg.liveResume {
+		names := make([]string, len(d.refetch))
+		for i, r := range d.refetch {
+			names[i] = r.Name
+		}
+		st.lg.Printf("live: sockets resume; a reconnect whose subscription does not replay in full refetches %d dashboard routes: %s", len(d.refetch), strings.Join(names, ", "))
+		if len(d.refetch) > 0 {
+			d.sockets.refetch = refetcher{a: a, routes: d.refetch, issues: st.sf.Issues[:st.active]}.do
+		}
+	}
 	client := &http.Client{}
 	for i := range st.cfg.live {
-		header := http.Header{"X-Dispatch-User": {fmt.Sprintf("viewer-%d", i)}}
-		onFrame := func(f liveFrame) {
-			if st.inWindow(time.Unix(0, f.at)) {
-				ls.frames.add(f)
-			}
-		}
-		onBytes := func(n int64) { ls.bytes.Add(n) }
 		if st.cfg.dashboard == dashboardSSE {
-			header.Set("Accept", "text/event-stream")
-			go followSSE(ctx, client, url, header, st.nonce, time.Second, onFrame, onBytes)
+			header := http.Header{"X-Dispatch-User": {viewerName(i)}, "Accept": {"text/event-stream"}}
+			d.done.Go(func() {
+				followSSE(ctx, client, url, header, st.nonce, time.Second, onFrame, func(n int64) { d.sockets.bytes.Add(n) })
+			})
 			continue
 		}
-		go followLive(ctx, dialer, url, header, st.nonce, time.Second, onFrame, onBytes)
+		d.done.Go(func() { d.sockets.run(ctx, i) })
 	}
-	return ls
+	return d
+}
+
+// wait waits, once ctx has ended, for every socket to return, then closes the event-head
+// connection.
+func (d *dashboard) wait() {
+	d.done.Wait()
+	d.head.close()
 }
 
 // openLoop is an open-loop Poisson schedule at rate per second, from stream `stream` of rngSeed:
@@ -685,16 +784,30 @@ func (p *probes) wait() {
 // totals of its failed reads.
 func (p *probes) waitSampler() { <-p.smpDone }
 
-// profile fetches Dispatch's profiles. The CPU profile covers the whole window; the goroutine
-// dump and the heap profile are taken once it has finished, outside it, and under -source replay
-// after the replay's window-end reads (heap-end.pprof, then Dispatch's /proc read).
+// profile fetches Dispatch's profiles. The CPU profile covers the whole window, or with a restart
+// the window from the restarted Dispatch's /healthz to the window's end (a profile cannot span two
+// processes); the goroutine dump and the heap profile are taken once it has finished, outside it,
+// and under -source replay after the replay's window-end reads (heap-end.pprof, then Dispatch's
+// /proc read).
 func (st *step) profile(ctx context.Context) {
 	if !sleepUntil(ctx, st.winStart) {
 		return
 	}
+	from := st.winStart
+	if st.restart != nil {
+		select {
+		case <-st.restart.done:
+		case <-ctx.Done():
+			return
+		}
+		from = time.Now()
+	}
 	pprof, out := st.cfg.ep.pprof, st.cfg.out
-	secs := int(math.Ceil(st.cfg.duration.Seconds()))
-	fetchTo(pprof+"/debug/pprof/profile?seconds="+strconv.Itoa(secs), filepath.Join(out, "cpu.pprof"), st.cfg.duration+60*time.Second, st.lg)
+	if secs := int(math.Ceil(st.winEnd.Sub(from).Seconds())); secs > 0 {
+		fetchTo(pprof+"/debug/pprof/profile?seconds="+strconv.Itoa(secs), filepath.Join(out, "cpu.pprof"), st.winEnd.Sub(from)+60*time.Second, st.lg)
+	} else {
+		st.lg.Printf("cpu profile: none, the restart ended after the window")
+	}
 	if st.replay != nil {
 		select {
 		case <-st.replay.endRead:
@@ -709,7 +822,7 @@ func (st *step) profile(ctx context.Context) {
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
 // reads the run's commit rows and names the ungranted locks' relations, so it runs after the load.
-func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, live *liveSockets, pr *probes) summary {
+func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, live *dashboard, pr *probes) summary {
 	cfg := st.cfg
 	ws := writes.snapshot()
 	frames := live.frames.snapshot()
@@ -735,7 +848,9 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 			Dashboard: cfg.dashboard,
 			EventMix:  cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
-			SessionDelivery: cfg.sessionDelivery, MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
+			LiveResume: cfg.liveResume, LiveStale: cfg.liveStale, RestartAtS: cfg.restartAt.Seconds(),
+			MentionFrac: cfg.mentionFrac, Mentions: cfg.mentions, SessionDelivery: cfg.sessionDelivery,
+			MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
 		},
 		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
 		Requests: summarizeRequests(reqs.recs.snapshot(), int(reqs.dropped.Load()), cfg.requests, durS),
@@ -746,7 +861,19 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		CommitOrderLock: summarizeLock(pr.lp.samples, pr.lp.errors),
 		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
 		Live:            summarizeLive(frames, ws, commits),
-		LiveBytes:       live.bytes.Load(),
+		LiveBytes:       live.sockets.bytes.Load(),
+	}
+	if cfg.liveResume {
+		recs := live.sockets.reconnects()
+		writeJSONFile(filepath.Join(cfg.out, "reconnects.json"), recs, 0o644, st.lg)
+		sum.LiveReconnects = summarizeReconnects(recs, cfg.liveStale, live.refetch, st.inWindow)
+	}
+	var restartAt time.Time
+	if st.restart != nil {
+		restartAt = st.restart.sum.At
+	}
+	if cfg.mentionFrac > 0 {
+		sum.CommentMentions = summarizeMentions(ws, cfg.mentionFrac, cfg.mentions, restartAt)
 	}
 	if ns.relay != nil {
 		d := ns.relay.summary()
@@ -768,6 +895,10 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 			// Its operations count the committed events, which were not read.
 			sum.Resources.DispatchCPUSPerOp = nil
 		}
+	}
+	if st.restart != nil {
+		st.restart.sum.fillCPU(ss)
+		sum.Restart = &st.restart.sum
 	}
 	sum.StackExits = pr.smp.stackExits()
 	if st.replay != nil {
@@ -870,7 +1001,7 @@ const (
 func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	m := metaFile{
 		Step: cfg.name, Args: cfg.args, Nproc: runtime.NumCPU(), BuildCommit: cfg.buildCommit, BuildDirty: cfg.buildDirty,
-		Stack: cfg.ep.stack, PGDirect: cfg.ep.pgDirect, AllowForeign: cfg.allowForeign, PIDs: cfg.ep.pids, GOMAXPROCS: "unset",
+		Stack: cfg.ep.stack, PGDirect: cfg.ep.pgDirect, EnvoyRTT: cfg.ep.envoyRTT, AllowForeign: cfg.allowForeign, PIDs: cfg.ep.pids, GOMAXPROCS: "unset",
 	}
 	if b, err := os.ReadFile("/proc/cpuinfo"); err == nil {
 		for line := range strings.SplitSeq(string(b), "\n") {

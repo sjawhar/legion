@@ -41,7 +41,7 @@ import { excludedParts } from "./broadcast-plan";
 import { useMarkShownRepliesRead } from "./unread";
 
 /** How long the server leaves a delivery claim before another sender may take it
- *  (`claimLapsed`, one minute). Past it, a pending attempt is nobody's. */
+ *  (`model.DeliveryClaimFreeSQL`, one minute). Past it, a pending attempt is nobody's. */
 const CLAIM_LEASE_MS = 60_000;
 
 /** How many recipients have answered: a recipient whose thread carries a message the session
@@ -89,9 +89,9 @@ function BroadcastRecipientRow({
   const attempts = deliveryAttempts(recipient.message.deliveries, recipientAgent);
   const latest = attempts.at(-1);
   // A pending attempt nobody has come back to. The server frees a claim after a minute
-  // (`claimLapsed`), and it judges the claim; this reads the attempt's own timestamp, which is
-  // never later than the claim, so at worst the retry is offered a moment early - and a
-  // same-mode retry of a send that landed is recognised as a repeat and dropped
+  // (`model.DeliveryClaimFreeSQL`), and it judges the claim; this reads the attempt's own
+  // timestamp, which is never later than the claim, so at worst the retry is offered a moment
+  // early - and a same-mode retry of a send that landed is recognised as a repeat and dropped
   // (`DELIVERY_DUPLICATE_WINDOW_MS` in `@legion/contracts`), so early is safe.
   const stranded =
     latest?.state === "pending" && Date.now() - Date.parse(latest.createdAt) > CLAIM_LEASE_MS;

@@ -1,0 +1,13 @@
+kind: Changed
+body: |-
+    **Breaking for a page that relied on a full replay:** an events subscription on `GET /ws/live`
+    that resumes (`since`) is replayed at most 256 events whose frames total at most 1 MiB; past
+    either bound it is replayed nothing and its `events_start` says `replay_complete: false`, so the
+    page refreshes what it shows once. A cold subscription is replayed nothing, as before. A
+    subscription that falls 64 events behind the relay now catches up from the event log within the
+    same bounds and stays open, where it ended; past the bounds, or when the event log is reset
+    under it, it ends as `behind` and the page subscribes again. When the server stops, the socket
+    closes with 1012, as before.
+time: 2026-10-28T11:33:01.639853263Z
+custom:
+    Issue: pr2406
