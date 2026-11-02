@@ -420,9 +420,6 @@ test("the header says why a session shows less: an Oh My Pi that does not report
 // the thread shows as theirs; Send waits for the session's answer, and the header moves only when
 // the session reports the switch. A pick is a steer whatever the composer's mode, since a BTW is a
 // side question the session answers rather than input it runs.
-// SLOW(>=2s): two whole switch round trips through the fake listener - the pick, the session's
-// stored answer and the frame that reports the new model, then the same again from a BTW
-// composer - are what the row proves; neither can be cut without dropping half the claim.
 test("a model picked in the header is the viewer's own Send of /model, holds Send until the session answers, and goes as a steer whatever Send as says @phone", async ({
   browser,
 }, testInfo) => {
@@ -537,6 +534,10 @@ test("a thinking level picked in the header sends /effort, and the session's ans
 
 // A2: a switch the session refuses (here, a model whose key it cannot read) changes nothing, and
 // the page shows the session's own reason, quoted.
+// SLOW(>=2s): the session's own reason is the claim, so the row pays a whole round trip for it -
+// the pick's send through the fake listener, Dispatch's store, the session's reply - over the
+// live view's first load. The header reads that reply on the page's next fetch of the thread,
+// which the app holds to one a second (MIN_REFETCH_INTERVAL_MS, web/src/api/query-refresh.ts).
 test("a switch the session refuses shows its reason and leaves the header on the values it last reported @phone", async ({
   browser,
 }, testInfo) => {
@@ -661,6 +662,10 @@ test("an agent's bearer cannot switch a session: the messages route answers 403 
 // pickers back; an answer that still comes replaces the line. A switch whose send already failed
 // (no live session took it) says so as soon as Dispatch answers with the failed attempt, without
 // waiting for that deadline.
+// SLOW(>=2s): two switches, each a round trip of its own: the answered one waits out the page's
+// once-a-second read of the thread (MIN_REFETCH_INTERVAL_MS, web/src/api/query-refresh.ts), and
+// the failed one waits out the listener take-over window Dispatch answers after, as the comment
+// on it below says. The deadline itself costs nothing - it is spent on the page's own clock.
 test("a switch the session never answers says so after 30 seconds and keeps the header, a late answer replaces that, and a send that failed says so without waiting for the deadline @phone", async ({
   browser,
 }, testInfo) => {

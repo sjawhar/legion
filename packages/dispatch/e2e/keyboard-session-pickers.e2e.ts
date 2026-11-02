@@ -302,9 +302,6 @@ for (const [row, way, leave] of [
 // Decision 6a: type-ahead is a step as the arrows are. A letter moves the choice to the next
 // option it starts, here `o` to openai/model-c past both anthropic models, and sends nothing;
 // Enter switches to it.
-// SLOW(>=2s): the live view is loaded with the session's replay in it - its own chunk and header
-// laid out afresh in each engine - and the one switch Enter sends is then read back from the
-// fake listener, which is how "once" is counted.
 test("type-ahead on a header picker moves its choice without switching the session, and Enter switches it once @phone", async ({
   browser,
 }, testInfo) => {

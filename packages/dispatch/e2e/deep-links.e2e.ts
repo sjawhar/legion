@@ -1147,8 +1147,6 @@ test("an item link the SPA cannot resolve names what is missing, inside the shel
 
 // A landing marks exactly one conversation card, whatever bucket that conversation is in, and
 // where the link names a reply rather than the root it marks that reply's own row inside it.
-// SLOW(>=2s): nine seeded items, then six landings over one loaded Conversation: the row proves
-// that every kind of item link marks exactly one card, so each kind costs it a landing.
 test("every item link lands on exactly one marked card, and a reply link marks its row too @phone", async ({
   browser,
 }, testInfo) => {

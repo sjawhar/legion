@@ -115,7 +115,6 @@ test("live: bob's ask updates alice's Inbox and project badges without reload @p
   await alice.close();
 });
 
-// SLOW(>=2s): two pages, each paying its own first load, and a full-page phone screenshot.
 test("live: answering an ask updates the Inbox and project badges immediately @phone", async ({
   browser,
 }, testInfo) => {

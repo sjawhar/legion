@@ -353,8 +353,6 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// SLOW(>=2s): the six-question seed every row of this file reads, and two loads of the Inbox -
-// one per width the two columns have to hold.
 test("the Inbox shows a decision block in the reading pane and answers it in two taps", async ({
   browser,
 }) => {
@@ -568,8 +566,6 @@ test("the arrow keys, j, k, Enter and ?item= drive the reading pane", async ({ b
   }
 });
 
-// SLOW(>=2s): the six-question seed every row of this file reads, and a load at each of the
-// three widths whose layout this row is about.
 test("the Inbox keeps today's card below 1280 px and in the drawer @phone", async ({ browser }) => {
   const seed = await seedInbox();
   const alice = await asUser(browser, "alice");

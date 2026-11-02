@@ -154,9 +154,6 @@ test("a comment whose answer is lost lands once, under one key @phone", async ({
 // tab's storage, asks before the tab is left, and the reloaded page sends it again under the same
 // key. The shell's pending-writes indicator names it while it is out and clears once Dispatch
 // answers it.
-// SLOW(>=2s): surviving the reload is the claim, so the row pays two loads of the issue page -
-// the one that sends the write and the one that resumes it - in each engine that keeps a tab's
-// storage its own way.
 test("a status change whose answer is lost survives a reload, lands once, and the pending-writes indicator shows and clears @phone", async ({
   browser,
 }) => {
@@ -671,9 +668,6 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
 // `chromium-plain-http-sign-out` project runs these on the lease a page without `navigator.locks`
 // holds by.
 for (const landed of [false, true]) {
-  // SLOW(>=2s): two real tabs are the property - the one holding alice's write and the one she
-  // signs out from - so the row pays two page loads, and the sign-out has to reach a server that
-  // never answers it before the holding tab can be read.
   test(`a sign-out ${landed ? "that landed" : "that never reached Dispatch"}, its tab closed before the answer, ${landed ? "discards" : "lets go on"} the write another tab held for it @phone`, async ({
     browser,
   }, testInfo) => {

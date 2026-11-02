@@ -79,8 +79,6 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-// SLOW(>=2s): surviving a reload is the claim, so two document loads with a Yjs sync each are
-// the floor, in the engines whose own browser storage this spec exists to cover.
 test("an edit typed while the document transport is down survives a reload", async ({
   browser,
 }) => {

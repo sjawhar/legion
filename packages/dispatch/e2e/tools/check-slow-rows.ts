@@ -11,6 +11,13 @@
  *  above a `test(` inside a loop marks every row that call generates, since every one of them
  *  reports that call's line.
  *
+ *  A report is a snapshot of a tree that goes on moving: a marker written above a row moves that
+ *  row down by its own length, and every line added or taken above one moves it too. So a marked
+ *  `test(` whose title is a plain string literal is joined to the rows of that title as well as
+ *  to the rows on its line, and a report taken before an edit still finds the row it measured.
+ *  A row a loop generates has a title built at run time and is found by its line alone, as a
+ *  `test.describe(` block's rows are.
+ *
  *  Two things fail the check, each printed under its own heading:
  *
  *  - a row at or above the threshold with no marker, because A5's claim does not hold for it;
@@ -41,6 +48,8 @@ const markerPattern = /^\s*\/\/\s*SLOW\(>=2s\):\s*(?<reason>.+?)\s*$/u;
 const commentPattern = /^\s*\/\//u;
 const describePattern = /^(?<indent>\s*)test\.describe[.(]/u;
 const testPattern = /^\s*test[.(]/u;
+/** The title of a marked `test(` call, where the call gives it as one plain string literal. */
+const titlePattern = /^\s*test(?:\.[A-Za-z]+)*\(\s*(?<title>"(?:[^"\\]|\\.)*")/u;
 
 export interface Row {
   readonly project: string;
@@ -61,6 +70,9 @@ export interface Marker {
   /** The last line that call covers: the `test(` call's own line, or a block's closing line. */
   readonly targetEnd: number;
   readonly kind: "test" | "describe";
+  /** The title the marked `test(` call gives as a literal, which the report's rows of that call
+   *  carry whatever line they are on now. Absent where the call builds its title at run time. */
+  readonly title?: string;
 }
 
 export interface Verdict {
@@ -154,6 +166,7 @@ export function markersIn(file: string, source: string): readonly Marker[] {
       continue;
     }
     if (testPattern.test(lines[next])) {
+      const title = titlePattern.exec(lines[next])?.groups?.title;
       markers.push({
         file,
         kind: "test",
@@ -161,6 +174,7 @@ export function markersIn(file: string, source: string): readonly Marker[] {
         reason,
         target: next + 1,
         targetEnd: next + 1,
+        ...(title === undefined ? {} : { title: JSON.parse(title) as string }),
       });
     }
   }
@@ -168,13 +182,12 @@ export function markersIn(file: string, source: string): readonly Marker[] {
 }
 
 /** A marker and a row meet when the row's `test(` call is the marked one, or sits inside the
- *  marked `describe` block. */
+ *  marked `describe` block - by the line the report read it on, or, for a marked call that names
+ *  its title outright, by that title, which the lines around it moving cannot change. */
 function covers(marker: Marker, row: Row): boolean {
-  return (
-    basename(marker.file) === basename(row.file) &&
-    row.line >= marker.target &&
-    row.line <= marker.targetEnd
-  );
+  if (basename(marker.file) !== basename(row.file)) return false;
+  if (row.line >= marker.target && row.line <= marker.targetEnd) return true;
+  return marker.title !== undefined && marker.title === row.title;
 }
 
 /** A5, judged: which slow rows carry no marker, and which markers no slow row used. */

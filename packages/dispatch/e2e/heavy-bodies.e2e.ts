@@ -340,9 +340,6 @@ test("the Inbox's ask card draws a reply of 8,000 list items without holding the
 // A hover card previews the target's body on one line (`MarkdownPreview`'s `paintOneLine`), so
 // the 8,000 items read as their 8,000 `x` separated by 7,999 spaces. The body still has to be
 // parsed whole, which is what froze the tab of a reader who only pointed at a reference.
-// SLOW(>=2s): a one-line preview of 8,000 items still parses all 8,000 of them, which is the
-// cost this row exists to bound: the conversation load, the reference's own comment GET and that
-// whole parse stand between the hover and the preview's 15,999 characters.
 test("a hover card of a comment of 8,000 list items draws without holding the main thread for a second", async ({
   browser,
 }) => {

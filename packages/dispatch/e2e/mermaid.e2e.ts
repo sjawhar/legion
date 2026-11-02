@@ -330,9 +330,6 @@ test("an ask's question holding a mermaid block draws a diagram on the Inbox car
   }
 });
 
-// SLOW(>=2s): one real worker draw. The Mermaid chunk loads, lays the flowchart out and hands
-// back an SVG the page parses into a shadow root, which is the whole of what the row proves; the
-// seed is one message and the page is loaded once.
 test("an issue message holding a mermaid block draws a diagram in the Conversation @phone", async ({
   browser,
 }) => {
@@ -356,8 +353,6 @@ test("an issue message holding a mermaid block draws a diagram in the Conversati
   }
 });
 
-// SLOW(>=2s): one real worker draw, under a reply the thread has to be expanded to show; the
-// chunk load, the layout and the SVG the page parses back are what the row proves.
 test("a reply to a comment holding a mermaid block draws a diagram under its comment @phone", async ({
   browser,
 }, testInfo) => {
@@ -420,9 +415,6 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
 // page timer, so the clock fires it rather than the row waiting 5 s for it; the responsiveness
 // samples run first, on the clock at real speed (`install` alone does not pause it), since an
 // advanced clock would make a sample read its deadline for free.
-// SLOW(>=2s): the worker chunk has to load and take the source for real, and the proof that the
-// page's own thread keeps answering while it holds it is five samples of a tenth of a second
-// each, at real speed; only the limit's own five seconds are spent on the clock.
 test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
   browser,
 }, testInfo) => {
@@ -504,9 +496,6 @@ test("a code block in another language stays code @phone", async ({ browser }, t
 // `svg { --_text: var(--fg) … }` after an `@import` of Google Fonts. In the page it restyles
 // every `svg` and `text` there and fetches the font; in the diagram's own shadow root it styles
 // that diagram alone.
-// SLOW(>=2s): one real worker draw in the editor, then the page's own styles, sheets and the
-// preview's shadow root read back one by one, and the 250 ms margin a fetch that must never come
-// can only be read after.
 test("a document's mermaid diagram draws, styles nothing outside it, and fetches no Google font @phone", async ({
   browser,
 }) => {
@@ -735,9 +724,6 @@ test("an edited document diagram redraws once typing pauses, and its last drawin
 // clock: the editor hands the source to the worker chunk, the page keeps answering while the
 // clock runs at real speed, and the shipped limit, fired by the fast-forward, refuses it with the
 // reason above its source. An editor drawing on the page's thread fails at the hold.
-// SLOW(>=2s): the worker chunk has to load and take the source for real, and the proof that the
-// page's own thread keeps answering while it holds it is five samples of a tenth of a second
-// each, at real speed; only the limit's own five seconds are spent on the clock.
 test("a document diagram too large to draw in time shows the reason and its source, and the page keeps responding @phone", async ({
   browser,
 }) => {
@@ -959,8 +945,6 @@ test("with no worker a document's diagram shows its source @phone", async ({ bro
 
 // A worker that drew once can fail later, as when a redeploy removes its chunk: the block then
 // shows its edited source as code, never the last drawing above a source it no longer matches.
-// SLOW(>=2s): the editor is loaded and the diagram drawn for real once, which is what "after its
-// first drawing" means, before the typed edit starts the second pass the row makes fail.
 test("a document diagram whose worker fails after its first drawing shows its source @phone", async ({
   browser,
 }) => {

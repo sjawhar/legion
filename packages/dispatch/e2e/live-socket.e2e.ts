@@ -157,6 +157,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): one socket for every live view is read over three live views, so the row loads and
+// draws all three in the one tab - the project's board, the session's live thread and the
+// delivery timeline - and each is a page's worth of rendering the claim cannot do without.
 test("a tab holds one live socket for every live view @phone", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board issue" });
@@ -409,9 +412,6 @@ test("a change committed while the page loads is shown without a reload @phone",
   }
 });
 
-// SLOW(>=2s): the claim is an absence, and the only honest reading of it is a second of real
-// quiet after the feed starts on the opened socket; the page's clock cannot stand in for it, as
-// the comment on that wait below says.
 test("a first live socket opening without a change makes no API request @phone", async ({
   browser,
 }) => {

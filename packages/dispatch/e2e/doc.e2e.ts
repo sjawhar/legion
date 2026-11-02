@@ -599,8 +599,6 @@ for (const row of [
   });
 }
 
-// SLOW(>=2s): three browser contexts - two of them desktop-sized, since the peer selection this
-// row reads is drawn only from 1280 px - already opened together.
 test("document marks and table alignment use classes rather than inline styles", async ({
   browser,
 }) => {

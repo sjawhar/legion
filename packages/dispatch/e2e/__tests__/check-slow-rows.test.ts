@@ -74,6 +74,8 @@ test("a marker above a describe marks every row of that block, and nothing after
 test("a marker above a loop's test( marks every row that call generates", () => {
   const markers = markersIn("task-items.e2e.ts", loopSource);
   expect(markers).toMatchObject([{ kind: "test", line: 5, target: 6, targetEnd: 6 }]);
+  // The call builds each row's title, so these rows are found by their line alone.
+  expect(markers[0].title).toBeUndefined();
 
   const verdict = judge(
     [
@@ -86,6 +88,33 @@ test("a marker above a loop's test( marks every row that call generates", () => 
   expect(verdict.unmarked).toEqual([]);
   expect(verdict.rowsSlow).toBe(2);
   expect(verdict.markersUsed).toBe(1);
+});
+
+// A report is a snapshot of a tree that has moved on: writing a marker above a row moves that row
+// down by the marker's own length, so the line the report holds is no longer the row's. The title
+// the call names is the row's either way.
+test("a marker finds the row it sits above by title once the line has moved", () => {
+  const source = `import { expect, test } from "@playwright/test";
+
+// SLOW(>=2s): a real finger, step by step.
+test("a finger drives the board", async ({ page }) => {
+  await page.goto("/");
+});
+`;
+  const markers = markersIn("board.e2e.ts", source);
+  expect(markers).toMatchObject([{ target: 4, title: "a finger drives the board" }]);
+
+  // The report measured this row at line 3, before the marker above it was written.
+  const moved = row("board.e2e.ts", 3, { title: "a finger drives the board" });
+  const verdict = judge([moved], markers, 2_000);
+  expect(verdict.unmarked).toEqual([]);
+  expect(verdict.stale).toEqual([]);
+  expect(verdict.markersUsed).toBe(1);
+
+  // A row of another title at that line is another row, and carries no marker of this one's.
+  const other = judge([row("board.e2e.ts", 3, { title: "a mouse drags a card" })], markers, 2_000);
+  expect(other.unmarked.map((slow) => slow.title)).toEqual(["a mouse drags a card"]);
+  expect(other.stale).toEqual([...markers]);
 });
 
 // A5's first half: a row that takes the threshold or more and names no reason fails the check,

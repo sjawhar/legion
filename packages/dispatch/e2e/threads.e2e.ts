@@ -330,9 +330,6 @@ test("resolve, reopen, then edit leaves one comment turn in its final state @pho
   }
 });
 
-// SLOW(>=2s): who may edit is read in two browsers at once - bob's thread holds no Edit, alice's
-// holds two - so the row pays two signed-in contexts, and then carries both of her edits across
-// to his open thread.
 test("only comment authors edit root and reply text in Conversation @phone", async ({
   browser,
 }, testInfo) => {

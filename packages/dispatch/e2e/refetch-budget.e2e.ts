@@ -250,9 +250,6 @@ test("budget: 20 title writes to issues the page does not show send at most 5 re
   }
 });
 
-// SLOW(>=2s): the crossing is the claim, so the three sidebar reads are held on the wire until a
-// real issue event has reached the page - an event barrier of its own writes - and the count is
-// only safe to read after the refresh window has drained to half a second of quiet traffic.
 test("sidebar: an issue event while the sidebar's first reads are in flight discards none of them @phone", async ({
   browser,
 }, testInfo) => {

@@ -259,9 +259,6 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
   }
 });
 
-// SLOW(>=2s): two signed-in readers are two browser contexts with an editor each, and the row
-// proves one reader's edits move the other's highlights: four marks placed on both sides, then
-// a typed insert and a deletion carried across the shared document.
 test("highlights follow edits in the other browser and preserve their anchor state @phone", async ({
   browser,
 }) => {
@@ -474,6 +471,9 @@ test("accepting a suggestion changes the text in both browsers and names a versi
   }
 });
 
+// SLOW(>=2s): both viewers are the claim, so the row pays two browser contexts and a Conversation
+// load in each - made together - and each page then draws the seeded anchored comment in its
+// conversation and in its margin before a second comment, made with both pages open, reaches them.
 test("anchored and unanchored comments reach Conversation for both viewers", async ({
   browser,
 }) => {

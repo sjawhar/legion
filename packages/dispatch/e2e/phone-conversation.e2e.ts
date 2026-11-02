@@ -670,9 +670,6 @@ test("on a phone, a thread reply the server never answers lets Back go at the de
 // On a phone the docked composer sits at the foot of the screen, and a refusal's row grows it
 // upward. `Jump to latest` shows while the reader is scrolled down, which is when they reach for
 // the refusal's Retry, or a closed issue's Discard draft, so it never sits over the composer.
-// SLOW(>=2s): the pill only shows over a conversation taller than the phone, so fifteen turns are
-// seeded one event at a time and laid out, then scrolled to the oldest twice; between the two
-// readings the composer is grown by a refusal, a held Retry and the close that refuses it.
 test("on a phone, Jump to latest covers none of the docked composer's Retry or Discard draft @phone", async ({
   browser,
 }) => {

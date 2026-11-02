@@ -1163,9 +1163,6 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
   };
 }
 
-// SLOW(>=2s): forty agent rows and twenty exclusion names laid out for real at each of three
-// compact sizes, with the message refilled until it stops growing at each; the layout under
-// measurement is what the row proves.
 test("with half the recipients unable to take the mode, the compact composer keeps its budget and every exclusion stays reachable on one line", async ({
   browser,
 }, testInfo) => {
@@ -1215,9 +1212,6 @@ test("with half the recipients unable to take the mode, the compact composer kee
 });
 
 test.describe("the composer's notices share one slot, highest first, within budget on compact screens", () => {
-  // SLOW(>=2s): 120 agent rows and 120 recipient chips laid out for real at each of three compact
-  // sizes, with the message refilled until it stops growing at each; the layout under measurement
-  // is what the row proves.
   test("the limit alone: 120 recipients", async ({ browser }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
     const alice = await asUser(browser, "alice");
@@ -1233,9 +1227,6 @@ test.describe("the composer's notices share one slot, highest first, within budg
     }
   });
 
-  // SLOW(>=2s): 120 agent rows and 110 recipient chips laid out for real at each of three
-  // compact sizes, with the message refilled until it stops growing at each; the layout under
-  // measurement is what the row proves.
   test("the limit over exclusions: 120 selected, 110 recipients, each excluded chip still names its reason", async ({
     browser,
   }, testInfo) => {
