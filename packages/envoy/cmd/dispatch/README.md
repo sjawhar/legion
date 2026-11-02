@@ -281,10 +281,12 @@ So redelivering a delivery that did reach the stream adds nothing to the stream.
   After a gap in sweeping (Dispatch down), the running sweep resumes its listing from its cursor, back to GitHub's three days.
   The first sweep ever made, with no cursor, looks back 72 hours.
 
-The cursor, one record per delivery acted on, one index entry per open delivery, keyed `pending.<YYYYMMDD>.<HH>.<MM>.<GUID>` by the minute that delivery next needs a sweep, and the marker that says every open record has an entry live in the JetStream KV bucket `envoy_webhook_redelivery`.
+The cursor, one record per delivery acted on, one index entry per open delivery, keyed `pending.<YYYYMMDD>.<HH>.<MM>.<GUID>` by the minute that delivery next needs a sweep, and the marker that says when a back-fill last gave every open record an entry live in the JetStream KV bucket `envoy_webhook_redelivery`.
 Its 72-hour TTL matches GitHub's horizon, and an index entry a sweeper died before deleting expires with the records.
 The running sweep reads from that index the deliveries due in its window; the operator command reads every record there is.
-A sweep that meets open records an older build wrote without entries gives each one an entry and then writes the marker, which the TTL expires, so that repair runs again at most once every three days.
+A sweep that meets open records an older build wrote without entries gives each one an entry and then writes the marker, which holds the moment that back-fill read the bucket.
+Once that moment is further behind than the sweep's look-back, the next sweep reads every record again, so the whole-bucket read costs one sweep an hour at most rather than one every two minutes;
+a sweep that reads a cursor an older build wrote — one carrying no mark of this build's — back-fills at once rather than waiting out that hour.
 The server opens the bucket on the first sweep that finds NATS connected, not at boot, so a NATS that is down at boot skips the sweeps until it answers, each logged as failed.
 A compare-and-swap claim, written before the request and replaced by GitHub's answer after it, keeps two Dispatch processes from requesting the same attempt twice, and the operator command honours the same rate limits.
 

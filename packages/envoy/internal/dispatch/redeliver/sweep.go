@@ -535,16 +535,11 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 	if current.InFlight {
 		if s.now().Before(current.claimEndsAt()) {
 			decision.Outcome = ClaimedElsewhere
-			if !dryRun && current.Pending == "" {
-				// A claim a build without the index wrote leaves the record naming no entry, so
-				// the entry this sweep read the delivery by is the only one it has, and this
-				// sweep's cursor passes that entry the moment it finishes. The entry the claim's
-				// end is owed is written here, and the record is not: the claimant writes its
-				// outcome over the revision it claimed at, and a record write here would take
-				// that revision from it. openDue adopts the entry on the sweep after the claim
-				// is void, and the write that decides the delivery then gives the record an
-				// entry of its own (below).
-				if err := s.putPending(guid, pendingFor(current, guid, now)); err != nil {
+			if !dryRun {
+				// A claim an older build wrote leaves the record naming no index entry, so the
+				// entry its claim's end is owed is written here and no record is, which is the
+				// rule the back-fill meeting the same claim follows (indexLiveClaim).
+				if _, err := s.indexLiveClaim(guid, current, now); err != nil {
 					return decision, false, err
 				}
 			}

@@ -1584,11 +1584,21 @@ func TestAStaleIndexEntryIsDeletedAndTheDeliveryIsNotLost(t *testing.T) {
 // written before the record that names it, so an entry keyed inside the margin may be one another
 // sweeper has just written and is about to name, and deleting it would leave that record naming a
 // key that is gone. A key is truncated to its minute, so the margin is cursorOverlap and a minute:
-// a key inside it says nothing about when its entry was written. Here one stray is keyed in the
-// sweep's own minute and one five minutes back, and the record of the delivery both name is
-// waiting out the longest backoff, so it names neither.
+// an entry keyed at the minute cursorOverlap before now may have been written at any moment up to
+// a minute after that key, which is inside the overlap, and so is kept.
+//
+// Here the clock is taken to half a minute past the minute, so each key falls on its own side of
+// the margin: one stray is keyed in the sweep's own minute, one at the minute cursorOverlap
+// before it, which the margin keeps, and one five minutes back, which it deletes. The record of
+// the delivery all three name is waiting out the longest backoff, so it names none of them.
 func TestAStrayIndexEntryIsDeletedOnlyPastTheMargin(t *testing.T) {
 	h := newHarness(t)
+	// The margin is measured from now against a key truncated to its minute, so it stands clear
+	// of a key only on a clock that is not on a minute boundary. The harness starts on whatever
+	// second the test began at; this takes it forward to the next :30. The sweeper's own clock is
+	// all this moves -- a recorded rate limit is judged by the database's clock, and this test
+	// records none.
+	h.clock.advance(time.Duration((90-h.clock.Now().Second())%60) * time.Second)
 	h.sweep(redeliver.Options{}) // the cursor
 	waiting := h.fail("guid-waiting", http.StatusServiceUnavailable, 0)
 	h.webhook.Refuse(waiting.ID, http.StatusUnprocessableEntity)
@@ -1598,12 +1608,15 @@ func TestAStrayIndexEntryIsDeletedOnlyPastTheMargin(t *testing.T) {
 		t.Fatalf("the record of guid-waiting names no index entry: %v", h.keys())
 	}
 
-	// Eight minutes on, the sweep's window reaches back past both strays and its minute is not
-	// the one the record's own entry, an hour out, is keyed in.
+	// Eight minutes on, the sweep's window reaches back past all three strays and its minute is
+	// not the one the record's own entry, an hour out, is keyed in.
 	h.clock.advance(8 * time.Minute)
 	fresh := redeliver.PendingKey(h.clock.Now(), "guid-waiting")
+	// cursorOverlap before the sweep's own minute: the oldest key an entry another sweeper is
+	// about to name can carry.
+	edge := redeliver.PendingKey(h.clock.Now().Truncate(time.Minute).Add(-2*time.Minute), "guid-waiting")
 	old := redeliver.PendingKey(h.clock.Now().Add(-5*time.Minute), "guid-waiting")
-	for _, stray := range []string{fresh, old} {
+	for _, stray := range []string{fresh, edge, old} {
 		if _, err := h.state.Put(stray, nil); err != nil {
 			t.Fatalf("write the stray index entry %s: %v", stray, err)
 		}
@@ -1616,6 +1629,9 @@ func TestAStrayIndexEntryIsDeletedOnlyPastTheMargin(t *testing.T) {
 	held := h.keys()
 	if !slices.Contains(held, fresh) {
 		t.Fatalf("the sweep deleted %s, an entry keyed in its own minute that another sweeper may be about to name: %v", fresh, held)
+	}
+	if !slices.Contains(held, edge) {
+		t.Fatalf("the sweep deleted %s, an entry whose writer may be inside the overlap a cursor leaves: %v", edge, held)
 	}
 	if slices.Contains(held, old) {
 		t.Fatalf("the sweep left the stray index entry %s, keyed before the margin: %v", old, held)
@@ -1968,6 +1984,147 @@ func TestALiveClaimOverARecordNamingNoIndexEntryIsIndexedAtItsClaimEnd(t *testin
 	}
 	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
 		t.Fatalf("redelivery requests %v, want %v", got, want)
+	}
+}
+
+// The back-fill meets a live claim the way the sweep's index read does: it writes the index entry
+// the claim's end is owed and no record at all. The claimant writes GitHub's answer over the
+// revision it claimed at, so a record write here would move that revision out from under it, the
+// answer would be refused, and the attempts, refusals and next request it earned would be lost --
+// after which the delivery is asked for a second time once the claim ends.
+//
+// Here the bucket is as an older build leaves it: a cursor without this build's mark, so the
+// back-fill runs whatever the marker says, and a record that build created and then claimed, with
+// no `pending` field. Its failed attempt is two hours old, so nothing but the back-fill's scan
+// reads it, and its claimant is still waiting on GitHub while this sweep runs.
+func TestABackfillLeavesALiveClaimToItsClaimant(t *testing.T) {
+	h := newHarness(t)
+	now := h.clock.Now().UTC()
+	if _, err := h.state.Put("cursor", fmt.Appendf(nil, `{"at":%q}`, now.Format(time.RFC3339))); err != nil {
+		t.Fatalf("write the cursor the older build left: %v", err)
+	}
+	failed := h.fail("guid-claimed", http.StatusServiceUnavailable, 2*time.Hour)
+	claimed, err := json.Marshal(map[string]any{
+		"attempts": 1, "refusals": 0, "last_attempt_at": now.Add(-2 * time.Hour),
+		"next_attempt_at": now.Add(-time.Hour), "first_delivered_at": failed.DeliveredAt,
+		"delivery": failed, "in_flight": true, "claimed_at": now,
+	})
+	if err != nil {
+		t.Fatalf("encode the record the older build claimed: %v", err)
+	}
+	claimRevision, err := h.state.Create("guid.guid-claimed", claimed)
+	if err != nil {
+		t.Fatalf("write the record the older build claimed: %v", err)
+	}
+
+	report := h.sweep(redeliver.Options{})
+	if report.Listed != 0 {
+		t.Fatalf("the sweep listed %d failed attempts, so the back-fill is not what read the record", report.Listed)
+	}
+	if got := h.requests(); len(got) != 0 {
+		t.Fatalf("the sweep asked GitHub for a delivery the older build's claim holds: %v", got)
+	}
+	entry, err := h.state.Get("guid.guid-claimed")
+	if err != nil {
+		t.Fatalf("read the claimed record after the back-fill: %v", err)
+	}
+	if entry.Revision() != claimRevision {
+		t.Fatalf("the back-fill wrote the claimed record, moving it from revision %d to %d: the claimant's outcome write is refused over that", claimRevision, entry.Revision())
+	}
+	want := redeliver.PendingKey(now.Add(claimDeadline), "guid-claimed")
+	if held := h.keys(); !slices.Contains(held, want) {
+		t.Fatalf("the back-fill wrote no index entry at the claim's end (%s), so nothing brings the delivery back: %v", want, held)
+	}
+
+	// The claimant's own outcome write, over the revision it claimed at: GitHub refused its
+	// request, so the record carries a refusal and its next request is four minutes out.
+	answered, err := json.Marshal(map[string]any{
+		"attempts": 1, "refusals": 1, "last_attempt_at": now,
+		"next_attempt_at": now.Add(4 * time.Minute), "first_delivered_at": failed.DeliveredAt,
+		"delivery": failed,
+	})
+	if err != nil {
+		t.Fatalf("encode the claimant's outcome: %v", err)
+	}
+	if _, err := h.state.Update("guid.guid-claimed", answered, claimRevision); err != nil {
+		t.Fatalf("the claimant's outcome write over the revision it claimed at: %v: GitHub's answer is lost and the delivery is asked for again", err)
+	}
+
+	// Once the claim is void the entry the back-fill wrote brings the delivery back, and the
+	// record the claimant wrote says its next request is not due, so GitHub is asked nothing.
+	h.clock.advance(claimDeadline + time.Minute)
+	report = h.sweep(redeliver.Options{})
+	if got := outcome(report, "guid-claimed"); got != redeliver.Waiting {
+		t.Fatalf("past the claim: outcome %q, want %q", got, redeliver.Waiting)
+	}
+	if got := h.requests(); len(got) != 0 {
+		t.Fatalf("the delivery was asked for a second time after the claim ended: %v", got)
+	}
+}
+
+// The cursor is written only by a sweep that ran whole, so an older build whose every sweep is
+// cut short -- a SIGTERM in the pace wait, the cap of 300 requests, a rate limit -- writes no
+// cursor at all, and this build's own cursor and its back-fill's marker both stand while that
+// build creates records with no index entry. The marker holds when the back-fill that wrote it
+// read the bucket, and a sweep back-fills again once that moment is further behind than Lookback,
+// so such a record is found within the hour whatever any build wrote or failed to write.
+//
+// Here the bucket holds this build's cursor, a marker from a back-fill Lookback and four minutes
+// ago, and a record an older build created at a claim whose request GitHub refused: no `pending`
+// field, and a failed attempt four minutes older than Lookback, which no sweep lists any more.
+func TestAMarkerOlderThanTheLookbackIsBackfilledAgain(t *testing.T) {
+	h := newHarness(t)
+	now := h.clock.Now().UTC()
+	if _, err := h.state.Put("cursor", fmt.Appendf(nil, `{"at":%q,"indexed":true}`, now.Format(time.RFC3339))); err != nil {
+		t.Fatalf("write this build's cursor: %v", err)
+	}
+	stale := now.Add(-redeliver.Lookback - 4*time.Minute)
+	if _, err := h.state.Put("index", fmt.Appendf(nil, `{"at":%q}`, stale.Format(time.RFC3339))); err != nil {
+		t.Fatalf("write the marker of the last back-fill: %v", err)
+	}
+	ago := redeliver.Lookback + 4*time.Minute
+	failed := h.fail("guid-unlisted", http.StatusServiceUnavailable, ago)
+	// The record as the older build's refused request left it: one refusal, no attempt GitHub
+	// logged, the next request due two minutes after that one, and no `pending` field.
+	refused, err := json.Marshal(map[string]any{
+		"attempts": 0, "refusals": 1, "last_attempt_at": now.Add(-ago),
+		"next_attempt_at": now.Add(-ago + 2*time.Minute), "first_delivered_at": failed.DeliveredAt,
+		"delivery": failed,
+	})
+	if err != nil {
+		t.Fatalf("encode the record the older build wrote: %v", err)
+	}
+	if _, err := h.state.Create("guid.guid-unlisted", refused); err != nil {
+		t.Fatalf("write the record the older build wrote: %v", err)
+	}
+
+	report := h.sweep(redeliver.Options{})
+	if report.Listed != 0 {
+		t.Fatalf("the sweep listed %d failed attempts, so the back-fill is not what found the delivery", report.Listed)
+	}
+	if got := outcome(report, "guid-unlisted"); got != redeliver.Redelivered {
+		t.Fatalf("guid-unlisted outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want %v", got, want)
+	}
+	if entries := h.indexEntries("guid-unlisted"); entries != 1 {
+		t.Fatalf("guid-unlisted has %d index entries after the back-fill, want one: %v", entries, h.keys())
+	}
+	// The marker holds the moment the back-fill worked from, which is the sweep's own start, so
+	// the next back-fill falls due a Lookback after it.
+	entry, err := h.state.Get("index")
+	if err != nil {
+		t.Fatalf("read the marker the back-fill wrote: %v", err)
+	}
+	var marker struct {
+		At time.Time `json:"at"`
+	}
+	if err := json.Unmarshal(entry.Value(), &marker); err != nil {
+		t.Fatalf("decode the marker the back-fill wrote (%q): %v", entry.Value(), err)
+	}
+	if !marker.At.Equal(now) {
+		t.Fatalf("the marker holds %s, want the sweep's own start %s", marker.At.Format(time.RFC3339), now.Format(time.RFC3339))
 	}
 }
 

@@ -1,6 +1,7 @@
 package redeliver
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -232,10 +233,22 @@ func (s *Sweeper) openDue(listed map[string][]githubapp.Delivery, floor, now tim
 	return open, scan.Puts, nil
 }
 
-// indexKey marks the bucket as one whose open records all have an index entry, so the back-fill a
-// build that writes entries runs over a bucket an older build filled happens once (backfillIndex)
-// rather than every two minutes.
+// indexKey marks the bucket as one whose open records all have an index entry, and holds the
+// moment the back-fill that wrote it worked from (backfillIndex). A sweep that finds that moment
+// no further behind than Lookback reads only the window its index names; one that finds it
+// further behind, or finds no marker at all, reads every record the bucket holds once more. So
+// the whole-bucket read is one an hour at most rather than one every two minutes.
 const indexKey = "index"
+
+// indexMarker is what the marker holds: the moment the back-fill that wrote it worked from, which
+// is the now its sweep started at. That moment is at or before the scan the back-fill read the
+// records with, so the marker never claims the bucket was covered past the moment it really was,
+// and the next back-fill falls due no later than it is owed. A marker this build wrote before the
+// marker carried a time at all decodes to the zero time, which indexFresh reads as a marker to
+// replace.
+type indexMarker struct {
+	At time.Time `json:"at"`
+}
 
 // backfillIndex gives an index entry, and the Pending that names it, to every open record that has
 // none, marks the bucket indexed, and answers whether it finished: a record it could not index
@@ -245,29 +258,34 @@ const indexKey = "index"
 //
 // A record counts as indexed only when its write landed. A write the bucket refused wrote no entry
 // a record names, and one that lost its compare-and-set may have lost it to a build that writes no
-// entry at all, so neither marks the bucket.
+// entry at all, so neither marks the bucket. A record a live claim holds is indexed by its entry
+// alone and never by a record write, which would take the claimant's revision from it
+// (indexLiveClaim); an entry the bucket refuses there leaves the bucket unmarked as any other
+// refusal does.
 //
-// The marker lives in the same bucket under its 72-hour TTL, so it expires and this runs again at
-// most once every three days: a standing repair rather than a one-off, which is also what covers a
-// sweeper that died in the middle of one. olderBuild is the other way past the marker, and it is
-// what carries a rollback: a build without the Pending field creates a record at its first claim,
-// with no entry and no Pending, and that record is listed only while its failed attempt is inside
-// Lookback. A rollback that outlasts those 66 minutes would otherwise leave such a record in
-// nothing the sweep reads until the marker expired, up to three days on and so possibly past the
-// delivery itself. So a sweep that reads a cursor an older build wrote -- one without the mark
-// this build always writes (cursorRecord) -- back-fills whatever the marker says. The records that
-// build rewrote rather than created keep the entry that names them, which openDue adopts rather
-// than deletes (decide). A dry run writes neither the entries nor the marker.
+// The marker is what holds this off between back-fills, and the moment it holds is what brings it
+// back: a sweep back-fills once that moment is further behind than Lookback. That is what reaches
+// a record a build without the Pending field created at its first claim, with no entry and no
+// Pending, which is listed only while its failed attempt is inside Lookback and read by nothing
+// after that. Reading every record once a Lookback finds such a record whatever that build did,
+// including the build whose sweeps are all cut short -- a SIGTERM in the pace wait, the cap of 300
+// requests, a rate limit -- and so writes no cursor of its own at all.
+//
+// olderBuild is the other way past the marker: a sweep that reads a cursor without the mark this
+// build always writes (cursorRecord) knows a build that writes no entry has swept since, and
+// back-fills at once rather than within the hour. The records that build rewrote rather than
+// created keep the entry that names them, which openDue adopts rather than deletes (decide). A
+// dry run writes neither the entries nor the marker.
 func (s *Sweeper) backfillIndex(listed map[string][]githubapp.Delivery, now time.Time, dryRun, olderBuild bool) (bool, error) {
 	if dryRun {
 		return true, nil
 	}
 	if !olderBuild {
-		marked, err := s.indexMarked()
+		fresh, err := s.indexFresh(now)
 		if err != nil {
 			return false, err
 		}
-		if marked {
+		if fresh {
 			return true, nil
 		}
 	}
@@ -278,6 +296,14 @@ func (s *Sweeper) backfillIndex(listed map[string][]githubapp.Delivery, now time
 	indexed := true
 	for _, stored := range open {
 		if stored.record.Pending != "" {
+			continue
+		}
+		if held, err := s.indexLiveClaim(stored.guid, stored.record, now); held {
+			if err != nil {
+				s.Logger.Warn("webhook redelivery claim not back-filled into the index; the next sweep reads every record again",
+					"guid", stored.guid, "error", err)
+				indexed = false
+			}
 			continue
 		}
 		next := stored.record
@@ -293,21 +319,61 @@ func (s *Sweeper) backfillIndex(listed map[string][]githubapp.Delivery, now time
 	if !indexed {
 		return false, nil
 	}
-	if _, err := s.state.Put(indexKey, nil); err != nil {
+	marker, err := json.Marshal(indexMarker{At: now})
+	if err == nil {
+		_, err = s.state.Put(indexKey, marker)
+	}
+	if err != nil {
 		s.Logger.Warn("webhook redelivery index not marked back-filled; the next sweep reads every record again", "error", err)
 	}
 	return true, nil
 }
 
-// indexMarked reports whether a sweep has back-filled the index since the marker last expired
-// (backfillIndex).
-func (s *Sweeper) indexMarked() (bool, error) {
-	_, err := s.state.Get(indexKey)
+// indexFresh reports whether a back-fill has covered the bucket recently enough for this sweep to
+// read its index alone: the marker is there, and the moment it holds is no further behind now than
+// Lookback (backfillIndex). A marker whose value holds no such moment -- the empty value this
+// build wrote before the marker carried one -- says nothing about when its back-fill ran, so it is
+// read as a marker to replace rather than as an error.
+func (s *Sweeper) indexFresh(now time.Time) (bool, error) {
+	entry, err := s.state.Get(indexKey)
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("read the redelivery index marker: %w", err)
+	}
+	var marker indexMarker
+	if err := json.Unmarshal(entry.Value(), &marker); err != nil || marker.At.IsZero() {
+		return false, nil
+	}
+	return !marker.At.Before(now.Add(-Lookback)), nil
+}
+
+// indexLiveClaim gives a record held by a claim that has not ended the index entry its claim's end
+// is owed, when the record names none, and writes no record at all. It reports whether the record
+// is such a claim, which both of the sweep's reads of the bucket meet: the index read, whose
+// record decide settles, and the back-fill's scan of every record there is.
+//
+// A record write here would take the claimant's revision from it. The claimant writes GitHub's
+// answer over the revision it claimed at, and a write that moves that revision first refuses the
+// answer: the attempts, refusals and next request GitHub's answer earned are lost, and unless
+// GitHub recorded an OK attempt the delivery is asked for a second time once the claim ends. The
+// entry costs the claimant nothing, since entries are written with Put and no record names this
+// one yet.
+//
+// The entry is what keeps the delivery: a claim an older build wrote leaves the record naming
+// none, so the entry the sweep read the delivery by is the only one it has, and this sweep's
+// cursor passes that entry the moment it finishes. openDue adopts the entry written here once the
+// claim is void, and the write that decides the delivery then gives the record an entry of its own
+// (decide).
+func (s *Sweeper) indexLiveClaim(guid string, current record, now time.Time) (bool, error) {
+	if !current.InFlight || !now.Before(current.claimEndsAt()) {
+		return false, nil
+	}
+	if current.Pending == "" {
+		if err := s.putPending(guid, pendingFor(current, guid, now)); err != nil {
+			return true, err
+		}
 	}
 	return true, nil
 }
