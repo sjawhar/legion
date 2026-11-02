@@ -103,34 +103,21 @@ func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) b
 // transaction's commit holds locked while it commits and marks them (commitConsuming). through is
 // the position through which the transaction has stored every unstored durable class. service is
 // the service the flushed room belongs to, which the store calls back into to run the flush
-// (AppendRoomFlush). roomLocked is whether the connection the flush's transaction runs on already
-// holds the room's advisory lock (holdsRoomLock).
+// (AppendRoomFlush).
 //
 // It crosses VersionedStore, which a test store outside this package wraps, so it is exported
 // with its fields unexported: such a store can only pass it on, as it can an UpdateCredit.
 type RoomFlush struct {
-	service    *Service
-	room       string
-	cursor     *roomCursor
-	state      *roomState
-	through    uint64
-	roomLocked bool
-	classes    []*queuedClass
-	versions   []persistence.Version
-	changed    []bool
-	credits    []*UpdateCredit
-	repairs    []persistence.Version
-}
-
-// holdsRoomLock reports whether the flush's appends run on a connection that already holds the
-// room's advisory lock, so each of them can skip the transaction-level acquisition
-// (appendUpdateTxClass): the room's own persistence worker takes the session-level lock on its
-// connection before it opens the transaction and keeps it past the commit (AppendRoomFlush,
-// withRoomLock), and a second acquisition inside that transaction would cost a round trip per
-// append and grant what the session already has. A flush of a transaction a writer joined
-// (Ledger.flushThrough) holds no such lock, and a nil flush is no flush at all: both take it.
-func (f *RoomFlush) holdsRoomLock() bool {
-	return f != nil && f.roomLocked
+	service  *Service
+	room     string
+	cursor   *roomCursor
+	state    *roomState
+	through  uint64
+	classes  []*queuedClass
+	versions []persistence.Version
+	changed  []bool
+	credits  []*UpdateCredit
+	repairs  []persistence.Version
 }
 
 // appended is the run of versions one transaction appended for the instance, ascending: the room
@@ -185,11 +172,20 @@ func foldAppended(base int64, versions []persistence.Version) int64 {
 // and the transaction's commit marks them stored and lands their credits (markStored); a
 // transaction that rolls back marks nothing, and the room's persistence stores them later.
 //
-// The caller holds the document's advisory lock in tx from before it read the head, and calls this
-// before its own append. The classes are read under that lock, and every writer marks what it
-// stored before the lock passes on, so no update is stored twice. Every class is measured before
-// the first append: between its appends it renders and decodes nothing, so it is the lock, the
-// read of the room's queue, the measures, and the appends.
+// Every flush runs on a transaction or a session that already holds the room's advisory lock,
+// taken before the head it is gated on was read: the room's own persistence worker holds the
+// session-level lock on its connection across the whole transaction (AppendRoomFlush,
+// withRoomLock), and every caller of Ledger.flushThrough took the transaction-level lock in the
+// same transaction - a live write's one read of the document (readFork, lockedHead), a version
+// capture's (captureLiveTextAndAuthors) and the write's own (captureWrite, through its read), a
+// settlement's (lockSettlementCursor) and the block-id backfill's (lockDocumentRoom), which a
+// repair's flush runs under too (storeRepair). So the appends this makes take no lock of their
+// own: a second acquisition would cost a round trip each and grant what the caller holds
+// (appendUpdateTxClass). The caller calls this before its own append. The classes are read under
+// that lock, and every writer marks what it stored before the lock passes on, so no update is
+// stored twice. Every class is measured before the first append: between its appends it renders
+// and decodes nothing, so it is the lock, the read of the room's queue, the measures, and the
+// appends.
 func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush, through uint64) error {
 	state := s.lockExistingState(flush.room)
 	if state == nil {
@@ -207,6 +203,9 @@ func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush,
 	s.unlockState(flush.room, state)
 	flush.state = state
 	flush.through = max(flush.through, through)
+	if s.beforeFlushMeasure != nil {
+		s.beforeFlushMeasure(flush.room)
+	}
 	stored := storedClasses(flush.room, window, taking)
 	for index, class := range taking {
 		version, err := s.persistence.AppendRoomUpdateTx(ctx, tx, flush.room, flush, class.update, stored[index].changed, stored[index].credit, class.observed)

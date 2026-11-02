@@ -178,48 +178,28 @@ func oneLineSQL(sql string) string {
 	return strings.Join(strings.Fields(sql), " ")
 }
 
-// tracedRoomService is storedOrderService over a pool whose every round trip is recorded. held,
-// when true, holds the room's first browser append in the store until the test ends, so a writer
-// of the document meets an update the room has committed and no one has stored.
-func tracedRoomService(t *testing.T, held bool) (*Service, string, *roundTripRecorder, <-chan struct{}) {
+// tracedRoomService is storedOrderService over a pool whose every round trip is recorded.
+func tracedRoomService(t *testing.T) (*Service, string, *roundTripRecorder) {
 	t.Helper()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	recorder := &roundTripRecorder{}
 	traced := &store.Store{Pool: storetest.Traced(t, database.Pool, recorder, nil)}
-	deps := Deps{
+	service := New(Deps{
 		Store:     traced,
 		Events:    events.NewBroker(),
 		Identity:  headerIdentity(traced),
 		ServerURL: "https://dispatch.example",
 		Settle:    time.Hour,
-	}
-	entered := make(chan struct{})
-	var releaseHeld func()
-	if held {
-		release := make(chan struct{})
-		blocking := &blockingFirstAppendStore{VersionedStore: NewPgVersioned(traced), entered: entered, release: release}
-		deps.Persistence = blocking
-		releaseHeld = func() {
-			if blocking.released.CompareAndSwap(false, true) {
-				close(release)
-			}
-		}
-	}
-	service := New(deps)
+	})
 	t.Cleanup(func() {
 		if err := service.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	// The held append is released before the service is shut down: the drain its shutdown runs
-	// waits for it. Cleanups run in reverse, so this one is registered last.
-	if releaseHeld != nil {
-		t.Cleanup(releaseHeld)
-	}
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
 	settleCurrentGeneration(t, service, artifactID)
-	return service, artifactID, recorder, entered
+	return service, artifactID, recorder
 }
 
 // A warm browser keystroke's store is six round trips, all of them under the document's advisory
@@ -229,7 +209,7 @@ func tracedRoomService(t *testing.T, held bool) (*Service, string, *roundTripRec
 // the document's lock on this very connection, so taking it again would grant what the session
 // has and cost a seventh trip - the one every other writer of the document waits out.
 func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
-	service, artifactID, recorder, _ := tracedRoomService(t, false)
+	service, artifactID, recorder := tracedRoomService(t)
 	// The first keystroke warms the room, the pool and the store's prepared statements; the
 	// second is the one measured.
 	editAsConnectedPeer(t, service, artifactID, 1, storedOrderBob, replaceRun("Second.", "Second, bob."))
@@ -260,26 +240,79 @@ func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
 	}
 }
 
-// A live write holds no session lock of the document: its transaction takes the room's
-// transaction-level lock itself, and so does every append of the room's updates it stores ahead
-// of its own (Ledger.flushThrough, lockDocumentRoom). The keystroke path's saving is the room's
-// persistence worker's alone, and must not reach here: an append that took no lock in a
-// transaction holding none would race every other writer of the document.
-func TestALiveWritesFlushedAppendTakesTheRoomsTransactionLock(t *testing.T) {
-	service, artifactID, recorder, entered := tracedRoomService(t, true)
-	// Bob's keystroke is in the room and its append is held before the store, so the live write
-	// below stores it ahead of its own append.
-	editAsConnectedPeer(t, service, artifactID, 1, storedOrderBob, replaceRun("Second.", "Second, bob."))
-	awaitHeldAppend(t, entered)
-	recorder.reset()
-	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
-		{Op: "replace", Find: "First.", With: "First, written."},
-	}, storedOrderAgent, nil); err != nil {
-		t.Fatalf("make the live write: %v", err)
+// What the saving above must not cost: the room's two durable writers of one document, a live
+// write and the room's own persistence worker, are serialised by the room's advisory lock. The
+// write takes it in its own transaction at its one read of the document (readFork, lockedHead)
+// and holds it until the transaction ends; the worker holds the session-level form on its own
+// connection for the whole of its store (withRoomLock). That lock is also what lets every append
+// of a flush skip a lock of its own (Service.flushThrough's rule): a flush runs inside the
+// transaction its caller already locked the room in.
+//
+// Here a transaction of the test's own holds the room's lock, Bob's keystroke queues on it and
+// the live write queues behind the keystroke. Nothing either of them writes is stored while the
+// lock is held, and once it is free both land, in the order they queued, with both edits in the
+// document and neither lost. The holder is what isolates this lock: two live writes queue on the
+// document's owner row before they ever read (lockArtifactOwner), so they serialise whatever the
+// room's lock does, while nothing but this lock orders a live write against the room's worker.
+func TestALiveWriteAndAKeystrokeQueueOnTheRoomsLockAndNeitherIsLost(t *testing.T) {
+	service, artifactID, _ := tracedRoomService(t)
+	head := storedHead(t, service.store, artifactID)
+	ctx := context.Background()
+	holder, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction that holds the room's lock: %v", err)
 	}
-	before := recorder.beforeFirstAppend(t, artifactID, 2)
-	want := []string{"pg_advisory_xact_lock", "the append gate read"}
-	if !slices.Equal(before, want) {
-		t.Fatalf("the live write's flushed append followed %v, want %v", before, want)
+	defer holder.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, holder, artifactID); err != nil {
+		t.Fatalf("hold the room's lock: %v", err)
+	}
+
+	editAsConnectedPeer(t, service, artifactID, 1, storedOrderBob, replaceRun("Second.", "Second, bob."))
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, roomWait(t)); waiting < 1 {
+		t.Fatal("the keystroke's append never came to wait on the room's lock")
+	}
+	written := make(chan error, 1)
+	go func() {
+		_, err := joinedApplyOps(service, artifactID, []model.EditOp{
+			{Op: "replace", Find: "First.", With: "First, written."},
+		}, storedOrderAgent, nil)
+		written <- err
+	}()
+	if waiting := storetest.WaitForLockWaiters(t, holder, 2, roomWait(t)); waiting < 2 {
+		t.Fatal("the live write never came to wait on the room's lock behind the keystroke's append")
+	}
+	select {
+	case err := <-written:
+		t.Fatalf("the live write answered %v while the room's lock was held: it waited on no lock of the room", err)
+	default:
+	}
+	if moved := storedHead(t, service.store, artifactID); moved != head {
+		t.Fatalf("the document moved from update %d to %d while the room's lock was held", head, moved)
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release the room's lock: %v", err)
+	}
+
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatalf("the live write: %v", err)
+		}
+	case <-time.After(roomWait(t)):
+		t.Fatal("the live write never finished once the room's lock was free")
+	}
+	waitForLandedAppends(t, service, artifactID)
+	report := assertStoredOrder(t, service, artifactID)
+	if report.UpdatesChecked < 2 {
+		t.Fatalf("the stored history holds %d updates to check, want the keystroke's and the write's", report.UpdatesChecked)
+	}
+	if moved := storedHead(t, service.store, artifactID); moved != head+2 {
+		t.Fatalf("the document moved from update %d to %d, want one append each, in the order they queued", head, moved)
+	}
+	stored := storedMarkdown(t, service.store, artifactID)
+	for _, want := range []string{"First, written.", "Second, bob."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document is %q, want %q in it: one of the two writers lost its edit", stored, want)
+		}
 	}
 }

@@ -41,6 +41,37 @@ func writeIssueClosed(t *testing.T, database *store.Store, issueKey string, clos
 	}
 }
 
+// waitPastCloseMargin waits on the database's clock until it stands more than closeMargin past
+// the moment issueKey closed (issues.closed_at), and fails the test unless it does. Inside the
+// margin the gate admits a browser's update whatever its age (observedBeforeClose), so a test of
+// the age term must put the close that far behind first. It waits in the database, in one
+// statement, rather than sleeping on this process's clock: the two terms the gate compares are
+// read on the database's clock and this one, and only the database's says when the margin is out.
+func waitPastCloseMargin(t *testing.T, database *store.Store, issueKey string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `
+		select pg_sleep(greatest(0::double precision,
+			$2::double precision - extract(epoch from clock_timestamp() - closed_at)::double precision))
+		from issues where key = $1
+	`, issueKey, (closeMargin + 50*time.Millisecond).Seconds()); err != nil {
+		t.Fatalf("wait out issue %s's close margin: %v", issueKey, err)
+	}
+	var micros *int64
+	if err := database.Pool.QueryRow(ctx, `
+		select (extract(epoch from clock_timestamp() - closed_at) * 1000000)::bigint from issues where key = $1
+	`, issueKey).Scan(&micros); err != nil {
+		t.Fatalf("read how long ago issue %s closed: %v", issueKey, err)
+	}
+	if micros == nil {
+		t.Fatalf("issue %s is open, so no close margin applies and nothing waits it out", issueKey)
+	}
+	if closedFor := time.Duration(*micros) * time.Microsecond; closedFor <= closeMargin {
+		t.Fatalf("the database's clock stands %s past issue %s's close, want more than the gate's close margin of %s",
+			closedFor.Round(time.Millisecond), issueKey, closeMargin)
+	}
+}
+
 // setIssueClosedHere writes issueKey's closed_at (writeIssueClosed) and hands service the
 // notification that commit sends, at once and on the test's goroutine, for a test that runs no
 // room sync.
@@ -181,7 +212,10 @@ func TestClosingAnIssueOnOneProcessClosesEveryProcessesRoomsAndReopeningMakesThe
 // it. The gate is an event, not a wait: the append stays unstored for exactly as long as the test
 // needs, whatever the race detector costs the run, and the test reads back that the keystroke is
 // unstored rather than that the head stands still, since a browser's connect makes a durable
-// append of its own that changes no content and lands whenever it lands.
+// append of its own that changes no content and lands whenever it lands. The gate opens only once
+// the close is further behind than closeMargin on the database's clock (waitPastCloseMargin): the
+// margin alone admits an update of any age, so until it is out the gate's age term, the one this
+// guards, decides nothing.
 func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateAfter(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
@@ -210,6 +244,10 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateA
 	if stored := storedMarkdown(t, database, artifactID); strings.Contains(stored, "typed before the close") {
 		t.Fatalf("the close was meant to take effect while task A held alice's keystroke at the gate, but the store already holds %q", stored)
 	}
+	// The gate's margin covers the latency of the close's notification, so it admits any update
+	// while the close is that recent: the wait puts the close behind it, and the keystroke is
+	// then stored for its age alone, the term this test guards.
+	waitPastCloseMargin(t, database, "DOC-1")
 	// The room's close waits for its persistence to store what it holds (CloseRoom's flush), so
 	// once the gate is open and the room is gone the keystroke's append has been decided.
 	appends.release()

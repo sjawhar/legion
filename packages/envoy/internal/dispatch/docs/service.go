@@ -237,6 +237,11 @@ type Service struct {
 	// holder takes - the window the commit's cursors must already stand at the head for
 	// (Ledger.takeRoomCursors).
 	afterLiveCommit func(room string)
+	// beforeFlushMeasure runs once a flush has copied the room's shadow window and the classes it
+	// is to store under the state's lock and released that lock, and before it measures them on
+	// the shadow (Service.flushThrough, storedClasses). Nil outside tests; tests use it to drop
+	// and release the shadow in that window.
+	beforeFlushMeasure func(room string)
 	// afterBackfillRead runs after the block-id backfill has read a document that needs stamping
 	// and before it stamps it. Nil outside tests; tests use it to edit the room in that window.
 	afterBackfillRead func(room string)
