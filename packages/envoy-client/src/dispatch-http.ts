@@ -315,10 +315,10 @@ export interface DispatchWriteRetry {
 /**
  * At most five attempts, 1, 2, 4 and 8 s apart, none starting more than 30 s after the first, so a
  * write whose every attempt fails at once settles in about 15 s and a `Retry-After` can stretch that
- * to 30 s. A write Dispatch may still be running is asked every 3 s at most until 55 s, so an
- * attempt cut off for silence at 20 s still has 35 s in which Dispatch can finish it, two silent
- * attempts and the ask that collects the answer fit, and the last ask has 5 s before the client's
- * 60 s deadline.
+ * to 30 s. A write Dispatch may still be running is asked every 3 s at most (longer only when a
+ * `Retry-After` asks) until 55 s, so an attempt cut off for silence at 20 s still has 35 s in which
+ * Dispatch can finish it, two silent attempts and the ask that collects the answer fit, and the
+ * last ask has 5 s before the client's 60 s deadline.
  *
  * Measured from the transcript store over 3,612 `dispatch` write commands that succeeded between
  * 2026-10-31 21:00Z and 2026-11-02 07:30Z, Dispatch's busiest days so far: p50 1.8 s, p90 10.5 s,
@@ -1606,13 +1606,14 @@ export class DispatchClient {
     const pause = this.writeRetry.pause ?? pauseFor;
     const request = `${method} ${url}`;
     const started = this.#now();
-    // An upload, whose body goes out as a stream (`attemptBody`), sends that whole body again on
-    // every repeat, so it keeps the schedule alone and never enters the in-flight asking below.
+    // An upload, a body of `STREAMED_BODY_MIN` or more that goes out as a stream (`attemptBody`),
+    // sends that whole body again on every repeat, so it keeps the schedule alone and never enters
+    // the in-flight asking below.
     const bodyBytes =
       body === undefined
         ? 0
         : typeof body.content === "string"
-          ? new TextEncoder().encode(body.content).byteLength
+          ? Buffer.byteLength(body.content)
           : body.content.byteLength;
     const upload = bodyBytes >= STREAMED_BODY_MIN;
     // No ask starts later than this: the client's deadline counts from when it was made.

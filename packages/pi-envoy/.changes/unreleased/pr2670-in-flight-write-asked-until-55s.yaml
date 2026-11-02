@@ -5,10 +5,10 @@ body: |-
     3 s at most (longer only when a `Retry-After` asks) until 55 s, inside the command's 60 s
     deadline, so it ends in the answer Dispatch stores for it. Before, it stopped asking 30 s after
     the first attempt, so a write Dispatch took 50 s to finish, or two silent attempts in a row,
-    was reported as perhaps taken effect although it landed. An upload keeps the five-attempt
-    schedule, since each repeat sends its whole file again. When a write still ends with no answer
-    after the command saw the keyed layer, the message says Dispatch finishes it and to read it
-    back before sending it again, since a new command sends it under a new key.
+    was reported as perhaps taken effect although it landed. An upload of a megabyte or more keeps
+    the five-attempt schedule, since each repeat sends its whole file again. When a write still
+    ends with no answer after the command saw the keyed layer, the message says Dispatch finishes
+    it and to read it back before sending it again, since a new command sends it under a new key.
 time: 2026-11-02T08:30:00.000000000Z
 custom:
     Issue: pr2670
