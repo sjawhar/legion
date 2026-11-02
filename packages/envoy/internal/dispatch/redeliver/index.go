@@ -237,15 +237,18 @@ func (s *Sweeper) openDue(listed map[string][]githubapp.Delivery, floor, now tim
 // moment the back-fill that wrote it worked from (backfillIndex). A sweep that finds that moment
 // no further behind than Lookback reads only the window its index names; one that finds it
 // further behind, or finds no marker at all, reads every record the bucket holds once more. So
-// the whole-bucket read is one an hour at most rather than one every two minutes.
+// the whole-bucket read is one an hour at most for as long as the back-fills land: a back-fill
+// that left a record unindexed writes no marker, and a cursor carrying no `indexed` mark says a
+// build without the index has swept, so either has every sweep read the whole bucket until a
+// back-fill lands.
 const indexKey = "index"
 
 // indexMarker is what the marker holds: the moment the back-fill that wrote it worked from, which
 // is the now its sweep started at. That moment is at or before the scan the back-fill read the
 // records with, so the marker never claims the bucket was covered past the moment it really was,
-// and the next back-fill falls due no later than it is owed. A marker this build wrote before the
-// marker carried a time at all decodes to the zero time, which indexFresh reads as a marker to
-// replace.
+// and the next back-fill falls due no later than it is owed. A value that does not decode as a
+// marker -- the empty value this build wrote before the marker carried a time at all, which
+// json.Unmarshal refuses -- is read as stale, exactly as a moment older than Lookback is.
 type indexMarker struct {
 	At time.Time `json:"at"`
 }
@@ -260,7 +263,7 @@ type indexMarker struct {
 // a record names, and one that lost its compare-and-set may have lost it to a build that writes no
 // entry at all, so neither marks the bucket. A record a live claim holds is indexed by its entry
 // alone and never by a record write, which would take the claimant's revision from it
-// (indexLiveClaim); an entry the bucket refuses there leaves the bucket unmarked as any other
+// (indexClaimEnd); an entry the bucket refuses there leaves the bucket unmarked as any other
 // refusal does.
 //
 // The marker is what holds this off between back-fills, and the moment it holds is what brings it
@@ -298,8 +301,10 @@ func (s *Sweeper) backfillIndex(listed map[string][]githubapp.Delivery, now time
 		if stored.record.Pending != "" {
 			continue
 		}
-		if held, err := s.indexLiveClaim(stored.guid, stored.record, now); held {
-			if err != nil {
+		if stored.record.InFlight && now.Before(stored.record.claimEndsAt()) {
+			// A live claim is owed its entry and no record write, which would take the
+			// claimant's revision from it (indexClaimEnd).
+			if err := s.indexClaimEnd(stored.guid, stored.record, now); err != nil {
 				s.Logger.Warn("webhook redelivery claim not back-filled into the index; the next sweep reads every record again",
 					"guid", stored.guid, "error", err)
 				indexed = false
@@ -331,9 +336,9 @@ func (s *Sweeper) backfillIndex(listed map[string][]githubapp.Delivery, now time
 
 // indexFresh reports whether a back-fill has covered the bucket recently enough for this sweep to
 // read its index alone: the marker is there, and the moment it holds is no further behind now than
-// Lookback (backfillIndex). A marker whose value holds no such moment -- the empty value this
-// build wrote before the marker carried one -- says nothing about when its back-fill ran, so it is
-// read as a marker to replace rather than as an error.
+// Lookback (backfillIndex). A value that does not decode as a marker -- the empty value this
+// build wrote before the marker carried one -- says nothing about when its back-fill ran, so it
+// is read as a marker to replace rather than as an error.
 func (s *Sweeper) indexFresh(now time.Time) (bool, error) {
 	entry, err := s.state.Get(indexKey)
 	if errors.Is(err, nats.ErrKeyNotFound) {
@@ -343,16 +348,18 @@ func (s *Sweeper) indexFresh(now time.Time) (bool, error) {
 		return false, fmt.Errorf("read the redelivery index marker: %w", err)
 	}
 	var marker indexMarker
-	if err := json.Unmarshal(entry.Value(), &marker); err != nil || marker.At.IsZero() {
+	if err := json.Unmarshal(entry.Value(), &marker); err != nil {
 		return false, nil
 	}
 	return !marker.At.Before(now.Add(-Lookback)), nil
 }
 
-// indexLiveClaim gives a record held by a claim that has not ended the index entry its claim's end
-// is owed, when the record names none, and writes no record at all. It reports whether the record
-// is such a claim, which both of the sweep's reads of the bucket meet: the index read, whose
-// record decide settles, and the back-fill's scan of every record there is.
+// indexClaimEnd gives a record held by a live claim the index entry its claim's end is owed, when
+// the record names none, and writes no record at all. Both of the sweep's reads of the bucket
+// meet such a record -- the index read, whose record decide settles, and the back-fill's scan of
+// every record there is -- and each tests the claim against its own clock before calling, so the
+// rule the entry follows lives here and the liveness check stays where the caller reads the
+// record.
 //
 // A record write here would take the claimant's revision from it. The claimant writes GitHub's
 // answer over the revision it claimed at, and a write that moves that revision first refuses the
@@ -366,16 +373,11 @@ func (s *Sweeper) indexFresh(now time.Time) (bool, error) {
 // cursor passes that entry the moment it finishes. openDue adopts the entry written here once the
 // claim is void, and the write that decides the delivery then gives the record an entry of its own
 // (decide).
-func (s *Sweeper) indexLiveClaim(guid string, current record, now time.Time) (bool, error) {
-	if !current.InFlight || !now.Before(current.claimEndsAt()) {
-		return false, nil
+func (s *Sweeper) indexClaimEnd(guid string, current record, now time.Time) error {
+	if current.Pending != "" {
+		return nil
 	}
-	if current.Pending == "" {
-		if err := s.putPending(guid, pendingFor(current, guid, now)); err != nil {
-			return true, err
-		}
-	}
-	return true, nil
+	return s.putPending(guid, pendingFor(current, guid, now))
 }
 
 // errNotWritten is a write of a delivery's state the bucket refused, its index entry or its
@@ -396,8 +398,7 @@ var errNotWritten = errors.New("webhook redelivery state not written")
 //   - An entry that cannot be written stops the write there and returns errNotWritten. The
 //     record is left as it was, the sweep is marked incomplete, its cursor stays where it was and
 //     the delivery is decided again by the sweep after it. That is what keeps a lost index write
-//     from turning into a lost delivery, and why nothing here reads the whole bucket from time to
-//     time looking for records the index forgot.
+//     from turning into a lost delivery.
 //   - A record the bucket refuses is errNotWritten as well, and leaves the sweep incomplete for
 //     the same reason: an incomplete sweep holds its cursor where it was, so the delivery is
 //     decided again by the sweep after it, whatever entry the record is left naming. The entry
@@ -432,9 +433,9 @@ func (s *Sweeper) writeRecord(guid string, next *record, revision uint64, now ti
 // putPending writes an index entry, and answers errNotWritten when the bucket refuses it:
 // nothing carries that delivery on, so the sweep that met the refusal is incomplete, its cursor
 // stays where it was and the delivery is decided again by the sweep after it. Every entry a sweep
-// writes goes through here, the one the record that names it is written with (writeRecord) and the
-// one a live claim over a record naming no entry is owed (decide), so a refusal reads the same
-// either way.
+// writes goes through here, the one the record that names it is written with (writeRecord) and
+// the one a live claim over a record naming no entry is owed, which the index read and the
+// back-fill's scan both write (indexClaimEnd), so a refusal reads the same whichever wrote it.
 func (s *Sweeper) putPending(guid, key string) error {
 	if _, err := s.state.Put(key, nil); err != nil {
 		s.Logger.Error("webhook redelivery index entry not written; the delivery is decided again by the next sweep",

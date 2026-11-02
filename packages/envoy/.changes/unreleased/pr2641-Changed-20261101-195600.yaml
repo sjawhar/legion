@@ -8,6 +8,7 @@ body: |-
 
   Dispatch's webhook redelivery sweep reads the deliveries an index says are due instead of every
   record in its KV bucket, so a sweep's cost follows what is due rather than three days of
-  deliveries. Its summary line gains `index_entries`, and `deliveries=` no longer counts an open
+  deliveries; one sweep an hour reads every record once more, to give an entry to any record left
+  without one. Its summary line gains `index_entries`, and `deliveries=` no longer counts an open
   delivery that is not due and whose attempts the listing no longer returns.
   `envoy-dispatch redeliver-webhooks`, dry run included, answers exactly as before.

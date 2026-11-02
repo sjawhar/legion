@@ -20,3 +20,8 @@ func FixJitter(t *testing.T, draw func(n time.Duration) time.Duration) {
 const PendingPrefix = pendingPrefix
 
 func PendingKey(at time.Time, guid string) string { return pendingKey(at, guid) }
+
+// CursorOverlap is how far before its cursor a sweep starts (sweep.go), the margin a stray index
+// entry must fall behind, with the minute its key is truncated to, before a sweep deletes it. A
+// test reads the margin from here so it cannot drift from the one the sweep keeps.
+const CursorOverlap = cursorOverlap

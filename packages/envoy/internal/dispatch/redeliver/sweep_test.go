@@ -1613,8 +1613,9 @@ func TestAStrayIndexEntryIsDeletedOnlyPastTheMargin(t *testing.T) {
 	h.clock.advance(8 * time.Minute)
 	fresh := redeliver.PendingKey(h.clock.Now(), "guid-waiting")
 	// cursorOverlap before the sweep's own minute: the oldest key an entry another sweeper is
-	// about to name can carry.
-	edge := redeliver.PendingKey(h.clock.Now().Truncate(time.Minute).Add(-2*time.Minute), "guid-waiting")
+	// about to name can carry. The margin is read from the sweep's own constant, so the test
+	// cannot hold one margin while the sweep keeps another.
+	edge := redeliver.PendingKey(h.clock.Now().Truncate(time.Minute).Add(-redeliver.CursorOverlap), "guid-waiting")
 	old := redeliver.PendingKey(h.clock.Now().Add(-5*time.Minute), "guid-waiting")
 	for _, stray := range []string{fresh, edge, old} {
 		if _, err := h.state.Put(stray, nil); err != nil {
@@ -1673,8 +1674,9 @@ func (c *countingBucket) counts() (scans, windows int) {
 // A record an older build wrote names no index entry, so an index read would never return it and
 // its delivery is lost the moment its failed attempt leaves the listing's window. The first sweep
 // of a build that writes entries gives every such record one, and marks the bucket so the scan of
-// every record that costs is not repeated: the marker expires with the bucket's 72-hour TTL, so
-// the repair stands without being paid for every two minutes.
+// every record that costs is not repeated: the marker holds the moment that sweep worked from,
+// and no sweep inside the Lookback after it scans again, so the repair stands without being paid
+// for every two minutes.
 func TestARecordWithNoIndexEntryIsBackfilledOnTheFirstSweep(t *testing.T) {
 	h := newHarness(t)
 	// The bucket as an older build left it: its cursor, and an open record that names no index
@@ -1748,10 +1750,11 @@ func recordWithoutPending(tb testing.TB, now time.Time, failed githubapptest.Del
 	return stored
 }
 
-// The back-fill's marker holds the whole-record scan off until it expires, up to three days on,
-// so a back-fill that did not write a record must leave the bucket unmarked whatever stopped the
-// write: a write the bucket refused indexed nothing at all, and a compare-and-set it lost may
-// have been lost to a build that writes no index entry.
+// The back-fill's marker holds the whole-record scan off for a Lookback, so a back-fill that did
+// not write a record must leave the bucket unmarked whatever stopped the write: the next sweep
+// reads every record again rather than the one an hour on. A write the bucket refused indexed
+// nothing at all, and a compare-and-set it lost may have been lost to a build that writes no
+// index entry.
 func TestABackfillWhoseRecordWriteIsRefusedLeavesTheIndexUnmarked(t *testing.T) {
 	h := newHarness(t)
 	// The bucket as a build without the index left it: its cursor, and an open record that names
@@ -1779,7 +1782,7 @@ func TestABackfillWhoseRecordWriteIsRefusedLeavesTheIndexUnmarked(t *testing.T) 
 		t.Fatalf("the sweep listed %d failed attempts, so the back-fill is not what read the record", report.Listed)
 	}
 	if _, err := h.state.Get("index"); !errors.Is(err, natsgo.ErrKeyNotFound) {
-		t.Fatalf("reading the index marker gave %v, want %v: a back-fill that indexed no record marked the bucket, and nothing reads that record again for three days", err, natsgo.ErrKeyNotFound)
+		t.Fatalf("reading the index marker gave %v, want %v: a back-fill that indexed no record marked the bucket, and nothing reads that record again for about 68 minutes", err, natsgo.ErrKeyNotFound)
 	}
 	if report.Complete {
 		t.Fatalf("the sweep reported itself complete: %+v", report)
@@ -1805,8 +1808,8 @@ func (c *conflictingRecord) Update(key string, value []byte, last uint64) (uint6
 // A back-fill write that lost its compare-and-set indexed nothing it can count on: the writer that
 // won the race may be a build that keeps no Pending, which leaves the record with no index entry
 // at all. Marking the bucket over that write would hide the record from every read the sweep makes
-// until the marker expired, up to three days on, so a lost race leaves the bucket unmarked exactly
-// as a refused write does.
+// until the marker went stale, about 68 minutes on, so a lost race leaves the bucket unmarked
+// exactly as a refused write does.
 func TestABackfillThatLosesItsRecordRaceLeavesTheIndexUnmarked(t *testing.T) {
 	h := newHarness(t)
 	// The bucket as a build without the index left it: its cursor, and an open record that names
@@ -1833,7 +1836,7 @@ func TestABackfillThatLosesItsRecordRaceLeavesTheIndexUnmarked(t *testing.T) {
 		t.Fatalf("the sweep listed %d failed attempts, so the back-fill is not what read the record", report.Listed)
 	}
 	if _, err := h.state.Get("index"); !errors.Is(err, natsgo.ErrKeyNotFound) {
-		t.Fatalf("reading the index marker gave %v, want %v: a back-fill whose write another writer won marked the bucket, and nothing reads that record again for three days", err, natsgo.ErrKeyNotFound)
+		t.Fatalf("reading the index marker gave %v, want %v: a back-fill whose write another writer won marked the bucket, and nothing reads that record again for about 68 minutes", err, natsgo.ErrKeyNotFound)
 	}
 	if report.Complete {
 		t.Fatalf("the sweep reported itself complete: %+v", report)
@@ -1843,18 +1846,19 @@ func TestABackfillThatLosesItsRecordRaceLeavesTheIndexUnmarked(t *testing.T) {
 // A build without the sweep's index creates a record at its first claim: no index entry, and no
 // Pending to name one. A refused request adds no attempt to GitHub's log, so once that delivery's
 // failed attempt is older than Lookback nothing lists it, and the back-fill's whole-record scan is
-// all that can find it. The marker holds that scan off for up to three days, longer than a
-// rollback and longer than the delivery itself lives, so a cursor an older build wrote -- one
-// without the mark every sweep of this build writes -- runs the back-fill whatever the marker
-// says.
+// all that can find it. A marker a sweep of this build left holds that scan off for a Lookback,
+// so such a record would wait about 68 minutes for the sweep that scans again, while the older
+// build goes on creating more; a cursor an older build wrote -- one without the mark every sweep
+// of this build writes -- runs the back-fill whatever the marker says.
 func TestABackfillRunsUnderAnOlderBuildsCursorWhateverTheMarkerSays(t *testing.T) {
 	h := newHarness(t)
-	// The bucket as a rollback leaves it: the marker a sweep of this build wrote before it, a
-	// cursor the older build has rewritten since, and an open record that older build created,
-	// naming no index entry, whose failed attempt is two hours old and so outside the window
-	// this sweep lists.
+	// The bucket as a rollback leaves it: a fresh marker, one whose moment is inside this
+	// sweep's Lookback, so the marker alone would hold the whole-record scan off, a cursor the
+	// older build has rewritten since, and an open record that older build created, naming no
+	// index entry, whose failed attempt is two hours old and so outside the window this sweep
+	// lists.
 	now := h.clock.Now().UTC()
-	if _, err := h.state.Put("index", nil); err != nil {
+	if _, err := h.state.Put("index", fmt.Appendf(nil, `{"at":%q}`, now.Format(time.RFC3339))); err != nil {
 		t.Fatalf("write the index marker a sweep of this build left: %v", err)
 	}
 	if _, err := h.state.Put("cursor", fmt.Appendf(nil, `{"at":%q}`, now.Format(time.RFC3339))); err != nil {
@@ -1882,11 +1886,11 @@ func TestABackfillRunsUnderAnOlderBuildsCursorWhateverTheMarkerSays(t *testing.T
 
 // A build without the sweep's index rewrites a record without the Pending that names its index
 // entry, which an ordinary rolling deploy makes and a rollback and roll-forward inside the
-// marker's three days makes again. The entry naming such a record is not a stray: a record that
+// marker's Lookback makes again. The entry naming such a record is not a stray: a record that
 // names no entry disowns none, so the entry is adopted, its delivery is decided like any other
 // due one, and the write that decides it gives the record an entry of its own again. Deleting it
-// as a stray would lose the delivery until the marker expired and a back-fill found the record,
-// up to 72 hours later.
+// as a stray would lose the delivery until the marker went stale and a back-fill found the
+// record, about 68 minutes later.
 func TestAnIndexEntryWhoseRecordNamesNoneIsAdopted(t *testing.T) {
 	h := newHarness(t)
 	h.sweep(redeliver.Options{}) // the cursor, and the marker that says every open record is indexed
@@ -1929,8 +1933,8 @@ func TestAnIndexEntryWhoseRecordNamesNoneIsAdopted(t *testing.T) {
 // leaves the claim standing until it is void. The entry naming that record is adopted rather than
 // deleted, but a sweep that reported the live claim and moved on would leave nothing behind: its
 // cursor passes the entry it read, the record names none of its own, and the back-fill's marker
-// holds the whole-record scan off for up to three days. So the sweep that meets a live claim over
-// a record naming no entry writes the entry the claim's end is owed, and the sweep after the claim
+// holds the whole-record scan off for a Lookback. So the sweep that meets a live claim over a
+// record naming no entry writes the entry the claim's end is owed, and the sweep after the claim
 // is void asks GitHub for the delivery.
 //
 // Here the older build's process holds the lease and claims the delivery late in its paced sweep,
@@ -1987,11 +1991,30 @@ func TestALiveClaimOverARecordNamingNoIndexEntryIsIndexedAtItsClaimEnd(t *testin
 	}
 }
 
+// refusingPending is the sweep's state bucket whose index entry writes NATS will not take: every
+// write of a `pending.` key fails with an error that is not a conflict, and every other write,
+// the marker's included, is the bucket's own.
+type refusingPending struct {
+	natsgo.KeyValue
+	refused error
+}
+
+func (r refusingPending) Put(key string, value []byte) (uint64, error) {
+	if strings.HasPrefix(key, redeliver.PendingPrefix) {
+		return 0, r.refused
+	}
+	return r.KeyValue.Put(key, value)
+}
+
 // The back-fill meets a live claim the way the sweep's index read does: it writes the index entry
 // the claim's end is owed and no record at all. The claimant writes GitHub's answer over the
 // revision it claimed at, so a record write here would move that revision out from under it, the
 // answer would be refused, and the attempts, refusals and next request it earned would be lost --
 // after which the delivery is asked for a second time once the claim ends.
+//
+// That entry is also the whole of what the back-fill does for such a claim, so a bucket that
+// refuses it has carried the delivery nowhere: the first sweep below meets that refusal, and
+// must leave the marker unwritten and report itself incomplete, as a refused record write does.
 //
 // Here the bucket is as an older build leaves it: a cursor without this build's mark, so the
 // back-fill runs whatever the marker says, and a record that build created and then claimed, with
@@ -2015,6 +2038,21 @@ func TestABackfillLeavesALiveClaimToItsClaimant(t *testing.T) {
 	claimRevision, err := h.state.Create("guid.guid-claimed", claimed)
 	if err != nil {
 		t.Fatalf("write the record the older build claimed: %v", err)
+	}
+
+	refusing := h.sweeper()
+	refusing.Open = func() (bus.KeyValue, error) {
+		return bus.KeyValue{KeyValue: refusingPending{KeyValue: h.state, refused: errors.New("nats: no responders available for request")}}, nil
+	}
+	refused, err := refusing.Sweep(context.Background(), redeliver.Options{})
+	if err != nil {
+		t.Fatalf("the sweep whose entry for the live claim was refused: %v", err)
+	}
+	if _, err := h.state.Get("index"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("reading the index marker gave %v, want %v: a back-fill whose entry for a live claim was refused marked the bucket, and nothing brings that delivery back", err, natsgo.ErrKeyNotFound)
+	}
+	if refused.Complete {
+		t.Fatalf("the sweep whose entry for the live claim was refused reported itself complete: %+v", refused)
 	}
 
 	report := h.sweep(redeliver.Options{})
@@ -2065,9 +2103,10 @@ func TestABackfillLeavesALiveClaimToItsClaimant(t *testing.T) {
 // The cursor is written only by a sweep that ran whole, so an older build whose every sweep is
 // cut short -- a SIGTERM in the pace wait, the cap of 300 requests, a rate limit -- writes no
 // cursor at all, and this build's own cursor and its back-fill's marker both stand while that
-// build creates records with no index entry. The marker holds when the back-fill that wrote it
-// read the bucket, and a sweep back-fills again once that moment is further behind than Lookback,
-// so such a record is found within the hour whatever any build wrote or failed to write.
+// build creates records with no index entry. The marker holds the moment the back-fill that
+// wrote it worked from, its own sweep's start, and a sweep back-fills again once that moment is
+// further behind than Lookback, so such a record is found within the hour whatever any build
+// wrote or failed to write.
 //
 // Here the bucket holds this build's cursor, a marker from a back-fill Lookback and four minutes
 // ago, and a record an older build created at a claim whose request GitHub refused: no `pending`
@@ -2098,7 +2137,13 @@ func TestAMarkerOlderThanTheLookbackIsBackfilledAgain(t *testing.T) {
 		t.Fatalf("write the record the older build wrote: %v", err)
 	}
 
-	report := h.sweep(redeliver.Options{})
+	counting := &countingBucket{KeyValue: h.state}
+	sweeper := h.sweeper()
+	sweeper.Open = func() (bus.KeyValue, error) { return bus.KeyValue{KeyValue: counting}, nil }
+	report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
+	if err != nil {
+		t.Fatalf("the sweep past the stale marker: %v", err)
+	}
 	if report.Listed != 0 {
 		t.Fatalf("the sweep listed %d failed attempts, so the back-fill is not what found the delivery", report.Listed)
 	}
@@ -2111,20 +2156,25 @@ func TestAMarkerOlderThanTheLookbackIsBackfilledAgain(t *testing.T) {
 	if entries := h.indexEntries("guid-unlisted"); entries != 1 {
 		t.Fatalf("guid-unlisted has %d index entries after the back-fill, want one: %v", entries, h.keys())
 	}
-	// The marker holds the moment the back-fill worked from, which is the sweep's own start, so
-	// the next back-fill falls due a Lookback after it.
-	entry, err := h.state.Get("index")
-	if err != nil {
-		t.Fatalf("read the marker the back-fill wrote: %v", err)
+	// The marker this back-fill wrote holds the moment its own sweep started, not the moment the
+	// marker it replaced held, so the next whole-bucket scan falls due a Lookback after this
+	// sweep: one just inside that reads the index alone, and the one past it scans again.
+	if scans, windows := counting.counts(); scans != 1 || windows != 1 {
+		t.Fatalf("the back-fill's sweep made %d whole-bucket scans and %d index reads, want 1 and 1", scans, windows)
 	}
-	var marker struct {
-		At time.Time `json:"at"`
+	h.clock.advance(redeliver.Lookback - time.Minute)
+	if _, err := sweeper.Sweep(context.Background(), redeliver.Options{}); err != nil {
+		t.Fatalf("the sweep just inside the new marker's Lookback: %v", err)
 	}
-	if err := json.Unmarshal(entry.Value(), &marker); err != nil {
-		t.Fatalf("decode the marker the back-fill wrote (%q): %v", entry.Value(), err)
+	if scans, _ := counting.counts(); scans != 1 {
+		t.Fatalf("the bucket was scanned whole %d times, want 1: a sweep inside the new marker's Lookback scanned it again", scans)
 	}
-	if !marker.At.Equal(now) {
-		t.Fatalf("the marker holds %s, want the sweep's own start %s", marker.At.Format(time.RFC3339), now.Format(time.RFC3339))
+	h.clock.advance(2 * time.Minute)
+	if _, err := sweeper.Sweep(context.Background(), redeliver.Options{}); err != nil {
+		t.Fatalf("the sweep past the new marker's Lookback: %v", err)
+	}
+	if scans, _ := counting.counts(); scans != 2 {
+		t.Fatalf("the bucket was scanned whole %d times, want 2: the sweep past the new marker's Lookback did not back-fill again", scans)
 	}
 }
 

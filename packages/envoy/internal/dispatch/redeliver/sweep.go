@@ -538,8 +538,10 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 			if !dryRun {
 				// A claim an older build wrote leaves the record naming no index entry, so the
 				// entry its claim's end is owed is written here and no record is, which is the
-				// rule the back-fill meeting the same claim follows (indexLiveClaim).
-				if _, err := s.indexLiveClaim(guid, current, now); err != nil {
+				// rule the back-fill meeting the same claim follows (indexClaimEnd). The claim
+				// is live by the clock read just above, so the entry is owed whatever another
+				// clock would say.
+				if err := s.indexClaimEnd(guid, current, now); err != nil {
 					return decision, false, err
 				}
 			}
