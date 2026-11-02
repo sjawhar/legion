@@ -8246,7 +8246,7 @@ describe("executeDispatchTool", () => {
         fetchImpl: fetchImpl as typeof fetch,
       })
     ).rejects.toThrow(
-      `document "prediction-P1-md" not found by slug; this issue's 12 documents include: ` +
+      `document "prediction-P1-md" not found by slug; this issue's 12 documents and files include: ` +
         `prediction-p1-md (prediction-P1.md), ${notes}; dispatch read --issue DSP-1234 lists them all`
     );
   });

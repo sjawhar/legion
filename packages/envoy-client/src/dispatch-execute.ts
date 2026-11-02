@@ -1766,7 +1766,9 @@ const documentHintLimit = 8;
  * the documents nearest the reference first (`documentsNearest`), and the read that lists them all. */
 function documentReferenceProblem(
   reference: string,
-  documents: readonly Pick<Artifact, "id" | "slug" | "name">[],
+  documents: readonly (Pick<Artifact, "id" | "slug" | "name"> & {
+    readonly kind?: Artifact["kind"];
+  })[],
   owner: Owner,
   use?: "slug" | "id"
 ): string {
@@ -1785,7 +1787,12 @@ function documentReferenceProblem(
       owner.kind === "issue"
         ? `dispatch read --issue ${owner.issue}`
         : `dispatch read --project ${owner.project}`;
-    return `document "${reference}" not found by slug; this ${scope}'s ${documents.length} documents include: ${list}; ${read} lists them all`;
+    // `--artifact` names an uploaded picture or file as well as a document, so the hint counts
+    // and ranks them too, and says so: Dispatch's own refusal counts documents alone.
+    const counted = documents.every((document) => (document.kind ?? "doc") === "doc")
+      ? "documents"
+      : "documents and files";
+    return `document "${reference}" not found by slug; this ${scope}'s ${documents.length} ${counted} include: ${list}; ${read} lists them all`;
   }
   return use === undefined
     ? `document "${reference}" not found by slug; this ${scope}'s documents: ${list}`
