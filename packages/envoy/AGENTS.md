@@ -2868,7 +2868,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request.
   `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses;
   a file a test reads through `..` and a go command a test starts are rows of `.github/scripts/ci_job_reads.py`, which the change that adds them extends, since the check finds neither by itself.
-  `envoy-go`, gated by its broad `envoy_go` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module;
+  `envoy-go`, gated by its broad `envoy_go` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change but the two packages that run apart from its unit step - `internal/integration`, in a step of its own in that job, and `internal/dispatch/docs`, in `envoy-go-docs`, a job the same `envoy_go` list selects (INFRA-179) - so it also runs the untagged tests of every other job's packages in that module;
   `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go`.
 
 ## Security
