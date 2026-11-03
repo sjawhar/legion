@@ -478,6 +478,34 @@ func TestAPriorEnrollmentOfAnotherOperatorDoesNotStrandTheSession(t *testing.T) 
 	}
 }
 
+// TestAPriorEnrollmentOfAReplacedCredentialDoesNotStrandTheSession: a machine that proves an
+// identity of its own holds one launcher credential, keyed by the key its trade presented
+// (exchange.MachineSubject), and a helper that comes back on another key holds another. Every
+// revoke of the re-pinned session's prior enrollment is then refused 403
+// NOT_ENROLLING_CREDENTIAL (enroll.Service.Revoke: the enrollment is not this credential's),
+// which no retry can change, so the helper must stop retrying it and enroll the session afresh.
+// Before, the session retried that revoke for as long as its process lived and never enrolled.
+func TestAPriorEnrollmentOfAReplacedCredentialDoesNotStrandTheSession(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "sessions.json")
+	pid := recordPrior(t, state, "enr-other-credential")
+
+	r := newRig(t, state) // Recover re-pins the child; its prior revoke waits for a credential
+	r.fake.mu.Lock()
+	r.fake.revokeNotEnrolling = map[string]bool{"enr-other-credential": true}
+	r.fake.mu.Unlock()
+	r.login(t)
+	waitFor(t, func() bool {
+		sess := r.srv.Registry.Get(pid)
+		return sess != nil && sess.EnrollmentID() != ""
+	})
+	r.fake.mu.Lock()
+	attempts := r.fake.revokeAttempts
+	r.fake.mu.Unlock()
+	if attempts != 1 {
+		t.Fatalf("a revoke refused as another credential's is final, not retried: %d attempts", attempts)
+	}
+}
+
 // recordPrior saves a session record at state for a live child process, as a helper that
 // enrolled it under id would have left it, and returns the child's pid.
 func recordPrior(t *testing.T, state, id string) int {

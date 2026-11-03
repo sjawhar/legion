@@ -285,8 +285,14 @@ Compute Engine instance, and `<account>#<key thumbprint>` for one minted anywher
 part of the name because the identity token is a bearer: a copy of it presented with a key of the
 copier's asks for a credential of its own and moves nothing of the machine's. So one machine's
 trade never moves another's credential, and ending one machine's enrollment leaves the others.
-A machine that makes a new key — a reboot that empties its key directory — leaves its old
-credential behind until that credential's own expiry, and starts a new one at its next trade.
+`agent-secrets-helper` keeps that key in `~/.config/agent-secrets/identity-key.pem`, mode 0600,
+beside the machine login a machine that proves no identity keeps, and makes one only at this
+machine's first trade. A restart therefore trades the same subject and moves the one credential
+the machine already holds, so the sessions enrolled under it keep renewing. A machine that makes
+a new key — one whose key file was removed, or a machine rebuilt — leaves its old credential
+behind until that credential's own expiry, and starts a new one at its next trade; the sessions
+enrolled under the old one stop renewing when it lapses, and a box enrolled with
+`agent-secrets enroll --helper` is enrolled again by running that command again.
 
 The credential expires with the token it was minted from, an hour after that token was minted, and
 a machine's session renews only while that credential is live: not revoked, not past its expiry,
@@ -321,9 +327,16 @@ which identity this machine proves: `metadata` with `AGENT_SECRETS_MACHINE_AUDIE
 Engine machine's own token from its metadata server, which is the fleet above; `kubernetes` with
 `AGENT_SECRETS_MACHINE_TOKEN_FILE`, a pod's projected service-account token; or `pool` with
 `AGENT_SECRETS_POOL_AUDIENCE` and `AGENT_SECRETS_POOL_ACCOUNT`, a token minted through a workload
-identity pool. `AGENT_SECRETS_SESSION` names the session a trade writes under where the fleet's
-entry fixes none. For a person to sign in there, give the machine the device-flow client as
-`AGENT_SECRETS_SIGNIN_CLIENT_ID` and `AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE`, the client whose
+identity pool. `AGENT_SECRETS_SESSION` names the session a trade writes under for a caller that
+acts as no session of its own — `agent-secrets`, the helper, a daemon — and is the only name
+such a caller has. A caller that is a session writes under its own session id and reads that
+variable for nothing: an agent session's id is minted when the session starts, and its token
+must name it, since the Envoy listener refuses a subscribe, an unsubscribe, a role claim or a
+send from a session whose token names another. So a fleet whose entry fixes a session, or whose
+pods write under registered names, is a fleet no agent session can trade at: the broker refuses
+the trade, naming what the entry writes as. For a person to sign in there, give the machine the
+device-flow client as `AGENT_SECRETS_SIGNIN_CLIENT_ID` and
+`AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE`, the client whose
 id is `BROKER_SIGNIN_DEVICE_AUDIENCE`. With `AGENT_SECRETS_MACHINE_IDENTITY` unset nothing trades
 and every machine works as it did, through a machine login a person approves.
 

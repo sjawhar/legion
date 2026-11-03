@@ -20,7 +20,8 @@ export const MACHINE_TOKEN_FILE_VAR = "AGENT_SECRETS_MACHINE_TOKEN_FILE";
 /** The audience of this machine's Google identity token: the metadata server mints it for that
  *  audience. */
 export const MACHINE_AUDIENCE_VAR = "AGENT_SECRETS_MACHINE_AUDIENCE";
-/** The session name a trade writes under, where the deployment's entry fixes none. */
+/** The session a trade writes under for a caller that acts as no session of its own, which a
+ *  daemon, a command and a helper are ({@link tradeSession}). */
 export const SESSION_VAR = "AGENT_SECRETS_SESSION";
 
 /** A pod's projected service-account token. */
@@ -82,13 +83,34 @@ export function machineIdentity(env: BrokerEnvironment): TokenSource | undefined
 }
 
 /**
- * The client this environment describes, or undefined where it names no broker or no identity —
- * a machine that trades nothing, which every deployment that has not turned the exchange on is.
- * The key is this process's own and is made here, once per client, so only its public half ever
- * leaves the process.
+ * The session a trade writes under, which the broker records the minted token against: `own`,
+ * the session the caller is acting as, where it acts as one, and otherwise `AGENT_SECRETS_SESSION`.
+ * The Go client reads the same rule out of the same two places
+ * (`packages/envoy/internal/brokerclient/environment.go`, `TradeSession`).
+ *
+ * The caller's own session comes first because a token names one session and the Envoy listener
+ * holds every write that acts as a session to the session its token names
+ * (`packages/envoy/cmd/listener/brokerauth.go`, `sessionNotBound`): a token minted under some
+ * other name is one its own holder cannot spend, so a deployment's variable winning here would
+ * turn a refused trade, which says which name the entry fixes, into a 403 on every subscribe,
+ * unsubscribe, role claim and send. `AGENT_SECRETS_SESSION` is therefore the name for a caller
+ * that acts as no session of its own — a daemon, a command, the helper — and the only name such
+ * a caller has.
+ */
+export function tradeSession(env: BrokerEnvironment, own = ""): string {
+  const acting = own.trim();
+  return acting !== "" ? acting : value(env, SESSION_VAR);
+}
+
+/**
+ * The client this environment describes for a caller acting as the session `own`, or undefined
+ * where it names no broker or no identity — a machine that trades nothing, which every
+ * deployment that has not turned the exchange on is. The key is this process's own and is made
+ * here, once per client, so only its public half ever leaves the process.
  */
 export async function brokerTokenClient(
-  env: BrokerEnvironment
+  env: BrokerEnvironment,
+  own = ""
 ): Promise<BrokerTokenClient | undefined> {
   const brokerUrl = value(env, BROKER_URL_VAR);
   const subject = machineIdentity(env);
@@ -97,6 +119,6 @@ export async function brokerTokenClient(
     brokerUrl,
     key: await newDpopKey(),
     subject,
-    session: value(env, SESSION_VAR),
+    session: tradeSession(env, own),
   });
 }

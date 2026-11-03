@@ -31,8 +31,8 @@ const (
 	PoolAudienceVar = "AGENT_SECRETS_POOL_AUDIENCE"
 	// PoolAccountVar is the managed identity generateIdToken is called on.
 	PoolAccountVar = "AGENT_SECRETS_POOL_ACCOUNT"
-	// SessionVar is the session name a trade writes under, where the deployment's entry fixes
-	// none. Unset, the caller names its own or the entry's stands.
+	// SessionVar is the session a trade writes under for a caller that acts as no session of
+	// its own, which a daemon, a command and this helper are (TradeSession).
 	SessionVar = "AGENT_SECRETS_SESSION"
 	// SignInIssuerVar is the OpenID provider a person signs in at, Google's unless a dev stack
 	// says otherwise.
@@ -58,6 +58,25 @@ const callTimeout = 30 * time.Second
 // HTTPClient is the client every caller of this package uses unless it has one of its own: a
 // timeout on each call, and the default transport.
 func HTTPClient() *http.Client { return &http.Client{Timeout: callTimeout} }
+
+// TradeSession is the session a trade writes under, which the broker records the minted token
+// against: own, the session the caller is acting as, where it acts as one, and otherwise
+// AGENT_SECRETS_SESSION. The TypeScript client reads the same rule out of the same two places
+// (packages/broker-client/src/environment.ts, tradeSession).
+//
+// The caller's own session comes first because a token names one session and the Envoy listener
+// holds every write that acts as a session to the session its token names (cmd/listener/
+// brokerauth.go, sessionNotBound): a token minted under some other name is one its own holder
+// cannot spend, so a deployment's variable winning here would turn a refused trade, which says
+// which name the entry fixes, into a 403 on every subscribe, unsubscribe, role claim and send.
+// AGENT_SECRETS_SESSION is therefore the name for a caller that acts as no session of its own,
+// and the only name such a caller has.
+func TradeSession(getenv func(string) string, own string) string {
+	if acting := strings.TrimSpace(own); acting != "" {
+		return acting
+	}
+	return strings.TrimSpace(getenv(SessionVar))
+}
 
 // MachineIdentity is the identity IdentityVar names, or nil when it names none, which is a
 // machine that trades nothing and is no error. A named identity whose own variables are missing

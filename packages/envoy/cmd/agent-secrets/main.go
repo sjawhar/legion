@@ -604,7 +604,7 @@ func registerMachineSession(ctx context.Context, dir string, key *ecdsa.PrivateK
 	}
 	client, err := brokerclient.New(brokerclient.Config{
 		BrokerURL: base, Key: key, Subject: identity,
-		Session: os.Getenv(brokerclient.SessionVar), HTTP: brokerclient.HTTPClient(),
+		Session: brokerclient.TradeSession(os.Getenv, ""), HTTP: brokerclient.HTTPClient(),
 	})
 	if err != nil {
 		return "", err

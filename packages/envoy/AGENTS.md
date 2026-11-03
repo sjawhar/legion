@@ -5478,7 +5478,7 @@ The variables, all unset by default, in which case every program works exactly a
 | `AGENT_SECRETS_MACHINE_AUDIENCE` | an audience | unset | the `aud` of this machine's Google identity token, which `metadata` mints for and `pool` names on its mint |
 | `AGENT_SECRETS_POOL_AUDIENCE` | `//iam.googleapis.com/projects/…` | unset | the workload identity pool provider an external credential is traded at |
 | `AGENT_SECRETS_POOL_ACCOUNT` | a service account | unset | the managed identity `generateIdToken` is called on, with `includeEmail` |
-| `AGENT_SECRETS_SESSION` | a session name | unset | the session a trade writes under, where the deployment's entry fixes none |
+| `AGENT_SECRETS_SESSION` | a session name | unset | the session a trade writes under for a caller that acts as no session of its own; a caller that is a session writes under its own id and reads this for nothing |
 | `AGENT_SECRETS_PERSON` | an address | unset | which person a session acts for, where more than one has signed in here |
 | `AGENT_SECRETS_SIGNIN_CLIENT_ID` | an OAuth client id | unset | the device-flow client `agent-secrets login` signs a person in as |
 | `AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE` | a path | unset | that client's secret, in a file rather than a variable |

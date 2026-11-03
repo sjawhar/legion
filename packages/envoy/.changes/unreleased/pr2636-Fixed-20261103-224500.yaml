@@ -1,0 +1,23 @@
+kind: Fixed
+body: |
+  `agent-secrets-helper` keeps the key a machine that proves an identity of its own trades with
+  in `~/.config/agent-secrets/identity-key.pem`, mode 0600, and makes one only at that machine's
+  first trade. The broker names a machine's one launcher credential by the thumbprint of that
+  key, so a helper that made a new key at every start asked for a new subject at every restart
+  and left the credential its sessions were enrolled under behind: the sessions it re-pinned
+  retried a revoke no credential of theirs could ever make and never enrolled again while their
+  processes lived, and a box enrolled with `agent-secrets enroll --helper` was refused
+  `ENROLLMENT_NOT_LIVE` once the old credential lapsed, with nothing to enrol it again. A revoke
+  the broker refuses `NOT_ENROLLING_CREDENTIAL` is final to the helper, as `OPERATOR_MISMATCH`
+  already was, so a session whose old enrollment belongs to a credential this helper no longer
+  holds enrolls afresh and leaves that one to its lease.
+  `legion controller start`'s check of the broker route trades under a session name of its own
+  rather than under `AGENT_SECRETS_SESSION`, which is what the controller's session does: its
+  session id is minted when Oh My Pi starts, so a check that traded under the variable passed
+  for a fleet entry that fixes that very name and then launched a controller whose every
+  Dispatch write the broker refused. The rule a trade names a session by is now one function
+  each client reads — the caller's own session where it acts as one, and `AGENT_SECRETS_SESSION`
+  otherwise, which is the only name a daemon, a command or the helper has.
+time: 2026-11-03T22:45:00.000000000Z
+custom:
+  Issue: pr2636

@@ -668,17 +668,28 @@ func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) boo
 	return revoked
 }
 
-// revokeOnce revokes an enrollment once. One refusal counts as done rather than failed: 403
-// OPERATOR_MISMATCH, when the enrollment was made under another operator's launcher credential
-// (a helper logged back in as someone else). This credential can never revoke it, and it cannot
-// block a fresh enrollment either, since the broker's conflict is keyed on the launcher
-// credential; the old enrollment ends with its own lease. revokeLapsed and the bounded revoke it
-// hands ids to both use it, so a mismatch is final wherever a lapsed id is revoked.
+// revokeOnce revokes an enrollment once. Two refusals count as done rather than failed, and
+// both say the same thing: the credential this helper holds now is not the one that made this
+// enrollment, so no retry of this call can ever end it.
+//
+//   - 403 OPERATOR_MISMATCH, when the enrollment was made under another operator's launcher
+//     credential (a helper logged back in as someone else).
+//   - 403 NOT_ENROLLING_CREDENTIAL, when it was made under another credential of no operator
+//     (enroll.Service.Revoke): a machine whose credential was replaced, which is what a helper
+//     that comes back on a key other than the one it traded with before holds.
+//
+// Neither can block a fresh enrollment either, since the broker's conflict is keyed on
+// (launcher_credential_id, runtime_id) and this credential is not that one; the old enrollment
+// ends with its own lease. revokeLapsed and the bounded revoke it hands ids to both use this,
+// so either refusal is final wherever a lapsed id is revoked, and the session it belongs to
+// enrolls afresh rather than retrying a revoke for as long as its process lives.
 func (s *Server) revokeOnce(ctx context.Context, id string) error {
 	err := s.Broker.Revoke(ctx, id)
 	var be *BrokerError
-	if errors.As(err, &be) && be.Status == http.StatusForbidden && be.Code == "OPERATOR_MISMATCH" {
-		s.Log.Warn("the enrollment belongs to another operator's launcher credential; leaving it to its lease", "enrollment_id", id)
+	if errors.As(err, &be) && be.Status == http.StatusForbidden &&
+		(be.Code == "OPERATOR_MISMATCH" || be.Code == "NOT_ENROLLING_CREDENTIAL") {
+		s.Log.Warn("the enrollment belongs to another launcher credential; leaving it to its lease",
+			"enrollment_id", id, "code", be.Code)
 		return nil
 	}
 	return err

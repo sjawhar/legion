@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -17,22 +18,44 @@ import (
 const controllerBrokerToken = "broker-access-token-9f3a"
 
 // stubBroker is the secrets broker's token endpoint and nothing else: it answers every trade
-// with controllerBrokerToken, or, when refusal is set, with that OAuth refusal and a 400.
+// with controllerBrokerToken, or, when refusal is set, with that OAuth refusal and a 400. It
+// keeps the session name each trade asked under.
 type stubBroker struct {
 	url    string
 	trades atomic.Int64
+	mu     sync.Mutex
+	asked  []string
 }
 
 // newStubBroker serves POST /v1/oauth/token, answering refusal's words when it is not empty.
 func newStubBroker(t *testing.T, refusal string) *stubBroker {
+	return newStubBrokerFixingASession(t, refusal, "")
+}
+
+// newStubBrokerFixingASession is newStubBroker for a broker whose entry for this machine fixes
+// the session fixed: a trade naming any other name is refused exactly as the exchange's
+// resolveSession refuses it (ErrSessionMismatch, invalid_grant, naming what the machine writes
+// as), and a trade naming that one is taken.
+func newStubBrokerFixingASession(t *testing.T, refusal, fixed string) *stubBroker {
 	t.Helper()
 	broker := &stubBroker{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		broker.trades.Add(1)
+		session := ""
+		if err := r.ParseForm(); err == nil {
+			session = r.PostForm.Get("session")
+		}
+		broker.mu.Lock()
+		broker.asked = append(broker.asked, session)
+		broker.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		if refusal != "" {
+		said := refusal
+		if said == "" && fixed != "" && session != fixed {
+			said = "this machine writes as " + fixed
+		}
+		if said != "" {
 			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid_request", "error_description": refusal})
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid_grant", "error_description": said})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -43,6 +66,13 @@ func newStubBroker(t *testing.T, refusal string) *stubBroker {
 	t.Cleanup(server.Close)
 	broker.url = server.URL
 	return broker
+}
+
+// tradedSessions is the session name each trade asked under, in order.
+func (b *stubBroker) tradedSessions() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.asked...)
 }
 
 // provesAnIdentity has the operator's machine prove a Kubernetes identity of its own at broker,
@@ -90,7 +120,10 @@ func TestAControllerOnTheBrokerRouteIsHandedNoBearerPointer(t *testing.T) {
 		if got := env["DISPATCH_URL"]; got != "https://dispatch.test" {
 			t.Errorf("DISPATCH_URL = %q, want the configured Dispatch", got)
 		}
-		// What the client trades with, which it reads from this environment itself.
+		// What the client trades with, which it reads from this environment itself. The session
+		// name among them is the operator's own, for the `agent-secrets` the controller's bash
+		// runs: the controller's session acts as a session, so its Dispatch credential is traded
+		// under its own session id and under no variable (brokerclient.TradeSession).
 		for name, want := range map[string]string{
 			"AGENT_SECRETS_URL":                broker.url,
 			"AGENT_SECRETS_MACHINE_IDENTITY":   "kubernetes",
@@ -133,6 +166,31 @@ func TestAControllerOnTheBrokerRouteIsHandedNoBearerPointer(t *testing.T) {
 	}
 	if trades := broker.trades.Load(); trades != 1 {
 		t.Errorf("the start made %d trades, want the one that proves this machine can hold a credential", trades)
+	}
+	// The check trades under a session name of its own, never the operator's variable: Oh My Pi
+	// mints the controller's session id at session start, so a check that traded under a name no
+	// session will use would pass for an entry that fixes that name while refusing the session.
+	asked := broker.tradedSessions()
+	if len(asked) != 1 || !strings.HasPrefix(asked[0], "legion-controller-start-") || asked[0] == "legion-demo-controller" {
+		t.Errorf("the check traded under %q, want one name of its own beginning legion-controller-start-", asked)
+	}
+}
+
+// TestAnEntryThatFixesASessionRefusesTheControllerStart: an entry that fixes a session answers
+// every trade naming another `invalid_grant`, and the controller's session names its own id,
+// which no deployment can have fixed. So a Kubernetes-identity controller whose entry fixes a
+// session can write nothing, and the start says what the broker said instead of launching it.
+// The operator's AGENT_SECRETS_SESSION naming that very session does not rescue it: the session
+// does not trade under that variable.
+func TestAnEntryThatFixesASessionRefusesTheControllerStart(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{dispatchBroker: true})
+	c.provesAnIdentity(newStubBrokerFixingASession(t, "", "legion-demo-controller"))
+
+	c.refused("writes as legion-demo-controller")
+	c.wantNoSecretRequest()
+	if c.launched() {
+		t.Error("Oh My Pi was launched for a controller whose every Dispatch write the broker refuses")
 	}
 }
 

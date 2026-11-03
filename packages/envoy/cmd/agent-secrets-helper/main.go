@@ -65,9 +65,14 @@ type config struct {
 	// Person is AGENT_SECRETS_PERSON in the helper's own environment, which picks one of
 	// several sign-ins of this user; empty where it says nothing.
 	Person string
-	// Session is the session name a trade writes under (AGENT_SECRETS_SESSION), empty where
-	// the deployment's entry fixes one.
+	// Session is the session name this machine's own trades write under: the helper acts as no
+	// session of its own, so it is AGENT_SECRETS_SESSION's, empty where the deployment's entry
+	// fixes one (brokerclient.TradeSession).
 	Session string
+	// IdentityKeyFile is where a machine that proves an identity of its own keeps the key its
+	// launcher credential is bound to (helper.LoadOrMakeIdentityKey), beside the machine login
+	// a machine that proves none keeps: ~/.config/agent-secrets/identity-key.pem.
+	IdentityKeyFile string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -79,7 +84,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		MachineFile:  getenv("AGENT_SECRETS_MACHINE_FILE"),
 		KeyDir:       getenv("AGENT_SECRETS_KEY_DIR"),
 		Person:       strings.TrimSpace(getenv(brokerclient.PersonVar)),
-		Session:      strings.TrimSpace(getenv(brokerclient.SessionVar)),
+		Session:      brokerclient.TradeSession(getenv, ""),
 	}
 	cfg.SignIns = brokerclient.SignIns(getenv)
 	identity, err := brokerclient.MachineIdentity(getenv)
@@ -103,6 +108,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if cfg.MachineFile == "" {
 		cfg.MachineFile = filepath.Join(home, ".config", "agent-secrets", "machine.json")
 	}
+	// Beside the machine login, under the one directory a person's own machine credentials
+	// already live in, and never in the key directory, which a reboot empties and which a box
+	// is given a copy of.
+	cfg.IdentityKeyFile = filepath.Join(home, ".config", "agent-secrets", "identity-key.pem")
 	if cfg.KeyDir == "" {
 		// The default `agent-secrets` itself reads (its keyDir()): the directory the helper's
 		// own socket lives in, so both find one place with neither variable set.
@@ -132,15 +141,17 @@ environment:
   AGENT_SECRETS_MACHINE_FILE   where the helper keeps this machine's login (its key and refresh
                                token, mode 0600), so a restart resumes it; install writes it into
                                the unit when set (default ~/.config/agent-secrets/machine.json).
-                               A machine that proves an identity of its own keeps no such file
+                               A machine that proves an identity of its own keeps no such file;
+                               it keeps the key it trades with in
+                               ~/.config/agent-secrets/identity-key.pem, mode 0600
   AGENT_SECRETS_MACHINE_IDENTITY
                                the identity this machine proves at the broker's token exchange:
                                kubernetes (AGENT_SECRETS_MACHINE_TOKEN_FILE), metadata
                                (AGENT_SECRETS_MACHINE_AUDIENCE) or pool (both, with
                                AGENT_SECRETS_POOL_AUDIENCE and AGENT_SECRETS_POOL_ACCOUNT).
                                With it the helper's launcher credential is the one that exchange
-                               mints, traded again before it lapses, and no person approves this
-                               machine; unset, a person logs it in as before
+                               mints, traded again before it lapses with the key it kept, and no
+                               person approves this machine; unset, a person logs it in as before
   AGENT_SECRETS_KEY_DIR        where this user's session identity lives; install writes it into
                                the unit when set (default $XDG_RUNTIME_DIR/agent-secrets)
   AGENT_SECRETS_SIGNIN_DIR     where agent-secrets login keeps this user's sign-ins, which the
@@ -274,17 +285,28 @@ func serve(cfg config) error {
 }
 
 // identityClient is the token client for the identity this machine proves, or nil where it
-// proves none. The key is made here, in this process, and only its public half ever reaches the
-// broker: it is the key every launcher proof the helper signs is signed with, and it lives as
-// long as the process does, so a restart proves a new one and trades again.
+// proves none. The key is this machine's own and only its public half ever reaches the broker:
+// it is the key every launcher proof the helper signs is signed with, and it is the key the
+// broker names this machine's one launcher credential by (exchange.MachineSubject).
+//
+// It is read back from IdentityKeyFile, and made and kept there at this machine's first trade
+// (helper.LoadOrMakeIdentityKey), so a restart trades the same subject and moves the one
+// credential this machine already holds rather than leaving it and its sessions behind. A
+// reboot empties neither that file nor this machine's credential; what a reboot does end is
+// every session, which is enrolled afresh by the processes that come back.
 func identityClient(cfg config, log *slog.Logger) (*brokerclient.Client, error) {
 	if cfg.Identity == nil {
 		return nil, nil
 	}
-	key, err := proof.NewKey()
+	key, made, err := helper.LoadOrMakeIdentityKey(cfg.IdentityKeyFile)
 	if err != nil {
-		return nil, fmt.Errorf("make this machine's key: %w", err)
+		return nil, err
 	}
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("this machine's identity key", "file", cfg.IdentityKeyFile, "thumbprint", thumbprint, "made", made)
 	return brokerclient.New(brokerclient.Config{
 		BrokerURL: cfg.URL, Key: key, Subject: cfg.Identity, Session: cfg.Session,
 		HTTP: brokerclient.HTTPClient(), Log: log,

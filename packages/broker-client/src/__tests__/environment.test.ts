@@ -10,6 +10,7 @@ import {
   MACHINE_AUDIENCE_VAR,
   MACHINE_TOKEN_FILE_VAR,
   machineIdentity,
+  tradeSession,
 } from "../environment";
 
 test("a machine that names no identity trades nothing, and that is no error", async () => {
@@ -66,4 +67,17 @@ test("a client is built for the broker, the identity and the session the variabl
   // The key is this process's own, made once with the client, and only its public half exists
   // outside the signer.
   expect(Object.hasOwn(client?.key.publicJwk ?? {}, "d")).toBe(false);
+});
+
+test("the session a trade writes under is the caller's own, and the variable's where it has none", () => {
+  const deployment = { AGENT_SECRETS_SESSION: " legion-demo-controller " };
+  // A caller that acts as a session: its token must name that session, since the Envoy
+  // listener refuses a write acting as one whose token names another.
+  expect(tradeSession(deployment, "ses_01a9")).toBe("ses_01a9");
+  expect(tradeSession({}, " ses_01a9 ")).toBe("ses_01a9");
+  // A caller that acts as no session: a daemon, a command, the helper.
+  expect(tradeSession(deployment)).toBe("legion-demo-controller");
+  expect(tradeSession(deployment, "   ")).toBe("legion-demo-controller");
+  // Neither: the trade names no session, and the fleet entry's own name stands.
+  expect(tradeSession({})).toBe("");
 });

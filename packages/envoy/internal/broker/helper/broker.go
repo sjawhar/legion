@@ -126,9 +126,11 @@ type Broker struct {
 	MachineFile string
 	// Identity, when set, is this machine's own identity at the broker's token exchange, which
 	// answers a launcher credential of its own. It replaces the machine login entirely: Start
-	// reads no machine file, no device grant runs, nothing is kept on disk (a restart trades
-	// again), and the renewal is a fresh identity token traded again, this grant issuing no
-	// refresh token. Nil is a machine that proves nothing of its own and logs in as before.
+	// reads no machine file, no device grant runs, and no person approves anything. The key it
+	// trades with is kept (LoadOrMakeIdentityKey), so a restart trades the same subject and the
+	// broker moves the one credential this machine holds rather than minting a second beside
+	// it; the renewal is a fresh identity token traded again, this grant issuing no refresh
+	// token. Nil is a machine that proves nothing of its own and logs in as before.
 	Identity *brokerclient.Client
 	// SignIns, when set, is the people signed in on this box as this helper's own user
 	// (`agent-secrets login`), asked before every enrolment: a session registered while one of
@@ -624,7 +626,9 @@ func (b *Broker) Start(ctx context.Context) error {
 // startIdentity is Start for a machine that proves an identity of its own: the token client
 // trades it for one of the broker's access tokens, whose launcher credential the helper then
 // enrolls sessions with, and keeps trading before each one lapses (brokerclient.Client.Run) until
-// ctx ends. Nothing is kept on disk and no person is asked: a restart trades again.
+// ctx ends. No person is asked and no token or credential is kept on disk: a restart trades
+// again, with the key it kept (LoadOrMakeIdentityKey), so that trade moves the credential this
+// machine already holds.
 //
 // It waits startRefreshBound (5 s) for the first credential, so a helper on a reachable broker
 // listens with one in hand, well inside the 10 s `agent-secrets register` waits for the socket;

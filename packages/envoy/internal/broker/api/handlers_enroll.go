@@ -180,10 +180,14 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 //
 // A machine's own session whose launcher credential has ended (enroll.ErrMachineLoginEnded: the
 // machine login was revoked, lapsed, or its account was dropped from BROKER_VM_SERVICES) is
-// answered ENROLLMENT_NOT_LIVE, which is what the enrollment now is: every renewer treats that
-// code as terminal and enrolls again, which needs a live credential, where a code of its own
-// would read as a retryable failure to a renewer that has not heard of it. The WARN beside it
-// is the only record naming which of the two refusals an operator is looking at.
+// answered ENROLLMENT_NOT_LIVE, which is what the enrollment now is, rather than a code of its
+// own, which would read as a retryable failure to a renewer that has not heard of it. Every
+// renewer treats it as terminal, and what each does then is its own: a session the helper holds
+// is enrolled again by the helper's own loop, under whatever credential it holds then
+// (helper.Server.enrollLoop); `agent-secrets renew` stops, exit 76 naming the enrollment, and
+// leaves the enrolling again to whatever enrolled the box or pod in the first place, which for
+// a box enrolled through `enroll-session-key` is a person running that command again. The WARN
+// beside it is the only record naming which of the two refusals an operator is looking at.
 func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id string) {
 	urlID, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {

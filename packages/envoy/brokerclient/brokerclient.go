@@ -50,5 +50,11 @@ func MachineIdentity(getenv func(string) string) (Source, error) {
 	return internal.MachineIdentity(getenv)
 }
 
+// TradeSession forwards to internal/brokerclient.TradeSession: the session a trade writes
+// under, the caller's own where it acts as one and SessionVar's otherwise.
+func TradeSession(getenv func(string) string, own string) string {
+	return internal.TradeSession(getenv, own)
+}
+
 // HTTPClient forwards to internal/brokerclient.HTTPClient.
 func HTTPClient() *http.Client { return internal.HTTPClient() }

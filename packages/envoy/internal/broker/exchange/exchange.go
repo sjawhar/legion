@@ -213,8 +213,12 @@ func isVerified(claim any) bool {
 //
 // What the key in the name costs is that a machine making a new key leaves its old credential
 // behind until that credential's own expiry, which is the subject token's, and the sessions
-// enrolled under it stop renewing when it lapses (enroll.Service.Renew). A machine keeps its
-// key across a restart of its helper, and the reboot that loses it ends those sessions anyway.
+// enrolled under it stop renewing when it lapses (enroll.Service.Renew). So a machine keeps its
+// key rather than making one per process: `agent-secrets-helper` reads it back from
+// ~/.config/agent-secrets/identity-key.pem, mode 0600, and makes one only at the machine's
+// first trade (helper.LoadOrMakeIdentityKey). A helper that lost that file, or a machine that
+// is rebuilt, trades a new subject and leaves the old credential to lapse, and the sessions it
+// enrolled are gone with the processes that held them.
 func MachineSubject(identity GoogleIdentity, thumbprint string) string {
 	return machineName(identity) + "#" + thumbprint
 }

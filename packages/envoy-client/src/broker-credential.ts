@@ -16,7 +16,7 @@ import {
   IDENTITY_POOL,
   IDENTITY_VAR,
   machineIdentity,
-  SESSION_VAR,
+  tradeSession,
 } from "@legion/broker-client/environment";
 import type { BrokerTokenClient } from "@legion/broker-client/token-client";
 import type { RequestCredential } from "./bearer";
@@ -28,7 +28,8 @@ import type { RequestCredential } from "./bearer";
  * of its process — Claude Code mints a new id on `/clear`, and one Oh My Pi process switches
  * between sessions — passes a function, which is read at every trade rather than fixed when the
  * configuration resolved. A caller that acts as no session at all passes nothing, and the trade
- * names whatever `AGENT_SECRETS_SESSION` does, which is how a daemon names its own.
+ * names whatever `AGENT_SECRETS_SESSION` does, which is how a daemon names its own
+ * (`tradeSession`, `@legion/broker-client/environment`, the one rule both clients read).
  */
 export type BrokerSessionName = string | (() => string);
 
@@ -71,11 +72,14 @@ export function forgetBrokerClients(): void {
   CLIENTS.clear();
 }
 
-/** The client `env` describes for `session`, made once per process. */
-function clientFor(
-  env: BrokerEnvironment,
-  session: string
-): Promise<BrokerTokenClient | undefined> {
+/**
+ * The client `env` describes for a caller acting as the session `own`, made once per process.
+ * The entry is keyed by the name the trade writes under rather than by `own`, since that is the
+ * name the token carries: a caller that acts as no session and one that acts as the session
+ * `AGENT_SECRETS_SESSION` names are one client, and two environments naming two sessions are two.
+ */
+function clientFor(env: BrokerEnvironment, own: string): Promise<BrokerTokenClient | undefined> {
+  const session = tradeSession(env, own);
   const key = JSON.stringify([
     env.AGENT_SECRETS_URL,
     env.AGENT_SECRETS_MACHINE_IDENTITY,
@@ -83,9 +87,7 @@ function clientFor(
     env.AGENT_SECRETS_MACHINE_AUDIENCE,
     session,
   ]);
-  const made =
-    CLIENTS.get(key) ??
-    brokerTokenClient(session === "" ? env : { ...env, [SESSION_VAR]: session });
+  const made = CLIENTS.get(key) ?? brokerTokenClient(env, session);
   CLIENTS.set(key, made);
   return made;
 }
@@ -96,9 +98,10 @@ function clientFor(
  * presented beside (`ath`), so a copy of the token taken off the wire buys nothing.
  *
  * The token names `session` (`BrokerSessionName`), which is what a fleet entry that fixes no
- * session requires and what the listener checks each call against. The name is read at every
- * trade, so a process that moves from one session to another trades afresh under the new name
- * rather than presenting the old one.
+ * session requires and what the listener checks each call against; a caller that names none
+ * trades under `AGENT_SECRETS_SESSION` instead. The name is read at every trade, so a process
+ * that moves from one session to another trades afresh under the new name rather than
+ * presenting the old one.
  *
  * The trade happens at the first request that needs it and at every renewal after, both inside
  * `headers`, so nothing of the caller's restarts when a token lapses. Dispatch and the listener
