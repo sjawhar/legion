@@ -57,7 +57,7 @@ holds the defect for every later change.
   it, only the half of the test whose state directory sits *inside* the decoy would have separated
   the fixed code from the broken.
 
-- Rule 3 bit this change: its own earlier runs migrated `/legion/repos/github.com/sjawhar/legion`,
+- Rule 3 bit this change: its own earlier runs migrated `/legion/repos/github.com/cybermonklabs/legion`,
   which now holds `config-id` and no legacy `config.toml`, so the first round's base control no
   longer reproduces a write on that repository. Every later control used a decoy.
 

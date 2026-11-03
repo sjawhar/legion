@@ -33,7 +33,7 @@ detected the target.
 
 | shape | pre-fix parent | fixed head | what the failures were |
 | :--- | :--- | :--- | :--- |
-| sequential, 50 runs | **49 pass, 1 fail** — run 47: `Incomplete Jujutsu clone at …/repos/github.com/sjawhar/legion: missing …/.jj` | 50 pass, 0 fail | the target race, once |
+| sequential, 50 runs | **49 pass, 1 fail** — run 47: `Incomplete Jujutsu clone at …/repos/github.com/cybermonklabs/legion: missing …/.jj` | 50 pass, 0 fail | the target race, once |
 | 8 parallel lanes × 10 runs (80) | 58 pass, 22 fail — **0** mention the target | 72 pass, 8 fail — **0** mention the target | registration-deadline, boot-watchdog, and resurrection tests waiting on `setTimeout(…, 1)`/`setTimeout(…, 20)` or a bounded `flushEventLoopUntil`, starved by eight concurrent `bun` processes |
 
 The parallel shape looked like a stronger detector — 80 runs, more load — and produced *more*

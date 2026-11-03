@@ -187,7 +187,7 @@ Each item below names a task and where its code is, then notes on it.
   any process whose bus is connected publishes each unpublished row, directly through the bus client rather than the outbox, with event id `dispatch-server-started-<commit>-<seq>` and `started_at` the database's time of the announcement.
   A restart on the announced commit announces nothing; a rollback announces again.
   `/healthz` reports the latest announcement's commit as `fleet_commit`, which the Legion daemon's boot reads;
-  the daemon compares the commit against the merges of its open production checks in `sjawhar/legion`.
+  the daemon compares the commit against the merges of its open production checks in `cybermonklabs/legion`.
   Subject and payload: `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayload` in `packages/contracts/src/dispatch-api.ts`
 
 - **Registry of live server processes**: `internal/dispatch/processes/`
@@ -5259,7 +5259,7 @@ Each `dev-broker.sh` run creates and drops its own isolated database, on the sha
 
 `.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the image builds from, and by hand (`workflow_dispatch`) from any branch.
 Every run builds and smoke-tests each platform on a native runner of its own, with no emulation (`docker (amd64)` on `ubuntu-24.04`, `docker (arm64)` on `ubuntu-24.04-arm`), and pushes it by digest, with no tag;
-its `image_index` job then joins the two into the `ghcr.io/sjawhar/legion/envoy:<commit sha>` index, each image labelled `org.opencontainers.image.revision` with that sha, and its `attest` job attests that index's digest with `actions/attest-build-provenance`.
+its `image_index` job then joins the two into the `ghcr.io/cybermonklabs/legion/envoy:<commit sha>` index, each image labelled `org.opencontainers.image.revision` with that sha, and its `attest` job attests that index's digest with `actions/attest-build-provenance`.
 Its `release_build` and `release_publish` jobs run only on `refs/heads/main`, so a branch dispatch publishes one immutable image index, for a dev slot to pin before merge, and moves no tag.
 `release_build` holds no secret: it computes the version with `release-push.sh version` and builds and checks the agent-secrets binaries (`agent-secrets --version` on the linux/amd64 binary;
 `go version -m` on all six for the recorded `buildversion.tag`).
@@ -5275,8 +5275,8 @@ a branch dispatch pushes an `envoy:<sha>` tag too, and its certificate names `re
 Accept a digest only when a run of the workflow on `main` built it, as for the worker image (`docs/kubernetes.md`, "Pin by digest, never by tag"):
 
 ```bash
-gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+gh attestation verify oci://ghcr.io/cybermonklabs/legion/envoy@sha256:… --repo cybermonklabs/legion \
+  --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
   --source-ref refs/heads/main --deny-self-hosted-runners
 ```
 
@@ -5285,7 +5285,7 @@ The certificate names the workflow whose job signed, so the `attest` job stays i
 in a called workflow it would name that file and this command would refuse every image.
 Its subject is the `envoy:<commit sha>` index digest a deployment pins, not a per-platform manifest.
 `latest` has no attestation: `release_publish` writes it as a new index with its own revision annotation, so its digest differs from the `envoy:<sha>` index it points at.
-To pin from `latest`, read that annotation (`docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy:latest | jq -r
+To pin from `latest`, read that annotation (`docker buildx imagetools inspect --raw ghcr.io/cybermonklabs/legion/envoy:latest | jq -r
 '.annotations["org.opencontainers.image.revision"]'`) and pin `envoy:<that sha>`'s digest.
 `release_publish` does not wait for `attest`; when `attest` alone fails, re-run the failed jobs, which signs the same digest `image_index` hands over.
 The attestation is separate from the BuildKit provenance (`provenance: mode=min`) each `docker` leg attaches to its platform's image, and the index carries both legs' provenance, which a deployment reads to map a digest to its commit.

@@ -3,7 +3,7 @@
 Part of `skill://legion-worker`. Read it the moment your phase needs a tool the worker image may
 not carry — a database client, a linter, a one-off CLI — before you install, download, or vendor
 anything; before you measure Oh My Pi's binary; and when a test fails in your pod. Every path it
-cites is in sjawhar/legion.
+cites is in cybermonklabs/legion.
 
 ## The database your tests use
 
@@ -405,7 +405,7 @@ halves are yours to type.
 ## When no runner reaches it
 
 A tool that is neither in the image nor reachable through one of the three runners is an image
-change: a pull request against sjawhar/legion that carries the same name through every site that
+change: a pull request against cybermonklabs/legion that carries the same name through every site that
 spells it out, and those sites are not all held by a test.
 
 Do not work from a list of those sites. This page has carried one twice and it was wrong both

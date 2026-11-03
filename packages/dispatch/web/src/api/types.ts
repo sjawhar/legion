@@ -218,7 +218,7 @@ export type {
 } from "@legion/contracts";
 
 // Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (its UI routes, in the
-// broker's HTTP API reference: https://sjawhar.github.io/legion/broker/reference/api/). These have
+// broker's HTTP API reference: https://cybermonklabs.github.io/legion/broker/reference/api/). These have
 // no reason to live in the shared @legion/contracts package, which is for Envoy event contracts.
 export type CredentialRequestKind = "agent_secret" | "launcher_credential";
 export type CredentialRequestState =

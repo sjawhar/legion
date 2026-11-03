@@ -888,7 +888,7 @@ func TestLoadRefusesTheDatabasePassword(t *testing.T) {
 			if !strings.HasPrefix(refusal, tc.opens) {
 				t.Errorf("refusal %q does not open %q", refusal, tc.opens)
 			}
-			for _, why := range []string{"by IAM token", "https://sjawhar.github.io/legion/broker/operate/#signing-in-to-rds-by-iam-token", "goes in the URL itself"} {
+			for _, why := range []string{"by IAM token", "https://cybermonklabs.github.io/legion/broker/operate/#signing-in-to-rds-by-iam-token", "goes in the URL itself"} {
 				if !strings.Contains(refusal, why) {
 					t.Errorf("refusal %q does not say %q", refusal, why)
 				}

@@ -2,7 +2,7 @@
 
 Part of `skill://legion-worker`. Read it before you write or edit any line of the pull request
 body, put a `proof` array in a handoff, verify another phase's proof, or run the simplify pass.
-Every path it cites is in sjawhar/legion.
+Every path it cites is in cybermonklabs/legion.
 
 ## The pull request body template
 

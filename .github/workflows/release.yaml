@@ -873,8 +873,8 @@ jobs:
       # against SHA256SUMS, which sits in the same mutable release. `--repo` alone accepts an
       # archive any workflow of this repository attested, so the check pins the signer as
       # docs/kubernetes.md ("Pin by digest, never by tag") does:
-      #   gh attestation verify legion-<os>-<arch>.tar.gz --repo sjawhar/legion \
-      #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main \
+      #   gh attestation verify legion-<os>-<arch>.tar.gz --repo cybermonklabs/legion \
+      #     --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release.yaml@refs/heads/main \
       #     --source-ref refs/heads/main --deny-self-hosted-runners
       # and adds `--source-digest <the legion-v<version> tag's commit>` to pin the commit as well.
       # It runs after "legion: Tag release", so a run whose tag step refuses (the tag already names

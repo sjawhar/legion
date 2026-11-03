@@ -55,7 +55,7 @@ became a cross-owner pair; and the control is the revert, which answers
 
 ```
 fill the repository of LEGION-1: mint the implement App token to read the default branch of
-sjawhar/legion: no installation of the implement App on sjawhar covers the repository
+cybermonklabs/legion: no installation of the implement App on sjawhar covers the repository
 ```
 
 `review_permission_test.go` reuses the same fake for the review paths, and its no-pair subtests

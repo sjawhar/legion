@@ -2907,7 +2907,7 @@ production_audit() {
 }
 # note_listener_restarts records every listener-restart episode in $evidence/listener-restarts.json
 # and names, in a note, the release of the production listener whose run spans them, when one does.
-listener_release_repo=sjawhar/legion
+listener_release_repo=cybermonklabs/legion
 note_listener_restarts() {
   local episodes first last releases
   episodes=$(listener_restarts "$evidence/interests-outcomes.txt") || { note "the listener-restart episodes could not be read"; return 0; }

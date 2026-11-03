@@ -22,7 +22,7 @@ related_issues:
   the moment the required set turns green. A lane outside that set is read by nothing in that
   path: red or still running, it is merged over.
 - So the required set is not "CI". On main it is `lint`, `typecheck`, `test`, `pr-title`
-  (`gh api repos/sjawhar/legion/rules/branches/main`). `test` does not compile
+  (`gh api repos/cybermonklabs/legion/rules/branches/main`). `test` does not compile
   `packages/envoy`; `envoy-go` and `broker-multiprocess` do, and neither is required.
 - Reviewer, before approving: list every check run at the code head
   (`gh api "repos/<o>/<r>/commits/<sha>/check-runs?per_page=100" --jq '.check_runs[]|"\(.name) \(.status) \(.conclusion)"'`),

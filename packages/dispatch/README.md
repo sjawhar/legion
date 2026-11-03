@@ -310,7 +310,7 @@ E2E_AGENT_TOKEN=acceptance-token \
 bun run e2e:deployed
 cd ../envoy/deploy/compose
 "${compose[@]}" down -v
-docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
+docker rmi "ghcr.io/cybermonklabs/legion/envoy:${acceptance_image_tag}"
 ```
 
 `e2e/seed.ts` truncates its database before each scenario. Always set

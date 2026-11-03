@@ -5,7 +5,7 @@ controller asks you to resolve a conflict, the change needs something only the b
 request is retargeted to a new base, you compare two heads after such a merge, a push is refused
 because the handoff import moved the branch, or you are about to rewrite a commit you already
 pushed.
-Every path it cites is in sjawhar/legion.
+Every path it cites is in cybermonklabs/legion.
 
 ## Reintegrating the base
 

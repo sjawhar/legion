@@ -156,8 +156,8 @@ ARG PGDG_KEY_SHA256=0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e
 # ------------------------------------------------------------------------------------------------
 # plugin: workspace install, the Oh My Pi plugins' frozen install, the CodeGraph CLI's frozen
 # install, and the two packed plugins.
-# ghcr.io/sjawhar/legion/ci, the copy of oven/bun:1.4.4-slim (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 AS plugin
+# ghcr.io/cybermonklabs/legion/ci, the copy of oven/bun:1.4.4-slim (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 AS plugin
 WORKDIR /repo
 # jq: the same omp.extensions rewrite release.yaml's pi_envoy_build and pi_legion_build jobs run.
 # python3/make/g++: native devDependencies in the workspace lockfile (mirrors
@@ -264,8 +264,8 @@ RUN set -eu; \
 # daemon hands to `mise where` on a tmux host. mise itself is checked against MISE_SHA256 before
 # anything extracts or runs it, the same shape the toolchain stage below uses for uv, Node and the AWS
 # CLI; .github/actions/install-jj reads the same pair for the CI runner's own mise.
-# ghcr.io/sjawhar/legion/ci, the copy of debian:bookworm-slim (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS tools
+# ghcr.io/cybermonklabs/legion/ci, the copy of debian:bookworm-slim (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS tools
 ARG MISE_VERSION
 ARG MISE_SHA256
 ARG JJ_TOOL
@@ -307,8 +307,8 @@ RUN --mount=type=secret,id=github_token \
 # base. LEGION_REVISION is the commit the workflow builds; it is linked in so `legion version` names
 # it, and the build refuses without it.
 # The same toolchain builds gopls (static too) for the runtime stage's /usr/local/bin/gopls.
-# ghcr.io/sjawhar/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS go
+# ghcr.io/cybermonklabs/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS go
 WORKDIR /src
 
 # A `|` between proxy entries makes a go command fall through to the next source after any error,
@@ -418,8 +418,8 @@ RUN test -n "$LEGION_REVISION" \
 # variable the final stage's ENV sets is one `runtime.kubernetes.pod.env` may not set
 # (sandbox/operatorpod.go imageEnv). A go.env default leaves GOPROXY to an operator, a role or a
 # command that names its own. The process environment outranks go.env, so each of those wins.
-# ghcr.io/sjawhar/legion/ci, the copy of debian:trixie-slim (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS toolchain
+# ghcr.io/cybermonklabs/legion/ci, the copy of debian:trixie-slim (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256
 ARG NODE_VERSION
@@ -486,8 +486,8 @@ RUN set -eu; \
 # WORKDIR belong in the final stage, not here:
 # TestImageEnvIsWhatTheWorkerImageSets (packages/daemon/internal/runtime/sandbox/operatorpod_test.go)
 # reads the last stage's ENV only.
-# ghcr.io/sjawhar/legion/ci, the copy of debian:trixie-slim (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS runtime-base
+# ghcr.io/cybermonklabs/legion/ci, the copy of debian:trixie-slim (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS runtime-base
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
 # chromium, python3, curl, wget, jq, openssh-client (for ssh-keygen), util-linux (for flock),
 # postgresql-client (for psql), redis-tools (for redis-cli), sqlite3, netcat-openbsd (for nc) and
@@ -764,7 +764,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
 # ------------------------------------------------------------------------------------------------
 # runtime: the final stage, the image itself, on runtime-base.
 FROM runtime-base AS runtime
-LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
+LABEL org.opencontainers.image.source=https://github.com/cybermonklabs/legion
 # Pinned Bun: the binary the plugin stage packed with (the copy of oven/bun:${BUN_VERSION}-slim).
 COPY --from=plugin /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s bun /usr/local/bin/bunx

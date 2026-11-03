@@ -41,13 +41,13 @@ related_issues:
 
 ## Evidence
 
-- On sjawhar/legion `scratch/infra-390-large-head` (320 files of about 7 KB), the JSON answer was
+- On cybermonklabs/legion `scratch/infra-390-large-head` (320 files of about 7 KB), the JSON answer was
   1,239,400 bytes. Before the fix, `Ref` failed with `GitHub response body exceeds the
   1048576-byte limit`. Under the SHA media type, the tester's proxy logged `-> 200 40 bytes`.
   This is the second failure from the same cap. `delivery/reconcile_volume_test.go` records the
   first, on pages of workflow runs.
 - The tester dropped `Accept` in a proxy between Dispatch and GitHub. The sync then failed with
-  `commit for sjawhar/legion@main: GitHub answered no commit SHA (31100 bytes)` and kept
+  `commit for cybermonklabs/legion@main: GitHub answered no commit SHA (31100 bytes)` and kept
   `last_commit` and all 36 components.
 - A missing branch answered 422 under the SHA media type (the tester's run, and the planner's
   probe under JSON). Every Go fake answered 404 for a missing branch, so no test covered

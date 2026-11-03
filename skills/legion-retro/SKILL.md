@@ -42,7 +42,7 @@ missing proof goes back as step 1 says. The Dispatch message (step 6) is for a f
    at the version your task's `Handoff:` line names, `--phase review --version <n>`, the command
    that line quotes). Confirm the body has an `E2E (implementer)` and an `E2E (tester)` line, each
    a proof as `skill://legion-worker/references/pr-body.md#what-a-proof-is` defines it. In
-   sjawhar/legion a surface may also be the daemon's real-process tests, a live proof under
+   cybermonklabs/legion a surface may also be the daemon's real-process tests, a live proof under
    `scripts/e2e/`, or a live check at the operator's next daemon restart recorded on the pull
    request. When either line is missing or links only a unit suite, commit nothing and call the
    `legion` tool's `request_backward_move` with `to: implementing` for your own proof or
