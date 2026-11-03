@@ -119,6 +119,12 @@ type Runtime struct {
 	// stored one against it (PodDrift, once per claim of the deployment per tick) read a string
 	// rather than marshalling that configuration again.
 	podShapes map[podKind]string
+	// launchSettings is the launch keys this runtime's launches read, as a pod template records
+	// them (LaunchSettings), encoded once by the daemon from the configuration this runtime was
+	// built from (Options.LaunchSettings); "" records none, which reads as no drift. A change of
+	// one of them rebuilds the runtime (config.HolderRuntime), so the string is settled here and
+	// only read afterwards, as the shapes are.
+	launchSettings string
 	// cacheConfig is how each repository's cache is made, mapped the repositories the project's
 	// mapping names now (Options.RepositoryCache, Options.Mapped), and cacheDial opens every
 	// connection the health read makes (net.Dialer's own; a test routes the Service's name itself).
@@ -346,8 +352,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
-		testPostgres: opts.TestPostgres,
-		tokens:       opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
+		testPostgres: opts.TestPostgres, launchSettings: opts.LaunchSettings,
+		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
 		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
 		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},

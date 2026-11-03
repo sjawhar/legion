@@ -179,6 +179,12 @@ const legionPullRequestView = z.strictObject({
   state: z.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
+  /** Whether the pull request's base branch requires a check: the daemon has read that branch's
+   * rules and found at least one required status check or required workflow
+   * (`record.PullRequest.Required` and `Workflows`). Only what the base requires decides
+   * `checksVerdict`, so a reader waiting on CI reads the two together. It is `false` before the
+   * daemon has read those rules, as it is for a base that requires nothing. */
+  requiresChecks: z.boolean(),
   fixAttempts: z.number().int().nonnegative(),
 });
 
@@ -335,9 +341,13 @@ const legionIssue = z.strictObject({
   check: legionCheckView.optional(),
 });
 
-/** `api.DaemonInfo` — the running daemon: its project, its store's schema, and its boot history. */
+/** `api.DaemonInfo` — the running daemon: its project, the commit it was built from, its store's
+ * schema, and its boot history. */
 const daemonInfo = z.strictObject({
   project: nonEmptyString,
+  /** The commit this daemon's binary was built from, so a reader can tell which release runs;
+   * empty in a build that is not a release, which stamps none. */
+  commit: z.string(),
   schemaVersion: z.number().int().nonnegative(),
   boots: z.number().int().nonnegative(),
   firstBootAt: timestamp,
@@ -416,6 +426,23 @@ const legionSettings = z.looseObject({
   max_fix_attempts: z.number().int().positive(),
   worker_boot_timeout_seconds: z.number().int().positive(),
 });
+
+/** `api.SettingSource` — where one setting's value came from: the configuration file the daemon
+ * read, or the settings route, with whoever asked for it (`by`, absent for the file) and when the
+ * daemon took that value. */
+const legionSettingSource = z.strictObject({
+  source: z.enum(["file", "route"]),
+  by: nonEmptyString.optional(),
+  at: timestamp,
+});
+
+/** `api.State.settingSources` — where each setting came from, by the dotted `legion.yaml` path
+ * the daemon's class table writes (contract 4). It is a block of its own beside `settings`, so a
+ * reader of `settings` keeps its shape, and it is keyed by every settable path, the ones
+ * `settings` withholds included: a credential, the source of one and the path of a file holding
+ * one each carry their provenance here with no value anywhere, which is how a rotation is visible
+ * without the credential. */
+const legionSettingSources = z.record(z.string(), legionSettingSource);
 
 /** `api.CacheView` — a repository cache as the Kubernetes runtime shows it: its repository and
  * Sandbox, its `state` (`failing` with the kubelet's `reason`, `refused` with its Service's),
@@ -500,6 +527,7 @@ export const LegionStateResponse = z.strictObject({
   capabilities: z.array(legionCapabilityState),
   repositories: legionRepositories,
   settings: legionSettings,
+  settingSources: legionSettingSources,
   consumers: z.array(legionConsumerLag),
 });
 

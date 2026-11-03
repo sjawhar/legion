@@ -838,6 +838,68 @@ test("the state golden carries the daemon's settings with no credential, and the
   expect(text).not.toMatch(/:\/\/[^/@\s]+:[^/@\s]+@/);
 });
 
+// Where each setting came from (contract 4): a block of its own beside `settings`, keyed by the
+// dotted legion.yaml path the daemon's class table writes, so a reader of `settings` keeps its
+// shape. The golden names the file for every path it read and the route for the one an operator
+// changed, with who asked and when; a path the state withholds carries its provenance and no
+// value; and the block cannot be dropped, nor an entry rewritten into another shape.
+test("the state golden names where each setting came from, beside settings", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+
+  expect(state.settings.max_fix_attempts).toBe(5);
+  expect(state.settingSources.max_fix_attempts).toEqual({
+    source: "file",
+    at: state.daemon.startedAt,
+  });
+  expect(state.settingSources.admission_cap).toEqual({
+    source: "route",
+    by: "ana@example.com",
+    at: "2026-09-22T09:40:18Z",
+  });
+  // A credential, and the path of a file holding one: the provenance is here, the value nowhere.
+  expect(state.settingSources.postgres_dsn?.source).toBe("file");
+  expect(state.settingSources.operator_token_file?.source).toBe("file");
+  expect(state.settings.postgres_dsn).toBeUndefined();
+  expect(state.settings.operator_token_file).toBeUndefined();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.settingSources;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+
+  const unknownSource = fixture("state.json") as { settingSources: Record<string, unknown> };
+  unknownSource.settingSources.admission_cap = { source: "guess", at: "2026-09-22T09:40:18Z" };
+  expect(LegionStateResponse.safeParse(unknownSource).success).toBeFalse();
+
+  const extra = fixture("state.json") as { settingSources: Record<string, unknown> };
+  extra.settingSources.admission_cap = {
+    source: "route",
+    at: "2026-09-22T09:40:18Z",
+    why: "unknown to this schema",
+  };
+  expect(LegionStateResponse.safeParse(extra).success).toBeFalse();
+});
+
+// The commit the daemon was built from (R7), so a reader can tell which release runs, and
+// whether a pull request's base branch requires a check, which is what a reader waiting on CI
+// reads beside `checksVerdict`. Both are required: a state missing either is refused.
+test("the state golden names the daemon's commit and each pull request's required checks", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.daemon.commit).toBe("3f9c1a7e5b2d84c06f1a9e3b7d5c2a08e4f6b1d9");
+  expect(state.issues["LEGION-208"]?.pullRequest?.requiresChecks).toBeTrue();
+  expect(state.issues["LEGION-208"]?.pullRequest?.checksVerdict).toBe("pending");
+  expect(state.issues["LEGION-207"]?.pullRequest?.requiresChecks).toBeFalse();
+
+  const noCommit = fixture("state.json") as { daemon: Record<string, unknown> };
+  delete noCommit.daemon.commit;
+  expect(LegionStateResponse.safeParse(noCommit).success).toBeFalse();
+
+  const noRequired = fixture("state.json") as {
+    issues: Record<string, { pullRequest?: Record<string, unknown> }>;
+  };
+  delete noRequired.issues["LEGION-208"]?.pullRequest?.requiresChecks;
+  expect(LegionStateResponse.safeParse(noRequired).success).toBeFalse();
+});
+
 // The lag of the daemon's durable consumers (contract 43): the golden carries a caught-up consumer,
 // one whose info NATS did not answer and one stalled with messages waiting; a state with no
 // workflow carries an empty list; the oldest and the last handled are null rather than absent, an

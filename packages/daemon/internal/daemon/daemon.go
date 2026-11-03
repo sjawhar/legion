@@ -246,7 +246,7 @@ func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, 
 	if err != nil {
 		return err
 	}
-	plan.live, plan.rebuild = live, rebuild
+	plan.live, plan.rebuild, plan.commit = live, rebuild, build.Revision
 	if cfg.Runtime.Name == "kubernetes" {
 		logPlugins(log, plan.plugins, plan.pluginsSource)
 		logProbeBudget(log, cfg)
@@ -575,6 +575,9 @@ type plan struct {
 	// read live through live.
 	live    *config.Live
 	rebuild *rebuilder
+	// commit is the commit this binary was built from (Build.Revision), which the state's daemon
+	// block names so a reader can tell which release runs; "" in a build that is not a release.
+	commit string
 	// environ is the environment the daemon's own reads resolve under (overrides.environment):
 	// the launch secrets a rebuilt launch spec reads again are read under it, as boot's were.
 	environ []string
@@ -1641,6 +1644,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	// socket is the one boot took and is never rebound.
 	held := newAPIHolder(cfg, p.operatorToken)
 	p.rebuild.register(held)
+	// Where each setting of the running daemon came from, which the state carries beside its
+	// settings: the file this boot read, until a change of that path names another source. It is
+	// an observer of the one settings holder, as the rebuilder is, so a change by the file and a
+	// change by the route are recorded on the one path both take (config.Live.Apply).
+	sources := api.NewSettingProvenance(startedAt)
+	p.live.OnChange(sources.Observe)
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
@@ -1656,6 +1665,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			repositories: p.repositories,
 			caches:       repositoryCachesOf(s.runtime),
 			settings:     api.SettingsOf(cfg),
+			sources:      sources,
+			commit:       p.commit,
 		},
 		StateTransactions:  st,
 		ConsumerLag:        consumerLag,
@@ -1809,6 +1820,12 @@ type source struct {
 	// settings is the resolved configuration as the state shows it, built once here: Load reads
 	// legion.yaml once and an edit to it restarts the daemon, so once-at-boot is live.
 	settings api.Settings
+	// sources is where each setting came from (api.SettingProvenance), read at every read of the
+	// state: it moves with every change the daemon applies, so the state names the file or the
+	// route per path as it stands now.
+	sources *api.SettingProvenance
+	// commit is the commit this daemon's binary was built from, which the daemon block names.
+	commit string
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -1936,12 +1953,16 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	state.StrandedClaims = api.StrandedClaimsOf(stranded)
 	state.Daemon = api.DaemonInfo{
 		Project:       s.project,
+		Commit:        s.commit,
 		SchemaVersion: version,
 		Boots:         boots,
 		FirstBootAt:   firstBootAt,
 		StartedAt:     s.startedAt,
 	}
 	state.Settings = s.settings
+	if s.sources != nil {
+		state.SettingSources = s.sources.Sources()
+	}
 	state.Admission.Cap = s.admissionCap()
 	controller, _, err := s.store.ControllerTx(ctx, tx, s.projectToken)
 	if err != nil {

@@ -500,4 +500,16 @@ package api
 // 44 and the handoff records at 45 first, with store migrations 0065, 0066 and 0067, so this
 // change takes the number above them. Its migration is named for the moment it was written,
 // 20261029195520, since main closed the numbered series at 0067.)
-const DaemonAPIVersion = 46
+//
+// 47: INFRA-1077 -- three fields of `GET /legion/v1/state`, each refused by a strict reader
+// before 47 (`packages/contracts/src/legion-api.ts` mirrors all three). The `daemon` block names
+// the commit the daemon was built from (`commit`, the release build's own revision, empty in a
+// build that is not a release), so a reader can tell which release runs. Each pull request says
+// whether its base branch requires a check (`requiresChecks`, from the daemon's record of that
+// branch's required status checks and workflows), which is what a reader waiting on CI reads
+// beside `checksVerdict`. And a `settingSources` block beside `settings` says where each setting
+// came from — the file the daemon read or the settings route, with who asked and when — keyed by
+// the dotted `legion.yaml` path the daemon's class table writes, every settable path included,
+// the ones `settings` withholds among them, so a rotated credential is visible without the
+// credential. `settings` itself is untouched, and stays the loose object it was.
+const DaemonAPIVersion = 47

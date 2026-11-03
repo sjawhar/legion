@@ -10,12 +10,15 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"maps"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -68,6 +71,14 @@ type State struct {
 	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
 	// inside: every collection in it is emitted non-nil (contract 35).
 	Settings Settings `json:"settings"`
+	// SettingSources is where each setting of that file came from: the file the daemon read, or
+	// the settings route, with whoever asked for it and when the daemon took it, by the dotted
+	// path the class table writes (config.Paths, SettingProvenance). It is a block of its own
+	// beside Settings so a reader of Settings keeps its shape (contract 4), and it is keyed by
+	// every settable path, Settings' own and the ones Settings withholds alike: a credential, the
+	// source of one and the path of a file holding one each carry their provenance here with no
+	// value anywhere, which is how a rotation is visible without the credential. Never null.
+	SettingSources map[string]SettingSource `json:"settingSources"`
 	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
 	// NATS at the request after the state's transaction commits, so no NATS read holds the
 	// snapshot open. Never null: a daemon with no workflow has none (contract 43).
@@ -245,14 +256,17 @@ type AgentSecretsLoginView struct {
 	State string `json:"state"`
 }
 
-// MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
-// `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
-// `null`, which the plugin's strict reader refuses.
+// MarshalJSON keeps `issues` and `settingSources` objects and `pendingStatusWrites`,
+// `heldOutboxRows`, `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go
+// map or slice is `null`, which the plugin's strict reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
 	if out.Issues == nil {
 		out.Issues = map[string]Issue{}
+	}
+	if out.SettingSources == nil {
+		out.SettingSources = map[string]SettingSource{}
 	}
 	if out.PendingStatusWrites == nil {
 		out.PendingStatusWrites = []PendingStatusWrite{}
@@ -272,14 +286,90 @@ func (s State) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// DaemonInfo is the running daemon itself: which project it coordinates, the schema its store is
-// migrated to, and its boot history.
+// DaemonInfo is the running daemon itself: which project it coordinates, the commit it was built
+// from, the schema its store is migrated to, and its boot history.
 type DaemonInfo struct {
-	Project       string    `json:"project"`
+	Project string `json:"project"`
+	// Commit is the commit this daemon's binary was built from (daemon.Build.Revision), so a
+	// reader can tell which release runs (R7); "" in a build that is not a release, which stamps
+	// none.
+	Commit        string    `json:"commit"`
 	SchemaVersion int       `json:"schemaVersion"`
 	Boots         int       `json:"boots"`
 	FirstBootAt   time.Time `json:"firstBootAt"`
 	StartedAt     time.Time `json:"startedAt"`
+}
+
+// SettingSource is where one setting's value came from: Source is `file`, the configuration file
+// the daemon read, or `route`, a change the settings route applied (config.SourceFile,
+// config.SourceRoute); By is whoever asked for it, empty for the file; and At is when the daemon
+// took that value — its boot for a value the file alone decides, and the moment of the change for
+// one the route applied.
+type SettingSource struct {
+	Source string    `json:"source"`
+	By     string    `json:"by,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// SettingProvenance is where each setting of the running daemon came from, which the state
+// carries beside its settings (State.SettingSources). It holds one entry per dotted path the
+// class table names (config.Paths), the file's own until a change names that path, and it is the
+// daemon's one observer of that question: it is registered with config.Live.OnChange, so every
+// change the daemon applies — the file read again, or the settings route — is recorded here by
+// the same path the change carries.
+//
+// Seam: Restore is where the durable store of route changes, which no daemon keeps yet, hands
+// back what it kept across a restart. Until that store exists, a restarted daemon reads every
+// path as the file's, which is what it is running on.
+type SettingProvenance struct {
+	now func() time.Time
+	mu  sync.Mutex
+	// sources is every path's latest source, keyed as the class table writes the path.
+	sources map[string]SettingSource
+}
+
+// NewSettingProvenance is the provenance of a daemon that has just read its file: every settable
+// path is the file's, as of loadedAt.
+func NewSettingProvenance(loadedAt time.Time) *SettingProvenance {
+	sources := map[string]SettingSource{}
+	for _, path := range config.Paths() {
+		sources[path] = SettingSource{Source: config.SourceFile, At: loadedAt.UTC()}
+	}
+	return &SettingProvenance{now: func() time.Time { return time.Now().UTC() }, sources: sources}
+}
+
+// Restore lays the route changes a store kept over the file's own provenance, path for path. It
+// is the seam the daemon's settings store fills once it exists: the route changes that survived
+// the daemon's restart are the values it is running on, and the state must name them as the
+// route's rather than the file's. A path the class table does not name is recorded as it is
+// given: the store holds what a route applied, and this reports it.
+func (p *SettingProvenance) Restore(stored map[string]SettingSource) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	maps.Copy(p.sources, stored)
+}
+
+// Observe records one applied settings change per path, which is what config.Live.OnChange hands
+// every observer. It runs under the settings holder's lock and reads nothing of the
+// configuration: a path's value is Settings' business, and only where it came from is this one's.
+func (p *SettingProvenance) Observe(_ *config.Config, applied []config.Change) {
+	if len(applied) == 0 {
+		return
+	}
+	at := p.now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, change := range applied {
+		p.sources[change.Path] = SettingSource{Source: change.Source, By: change.By, At: at}
+	}
+}
+
+// Sources is the provenance as the state carries it, a copy the caller may hold while the daemon
+// applies the next change.
+func (p *SettingProvenance) Sources() map[string]SettingSource {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return maps.Clone(p.sources)
 }
 
 // Admission is the issue cap and the issues under it, in Dispatch rank order. Concurrency is
@@ -473,7 +563,18 @@ type PullRequestView struct {
 	State          string `json:"state"`
 	ChecksVerdict  string `json:"checksVerdict,omitempty"`
 	ReviewDecision string `json:"reviewDecision,omitempty"`
-	FixAttempts    int    `json:"fixAttempts"`
+	// RequiresChecks is whether the pull request's base branch requires a check: the daemon has
+	// read that branch's rules and found at least one required status check or required workflow
+	// (record.PullRequest.Required and Workflows, read by internal/requiredchecks). Only what the
+	// base requires decides the checks verdict (classify.HeadVerdict), so a reader waiting on CI
+	// reads this beside ChecksVerdict: a base that requires nothing never gives a head a verdict,
+	// and no wait there is a CI wait.
+	//
+	// It is false before the daemon has read those rules, exactly as it is for a base that
+	// requires nothing: nothing is known to be required, and the daemon's own judgement reads an
+	// unread base the same way.
+	RequiresChecks bool `json:"requiresChecks"`
+	FixAttempts    int  `json:"fixAttempts"`
 }
 
 // GateView is the design gate: the spec document, the version Dispatch currently holds, and the

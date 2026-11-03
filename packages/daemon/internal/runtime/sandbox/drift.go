@@ -2,8 +2,15 @@ package sandbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"reflect"
+	"slices"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -11,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -182,6 +190,193 @@ func templateImageDrift(s *sandbox, image string) []string {
 	return nil
 }
 
+// launchSettingsAnnotation records on a pod template's metadata the launch settings the pod's own
+// launch read (LaunchSettings), beside the shape the pod was built from (podShapeAnnotation).
+//
+// It is an annotation of its own and no field of podShapeRecord, and its absence reads as no
+// drift at all, exactly as a missing podShapeAnnotation reads as a pod built before this release
+// (podShapeDrift). Every pod of the fleet was built before this release and carries none, and a
+// field added to podShapeRecord would make every one of them read as drifted at the first boot of
+// the new build — an update round over every open issue at once, which is the fleet-wide round
+// podShapeRecord's own comment refuses.
+const launchSettingsAnnotation = "legion.dev/launch-settings"
+
+// launchRows is the class table by the Go field each row is read into, as config's own diff reads
+// it (config.Classes). The launch keys are derived from that one table rather than listed again
+// here, so a row added to it reaches the annotation with it and the two can never disagree.
+var launchRows = func() map[string]config.Row {
+	rows := make(map[string]config.Row, len(config.Classes))
+	for _, row := range config.Classes {
+		rows[row.Field] = row
+	}
+	return rows
+}()
+
+// The two values a launch setting is recorded as in place of the value itself.
+const (
+	// unsetLaunchValue stands for a path the configuration does not carry: a block the file names
+	// under one runtime and not the other, or an optional block it drops. It is only ever a drift
+	// reason's word — a path the configuration does not carry is in no record.
+	unsetLaunchValue = "(unset)"
+	// withheldLaunchValue is what a drift reason says of a secret launch key, whose value is
+	// recorded as a digest and never printed.
+	withheldLaunchValue = "changed (withheld)"
+)
+
+// LaunchSettings is the launch keys of cfg as a pod's template records them
+// (launchSettingsAnnotation): one entry per dotted `legion.yaml` path the class table calls a
+// launch of a pod's own, by path, with the value as a log line renders it. "" records none, which
+// every reader takes as no drift.
+//
+// The set is the table's: every row of class `launch` (config.ClassLaunch) whose path is not the
+// tmux runtime's, which is a pane's launch and no pod's. Today that is `instructions`,
+// `provider_keys`, `daemon_url`, `advertise_host`, `role_config_files`, `worker_backends`,
+// `omp_invocation`, `omp_launch_prefix` and the `runtime.kubernetes` launch keys — the image, the
+// storage class, the issue volume, the session store, the setup command, the test Postgres, the
+// scheduling, the reservations, the operator's pod, the secrets broker and the plugin pair.
+//
+// A secret row's value is recorded as the digest of what it renders as (sha256:…) and never as
+// itself: a pod annotation is readable by everything that may read a pod, and a rotation must be
+// drift without the credential, its source or the path of its file reaching the cluster.
+func LaunchSettings(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	settings := map[string]string{}
+	collectLaunchSettings(reflect.ValueOf(cfg).Elem(), settings)
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+// collectLaunchSettings walks one block of the configuration as config's own diff walks it: a row
+// the table calls a block is descended into, and every other row is one value, recorded when its
+// class is the launch of a pod's own. A field with no row is a derived value that is no
+// `legion.yaml` key, which config's census test names.
+func collectLaunchSettings(block reflect.Value, settings map[string]string) {
+	typ := block.Type()
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		row, known := launchRows[typ.Name()+"."+field.Name]
+		if !known {
+			continue
+		}
+		value := block.Field(i)
+		if row.Block {
+			if value.Kind() == reflect.Pointer {
+				if value.IsNil() {
+					continue
+				}
+				value = value.Elem()
+			}
+			collectLaunchSettings(value, settings)
+			continue
+		}
+		if row.Class != config.ClassLaunch || !podLaunchPath(row.Path) {
+			continue
+		}
+		rendered := launchValue(value)
+		if row.Secret {
+			digest := sha256.Sum256([]byte(rendered))
+			rendered = "sha256:" + hex.EncodeToString(digest[:])
+		}
+		settings[row.Path] = rendered
+	}
+}
+
+// podLaunchPath is whether a launch key is one a pod's own launch reads. The tmux runtime's keys
+// are a pane's launch and reach no pod, and no pod of this runtime is ever built from them.
+func podLaunchPath(path string) bool {
+	return !strings.HasPrefix(path, "runtime.tmux.")
+}
+
+// launchValue is one launch key as the record holds it, which is how config's own log line
+// renders it: a duration as its own string, another scalar as it is, and anything composite as
+// JSON, whose map keys Go sorts and whose pointers it follows. Two equal configurations must
+// encode identically, since a record that differs is drift.
+func launchValue(value reflect.Value) string {
+	if duration, ok := value.Interface().(time.Duration); ok {
+		return duration.String()
+	}
+	switch value.Kind() {
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return fmt.Sprintf("%v", value.Interface())
+	}
+	encoded, err := json.Marshal(value.Interface())
+	if err != nil {
+		return fmt.Sprintf("%+v", value.Interface())
+	}
+	return string(encoded)
+}
+
+// launchSettingsDrift names what the pod whose template records held read at its launch that a
+// pod launched now would be handed otherwise (want, LaunchSettings), one short phrase per key:
+// `launch setting <path> <held>, now <handed>`, and for a secret key, whose value is a digest,
+// `launch setting <path> changed (withheld)`. Nil means nothing drifted.
+//
+// A template recording no launch settings at all was written before this release: it reads as no
+// drift, whatever the configuration now says, since nothing recorded what that pod's launch read
+// and a guess would open an update round over every pod of the fleet at once. A runtime that
+// records none itself compares nothing for the same reason.
+func launchSettingsDrift(held, want string) []string {
+	if held == want || held == "" || want == "" {
+		return nil
+	}
+	was, err := launchSettingsOf(held)
+	if err != nil {
+		return []string{fmt.Sprintf("its recorded launch settings %q cannot be read: %v", held, err)}
+	}
+	now, err := launchSettingsOf(want)
+	if err != nil {
+		return nil
+	}
+	paths := slices.Collect(maps.Keys(now))
+	for path := range was {
+		if _, held := now[path]; !held {
+			paths = append(paths, path)
+		}
+	}
+	slices.Sort(paths)
+
+	var drifted []string
+	for _, path := range paths {
+		before, had := was[path]
+		after, has := now[path]
+		if before == after {
+			continue
+		}
+		if row, known := config.ClassOf(path); known && row.Secret {
+			drifted = append(drifted, "launch setting "+path+" "+withheldLaunchValue)
+			continue
+		}
+		if !had {
+			before = unsetLaunchValue
+		}
+		if !has {
+			after = unsetLaunchValue
+		}
+		drifted = append(drifted, "launch setting "+path+" "+before+", now "+after)
+	}
+	return drifted
+}
+
+// launchSettingsOf is one recorded launch settings annotation decoded.
+func launchSettingsOf(record string) (map[string]string, error) {
+	settings := map[string]string{}
+	if err := json.Unmarshal([]byte(record), &settings); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
 // shapeDrift is why the pod of the Sandbox read as s, a pod of kind, was built from a
 // configuration other than the one a pod of that kind is built from now: podShapeDrift against the
 // shape the runtime computed for that kind when it was built (r.podShapes).
@@ -201,10 +396,12 @@ func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
 //
 // It is the configuration a running pod cannot be changed to carry: what its template was built
 // from (podShapeDrift — the image, the kind's reservation, the operator's volumes and mounts, and
-// the disk), and the three facets of the pod itself whose worker can be asked to push first — the
-// operator's volume and mount holding its role's overlays, the secrets broker's enrollment, and
-// the session store (driftedInPod). The two facets whose worker cannot be reached at all stay a
-// launch's business and are never a round's (movedInPod).
+// the disk), the launch keys that template records the pod's own launch read
+// (launchSettingsDrift — `instructions`, `provider_keys`, `daemon_url` and the rest, each a
+// settings change of class `launch`), and the three facets of the pod itself whose worker can be
+// asked to push first — the operator's volume and mount holding its role's overlays, the secrets
+// broker's enrollment, and the session store (driftedInPod). The two facets whose worker cannot
+// be reached at all stay a launch's business and are never a round's (movedInPod).
 //
 // It answers nothing for a claim with no process — such a claim records no pod, so no pod of it
 // is gone — and nothing for a pod no round covers (roundCovers), today the project controller's:
@@ -280,6 +477,12 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 			return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, err)
 		}
 		drifted = r.shapeDrift(s, kind)
+	}
+	if held, _, _ := unstructured.NestedString(u.Object, "spec", "podTemplate", "metadata", "annotations", launchSettingsAnnotation); held != r.launchSettings {
+		// The record is read from the stored template alone, as the shape is: the steady state
+		// costs the one string compare above, and a template that records none — every pod built
+		// before this release — answers nothing.
+		drifted = append(drifted, launchSettingsDrift(held, r.launchSettings)...)
 	}
 	for _, moved := range r.driftedInPod(pod, role) {
 		drifted = append(drifted, moved.String())

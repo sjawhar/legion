@@ -1,6 +1,7 @@
 {
   "daemon": {
     "project": "AC91849371",
+    "commit": "",
     "schemaVersion": 3,
     "boots": 1,
     "firstBootAt": "2026-09-25T05:50:00Z",
@@ -90,5 +91,6 @@
     "role_config_files": {},
     "repository_renames": []
   },
+  "settingSources": {},
   "consumers": []
 }

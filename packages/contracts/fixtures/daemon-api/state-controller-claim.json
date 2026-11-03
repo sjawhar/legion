@@ -1,6 +1,7 @@
 {
   "daemon": {
     "project": "LEGION",
+    "commit": "",
     "schemaVersion": 35,
     "boots": 2,
     "firstBootAt": "2026-10-06T17:02:11Z",
@@ -168,5 +169,6 @@
     "role_config_files": {},
     "repository_renames": []
   },
+  "settingSources": {},
   "consumers": []
 }

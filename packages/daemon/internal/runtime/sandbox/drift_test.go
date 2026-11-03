@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -692,3 +696,211 @@ func TestPodDriftAndReplacePodRefuseALocatorTheRuntimeDidNotMint(t *testing.T) {
 // replacement is due, so the runtime goes on. The parameter is required, since a replacement is
 // the one call that deletes an issue's disk and every caller states what makes it still due.
 func stillDue(context.Context) error { return nil }
+
+// launchFixture is a configuration whose every launch key is set, as a deployment's file settles
+// them: what a pod's own launch reads, with a planted value for each key a record may never carry
+// in the clear.
+func launchFixture() *config.Config {
+	return &config.Config{
+		Project:          "LEGION",
+		DaemonURL:        "http://legion-daemon.legion.svc:13370",
+		AdvertiseHost:    "legion-daemon.legion.svc",
+		OmpInvocation:    "omp",
+		OmpLaunchPrefix:  []string{"/usr/bin/env"},
+		InstructionsPath: "/etc/legion/instructions.md",
+		ProviderKeys:     []config.ProviderKey{{Env: "ANTHROPIC_API_KEY", Secret: "fixture-anthropic-secret"}},
+		RoleConfigFiles:  map[claim.Role][]string{claim.RoleTester: {"/etc/legion-operator/tester.yml"}},
+		WorkerBackends:   map[claim.Role]runtime.Backend{claim.RoleTester: runtime.BackendOmp},
+		Runtime: config.Runtime{
+			Name: "kubernetes",
+			Kubernetes: &config.Kubernetes{
+				Namespace: "legion", Image: testImage, StorageClass: "standard", IssueVolume: "50Gi",
+				SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
+				Setup:        []string{"/bin/sh", "-c", "echo setup"},
+				TestPostgres: true,
+				Scheduling: config.Scheduling{
+					NodeSelector:  map[string]string{"cloud.google.com/compute-class": "Performance"},
+					Tolerations:   []config.Toleration{{Key: "legion", Operator: "Equal", Value: "true", Effect: "NoSchedule"}},
+					PriorityClass: "legion-worker",
+				},
+				Resources: config.PodResources{
+					Issue:      config.Reservation{CPU: "4", CPURequest: "4", Memory: "24Gi", MemoryRequest: "24Gi", EphemeralStorage: "80Gi", EphemeralStorageRequest: "6Gi"},
+					Controller: config.Reservation{CPU: "2", CPURequest: "1", Memory: "8Gi", MemoryRequest: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "6Gi"},
+				},
+				Pod: config.PodConfig{
+					Env:            map[string]string{"OPERATOR_SETTING": "fixture-operator-value"},
+					Volumes:        []corev1.Volume{operatorVolume},
+					VolumeMounts:   []corev1.VolumeMount{operatorMount},
+					ServiceAccount: "legion-worker",
+				},
+				AgentSecrets: &config.AgentSecretsConfig{
+					URL: "https://secrets.internal.example", Audience: "agent-secrets",
+					TokenExpirySeconds: 3600, TokenFile: "/var/run/secrets/agent-secrets/fixture-token",
+				},
+				Plugins: &config.PluginsConfig{PiLegion: "10.4.0", PiEnvoy: "https://legion:fixture-plugin-password@plugins.internal.example/pi-envoy-10.4.0.tgz"},
+			},
+		},
+	}
+}
+
+// The record a pod template carries holds exactly the launch keys a pod's own launch reads, which
+// are the class table's: every row of class `launch` that is a value rather than a block and
+// whose path is not a template or the tmux runtime's, which is a pane's launch and reaches no
+// pod. The set is pinned here as well as derived, so a row added to the table is read by someone
+// before every pod of the fleet is compared against it.
+//
+// A secret row is recorded as a digest of its value and never as itself: an annotation is
+// readable by everything that may read the pod, and a rotation must be drift without the
+// credential, its source or the path of its file reaching the cluster.
+func TestLaunchSettingsHoldEveryLaunchKeyOfTheClassTable(t *testing.T) {
+	recorded := LaunchSettings(launchFixture())
+	settings, err := launchSettingsOf(recorded)
+	if err != nil {
+		t.Fatalf("the record cannot be read: %v", err)
+	}
+	want := []string{
+		"advertise_host", "daemon_url", "instructions", "omp_invocation", "omp_launch_prefix",
+		"provider_keys", "role_config_files",
+		"runtime.kubernetes.agent_secrets.audience", "runtime.kubernetes.agent_secrets.token_expiry_seconds",
+		"runtime.kubernetes.agent_secrets.token_file", "runtime.kubernetes.agent_secrets.url",
+		"runtime.kubernetes.image", "runtime.kubernetes.issue_volume",
+		"runtime.kubernetes.plugins.pi_envoy", "runtime.kubernetes.plugins.pi_legion",
+		"runtime.kubernetes.pod.env", "runtime.kubernetes.pod.service_account",
+		"runtime.kubernetes.pod.volume_mounts", "runtime.kubernetes.pod.volumes",
+		"runtime.kubernetes.resources.controller", "runtime.kubernetes.resources.issue",
+		"runtime.kubernetes.scheduling.node_selector", "runtime.kubernetes.scheduling.priority_class",
+		"runtime.kubernetes.scheduling.tolerations",
+		"runtime.kubernetes.session_store", "runtime.kubernetes.setup", "runtime.kubernetes.storage_class",
+		"runtime.kubernetes.test_postgres", "worker_backends",
+	}
+	if got := slices.Sorted(maps.Keys(settings)); !slices.Equal(got, want) {
+		t.Errorf("the recorded launch keys are\n%q\nwant\n%q", got, want)
+	}
+	// Every launch row of the table the walk must reach: one entry per path it calls a value of a
+	// pod's launch. A row it misses would be a key an operator changes with no pod replaced.
+	for _, row := range config.Classes {
+		switch {
+		case row.Class != config.ClassLaunch || row.Block,
+			strings.Contains(row.Path, "<") || strings.Contains(row.Path, "[]"),
+			!podLaunchPath(row.Path):
+			continue
+		}
+		if _, held := settings[row.Path]; !held {
+			t.Errorf("the class table calls %s a launch key of a pod and the record holds none", row.Path)
+		}
+	}
+	for _, planted := range []string{
+		"fixture-anthropic-secret", "fixture-operator-value",
+		"/var/run/secrets/agent-secrets/fixture-token", "fixture-plugin-password",
+	} {
+		if strings.Contains(recorded, planted) {
+			t.Errorf("the record carries %q: %s", planted, recorded)
+		}
+	}
+	if digest := settings["runtime.kubernetes.agent_secrets.token_file"]; !strings.HasPrefix(digest, "sha256:") {
+		t.Errorf("agent_secrets.token_file is recorded as %q, want a digest", digest)
+	}
+	if again := LaunchSettings(launchFixture()); again != recorded {
+		t.Errorf("one configuration encodes differently twice:\n%s\n%s", recorded, again)
+	}
+}
+
+// The guard this annotation exists for: a pod carrying today's annotations and no launch-settings
+// one — every pod of the fleet, each built before this release — has drifted from nothing,
+// whatever launch keys the daemon now reads. Its absence is read as "built before this release",
+// exactly as a missing pod shape is, because the other answer is an update round over every open
+// issue at once on the first boot of the new build.
+func TestPodDriftReadsAPodThatRecordsNoLaunchSettingsAsUndrifted(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	annotations := g.sandbox(loc.Sandbox.Name).Spec.PodTemplate.Metadata.Annotations
+	if _, recorded := annotations[launchSettingsAnnotation]; recorded {
+		t.Fatalf("the pod template records %s: this case is the pod of a release that recorded none", launchSettingsAnnotation)
+	}
+	if annotations[podShapeAnnotation] == "" {
+		t.Fatalf("the pod template records no %s, so this proves nothing of a pod carrying today's annotations", podShapeAnnotation)
+	}
+
+	moved := launchFixture()
+	moved.InstructionsPath = "/etc/legion/instructions-2.md"
+	r2 := secondRuntime(t, g, func(o *Options) { o.LaunchSettings = LaunchSettings(moved) })()
+	if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) > 0 {
+		t.Fatalf("PodDrift = %q, want nothing of a pod that records no launch settings", drifted)
+	}
+}
+
+// A pod whose launch keys have moved since its template recorded them has drifted, and the reason
+// names the key, what the pod's launch read and what a launch now reads. A secret key names
+// itself and no value either way.
+func TestPodDriftNamesTheLaunchKeyThatMoved(t *testing.T) {
+	for name, tc := range map[string]struct {
+		move func(*config.Config)
+		says string
+	}{
+		"the same configuration": {func(*config.Config) {}, ""},
+		"the instructions": {
+			func(cfg *config.Config) { cfg.InstructionsPath = "/etc/legion/instructions-2.md" },
+			"launch setting instructions /etc/legion/instructions.md, now /etc/legion/instructions-2.md",
+		},
+		"a role's overlays": {
+			func(cfg *config.Config) {
+				cfg.RoleConfigFiles[claim.RoleTester] = []string{"/etc/legion-operator/tester-2.yml"}
+			},
+			`launch setting role_config_files {"tester":["/etc/legion-operator/tester.yml"]}, now {"tester":["/etc/legion-operator/tester-2.yml"]}`,
+		},
+		"a rotated provider key": {
+			func(cfg *config.Config) { cfg.ProviderKeys[0].Secret = "fixture-anthropic-secret-2" },
+			"launch setting provider_keys " + withheldLaunchValue,
+		},
+		"the pod's service account": {
+			func(cfg *config.Config) { cfg.Runtime.Kubernetes.Pod.ServiceAccount = "legion-worker-2" },
+			"launch setting runtime.kubernetes.pod.service_account legion-worker, now legion-worker-2",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			built := LaunchSettings(launchFixture())
+			g := newRig(t, nil, withOptions(func(o *Options) { o.LaunchSettings = built }))
+			loc := g.spawn(workerSpec(t))
+			if recorded := g.sandbox(loc.Sandbox.Name).Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation]; recorded != built {
+				t.Fatalf("the pod template records %q, want the launch settings its launch read", recorded)
+			}
+
+			moved := launchFixture()
+			tc.move(moved)
+			r2 := secondRuntime(t, g, func(o *Options) { o.LaunchSettings = LaunchSettings(moved) })()
+			drifted := driftOf(t, g.ctx, r2, loc)
+			if tc.says == "" {
+				if len(drifted) > 0 {
+					t.Fatalf("PodDrift = %q, want nothing: no launch key moved", drifted)
+				}
+				return
+			}
+			if !slices.Equal(drifted, []string{tc.says}) {
+				t.Fatalf("PodDrift = %q, want exactly one reason, %q", drifted, tc.says)
+			}
+		})
+	}
+}
+
+// A record neither side can read is one reason naming it, and never a silent no-drift: an
+// operator who patched an annotation by hand reads why the daemon will not compare it. A runtime
+// that records no launch settings of its own compares nothing, as a pod that records none is
+// compared against nothing.
+func TestLaunchSettingsDriftReadsAnUnreadableAndAnAbsentRecord(t *testing.T) {
+	built := LaunchSettings(launchFixture())
+	if drifted := launchSettingsDrift("{not json", built); len(drifted) != 1 || !strings.Contains(drifted[0], "cannot be read") {
+		t.Errorf("launchSettingsDrift of an unreadable record = %q, want one reason naming it", drifted)
+	}
+	if drifted := launchSettingsDrift("", built); drifted != nil {
+		t.Errorf("launchSettingsDrift of a pod that records none = %q, want nothing", drifted)
+	}
+	if drifted := launchSettingsDrift(built, ""); drifted != nil {
+		t.Errorf("launchSettingsDrift against a runtime that records none = %q, want nothing", drifted)
+	}
+	if drifted := launchSettingsDrift(built, built); drifted != nil {
+		t.Errorf("launchSettingsDrift of one record against itself = %q, want nothing", drifted)
+	}
+	if drifted := launchSettingsDrift(`{"instructions":"/etc/legion/instructions.md"}`, `{}`); !slices.Equal(drifted, []string{"launch setting instructions /etc/legion/instructions.md, now " + unsetLaunchValue}) {
+		t.Errorf("launchSettingsDrift of a key the configuration dropped = %q, want it named as unset", drifted)
+	}
+}

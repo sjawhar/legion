@@ -183,6 +183,22 @@ func minimalSettingsConfig(t *testing.T) config.Config {
 	return loadSettingsFile(t, minimalSettingsFile)
 }
 
+// goldenSettingSources is where each setting of the fixture's daemon came from, written by the
+// daemon's own provenance (SettingProvenance): every settable path is the file this boot read,
+// and the one path an operator changed through the settings route names the route, who asked and
+// when. The clock is pinned here, since a fixture must encode the same bytes at every run.
+func goldenSettingSources() map[string]SettingSource {
+	changed := time.Date(2026, 9, 22, 9, 40, 18, 0, time.UTC)
+	sources := NewSettingProvenance(time.Date(2026, 9, 22, 9, 15, 2, 0, time.UTC))
+	sources.now = func() time.Time { return changed }
+	sources.Observe(nil, []config.Change{{
+		Path: "admission_cap", Old: "2", New: "3",
+		Class: config.ClassDecision, Outcome: config.OutcomeAtOnce,
+		Source: config.SourceRoute, By: "ana@example.com",
+	}})
+	return sources.Sources()
+}
+
 // populatedState carries every optional the state shape has, so the fixture pins the full shape
 // rather than Stage 1's empty record.
 func populatedState(t *testing.T) State {
@@ -193,11 +209,13 @@ func populatedState(t *testing.T) State {
 	return State{
 		Daemon: DaemonInfo{
 			Project:       "legion",
+			Commit:        "3f9c1a7e5b2d84c06f1a9e3b7d5c2a08e4f6b1d9",
 			SchemaVersion: 1,
 			Boots:         4,
 			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
 			StartedAt:     time.Date(2026, 9, 22, 9, 15, 2, 0, time.UTC),
 		},
+		SettingSources: goldenSettingSources(),
 		Admission: Admission{
 			Cap:     2,
 			Active:  []string{"LEGION-208", "LEGION-210"},
@@ -288,6 +306,8 @@ func populatedState(t *testing.T) State {
 					State:          "open",
 					ChecksVerdict:  "pending",
 					ReviewDecision: "changes_requested",
+					// Its base branch requires a check, so the pending verdict is a CI wait.
+					RequiresChecks: true,
 					FixAttempts:    1,
 				},
 				DesignGate: &GateView{
@@ -348,6 +368,9 @@ func populatedState(t *testing.T) State {
 					Head:           "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
 					State:          "merged",
 					ReviewDecision: "approved",
+					// A base branch that requires nothing, or one whose rules the daemon has not
+					// read: either way it knows of no required check there.
+					RequiresChecks: false,
 				},
 				Check: &CheckView{
 					Repo:        "acme/widgets",

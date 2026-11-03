@@ -360,15 +360,20 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		SessionStore:            k.SessionStore,
 		Setup:                   k.Setup,
 		TestPostgres:            k.TestPostgres,
-		BootTimeout:             cfg.WorkerBootTimeout,
-		RegistrationIntervals:   cfg.WorkerBootRegistrationDeadlineIntervals,
-		BusyBackoff:             busyBackoffFirst,
-		TerminationGrace:        cfg.WorkerStopTimeout,
-		ProbeInterval:           cfg.ProbeInterval,
-		AdoptTimeout:            cfg.SlowCommandTimeout,
-		AgentSecrets:            agentSecrets,
-		RepositoryCache:         cache,
-		Log:                     log,
+		// Every launch key of the configuration this runtime is built from, which each pod
+		// template records and an update round reads a pod's launch-key drift from
+		// (sandbox.LaunchSettings, runtime/sandbox's drift.go). A change of one of them rebuilds
+		// the runtime (config.HolderRuntime), which is what settles this again.
+		LaunchSettings:        sandbox.LaunchSettings(&cfg),
+		BootTimeout:           cfg.WorkerBootTimeout,
+		RegistrationIntervals: cfg.WorkerBootRegistrationDeadlineIntervals,
+		BusyBackoff:           busyBackoffFirst,
+		TerminationGrace:      cfg.WorkerStopTimeout,
+		ProbeInterval:         cfg.ProbeInterval,
+		AdoptTimeout:          cfg.SlowCommandTimeout,
+		AgentSecrets:          agentSecrets,
+		RepositoryCache:       cache,
+		Log:                   log,
 	}, nil
 }
 

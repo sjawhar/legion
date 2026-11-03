@@ -1,6 +1,7 @@
 {
   "daemon": {
     "project": "legion",
+    "commit": "3f9c1a7e5b2d84c06f1a9e3b7d5c2a08e4f6b1d9",
     "schemaVersion": 1,
     "boots": 4,
     "firstBootAt": "2026-09-18T14:03:27Z",
@@ -56,6 +57,7 @@
         "head": "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
         "state": "merged",
         "reviewDecision": "approved",
+        "requiresChecks": false,
         "fixAttempts": 0
       },
       "check": {
@@ -165,6 +167,7 @@
         "state": "open",
         "checksVerdict": "pending",
         "reviewDecision": "changes_requested",
+        "requiresChecks": true,
         "fixAttempts": 1
       },
       "designGate": {
@@ -583,6 +586,469 @@
         "to": "acme/widgets"
       }
     ]
+  },
+  "settingSources": {
+    "admission_cap": {
+      "source": "route",
+      "by": "ana@example.com",
+      "at": "2026-09-22T09:40:18Z"
+    },
+    "advertise_host": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "bind": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "capabilities": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "capabilities.decided": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "controller": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "controller_wake_interval_seconds": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "daemon_url": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "dispatch_token_file": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "dispatch_url": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "envoy_token_file": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "envoy_url": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "gates": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "gates.design": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "github_apps": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "github_apps.\u003capp\u003e.app_id": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "github_apps.\u003capp\u003e.installations": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "github_apps.\u003capp\u003e.private_key": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "github_apps.\u003capp\u003e.private_key_command": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "github_apps.\u003capp\u003e.private_key_secret": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "github_apps.implement": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "github_apps.review": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "instructions": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "launch_failure_limit": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "linger_hours": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "max_fix_attempts": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "nats_daemon_nkey_seed_file": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "nats_nkey_seed_file": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "nats_urls": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "omp_invocation": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "omp_launch_prefix": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "operator_token_file": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "pod_update_notice_hours": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "pod_update_retask_hours": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "port": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "postgres_dsn": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "probe_interval_seconds": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "production_check_hours": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "project": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.deploys": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.deploys[].repo": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.deploys[].step": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.deploys[].workflow": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.merge": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.merge.by_hand": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.merge.by_hand[]": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.merge_queue_role": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.slack_channels": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "prompt_failure_limit": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "prompt_retire_limit": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "provider_keys": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "provider_keys.\u003cNAME\u003e": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "repository_renames": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "review_round_cap": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "role_config_files": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.agent_secrets": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.agent_secrets.audience": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.agent_secrets.token_expiry_seconds": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.agent_secrets.token_file": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.agent_secrets.url": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.context": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.image": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.issue_volume": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.kubeconfig": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.namespace": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.plugins": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.plugins.pi_envoy": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.plugins.pi_legion": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.pod": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.pod.env": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.pod.service_account": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.pod.volume_mounts": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.pod.volumes": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.repository_cache": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.repository_cache.refresh_minutes": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.repository_cache.resources": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.repository_cache.retain_hours": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.repository_cache.volume": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.resources": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.resources.\u003cpod\u003e.cpu": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.resources.\u003cpod\u003e.cpu_request": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.resources.\u003cpod\u003e.ephemeral_storage": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.resources.\u003cpod\u003e.ephemeral_storage_request": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.resources.\u003cpod\u003e.memory": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.resources.\u003cpod\u003e.memory_request": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.resources.controller": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.resources.issue": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.scheduling": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.scheduling.node_selector": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.scheduling.priority_class": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.scheduling.tolerations": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.scheduling.tolerations[].effect": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.scheduling.tolerations[].key": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.scheduling.tolerations[].operator": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.scheduling.tolerations[].value": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.session_store": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.setup": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.storage_class": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.kubernetes.test_postgres": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.tmux": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.tmux.pane_env": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.tmux.pi_config_files": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "runtime.tmux.take_over": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "slow_command_timeout_seconds": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "state_dir": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "tree_stop_timeout_seconds": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "worker_backends": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "worker_boot_registration_deadline_intervals": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "worker_boot_timeout_seconds": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "worker_rpc_timeout_seconds": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "worker_stop_timeout_seconds": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "worker_stream_port": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    }
   },
   "consumers": [
     {

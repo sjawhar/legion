@@ -77,7 +77,7 @@ const [PHASE = "", HANDOFF_WORD = ""] = runDaemonPane(DAEMON_MODULE, ["phase", r
  * `settings` is the daemon's resolved legion.yaml with no credential in it, also required; the rig
  * has no file, so it carries the two keys the reader types at the daemon's defaults. */
 const STATE = LegionStateResponse.parse({
-  daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
+  daemon: { project, commit: "", schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [], blocked: [] },
   issues: {
     [issue]: {
@@ -102,6 +102,9 @@ const STATE = LegionStateResponse.parse({
     caches: [],
   },
   settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+  // Where each setting came from, required beside `settings`: the rig reads no file and takes no
+  // settings change, so it names none.
+  settingSources: {},
   consumers: [],
 });
 

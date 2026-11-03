@@ -595,8 +595,9 @@ func (r *Runtime) sandboxManifest(l launch) sandbox {
 // wherever the pool has room. The controller applies a template only to the next pod it creates,
 // so the template is rebuilt for every relaunch. Its metadata carries, beside the two
 // stop-eviction annotations, the configuration the pod is built from (podShapeAnnotation,
-// podShape): the one write of it, so that a later sweep can read what a pod was built from
-// without rebuilding the launch that built it (drift.go).
+// podShape) and the launch keys its launch reads (launchSettingsAnnotation, LaunchSettings, left
+// out by a runtime that records none): the one write of each, so that a later sweep can read what
+// a pod was built from without rebuilding the launch that built it (drift.go).
 func (r *Runtime) podTemplate(l launch) podTemplate {
 	_, providersMounts := r.providers()
 	spec := corev1.PodSpec{
@@ -625,7 +626,7 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 	for i := range spec.Containers {
 		kubeletLiteral(&spec.Containers[i])
 	}
-	return podTemplate{
+	template := podTemplate{
 		Metadata: podMetadata{
 			Labels: r.labels(l),
 			Annotations: map[string]string{
@@ -635,6 +636,10 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 		},
 		Spec: spec,
 	}
+	if r.launchSettings != "" {
+		template.Metadata.Annotations[launchSettingsAnnotation] = r.launchSettings
+	}
+	return template
 }
 
 // launcherContainer is the pod's one container, its kind's (podKind.launcherContainer): an issue
