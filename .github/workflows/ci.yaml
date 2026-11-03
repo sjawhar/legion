@@ -2502,7 +2502,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_go == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # 60 rather than 45: this lane's work had grown to the old limit and it was cancelled at
+    # random, on main as much as on a pull request. Measured on main: run 41615415047 succeeded
+    # in 44m39s and 41620864593 in 43m15s, while 41621095692 and 41628426418 were cancelled at
+    # the limit, 45m28s and 45m26s. Its heavy step, "Unit test envoy Go package", is 34 of those
+    # minutes; splitting it is dispatch://INFRA-1075, and this limit comes back down with it.
+    timeout-minutes: 60
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
