@@ -572,24 +572,24 @@ Inside a write transaction, `docTree` and a version's capture take the write's o
 `heldTree` still reads the fork and returns a tree its reader owns.
 
 A read takes up to three locks, in one order:
-the room's state lock; then the replica's; then the live document's, for a copy's encode or clone.
+the room's state lock; then the replica's; then a document's own read lock - live's where a copy is taken from the room, and the replica document's where the replica is encoded, cloned or walked.
 A read of a resident room outside a write (`readLive`, through `holdLive`) only tries the replica's lock (`hold`), and its caller may hold the room's state lock.
-A version's capture, a settlement's read and a live write's fork read instead read the room at an exact commit position (`Service.readPoint`, `docs/flush.go`):
+A version's capture, a settlement's read and a live write's fork read instead read the room at an exact commit position (`Service.atPoint` and its three reads `readPoint`, `treePoint` and `forkPoint`, `docs/flush.go`):
 an author the update observer credits after the capture's bound is numbered past it and stays pending for the next version, and every update through that position is stored before the version (`Ledger.flushThrough`).
-A settlement takes the replica's tree at that position rather than its state encoded (`Service.readTreeQuietly`, `renderedReplica.readTreePoint`), read under the replica's lock with `pmdoc.ReadUnshared`, since only a holder of that lock reads or writes the replica;
-it holds the lock for the walk rather than for an encode, and decodes nothing afterwards, where it used to decode that state into a document of its own to read one tree from it (`stateTree`), which was 9.67 GB of the 90 GB a 39-minute LINUX replay allocated (sjawhar/legion#2535).
-A room whose replica holds no state, or that lists none, has no tree to walk, so its copy is taken from the room itself and still decoded (`stateTree`), as every read of such a room was.
-A live write's fork takes the replica cloned at that position rather than its state encoded (`Service.clonePoint`, `renderedReplica.clonePoint`, over `crdt.Doc.Clone` in the pinned fork), under the replica's lock, where it encoded the replica under that lock and decoded those bytes into the write's own document (`readPoint`, `buildFork`);
-the clone is the document that decode built - byte for byte in its encoding, its state vector and its delete set - and is built with the options that decode used (`forkOptions`), so the fork a write runs on, versions and publishes is unchanged (`TestTheClonedForkMatchesTheReadPointsForkAcrossTheCorpus`, 710 fork pairs over the 142-document corpus, each compared again after a typed word and an appended paragraph).
-`BenchmarkWriteFork` prices the trade on a two-core pod: on a 200 KiB document the fork falls from about 185 ms, 50 MB and 585,000 allocations to about 90 ms, 27 MB and 193,000, and on a 51 KiB one from about 50 ms, 13.6 MB and 157,000 to about 22 ms, 7 MB and 51,000, while the whole copy now runs under the replica's lock, so the hold the update observer waits for rises from the encode's 31 ms to 90 ms, and from 8 ms to 22 ms.
-A room whose replica holds no state, or that lists none, has no document to clone, so its copy is taken from the room encoded and decoded outside the lock (`buildFork`), as every fork was.
+A settlement takes the replica's tree at that position rather than its state encoded (`Service.treePoint`), read under the replica's lock with `pmdoc.ReadUnshared`, since only a holder of that lock reads or writes the replica;
+it holds the lock for the walk rather than for an encode, and decodes nothing afterwards.
+A room whose replica holds no state, or that lists none, has no tree to walk, so its copy is taken from the room itself and decoded (`stateTree`).
+A live write's fork takes the replica cloned at that position rather than its state encoded (`Service.forkPoint`, over `crdt.Doc.Clone` in the pinned fork), under the replica's lock;
+the clone is the document a decode of that state builds - byte for byte in its encoding, its state vector and its delete set - and is built with the options that decode uses (`forkOptions`), so the fork a write runs on, versions and publishes is unchanged (`TestTheClonedForkMatchesTheReadPointsForkAcrossTheCorpus`, 710 fork pairs over the 142-document corpus, each compared again after a typed word and an appended paragraph).
+`BenchmarkWriteFork` prices the trade on a two-core pod, and its doc comment holds the figures: the clone costs about half of what the encode and decode cost and allocates a third, while the whole copy runs under the replica's lock, so the hold the update observer waits for is the clone's whole time rather than an encode's.
+A room whose replica holds no state, or that lists none, has no document to clone, so its copy is taken from the room encoded and decoded outside the lock (`buildFork`).
 The cold fork, read from the store, stays a decode (`coldFork`).
 
 Three acquisitions block on the replica's lock (`lockForUpdate`) and classify each update they drain under it, which takes the room's state lock from inside it (`observeAskBlocksForUpdate`, `creditContentChange`, `queueUpdateClass`), nested the other way around:
-the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.readPoint`, `renderedReplica.readTreePoint`, `renderedReplica.clonePoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/tree.go`.
+the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.atPoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/tree.go`.
 This stays deadlock-free because of one rule for all three:
 their callers hold no room state lock and run inside no Yjs transaction, and only a Yjs transaction's own function holds a document's lock, taking neither of the others.
-So nothing waits on the state lock while one of them waits for the replica's, and the encode `readPoint` runs under the live document's lock, like the clone `clonePoint` takes of the replica under its read lock, never meets a held state lock.
+So nothing waits on the state lock while one of them waits for the replica's, and neither the encode of live a read of a room with no replica state takes, nor the read lock `crdt.Doc.Clone` takes on the replica document itself, ever meets a held state lock.
 Every other acquisition of the replica's lock only tries it, and never while holding the live document's lock:
 the caller of `readLive` or `holdLive` must not run inside a Yjs transaction on the document, since the copy encodes under that lock.
 A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads and holds the room:

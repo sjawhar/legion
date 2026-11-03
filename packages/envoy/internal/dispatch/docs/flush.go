@@ -30,102 +30,144 @@ type roomPoint struct {
 	seq    uint64
 }
 
-// readPoint is live, the room document resident for room, as of an exact commit position: its
-// state, encoded, the position it holds every update through, and what the room's replica knows
-// of that state beyond the state itself (renderedReplica.readPoint, replicaRead). It waits for the
-// room's replica as the room's update observer does, but holds it only while it drains the room's
-// log and copies the replica: its caller does its database work after, holding no replica lock. A
-// document whose load listed no replica has had no update recorded, so its state is taken under
-// its own lock at position 0, and nothing is known of it beyond the state. The updates it
-// classified arm the room's settlement, as their update observers would have. The caller holds no
-// state lock and is not inside a Yjs transaction on live.
-func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, error) {
-	state, point, read, settles, err := s.readPointQuietly(room, live)
-	if settles {
-		s.scheduleSettle(room)
-	}
-	return state, point, read, err
-}
-
-// readPointQuietly is readPoint without the arming: it reports whether an update it classified is
-// one a settlement follows rather than scheduling one, which is what readPoint does with it. A
-// read that wants the room's tree takes its counterpart, readTreeQuietly, which says why a
-// settlement's own read arms nothing.
-func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, bool, error) {
+// atPoint reads live, the room document resident for room, as of an exact commit position: take
+// reads the room's replica under the replica's lock (renderedReplica.atPoint), and the call
+// answers point, the position take read it at, read, what the replica knows of that state beyond
+// the state itself (replicaRead), and settles, whether an update the drain classified is one the
+// room's settlement follows. It arms no settlement for them: each read above it does what it
+// must with settles, since a settlement's own read may arm none (treePoint). It waits for the
+// room's replica as the room's update observer does, but holds it only while it drains the
+// room's log and take reads it: its caller does its database work after, holding no replica
+// lock.
+//
+// copied is the room's state, encoded under the document's own lock, for the reads take could
+// not be run for: a replica holding no state, and a document whose load listed no replica, which
+// has had no update recorded, so its state is taken at position 0 and nothing is known of it
+// beyond the state. Its caller decodes that state holding no lock. copied is nil for every read
+// take ran on. The caller holds no state lock and is not inside a Yjs transaction on live.
+func (s *Service) atPoint(room string, live *crdt.Doc, take func(point roomPoint, doc *crdt.Doc)) (copied []byte, point roomPoint, read replicaRead, settles bool, err error) {
 	if live == nil {
 		return nil, roomPoint{}, replicaRead{}, false, errDocUnloaded
 	}
-	point := roomPoint{cursor: s.cursorOf(live)}
+	point = roomPoint{cursor: s.cursorOf(live)}
 	replica := s.replicaOf(live)
 	if replica == nil {
 		return crdt.EncodeStateAsUpdateV1(live, nil), point, replicaRead{}, false, nil
 	}
-	state, seq, read, settles := replica.readPoint(room, live)
-	point.seq = seq
-	return state, point, read, settles, nil
+	var drained uint64
+	copied, drained, read, settles = replica.atPoint(room, live, func(seq uint64, doc *crdt.Doc) {
+		take(roomPoint{cursor: point.cursor, seq: seq}, doc)
+	})
+	point.seq = drained
+	return copied, point, read, settles, nil
 }
 
-// clonePoint is readPoint for a live write's fork of the room (warmFork): where readPoint gives
-// the room's state encoded for its caller to decode, this gives the room's replica cloned under
-// the replica's lock with options, the document that decode would have built
-// (renderedReplica.clonePoint, forkOptions). The point, the drain, what it classifies and what
-// it arms are the read point's.
-//
-// It hands back a clone or an encoded state, never both: a replica holding no state has no
-// document to clone, and so has a room whose load listed no replica, whose state is taken under
-// its own lock at position 0 as readPoint takes it. Its caller decodes that state holding no
-// lock, as every fork read did before (buildFork). The caller holds no state lock and is not
-// inside a Yjs transaction on live.
-func (s *Service) clonePoint(room string, live *crdt.Doc, options ...crdt.DocOption) (*crdt.Doc, []byte, roomPoint, replicaRead, error) {
-	if live == nil {
-		return nil, nil, roomPoint{}, replicaRead{}, errDocUnloaded
-	}
-	point := roomPoint{cursor: s.cursorOf(live)}
-	replica := s.replicaOf(live)
-	if replica == nil {
-		return nil, crdt.EncodeStateAsUpdateV1(live, nil), point, replicaRead{}, nil
-	}
-	clone, copied, seq, read, settles := replica.clonePoint(room, live, options...)
-	point.seq = seq
+// readPoint is live, the room document resident for room, as of an exact commit position: its
+// state, encoded under the replica's lock, the position it holds every update through, and what
+// the room's replica knows of that state beyond the state itself (atPoint, replicaRead). A
+// replica holding no state, and a document whose load listed no replica, have their state taken
+// under the document's own lock instead (atPoint). The updates the drain classified arm the
+// room's settlement, as their update observers would have.
+func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, error) {
+	var encoded []byte
+	copied, point, read, settles, err := s.atPoint(room, live, func(_ roomPoint, doc *crdt.Doc) {
+		encoded = crdt.EncodeStateAsUpdateV1(doc, nil)
+	})
 	if settles {
 		s.scheduleSettle(room)
 	}
-	return clone, copied, point, read, nil
+	if err != nil {
+		return nil, roomPoint{}, replicaRead{}, err
+	}
+	if copied != nil {
+		encoded = copied
+	}
+	return encoded, point, read, nil
 }
 
-// readTreeQuietly is readPointQuietly for a settlement's own read of the room
-// (readSettlementTree), which gives the tree the room's replica holds, read under the replica's
-// lock (renderedReplica.readTreePoint), where a read point gives the room's state encoded, which
-// the settlement decoded into a document of its own only to read that one tree from it. The
-// point, the drain and what it classifies are the read point's.
+// forkPoint is live, the room document resident for room, forked for a write whose items client
+// authors (warmFork, rebuildFork): the room's replica cloned under the replica's lock at an exact
+// commit position, with that position and what the replica knows of the state it cloned (atPoint,
+// replicaRead). The drain, what it classifies and what it arms are the read point's.
+//
+// The clone is the document a decode of the room's state builds - byte for byte in its encoding,
+// its state vector and its delete set (crdt.Doc.Clone), since nothing encodes or decodes the
+// state - and is built with the options that decode uses (forkOptions), so the two cannot drift.
+// Clone takes the replica document's read lock, never live's, which is the order every read of
+// the replica takes - the replica's lock, then the document's, as an encode takes it - and it
+// must not run inside a transaction on the replica, which only a holder of the replica's mu
+// writes. A clone differs from the decoded copy for one document alone, a source with an
+// UndoManager attached, which keeps the content of a deleted struct the decode collects; the
+// replica has none.
+//
+// A replica holding no state has no document to clone, and neither has a room whose load listed
+// no replica: the copy that read took from the room itself is decoded here, holding no lock
+// (buildFork). Either way the caller is handed the document that decode builds.
+//
+// at, when it is not nil, is the point the room must still stand at (rebuildFork): a read that
+// drains the room to another point clones nothing and answers errForkReleased, so the replica's
+// lock is held for no clone its caller throws away. The caller holds no state lock and is not
+// inside a Yjs transaction on live.
+func (s *Service) forkPoint(room string, live *crdt.Doc, client crdt.ClientID, at *roomPoint) (*crdt.Doc, roomPoint, replicaRead, error) {
+	var fork *crdt.Doc
+	copied, point, read, settles, err := s.atPoint(room, live, func(point roomPoint, doc *crdt.Doc) {
+		if at == nil || *at == point {
+			fork = doc.Clone(forkOptions(client)...)
+		}
+	})
+	if settles {
+		s.scheduleSettle(room)
+	}
+	switch {
+	case err != nil:
+		return nil, roomPoint{}, replicaRead{}, err
+	case at != nil && *at != point:
+		return nil, roomPoint{}, replicaRead{}, errForkReleased
+	case fork != nil:
+		return fork, point, read, nil
+	}
+	fork, err = buildFork(client, copied)
+	if err != nil {
+		return nil, roomPoint{}, replicaRead{}, fmt.Errorf("fork live document: %w", err)
+	}
+	return fork, point, read, nil
+}
+
+// treePoint is the tree live, the room document resident for room, holds as of an exact commit
+// position (readSettlementTree): the tree the room's replica holds, read under the replica's lock
+// through pmdoc.ReadUnshared (treeOfUnshared), with the position it was read at (atPoint). Only a
+// holder of the replica's mu reads or writes the replica (renderedReplica), which is what
+// ReadUnshared's lock-free walk of each text asks for, and the tree it hands back is the caller's
+// own (ownedValue), as pmdoc.Read's is. A replica holding no state has no tree to walk, and
+// neither has a room whose load listed no replica: the copy that read took from the room itself
+// is decoded and read here, holding no lock (stateTree).
 //
 // It arms no settlement for the updates it classified and reports instead whether any is one a
 // settlement follows: the settlement reading them is the one they would arm, and arming another
 // moves the room's generation under it, which ends it as superseded. It reports that whether or
 // not the tree could be read, so its caller arms what the drain classified exactly where a caller
-// of readPointQuietly would.
-//
-// A document whose load listed no replica has its state taken under its own lock, as
-// readPointQuietly takes it, and its tree read from that copy (stateTree). The caller holds no
-// state lock and is not inside a Yjs transaction on live.
-func (s *Service) readTreeQuietly(room string, live *crdt.Doc) (*pmdoc.Node, roomPoint, bool, error) {
-	if live == nil {
-		return nil, roomPoint{}, false, errDocUnloaded
+// of readPoint would. The caller holds no state lock and is not inside a Yjs transaction on live.
+func (s *Service) treePoint(room string, live *crdt.Doc) (*pmdoc.Node, roomPoint, bool, error) {
+	var tree *pmdoc.Node
+	var treeErr error
+	copied, point, _, settles, err := s.atPoint(room, live, func(_ roomPoint, doc *crdt.Doc) {
+		var valid pmdoc.ValidDocument
+		if valid, treeErr = treeOfUnshared(doc); treeErr == nil {
+			tree = valid.Node()
+		}
+	})
+	if err != nil {
+		return nil, roomPoint{}, settles, err
 	}
-	point := roomPoint{cursor: s.cursorOf(live)}
-	replica := s.replicaOf(live)
-	if replica == nil {
-		tree, err := stateTree(crdt.EncodeStateAsUpdateV1(live, nil))
-		return tree, point, false, err
+	if copied != nil {
+		tree, treeErr = stateTree(copied)
 	}
-	tree, seq, settles, err := replica.readTreePoint(room, live)
-	point.seq = seq
-	return tree, point, settles, err
+	return tree, point, settles, treeErr
 }
 
-// stateTree is the tree of state, a room's state as a read point copied it (readPoint): a write's
-// read of the room, and a tree read of a room that has no replica to read, or whose replica holds
-// no state (readTreeQuietly, renderedReplica.readTreePoint).
+// stateTree is the tree of state, a room's state as a read point copied it (readPoint): a
+// version's capture of the room it versions, and the tree read of a room that has no replica to
+// read, or whose replica holds no state (treePoint).
 func stateTree(state []byte) (*pmdoc.Node, error) {
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {

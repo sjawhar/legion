@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -14,11 +11,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// A warm fork takes the room's replica cloned under the replica's lock
-// (renderedReplica.clonePoint) where it decoded the replica's state encoded into a document of
-// its own (readPoint, buildFork). These tests hold the clone to that decode on the same room at
-// the same moment: the same document, the same commit position, the same replica read, and the
-// same update for the same write made on each.
+// A warm fork takes the room's replica cloned under the replica's lock (Service.forkPoint),
+// where a replica holding no state leaves it the copy taken from the room itself, decoded
+// (buildFork). These tests hold the fork read to that decode of the read point's state
+// (Service.readPoint) on the same room at the same moment: the same document, the same commit
+// position, the same replica read, and the same update for the same write made on each.
 
 // forkWriteClient is the client id both forks of a comparison are built with, as a write's fork
 // is built with its transaction's (liveWrite.clientID): the two forks author the same items, so
@@ -96,38 +93,37 @@ func writeUpdate(t *testing.T, fork *crdt.Doc, write func(*crdt.Transaction)) []
 }
 
 // compareForkReads takes both fork reads of the room at one point - the read point's state
-// decoded, which a warm fork took before, and the clone read - and fails the test where the two
-// forks, their commit positions, their replica reads or the updates they make for the same
-// writes differ. Nothing commits between the two reads: the first classifies everything the
+// decoded, which a warm fork took before, and the fork read itself - and fails the test where
+// the two forks, their commit positions, their replica reads or the updates they make for the
+// same writes differ. Nothing commits between the two reads: the first classifies everything the
 // room's log has handed over, so the second drains nothing and stands where the first did.
 //
 // It returns how many writes it made on each fork, which the test that drives it reports.
-func compareForkReads(t *testing.T, replica *renderedReplica, room string, live *crdt.Doc, stage string) int {
+func compareForkReads(t *testing.T, at corpusRoom) int {
 	t.Helper()
-	state, seq, read, _ := replica.readPoint(room, live)
+	state, point, read, err := at.service.readPoint(at.room, at.live)
+	if err != nil {
+		t.Fatalf("%s: read the room's point: %v", at.stage, err)
+	}
 	want, err := buildFork(forkWriteClient, state)
 	if err != nil {
-		t.Fatalf("%s: decode the read point's state: %v", stage, err)
+		t.Fatalf("%s: decode the read point's state: %v", at.stage, err)
 	}
-	got, copied, gotSeq, gotRead, _ := replica.clonePoint(room, live, forkOptions(forkWriteClient)...)
-	if got == nil {
-		if got, err = buildFork(forkWriteClient, copied); err != nil {
-			t.Fatalf("%s: decode the clone read's copy of the room: %v", stage, err)
-		}
-	} else if copied != nil {
-		t.Fatalf("%s: the clone read handed back a clone and a copy of the room's state", stage)
+	got, gotPoint, gotRead, err := at.service.forkPoint(at.room, at.live, forkWriteClient, nil)
+	if err != nil {
+		t.Fatalf("%s: fork the room: %v", at.stage, err)
 	}
-	if gotSeq != seq {
-		t.Fatalf("%s: the clone read stands at commit %d, want the read point's %d", stage, gotSeq, seq)
+	if gotPoint != point {
+		t.Fatalf("%s: the fork read stands at %+v, want the read point's %+v", at.stage, gotPoint, point)
 	}
 	if gotRead.mark != read.mark {
-		t.Fatalf("%s: the clone read found the replica at %+v, want the read point's %+v", stage, gotRead.mark, read.mark)
+		t.Fatalf("%s: the fork read found the replica at %+v, want the read point's %+v", at.stage, gotRead.mark, read.mark)
 	}
 	if describeMarkdown(gotRead.markdown) != describeMarkdown(read.markdown) {
-		t.Fatalf("%s: the clone read's rendering is %s, want the read point's %s",
-			stage, describeMarkdown(gotRead.markdown), describeMarkdown(read.markdown))
+		t.Fatalf("%s: the fork read's rendering is %s, want the read point's %s",
+			at.stage, describeMarkdown(gotRead.markdown), describeMarkdown(read.markdown))
 	}
-	compareForks(t, got, want, stage+": the fork as it was read")
+	compareForks(t, got, want, at.stage+": the fork as it was read")
 	writes := 0
 	for _, kind := range forkWriteKinds {
 		write := kind.prepare(t, want)
@@ -136,10 +132,10 @@ func compareForkReads(t *testing.T, replica *renderedReplica, room string, live 
 		}
 		wantUpdate, gotUpdate := write(t, want), write(t, got)
 		if !bytes.Equal(gotUpdate, wantUpdate) {
-			t.Fatalf("%s: %s on the cloned fork made a %d-byte update, want the decoded fork's %d bytes",
-				stage, kind.what, len(gotUpdate), len(wantUpdate))
+			t.Fatalf("%s: %s on the forked document made a %d-byte update, want the decoded fork's %d bytes",
+				at.stage, kind.what, len(gotUpdate), len(wantUpdate))
 		}
-		compareForks(t, got, want, stage+": the fork after "+kind.what)
+		compareForks(t, got, want, at.stage+": the fork after "+kind.what)
 		writes++
 	}
 	return writes
@@ -168,72 +164,15 @@ func describeMarkdown(markdown *string) string {
 	return fmt.Sprintf("a %d-byte rendering: %q", len(*markdown), *markdown)
 }
 
-// A room is driven through the corpus: every in-repo document, as a room with the replica its
-// update observer keeps, forked before the room's first transaction - when the replica holds no
-// state and both reads take their copy from the room itself - and after each of a series of
-// browser edits, some classified by the observer and some by the read that follows them.
+// A room is driven through the corpus (driveCorpusRooms), forked at each point the driver
+// compares at: before the room's first transaction, when the replica holds no state and the fork
+// read takes its copy from the room itself, and after each of its browser edits.
 func TestTheClonedForkMatchesTheReadPointsForkAcrossTheCorpus(t *testing.T) {
-	paths, err := filepath.Glob("../pmdoc/testdata/corpus/*.md")
-	if err != nil || len(paths) == 0 {
-		t.Fatalf("corpus: %v (%d documents)", err, len(paths))
-	}
-	service := &Service{}
-	forks, writes := 0, 0
-	for _, path := range paths {
-		name := strings.TrimSuffix(filepath.Base(path), ".md")
-		markdown, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		parsed, err := pmdoc.Parse(string(markdown))
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		update, err := encodeDocumentTree(parsed)
-		if err != nil {
-			t.Fatalf("encode %s: %v", name, err)
-		}
-		live := newDocumentCopy()
-		if err := crdt.ApplyUpdateV1(live, update, nil); err != nil {
-			t.Fatalf("load %s into a room: %v", name, err)
-		}
-		log := live.OpenUpdateLog()
-		replica := service.keepReplica(live, log)
-
-		writes += compareForkReads(t, replica, name, live, name+": a room with no transaction")
-		forks++
-		if replica.doc != nil {
-			t.Fatalf("%s: the replica of a room with no transaction holds state, so no fork took its copy from the room", name)
-		}
-
-		for index, edit := range []struct {
-			what string
-			edit func()
-		}{
-			{"a block appended", func() {
-				editRoomDocument(t, live, appendBlocks(t, "A paragraph the fork read.\n"))
-			}},
-			{"a table with marks appended", func() {
-				editRoomDocument(t, live, appendBlocks(t, "| Column | Value |\n| --- | --- |\n| row | **cell** |\n"))
-			}},
-			{"a word typed", func() { typeIntoLastParagraph(t, live, "typed ") }},
-			{"a character deleted", func() { deleteFromLastParagraph(t, live) }},
-		} {
-			edit.edit()
-			// Half the edits are classified by the room's update observer, half by the read
-			// that follows them, the two drainers of the room's log.
-			if index%2 == 0 {
-				replica.observe(name)
-			}
-			writes += compareForkReads(t, replica, name, live, name+": "+edit.what)
-			forks++
-			if replica.doc == nil {
-				t.Fatalf("%s: the replica holds no state after %s, so no fork cloned it", name, edit.what)
-			}
-		}
-		log.Close()
-	}
-	t.Logf("%d fork pairs compared, with %d writes made on each fork, over %d corpus documents", forks, writes, len(paths))
+	writes := 0
+	forks, documents := driveCorpusRooms(t, func(at corpusRoom) {
+		writes += compareForkReads(t, at)
+	})
+	t.Logf("%d fork pairs compared, with %d writes made on each fork, over %d corpus documents", forks, writes, documents)
 }
 
 // The clone is a document of its own: the write that runs on it changes nothing the replica
@@ -247,14 +186,17 @@ func TestAClonedForkAndItsReplicaAreIndependent(t *testing.T) {
 	log := live.OpenUpdateLog()
 	defer log.Close()
 	replica := service.keepReplica(live, log)
-	// A commit of its own gives the replica the room's state to follow: a replica holding none
-	// has nothing to clone.
+	// A commit of its own gives the replica the room's state to follow: the fork of a replica
+	// holding none is a decode of the room's own copy and not a clone.
 	typeIntoLastParagraph(t, live, "first ")
 	replica.observe("room")
+	if replica.doc == nil {
+		t.Fatal("the replica holds no state after the room's commit, so the fork below is no clone of it")
+	}
 
-	fork, copied, _, _, _ := replica.clonePoint("room", live, forkOptions(forkWriteClient)...)
-	if fork == nil {
-		t.Fatalf("the clone read of a replica holding state took a copy of the room instead (%d bytes)", len(copied))
+	fork, _, _, err := service.forkPoint("room", live, forkWriteClient, nil)
+	if err != nil {
+		t.Fatalf("fork the room: %v", err)
 	}
 	replicaState := replicaEncoding(t, replica)
 	forkState := crdt.EncodeStateAsUpdateV1(fork, nil)

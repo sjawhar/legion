@@ -19,12 +19,12 @@ import (
 
 // An approval request reads the document's approval twice inside its own transaction, once
 // before and once after it opens or renews the ask, each a batch on that transaction
-// (attachApproval, queueApprovals). Run concurrently, on documents of their own and on one
-// document, every request finishes, none fails, each document is left awaiting its one open
-// request, and the transactions give every connection back. What one request answers in sequence
-// - 201 for the first, 200 for a repeat - is reviews_test.go's
+// (attachApproval, queueApprovals). Run in two concurrent waves, one on documents of their own
+// and one on a single document, every request finishes, none fails, each document is left
+// awaiting its one open request, and the transactions give every connection back. What one
+// request answers in sequence - 201 for the first, 200 for a repeat - is reviews_test.go's
 // (TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion).
-func TestApprovalRequestsReadTheirApprovalInTheirTransactionInSequenceAndAtOnce(t *testing.T) {
+func TestApprovalRequestsSentAtOnceReadTheirApprovalInTheirTransaction(t *testing.T) {
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documents := docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
@@ -149,8 +149,8 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 //  19. a batch of 2: the approval as the request leaves it (attachApproval again);
 //  20. commit.
 //
-// The three batches are this pull request's: every statement in them was a round trip of its own
-// before it, so the request sent twenty-four.
+// The three batches hold seven statements between them, so a request that sent each statement on
+// its own would send twenty-four round trips.
 func TestApprovalRequestsCostTwentyRoundTrips(t *testing.T) {
 	database := storetest.Open(t)
 	counter := &roundTrips{}

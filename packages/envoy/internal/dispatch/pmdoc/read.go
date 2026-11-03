@@ -22,14 +22,13 @@ func ReadForRendering(frag *crdt.YXmlFragment) (*Node, error) {
 	return readDocument(frag, readLiveText, false)
 }
 
-// ReadUnshared is Read for a document no other goroutine reads or writes while the call runs: the
-// read cache's fold of a history it has just decoded, which drops the document afterwards, and a
-// write transaction's read of the fork only the goroutine holding it touches, which keeps the
-// tree it hands back. The tree is the caller's own, as Read's is (ownedValue). It reads each text
-// by walking its items directly (readUnsharedText) rather than through ygo's ToDelta, which takes
-// the document's read lock and builds a delta the walk would only turn into nodes, and it returns
-// the tree validated once, with the Validate and so the errors Read gives, so its holder never
-// validates it again.
+// ReadUnshared is Read for a document no other goroutine reads or writes for the whole of the
+// call - its caller either holds the only reference to the document or holds the lock every
+// reader and writer of it takes. The tree is the caller's own, as Read's is (ownedValue). It
+// reads each text by walking its items directly (readUnsharedText) rather than through ygo's
+// ToDelta, which takes the document's read lock and builds a delta the walk would only turn into
+// nodes, and it returns the tree validated once, with the Validate and so the errors Read gives,
+// so its holder never validates it again.
 func ReadUnshared(frag *crdt.YXmlFragment) (ValidDocument, error) {
 	doc, err := readDocument(frag, readUnsharedText, true)
 	if err != nil {
@@ -168,8 +167,9 @@ func deltaTextNode(insert any, attributes crdt.Attributes, copyAttrs bool) (*Nod
 // ToDelta's loop (crdt/ytext.go, YText.ToDelta, sjawhar/ygo v1.51.3-sami.4) with its state, the
 // buffered run's text and attribute snapshot, attrsDirty and the live attribute set, emitting each
 // delta ToDelta would emit as its node (deltaTextNode) instead, in the same order, so the first
-// node refused is the one readLiveText refuses. It takes no lock: its caller holds the only
-// reference to the document (ReadUnshared). The rules it keeps from ToDelta:
+// node refused is the one readLiveText refuses. It takes no lock, which is what ReadUnshared
+// asks of its caller: no other goroutine reads or writes the document while the call runs. The
+// rules it keeps from ToDelta:
 //
 //   - A deleted item is skipped. A format sets its key in the live set, and an untyped nil value
 //     deletes the key (crdt's updateAttr); a typed nil sets it.
