@@ -190,6 +190,12 @@ func (kv KeyValue) Legacy() nats.KeyValue {
 	return kv.legacy
 }
 
+// Opened reports whether kv is a handle on a bucket rather than the zero value, for a caller that
+// opens its bucket once and keeps it (the webhook redelivery sweep's openState).
+func (kv KeyValue) Opened() bool {
+	return kv.legacy != nil
+}
+
 // WatchHandle is the jetstream handle kv's watches go through.
 func (kv KeyValue) WatchHandle() jetstream.KeyValue {
 	return kv.watch

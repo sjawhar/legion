@@ -86,8 +86,8 @@ func ScanFilteredKeys(kv bus.KeyValue, keys []string, what string, idle time.Dur
 	return drainScan(watcher, what, idle, log, visitLive)
 }
 
-// drainScan reads watcher to the end of its existing keys, the one place the three endings above
-// are told apart, and is what both scans are.
+// drainScan reads watcher to the end of its existing keys, the one place the watcher's two endings
+// above and this scan's own idle bound are told apart, and is what both scans are.
 func drainScan(watcher jetstream.KeyWatcher, what string, idle time.Duration, log *slog.Logger, visitLive func(Entry) error) (KeyScan, error) {
 	done := func() {
 		if err := watcher.Stop(); err != nil {

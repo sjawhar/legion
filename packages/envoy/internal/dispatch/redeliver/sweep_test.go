@@ -1655,8 +1655,8 @@ func TestAStrayIndexEntryIsDeletedOnlyPastTheMargin(t *testing.T) {
 }
 
 // countingBucket is the sweep's state bucket as its scans reach it, the jetstream handle, counting
-// the two reads a sweep makes of it: the scan of every record the bucket holds (Watch, one
-// pattern) and the index's own window (WatchFiltered, one per minute of the window).
+// the two reads a sweep makes of it: the scan of every record the bucket holds (Watch, one pattern)
+// and the index's own window (WatchFiltered, one watch carrying one pattern per minute of it).
 type countingBucket struct {
 	jetstream.KeyValue
 	mu      sync.Mutex

@@ -41,9 +41,9 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status with `dispatch` or route it, and claim it only as a role of its tree, whatever its claim reads. An outside claim can take the tree out of the workflow. A status write is set back or stands.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status with `dispatch` or route it, and claim it only as a role of its tree. An outside claim can take the tree out of the workflow. A status write is set back or stands.
 
-When an issue becomes takeable from its holder: `skill://envoy`.
+`unresponsive` holders keep their claims 20 minutes (`skill://envoy`).
 
 A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no event Dispatch marks quiet.
 

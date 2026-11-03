@@ -191,7 +191,7 @@ func writeState(kv bus.KeyValue, key string, value any, revision uint64) (uint64
 // after: the one place the bucket is opened. A sweep it fails for opens nothing, so the next one
 // calls Open again.
 func (s *Sweeper) openState() error {
-	if s.state.Legacy() != nil {
+	if s.state.Opened() {
 		return nil
 	}
 	state, err := s.Open()
