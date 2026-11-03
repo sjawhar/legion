@@ -863,10 +863,14 @@ prove_daemon_container() {
       "$2" --help >/dev/null 2>&1; printf "plugin-exec %s\n" "$?"
     fi
     shift 2
+    # The stderr of each token command is cut at 64 KiB, redacted of every GitHub token form, and
+    # only its first 200 characters kept, so a token on it never reaches the transcript, nor does
+    # a command that writes without end fill the shell.
+    set -o pipefail
     while [ "$#" -ge 2 ]; do
-      said=$(sh -c "$2" 2>&1 >/dev/null)
+      said=$(sh -c "$2" 2>&1 >/dev/null | head -c 65536 | sed -E "s/(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/[redacted]/g" | tr "\n" " " | cut -c1-200)
       status=$?
-      printf "key %s %s %s\n" "$1" "$status" "$(printf %s "$said" | tr "\n" " " | cut -c1-200)"
+      printf "key %s %s %s\n" "$1" "$status" "$said"
       shift 2
     done' sh "$host" "$plugin_word" "${key_args[@]}" 2>&1) ||
     fail "the daemon's container ($daemon_image) could not run its probe: $(tr '\n' ' ' <<<"$inside" | cut -c1-300)"

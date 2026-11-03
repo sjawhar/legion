@@ -255,6 +255,15 @@ describe("app-logins.ts", () => {
     expect(stderr.slice(-1000)).toContain("wrote more than 1048576 bytes to stderr");
   });
 
+  test("a token command whose escaped descendant holds its output open fails within the drain bound", async () => {
+    const escaped = "setsid sleep 60 >&2 & exit 0";
+    const started = Date.now();
+    const { code, stderr } = await run(config(app("101", escaped), app("202")));
+    expect(code).toBe(1);
+    expect(stderr).toContain("still held its output open");
+    expect(Date.now() - started).toBeLessThan(30_000);
+  }, 30_000);
+
   test("output that is no release, an expired token, or no installation is refused without quoting it", async () => {
     const cases: [string, string][] = [
       [`echo '{"token":"${tokenOf(101)}"'`, "printed no release"],

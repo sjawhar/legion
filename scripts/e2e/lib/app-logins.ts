@@ -177,8 +177,19 @@ async function runTokenCommand(field: string, command: string): Promise<string> 
       chunks.push(chunk);
     }
   })();
-  const [status] = await Promise.all([child.exited, relay, collect]);
+  // The command's own process may exit while a descendant that left its process group still holds
+  // the pipes open, which the group kill cannot reach: the streams get five seconds to end after
+  // the exit, then the run fails rather than wait on them.
+  const status = await child.exited;
+  const drainWait = Promise.withResolvers<boolean>();
+  const drainTimer = setTimeout(() => drainWait.resolve(false), 5000);
+  const drained = await Promise.race([
+    Promise.all([relay, collect]).then(() => true),
+    drainWait.promise,
+  ]);
+  clearTimeout(drainTimer);
   clearTimeout(deadline);
+  if (!drained) end("exited while a process it started still held its output open");
   if (ended !== "") throw new Error(`${field} ${ended}`);
   if (status !== 0) {
     const failed = `${field} failed (exit ${status})`;
@@ -359,10 +370,13 @@ if (import.meta.main) {
     );
     process.exit(2);
   }
+  // Exit explicitly: a stream reader a token command's escaped descendant still feeds would keep
+  // the event loop, and so the run, alive past the drain bound.
   try {
     process.stdout.write(`${JSON.stringify(await appLogins(configPath, api, roles))}\n`);
+    process.exit(0);
   } catch (error) {
     process.stderr.write(`app-logins: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
+    process.exit(1);
   }
 }
