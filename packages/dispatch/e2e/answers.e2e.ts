@@ -368,8 +368,10 @@ test("the answers page formats a reply and clamps it to three lines", async ({
     // Every block is in it, formatted: no source character of the bold, the list or the fence.
     await expect(quoted).toContainText("a tagged build is a release");
     await expect(quoted).toContainText("bun run build --nightly");
+    // The fence is a code element holding the command, not three backticks and a language.
+    await expect(quoted.locator("code")).toHaveText("bun run build --nightly --branch main");
     await expect(row).not.toContainText("**");
-    await expect(row).not.toContainText("```");
+    await expect(row).not.toContainText("`");
     await expect(row).not.toContainText("- the nightly job");
 
     // Three lines, and there is more behind the cut.

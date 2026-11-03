@@ -179,6 +179,41 @@ test("an artifact's link comes from its own part, not from the sentence's text",
   }
 });
 
+// The case the old `indexOf` over the sentence's text got wrong: the quote beside the artifact
+// names it too, and the first occurrence of the name is the quoted one. The link is the
+// artifact's own part, so it lands on the artifact and the quoted name stays words.
+test("an artifact's link lands on the artifact though the quote beside it names it too", async () => {
+  const event: Event = {
+    ...base,
+    id: 4,
+    payload: { artifact: uploaded },
+    seq: 4,
+    type: "artifact.created",
+  };
+  const { cleanup, view } = renderLine(event, [
+    "replied to “",
+    { markdown: "Does **cu-update-2026-09-15.md** replace the plan?" },
+    "” and added ",
+    { artifact: "cu-update-2026-09-15.md" },
+  ]);
+
+  try {
+    await waitFor(() => expect(view.container.querySelector("strong")).not.toBeNull());
+    const quote = view.container.querySelector("[data-markdown-preview]");
+    expect(quote?.textContent).toBe("Does cu-update-2026-09-15.md replace the plan?");
+    const links = screen.getAllByRole("link");
+    expect(links).toHaveLength(1);
+    expect(links[0]?.getAttribute("href")).toBe("/issues/OPS-52/artifacts/cu-update-2026-09-15-md");
+    // The one link is the sentence's own part, never the name the quote repeats before it.
+    expect(links[0]?.closest("[data-markdown-preview]")).toBeNull();
+    expect(view.container.textContent).toBe(
+      "replied to “Does cu-update-2026-09-15.md replace the plan?” and added cu-update-2026-09-15.md"
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 // The quoted question is a part of its own, so the line draws it through `MarkdownPreview`:
 // the reader sees bold words, never the `**` their author typed.
 test("a quoted question is drawn as Markdown rather than as its source", async () => {

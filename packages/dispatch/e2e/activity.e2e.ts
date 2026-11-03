@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import {
   answerAsk,
@@ -197,21 +197,51 @@ test("an Activity row pins into the review margin and unpins from it @phone", as
   }
 });
 
-// R6: a question an agent wrote is Markdown wherever the reader meets it. The Activity line and
-// the margin's event line for the edit both format it, each at one line, so neither leaks the
-// `**` its author typed.
-test("the activity line and the margin's pinned event line format a quoted question", async ({
-  browser,
-}, testInfo) => {
+// R6: a question an agent wrote is Markdown wherever the reader meets it. The Activity line
+// and the margin's event line for the edit each format it at one line, so neither leaks the
+// `**`, the list dash or the backticks its author typed.
+
+/** The question the ask is edited into: a whole little document, bold words, a list and a
+ *  fenced command, so a line drawing it as its source would leak one of them. */
+const editedQuestion = [
+  "**Hold** the release until Monday?",
+  "",
+  "- the nightly build is red",
+  "",
+  "```sh",
+  "bun run verify",
+  "```",
+].join("\n");
+
+/** What one line of that question reads as, every block of it on the one line a quote gets. */
+const editedOnOneLine = "Hold the release until Monday? the nightly build is red bun run verify";
+
+/** An issue holding an ask asked with a bold question and then edited into `editedQuestion`. */
+async function seedEditedAsk(): Promise<string> {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Formatted questions" });
   const ask = await createAsk(issue.key, { question: "**Ship** the release tonight?" }, agent);
-  await editAsk(ask.id, { question: "**Hold** the release until Monday?" }, agent);
+  await editAsk(ask.id, { question: editedQuestion }, agent);
+  return issue.key;
+}
+
+/** No source character of the bold, the list or the fence is anywhere in `where`, and every
+ *  quote it holds is the one clamped line the row gives it. */
+async function expectFormattedAtOneLine(where: Locator): Promise<void> {
+  await expect(where).not.toContainText("**");
+  await expect(where).not.toContainText("- the nightly");
+  await expect(where).not.toContainText("`");
+  // One line, cut by the browser rather than by the words: the quote is a clamped preview.
+  await expect(where.locator("[data-markdown-preview]")).toHaveCSS("-webkit-line-clamp", "1");
+}
+
+test("the activity line formats a quoted question", async ({ browser }, testInfo) => {
+  const key = await seedEditedAsk();
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/activity`);
+    await page.goto(`/issues/${key}/activity`);
     const rows = page.getByRole("list", { name: "Issue activity" }).getByRole("listitem");
     const asked = rows.filter({ hasText: "asked" });
     const edited = rows.filter({ hasText: "edited the question" });
@@ -223,30 +253,49 @@ test("the activity line and the margin's pinned event line format a quoted quest
     await expect(asked.locator("strong")).toHaveText("Ship");
     await expect(edited.locator("strong")).toHaveText("Hold");
     await expect(asked).toContainText("asked “Ship the release tonight?”");
-    await expect(edited).toContainText('edited the question "Hold the release until Monday?"');
-    for (const row of [asked, edited]) {
-      await expect(row).not.toContainText("**");
-      // One line, cut by the browser rather than by the words: the quote is a clamped preview.
-      await expect(row.locator("[data-markdown-preview]")).toHaveCSS("-webkit-line-clamp", "1");
-    }
+    await expect(edited).toContainText(`edited the question "${editedOnOneLine}"`);
+    // The fence is a code element holding the command, not three backticks and a language.
+    await expect(edited.locator("code")).toHaveText("bun run verify");
+    await expectFormattedAtOneLine(asked);
+    await expectFormattedAtOneLine(edited);
+    await page.screenshot({
+      fullPage: true,
+      path: testInfo.outputPath(`activity-quoted-question-${testInfo.project.name}.png`),
+    });
+  } finally {
+    await alice.close();
+  }
+});
 
-    // The margin draws the same quote the same way, through `eventDescription`'s event line.
+// The margin's event line is `eventDescription`'s, drawn by `EventBody`: the same quote, drawn
+// the same way as the Activity tab's own line.
+test("the margin's pinned event line formats the same quoted question", async ({
+  browser,
+}, testInfo) => {
+  const key = await seedEditedAsk();
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${key}/activity`);
+    const rows = page.getByRole("list", { name: "Issue activity" }).getByRole("listitem");
+    const edited = rows.filter({ hasText: "edited the question" });
     await edited.getByRole("button", { name: "Pin" }).click();
     await expect(edited.getByRole("button", { name: "Unpin" })).toHaveAttribute(
       "aria-pressed",
       "true"
     );
+
     const margin = page.getByTestId("margin-sheet");
     await margin.getByRole("tab", { name: "Pinned" }).click();
-    const pinned = margin.getByText("Ask edited:");
-    await expect(pinned).toBeVisible();
+    await expect(margin.getByText("Ask edited:")).toBeVisible();
     await expect(margin.locator("strong")).toHaveText("Hold");
-    await expect(margin).toContainText("Ask edited: Hold the release until Monday?");
-    await expect(margin).not.toContainText("**");
-    await expect(margin.locator("[data-markdown-preview]")).toHaveCSS("-webkit-line-clamp", "1");
+    await expect(margin).toContainText(`Ask edited: ${editedOnOneLine}`);
+    await expect(margin.locator("code")).toHaveText("bun run verify");
+    await expectFormattedAtOneLine(margin);
     await page.screenshot({
       fullPage: true,
-      path: testInfo.outputPath(`activity-quoted-question-${testInfo.project.name}.png`),
+      path: testInfo.outputPath(`margin-quoted-question-${testInfo.project.name}.png`),
     });
   } finally {
     await alice.close();
