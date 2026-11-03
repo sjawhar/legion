@@ -6,6 +6,7 @@ import { forgetBrokerClients } from "@legion/envoy-client/broker-credential";
 import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import {
   findHandoffReport,
+  findPushedBranchHead,
   type JjRunner,
   type LatestHandoff,
   paneLatestHandoff,
@@ -171,6 +172,35 @@ test("a failing jj surfaces its command and stderr", async () => {
     findHandoffReport({ phase: "retro", role: "implementer", env, jj, latestHandoff })
   ).rejects.toThrow(
     'jj log -r @- --no-graph -T commit_id failed: Error: There is no jj repo in "."'
+  );
+});
+
+// The head `ready_for_update` reports: the issue branch at the remote, read with the pane's jj.
+test("the branch head is the issue bookmark at origin, and empty when the remote has no such branch", async () => {
+  const calls: string[][] = [];
+  const answer = async (head: string) => {
+    const jj: JjRunner = async (args, cwd) => {
+      expect(cwd).toBe(env.LEGION_WORKSPACE);
+      calls.push([...args]);
+      return head;
+    };
+    return findPushedBranchHead({ env, jj });
+  };
+  await expect(answer(TIP)).resolves.toBe(TIP);
+  expect(calls).toEqual([["log", "-r", REMOTE, "--no-graph", "-T", "commit_id"]]);
+  // A planner before its first push: no branch at the remote, and no error.
+  await expect(answer("")).resolves.toBe("");
+
+  // The issue key names the branch, and a worker sets its own environment.
+  await expect(
+    findPushedBranchHead({ env: { ...env, LEGION_ISSUE: "../x" }, jj: async () => TIP })
+  ).rejects.toThrow(new Error('LEGION_ISSUE "../x" is not a Dispatch issue key like LEGION-1'));
+  await expect(
+    findPushedBranchHead({ env: { ...env, LEGION_WORKSPACE: "" }, jj: async () => TIP })
+  ).rejects.toThrow(
+    new Error(
+      "LEGION_WORKSPACE is not set, so ready_for_update cannot find the branch head to report"
+    )
   );
 });
 

@@ -28,6 +28,10 @@ import { staleGitLockNote } from "./git-lock";
  * a phase it does not run (which the daemon refuses naming whose phase it is) — reports the commit
  * the workspace stands on, `@-`, and no record. The implementer's report on its closed issue's
  * production check resolves neither: `legion-phase-ops.ts` never asks this module for one.
+ *
+ * The module also reads the head of `legion/<issue>@origin` that a `ready_for_update` signal
+ * reports (`findPushedBranchHead`), with the same jj and the same revset the completion's push
+ * check uses.
  */
 
 /** Runs the pane's jj with `args` against the workspace at `cwd` and answers its trimmed stdout;
@@ -139,16 +143,54 @@ export function paneHandoffReport(
     });
 }
 
-function requiredVariable(env: NodeJS.ProcessEnv, name: string): string {
+/** A variable the pane's jj is run with, or an error naming what the caller cannot do without it
+ * (`purpose`, a clause after `so`). */
+function requiredVariable(env: NodeJS.ProcessEnv, name: string, purpose: string): string {
   const value = env[name];
   if (value === undefined || value === "") {
-    throw new Error(`${name} is not set, so handoff_complete cannot find what to report`);
+    throw new Error(`${name} is not set, so ${purpose}`);
   }
   return value;
 }
 
+const FOR_HANDOFF = "handoff_complete cannot find what to report";
+
+/** The issue the pane works and the branch it names, `legion/<issue>`: the key is the worker's own
+ * environment, so a value carrying `#` or `/` would otherwise name another reference or path.
+ * `purpose` is what the caller cannot do without the key. */
+function issueBranch(env: NodeJS.ProcessEnv, purpose: string): { issue: string; bookmark: string } {
+  const issue = requiredVariable(env, "LEGION_ISSUE", purpose);
+  if (!DISPATCH_KEY_PATTERN.test(issue)) {
+    throw new Error(
+      `LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`
+    );
+  }
+  return { issue, bookmark: `legion/${issue}` };
+}
+
+/** The revset of `<bookmark>@origin`: the branch head as the remote has it, which is what the
+ * implementer's completion holds its round to and what `ready_for_update` reports. */
+function pushedBranch(bookmark: string): string {
+  return `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
+}
+
 /** The jj command that answers the commit the workspace stands on, `@-`. */
 const STANDING = ["log", "-r", "@-", "--no-graph", "-T", "commit_id"] as const;
+
+/** The head of `legion/<issue>@origin`, as `ready_for_update` reports it: the commit the pane's
+ * jj reads for the issue branch at the remote, and `""` when the branch is not on the remote at
+ * all — a planner before its first push has none, which is no error. */
+export async function findPushedBranchHead(input: {
+  readonly env: NodeJS.ProcessEnv;
+  readonly jj?: JjRunner;
+}): Promise<string> {
+  const { env } = input;
+  const jj = input.jj ?? pathJj;
+  const purpose = "ready_for_update cannot find the branch head to report";
+  const workspace = requiredVariable(env, "LEGION_WORKSPACE", purpose);
+  const { bookmark } = issueBranch(env, purpose);
+  return jj(["log", "-r", pushedBranch(bookmark), "--no-graph", "-T", "commit_id"], workspace);
+}
 
 /** What a completion of `phase` by `role` reports. */
 export async function findHandoffReport(input: HandoffReportInput): Promise<HandoffReport> {
@@ -156,16 +198,9 @@ export async function findHandoffReport(input: HandoffReportInput): Promise<Hand
   const jj = input.jj ?? pathJj;
   const handoff = FILE_BACKED[phase];
   if (handoff === undefined || handoff.role !== role) {
-    return { commit: await jj(STANDING, requiredVariable(env, "LEGION_WORKSPACE")) };
+    return { commit: await jj(STANDING, requiredVariable(env, "LEGION_WORKSPACE", FOR_HANDOFF)) };
   }
-  // The issue key names the record's issue and the branch, and a worker sets its own environment:
-  // a value carrying `#` or `/` would otherwise name another reference or path.
-  const issue = requiredVariable(env, "LEGION_ISSUE");
-  if (!DISPATCH_KEY_PATTERN.test(issue)) {
-    throw new Error(
-      `LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`
-    );
-  }
+  const { issue, bookmark } = issueBranch(env, FOR_HANDOFF);
   let record: { readonly id: string; readonly version: number };
   try {
     record = await input.latestHandoff(issue, handoff.word);
@@ -192,9 +227,8 @@ export async function findHandoffReport(input: HandoffReportInput): Promise<Hand
 
   // The implementer's round is of its pushed tip: the pull request's head, which the daemon holds
   // the round's CI to. Work still under `@-` that the branch does not carry is not pushed.
-  const workspace = requiredVariable(env, "LEGION_WORKSPACE");
-  const bookmark = `legion/${issue}`;
-  const remote = `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
+  const workspace = requiredVariable(env, "LEGION_WORKSPACE", FOR_HANDOFF);
+  const remote = pushedBranch(bookmark);
   const stands = await jj(STANDING, workspace);
   // The branch's tip at origin when `@-` is on it, and nothing when it is not.
   const tip = await jj(

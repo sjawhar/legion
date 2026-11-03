@@ -30,13 +30,15 @@ Extends docs/solutions/github/conflicting-pr-gets-no-pull-request-ci.md.
   `synchronize` event its push delivers, and under a Webhooks or Pull Requests outage the ref
   moves while the pull request does not. Diagnose it with two reads, never a wait on `run list`:
   `api repos/{o}/{r}/git/ref/heads/legion/<KEY>` against `pr view <n> --json headRefOid`.
-- Do not re-push the same commit and do not wait it out: the next genuine push (the following
-  phase's handoff commit) synchronises the pull request and carries the skipped commits with it.
-  A push of only `.legion/` handoffs carries `skip-checks: true`, so the code head's verdict is
-  the one the daemon carries either way.
-- State CI by the head GitHub built and name every commit above it that touches nothing but
-  `.legion/`: an E2E, review or merge-gate line naming a head no run exists for is unverifiable
-  by the next role.
+- Do not re-push the same commit and do not wait it out: the next genuine push synchronises the
+  pull request and carries the skipped commits with it. (While handoffs were commits, the
+  following phase's handoff push was that push, and a push of only `.legion/` handoffs carried
+  `skip-checks: true`, so the code head's verdict was the one the daemon carried either way.
+  sjawhar/legion#2354 made a handoff a Dispatch record, so every push is a code push and starts
+  its own runs.)
+- State CI by the head GitHub built, and name every commit above it that the runs do not cover:
+  an E2E, review or merge-gate line naming a head no run exists for is unverifiable by the next
+  role.
 
 ## Evidence
 

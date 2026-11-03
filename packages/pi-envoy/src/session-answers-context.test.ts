@@ -8,7 +8,11 @@ import {
   SESSION_ANSWERS_MARKER,
   sessionAnswersFailureLine,
 } from "@legion/envoy-client/session-answers";
-import { type SessionAnswersRequest, withSessionAnswers } from "./session-answers-context";
+import {
+  type CarriedAnswers,
+  type SessionAnswersRequest,
+  withSessionAnswers,
+} from "./session-answers-context";
 
 // Message shapes as Oh My Pi hands them to a `context` handler.
 const LIST = `${SESSION_ANSWERS_MARKER}\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
@@ -123,16 +127,27 @@ function branchOf(...items: readonly unknown[]): () => readonly unknown[] {
 
 const noBranch = branchOf();
 
+/** What `readSessionAnswers` gives with `text`: the text, and what the people wrote in it (each
+ *  item's head and words, as `sessionAnswersWords` keys them), none for the failure line. */
+function carry(text: string | undefined): CarriedAnswers | undefined {
+  if (text === undefined) return undefined;
+  const words = Array.from(
+    text.matchAll(/^\d{4}-\S+ · (.+)\n(.+)$/gm),
+    (match) => `${match[1]}: ${match[2]}`
+  );
+  return { text, words };
+}
+
 /** A read that records each call and answers `text`. */
 function reading(text: string | undefined): {
-  readonly read: () => Promise<string | undefined>;
+  readonly read: () => Promise<CarriedAnswers | undefined>;
   readonly calls: () => number;
 } {
   let calls = 0;
   return {
     read: async () => {
       calls += 1;
-      return text;
+      return carry(text);
     },
     calls: () => calls,
   };
@@ -140,12 +155,13 @@ function reading(text: string | undefined): {
 
 /** A request of `session` (a session of its own unless given), not compacting unless told. */
 function requestOf(
-  read: () => Promise<string | undefined>,
+  read: () => Promise<CarriedAnswers | undefined>,
   branch: () => readonly unknown[],
   session: object = {},
-  compacting = false
+  compacting = false,
+  id = "ses_a"
 ): SessionAnswersRequest {
-  return { read, branch, session, compacting: () => compacting };
+  return { read, branch, session, id, compacting: () => compacting };
 }
 
 test("the list goes after the request's last message, as a message of its own", async () => {
@@ -166,6 +182,201 @@ test("after a tool round the list follows the tool result, which keeps its own c
   ).toEqual([...messages, list]);
 });
 
+// What a session's requests carry over turns with the same people's answers. A list sits after the
+// request's last message only on the request that first shows an item, and stays there on the
+// requests after it, so the model never reads a list with nothing new in it as the newest turn.
+const LATER = `${SESSION_ANSWERS_MARKER}\n\n2026-10-27T11:00:00.000Z · bob sent you a message\nAlso check the docs.\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
+const later = { role: "user", content: [{ type: "text", text: LATER }], timestamp: 0 };
+const grepCall = {
+  role: "assistant",
+  content: [{ type: "toolCall", id: "call-2", name: "grep", arguments: { pattern: "bug" } }],
+  timestamp: 5,
+};
+const grepResult = {
+  role: "toolResult",
+  toolCallId: "call-2",
+  toolName: "grep",
+  content: [{ type: "text", text: "x.ts:3: the bug" }],
+  isError: false,
+  timestamp: 6,
+};
+
+/** A read that answers each of `texts` in turn, then the last one again. */
+function readingEach(...texts: string[]): () => Promise<CarriedAnswers | undefined> {
+  let call = 0;
+  return async () => carry(texts[Math.min(call++, texts.length - 1)]);
+}
+
+test("a list with no new item stays where it first went: the request still ends with its own last message", async () => {
+  const session = {};
+  const read = readingEach(LIST);
+  expect(await withSessionAnswers([skill, ask], requestOf(read, noBranch, session))).toEqual([
+    skill,
+    ask,
+    list,
+  ]);
+  // Two tool rounds later, with nothing new: the list is where the first request put it.
+  const turn = [skill, ask, readCall, readResult, grepCall, grepResult];
+  for (let request = 0; request < 3; request += 1) {
+    const carried = await withSessionAnswers([...turn], requestOf(read, noBranch, session));
+    expect(carried).toEqual([skill, ask, list, readCall, readResult, grepCall, grepResult]);
+    expect(carried?.at(-1)).toBe(grepResult);
+  }
+});
+
+test("a new item goes after the request's last message, and stays there on the requests after it", async () => {
+  const session = {};
+  const read = readingEach(LIST, LATER);
+  await withSessionAnswers([skill, ask], requestOf(read, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  expect(await withSessionAnswers([...turn], requestOf(read, noBranch, session))).toEqual([
+    ...turn,
+    later,
+  ]);
+  expect(
+    await withSessionAnswers([...turn, grepCall, grepResult], requestOf(read, noBranch, session))
+  ).toEqual([...turn, later, grepCall, grepResult]);
+});
+
+test("a list that only lost items, or changed its header, keeps its place with the new text", async () => {
+  const session = {};
+  const cached = `${SESSION_ANSWERS_MARKER}\nAs read at 2026-10-27T11:00:00.000Z; this read failed: Dispatch did not answer within 800 ms.\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
+  const read = readingEach(LATER, LIST, cached);
+  await withSessionAnswers([skill, ask], requestOf(read, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  expect(await withSessionAnswers([...turn], requestOf(read, noBranch, session))).toEqual([
+    skill,
+    ask,
+    list,
+    readCall,
+    readResult,
+  ]);
+  expect(
+    await withSessionAnswers([...turn, grepCall, grepResult], requestOf(read, noBranch, session))
+  ).toEqual([
+    skill,
+    ask,
+    { role: "user", content: [{ type: "text", text: cached }], timestamp: 0 },
+    readCall,
+    readResult,
+    grepCall,
+    grepResult,
+  ]);
+});
+
+test("a list whose place left the conversation, as a compaction leaves it, goes after the last message again", async () => {
+  const session = {};
+  const read = readingEach(LIST);
+  await withSessionAnswers([skill, ask], requestOf(read, noBranch, session));
+  // The compaction summarized the question the list followed.
+  const compacted = [skill, branchSummary, readCall, readResult];
+  expect(await withSessionAnswers([...compacted], requestOf(read, noBranch, session))).toEqual([
+    ...compacted,
+    list,
+  ]);
+  expect(
+    await withSessionAnswers(
+      [...compacted, grepCall, grepResult],
+      requestOf(read, noBranch, session)
+    )
+  ).toEqual([...compacted, list, grepCall, grepResult]);
+});
+
+test("a second copy of the extension finds the list where the first put it, and reads nothing", async () => {
+  const session = {};
+  const first = reading(LIST);
+  await withSessionAnswers([skill, ask], requestOf(first.read, noBranch, session));
+  const carried = await withSessionAnswers(
+    [skill, ask, readCall, readResult],
+    requestOf(first.read, noBranch, session)
+  );
+  expect(carried?.at(-1)).toBe(readResult);
+  // The host hands the second copy's handler the array the first returned.
+  const second = reading(LIST);
+  expect(
+    await withSessionAnswers(carried ?? [], requestOf(second.read, noBranch, session))
+  ).toBeUndefined();
+  expect(second.calls()).toBe(0);
+});
+
+// A speculative compaction runs beside the main loop, so the main loop's request can come between
+// the compaction's cut and its whole conversion. While the session compacts, every list goes after
+// the last message, so the whole conversion's first messages are the cut's, as the compaction
+// keeps them.
+test("a main-loop request between a compaction's cut and its whole conversion leaves the compaction its messages", async () => {
+  const session = {};
+  const read = readingEach(LIST);
+  await withSessionAnswers([skill, ask], requestOf(read, noBranch, session));
+  const branch = branchOf(ask, readCall, readResult, grepCall, grepResult);
+  const cut = [skill, ask, readCall, readResult];
+  expect(await withSessionAnswers([...cut], requestOf(read, branch, session, true))).toBe(
+    undefined
+  );
+  const whole = [skill, ask, readCall, readResult, grepCall, grepResult];
+  expect(await withSessionAnswers([...whole], requestOf(read, branch, session, true))).toEqual([
+    ...whole,
+    list,
+  ]);
+  const converted = await withSessionAnswers([...whole], requestOf(read, branch, session, true));
+  expect(converted?.slice(0, cut.length)).toEqual(cut);
+  // Once the compaction is over, the list is back where it went first.
+  expect(await withSessionAnswers([...whole], requestOf(read, branch, session))).toEqual([
+    skill,
+    ask,
+    list,
+    readCall,
+    readResult,
+    grepCall,
+    grepResult,
+  ]);
+});
+
+test("a retry after an aborted tool call, whose results the host wrote, carries the list", async () => {
+  const { read } = reading(LIST);
+  const aborted = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-9", name: "read", arguments: { path: "y.ts" } }],
+    stopReason: "aborted",
+    timestamp: 5,
+  };
+  const synthetic = {
+    role: "toolResult",
+    toolCallId: "call-9",
+    toolName: "read",
+    content: [{ type: "text", text: "Aborted." }],
+    isError: true,
+    timestamp: 6,
+  };
+  expect(
+    await withSessionAnswers([skill, ask], requestOf(read, branchOf(ask, aborted, synthetic)))
+  ).toEqual([skill, ask, list]);
+});
+
+test("each session on one sessionManager keeps its own list's place", async () => {
+  const manager = {};
+  const read = readingEach(LIST);
+  await withSessionAnswers([skill, ask], requestOf(read, noBranch, manager, false, "ses_a"));
+  const other = { ...ask, content: [{ type: "text", text: "Another task." }], timestamp: 50 };
+  await withSessionAnswers([skill, other], requestOf(read, noBranch, manager, false, "ses_b"));
+  expect(
+    await withSessionAnswers(
+      [skill, ask, readCall, readResult],
+      requestOf(read, noBranch, manager, false, "ses_a")
+    )
+  ).toEqual([skill, ask, list, readCall, readResult]);
+});
+
+test("tool results with one timestamp are told apart by their call ids", async () => {
+  const session = {};
+  const read = readingEach(LIST);
+  const sameTime = { ...grepResult, timestamp: readResult.timestamp };
+  const turn = [skill, ask, readCall, readResult];
+  await withSessionAnswers([...turn], requestOf(read, noBranch, session));
+  expect(
+    await withSessionAnswers([...turn, grepCall, sameTime], requestOf(read, noBranch, session))
+  ).toEqual([...turn, list, grepCall, sameTime]);
+});
+
 test("the failure line goes where the list would", async () => {
   const line = sessionAnswersFailureLine("Dispatch did not answer within 800 ms");
   const { read } = reading(line);
@@ -181,15 +392,39 @@ test("no text to carry adds no message", async () => {
   expect(calls()).toBe(1);
 });
 
-test("a request another copy of the extension already gave the list gets no second one, and no read", async () => {
+// An older copy of the extension put the list after the last message of every request. This copy
+// reads nothing for that request, adds no second list, and moves the one there where it belongs.
+test("a request an older copy already gave the list gets no second one and no read; its list is placed as this copy's", async () => {
   const { read, calls } = reading(LIST);
-  expect(await withSessionAnswers([skill, ask, list], requestOf(read, noBranch))).toBeUndefined();
+  const session = {};
+  expect(await withSessionAnswers([skill, ask, list], requestOf(read, noBranch, session))).toEqual([
+    skill,
+    ask,
+    list,
+  ]);
+  // The next request, with the same list after its last message, gets it after the first one's.
+  expect(
+    await withSessionAnswers(
+      [skill, ask, readCall, readResult, list],
+      requestOf(read, noBranch, session)
+    )
+  ).toEqual([skill, ask, list, readCall, readResult]);
   const failure = {
     role: "user",
     content: [{ type: "text", text: sessionAnswersFailureLine("database is down") }],
     timestamp: 0,
   };
-  expect(await withSessionAnswers([ask, failure], requestOf(read, noBranch))).toBeUndefined();
+  expect(await withSessionAnswers([ask, failure], requestOf(read, noBranch))).toEqual([
+    ask,
+    failure,
+  ]);
+  expect(calls()).toBe(0);
+});
+
+test("a person's own last message quoting the list's marker is never moved", async () => {
+  const { read, calls } = reading(LIST);
+  const quoted = { ...list, timestamp: 7 };
+  expect(await withSessionAnswers([skill, ask, quoted], requestOf(read, noBranch))).toBeUndefined();
   expect(calls()).toBe(0);
 });
 
@@ -230,18 +465,20 @@ test("two copies of the extension and an empty list: one HTTP read, under one se
     });
   }) as typeof fetch;
   const read = async () =>
-    (
-      await readSessionAnswers({
-        session: "ses_two_copies_empty",
-        dispatch: {
-          enabled: true,
-          url: "http://dispatch.test",
-          credential: bearerCredential("token"),
-        },
-        env: { DISPATCH_STATE_DIR: stateRoot },
-        fetchImpl,
-      })
-    ).text;
+    carry(
+      (
+        await readSessionAnswers({
+          session: "ses_two_copies_empty",
+          dispatch: {
+            enabled: true,
+            url: "http://dispatch.test",
+            credential: bearerCredential("token"),
+          },
+          env: { DISPATCH_STATE_DIR: stateRoot },
+          fetchImpl,
+        })
+      ).text
+    );
   const messages = [skill, ask];
 
   const started = performance.now();
