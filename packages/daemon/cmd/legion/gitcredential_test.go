@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
+	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // gitCredentialBundle writes a two-owner gh bundle, acme's write token and sjawhar's read token,
@@ -192,5 +195,64 @@ func TestGitCredentialOperationsAnswerHelp(t *testing.T) {
 		if code != 0 || stdout != "" || !usageOf(stderr, "git-credential", op) {
 			t.Errorf("legion git-credential %s --help = exit %d, stdout %q, stderr %q; want exit 0 and its usage", op, code, stdout, stderr)
 		}
+	}
+}
+
+// namedTokens is each lease named for the App, the owner and whether it reads or writes, as the
+// daemon's own token source answers one.
+type namedTokens struct{}
+
+func (namedTokens) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	return appauth.Lease{Token: "ghs_" + string(role) + "_write_" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (namedTokens) ReadToken(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	return appauth.Lease{Token: "ghs_" + string(role) + "_read_" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+// renamedCredentialBundle writes to disk the bundle appauth.GitHubCredential builds for an
+// implementer whose issue's record names sjawhar — the owner it was recorded on before the
+// transfer — in a project that owns cybermonklabs, under renames. It returns the bundle's root
+// and sjawhar's directory, which the pod's GH_CONFIG_DIR names.
+func renamedCredentialBundle(t *testing.T, renames ghrepo.Renames) (root, defaultDir string) {
+	t.Helper()
+	credential := appauth.GitHubCredential(namedTokens{}, func() []string { return []string{"cybermonklabs"} }, renames)
+	bundle, err := credential(context.Background(), legionclaim.RoleImplementer, "sjawhar")
+	if err != nil {
+		t.Fatalf("build the bundle: %v", err)
+	}
+	root = filepath.Join(t.TempDir(), "gh")
+	if _, err := ghconfig.WriteBundle(root, bundle); err != nil {
+		t.Fatal(err)
+	}
+	return root, ghconfig.OwnerDir(root, bundle.Default)
+}
+
+// A pod whose issue is recorded on the repository as it was still has to write the repository as
+// GitHub holds it now: with the pair configured, `legion git-credential get` for a path under
+// sjawhar answers the write token minted for cybermonklabs, the owner the repository moved to,
+// from sjawhar's own directory of the bundle appauth.GitHubCredential built. With no pair
+// configured the same bundle gives sjawhar its own token, as today, and that is what the same
+// request answers.
+func TestGitCredentialAnswersARenamedRepositoryWithTheOwnerItMovedTo(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		renames ghrepo.Renames
+		token   string
+	}{
+		{name: "the pair configured", renames: ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion")),
+			token: "ghs_implement_write_cybermonklabs"},
+		{name: "no pair configured", renames: ghrepo.Renames{}, token: "ghs_implement_write_sjawhar"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, defaultDir := renamedCredentialBundle(t, tc.renames)
+			t.Setenv("GH_CONFIG_DIR", defaultDir)
+			t.Setenv("LEGION_GH_OWNERS_DIR", root)
+			code, stdout, stderr := runGitCredentialHere(t, "protocol=https\nhost=github.com\npath=/sjawhar/legion.git\n\n", "get")
+			want := "username=x-access-token\npassword=" + tc.token + "\n"
+			if code != 0 || stdout != want || stderr != "" {
+				t.Fatalf("legion git-credential get for /sjawhar/legion = exit %d, stdout %q, stderr %q; want exit 0 and %q", code, stdout, stderr, want)
+			}
+		})
 	}
 }

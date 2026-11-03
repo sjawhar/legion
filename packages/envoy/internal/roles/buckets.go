@@ -93,7 +93,8 @@ func within[T any](ctx context.Context, what string, read func() (T, error)) (T,
 	return value, err
 }
 
-// claimEntry reads role's claim and its bucket entry within ctx: a zero claim and a nil entry when
+// claimEntry reads role's claim and its bucket entry within ctx, the claim stamped with the
+// entry's revision as store.Registry stamps the claims it reads: a zero claim and a nil entry when
 // there is none.
 func (b *Buckets) claimEntry(ctx context.Context, role string) (store.RoleClaim, nats.KeyValueEntry, error) {
 	type read struct {
@@ -119,6 +120,7 @@ func (b *Buckets) claimEntry(ctx context.Context, role string) (store.RoleClaim,
 		if err != nil {
 			return read{}, err
 		}
+		claim.Revision = entry.Revision()
 		return read{claim: claim, entry: entry}, nil
 	})
 	return got.claim, got.entry, err

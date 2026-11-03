@@ -18,6 +18,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/google/pprof v0.0.0-20261026192309-dbd0ed30aa88
 	github.com/google/uuid v1.6.0
 	github.com/googleapis/gax-go/v2 v2.23.0
 	github.com/gorilla/websocket v1.5.3
@@ -149,12 +150,14 @@ require (
 // update, and what the commit parked, in commit order under its own lock (UpdateLog,
 // LoggedUpdate.Parked, #332), against which the room's update observer measures each update; a
 // remote update's scans can be bounded (#333); a map-valued text format no longer panics with the
-// lock held (#335); ChangedTypes and Parent (#336); awareness reaches its sending peer and a
-// read-only peer gets a bounded empty awareness response, so an idle provider stays connected
-// (#338); Server.OnTokenAuthContext, OnTokenAuth with the connection's request context, which
-// Dispatch does not set (#351); and WithFormatCleanup and Doc.SetFormatCleanup, which turn off the
-// format cleanup a remote apply runs, so a copy that replays the room's commit log
-// (newDocumentCopy) and a room loading its stored history (bootstrapLoadedState) make no commit the
-// room never made (#369). One is fork-only, with no upstream pull request yet: a per-apply scan
-// budget stacked on #333, which Dispatch does not set.
+// lock held (#335); a transaction names the shared types it changed and every shared type its
+// container (ChangedTypes and Parent, #336), so the room's update observer renders only the
+// top-level blocks an update touched; awareness reaches its sending peer and a read-only peer gets
+// a bounded empty awareness response, so an idle provider stays connected (#338);
+// Server.OnTokenAuthContext, OnTokenAuth with the connection's request context, which Dispatch
+// does not set (#351); and WithFormatCleanup and Doc.SetFormatCleanup, which turn off the format
+// cleanup a remote apply runs, so a copy that replays the room's commit log (newDocumentCopy) and
+// a room loading its stored history (bootstrapLoadedState) make no commit the room never made
+// (#369). One is fork-only, with no upstream pull request yet: a per-apply scan budget stacked on
+// #333, which Dispatch does not set.
 replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-0.20261102105534-b3b8308dee0e

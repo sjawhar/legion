@@ -329,12 +329,13 @@ function renderAdvice(
   // The gate line is last for the document tools, for the reason the cadence line is last for
   // the others: behind `| tail -1` it is the only line the agent sees, and it is the one line of
   // a document write that someone else has to act on. It describes this one write - the version
-  // it stored and the approval that version replaced - rather than a rule about editing a spec,
-  // because the server sends it only on the write that superseded the approval.
+  // it stored, the approval that version replaced and how that approval comes back - rather than a
+  // rule about editing a spec, because the server sends it only on the write that superseded the
+  // approval.
   const superseded = advice.superseded_approval;
   if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
     lines.push(
-      `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
+      `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version} or a later write stores the text of version ${superseded.approved_version} again exactly, with no decision block in it decided since: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
     );
   }
 
@@ -1123,10 +1124,11 @@ function readWithoutEvents(args: ToolArguments): string | undefined {
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
  * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
- * pages, project document pages (with their ?ask= / ?comment= deep links, which name the item
- * whatever the fragment), the `#b-<block id>` of a live document page or of an issue ask's,
- * comment's or message's page, which names that block, and the page of an upload an agent's
- * conversation owns (`/agents/<session id>/artifacts/<slug>`).
+ * pages, the Decisions page (which names the issue's decisions.md), project document pages (with
+ * their ?ask= / ?comment= deep links, which name the item whatever the fragment), the
+ * `#b-<block id>` of a live document page or of an issue ask's, comment's or message's page,
+ * which names that block, and the page of an upload an agent's conversation owns
+ * (`/agents/<session id>/artifacts/<slug>`).
  */
 export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
   let url: URL;
@@ -1154,7 +1156,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
       : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(
-    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
+    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children|decisions)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
   );
   if (issuePage) {
     const [, key = "", page, artifact, ask, comment, message] = issuePage;
@@ -1169,6 +1171,9 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
     if (page === "spec") return `dispatch://${key}/spec${blockOf("v")}`;
+    // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
+    // whatever its fragment.
+    if (page === "decisions") return `dispatch://${key}/artifact/decisions-md`;
     // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
     // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
@@ -1920,6 +1925,32 @@ function askIDInputProblem(asks: readonly Pick<Ask, "id" | "question">[], scope:
     .slice(0, askHintLimit)
     .map((ask) => `${ask.id.slice(0, 8)}… ${textHead(ask.question)}`);
   return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
+}
+
+/** The line a reply on an approval request a newer version moved prints: no reply hands such a
+ *  request back (the server's approvalMoved), only `request-approval` at the current version does.
+ *  Undefined when the ask is anything else or its read fails, so the reply reports as before. */
+async function movedApprovalLine(
+  client: DispatchClient,
+  askID: string
+): Promise<string | undefined> {
+  const ask = (await client.getAsk(askID).catch(() => undefined))?.ask;
+  const approval = ask?.approval;
+  if (ask?.kind !== "approval" || approval === undefined) return undefined;
+  if (approval.requested_version >= approval.version) return undefined;
+  const owner =
+    ask.issue_key === null
+      ? `--project ${ask.approval_artifact?.project ?? "<project>"} --artifact ${approval.artifact_id}`
+      : ask.approval_artifact?.primary === true
+        ? `--issue ${ask.issue_key}`
+        : `--issue ${ask.issue_key} --artifact ${approval.artifact_id}`;
+  return (
+    `The reply did not hand the ask to the human: it is the approval request for ${approval.name} ` +
+    `at version ${approval.requested_version}, and ${approval.name} is now version ${approval.version}. ` +
+    "No reply hands a moved approval request back. Once the human has agreed to every point in " +
+    `version ${approval.version}, run: dispatch request-approval ${owner} --summary ` +
+    `'<what changed since version ${approval.requested_version}>'`
+  );
 }
 
 async function invalidReplyToAskProblem(
@@ -4248,9 +4279,16 @@ export async function executeDispatchTool(
           comment.ask_waiting_on === undefined
             ? ""
             : `; ask now waiting on ${comment.ask_waiting_on}`;
+        // A reply meant for the human that leaves the ask with the agent landed on an approval
+        // request a newer version moved: say why, and name the call that hands it back.
+        const moved =
+          requestedTurn !== "agent" && comment.ask_waiting_on === "agent"
+            ? await movedApprovalLine(client, replyToAsk)
+            : undefined;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
+            ...(moved === undefined ? [] : [moved]),
             ...adviceLines,
           ].join("\n"),
           details: {

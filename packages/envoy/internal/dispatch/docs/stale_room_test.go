@@ -1647,10 +1647,10 @@ func (r *recordedClasses) latest(t *testing.T, what string, matches func(origin 
 	return documentUpdateClass{}
 }
 
-// replicaRendering is the markdown the resident room's rendered replica keeps for the room's
+// keptAndFreshRendering is the markdown the resident room's rendered replica keeps for the room's
 // latest commit - what the update observer measures the next update against
 // (updateChangesMarkdown) - and a fresh render of the room's document as of the same moment.
-func replicaRendering(t *testing.T, service *Service, artifactID string) (kept, fresh string) {
+func keptAndFreshRendering(t *testing.T, service *Service, artifactID string) (kept, fresh string) {
 	t.Helper()
 	live := service.srv.GetDoc(artifactID)
 	if live == nil {
@@ -1660,7 +1660,7 @@ func replicaRendering(t *testing.T, service *Service, artifactID string) (kept, 
 	if err != nil {
 		t.Fatalf("copy the room's document: %v", err)
 	}
-	if fresh, _, err = renderDocumentForUpdate(copied); err != nil {
+	if fresh, _, _, err = renderDocumentForUpdate(copied.GetXmlFragment(fragmentName)); err != nil {
 		t.Fatalf("render the room's document: %v", err)
 	}
 	_, listed := listedReplica(t, service, artifactID)
@@ -1673,10 +1673,10 @@ func replicaRendering(t *testing.T, service *Service, artifactID string) (kept, 
 	if pending := replica.log.Pending(); pending > 0 {
 		t.Fatalf("the replica has %d committed updates it has not taken", pending)
 	}
-	if replica.markdown == nil {
+	if replica.rendering == nil {
 		t.Fatal("the replica keeps no rendering")
 	}
-	return *replica.markdown, fresh
+	return replica.rendering.markdown, fresh
 }
 
 // A comment's margin write changes only the marks map, and the update it publishes carries only
@@ -1727,7 +1727,7 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 	if published.contentChanged {
 		t.Error("the room recorded the margin write's publish as a content change, though it changed no text in the room")
 	}
-	kept, fresh := replicaRendering(t, pair.taskA, pair.artifactID)
+	kept, fresh := keptAndFreshRendering(t, pair.taskA, pair.artifactID)
 	if !strings.Contains(fresh, "Second.") {
 		t.Fatalf("the room after the publish = %q, want it to keep \"Second.\": the margin write's update carries only its own transaction", fresh)
 	}
@@ -1790,7 +1790,7 @@ func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *t
 		t.Fatal("task A's room was replaced, so the publishes did not reach the room the fork was built from")
 	}
 
-	kept, fresh := replicaRendering(t, pair.taskA, pair.artifactID)
+	kept, fresh := keptAndFreshRendering(t, pair.taskA, pair.artifactID)
 	if strings.Contains(fresh, "Second.") {
 		t.Fatalf("the room after the publishes = %q, want the text edit's deletion of \"Second.\"", fresh)
 	}

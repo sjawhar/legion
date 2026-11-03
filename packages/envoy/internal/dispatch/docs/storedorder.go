@@ -284,7 +284,7 @@ type storedRender struct {
 }
 
 func renderStoredFold(doc *crdt.Doc) storedRender {
-	markdown, _, err := renderDocumentForUpdate(doc)
+	markdown, err := renderFragmentMarkdown(doc.GetXmlFragment(fragmentName))
 	return storedRender{markdown: markdown, renders: err == nil}
 }
 
@@ -456,13 +456,18 @@ func sameStoredState(a, b *crdt.Doc) bool {
 	if aParked.Items != bParked.Items || aParked.DeleteRanges != bParked.DeleteRanges || !maps.Equal(a.StateVector(), b.StateVector()) {
 		return false
 	}
-	aDeletes, bDeletes := crdt.DeleteSetFromDoc(a), crdt.DeleteSetFromDoc(b)
-	aClients := aDeletes.Clients()
-	if len(aClients) != len(bDeletes.Clients()) {
+	return sameDeletes(crdt.DeleteSetFromDoc(a), crdt.DeleteSetFromDoc(b))
+}
+
+// sameDeletes reports whether two delete sets cover the same runs. Ranges are normalized, so
+// equal sets compare equal run for run.
+func sameDeletes(was, now *crdt.IDSet) bool {
+	wasClients := was.Clients()
+	if len(wasClients) != len(now.Clients()) {
 		return false
 	}
-	for _, client := range aClients {
-		if !slices.Equal(aDeletes.Ranges(client), bDeletes.Ranges(client)) {
+	for _, client := range wasClients {
+		if !slices.Equal(was.Ranges(client), now.Ranges(client)) {
 			return false
 		}
 	}
