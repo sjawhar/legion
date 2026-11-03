@@ -388,22 +388,27 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 // directory of that owner's name, every `gh` call of its roles against that owner's repositories
 // runs unauthenticated, and only a new pod projects it.
 //
-// Two pods lack nothing. One with no such volume at all is no pod of this runtime's making, and
-// one whose gh volume is an EmptyDir was launched with no owners (volumes: a Secret projection
-// with no items would project every key of the Secret, the launcher token among them), which is
-// the Sandbox's first template and a controller whose project has no owner. The comparison runs
-// one way only: an owner the pod holds that the daemon no longer serves costs the pod a stale
-// directory and nothing more, and must never be worth remaking a pod and deleting its disk for.
+// The two pods without a Secret projection are not the same. One with no gh volume at all is no
+// pod of this runtime's making and stays unmoved: this runtime does not know what it holds. One
+// whose gh volume is an EmptyDir was launched with no owners at all (volumes: a Secret projection
+// with no items would project every key of the Secret, the launcher token among them), so it
+// holds the empty owner set — a controller whose project had no owner yet reads every owner the
+// daemon serves now as lacking, and the first owner its project gains remakes it. The comparison
+// runs one way only: an owner the pod holds that the daemon no longer serves costs the pod a
+// stale directory and nothing more, and must never be worth remaking a pod and deleting its disk
+// for.
 func (r *Runtime) movedGhOwners(pod corev1.PodSpec, role claim.Role) (movedAddress, bool) {
 	name := roleVolume(ghVolume, role)
 	at := slices.IndexFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == name })
-	if at < 0 || pod.Volumes[at].Secret == nil {
+	if at < 0 {
 		return movedAddress{}, false
 	}
 	var held []string
-	for _, item := range pod.Volumes[at].Secret.Items {
-		if owner, ok := GitHubHostsOwner(item.Key); ok {
-			held = append(held, owner)
+	if secret := pod.Volumes[at].Secret; secret != nil {
+		for _, item := range secret.Items {
+			if owner, ok := GitHubHostsOwner(item.Key); ok {
+				held = append(held, owner)
+			}
 		}
 	}
 	served := r.gitHubOwners()
