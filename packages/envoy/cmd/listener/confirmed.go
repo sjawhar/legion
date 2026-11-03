@@ -407,7 +407,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 			// The forward carries the same Nats-Msg-Id on every attempt, so the stream, which
 			// captures agent subjects, keeps one copy of it per message and recipient however
 			// many attempts this send makes.
-			err := d.forwardAndWait(subject, forwarded, bus.ForwardMsgID(forwarded.DedupeKey, subject), window, roleForwardStoredOnly(resolved.HolderState))
+			err := d.forwardAndWait(subject, forwarded, bus.ForwardMsgID(forwarded.DedupeKey, subject), window, false)
 			if err == nil {
 				d.confirm(item.DedupeKey, send.holder)
 				send.delivered(sendDelivered)

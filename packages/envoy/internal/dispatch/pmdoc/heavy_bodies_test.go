@@ -145,7 +145,7 @@ func TestHeavyBodiesAtTheBodyCapAreStoredOrRefusedInTime(t *testing.T) {
 				t.Fatalf("%s is %d characters, past the %d a caller may write", shape.name, len(body), bodyCap)
 			}
 			var err error
-			took := timedWithDeadline(t, "parsing "+shape.name, perCallDeadline, func() (time.Duration, error) {
+			took := timedWithDeadline(t, "parsing "+shape.name, perCallDeadline(t), func() (time.Duration, error) {
 				return cpuTimeOf(again(func() { _, err = ParseForWrite(body, nil) }))
 			})
 			if shape.refusal == "" {

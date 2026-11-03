@@ -268,7 +268,3 @@ func first(value string, fallback string) string {
 	}
 	return fallback
 }
-
-func curValue(value string) string {
-	return value
-}

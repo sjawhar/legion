@@ -9,7 +9,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
-	"github.com/sjawhar/envoy/internal/session"
 )
 
 // roleForwardWaitLimit bounds the role forwards the role lane holds at once, queued behind their
@@ -23,20 +22,13 @@ const roleForwardWaitLimit = 4096
 const roleLaneSlowConsumerInterval = 5 * time.Second
 
 // roleForward is one role message the role lane resolved to its holder, every guard passed: item is
-// the message as it arrived, sessionID its holder, and storedOnly set for a holder that answers no
-// receipt while it is unresponsive (roleForwardStoredOnly).
+// the message as it arrived and sessionID its holder. Every forward it makes waits for the
+// holder's receipt: a role message is forwarded only to a holder that reads live (publishRole,
+// roleTopicDelivery), so no role forward is the stored-only kind an unresponsive recipient of an
+// ad-hoc topic takes (confirmTopicRecipient).
 type roleForward struct {
-	item       contracts.Envelope
-	sessionID  string
-	storedOnly bool
-}
-
-// roleForwardStoredOnly reports whether holder answers no receipt for a role forward: a session
-// past its live window is still registered and the stream still keeps its copy, but it sends
-// nothing back while it is stalled, so its forward counts as made once the stream acknowledges
-// storing it.
-func roleForwardStoredOnly(state session.State) bool {
-	return state == session.Unresponsive
+	item      contracts.Envelope
+	sessionID string
 }
 
 // roleForwarder runs the role lane's forwards off its NATS handler, so a holder slow to answer, or
@@ -119,7 +111,7 @@ func (f *roleForwarder) publish(sessionID string) {
 		f.queues[sessionID] = queue[1:]
 		f.mu.Unlock()
 
-		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleReceiptTimeout, forward.storedOnly)
+		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleReceiptTimeout, false)
 		if err != nil {
 			f.finish(forward, err)
 			continue
