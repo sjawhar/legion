@@ -16,7 +16,6 @@ func listenerEnv() rendering.ListenerEnv {
 	return rendering.ListenerEnv{
 		MachineID:      "example-machine",
 		ListenHost:     "0.0.0.0",
-		HostBridge:     "127.0.0.1",
 		NatsReplicas:   1,
 		Webhooks:       []string{"github", "slack"},
 		ReviewerAppId:  &appID,

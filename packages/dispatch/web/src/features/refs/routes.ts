@@ -28,6 +28,7 @@ export type IssueRoute =
   | ({ key: string; kind: "spec" } & BlockTarget)
   | { key: string; kind: "conversation" }
   | { key: string; kind: "activity" }
+  | { key: string; kind: "decisions" }
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
   | ({ key: string; kind: "artifact"; slug: string; version?: number } & BlockTarget)
@@ -118,7 +119,16 @@ export interface InboxRoute {
    *  with nothing chosen is absent, never an empty array. */
   filters?: Partial<Record<InboxFilterField, readonly string[]>>;
 }
-export type IssueTab = "spec" | "conversation" | "children" | "artifacts" | "activity";
+export type IssueTab =
+  | "spec"
+  | "conversation"
+  | "children"
+  | "artifacts"
+  | "activity"
+  | "decisions";
+
+/** The slug of an issue's `decisions.md`, the document its Decisions tab is a view of. */
+export const DECISIONS_DOCUMENT_SLUG = "decisions-md";
 
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
@@ -178,6 +188,9 @@ export function issueTabForRoute(
   }
   if (route.kind === "activity") {
     return "activity";
+  }
+  if (route.kind === "decisions") {
+    return "decisions";
   }
   if (route.kind === "artifacts") {
     return "artifacts";
@@ -388,6 +401,9 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   if (target === "activity") {
     return { key, kind: "activity" };
   }
+  if (target === "decisions") {
+    return { key, kind: "decisions" };
+  }
   if (target === "children") {
     return { key, kind: "children" };
   }
@@ -533,6 +549,14 @@ function pageRoutes(
   if (route === undefined || (isProjectRoute(route) && route.kind !== "document")) {
     return undefined;
   }
+  // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
+  // whatever its fragment, as the server's `text` and the agent client read the page.
+  if (route.kind === "decisions") {
+    return {
+      block: undefined,
+      page: { key: route.key, kind: "artifact", slug: DECISIONS_DOCUMENT_SLUG },
+    };
+  }
   if ("slug" in route && !artifactSlugOnlyPattern.test(route.slug)) {
     return undefined;
   }
@@ -623,6 +647,9 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   }
   if (route.kind === "activity") {
     return `${issue}/activity`;
+  }
+  if (route.kind === "decisions") {
+    return `${issue}/artifact/${DECISIONS_DOCUMENT_SLUG}`;
   }
   if (route.kind === "children") {
     return `${issue}/children`;
@@ -802,6 +829,8 @@ export function shortForm(route: DispatchReferenceRoute): string {
       return `${route.key} log`;
     case "activity":
       return `${route.key} activity`;
+    case "decisions":
+      return `${route.key} decisions`;
     case "children":
       return `${route.key} children`;
     case "artifacts":
@@ -868,6 +897,9 @@ export function buildIssuePath(route: IssueRoute): string {
   }
   if (route.kind === "activity") {
     return `${issue}/activity`;
+  }
+  if (route.kind === "decisions") {
+    return `${issue}/decisions`;
   }
   if (route.kind === "children") {
     return `${issue}/children`;

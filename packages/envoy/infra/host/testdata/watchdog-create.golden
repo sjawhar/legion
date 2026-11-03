@@ -8,7 +8,6 @@ PORT=9020
 ENVOY_MACHINE_ID=example-host-a
 NATS_URLS=nats://hub.internal.example:4222
 ENVOY_ALLOW_REMOTE_NATS=1
-ENVOY_HOST_BRIDGE=127.0.0.1
 ENVEOF
 
         # Write watchdog config

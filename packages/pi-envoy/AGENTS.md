@@ -643,13 +643,21 @@ owner-only file for its own process into the `askgate/` record directory of the 
 directory of every session id it binds (`bindDispatchSession`), keeps each until shutdown (a shell
 or kernel started before a switch still acts as the old session), and on a clean exit removes its
 own files and its marker store; the CLI's daily prune (`sweepStores`) removes the store of a
-process that crashed. `bindDispatchSession` also sets `DISPATCH_STATE_DIR` when it is unset, so a
-command that changes `HOME` or `XDG_STATE_HOME` still finds the record, and a record it cannot
-write after a switch is a UI notice at once. For each literal call it lets run, the gate mints one
-single-use marker in that store (`mintFor`): the argv the CLI gets, bound behind a review or a
-deliberate pass (a rebuttal, a breaker trip) to the dry run's arguments and to the sha256 of each
-file the argv names (`fileOperands`), as the gate read it in place; argv-only for a call no verdict
-stands behind (`UNREVIEWED_OUTCOMES`, a halt and another provider among them) and
+process that crashed. The owner names its pid namespace (`pidNamespace`, in the file and in the
+store's name), since the host and every agent box share one state directory: a reader looks up by
+pid only an owner of its own namespace, and counts one of another namespace live while its store
+changed within `MARKER_MAX_AGE_MS`. So the instance touches its store every `STORE_BEAT_MS`
+(`keepStore`) while it keeps a record, and every write of its owner file (`writeAskgateRecord`,
+`setRecordMode`) makes the store first, so a record never names a store another process removed
+for longer than one call. A store an earlier pi-envoy named without a namespace may be a live
+process's of another namespace, so the prune keeps it for 14 days
+(`UNNAMESPACED_STORE_MAX_AGE_MS`). `bindDispatchSession` also sets `DISPATCH_STATE_DIR` when it is
+unset, so a command that changes `HOME` or `XDG_STATE_HOME` still finds the record, and a record it
+cannot write after a switch is a UI notice at once. For each literal call it lets run, the gate
+mints one single-use marker in that store (`mintFor`): the argv the CLI gets, bound behind a review
+or a deliberate pass (a rebuttal, a breaker trip) to the dry run's arguments and to the sha256 of
+each file the argv names (`fileOperands`), as the gate read it in place; argv-only for a call no
+verdict stands behind (`UNREVIEWED_OUTCOMES`, a halt and another provider among them) and
 for a `task` subagent's literal call. A marker goes when its call ends or at shutdown, and the CLI
 refuses one older than two hours (`MARKER_MAX_AGE_MS`). The CLI reads each named file once,
 consumes one matching marker by unlinking it before it posts a gated write under a live record,

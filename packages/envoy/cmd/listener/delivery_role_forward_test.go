@@ -41,7 +41,7 @@ func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testi
 		{"a webhook envelope sent twice", "ses_forward_webhook", []contracts.Envelope{webhook, webhook}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			harness := newListenerDeliveryHarness(t, nil)
+			harness := newListenerDeliveryHarness(t)
 			const role = "forward-dedupe"
 			if err := harness.sessions.Put(tc.holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 				t.Fatalf("register the holder: %v", err)
@@ -75,7 +75,7 @@ func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testi
 					forwardErr = harness.client.RequestCoreTo(subject, item, msgID, timeout)
 					return forwardErr
 				})
-				cfg = wireTestDeliveryWorkers(t, cfg)
+				cfg = wireTestRoleForwarder(t, cfg)
 				item.Topic = contracts.RoleTopicPrefix + role
 				item.Payload = `{"type":"worker-queued"}`
 				item.IssuedAt = contracts.NowMillis()
