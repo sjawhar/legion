@@ -29,9 +29,12 @@ import (
 type brokerRig struct {
 	deps    *listenerDeps
 	handler http.Handler
-	broker  *brokertokentest.StubBroker
-	caller  *brokertokentest.Caller
-	logs    *bytes.Buffer
+	// open is the same routes behind an apiAuth given no broker setting at all, which is the
+	// listener R9 is about: the loopback, no-bearer one a GCP VM and the clustered hub run.
+	open   http.Handler
+	broker *brokertokentest.StubBroker
+	caller *brokertokentest.Caller
+	logs   *bytes.Buffer
 }
 
 // newBrokerRig opens the stores on one bus, opens the spent-proof bucket through the very call
@@ -78,6 +81,7 @@ func newBrokerRig(t *testing.T) *brokerRig {
 	return &brokerRig{
 		deps:    deps,
 		handler: apiAuth("", nil, tokens, nil, logger, routes),
+		open:    apiAuth("", nil, nil, nil, logger, routes),
 		broker:  broker,
 		caller:  brokertokentest.NewCaller(t),
 		logs:    logs,
@@ -93,19 +97,27 @@ func (r *brokerRig) register(t *testing.T, sessionID string) {
 	}
 }
 
-// send drives one request through the whole stack: the credential, then the route.
+// send drives one POST through the whole stack: the credential, then the route.
 func (r *brokerRig) send(t *testing.T, token, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return r.call(t, r.handler, http.MethodPost, token, path, body)
+}
+
+// call is send for the routes that are not POSTs and for the listener that takes no broker
+// token: one request of any method, through the handler named.
+func (r *brokerRig) call(t *testing.T, handler http.Handler, method, token, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	recorder := httptest.NewRecorder()
-	r.handler.ServeHTTP(recorder, brokerTokenRequest(t, r.caller, http.MethodPost, path, token, body))
+	handler.ServeHTTP(recorder, brokerTokenRequest(t, r.caller, method, path, token, body))
 	return recorder
 }
 
 // The whole of R6 on a real bus: a request presenting a broker access token acts as the session
-// that token names and as no other, on each of the five routes that act as a session; a revoked
+// that token names and as no other, on each of the eight routes that act as a session; a revoked
 // token reaches no route at all; a token naming a service and no person is admitted as any other
 // session's is; and a request presenting no token is served exactly as it was before this
-// credential existed.
+// credential existed. R9 is here too: the same routes behind a listener given no broker setting
+// serve that very presentation and read no credential out of it (rig.open).
 func TestBrokerTokenBindsEveryWriteRouteToTheSessionItNames(t *testing.T) {
 	rig := newBrokerRig(t)
 	const (
@@ -224,6 +236,80 @@ func TestBrokerTokenBindsEveryWriteRouteToTheSessionItNames(t *testing.T) {
 			if answer.Code != http.StatusOK {
 				t.Fatalf("GET %s under a token naming %s: status = %d, want 200; body = %s", path, bound, answer.Code, answer.Body.String())
 			}
+		}
+	})
+
+	// The three routes that act on one session without naming it in a message body: the replay of
+	// a session's inbox, and the two deletes, whose session is the path. Each is driven as the
+	// session the token names and then as a session it does not.
+	t.Run("replay reads only the session the token names", func(t *testing.T) {
+		own := rig.send(t, token, "/v1/replay",
+			`{"session_id":"`+bound+`","subjects":[{"subject":"notifications.agent.`+bound+`"}]}`)
+		if own.Code != http.StatusOK {
+			t.Fatalf("replaying %s's own inbox: status = %d, want 200; body = %s", bound, own.Code, own.Body.String())
+		}
+		refused := rig.send(t, token, "/v1/replay",
+			`{"session_id":"`+other+`","subjects":[{"subject":"notifications.agent.`+other+`"}]}`)
+		if refused.Code != http.StatusForbidden {
+			t.Fatalf("replaying %s's inbox under a token naming %s: status = %d, want 403; body = %s",
+				other, bound, refused.Code, refused.Body.String())
+		}
+	})
+
+	t.Run("a session's interests are removed only under the token that names it", func(t *testing.T) {
+		refused := rig.call(t, rig.handler, http.MethodDelete, token, "/v1/interests/"+other, "")
+		if refused.Code != http.StatusForbidden {
+			t.Fatalf("DELETE /v1/interests/%s under a token naming %s: status = %d, want 403; body = %s",
+				other, bound, refused.Code, refused.Body.String())
+		}
+		if _, err := rig.deps.registry.Get(context.Background(), other); err != nil {
+			t.Fatalf("read %s's interests after the refusal: %v", other, err)
+		}
+		own := rig.call(t, rig.handler, http.MethodDelete, token, "/v1/interests/"+bound, "")
+		if own.Code != http.StatusNoContent {
+			t.Fatalf("DELETE /v1/interests/%s under its own token: status = %d, want 204; body = %s",
+				bound, own.Code, own.Body.String())
+		}
+	})
+
+	t.Run("a session registration is removed only under the token that names it", func(t *testing.T) {
+		refused := rig.call(t, rig.handler, http.MethodDelete, token, "/v1/sessions/"+other, "")
+		if refused.Code != http.StatusForbidden {
+			t.Fatalf("DELETE /v1/sessions/%s under a token naming %s: status = %d, want 403; body = %s",
+				other, bound, refused.Code, refused.Body.String())
+		}
+		if _, err := rig.deps.sessions.Refresh(context.Background(), other); err != nil {
+			t.Fatalf("%s's registration after the refusal: %v", other, err)
+		}
+		// The Claude Code /clear handoff's own shape: the client instance id of the process
+		// leaving, beside the session its token still names, since it deregisters the session it
+		// hands off from before it adopts the new id.
+		own := rig.call(t, rig.handler, http.MethodDelete, token,
+			"/v1/sessions/"+bound+"?client_instance_id=4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a", "")
+		if own.Code != http.StatusOK {
+			t.Fatalf("DELETE /v1/sessions/%s under its own token: status = %d, want 200; body = %s",
+				bound, own.Code, own.Body.String())
+		}
+		if !strings.Contains(own.Body.String(), `"deleted":true`) {
+			t.Fatalf("DELETE /v1/sessions/%s answered %s, want the registration gone", bound, own.Body.String())
+		}
+	})
+
+	t.Run("a listener with no broker setting reads no credential out of the same request", func(t *testing.T) {
+		// R9: with none of the broker variables set, the request the listener above holds to one
+		// session is served by this one as an unauthenticated request was before this credential
+		// existed — it names any session it likes — and nothing of it reaches the broker. A
+		// client presents a broker token to whatever listener it is pointed at, so refusing it
+		// here would lock every such client out of the listeners that take no broker token.
+		asked := rig.broker.Count()
+		answer := rig.call(t, rig.open, http.MethodPost, token, "/v1/interests/subscribe",
+			`{"session_id":"`+other+`","topics":[]}`)
+		if answer.Code != http.StatusOK {
+			t.Fatalf("subscribing as %s under a DPoP presentation to a listener that takes no broker token: status = %d, want 200; body = %s",
+				other, answer.Code, answer.Body.String())
+		}
+		if asked != rig.broker.Count() {
+			t.Fatalf("the listener that takes no broker token made %d introspections, want none", rig.broker.Count()-asked)
 		}
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"authelia.com/provider/oauth2/handler/rfc9449"
 	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/brokertoken/brokertokentest"
 	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 // The origin this file's listener is reached at: a loopback name, so the Host fence an open
@@ -51,9 +55,25 @@ func (s *spentProofsInMemory) CheckAndSetDPoPProofUsed(_ context.Context, jti, _
 	return used, nil
 }
 
+// spentProofsUnanswered is the spent-proof store a NATS fault leaves behind: it decides nothing,
+// so the listener cannot judge the presentation at all. It is the listener's own failure, not
+// the token's, which is why apiAuth answers it the 503 every unjudged presentation gets.
+type spentProofsUnanswered struct{}
+
+func (spentProofsUnanswered) CheckAndSetDPoPProofUsed(context.Context, string, string, string, string, string, time.Time) (bool, error) {
+	return false, errors.New("nats: no responders available for request")
+}
+
 // listenerBrokerTokens is the credential apiAuth takes, built over broker and ready to serve, as
 // a listener whose spent-proof bucket is open holds it.
 func listenerBrokerTokens(t *testing.T, broker *brokertokentest.StubBroker) *brokerTokens {
+	t.Helper()
+	return listenerBrokerTokensOver(t, broker, &spentProofsInMemory{})
+}
+
+// listenerBrokerTokensOver is listenerBrokerTokens over the spent-proof store named, which is
+// how the outcomes of that store reach apiAuth.
+func listenerBrokerTokensOver(t *testing.T, broker *brokertokentest.StubBroker, replay rfc9449.DPoPReplayStorage) *brokerTokens {
 	t.Helper()
 	tokens := newBrokerTokens(listenerBrokerConfig{
 		BrokerURL:        broker.Server.URL,
@@ -64,7 +84,7 @@ func listenerBrokerTokens(t *testing.T, broker *brokertokentest.StubBroker) *bro
 		BrokerURL: broker.Server.URL,
 		Account:   listenerBrokerAccount("listener-account-token"),
 		Origin:    listenerBrokerOrigin,
-		Replay:    &spentProofsInMemory{},
+		Replay:    replay,
 		Address:   listenerSourceAddress,
 	})
 	if err != nil {
@@ -242,10 +262,15 @@ func TestAPIAuthBrokerToken(t *testing.T) {
 			wantReason: "not_a_session",
 		},
 		{
-			name:       "refuses a DPoP presentation to a listener that takes none",
+			// R9: with none of the broker variables set the listener takes no such credential,
+			// so the header is one it does not know and the open listener serves the request
+			// as it served every unauthenticated one before this credential existed. Refusing
+			// it would lock out every client that holds a broker route of its own — the
+			// loopback, no-bearer listener a GCP VM and the clustered hub run is called by
+			// exactly those clients.
+			name:       "serves a DPoP presentation to a listener that takes none, as it always did",
 			token:      personToken,
-			wantStatus: http.StatusUnauthorized,
-			wantReason: "not_configured",
+			wantStatus: http.StatusOK,
 		},
 		{
 			name:       "answers a DPoP presentation while the spent-proof bucket is still opening with the starting 503",
@@ -291,7 +316,11 @@ func TestAPIAuthBrokerToken(t *testing.T) {
 				if err := json.Unmarshal(recorder.Body.Bytes(), &admitted); err != nil {
 					t.Fatalf("decode what the handler was handed: %v", err)
 				}
-				if !admitted.Bound || admitted.Session != tc.wantSession || admitted.Service != tc.wantService {
+				// An admitted broker caller always names a session (a live token naming none
+				// is refused not_a_session), so the request the listener bound one for is
+				// exactly the one that wants a session back. The listener that takes no broker
+				// token binds none: it passed the request through untouched.
+				if admitted.Bound != (tc.wantSession != "") || admitted.Session != tc.wantSession || admitted.Service != tc.wantService {
 					t.Fatalf("the handler was handed %+v, want session %q and service %q", admitted, tc.wantSession, tc.wantService)
 				}
 			} else if body := recorder.Body.String(); tc.wantStatus == http.StatusUnauthorized && strings.Contains(body, tc.wantReason) {
@@ -361,6 +390,33 @@ func TestAPIAuthAnswers503WhenTheBrokerCannotBeReached(t *testing.T) {
 		t.Fatal("the 503 carries no Retry-After")
 	}
 	assertBrokerRejectionLog(t, logged.String(), "unavailable", token, "")
+}
+
+// A spent-proof store that did not answer is not a refusal of the caller's token either: the
+// listener could not run its own half of the check, so nothing was decided about the token. It
+// is the same 503 with the same Retry-After the broker's silence gets, and for the same reason
+// Dispatch answers that failure 503 BROKER_UNAVAILABLE: a client does not retry a 401, so a
+// NATS fault of a few seconds answered as one would fail every send a live token makes.
+func TestAPIAuthAnswers503WhenTheSpentProofStoreCannotAnswer(t *testing.T) {
+	broker := brokertokentest.NewStubBroker(t)
+	caller := brokertokentest.NewCaller(t)
+	const token = "access-token-whose-proof-could-not-be-recorded"
+	broker.Says(token, sessionAnswer("ses_unrecorded", "ada@example.com", caller.JKT()))
+	tokens := listenerBrokerTokensOver(t, broker, spentProofsUnanswered{})
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+
+	recorder := httptest.NewRecorder()
+	var logged bytes.Buffer
+	request := brokerTokenRequest(t, caller, http.MethodPost, "/v1/messages/publish", token, `{}`)
+	apiAuth("", nil, tokens, nil, logging.NewWithWriter("test-machine", &logged), next).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if retryAfter := recorder.Header().Get("Retry-After"); retryAfter != "1" {
+		t.Fatalf("Retry-After = %q, want 1: the caller is asked to come back", retryAfter)
+	}
+	assertBrokerRejectionLog(t, logged.String(), brokerTokenCheckFailed, token, request.Header.Get("DPoP"))
 }
 
 // RFC 9449 Section 7.2: a DPoP-bound token presented under any other scheme is refused, and a
@@ -554,5 +610,86 @@ func TestAPIAuthReadsOnlyTheDPoPSchemeAsABrokerToken(t *testing.T) {
 		if recorder.Code != http.StatusNoContent {
 			t.Fatalf("Authorization %q: status = %d, want 204 from the open listener; body = %s", authorization, recorder.Code, recorder.Body.String())
 		}
+	}
+}
+
+// R9, the whole of it for this credential: with none of the broker variables set the listener
+// is the listener it was before this credential existed, whatever a client presents. A client
+// sends `Authorization: DPoP` whenever it has a broker and an identity to trade and no Envoy
+// bearer is set (packages/envoy-client/src/envoy-settings.ts), so it presents one to every
+// listener it is pointed at — including the loopback, no-bearer listener a GCP VM and the
+// clustered hub run, which takes no broker token. Such a listener reads that header as it read
+// every Authorization header it did not know: the open one serves the request, the one that
+// requires a bearer answers the 401 it always answered. It asks the broker nothing, binds no
+// caller, and writes no refusal of a credential kind it does not take.
+func TestAPIAuthWithNoBrokerSettingIsTheListenerItAlwaysWas(t *testing.T) {
+	broker := brokertokentest.NewStubBroker(t)
+	caller := brokertokentest.NewCaller(t)
+	const token = "access-token-of-a-session-on-another-listener"
+	broker.Says(token, sessionAnswer("ses_elsewhere", "ada@example.com", caller.JKT()))
+
+	issuer := oidctest.New(t)
+	verifier, err := oidc.New(context.Background(), issuer.URL(), listenerTestAudience)
+	if err != nil {
+		t.Fatalf("oidc.New(%q, %q): %v", issuer.URL(), listenerTestAudience, err)
+	}
+
+	bound := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, bound = brokerCaller(r)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	for _, tc := range []struct {
+		name       string
+		shared     string
+		verifier   *oidc.Verifier
+		wantStatus int
+	}{
+		{
+			name:       "an open listener serves it",
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name:       "a listener that requires the shared bearer answers its own 401",
+			shared:     "expected-token",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "a listener that requires a service-account token answers its own 401",
+			verifier:   verifier,
+			wantStatus: http.StatusUnauthorized,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bound = false
+			var logged bytes.Buffer
+			handler := apiAuth(tc.shared, tc.verifier, nil, nil, logging.NewWithWriter("test-machine", &logged), next)
+			request := brokerTokenRequest(t, caller, http.MethodPost, "/v1/messages/publish", token, `{}`)
+
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tc.wantStatus, recorder.Body.String())
+			}
+			if tc.wantStatus == http.StatusUnauthorized {
+				if body := recorder.Body.String(); body != "{\"error\":\"unauthorized\"}\n" {
+					t.Fatalf("body = %q, want the one 401 body every refused credential shares", body)
+				}
+			} else if bound {
+				t.Fatal("a listener that takes no broker token handed the route a broker caller")
+			}
+			if broker.Count() != 0 {
+				t.Fatalf("the listener made %d introspections, want none: it takes no broker token", broker.Count())
+			}
+			assertBrokerRejectionLog(t, logged.String(), "", token, request.Header.Get("DPoP"))
+		})
+	}
+
+	// And the boot log says what it always said: this listener names the bearers it takes and
+	// no third credential.
+	if got := describeListenerAPIAuth("expected-token", issuer.URL(), nil); got != "shared token and oidc "+issuer.URL() {
+		t.Fatalf("describeListenerAPIAuth with no broker setting = %q, want the two bearers alone", got)
 	}
 }

@@ -114,11 +114,6 @@ func resolveListenerBrokerConfig(getenv func(string) string) (listenerBrokerConf
 	return config, nil
 }
 
-// errBrokerTokensOff is a DPoP presentation to a listener that takes no broker token: there is no
-// such credential kind here, so it is the 401 any Authorization header this listener does not
-// know has always been.
-var errBrokerTokensOff = errors.New("this listener takes no broker access token")
-
 // errBrokerTokensStarting is a DPoP presentation that arrives after /v1 is mounted and before the
 // spent-proof bucket is open, which is the window between the listening socket and NATS. It is
 // the starting gate's 503 rather than a 401: the credential is configured and the listener cannot
@@ -182,12 +177,11 @@ func (b *brokerTokens) open(conn *nats.Conn, replicas int) error {
 	return nil
 }
 
-// verify decides the caller of r, and is the whole of what apiAuth asks of this credential: a nil
-// holder is a listener that takes none, and a holder with no verifier yet is one still starting.
+// verify decides the caller of r, and is the whole of what apiAuth asks of this credential. It is
+// reached only on a listener that takes broker tokens (apiAuth checks that before it reads the
+// scheme), so the one state it still answers for itself is a holder whose spent-proof bucket is
+// not open yet.
 func (b *brokerTokens) verify(r *http.Request) (brokertoken.Caller, error) {
-	if b == nil {
-		return brokertoken.Caller{}, errBrokerTokensOff
-	}
 	verifier := b.verifier.Load()
 	if verifier == nil {
 		return brokertoken.Caller{}, errBrokerTokensStarting
@@ -314,13 +308,23 @@ func brokerCaller(r *http.Request) (brokertoken.Caller, bool) {
 // where it decides it, one line naming both sessions and the path and never the token, as
 // apiAuth's own refusals do.
 //
-// It is called by each of the five routes that act as a session, after that route has read the
-// session its body names, rather than being a wrapper around them: the routes name the session
-// in four different shapes (two message bodies' source_session, subscribe's and unsubscribe's
-// session_id, and the role claim's), and a wrapper would have to decode each body a second time
-// to find it. The read routes that name another session by design — a registry entry, a
-// session's interests, the session list — call nothing here: narrowing those would stop every
-// session looking another up.
+// It is called by each of the eight routes that act as a session, after that route has read the
+// session it names, rather than being a wrapper around them: the routes name the session in six
+// different shapes (two message bodies' source_session, subscribe's, unsubscribe's and replay's
+// session_id, the role claim's, and the path of the two DELETEs), and a wrapper would have to
+// decode each body a second time to find it. The read routes that name another session by design
+// — a registry entry, a session's interests, the session list — call nothing here: narrowing
+// those would stop every session looking another up.
+//
+// The two DELETEs are held to the token's session like the rest, the Claude Code /clear handoff
+// included: that handoff removes the registration of the session it hands off from while it is
+// still that session (`identity.set(next)` runs after the deregistration,
+// packages/claude-envoy/src/envoy-channel-server.ts, adoptHandoff), and the token it presents
+// names the session its client is acting as at the moment of the call
+// (packages/envoy-client/src/broker-credential.ts). So the handoff's DELETE names the session its
+// own token names, and no rule beyond this one is needed to keep it working. The
+// client_instance_id that DELETE carries decides something else and keeps deciding it: which
+// client instance's registration under that one session id may be removed.
 //
 // An empty session is no refusal: the body names no session, so the request acts as none, and
 // nothing is recorded under another session's name. The two message routes alone allow that, and

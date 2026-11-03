@@ -33,12 +33,21 @@ const bearerPrefix = "Bearer "
 // authentication path; the failure class goes to the log and never to the caller, since naming
 // it would tell an unauthenticated client which credential the listener is configured for.
 //
-// The broker-token branch is decided by the scheme alone and comes before both bearer ones: RFC
-// 9449 Section 7.2 refuses a DPoP-bound token presented under any other scheme, so a DPoP
+// The broker-token branch is taken only on a listener that takes this credential (brokers is
+// nil on one that does not), and there the scheme alone decides it, before both bearer ones:
+// RFC 9449 Section 7.2 refuses a DPoP-bound token presented under any other scheme, so a DPoP
 // presentation is this credential whatever the listener's other settings are, and is never
 // retried as a bearer. It comes before the open pass-through too, which is what binds a session
 // on an open listener: a caller that presents a broker token is held to the session it names
 // even where /v1 would have served the request with no credential at all.
+//
+// A listener with none of the broker variables set reads that header as it read every
+// Authorization header it did not know before this credential existed: the open listener serves
+// the request, and a listener that requires a bearer answers it the same 401 it always did.
+// That is what keeps the loopback, no-bearer listener the GCP VMs and the clustered hub run
+// serving the clients that hold a broker route of their own — a client sends Authorization:
+// DPoP whenever it has a broker and an identity to trade and no Envoy bearer is set, whatever
+// the listener it is calling takes.
 //
 // Configuring it opens nothing and closes nothing. A request presenting no token is judged
 // exactly as it was before this credential existed — the open listener still serves it, the Host
@@ -68,7 +77,7 @@ func apiAuth(token string, verifier *oidc.Verifier, brokers *brokerTokens, allow
 				return
 			}
 		}
-		if _, presented := brokertoken.Presented(r); presented {
+		if _, presented := brokertoken.Presented(r); brokers != nil && presented {
 			caller, err := brokers.verify(r)
 			if err != nil {
 				refuseBrokerToken(w, logger, r, brokers, err)
@@ -112,17 +121,20 @@ func apiAuth(token string, verifier *oidc.Verifier, brokers *brokerTokens, allow
 // line that says why: the class, as the service-account branch logs oidc.Reason's, the path, and
 // never the token or the proof.
 //
-// Two of the outcomes are not refusals of the caller and are not answered as one. A broker that
-// gave no answer is a 503, for the reason Dispatch answers one: a caller told its token was
-// refused would discard a token that may be perfectly live, where a 503 asks it to come back.
-// A source address with no introspection left in its bucket is the 429 that bucket exists to
-// write, carrying the wait it must come back after; nothing of it reached the broker. Every
-// other outcome is the same 401 and the same body every other refused credential gets here, so
-// the answer tells an unauthenticated caller nothing about which credentials this listener
-// takes.
+// Three of the outcomes are not refusals of the caller and are not answered as one. A broker
+// that gave no answer is a 503, for the reason Dispatch answers one: a caller told its token was
+// refused would discard a token that may be perfectly live, where a 503 asks it to come back. A
+// spent-proof store that did not answer is the same 503: the listener could not run the check,
+// which is its own failure rather than the token's, and a client does not retry a 401, so a NATS
+// fault of a few seconds would otherwise fail every send a live token makes. A source address
+// with no introspection left in its bucket is the 429 that bucket exists to write, carrying the
+// wait it must come back after; nothing of it reached the broker. Every other outcome is the
+// same 401 and the same body every other refused credential gets here, so the answer tells an
+// unauthenticated caller nothing about which credentials this listener takes.
 func refuseBrokerToken(w http.ResponseWriter, logger *logging.Logger, r *http.Request, brokers *brokerTokens, err error) {
+	reason := brokerTokenReason(err)
 	logger.Warn("listener: broker token rejected",
-		slog.String("reason", brokerTokenReason(err)),
+		slog.String("reason", reason),
 		slog.String("path", r.URL.Path))
 	switch {
 	case errors.Is(err, errBrokerTokensStarting):
@@ -134,17 +146,23 @@ func refuseBrokerToken(w http.ResponseWriter, logger *logging.Logger, r *http.Re
 	case errors.Is(err, brokertoken.ErrRateLimited):
 		w.Header().Set("Retry-After", strconv.Itoa(brokers.retryAfter()))
 		writeJSONError(w, http.StatusTooManyRequests, "too many access tokens checked from this address")
+	case reason == brokerTokenCheckFailed:
+		w.Header().Set("Retry-After", "1")
+		writeJSONError(w, http.StatusServiceUnavailable, "this access token could not be checked; try again in a minute")
 	default:
 		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 	}
 }
 
+// brokerTokenCheckFailed is the class of a presentation this listener could not judge at all:
+// its spent-proof store did not answer. It is this listener's own failure, so refuseBrokerToken
+// answers it the 503 every other unjudged presentation gets.
+const brokerTokenCheckFailed = "check_failed"
+
 // brokerTokenReason is the class one refused presentation goes into the log under, the
 // vocabulary an operator filters on. It names what was wrong and never what was presented.
 func brokerTokenReason(err error) string {
 	switch {
-	case errors.Is(err, errBrokerTokensOff):
-		return "not_configured"
 	case errors.Is(err, errBrokerTokensStarting):
 		return "starting"
 	case errors.Is(err, brokertoken.ErrNotActive):
@@ -160,9 +178,9 @@ func brokerTokenReason(err error) string {
 	case errors.Is(err, brokertoken.ErrBrokerUnreachable):
 		return "unavailable"
 	}
-	// The residue is this listener's own failure to run the check — its spent-proof bucket did
+	// The residue is this listener's own failure to run the check — its spent-proof store did
 	// not answer — which brokertoken reports as neither the broker's nor the caller's.
-	return "check_failed"
+	return brokerTokenCheckFailed
 }
 
 // servesHost reports whether a request's Host names this listener: its name, port stripped,

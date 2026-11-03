@@ -644,7 +644,12 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 // no body, as this route always has. The delete runs within sendRequestBudget of the request's
 // own context, so one the bus does not answer is the bus-unavailable 503 with Retry-After: 1
 // inside the caller's attempt (writeStoreError).
-func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
+//
+// A request presenting a broker access token may remove only the registration of the session
+// that token names, and is refused 403 for any other (sessionNotBound): this route acts as the
+// session it names. The Claude Code /clear handoff still deregisters its predecessor, since it
+// does so while it is still that session.
+func deleteSessionHandler(sessions *session.SessionRegistry, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -653,6 +658,10 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/sessions/")
 		if sessionID == "" {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
+			return
+		}
+		if refusal := sessionNotBound(r, logger, sessionID); refusal != "" {
+			writeJSONError(w, http.StatusForbidden, refusal, "session_id")
 			return
 		}
 		instanceID := strings.TrimSpace(r.URL.Query().Get("client_instance_id"))
@@ -1066,7 +1075,11 @@ func interestRowFor(sessions *session.SessionRegistry, item store.Interest) inte
 // writeBusUnavailable gives it). DELETE removes within the same budget, and answers store work that
 // did not answer with that 503 too (writeStoreError). removed, when not nil, is called after a
 // DELETE removed a session's interests.
-func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRegistry, removed func(ctx context.Context, sessionID string)) http.HandlerFunc {
+//
+// A DELETE presenting a broker access token may remove only the interests of the session that
+// token names, and is refused 403 for any other (sessionNotBound). The GET and the list are not
+// narrowed: reading another session's record is what those are for.
+func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRegistry, removed func(ctx context.Context, sessionID string), logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 
@@ -1105,6 +1118,10 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 			}
 			writeJSON(w, http.StatusOK, interestRowFor(sessions, item))
 		case http.MethodDelete:
+			if refusal := sessionNotBound(r, logger, sessionID); refusal != "" {
+				writeJSONError(w, http.StatusForbidden, refusal, "session_id")
+				return
+			}
 			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 			defer cancel()
 			if err := registry.Remove(ctx, sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
@@ -1614,12 +1631,12 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 
 	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry, d.sessions, func(ctx context.Context, sessionID string) {
 		d.consumers.refollow(ctx, d, sessionID)
-	}))
+	}, logger))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
-	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
+	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions, logger))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(d, logger))
-	v1.HandleFunc("/v1/replay", replayHandler(d))
+	v1.HandleFunc("/v1/replay", replayHandler(d, logger))
 	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})

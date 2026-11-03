@@ -1,0 +1,24 @@
+kind: Fixed
+body: |
+  An Envoy listener with none of the `ENVOY_AGENT_SECRETS_*` variables set serves a client that
+  presents `Authorization: DPoP` again. A client sends that header to whatever listener it is
+  pointed at whenever it has a secrets broker and a machine identity to trade and no Envoy bearer
+  is set, so the loopback, no-bearer listener a GCP VM and the clustered hub run was answering its
+  own clients 401. Such a listener now reads the header as it read every Authorization header it
+  did not know before this credential existed: the open listener serves the request with no
+  session bound, a listener that requires a bearer answers the 401 it always answered, no broker
+  is asked anything, and nothing is logged.
+  Three more routes that act on one session are now held to the session a broker access token
+  names, as the five write routes already were: `POST /v1/replay`, `DELETE /v1/sessions/<id>` and
+  `DELETE /v1/interests/<id>`. A token issued for one session can no longer read another session's
+  agent inbox, remove its registration or drop its interests; each is refused 403 naming both
+  sessions. The Claude Code `/clear` handoff still deregisters the session it hands off from,
+  which it does while it is still that session, and the `client_instance_id` that request carries
+  goes on deciding which client instance's registration may be removed.
+  A presentation the listener could not judge because its spent-proof store did not answer is now
+  answered `503` with `Retry-After: 1` rather than `401`, as a broker that did not answer already
+  was: the token was never judged, and a client does not retry a 401, so a NATS fault of a few
+  seconds was failing sends made with a perfectly live token.
+time: 2026-11-03T12:00:00.000000000Z
+custom:
+  Issue: pr2636

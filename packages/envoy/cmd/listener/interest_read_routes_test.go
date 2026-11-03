@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -90,7 +91,7 @@ func TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *t
 		return get(sessionEntryHandler(state), "/v1/registry/"+id)
 	}
 	interests := func(id string) (*httptest.ResponseRecorder, time.Duration) {
-		return get(adminInterestsHandler(registry, sessions, nil), "/v1/interests/"+id)
+		return get(adminInterestsHandler(registry, sessions, nil, logging.New("test")), "/v1/interests/"+id)
 	}
 	wantTopics := func(t *testing.T, info sessionInfo, want []string) {
 		t.Helper()

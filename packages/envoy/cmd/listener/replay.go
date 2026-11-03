@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logging"
 )
 
 // The bounds of one replay answer. The read budget stays well inside the HTTP server's 10 s write
@@ -124,7 +125,11 @@ func writeReplayReadError(w http.ResponseWriter, err error) {
 // refused 400: it becomes the agent subject as it is and is matched against requested subjects by
 // equality, so a session_id of `>` or `*` would make a wildcard such as notifications.agent.> pass
 // as the caller's own agent subject and read every other session's inbox.
-func replayHandler(d *listenerDeps) http.HandlerFunc {
+//
+// A request presenting a broker access token may replay only the session that token names, and
+// is refused 403 for any other (sessionNotBound): the answer is that session's own agent inbox
+// and the topics its interests follow, so the route acts as the session it names.
+func replayHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -143,6 +148,10 @@ func replayHandler(d *listenerDeps) http.HandlerFunc {
 		if !replaySessionToken(body.SessionID) {
 			writeJSONError(w, http.StatusBadRequest,
 				"session_id must be one NATS subject token: no ., *, >, whitespace or control character", "session_id")
+			return
+		}
+		if refusal := sessionNotBound(r, logger, body.SessionID); refusal != "" {
+			writeJSONError(w, http.StatusForbidden, refusal, "session_id")
 			return
 		}
 		if len(body.Subjects) > replayMaxSubjects {
