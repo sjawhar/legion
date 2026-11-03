@@ -422,14 +422,15 @@ func (r *renderer) block(n *Node, prefix string) {
 		}
 		colons := typedFence(n, len(prefix))
 		fence := strings.Repeat(":", colons)
-		if holdsOnlyAnEmptyParagraph(n) && (r.inTightItemBelowQuotes() || r.inFootnote() && r.itemBelowQuotes() != nil) {
+		if holdsOnlyAnEmptyParagraph(n) && r.itemBelowQuotes() != nil && !itemWritesOnly(r.itemBelowQuotes(), n) {
 			// Its empty paragraph written as a line would be a blank line in a typed block in a
 			// list item, which the browser editor reads as spacing the item; written as nothing,
-			// both parsers read the typed block back holding it. A spread item is spread by that
-			// very line, so there the line is written and the item reads back spread - but in a
-			// footnote definition the item holds, where that line is read as the definition's end
-			// and as the item's alike and refused (typedDefinitionBlankInItem), the bare form is
-			// the only one that reads back.
+			// both parsers read the typed block back holding it. The one place that line is
+			// written is a spread item this block alone fills (itemWritesOnly), where nothing else
+			// of the item carries the spread - not a tight item, not a spread one whose other
+			// blocks a blank line already stands between, and not a footnote definition the item
+			// holds, where that line is read as the definition's end and as the item's alike and
+			// refused (typedDefinitionBlankInItem).
 			r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix + fence)
 			return
 		}
@@ -450,7 +451,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		// above its closing fence, where the browser editor's parser reads it as the item's
 		// (typedBlankSpreadsItem). A footnote definition the item holds reads that line as its end
 		// and as the item's alike, and is refused by name instead (typedDefinitionBlankInItem).
-		if !r.inFootnote() && itemWritesOnly(r.itemBelowQuotes(), n) {
+		if !r.inFootnote() && !holdsOnlyAnEmptyParagraph(n) && itemWritesOnly(r.itemBelowQuotes(), n) {
 			r.writeSyntax("\n" + strings.TrimRight(prefix, " "))
 		}
 		r.leave()

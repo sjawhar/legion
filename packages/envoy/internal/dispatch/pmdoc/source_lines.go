@@ -242,15 +242,23 @@ func (l sourceLines) lastBefore(line int, past func([]byte) bool) int {
 	return line
 }
 
+// tabWidth is how many columns a tab spans at most: every parser here advances to the next
+// multiple of four.
+const tabWidth = 4
+
 // holdsOnlyBlockIndent reports whether line opens with depth quote markers, each with the space
 // after it, and holds past them nothing but indentation the containers between those quotes and
 // typed's content strip from every line they continue: as far past the quotes' content as typed's
 // own opening line starts, its list item's indentation and the block's own among it
 // (typedDirectiveParser.Continue). What is left of such a line for typed's content is its line
-// ending alone, so the browser editor's parser reads it as no line of typed. A line holding the
-// markers and a tab alone (markerTabEndsLine) is measured otherwise: that quote takes one column of
-// the tab and what is left of it is the line's own, which no block inside the quote strips, so only
-// a line the marker's column leaves nothing of is typed's there, whatever indentation typed carries.
+// ending alone, so the browser editor's parser reads it as no line of typed. Two spellings of the
+// whitespace are measured otherwise, each against the headless engine over every run of spaces and
+// tabs up to three characters, at one to three quotes and every indentation typed can carry: a
+// line holding the markers and a tab alone (markerTabEndsLine), where the quote takes one column
+// of the tab and only a line it leaves nothing of is typed's, whatever indentation typed carries;
+// and a run ending in a tab one of whose tabs begins before the list item's content starts and
+// ends past it (tabCrossesItemContent), which the item cannot strip in part, so the line is the
+// item's whatever indentation typed carries.
 func (l sourceLines) holdsOnlyBlockIndent(line, depth int, typed *typedDirective) bool {
 	if line < 0 || leadingQuoteMarkers(l.text(line)) != depth {
 		return false
@@ -261,11 +269,56 @@ func (l sourceLines) holdsOnlyBlockIndent(line, depth int, typed *typedDirective
 		return false
 	}
 	columns := l.textColumn(past) - l.quoteContentColumn(start, depth)
-	if depth > 0 && l.markerTabEndsLine(start, depth) {
-		return columns == 0
+	if depth > 0 {
+		if l.markerTabEndsLine(start, depth) {
+			return columns == 0
+		}
+		if l.whitespaceEndsInTab(line) && l.tabCrossesItemContent(start, depth, typed) {
+			return false
+		}
 	}
 	indent := l.textColumn(startOf(typed)) - l.quoteContentColumn(startOf(typed), depth)
 	return columns <= indent
+}
+
+// tabCrossesItemContent reports whether a tab in the whitespace past count quote markers on
+// position's line begins before the content of the list item around typed starts and ends past it.
+// A list item strips the columns before its content from every line it continues, and that parser
+// strips no part of a tab, so such a line keeps columns of its own however far typed is indented.
+// With no list item around typed, or one holding nothing, no column answers and none crosses.
+func (l sourceLines) tabCrossesItemContent(position, count int, typed *typedDirective) bool {
+	item, ok := ancestor[*ast.ListItem](typed)
+	if !ok || item.FirstChild() == nil {
+		return false
+	}
+	content := l.textColumn(startOf(item.FirstChild()))
+	index, column := position, 0
+	for ; count > 0; count-- {
+		for index < len(l.source) && (l.source[index] == ' ' || l.source[index] == '\t') {
+			column, index = advanceColumn(column, l.source[index]), index+1
+		}
+		if index >= len(l.source) || l.source[index] != '>' {
+			return false
+		}
+		column, index = column+1, index+1
+	}
+	for index < len(l.source) && (l.source[index] == ' ' || l.source[index] == '\t') {
+		next := advanceColumn(column, l.source[index])
+		if l.source[index] == '\t' && column < content && content < next {
+			return true
+		}
+		column, index = next, index+1
+	}
+	return false
+}
+
+// advanceColumn is the column a character takes the line to, a tab reaching the next multiple of
+// tabWidth.
+func advanceColumn(column int, char byte) int {
+	if char == '\t' {
+		return column + tabWidth - column%tabWidth
+	}
+	return column + 1
 }
 
 // markerTabEndsLine reports whether position's line holds count quote markers and a tab alone, the

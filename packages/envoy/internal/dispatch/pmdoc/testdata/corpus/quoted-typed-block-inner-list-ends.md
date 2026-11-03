@@ -46,3 +46,27 @@ Next.
 > > >   - x
 > > >	
 > > >	
+
+Next.
+
+> > - a
+> >     :::callout{#qi7 kind="note" title="T"}
+> >     - x
+> > 	
+> > 	
+
+Next.
+
+> > - a
+> >     :::callout{#qi8 kind="note" title="T"}
+> >     - x
+> >		
+> >		
+
+Next.
+
+> > 10. a
+> >     :::callout{#qi9 kind="note" title="T"}
+> >     - x
+> > 	
+> > 	
