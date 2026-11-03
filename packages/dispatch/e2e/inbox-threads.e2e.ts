@@ -87,7 +87,13 @@ test("the old Replies address opens the Inbox on its Reply rows, under one Inbox
     await page.goto("/replies");
 
     // The address is the Inbox narrowed to its Reply rows, and the filter says so in a token.
-    await expect(page).toHaveURL(/\/\?type=reply$/);
+    // It is read parameter by parameter rather than whole: the reading pane writes its own
+    // selection into the same address the moment it picks a row (`?item=reply:<thread id>`, which
+    // A7 requires it to hold), so an assertion anchored at the end of the query string is a race
+    // between the redirect and the pane.
+    await expect(page).toHaveURL(
+      (url) => url.pathname === "/" && url.searchParams.get("type") === "reply"
+    );
     await expect(page.locator('[data-inbox-filter-token="type:reply"]')).toHaveAttribute(
       "aria-label",
       "Remove filter Type: Reply"
