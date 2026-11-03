@@ -13,15 +13,10 @@ import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
-import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { compareTimestamps } from "../../lib/timestamps";
 import {
   askUrgencyAccent,
-  badgeBlocking,
-  badgeHigh,
-  badgeLow,
-  badgeMed,
   borderDefault,
   card,
   cardHoverBorder,
@@ -32,21 +27,16 @@ import {
   primaryButtonBg,
   primaryButtonDisabled,
   primaryButtonEnabledHoverBg,
-  surfaceBg,
   textMutedHoverToSecondary,
   textMutedOnSurface,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
-import { AgentName, useAgentText } from "../refs/AgentName";
-import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
-import { Timestamp } from "../refs/Timestamp";
 import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
-import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskApprovalLink } from "./AskApprovalLink";
 import { AskBlockLink } from "./AskBlockLink";
 import {
@@ -55,11 +45,11 @@ import {
   type AskFrame,
   OrphanedAnchorNotice,
 } from "./AskCompletionCard";
+import { AskHeader, hasUrgencyNotch } from "./AskHeader";
 import { AskChoiceRow } from "./AskOptionRow";
 import { AskRecipients } from "./AskRecipients";
 import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
-import { askTurnHolder } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
 import { EarlierApproval } from "./EarlierApproval";
 import { clearReplyDraft } from "./reply-drafts";
@@ -123,14 +113,6 @@ export interface AskCardProps {
    *  collapsed thread over it. No other surface lands on a reply. */
   currentReplyId?: string;
 }
-
-/** The urgency notch's text colour, matching the urgency badge of the same level. */
-const URGENCY_NOTCH_TEXT: Record<Ask["urgency"], string> = {
-  blocking: badgeBlocking.text,
-  high: badgeHigh.text,
-  low: badgeLow.text,
-  med: badgeMed.text,
-};
 
 /** Moves focus from inside the form to the nearest focusable ancestor (in the Inbox, the row, so
  *  j/k/Escape still start from the same place) instead of letting it fall to the document body. */
@@ -296,23 +278,13 @@ export function AskCard({
     }
   });
   const submitHintId = `${answerFieldId}-hint`;
-  const agentText = useAgentText();
-  // The asker as its button's tooltip: a block ask the server indexed with no pending author
-  // has an empty label and reads as "asked". A session's tooltip also carries its full id, since
-  // the innermost title is the one a browser shows, and an untitled session's name is the short
-  // form `session:<8>…` that sessions started in the same minute share.
+  // A block ask the server indexed with no pending author has an empty label and reads as
+  // "asked", with no session handles to open.
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
-  const askerTitle =
-    displayedAsk.author.id === ""
-      ? "asked"
-      : sessionAuthor === undefined
-        ? agentText.label(displayedAsk.author)
-        : `${agentText.label(sessionAuthor)} · ${sessionAuthor.id}`;
   // The copy handles' values: the title the session stamped, as the clipboard has always had it.
   const sessionTitle = sessionAuthor?.origin?.session_title?.trim();
   const tmuxTarget = sessionAuthor?.origin?.tmux;
-  const hasUrgencyNotch =
-    !inBlock && (displayedAsk.urgency === "blocking" || displayedAsk.urgency === "high");
+  const notched = hasUrgencyNotch(displayedAsk, inBlock);
   // The thread's own "still open?" wording must track the post-answer ask, not the possibly
   // stale prop passed to this instance: `completed` renders before an invalidated `ask` prop
   // round-trips down from the parent.
@@ -325,7 +297,6 @@ export function AskCard({
   // The count comes from `displayedAsk`, never from `completed`: answering an ask does not move
   // a backlink count, and the answer response is the one ask shape that carries no count.
   const referencedByCount = displayedAsk.referenced_by_count ?? 0;
-  const turnHolder = askTurnHolder(currentAsk, threadQuery.data?.replies.at(-1));
   // The thread's newest write the card shows, which the Replies mark watches and reads through:
   // the newest reply, unless the record's answer came after it (an answer is a write like a reply).
   const newestReply = threadQuery.data?.replies.at(-1);
@@ -498,6 +469,7 @@ export function AskCard({
           frame={frame}
           markRef={answerIsNewest ? markNewest : undefined}
           onChangeAnswer={canChangeAnswer ? startChanging : undefined}
+          owner={owner}
         />
         {unsentAnswer === "" ? null : (
           <div
@@ -526,7 +498,7 @@ export function AskCard({
       className={
         inBlock
           ? "relative mt-3"
-          : `relative rounded-xl border-l-4 shadow-sm ${isCompact ? "px-3 pt-4 pb-3" : "px-4 pt-5 pb-4"} ${hasUrgencyNotch ? "mt-3" : ""} ${card} ${askUrgencyAccent[displayedAsk.urgency]}`
+          : `relative rounded-xl border-l-4 shadow-sm ${isCompact ? "px-3 pt-4 pb-3" : "px-4 pt-5 pb-4"} ${notched ? "mt-3" : ""} ${card} ${askUrgencyAccent[displayedAsk.urgency]}`
       }
       // The one handle on a card as a whole, carrying the question the card draws: a page-level
       // key that must not fire while the reader is answering an ask (the issue page's priority
@@ -536,117 +508,33 @@ export function AskCard({
       data-ask-card={displayedAsk.id}
       data-testid={`ask-${displayedAsk.id}`}
     >
-      {hasUrgencyNotch ? (
-        <span
-          aria-hidden="true"
-          className={`absolute -top-2 left-3 rounded px-1.5 text-[10px] leading-4 font-semibold tracking-wide uppercase ${surfaceBg} ${URGENCY_NOTCH_TEXT[displayedAsk.urgency]}`}
-        >
-          {URGENCY_LABELS[displayedAsk.urgency].toUpperCase()}
-        </span>
-      ) : null}
-      <AskAnchorHeader ask={displayedAsk} inBlock={inBlock} quoteSpacing="roomy" tone="surface" />
-      <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={displayedAsk} />
-      {inBlock ||
-      displayedAsk.block_id === undefined ||
-      displayedAsk.block_id === null ||
-      displayedAsk.block_artifact === undefined ? null : (
-        <p className={`mt-2 text-sm ${linkText} ${linkHoverText}`}>
-          <AskBlockLink ask={displayedAsk} />
-        </p>
-      )}
-      <div>
-        {isApproval ? (
-          <p className={`text-[10px] font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
-            Approval requested
-          </p>
-        ) : null}
-        {isApproval && documentLink ? (
-          <p className={`mt-1 text-sm ${linkText} ${linkHoverText}`}>
-            <AskApprovalLink ask={displayedAsk} />
-          </p>
-        ) : null}
-        {inBlock ? null : (
-          <div className={`text-[15px] leading-relaxed font-medium ${textPrimaryOnSurface}`}>
-            <MarkdownBody markdown={displayedAsk.question} />
-          </div>
+      {/* One provenance line under the question, in the spec's decided conversation grammar:
+          whose turn it is (the only part a reader acts on), who asked, when, and the ask's
+          own reference, drawn by the one header every surface shows an ask through. The
+          session's own handles - its ID, its title, its tmux target - are chrome a reader
+          wants perhaps once a week, so they fold behind the author chip and open onto their
+          own row. That keeps the line inside the card at 390 px and in a 280 px margin, where
+          a single row could not hold five copy controls without pushing the reference out of
+          reach. */}
+      <AskHeader
+        ask={displayedAsk}
+        control={(name) => (
+          <button
+            aria-expanded={handlesOpen}
+            className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
+            onClick={() => setHandlesOpen((open) => !open)}
+            type="button"
+          >
+            {name}
+            <ChevronIcon expanded={handlesOpen} />
+          </button>
         )}
-        {/* A request to approve again names the approval it follows, under the question (the
-            spec's own placement), with the diff from that version behind Show diff; a first
-            request carries no earlier approval, and EarlierApproval renders nothing for it. */}
-        {displayedAsk.approval === undefined ? null : (
-          <EarlierApproval approval={displayedAsk.approval} />
-        )}
-        {/* One provenance line under the question, in the spec's decided conversation grammar:
-            whose turn it is (the only part a reader acts on), who asked, when, and the ask's
-            own reference. The session's own handles - its ID, its title, its tmux target - are
-            chrome a reader wants perhaps once a week, so they fold behind the author chip and
-            open onto their own row. That keeps the line inside the card at 390 px and in a
-            280 px margin, where a single row could not hold five copy controls without pushing
-            the reference out of reach. */}
-        <div
-          className={`@container mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs ${textMutedOnSurface}`}
-        >
-          {/* Turn, author and time are one group whose names truncate: a separator that wrapped
-              left a line opening - or ending - on a bare "·", and the agents are the only parts
-              that can give up width ("Waiting on you" never does). Below 24rem of line (a phone,
-              a margin) the turn takes a line of its own with no separator after it, and the
-              asker and time share the next: beside the turn and the live link's 44 px touch box
-              the asker's name kept only two letters. A block ask the server indexed with no
-              pending author has an empty label and still says when it was asked. */}
-          <span className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap @max-sm:flex-wrap">
-            {turnHolder === null ? null : (
-              <span
-                className={`${turnHolder === "you" ? "shrink-0" : "min-w-0 truncate"} font-semibold @max-sm:basis-full ${textSecondaryOnSurface}`}
-                data-testid={`turn-${displayedAsk.id}`}
-              >
-                Waiting on {turnHolder === "you" ? "you" : <AgentName actor={turnHolder} inline />}
-              </span>
-            )}
-            {turnHolder === null ? null : (
-              <span className="shrink-0 @max-sm:hidden" aria-hidden="true">
-                ·
-              </span>
-            )}
-            <span className="flex min-w-0 items-center gap-x-1.5">
-              {sessionAuthor === undefined ? (
-                <TruncatedText className="min-w-0" title={askerTitle}>
-                  {displayedAsk.author.id === "" ? (
-                    "asked"
-                  ) : (
-                    <AgentName actor={displayedAsk.author} />
-                  )}
-                </TruncatedText>
-              ) : (
-                // The asker's button keeps its name and opens the session's copy handles; the
-                // component's live link sits beside it, outside the button. `whitespace-pre`
-                // keeps the space before an attribution suffix, which a flex item would drop.
-                <AgentName
-                  actor={sessionAuthor}
-                  className="flex min-w-0 items-center whitespace-pre"
-                  control={(name) => (
-                    <button
-                      aria-expanded={handlesOpen}
-                      className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
-                      onClick={() => setHandlesOpen((open) => !open)}
-                      type="button"
-                    >
-                      <TruncatedText className="min-w-0" title={askerTitle}>
-                        {name}
-                      </TruncatedText>
-                      <ChevronIcon expanded={handlesOpen} />
-                    </button>
-                  )}
-                  kind="control"
-                />
-              )}
-              <span className="shrink-0" aria-hidden="true">
-                ·
-              </span>
-              <Timestamp at={displayedAsk.created_at} />
-            </span>
-          </span>
-          {reference === undefined ? null : <CopyRefButton route={reference} />}
-          {!handlesOpen ? null : (
+        inBlock={inBlock}
+        lastReply={threadQuery.data?.replies.at(-1)}
+        owner={owner}
+        place="card"
+        trailing={
+          !handlesOpen ? null : (
             <span className="flex basis-full flex-wrap items-center gap-x-1.5">
               {sessionAuthor === undefined ? null : (
                 <CopyButton value={sessionAuthor.id} what="session ID">
@@ -664,11 +552,46 @@ export function AskCard({
                 </CopyButton>
               )}
             </span>
+          )
+        }
+      >
+        <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={displayedAsk} />
+        {inBlock ||
+        displayedAsk.block_id === undefined ||
+        displayedAsk.block_id === null ||
+        displayedAsk.block_artifact === undefined ? null : (
+          <p className={`mt-2 text-sm ${linkText} ${linkHoverText}`}>
+            <AskBlockLink ask={displayedAsk} />
+          </p>
+        )}
+        <div>
+          {isApproval ? (
+            <p
+              className={`text-[10px] font-semibold uppercase tracking-wide ${textMutedOnSurface}`}
+            >
+              Approval requested
+            </p>
+          ) : null}
+          {isApproval && documentLink ? (
+            <p className={`mt-1 text-sm ${linkText} ${linkHoverText}`}>
+              <AskApprovalLink ask={displayedAsk} />
+            </p>
+          ) : null}
+          {inBlock ? null : (
+            <div className={`text-[15px] leading-relaxed font-medium ${textPrimaryOnSurface}`}>
+              <MarkdownBody markdown={displayedAsk.question} />
+            </div>
+          )}
+          {/* A request to approve again names the approval it follows, under the question (the
+              spec's own placement), with the diff from that version behind Show diff; a first
+              request carries no earlier approval, and EarlierApproval renders nothing for it. */}
+          {displayedAsk.approval === undefined ? null : (
+            <EarlierApproval approval={displayedAsk.approval} />
           )}
         </div>
-        <AskEditHistory ask={displayedAsk} edits={edits} />
-        {referencedByNode}
-      </div>
+      </AskHeader>
+      <AskEditHistory ask={displayedAsk} edits={edits} />
+      {referencedByNode}
       {askChanged ? (
         <p className={`mt-3 text-sm font-medium ${inlineWarningText}`}>
           This question changed while you were answering. Review the latest wording and confirm your

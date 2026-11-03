@@ -4,9 +4,6 @@ import { Link } from "react-router-dom";
 
 import type { Ask } from "../../api/types";
 import {
-  askBlockPill,
-  badgeBlocking,
-  badgeLow,
   dangerText,
   surfaceBg,
   textMutedOnSurfaceMuted,
@@ -14,16 +11,12 @@ import {
 } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
 import { AskCompletionCard } from "../inbox/AskCompletionCard";
+import { AskHeader } from "../inbox/AskHeader";
 import { AskOptionList } from "../inbox/AskOptionList";
-import { URGENCY_LABELS } from "../inbox/ask-urgency";
-import { AgentName } from "../refs/AgentName";
 import { blockFragment } from "../refs/block-reference";
-import { CopyRefButton } from "../refs/CopyRefButton";
-import { buildReferencePath, itemRoute, parseNodeReference, shortForm } from "../refs/routes";
+import { buildReferencePath, parseNodeReference, shortForm } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./typed-block-drawing";
-
-const PILL_CLASS = "rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase";
 
 export interface AskBlockCardProps {
   /** The indexed ask row for this block, once the server has created it. */
@@ -66,86 +59,50 @@ export function AskBlockCard({
 }: AskBlockCardProps): ReactNode {
   const facts = askBlockFacts(host.node);
   const malformed = facts.malformedReason !== undefined;
-  const open = facts.state === "open";
   const answered = facts.state === "answered";
   const hosted = !malformed && !readOnly && ask !== undefined;
   const resolvedRow =
     !malformed && rowResolution && facts.state === "resolved" && ask?.state === "resolved"
       ? ask
       : undefined;
-  // Whether the footer shows a card naming who asked and how it ended, so the header does not.
+  // Whether the footer shows a card naming who asked and how it ended, so the header does not:
+  // that card draws its own header, which carries the provenance and the reference.
   const carded = hosted || resolvedRow !== undefined;
-  const pill = askBlockPill[facts.urgency];
-  // A block ask indexed without an actor (the server settled it with no pending author, an
-  // empty login) still shows when it was asked; "asked by" waits for a name.
-  const named = ask !== undefined && (ask.author.kind === "session" || ask.author.id !== "");
-  const reference = ask === undefined ? undefined : itemRoute("ask", ask, owner);
   return (
     <>
       {createPortal(
         <>
-          <header
-            className={`mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm ${textMutedOnSurfaceMuted}`}
-          >
-            {malformed ? (
-              <span className={`${PILL_CLASS} ${badgeBlocking.bg} ${badgeBlocking.text}`}>
-                Malformed
-              </span>
-            ) : (
-              <span
-                className={`${PILL_CLASS} ${pill.bg} ${pill.text}`}
-                data-dispatch-ask-pill={facts.urgency}
-              >
-                {URGENCY_LABELS[facts.urgency]}
-              </span>
-            )}
-            <strong className={textPrimaryOnSurface}>Decision</strong>
-            {carded || ask === undefined ? null : (
-              <span className="inline-flex items-center gap-x-2" data-dispatch-ask-asked="">
-                <span aria-hidden="true">·</span>
-                <span>
-                  {named ? (
-                    <>
-                      asked by <AgentName actor={ask.author} inline />
-                    </>
-                  ) : (
-                    "asked"
-                  )}
-                </span>
-                {named ? <span aria-hidden="true">·</span> : null}
-                <Timestamp at={ask.created_at} />
-              </span>
-            )}
-            {/* The open card's metadata line carries the reference itself; the record it shows
-                once answered or resolved does not, so the header keeps it then. */}
-            {(hosted && ask.state === "open") || reference === undefined ? null : (
-              <CopyRefButton route={reference} />
-            )}
-            {!carded && answered ? (
-              <span className="inline-flex items-center gap-x-2" data-dispatch-ask-answered="">
-                <span aria-hidden="true">·</span>
-                <span>Answered by {facts.answeredBy}</span>
-                {facts.answeredAt === undefined ? null : (
-                  <>
+          <AskHeader
+            ask={ask}
+            block={{ malformed, state: facts.state, urgency: facts.urgency }}
+            carded={carded}
+            leading={<strong className={textPrimaryOnSurface}>Decision</strong>}
+            owner={owner}
+            place="block"
+            trailing={
+              <>
+                {!carded && answered ? (
+                  <span className="inline-flex items-center gap-x-2" data-dispatch-ask-answered="">
                     <span aria-hidden="true">·</span>
-                    <Timestamp at={facts.answeredAt} />
-                  </>
-                )}
-              </span>
-            ) : null}
-            {!carded && !malformed && !open && !answered ? (
-              <span className={`${PILL_CLASS} ${badgeLow.bg} ${badgeLow.text}`}>
-                {facts.state === "resolved" ? "Resolved" : "Closed"}
-              </span>
-            ) : null}
-            {ask === undefined && !malformed && facts.copiedFrom !== undefined ? (
-              <CopiedFromLink
-                blockId={facts.blockId}
-                copied={facts.copiedFrom}
-                state={facts.state}
-              />
-            ) : null}
-          </header>
+                    <span>Answered by {facts.answeredBy}</span>
+                    {facts.answeredAt === undefined ? null : (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <Timestamp at={facts.answeredAt} />
+                      </>
+                    )}
+                  </span>
+                ) : null}
+                {ask === undefined && !malformed && facts.copiedFrom !== undefined ? (
+                  <CopiedFromLink
+                    blockId={facts.blockId}
+                    copied={facts.copiedFrom}
+                    state={facts.state}
+                  />
+                ) : null}
+              </>
+            }
+          />
           {malformed ? (
             <p className={`mb-2 text-sm font-medium ${dangerText}`}>{facts.malformedReason}</p>
           ) : null}
@@ -176,6 +133,7 @@ export function AskBlockCard({
             documentLink={false}
             edits={[]}
             frame="block"
+            owner={owner}
           />
         ) : (
           <AttributeRecord facts={facts} />

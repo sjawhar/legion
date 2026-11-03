@@ -211,8 +211,10 @@ function renderCard({
       );
       return scoped.getByLabelText("Your answer") as HTMLTextAreaElement;
     },
+    /** The option rows of the record under the block, which a reply in the same footer - a
+     *  list item of its own - is no part of. */
     recordRows() {
-      return scoped
+      return within(scoped.getByRole("list", { name: "Options" }))
         .getAllByRole("listitem")
         .map((row) => [(row as HTMLElement).dataset.selected, row.textContent]);
     },
@@ -692,8 +694,10 @@ test("an answered decision hosts the shared record: who answered and when, the c
       expect(within(record).getByText("Ship it after the fix lands.")).toBeDefined()
     );
     expect(await card.footer.findByText("Ship where?")).toBeDefined();
-    // The record has no metadata line, so the block header keeps the reference copy control.
-    expect(card.header.getByRole("button", { name: /^Copy reference/ })).toBeDefined();
+    // The record draws the ask's own header, reference copy control and all, so the block's
+    // header leaves it there rather than offering a second one.
+    expect(within(record).getByRole("button", { name: /^Copy reference/ })).toBeDefined();
+    expect(card.header.queryByRole("button", { name: /^Copy reference/ })).toBeNull();
   } finally {
     card.unmount();
   }
