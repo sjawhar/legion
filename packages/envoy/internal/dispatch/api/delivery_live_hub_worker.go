@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
-	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 )
 
 // work recomputes the dirty views and the expired ones, one at a time, and keeps the freshness
@@ -250,18 +249,16 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec, epoch int6
 	now := h.clock.Now()
 	var body any
 	if spec.kind == deliveryLivePipeline {
-		read.at = now
-		if spec.at != nil {
-			read.at = *spec.at
-		}
-		if read.pipe, err = h.server.readPipelinePopulation(ctx, read.settings, read.at); err != nil {
+		window := spec.pipelineWindowAt(now)
+		read.at = window.end
+		if read.pipe, err = h.server.readPipelinePopulation(ctx, read.settings, window); err != nil {
 			return read, err
 		}
-		body = deliveryPipelineCompute(read.settings, read.pipe, read.at, now)
-		if spec.at == nil {
+		body = deliveryPipelineCompute(read.settings, read.pipe, window, now)
+		if spec.pipelineRolls() {
 			read.expiry = pipelineNextExpiry(read.pipe, now)
 		}
-		read.from = measures.WindowStart(read.at)
+		read.from = window.start()
 		read.prs, read.runs = len(read.pipe.leadTimes.prs), len(read.pipe.checks.Runs)+len(read.pipe.deploys.Runs)
 		read.unfetchable = read.pipe.leadTimes.unfetchable
 	} else {
@@ -320,11 +317,13 @@ func (h *deliveryHub) expire(view *deliveryView) {
 	var from, at, expiry time.Time
 	var prs, runs int
 	if spec.kind == deliveryLivePipeline {
-		at = now
-		narrowed := pipe.narrowedTo(settings, at)
-		body = deliveryPipelineCompute(settings, narrowed, at, now)
+		// Only a rolling window expires, so the window at now is this view's own, one day on.
+		window := spec.pipelineWindowAt(now)
+		at = window.end
+		narrowed := pipe.narrowedTo(settings, window)
+		body = deliveryPipelineCompute(settings, narrowed, window, now)
 		expiry = pipelineNextExpiry(narrowed, now)
-		from = measures.WindowStart(at)
+		from = window.start()
 		prs, runs = len(narrowed.leadTimes.prs), len(narrowed.checks.Runs)+len(narrowed.deploys.Runs)
 	} else {
 		from = now.Add(-spec.days())

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -154,7 +155,8 @@ func TestDeliveryPipelineProductionCardMergesJobNames(t *testing.T) {
 			},
 		},
 	}
-	body := deliveryPipelineCompute(settings, pop, pipelineFixtureTime(32, 12, 0), pipelineFixtureTime(32, 12, 0))
+	window := pipelineWindowEndingAt(pipelineFixtureTime(32, 12, 0), measures.ShownDayCount)
+	body := deliveryPipelineCompute(settings, pop, window, pipelineFixtureTime(32, 12, 0))
 	if body.ProductionApply.Job != oldName+" or "+newName || body.ProductionApply.Total.N != 2 || body.ProductionApply.Total.Success != 2 {
 		t.Fatalf("production_apply = %+v, want two successful results under both names", body.ProductionApply)
 	}
@@ -177,7 +179,7 @@ func TestDeliveryPipelineCardKeysSurviveReorderedCards(t *testing.T) {
 			{Name: "widgets-release / widgets-release", StartedAt: new(started), CompletedAt: new(started.Add(9 * time.Minute)), Conclusion: new(delivery.DeliveryJobConclusionSuccess)},
 		}},
 		cards,
-		measures.ShownDays(pipelineFixtureTime(32, 12, 0)),
+		measures.ShownDays(pipelineFixtureTime(32, 12, 0), measures.ShownDayCount),
 	)
 	stagingE2E := optionalDeployJobTiming(timings, pipelineStagingE2ECard)
 	stagingApply := optionalDeployJobTiming(timings, pipelineStagingApplyCard)
@@ -224,6 +226,84 @@ func TestGetDeliveryPipelineRejectsMalformedAt(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/delivery/pipeline?at=yesterday", nil, "alice")
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_QUERY"`) {
 		t.Fatalf("status = %d, body = %s, want 400 INVALID_QUERY", response.Code, response.Body.String())
+	}
+}
+
+// TestGetDeliveryPipelineRefusesAWindowItCannotRead: a malformed, inverted or over-long window is
+// refused as the other delivery routes refuse one, and so is an at beside a window, since the two
+// name the same thing.
+func TestGetDeliveryPipelineRefusesAWindowItCannotRead(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	seedMeasuresSettings(t, database)
+	to, err := time.Parse(time.RFC3339, pipelineAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	window := func(from, to time.Time) string {
+		return "from=" + from.Format(time.RFC3339) + "&to=" + to.Format(time.RFC3339)
+	}
+	for _, test := range []struct{ name, query string }{
+		{"a malformed from", "from=yesterday&to=" + to.Format(time.RFC3339)},
+		{"an inverted window", window(to, to.AddDate(0, 0, -7))},
+		{"a window over the cap", window(to.AddDate(0, 0, -85), to)},
+		{"an at beside a window", "at=" + to.Format(time.RFC3339) + "&" + window(to.AddDate(0, 0, -7), to)},
+		{"an at beside a from", "at=" + to.Format(time.RFC3339) + "&from=" + to.AddDate(0, 0, -7).Format(time.RFC3339)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/delivery/pipeline?"+test.query, nil, "alice")
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_QUERY"`) {
+				t.Fatalf("status = %d, body = %s, want 400 INVALID_QUERY", response.Code, response.Body.String())
+			}
+		})
+	}
+	// The cap itself is read: 84 days ending on the day its end is on.
+	_, body := getDeliveryPipeline(t, handler, window(to.AddDate(0, 0, -84), to))
+	if len(body.Days) != 84 || body.Days[83] != "2026-10-02" || body.Days[0] != "2026-07-11" {
+		t.Fatalf("days = %v, want the 84 ending on the window's last day", body.Days)
+	}
+}
+
+// TestGetDeliveryPipelineAnswersItsWindowsOwnDays: `from` and `to` answer the days that window
+// covers, with the same numbers `at` answers for the same days, and its failing-jobs table covers
+// the window's own last day whatever the window's length.
+func TestGetDeliveryPipelineAnswersItsWindowsOwnDays(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	seedPipelineFixture(t, database, pipelineSettings())
+	// The fixture's last day, Oct 2, whole: the days `at=2026-10-02T12:00:00Z` shows end on it.
+	lastDay := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
+	window := func(days int) string {
+		return "from=" + lastDay.AddDate(0, 0, -days).Format(time.RFC3339) + "&to=" + lastDay.Format(time.RFC3339)
+	}
+	_, pinned := getDeliveryPipeline(t, handler, "at="+pipelineAt)
+	_, week := getDeliveryPipeline(t, handler, window(7))
+	if strings.Join(week.Days, ",") != strings.Join(pinned.Days, ",") {
+		t.Fatalf("the window's days = %v, want the seven %v that at shows", week.Days, pinned.Days)
+	}
+	if !reflect.DeepEqual(week.PRChecks.Run.Days[6], pinned.PRChecks.Run.Days[6]) ||
+		!reflect.DeepEqual(week.OpenedToMerge.Total, pinned.OpenedToMerge.Total) {
+		t.Errorf("the window's last day = %+v, want at's %+v", week.PRChecks.Run.Days[6].Cell, pinned.PRChecks.Run.Days[6].Cell)
+	}
+	// The window stops at its end, so its failing-jobs table is Oct 2 alone: build / unit failed
+	// both of that day's two results, and lint one of them. The pinned at looks back 24 hours
+	// from noon, which reaches Oct 1's successful run too.
+	if len(week.PRChecks.FailingJobs) != 2 || week.PRChecks.FailingJobs[0].Name != "build / unit" ||
+		week.PRChecks.FailingJobs[0].Failures != 2 || week.PRChecks.FailingJobs[0].Results != 2 {
+		t.Fatalf("the window's failing jobs = %+v, want build / unit failing 2 of 2 on its last day", week.PRChecks.FailingJobs)
+	}
+	if pinned.PRChecks.FailingJobs[0].Results != 3 {
+		t.Fatalf("at's failing build / unit = %+v, want the 3 results of its own 24 hours", pinned.PRChecks.FailingJobs[0])
+	}
+	// A longer window shows more days and the same last day, and its failing-jobs table does not
+	// grow with it.
+	_, fortnight := getDeliveryPipeline(t, handler, window(14))
+	if len(fortnight.Days) != 14 || fortnight.Days[13] != week.Days[6] || fortnight.Days[0] != "2026-09-19" {
+		t.Fatalf("the fortnight's days = %v, want the 14 ending on %s", fortnight.Days, week.Days[6])
+	}
+	if !reflect.DeepEqual(fortnight.PRChecks.Run.Days[13], week.PRChecks.Run.Days[6]) {
+		t.Errorf("the fortnight's last day = %+v, want the week's %+v", fortnight.PRChecks.Run.Days[13].Cell, week.PRChecks.Run.Days[6].Cell)
+	}
+	if !reflect.DeepEqual(fortnight.PRChecks.FailingJobs, week.PRChecks.FailingJobs) {
+		t.Fatalf("the fortnight's failing jobs = %+v, want the week's %+v", fortnight.PRChecks.FailingJobs, week.PRChecks.FailingJobs)
 	}
 }
 

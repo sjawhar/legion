@@ -4073,18 +4073,21 @@ export interface DeliveryLeadTimeTiming {
 }
 
 /**
- * `GET /api/v1/delivery/pipeline?at`: the Pipeline page over the seven UTC days ending on `at`'s
- * (default now), computed on request from stored facts and followed by neither the timeline's
- * window nor its facets. `pr_checks` is the PR-checks workflow's pull_request runs: their whole
- * run time, their five slowest jobs (a job needs 50 timed results in the seven days to rank), and
- * the jobs that failed in the 24 hours before `at`, the roll-up job the settings name left out.
- * The three deploy jobs are timed in the deploy workflow's push runs on main;
- * `staging_e2e` and `staging_apply` are null when the settings name no such job. The two lead
- * times bucket every population pull request merged in the shown days by its merge day, judged
- * against `targets`.
+ * `GET /api/v1/delivery/pipeline?at` or `?from&to`: the Pipeline page over the UTC days its window
+ * covers, computed on request from stored facts and followed by none of the timeline's facets.
+ * `at` (default now) is the seven days ending on its own, the form the Pipeline page sends;
+ * `from` and `to` are read as every other delivery route reads them, bounded by the same 84 days,
+ * and show the days that window covers. The two forms are exclusive: naming `at` beside either is
+ * `400 INVALID_QUERY`. `pr_checks` is the PR-checks workflow's pull_request runs: their whole run
+ * time, their five slowest jobs (a job needs 50 timed results in the shown days to rank), and the
+ * jobs that failed in the 24 hours before the window's end, which are its last day whatever its
+ * length, the roll-up job the settings name left out. The three deploy jobs are timed in the
+ * deploy workflow's push runs on main; `staging_e2e` and `staging_apply` are null when the
+ * settings name no such job. The two lead times bucket every population pull request merged in
+ * the shown days by its merge day, judged against `targets`.
  */
 export interface DeliveryPipelineResponse {
-  /** The seven shown UTC days, oldest first; the last is `at`'s. */
+  /** The shown UTC days, oldest first; the last is the window's. */
   readonly days: readonly string[];
   readonly computed_at: string;
   readonly pr_checks: {
@@ -4107,11 +4110,15 @@ export type DeliveryLiveWindow =
   | { readonly from: string; readonly to: string };
 
 /** One view a page shows. `query` is the query string the page would send to the matching GET route
- *  without `from`/`to` (search and every facet), so the live answer and the GET answer are one. */
+ *  without `from`/`to` (search and every facet), so the live answer and the GET answer are one. A
+ *  pipeline view names a window, or an `at`, which is the seven days ending on that day, or
+ *  neither, which is the seven days ending at the present; naming both is refused, as the GET
+ *  route refuses `at` beside `from`/`to`, and it names no query, since the Pipeline page follows
+ *  none of the timeline's facets. */
 export type DeliveryLiveView =
   | { readonly kind: "timeline"; readonly window: DeliveryLiveWindow; readonly query: string }
   | { readonly kind: "measures"; readonly window: DeliveryLiveWindow; readonly query: string }
-  | { readonly kind: "pipeline"; readonly at?: string };
+  | { readonly kind: "pipeline"; readonly window?: DeliveryLiveWindow; readonly at?: string };
 
 /** The timeline's lists sent item by item, by id. */
 export type DeliveryLiveList = "prs" | "runs" | "session_groups";

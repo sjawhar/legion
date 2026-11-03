@@ -184,7 +184,7 @@ func TestPRChecksTimesWholeRunsFromStartToCompletion(t *testing.T) {
 	c.add(3, 32, 5, "cancelled", 8)
 	c.add(4, 31, 30, "failure", 8)
 	c.add(5, 24, 30, "success", 8)
-	run, _, _ := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "")
+	run, _, _ := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "")
 
 	assertCell(t, "run.days[6]", run.Days[6].Cell, 2, new(56.5), new(85.7), 2, 0, 1, new(1.0))
 	assertCell(t, "run.days[5]", run.Days[5].Cell, 1, new(30.0), new(30.0), 0, 1, 0, new(0.0))
@@ -207,7 +207,7 @@ func TestSlowestJobsRankBySevenDayMedianOnceAJobHasEnoughResults(t *testing.T) {
 	for i := range SlowestMinResults - 1 {
 		c.add(int64(1000+i), 30, 130, "success", 8, job("tasks / run (one task)", 120))
 	}
-	_, slowest, _ := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "")
+	_, slowest, _ := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "")
 
 	names := make([]string, len(slowest))
 	for i, j := range slowest {
@@ -240,7 +240,7 @@ func failingFixture() ciRuns {
 // no failure, and a failure before the last 24 hours is absent.
 func TestFailingJobsCoverTheLast24HoursWithoutTheRollup(t *testing.T) {
 	c := failingFixture()
-	run, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "checks-complete")
+	run, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "checks-complete")
 
 	lastFailed := time.Date(2026, 10, 2, 10, 30, 0, 0, time.UTC)
 	want := []FailingJob{
@@ -264,7 +264,7 @@ func TestFailingJobsCoverTheLast24HoursWithoutTheRollup(t *testing.T) {
 // the others' result is tallied like any other.
 func TestFailingJobsWithoutARollupLeaveNothingOut(t *testing.T) {
 	c := failingFixture()
-	_, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "")
+	_, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "")
 	names := make([]string, len(failing))
 	for i, j := range failing {
 		names[i] = j.Name
@@ -280,7 +280,7 @@ func TestFailingJobsStopAtNow(t *testing.T) {
 	c := failingFixture()
 	// Completed at 12:30 on Oct 2, half an hour after pipelineNow.
 	c.add(6, 32, 20, "failure", 12, job("build / unit", 19, "failure"), job("lint", 5, "failure"), job("typecheck", 3, "failure"))
-	_, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "checks-complete")
+	_, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "checks-complete")
 
 	byName := map[string]FailingJob{}
 	for _, f := range failing {
@@ -310,7 +310,7 @@ func TestAFailingJobsLastRunIsTheSameInEveryRunOrder(t *testing.T) {
 		for i, run := range runs {
 			ids[i] = run.RunID
 		}
-		_, _, failing := PRChecks(runs, c.jobs, pipelineDays, pipelineNow, "")
+		_, _, failing := PRChecks(runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "")
 		if len(failing) != 1 || failing[0].Failures != 3 || !failing[0].LastFailedAt.Equal(lastFailed) || failing[0].LastRunURL != runURL(9) {
 			t.Fatalf("failing jobs of runs listed %v = %+v, want build / unit failing 3 times, last in run 9 at %s", ids, failing, lastFailed)
 		}
@@ -521,18 +521,26 @@ func TestLeadTimesBucketByMergeDay(t *testing.T) {
 	assertLeadTimeCell(t, "opened.total", openedToMerge.Total, 3, new(60.0), new(84.0), new(90.0))
 }
 
-// TestShownDaysAndWindowStart is pipeline.py:54-63: the seven UTC days ending today, oldest
+// TestShownDaysAndWindowStart is pipeline.py:54-63: the days ending on the window's last, oldest
 // first, and midnight of the first.
 func TestShownDaysAndWindowStart(t *testing.T) {
-	if got := ShownDays(pipelineNow); !slices.Equal(got, pipelineDays) {
+	if got := ShownDays(pipelineNow, ShownDayCount); !slices.Equal(got, pipelineDays) {
 		t.Errorf("ShownDays = %v, want %v", got, pipelineDays)
 	}
-	if got, want := WindowStart(pipelineNow), time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+	if got, want := WindowStart(pipelineNow, ShownDayCount), time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
 		t.Errorf("WindowStart = %v, want %v", got, want)
 	}
 	// A clock in another zone names the same UTC days.
 	eastern := pipelineNow.In(time.FixedZone("UTC+14", 14*3600))
-	if got := ShownDays(eastern); !slices.Equal(got, pipelineDays) {
+	if got := ShownDays(eastern, ShownDayCount); !slices.Equal(got, pipelineDays) {
 		t.Errorf("ShownDays(UTC+14) = %v, want %v", got, pipelineDays)
+	}
+	// Another length ends on the same day and starts as many days before it.
+	fourteen := ShownDays(pipelineNow, 14)
+	if len(fourteen) != 14 || fourteen[13] != pipelineDays[6] || fourteen[0] != "2026-09-19" {
+		t.Errorf("ShownDays(14) = %v, want the 14 days ending on %s", fourteen, pipelineDays[6])
+	}
+	if got, want := WindowStart(pipelineNow, 14), time.Date(2026, 9, 19, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("WindowStart(14) = %v, want %v", got, want)
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
-	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
@@ -487,17 +486,16 @@ func (view *deliveryView) touchedBy(change delivery.Change, now time.Time) bool 
 
 // window is the view's window as its last answer resolved it: a custom range as named, a preset
 // from its last start (or its length before now, before its first answer) to the present, and a
-// pipeline view from the first shown day of its pinned at or of its last answer's.
+// pipeline view from the first of the days its own window shows, which a rolling window ends at
+// its last answer's moment or, before that, the present.
 func (view *deliveryView) window(now time.Time) (from, to time.Time) {
 	switch {
 	case view.spec.kind == deliveryLivePipeline:
-		at := now
-		if view.spec.at != nil {
-			at = *view.spec.at
-		} else if !view.at.IsZero() {
-			at = view.at
+		end := now
+		if view.spec.pipelineRolls() && !view.at.IsZero() {
+			end = view.at
 		}
-		return measures.WindowStart(at), time.Time{}
+		return view.spec.pipelineWindowAt(end).start(), time.Time{}
 	case view.spec.preset > 0:
 		if view.from.IsZero() {
 			return now.Add(-view.spec.days()), now

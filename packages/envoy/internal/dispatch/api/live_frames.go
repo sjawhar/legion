@@ -40,7 +40,8 @@ type DeliveryLiveWindow struct {
 
 // DeliveryLiveView is one view a page shows. A timeline or measures view names its Window and
 // Query, the query string the page would send to the GET route without from/to (search and every
-// facet); a pipeline view names at most an At.
+// facet); a pipeline view names its Window, or an At, which is the seven days ending on that day,
+// or neither, which is the seven days ending at the present, and no Query.
 type DeliveryLiveView struct {
 	Kind   string              `json:"kind"`
 	Window *DeliveryLiveWindow `json:"window,omitempty"`

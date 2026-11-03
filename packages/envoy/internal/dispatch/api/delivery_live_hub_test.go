@@ -375,6 +375,13 @@ func livePipelineView(at *time.Time) DeliveryLiveView {
 	return DeliveryLiveView{Kind: deliveryLivePipeline, At: &s}
 }
 
+// livePipelineWindow is a pipeline view of the whole UTC days [from, to) covers, as the page's
+// window control names a custom range.
+func livePipelineWindow(from, to time.Time) DeliveryLiveView {
+	f, tt := from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano)
+	return DeliveryLiveView{Kind: deliveryLivePipeline, Window: &DeliveryLiveWindow{From: &f, To: &tt}}
+}
+
 // subscribeFrame is a subscribe frame for a delivery view as the socket hands it to the hub.
 func subscribeFrame(sub string, view DeliveryLiveView) deliverySubscription {
 	return deliverySubscription{Sub: sub, View: view}
@@ -439,7 +446,9 @@ func getBody(t *testing.T, handler http.Handler, target string) json.RawMessage 
 	return json.RawMessage(response.Body.Bytes())
 }
 
-// windowTarget is the GET route of kind for the window a body answered.
+// windowTarget is the GET route of kind for the window a body answered: a timeline or measures
+// body names its window, and a pipeline body its days, whose first day's midnight and the
+// midnight after its last are the window the route reads back.
 func windowTarget(t *testing.T, kind string, body json.RawMessage, query string) string {
 	t.Helper()
 	var shape struct {
@@ -448,11 +457,62 @@ func windowTarget(t *testing.T, kind string, body json.RawMessage, query string)
 	if err := json.Unmarshal(body, &shape); err != nil {
 		t.Fatalf("read the body's window: %v", err)
 	}
-	target := "/api/v1/delivery/" + kind + "?from=" + shape.Window.From.Format(time.RFC3339Nano) + "&to=" + shape.Window.To.Format(time.RFC3339Nano)
+	from, to := shape.Window.From, shape.Window.To
+	if kind == deliveryLivePipeline {
+		days := pipelineBodyDays(t, body)
+		if len(days) == 0 {
+			t.Fatal("the pipeline body shows no day")
+		}
+		from, to = utcMidnightOf(t, days[0]), utcMidnightOf(t, days[len(days)-1]).AddDate(0, 0, 1)
+	}
+	target := "/api/v1/delivery/" + kind + "?from=" + from.Format(time.RFC3339Nano) + "&to=" + to.Format(time.RFC3339Nano)
 	if query != "" {
 		target += "&" + query
 	}
 	return target
+}
+
+// pipelineBodyDays is the UTC days a pipeline body shows, oldest first.
+func pipelineBodyDays(t *testing.T, body json.RawMessage) []string {
+	t.Helper()
+	var shape struct {
+		Days []string `json:"days"`
+	}
+	if err := json.Unmarshal(body, &shape); err != nil {
+		t.Fatalf("read the pipeline body's days: %v", err)
+	}
+	return shape.Days
+}
+
+// pipelineFailingJobs is the names of the jobs a pipeline body's failing-jobs table holds, in its
+// own order.
+func pipelineFailingJobs(t *testing.T, body json.RawMessage) []string {
+	t.Helper()
+	var shape struct {
+		PRChecks struct {
+			FailingJobs []struct {
+				Name string `json:"name"`
+			} `json:"failing_jobs"`
+		} `json:"pr_checks"`
+	}
+	if err := json.Unmarshal(body, &shape); err != nil {
+		t.Fatalf("read the pipeline body's failing jobs: %v", err)
+	}
+	names := make([]string, len(shape.PRChecks.FailingJobs))
+	for i, job := range shape.PRChecks.FailingJobs {
+		names[i] = job.Name
+	}
+	return names
+}
+
+// utcMidnightOf is midnight UTC of a YYYY-MM-DD day.
+func utcMidnightOf(t *testing.T, day string) time.Time {
+	t.Helper()
+	midnight, err := time.Parse(time.DateOnly, day)
+	if err != nil {
+		t.Fatalf("read the day %q: %v", day, err)
+	}
+	return midnight
 }
 
 // withoutComputedAt is a body decoded, without the computed_at it moves on every compute.
@@ -590,6 +650,70 @@ func TestAPRChecksRunMarksOnlyPipelineViews(t *testing.T) {
 		return note.what == "recompute begin" && !strings.HasPrefix(note.view, deliveryLivePipeline)
 	}); n != 0 {
 		t.Fatalf("a PR-checks run recomputed %d timeline or measures views, want only the pipeline view", n)
+	}
+}
+
+// TestTwoPipelineWindowsAreTwoViewsThatLandOnTheirOwnGET: a pipeline view is keyed by its window,
+// so two readers on two windows are answered their own days from their own recompute, each view's
+// snapshot and deltas are the GET route's body for that window (requireLandsOnGET), and the
+// failing-jobs table is the window's own last day whatever the window's length.
+func TestTwoPipelineWindowsAreTwoViewsThatLandOnTheirOwnGET(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	// The whole UTC days the page's window control names: the seven and the fourteen ending at
+	// the last midnight, which is where both windows' failing-jobs tables look a day back from.
+	end := nextUTCMidnight(rig.clock.Now()).AddDate(0, 0, -1)
+	// One PR-checks job failing on the windows' last day, and one failing the day before it.
+	upsertFailedPRChecks(t, rig.database, 410, "build / unit", end.Add(-12*time.Hour))
+	upsertFailedPRChecks(t, rig.database, 411, "typecheck", end.Add(-36*time.Hour))
+	rig.settle(t)
+
+	start := rig.mark()
+	week, fortnight := newFakeLiveConn(), newFakeLiveConn()
+	rig.hub.Subscribe(week, subscribeFrame("w", livePipelineWindow(end.AddDate(0, 0, -7), end)))
+	weekBody := week.snapshot(t, 5*time.Second, "w").Body
+	rig.hub.Subscribe(fortnight, subscribeFrame("f", livePipelineWindow(end.AddDate(0, 0, -14), end)))
+	fortnightBody := fortnight.snapshot(t, 5*time.Second, "f").Body
+	fortnight.freshness(t, time.Second, "the verdict the first view's read set, after the second's snapshot")
+	if n := rig.count(start, recomputeBegin("")); n != 2 {
+		t.Fatalf("recomputes for two windows = %d, want one each: two readers on two windows share no view", n)
+	}
+	weekDays, fortnightDays := pipelineBodyDays(t, weekBody), pipelineBodyDays(t, fortnightBody)
+	if len(weekDays) != 7 || len(fortnightDays) != 14 || weekDays[6] != fortnightDays[13] {
+		t.Fatalf("the two views show %v and %v, want seven and fourteen days ending on the same day", weekDays, fortnightDays)
+	}
+
+	// One merge inside both windows: each view is sent its own delta.
+	upsertPR(t, rig.database, hubPR(1, end.Add(-6*time.Hour)))
+	weekBody = requireLandsOnGET(t, rig.handler, deliveryLivePipeline, weekBody, week.delta(t, 5*time.Second, "w"), "")
+	fortnightBody = requireLandsOnGET(t, rig.handler, deliveryLivePipeline, fortnightBody, fortnight.delta(t, 5*time.Second, "f"), "")
+
+	// The failing-jobs table is the window's own last day, so the job that failed the day before
+	// is in neither, however long the window.
+	failing, longerFailing := pipelineFailingJobs(t, weekBody), pipelineFailingJobs(t, fortnightBody)
+	if !slices.Equal(failing, []string{"build / unit"}) || !slices.Equal(longerFailing, failing) {
+		t.Fatalf("the windows' failing jobs are %v and %v, want build / unit alone in both", failing, longerFailing)
+	}
+}
+
+// upsertFailedPRChecks writes a PR-checks run that failed, started at started and done half an
+// hour later, with one failed job by name.
+func upsertFailedPRChecks(t *testing.T, database *store.Store, id int64, job string, started time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	done := started.Add(30 * time.Minute)
+	failure, jobFailure := delivery.DeliveryRunConclusionFailure, delivery.DeliveryJobConclusionFailure
+	if err := delivery.UpsertRun(ctx, database.Pool, delivery.DeliveryRun{
+		Repo: "acme/widgets", RunID: id, Kind: delivery.DeliveryRunKindPRChecks, HeadSHA: "sha" + strconv.FormatInt(id, 10),
+		HeadCommitAt: started, StartedAt: started, CompletedAt: &done, Conclusion: &failure, PRNumber: new(7),
+		URL: "https://github.com/acme/widgets/actions/runs/" + strconv.FormatInt(id, 10), HeadBranch: new("feature"), Event: new("pull_request"),
+	}); err != nil {
+		t.Fatalf("upsert PR-checks run %d: %v", id, err)
+	}
+	if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", id, []delivery.DeliveryRunJob{
+		{Repo: "acme/widgets", RunID: id, Name: job, StartedAt: &started, CompletedAt: &done, Conclusion: &jobFailure},
+	}, true); err != nil {
+		t.Fatalf("upsert PR-checks run %d's job: %v", id, err)
 	}
 }
 
