@@ -11,7 +11,9 @@ body: |-
     namespace, and counts one of another namespace live while its store changed within two hours.
     `keepStore` makes a store when it is gone and marks it changed; `writeAskgateRecord` and
     `setRecordMode` call it before they write the owner file. An owner file without `ns` is looked
-    up by pid, as before.
+    up by pid, as before, and the prune keeps a store named without a namespace (`<pid>-<start>`)
+    for 14 days rather than two hours, since it may be a live process's of another namespace that
+    started on an earlier pi-envoy and touches its store only when it mints.
 time: 2026-11-03T09:00:00.000000000Z
 custom:
     Issue: pr2714

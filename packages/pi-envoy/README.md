@@ -416,7 +416,9 @@ gated write only when it consumes one, so a write sent any other way is refused 
   every ten minutes while it keeps a record, so a live one never looks gone from another namespace.
   The process also makes its store again, empty, before each write of its own file, so a store that
   another process removed is back by the gate's next call. A record written by an older pi-envoy
-  names no namespace and is still looked up by pid in the reader's own.
+  names no namespace and is still looked up by pid in the reader's own. The pruning keeps a store
+  such a pi-envoy named for 14 days rather than two hours, since its process may be a live one of
+  another namespace, which touches its store only when it mints a marker.
 - **The marker.** The gate mints one file in the store for each literal call it lets run, created
   owner-only and exclusively. It binds the exact argument vector the CLI receives and, behind a
   review or a deliberate pass (a rebuttal, a breaker trip), the digest of the arguments the dry

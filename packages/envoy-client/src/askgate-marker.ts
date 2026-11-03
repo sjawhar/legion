@@ -446,12 +446,22 @@ function storeTouched(store: string): number {
 }
 
 /**
+ * How long the sweep keeps a store named before the pid namespace was kept (`<pid>-<start>`) whose
+ * process it cannot find by pid. That process may be gone, or may be a live one of another
+ * namespace that an agent box started on an earlier pi-envoy, which names no namespace and touches
+ * its store only when it mints. The sweep cannot tell the two apart, so it keeps such a store as
+ * long as the daily prune keeps an idle session directory, and the earlier process keeps its store
+ * until it restarts on a pi-envoy that names its namespace.
+ */
+const UNNAMESPACED_STORE_MAX_AGE_MS = 14 * 86_400_000;
+
+/**
  * Removes each store under `<root>/askgate/` whose process is gone (a crashed process's, whose
  * markers no CLI reads) and that nothing changed for MARKER_MAX_AGE_MS. A store of another pid
  * namespace's process counts gone only by that age (`ownerLive`), which its process keeps from
- * passing while it runs; a store named before the namespace was kept has only its pid and start
- * time, read in this namespace. A store it cannot remove stays: this is tidiness, so it never
- * stops a call.
+ * passing while it runs. A store named before the namespace was kept has only its pid and start
+ * time, read in this namespace, and is kept for UNNAMESPACED_STORE_MAX_AGE_MS. A store it cannot
+ * remove stays: this is tidiness, so it never stops a call.
  */
 export function sweepStores(root: string, now: number): void {
   const parent = join(root, "askgate");
@@ -468,7 +478,9 @@ export function sweepStores(root: string, now: number): void {
     try {
       const owner = { pid: Number(match[1]), start: match[2] ?? null, ns: match[3] ?? null, store };
       if (ownerLive(owner, now)) continue;
-      if (now - storeTouched(store) <= MARKER_MAX_AGE_MS) continue;
+      const unnamespaced = owner.start !== null && owner.ns === null;
+      const keep = unnamespaced ? UNNAMESPACED_STORE_MAX_AGE_MS : MARKER_MAX_AGE_MS;
+      if (now - storeTouched(store) <= keep) continue;
       rmSync(store, { recursive: true, force: true });
     } catch {
       // Gone since the listing, or not this user's to remove.
