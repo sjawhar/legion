@@ -1,11 +1,12 @@
 import { type ReactNode, useId } from "react";
 
-import { primaryButton, secondaryButtonCompact } from "../theme/classes";
+import { primaryButton, secondaryButton, secondaryButtonCompact } from "../theme/classes";
 
 /** Each look whole, refused or not: the `refused:` variant (`styles.css`) paints `disabled` and
  *  `aria-disabled` alike, so a look states its cannot-press state once. */
 const LOOKS = {
   primary: primaryButton,
+  secondary: secondaryButton,
   "secondary-compact": secondaryButtonCompact,
 } as const;
 

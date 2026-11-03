@@ -5,6 +5,7 @@ import { api, type CreateArtifactReviewInput } from "../../api/client";
 import { inboxQuery } from "../../api/queries";
 import type { Artifact, ArtifactApproval } from "../../api/types";
 import { approvalPillClassName } from "../../components/Pill";
+import { RefusableButton } from "../../components/RefusableButton";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -123,6 +124,10 @@ function RequestChangesDialog({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dialog = useDialog<HTMLDivElement>({ initialFocusRef: textareaRef, onClose, open: true });
   const trimmed = reason.trim();
+  const refusalId = useId();
+  // An empty reason refuses the submit; the save already out is its `busy`, and nothing else
+  // holds it.
+  const refusal = trimmed === "" ? "Say what needs to change." : null;
 
   return (
     <>
@@ -164,6 +169,13 @@ function RequestChangesDialog({
               Could not request changes. Try again.
             </p>
           ) : null}
+          {/* The reason the submit refuses, on screen under the field it names, and the
+              description the button carries. */}
+          {refusal === null ? null : (
+            <p className={`text-xs ${textMutedOnSurface}`} id={refusalId}>
+              {refusal}
+            </p>
+          )}
           <div className="flex items-center justify-end gap-2">
             <button
               className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
@@ -173,14 +185,14 @@ function RequestChangesDialog({
             >
               Cancel
             </button>
-            <button
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-              disabled={trimmed === "" || saving}
-              onClick={() => onSubmit(trimmed)}
-              type="button"
+            <RefusableButton
+              busy={saving ? "Submitting…" : undefined}
+              onPress={() => onSubmit(trimmed)}
+              refusal={refusal}
+              refusalShownBy={refusalId}
             >
-              {saving ? "Submitting…" : "Request changes"}
-            </button>
+              Request changes
+            </RefusableButton>
           </div>
         </div>
       </div>
@@ -284,14 +296,15 @@ export function ApprovalChip({
               {approveLabel}
             </button>
           )}
-          <button
-            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-            disabled={review.isPending}
-            onClick={() => setRequestChangesOpen(true)}
-            type="button"
+          <RefusableButton
+            busy={review.isPending ? "Request changes" : undefined}
+            className="md:min-h-8 md:py-1"
+            look="secondary"
+            onPress={() => setRequestChangesOpen(true)}
+            refusal={null}
           >
             Request changes
-          </button>
+          </RefusableButton>
         </>
       ) : null}
       {reviewsOpen ? (

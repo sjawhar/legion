@@ -1,12 +1,13 @@
 import { ISSUE_TITLE_MAX } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useId, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError, api, type WriteBounds } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
 import type { CreateIssueInput, Issue } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { RefusableButton } from "../../components/RefusableButton";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -14,9 +15,6 @@ import {
   borderDefault,
   card,
   inputClasses,
-  primaryButtonBg,
-  primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
@@ -61,6 +59,7 @@ export function CreateIssueDialog({
   const [title, setTitle] = useState("");
   const [spec, setSpec] = useState("");
   const submitGuard = useSubmitGuard();
+  const refusalId = useId();
   // The dialog shows a refusal itself, beside the draft it was refused over.
   const mutation = useKeyedWrite({
     inline: true,
@@ -90,7 +89,10 @@ export function CreateIssueDialog({
     "";
   const trimmedTitle = title.trim();
   const trimmedSpec = spec.trim();
-  const canSubmit = selectedProject !== "" && trimmedTitle !== "" && !mutation.isPending;
+  // What the draft still lacks, which refuses Create and Create anyway alike; a create already
+  // in flight is the other thing that holds them, and that one is each button's `busy`.
+  const refusal =
+    selectedProject === "" || trimmedTitle === "" ? "Pick a project and write a title." : null;
   const submit = (force: boolean) =>
     submitGuard.guard(() =>
       mutation.mutate({
@@ -102,7 +104,9 @@ export function CreateIssueDialog({
     );
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (canSubmit) {
+    // Create swallows a refused click itself, but Enter in a field submits the form without
+    // passing through it, so the form owes the same check.
+    if (refusal === null && !mutation.isPending) {
       submit(false);
     }
   };
@@ -202,6 +206,13 @@ export function CreateIssueDialog({
               </p>
             )
           ) : null}
+          {/* The reason Create and Create anyway refuse, on screen beside the draft it was
+              refused over, and the description both buttons carry. */}
+          {refusal === null ? null : (
+            <p className={`text-right text-xs ${textMutedOnSurface}`} id={refusalId}>
+              {refusal}
+            </p>
+          )}
           <div className="flex items-center justify-end gap-2">
             <button
               className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
@@ -211,22 +222,25 @@ export function CreateIssueDialog({
               Cancel
             </button>
             {duplicate === undefined ? null : (
-              <button
-                className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-                disabled={!canSubmit}
-                onClick={() => submit(true)}
-                type="button"
+              <RefusableButton
+                busy={mutation.isPending ? "Create anyway" : undefined}
+                look="secondary"
+                onPress={() => submit(true)}
+                refusal={refusal}
+                refusalShownBy={refusalId}
               >
                 Create anyway
-              </button>
+              </RefusableButton>
             )}
-            <button
-              className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-              disabled={!canSubmit}
+            <RefusableButton
+              busy={mutation.isPending ? "Creating…" : undefined}
+              className="min-h-11"
+              refusal={refusal}
+              refusalShownBy={refusalId}
               type="submit"
             >
-              {mutation.isPending ? "Creating…" : "Create"}
-            </button>
+              Create
+            </RefusableButton>
           </div>
         </form>
       </div>
