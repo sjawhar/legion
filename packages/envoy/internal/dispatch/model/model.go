@@ -2071,6 +2071,66 @@ type BlockLinks struct {
 	Links []BlockLink `json:"links"`
 }
 
+// DecisionKeep is one person's agreement with a decision: the decision's heading block, the sum
+// of its whole text when they pressed Keep, the version it then stood at, and who did when. The
+// sum, not the version, is what tells a kept decision from one waiting for review again: a
+// decision's ChangedVersion is the greatest of the blocks it holds now, so it does not move when
+// a block is removed from the decision or moved into or out of it, where the text changes and
+// every remaining block keeps its version.
+type DecisionKeep struct {
+	ArtifactID     string    `json:"artifact_id"`
+	BlockID        string    `json:"block_id"`
+	ChangedVersion int       `json:"changed_version"`
+	KeptBy         string    `json:"kept_by"`
+	KeptAt         time.Time `json:"kept_at"`
+	// TextSHA256 is the sum the view compares; a reader is served the decision's Text and
+	// WaitingReview, so it is no part of the wire shape.
+	TextSHA256 string `json:"-"`
+}
+
+// DecisionLink is one link from a block of a decision to a block of the issue's spec: the
+// decision's own block that holds it, the spec block it names, when and in which version of
+// decisions.md the link was first written, and whether the spec block is out of date - the
+// decision changed after it first linked that block, and that block has not changed since.
+type DecisionLink struct {
+	FromBlock      string    `json:"from_block"`
+	To             GraphNode `json:"to"`
+	CreatedVersion int       `json:"created_version"`
+	CreatedAt      time.Time `json:"created_at"`
+	Stale          bool      `json:"stale"`
+}
+
+// Decision is one decision of an issue's decisions.md: its heading block and every block after
+// it up to the next heading of its level or higher. Kind is "person" when its blocks mention an
+// ask (a person's decision links the answered ask) and "agent" otherwise; Unsure is set by a
+// paragraph that starts "Unsure:"; Replaced is set by sitting under the section headed exactly
+// "## Replaced". ChangedVersion and ChangedAt are the greatest of its blocks'. TextSHA256 is the
+// sum of Text, which a Keep carries back to say which text it agreed with. WaitingReview is an
+// agent's decision, not replaced, whose text nobody has kept as it stands.
+type Decision struct {
+	BlockID        string         `json:"block_id"`
+	Heading        string         `json:"heading"`
+	Ref            string         `json:"ref"`
+	Text           string         `json:"text"`
+	TextSHA256     string         `json:"text_sha256"`
+	Kind           string         `json:"kind"`
+	Unsure         bool           `json:"unsure"`
+	Replaced       bool           `json:"replaced"`
+	Asks           []string       `json:"asks"`
+	Links          []DecisionLink `json:"links"`
+	ChangedVersion int            `json:"changed_version"`
+	ChangedAt      *time.Time     `json:"changed_at"`
+	Kept           *DecisionKeep  `json:"kept"`
+	WaitingReview  bool           `json:"waiting_review"`
+}
+
+// DocumentRead is one person's last read version of a document: null when they have read none.
+type DocumentRead struct {
+	ArtifactID string     `json:"artifact_id"`
+	Version    *int       `json:"version"`
+	ReadAt     *time.Time `json:"read_at"`
+}
+
 // Event is the immutable event-log record for a Dispatch mutation.
 type Event struct {
 	ID         int64     `json:"id"`

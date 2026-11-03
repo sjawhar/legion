@@ -5,8 +5,9 @@
 # step that is more than the go line, a shell, a container, a BASH_ENV) and a step off its exact
 # entry's pinned script count as reading every Go file of the repository and every file under a
 # Go module's directory, a why that cites a step must name a workflow file that still holds it,
-# ci-ok must need and map every job changes gates, its SELECTED_BY and PULL_REQUEST_ONLY must
-# say what each needed job's if: tests, and a PUSH_WORKFLOWS workflow's on.push.paths must equal
+# CI_OK_SELECTED_BY must map every job changes gates, it and CI_OK_PULL_REQUEST_ONLY must say what
+# each job's if: tests, every job but changes must end with the ci-ok report step and no job may be
+# named for a required check, and a PUSH_WORKFLOWS workflow's on.push.paths must equal
 # its filter.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
@@ -30,8 +31,9 @@ source "$script_dir/test-lib.sh"
 # fixture <name>: a tree that passes. The app job runs `go test ./cmd/app ./lib`, whose closure is
 # cmd/app and lib (cmd/app imports lib); lib's test reads fixtures/data.json through `..`, which
 # RULES records; mod/other is a package nothing imports. The image job runs only on a pull
-# request, and ci-ok needs both. The site filter gates no job: site.yaml, which PUSH_WORKFLOWS
-# pairs with it, runs on a push whose paths are that filter flattened. Echoes the fixture root.
+# request, and both end with the ci-ok report step. The site filter gates no job: site.yaml, which
+# PUSH_WORKFLOWS pairs with it, runs on a push whose paths are that filter flattened. Echoes the
+# fixture root.
 fixture() {
   local root="$work/$1"
   if [ -e "$root" ]; then
@@ -80,6 +82,9 @@ PY
   cat > "$root/.github/workflows/ci.yaml" <<'YAML'
 name: CI
 on: [pull_request]
+env:
+  CI_OK_SELECTED_BY: '{"app": "app", "image": "image"}'
+  CI_OK_PULL_REQUEST_ONLY: '["image"]'
 jobs:
   changes:
     runs-on: ubuntu-24.04
@@ -114,6 +119,12 @@ jobs:
       - name: Test the app
         run: go test ./cmd/app ./lib
         working-directory: mod
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
   image:
     needs: changes
     if: github.event_name == 'pull_request' && needs.changes.outputs.image == 'true'
@@ -121,16 +132,12 @@ jobs:
     steps:
       - name: Build
         run: go build ./...
-  ci-ok:
-    needs: [changes, app, image]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Condense
-        env:
-          SELECTED_BY: '{"app": "app", "image": "image"}'
-          PULL_REQUEST_ONLY: '["image"]'
-        run: .github/scripts/ci-ok.sh
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 YAML
   cat > "$root/.github/workflows/site.yaml" <<'YAML'
 name: Site
@@ -303,40 +310,54 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "says the closure is unknown" "$(contains "$out" 'so the closure of .* is unknown')"
 
-echo "case: ci-ok's SELECTED_BY misses a job ci-ok needs"
+echo "case: CI_OK_SELECTED_BY misses a job changes gates"
 root=$(fixture ci-ok-missing)
-replace "$root/.github/workflows/ci.yaml" "SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
-  "SELECTED_BY: '{\"image\": \"image\"}'"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
+  "CI_OK_SELECTED_BY: '{\"image\": \"image\"}'"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and the output to map it to" \
-  "$(contains "$out" "ci-ok's SELECTED_BY does not map app, which ci-ok needs, so ci-ok.sh fails it; add \"app\": \"app\"")"
+  "$(contains "$out" "CI_OK_SELECTED_BY does not map app, whose if: tests needs.changes.outputs.app, so ci-ok-report.sh never waits for its report and ci-ok.sh fails any it finds; add \"app\": \"app\"")"
 
-echo "case: ci-ok's SELECTED_BY maps a job to an output its if: does not test"
+echo "case: CI_OK_SELECTED_BY maps a job to an output its if: does not test"
 root=$(fixture ci-ok-wrong)
-replace "$root/.github/workflows/ci.yaml" "SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
-  "SELECTED_BY: '{\"app\": \"image\", \"image\": \"image\"}'"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
+  "CI_OK_SELECTED_BY: '{\"app\": \"image\", \"image\": \"image\"}'"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job, the wrong output and the right one" \
-  "$(contains "$out" "ci-ok's SELECTED_BY maps app to image, but its if: tests needs.changes.outputs.app")"
+  "$(contains "$out" "CI_OK_SELECTED_BY maps app to image, but its if: tests needs.changes.outputs.app")"
 
-echo "case: ci-ok's PULL_REQUEST_ONLY misses a job whose if: admits only pull_request"
+echo "case: CI_OK_SELECTED_BY maps a job changes does not gate"
+root=$(fixture ci-ok-extra)
+replace "$root/.github/workflows/ci.yaml" "CI_OK_SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
+  "CI_OK_SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\", \"gone\": \"gone\"}'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names it" "$(contains "$out" "CI_OK_SELECTED_BY maps gone, which is no job whose if: tests an output of changes; drop it")"
+
+echo "case: CI_OK_PULL_REQUEST_ONLY misses a job whose if: admits only pull_request"
 root=$(fixture ci-ok-pull-request-only)
-replace "$root/.github/workflows/ci.yaml" "PULL_REQUEST_ONLY: '[\"image\"]'" "PULL_REQUEST_ONLY: '[]'"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_PULL_REQUEST_ONLY: '[\"image\"]'" "CI_OK_PULL_REQUEST_ONLY: '[]'"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
-check "names the job" "$(contains "$out" "ci-ok's PULL_REQUEST_ONLY lacks image, whose if: admits only pull_request")"
+check "names the job" "$(contains "$out" "CI_OK_PULL_REQUEST_ONLY lacks image, whose if: admits only pull_request")"
 
-echo "case: a job changes gates is in neither ci-ok's needs nor its SELECTED_BY"
-root=$(fixture ci-ok-unheld)
-replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image]" "    needs: [changes, image]"
-replace "$root/.github/workflows/ci.yaml" "SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
-  "SELECTED_BY: '{\"image\": \"image\"}'"
+echo "case: a job whose last step is not the ci-ok report"
+root=$(fixture ci-ok-unreported)
+replace "$root/.github/workflows/ci.yaml" "        if: always()" "        if: success()"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
-check "names the job and both lists it is missing from" \
-  "$(contains "$out" "job app tests an output of changes in its if:, and ci-ok's needs and SELECTED_BY do not name it, so ci-ok passes while app fails. Add app to ci-ok's needs and SELECTED_BY.")"
+check "names the job and what its last step must be" \
+  "$(contains "$out" "job app's last step is not \`uses: ./.github/actions/ci-ok-report\` with \`if: always()\`")"
+
+echo "case: a job named for a required check"
+root=$(fixture ci-ok-job)
+replace "$root/.github/workflows/ci.yaml" $'\n  image:\n' $'\n  image:\n    name: ci-ok\n'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the check" \
+  "$(contains "$out" "job image is named ci-ok, a check main's ruleset requires")"
 
 echo "case: a push workflow's paths miss a pattern of its filter"
 root=$(fixture push-paths-missing)

@@ -40,6 +40,11 @@ on:
         type: string
         required: false
         default: ""
+      ci-ok-changes:
+        description: ci.yaml's toJSON(needs.changes), which the build's ci-ok report reads on a pull request (.github/actions/ci-ok-report); empty for every other caller
+        type: string
+        required: false
+        default: ""
     outputs:
       ref:
         description: The pushed image, pinned by digest (the `image` output below, then @sha256:…)
@@ -80,9 +85,15 @@ on:
 # copy of this file, so one that drops that `if:` gets those scopes too; its attestation is still
 # refused, because its certificate names `refs/pull/<n>/merge`, never `refs/heads/main`
 # (docs/kubernetes.md, "Pin by digest, never by tag").
+#
+# `actions: read` and `checks: write` are the scopes of the build's ci-ok report, which runs only on
+# ci.yaml's pull_request call; release.yaml's calls grant them too, since GitHub refuses a caller
+# that grants less than this block declares.
 permissions:
   contents: read
   packages: write # ghcr.io push
+  actions: read
+  checks: write
 
 jobs:
   build:
@@ -114,10 +125,11 @@ jobs:
     # that fails closed.
     # On a pull request, the run that reaches the group last wins, and GitHub does not guarantee
     # arrival order: two pushes seconds apart, or a re-run of an older head's run, can cancel the
-    # newest head's build, and ci.yaml's ci-ok then fails for that run. `gh run rerun` of the newest
-    # head's run restores it, so re-run an older head's run only after the newest head's build has
-    # completed. The job has no draft or closed `if:`: its only pull_request run is ci.yaml's call,
-    # which never runs on a draft (ci.yaml's `changes` skips it) and has no `closed` trigger.
+    # newest head's build, and ci.yaml's ci-ok then fails, or is never posted, for that run.
+    # `gh run rerun` of the newest head's run restores it, so re-run an older head's run only after
+    # the newest head's build has completed. The job has no draft or closed `if:`: its only
+    # pull_request run is ci.yaml's call, which never runs on a draft (ci.yaml's `changes` skips
+    # it) and has no `closed` trigger.
     concurrency:
       group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -270,6 +282,25 @@ jobs:
             echo
             echo "Pin \`runtime.kubernetes.image\` to the digest reference above; the daemon refuses a tag."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ci.yaml's pull_request call only: this job's result, and ci-ok itself when this job is that
+      # run's last, from the step every ci.yaml job ends with. The build checked out the pull
+      # request's head, which may predate that step, so the workspace is first checked out again,
+      # .github only, at the commit the run itself checked out (github.sha), whose ci.yaml and report
+      # step the rest of the run reads. The image is pushed by now, so nothing reads the build's tree.
+      - if: always() && github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github
+          persist-credentials: false
+      - name: Report ci-ok when this is the run's last job
+        if: always() && github.event_name == 'pull_request'
+        uses: ./.github/actions/ci-ok-report
+        with:
+          job: worker-image
+          changes: ${{ inputs.ci-ok-changes }}
+          job-status: ${{ job.status }}
 
   # A GitHub artifact attestation of the digest the build pushed, stored with GitHub. A pull request
   # run publishes its head's sha- tag too, and a pull request can edit this workflow, so a tag alone
