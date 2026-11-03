@@ -34,7 +34,11 @@ const implementPermissions = { contents: "write", checks: "read", pull_requests:
 const reviewPermissions = { contents: "write", checks: "write", pull_requests: "write" };
 /** Each stand-in App by its installation token. */
 const tokens: Record<string, StandInApp> = {
-  ghs_implement_101_secret: { id: 101, slug: "example-implement", permissions: implementPermissions },
+  ghs_implement_101_secret: {
+    id: 101,
+    slug: "example-implement",
+    permissions: implementPermissions,
+  },
   ghs_review_202_secret: { id: 202, slug: "example-review", permissions: reviewPermissions },
   ghs_other_404_secret: {
     id: 404,
@@ -49,8 +53,7 @@ const tokens: Record<string, StandInApp> = {
     permissions: reviewPermissions,
   },
 };
-const tokenOf = (id: number) =>
-  Object.keys(tokens).find((token) => tokens[token].id === id) ?? "";
+const tokenOf = (id: number) => Object.keys(tokens).find((token) => tokens[token].id === id) ?? "";
 const allTokens = Object.keys(tokens);
 
 const seen: string[] = [];
@@ -200,7 +203,9 @@ describe("app-logins.ts", () => {
   });
 
   test("an App without its role's write permission is refused, the two Apps swapped whole too", async () => {
-    const { code, stdout, stderr } = await run(config(app("202", `cat ${join(dir, "release-202.json")}`), app("101")));
+    const { code, stdout, stderr } = await run(
+      config(app("202", `cat ${join(dir, "release-202.json")}`), app("101"))
+    );
     expect(code).toBe(1);
     expect(stdout).toBe("");
     // The implement role on the review App passes (contents: write); the review role on the
@@ -224,8 +229,8 @@ describe("app-logins.ts", () => {
 
   test("a token command runs as the daemon runs it: no NATS seed, stdin closed, owner and read-only set empty", async () => {
     // An unset variable prints `unset`, so a set-empty owner and read-only flag print nothing.
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: a shell parameter expansion, not a template
     const probe =
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: a shell parameter expansion, not a template
       'printf "%s|%s|%s|%s|%s|%s" "$NATS_NKEY_SEED" "$NATS_DAEMON_NKEY_SEED" "$NATS_NKEY_SEED_FILE" "${LEGION_GITHUB_OWNER-unset}" "${LEGION_GITHUB_READ_ONLY-unset}" "$(cat)" >&2; exit 4';
     const { code, stderr } = await run(config(app("101", probe), app("202")), {
       NATS_NKEY_SEED: "pane-seed",
@@ -448,7 +453,11 @@ async function githubApps(inputs: Record<string, string | undefined>, then: stri
   // would strip them and hide whether the lib's own default entries do, so the child inherits none
   // and only a case's own inputs put one back.
   for (const name of Object.keys(ambient)) {
-    if (name.includes("PRIVATE_KEY") || name.startsWith("LEGION_E2E_") || name.startsWith("LEGION_GITHUB_")) {
+    if (
+      name.includes("PRIVATE_KEY") ||
+      name.startsWith("LEGION_E2E_") ||
+      name.startsWith("LEGION_GITHUB_")
+    ) {
       delete ambient[name];
     }
   }
@@ -497,7 +506,9 @@ echo "defaults $default_implement_app_id $default_implement_app_secret $default_
     );
     expect(stderr).toBe("");
     expect(code).toBe(0);
-    expect(line(stdout, "defaults ")).toBe("5341240 LEGION_IMPLEMENT_APP 5341243 LEGION_REVIEW_APP");
+    expect(line(stdout, "defaults ")).toBe(
+      "5341240 LEGION_IMPLEMENT_APP 5341243 LEGION_REVIEW_APP"
+    );
     const sources = appTokenSources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
     expect(sources.implement).toEqual({
       appId: "5341240",
@@ -592,18 +603,21 @@ printf 'command %s\\n' "$(app_token_command "$implement_app_secret")"`
   test("the token command asks agent-secrets for the owner and read-only flag the daemon names, and prints the release", async () => {
     const argvLog = join(dir, "argv-command");
     const cases: [Record<string, string>, string][] = [
-      [{}, "IMPLEMENT_APP --reason=legion-live-proof-github-app-token -- sh -c printf %s \"$IMPLEMENT_APP\""],
+      [
+        {},
+        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token -- sh -c printf %s "$IMPLEMENT_APP"',
+      ],
       [
         { LEGION_GITHUB_OWNER: "Acme-Org" },
-        "IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org -- sh -c printf %s \"$IMPLEMENT_APP\"",
+        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
         { LEGION_GITHUB_OWNER: "Acme-Org", LEGION_GITHUB_READ_ONLY: "1" },
-        "IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-read-only -- sh -c printf %s \"$IMPLEMENT_APP\"",
+        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-read-only -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
         { LEGION_GITHUB_OWNER: "", LEGION_GITHUB_READ_ONLY: "" },
-        "IMPLEMENT_APP --reason=legion-live-proof-github-app-token -- sh -c printf %s \"$IMPLEMENT_APP\"",
+        'IMPLEMENT_APP --reason=legion-live-proof-github-app-token -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
     ];
     for (const [daemonEnv, argv] of cases) {
@@ -675,7 +689,13 @@ echo minted`
     expect(stderr).toBe("");
     expect(code).toBe(0);
     expect(stdout).toContain("minted");
-    const files = ["_all.json", "acme-org.json", "acme-org.read.json", "sjawhar.json", "sjawhar.read.json"];
+    const files = [
+      "_all.json",
+      "acme-org.json",
+      "acme-org.read.json",
+      "sjawhar.json",
+      "sjawhar.read.json",
+    ];
     for (const [role, secret] of [
       ["implement", "IMPLEMENT_APP"],
       ["review", "REVIEW_APP"],
@@ -727,7 +747,9 @@ echo minted`
       "sjawhar.json",
       "sjawhar.read.json",
     ]);
-    expect(readFileSync(join(tokenDir, "implement", "sjawhar.read.json"), "utf8")).toBe("last good");
+    expect(readFileSync(join(tokenDir, "implement", "sjawhar.read.json"), "utf8")).toBe(
+      "last good"
+    );
     // The run stopped at the first failure: the review App was never minted.
     expect(existsSync(join(tokenDir, "review"))).toBe(false);
     holdsNoToken(stdout + stderr);
@@ -741,7 +763,9 @@ echo minted`
 mint_app_tokens "$TOKEN_DIR" sjawhar`
     );
     expect(code).toBe(1);
-    expect(stderr).toMatch(/^FAIL prerequisites: the implement App \(App 101, .*_all\.json: agent-secrets printed nothing$/m);
+    expect(stderr).toMatch(
+      /^FAIL prerequisites: the implement App \(App 101, .*_all\.json: agent-secrets printed nothing$/m
+    );
     expect(readdirSync(join(tokenDir, "implement"))).toEqual([]);
   });
 
