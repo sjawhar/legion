@@ -353,15 +353,16 @@ type SearchIssue struct {
 // document settlement retracted while it was answered, and nil when nobody answered.
 // Answer.Selected is an empty list, never null, when the answer chose no option.
 type SearchAsk struct {
-	State      string           `json:"state"` // "open" | "answered" | "resolved"
-	Answer     *SearchAskAnswer `json:"answer,omitempty"`
-	Resolution *AskResolution   `json:"resolution,omitempty"`
+	State      string             `json:"state"` // "open" | "answered" | "resolved"
+	Answer     *AskAnswerWithTree `json:"answer,omitempty"`
+	Resolution *AskResolution     `json:"resolution,omitempty"`
 }
 
-// SearchAskAnswer is the answer a search hit's ask carries, with the tree of the text given with
-// it. It is the hit's own reading of an AskAnswer rather than a field on AskAnswer itself: the
-// answer is an event payload's shape, and no payload gains a tree field.
-type SearchAskAnswer struct {
+// AskAnswerWithTree is an answer a read gives with the tree of its text. It is the read's own
+// shape rather than a field on AskAnswer itself: the answer is an event payload's shape, and no
+// payload gains a tree field. A search hit's ask and a person's answer history both answer with
+// it.
+type AskAnswerWithTree struct {
 	AskAnswer
 	// TextTree is the ProseMirror tree Text is shown as, present only for a caller that sent
 	// `Dispatch-Trees: 1`.
@@ -1190,14 +1191,14 @@ type MyAnswerRow struct {
 	Question string    `json:"question"`
 	// QuestionTree is the ProseMirror tree Question is shown as, present only for a caller that
 	// sent `Dispatch-Trees: 1`.
-	QuestionTree json.RawMessage `json:"question_tree,omitempty"`
-	AskKind      string          `json:"ask_kind"`
-	AskState     string          `json:"ask_state"`
-	EditedAt     *string         `json:"edited_at"`
-	Owner        OpenAskOwner    `json:"owner"`
-	Answer       *AskAnswer      `json:"answer,omitempty"`
-	Current      bool            `json:"current"`
-	Reply        *MyAnswerReply  `json:"reply,omitempty"`
+	QuestionTree json.RawMessage    `json:"question_tree,omitempty"`
+	AskKind      string             `json:"ask_kind"`
+	AskState     string             `json:"ask_state"`
+	EditedAt     *string            `json:"edited_at"`
+	Owner        OpenAskOwner       `json:"owner"`
+	Answer       *AskAnswerWithTree `json:"answer,omitempty"`
+	Current      bool               `json:"current"`
+	Reply        *MyAnswerReply     `json:"reply,omitempty"`
 }
 
 // MyAnswersResponse is a page of the caller's answers and ask replies.

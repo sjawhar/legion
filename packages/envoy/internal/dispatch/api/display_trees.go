@@ -332,13 +332,13 @@ func attachNodeTrees(node *model.GraphNode, trees bool) {
 	}
 }
 
-// newSearchAskAnswer is a search hit's answer with the tree of the text given with it, nil for a
-// hit whose ask nobody answered.
-func newSearchAskAnswer(answer *model.AskAnswer, trees bool) *model.SearchAskAnswer {
+// newAskAnswerWithTree is an answer a read gives with the tree of its text, nil where nobody
+// answered. A search hit's ask and a person's answer history both read one.
+func newAskAnswerWithTree(answer *model.AskAnswer, trees bool) *model.AskAnswerWithTree {
 	if answer == nil {
 		return nil
 	}
-	read := &model.SearchAskAnswer{AskAnswer: *answer}
+	read := &model.AskAnswerWithTree{AskAnswer: *answer}
 	if trees {
 		read.TextTree = displayTreeOf(answer.Text)
 	}

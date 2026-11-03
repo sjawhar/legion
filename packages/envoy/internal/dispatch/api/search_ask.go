@@ -44,7 +44,7 @@ func (s *server) attachAskStates(ctx context.Context, q queryer, results []model
 		}
 		results[indexByID[ask.ID]].Ask = &model.SearchAsk{
 			State:      ask.State,
-			Answer:     newSearchAskAnswer(ask.Answer, trees),
+			Answer:     newAskAnswerWithTree(ask.Answer, trees),
 			Resolution: ask.Resolution,
 		}
 	}
@@ -59,7 +59,7 @@ func (s *server) attachAskStates(ctx context.Context, q queryer, results []model
 		}
 		for _, id := range resolvedIDs {
 			if history := answers[id]; len(history) > 0 {
-				results[indexByID[id]].Ask.Answer = newSearchAskAnswer(&history[len(history)-1], trees)
+				results[indexByID[id]].Ask.Answer = newAskAnswerWithTree(&history[len(history)-1], trees)
 			}
 		}
 	}

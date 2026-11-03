@@ -127,6 +127,9 @@ func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 		}
 		if trees {
 			row.QuestionTree = displayTree(row.Question)
+			if row.Answer != nil && row.Answer.Text != nil {
+				row.Answer.TextTree = displayTree(*row.Answer.Text)
+			}
 			if row.Reply != nil {
 				row.Reply.BodyTree = displayTree(row.Reply.Body)
 			}
