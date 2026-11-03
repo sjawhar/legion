@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,5 +80,53 @@ func TestTheControllersPodIsNotLeftBehindByAConfigurationItCannotCarry(t *testin
 				t.Logf("on main this same change reads StaleAddress and the launch replaces the pod")
 			}
 		})
+	}
+}
+
+// The project controller's pod is the one pod no update round covers (roundCovers): PodDrift
+// answers nothing for it, so every facet of driftedInPod reaches it through movedInPod's rule
+// for an uncovered pod (addresses.go), and its next launch replaces it, as it always has. A
+// served owner its gh volume projects no directory for is such a facet: the controller acts as
+// the review App for every owner of the project, and one its pod holds no directory for is one
+// its `gh` reaches as nobody. It has no issue workspace and nothing to push, so nothing is lost
+// by replacing the pod where it stands — and it is replaced at its next launch, with no second
+// registration anywhere.
+func TestAControllerPodWhoseGhVolumeLacksAServedOwnerIsReplacedByItsNextLaunch(t *testing.T) {
+	g := newRig(t, nil)
+	spec := controllerSpec(t)
+	loc := g.spawn(spec)
+	ghVolumeName := roleVolume(ghVolume, claim.RoleController)
+	r2 := secondRuntime(t, g, servingAddedOwner)()
+	g.connectRunning(controllerToken, loc.Sandbox.Generation)
+	g.eventually("the controller's launcher to report its child to the restarted daemon", func() bool {
+		state, connected := r2.launchers.state(controllerToken, loc.Sandbox.PodUID)
+		return connected && state.Child != nil
+	})
+	want := (movedAddress{ghVolumeName, ghOwnersName(staticOwners), ghOwnersName(servedOwners)}).String()
+	held := r2.driftedInPod(g.pod(loc.Sandbox.Name), claim.RoleController)
+	if !slices.ContainsFunc(held, func(m movedAddress) bool { return m.String() == want }) {
+		t.Fatalf("the controller's pod holds %+v, want %q among it", held, want)
+	}
+	obs := readopt(t, g.ctx, r2, loc)[0]
+	if obs.Kind != runtime.StaleAddress || !strings.Contains(obs.Detail, want) {
+		t.Fatalf("%s (%s), want StaleAddress naming %q: no round is opened over the controller's pod, so its launch is what replaces it",
+			obs.Kind, obs.Detail, want)
+	}
+
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-controller-g2", controllerSession
+	next, err := r2.Resume(g.ctx, &loc, spec)
+	if err != nil {
+		t.Fatalf("Resume the controller: %v", err)
+	}
+	if next.Sandbox.PodUID == loc.Sandbox.PodUID {
+		t.Fatalf("the launch kept pod %s, whose gh volume names no directory for %s, and no round will ever replace it",
+			loc.Sandbox.PodUID, addedOwner)
+	}
+	pod := g.pod(loc.Sandbox.Name)
+	if held := ghItems(t, pod, claim.RoleController); !slices.Equal(held, ghItemsFor(servedOwners...)) {
+		t.Errorf("the replaced controller pod's gh volume projects %+v, want the two files of each of %q", held, servedOwners)
+	}
+	if held := r2.driftedInPod(pod, claim.RoleController); len(held) > 0 {
+		t.Fatalf("the replaced controller pod holds %+v, which a pod created now is not handed", held)
 	}
 }

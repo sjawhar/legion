@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -313,6 +314,119 @@ func TestEnrollingWithTheSecretsBrokerDriftsAnIssuePodMadeWithoutIt(t *testing.T
 	}
 	if newReviewer.Sandbox.PodUID != newTester.Sandbox.PodUID {
 		t.Fatalf("the reviewer resumed into pod %s, want the tester's new pod %s", newReviewer.Sandbox.PodUID, newTester.Sandbox.PodUID)
+	}
+}
+
+// ghItems are the items role's gh volume of the pod projects: the Secret keys of the owners the
+// pod was created under, which are fixed for its life (manifest's volumes). A pod of this
+// runtime's making holding no such projection fails the test, there being nothing to read.
+func ghItems(t *testing.T, pod *corev1.Pod, role claim.Role) []corev1.KeyToPath {
+	t.Helper()
+	name := roleVolume(ghVolume, role)
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name != name {
+			continue
+		}
+		if volume.Secret == nil {
+			t.Fatalf("the pod's %s volume is %+v, want its role Secret's gh keys", name, volume.VolumeSource)
+		}
+		return volume.Secret.Items
+	}
+	t.Fatalf("the pod has no %s volume", name)
+	return nil
+}
+
+// ghItemsFor is what a gh volume projects for owners, in the order a launch of them builds it:
+// each owner's hosts.yml and config.yml under a directory of its own name.
+func ghItemsFor(owners ...string) []corev1.KeyToPath {
+	items := make([]corev1.KeyToPath, 0, 2*len(owners))
+	for _, owner := range owners {
+		items = append(items,
+			corev1.KeyToPath{Key: GitHubHostsKey(owner), Path: owner + "/" + ghconfig.HostsFile},
+			corev1.KeyToPath{Key: GitHubConfigKey(owner), Path: owner + "/" + ghconfig.ConfigFile})
+	}
+	return items
+}
+
+// A project that gains a GitHub owner — a repository of a new owner in its mapping, which the
+// restarted daemon serves (appauth.GitHubOwners) and renders a directory for in every role's
+// bundle — leaves every issue pod created before it projecting the owners of its own creation:
+// the refresher adds the new owner's two keys to the live role Secret, but a pod's projection
+// names the keys it was built with, so /var/run/legion/gh holds no directory of that owner and
+// every gh call of its roles against that owner's repositories runs as nobody. The pod has
+// drifted, not moved: its workers are reachable, so PodDrift names the gh volume with the owners
+// it holds and the owners served now, the daemon opens an update round, and the relaunch keeps
+// the pod — replacing it under the roles working in it would delete the issue's disk with
+// everything unpushed on it. Once the round has ended the pod (ReplacePod), the next launch makes
+// one projecting the new owner's files too, and that pod has drifted from nothing.
+func TestAddingAGitHubOwnerDriftsAnIssuePodWhoseGhVolumeLacksIt(t *testing.T) {
+	g := newRig(t, nil)
+	tester := workerSpec(t)
+	testerLoc := g.spawn(tester)
+	ghVolumeName := roleVolume(ghVolume, claim.RoleTester)
+	if held := ghItems(t, g.pod(testerLoc.Sandbox.Name), claim.RoleTester); !slices.Equal(held, ghItemsFor(staticOwners...)) {
+		t.Fatalf("the tester's gh volume projects %+v, want the two files of each of %q and nothing else", held, staticOwners)
+	}
+
+	r2 := secondRuntime(t, g, servingAddedOwner)()
+	g.connectRunning(workerToken, testerLoc.Sandbox.Generation)
+	g.eventually("the tester's launcher to report its child to the restarted daemon", func() bool {
+		state, connected := r2.launchers.state(workerToken, testerLoc.Sandbox.PodUID)
+		return connected && state.Child != nil
+	})
+	obs := readopt(t, g.ctx, r2, testerLoc)[0]
+	if obs.Kind != runtime.Alive || obs.Locator != testerLoc {
+		t.Fatalf("%s at %+v, want the tester alive at its recorded locator until its round ends: %s", obs.Kind, obs.Locator, obs.Detail)
+	}
+	want := (movedAddress{ghVolumeName, ghOwnersName(staticOwners), ghOwnersName(servedOwners)}).String()
+	drifted := driftOf(t, g.ctx, r2, testerLoc)
+	if !slices.Contains(drifted, want) {
+		t.Errorf("PodDrift = %q, want %q among it", drifted, want)
+	}
+	named := 0
+	for _, reason := range drifted {
+		if strings.Contains(reason, ghVolumeName) {
+			named++
+		}
+	}
+	if named != 1 {
+		t.Errorf("PodDrift = %q, want exactly one reason naming %s: the gh directory is one volume, whatever it lacks", drifted, ghVolumeName)
+	}
+
+	tester.Generation, tester.BootToken, tester.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
+	kept, err := r2.Resume(g.ctx, &testerLoc, tester)
+	if err != nil {
+		t.Fatalf("Resume the tester: %v", err)
+	}
+	if kept.Sandbox.PodUID != testerLoc.Sandbox.PodUID {
+		t.Fatalf("Resume replaced the pod %s, which the tester's own update round replaces: the launch would delete the issue's disk", testerLoc.Sandbox.PodUID)
+	}
+
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}, stillDue); err != nil {
+		t.Fatalf("ReplacePod: %v", err)
+	}
+	tester.Generation, tester.BootToken = 3, "boot-tester-g3"
+	newTester, err := r2.Resume(g.ctx, &kept, tester)
+	if err != nil {
+		t.Fatalf("Resume the tester after its round: %v", err)
+	}
+	if newTester.Sandbox.PodUID == testerLoc.Sandbox.PodUID {
+		t.Fatalf("the round kept the pod %s, whose gh volume names no directory for %s", testerLoc.Sandbox.PodUID, addedOwner)
+	}
+	pod := g.pod(testerLoc.Sandbox.Name)
+	if held := ghItems(t, pod, claim.RoleTester); !slices.Equal(held, ghItemsFor(servedOwners...)) {
+		t.Errorf("the replaced pod's gh volume projects %+v, want the two files of each of %q", held, servedOwners)
+	}
+	for _, want := range ghItemsFor(addedOwner) {
+		if !slices.Contains(ghItems(t, pod, claim.RoleTester), want) {
+			t.Errorf("the replaced pod's gh volume does not project %s at %s", want.Key, want.Path)
+		}
+	}
+	if held := heldInPod(r2, pod, claim.Roles); len(held) > 0 {
+		t.Fatalf("the replaced pod holds %+v, which a pod created now is not handed", held)
+	}
+	if drifted := driftOf(t, g.ctx, r2, newTester); len(drifted) > 0 {
+		t.Fatalf("the replaced pod has drifted: %q", drifted)
 	}
 }
 
