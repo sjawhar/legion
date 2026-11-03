@@ -145,6 +145,37 @@ export const blockIdSchemas = [
 
 export const blockIdsPluginKey = new PluginKey('proof-block-ids');
 
+/** Receives the number of nodes a stamping pass read - see `createBlockIdsPlugin`. */
+export type BlockIdVisitCounter = (read: number) => void;
+
+let visitCounter: BlockIdVisitCounter | null = null;
+
+/**
+ * Observes what each stamping pass reads, including the passes that stamp nothing and so
+ * append no transaction to carry the count. Tests measure the plugin's cost with it; it
+ * follows `setBlockIdGenerator`, this file's existing test seam.
+ */
+export function setBlockIdVisitCounter(next: BlockIdVisitCounter | null): void {
+  visitCounter = next;
+}
+
+/** How many nodes a stamping pass has visited so far; shared by the two walks of one pass. */
+interface VisitCount {
+  read: number;
+}
+
+/** `node.descendants`, counting every node the walk visits - blocks, inline nodes and text alike. */
+function descendantsCounted(
+  node: ProseMirrorNode,
+  visits: VisitCount,
+  f: (node: ProseMirrorNode, pos: number) => boolean | void,
+): void {
+  node.descendants((child, pos) => {
+    visits.read += 1;
+    return f(child, pos);
+  });
+}
+
 interface MissingBlock {
   pos: number;
   node: ProseMirrorNode;
@@ -156,10 +187,14 @@ interface MissingBlock {
  * block in document order, which is where a split leaves it (the first half keeps the
  * attrs both halves were copied from).
  */
-function blocksNeedingIds(doc: ProseMirrorNode, keeper: (id: string) => number | undefined): MissingBlock[] {
+function blocksNeedingIds(
+  doc: ProseMirrorNode,
+  keeper: (id: string) => number | undefined,
+  visits: VisitCount,
+): MissingBlock[] {
   const blocks: { pos: number; node: ProseMirrorNode; id: string | null }[] = [];
   const count = new Map<string, number>();
-  doc.descendants((node, pos) => {
+  descendantsCounted(doc, visits, (node, pos) => {
     if (!isIdentifiedBlock(node)) return;
     const id = blockIdOf(node);
     blocks.push({ pos, node, id });
@@ -182,14 +217,18 @@ function blocksNeedingIds(doc: ProseMirrorNode, keeper: (id: string) => number |
  * now starts: its old position mapped through every step, leaning past anything
  * inserted right at its start, so a copy inserted above it does not take its place.
  */
-function holderAfter(before: ProseMirrorNode, transactions: readonly Transaction[]): (id: string) => number | undefined {
+function holderAfter(
+  before: ProseMirrorNode,
+  transactions: readonly Transaction[],
+  visits: VisitCount,
+): (id: string) => number | undefined {
   const mapping = new Mapping();
   for (const tr of transactions) mapping.appendMapping(tr.mapping);
   let held: Map<string, number> | undefined;
   return (id) => {
     if (held === undefined) {
       const holders = new Map<string, number>();
-      before.descendants((node, pos) => {
+      descendantsCounted(before, visits, (node, pos) => {
         if (!isIdentifiedBlock(node)) return;
         const blockId = blockIdOf(node);
         if (blockId !== null && !holders.has(blockId)) holders.set(blockId, pos);
@@ -240,6 +279,13 @@ function isRemote(tr: Transaction): boolean {
 /**
  * Stamps ids on blocks created by local transactions. Remote transactions and the
  * initial document load are left to their origin (the peer or the server).
+ *
+ * The pass reports what it costs: `read` is the number of nodes it visited while deciding
+ * what to stamp - every node of `blocksNeedingIds`'s walk of the new document plus every
+ * node of `holderAfter`'s walk of the old one, which only runs when an id is duplicated.
+ * Nodes visited, not blocks found: a walk that reads less is the point. The count reaches
+ * a stamping pass's transaction as the meta `{ stamped, read }` under `blockIdsPluginKey`,
+ * and every pass, stamping or not, through `setBlockIdVisitCounter`.
  */
 export function createBlockIdsPlugin(): Plugin {
   return new Plugin({
@@ -247,13 +293,21 @@ export function createBlockIdsPlugin(): Plugin {
     appendTransaction(transactions, oldState, newState) {
       if (!transactions.some((tr) => tr.docChanged)) return null;
       if (transactions.some((tr) => isRemote(tr) || tr.getMeta('document-load'))) return null;
-      const missing = blocksNeedingIds(newState.doc, holderAfter(oldState.doc, transactions));
+      const visits: VisitCount = { read: 0 };
+      const missing = blocksNeedingIds(
+        newState.doc,
+        holderAfter(oldState.doc, transactions, visits),
+        visits,
+      );
+      visitCounter?.(visits.read);
       if (missing.length === 0) return null;
       let tr = newState.tr;
       for (const { pos, node } of missing) {
         tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, [BLOCK_ID_ATTR]: mintBlockId() }, node.marks);
       }
-      return tr.setMeta('addToHistory', false).setMeta(blockIdsPluginKey, { stamped: missing.length });
+      return tr
+        .setMeta('addToHistory', false)
+        .setMeta(blockIdsPluginKey, { stamped: missing.length, read: visits.read });
     },
   });
 }
