@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -75,6 +78,14 @@ type Options struct {
 	// refuses it either, since refusing calls with no relaunch under way would stall agents that
 	// work today.
 	PluginRelaunchable bool
+	// NoPluginInstall is supervise.Deps.NoPluginInstall as the API sees it: whether this claim's
+	// launch installs no plugin at all, which only the daemon knows, since a role's backend and
+	// the runtime it launches into are its configuration (internal/daemon's noPluginInstall — a
+	// Claude Code role's plugin in a pod is its image's own claude-envoy). Nothing of this
+	// daemon relaunches such a claim for its contract and its registration stands, so the routes
+	// serve it on the contract it speaks (staleClaim). Nil is a daemon whose every claim a
+	// relaunch can carry.
+	NoPluginInstall func(c supervise.Claim) bool
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
@@ -95,6 +106,10 @@ type Options struct {
 	// GitHubOwners are the GitHub owners of the project's repositories, every one of which the
 	// controller's gh bundle holds a read-only token for (appauth.GitHubCredential).
 	GitHubOwners func() []string
+	// RepositoryRenames is the deployment's repository equivalence
+	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
+	// configured rename's two owners (appauth.GitHubCredential). The zero value configures none.
+	RepositoryRenames ghrepo.Renames
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
@@ -174,27 +189,33 @@ type server struct {
 	designGate      config.DesignGate
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
-	// pluginRelaunchable is Options.PluginRelaunchable.
+	// pluginRelaunchable is Options.PluginRelaunchable, noPluginInstall Options.NoPluginInstall.
 	pluginRelaunchable bool
+	noPluginInstall    func(c supervise.Claim) bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
 	githubOwners func() []string
-	githubAPI    string
-	mergeRules   func(project string) config.MergeRules
-	grants       *credential.Grants
-	releaser     store.TreeReleaser
-	trees        TreeLifecycles
-	pool         *pgxpool.Pool
-	handlers     []intake.Handler
-	prepare      func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	unread       func(resolved string) bool
-	await        func(repo, tree, child, parent string)
-	roleFor      func(phase.Phase) claim.Role
-	records      record.Store
-	dispatch     dispatch.Client
-	claimReady   func(c supervise.Claim)
+	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
+	// that says which owner's installation holds a repository recorded under the name a transfer
+	// moved it away from, which the controller's gh bundle reads (appauth.GitHubCredential) and
+	// serving reads for this server's own GitHub calls. The zero value configures none.
+	renames    ghrepo.Renames
+	githubAPI  string
+	mergeRules func(project string) config.MergeRules
+	grants     *credential.Grants
+	releaser   store.TreeReleaser
+	trees      TreeLifecycles
+	pool       *pgxpool.Pool
+	handlers   []intake.Handler
+	prepare    func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
+	unread     func(resolved string) bool
+	await      func(repo, tree, child, parent string)
+	roleFor    func(phase.Phase) claim.Role
+	records    record.Store
+	dispatch   dispatch.Client
+	claimReady func(c supervise.Claim)
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
@@ -228,8 +249,10 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		designGate:         opts.DesignGate,
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
+		noPluginInstall:    opts.NoPluginInstall,
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
+		renames:            opts.RepositoryRenames,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
@@ -278,6 +301,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 
 	mux.HandleFunc("POST /legion/v1/claims/register", s.register)
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
+	mux.HandleFunc("POST /legion/v1/claims/ready-for-update", s.readyForUpdate)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
@@ -315,6 +339,25 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
+}
+
+// serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
+// other name of its configured pair when the project's owners make that name's owner the one
+// whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
+// one rule, read here over the owners this server already holds (Options.GitHubOwners) rather
+// than written a second time.
+func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
+	return s.renames.Serving(recorded, s.ownsOwner)
+}
+
+// ownsOwner is whether owner is an owner of the project's repositories, compared without case as
+// GitHub compares owners. A server built with no owners — a test's, a daemon with no GitHub Apps
+// — owns none.
+func (s *server) ownsOwner(owner string) bool {
+	if s.githubOwners == nil {
+		return false
+	}
+	return slices.ContainsFunc(s.githubOwners(), func(o string) bool { return strings.EqualFold(o, owner) })
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,

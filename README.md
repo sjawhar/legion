@@ -74,7 +74,8 @@ request, decision and use is recorded. Legion enrolls every worker pod it starts
 its deployment names a broker.
 
 [The Secrets Broker's documentation](https://sjawhar.github.io/legion/broker/) ·
-[a walkthrough video of one request](https://sjawhar.github.io/legion/broker/walkthrough/)
+[a walkthrough video of one request](https://sjawhar.github.io/legion/broker/walkthrough/) ·
+[install `agent-secrets` and give a machine access](packages/envoy/cmd/agent-secrets/README.md#install)
 
 [![The secrets broker's approval page for one secret request: the secret, the enrollment the broker verified asked, the reason, how long the grant lasts, the approver, and Approve and Deny buttons](docs/site/public/media/broker/credential-request.png)](https://sjawhar.github.io/legion/broker/walkthrough/)
 

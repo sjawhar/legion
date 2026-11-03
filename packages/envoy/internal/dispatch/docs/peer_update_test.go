@@ -274,7 +274,7 @@ func peerUpdateRoom(t *testing.T, markdown string, leastBytes int) (*Service, *c
 		t.Fatal(err)
 	}
 	service := calibratedService()
-	replica := service.keepReplica(room, nil, &rendering, nil)
+	replica := service.keepReplica(room, nil, loadRendering(rendering), nil)
 	bytes, elements, measured := replica.size()
 	if !measured || bytes < int64(leastBytes) {
 		t.Fatalf("the room published %d bytes and %d elements, want at least %d bytes", bytes, elements, leastBytes)
@@ -626,7 +626,7 @@ func TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor(t *testing
 	serverWritten := len(crdt.EncodeStateAsUpdateV1(room, nil))
 	serverUnrendered := countRoom(room).unrendered
 	service := calibratedService()
-	replica := service.keepReplica(room, nil, &rendering, nil)
+	replica := service.keepReplica(room, nil, loadRendering(rendering), nil)
 	// A client id of five bytes, the most a lib0 varint of one takes, which most random ids are:
 	// every origin of every struct the browser writes names it, so a smaller one would measure a
 	// lighter frame than most browsers send.
@@ -1293,7 +1293,7 @@ func TestTheStructTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing.T) 
 	}
 	service := calibratedService()
 	rendering := "# Title\n\nOne paragraph of ordinary prose.\n"
-	replica := service.keepReplica(room, nil, &rendering, nil)
+	replica := service.keepReplica(room, nil, loadRendering(rendering), nil)
 	want := walked.structs + splitsAStructCanCause*uint64(pending.Items+pending.DeleteRanges)
 	if total, stale := replica.structs.runningStructs(); total != want || stale {
 		t.Fatalf("the load counted a total of %d (stale %t), want the walk's %d structs and the splits of %d parked structs and %d parked ranges, %d",
@@ -2316,7 +2316,7 @@ func TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy(t *testing.T)
 			// deleted (deletedRuns), so a handoff carrying them is weighed as adding none.
 			service := calibratedService()
 			service.budget.limit = roomBudgetBytes
-			replica := service.keepReplica(room, nil, &rendering, nil)
+			replica := service.keepReplica(room, nil, loadRendering(rendering), nil)
 			service.chargeLoadedRoom("room", room, replica)
 			called, alone := false, false
 			err = service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: handoff}, func() error {

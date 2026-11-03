@@ -354,17 +354,13 @@ func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoo
 	if err := crdt.ApplyUpdateV1(live, state, nil); err != nil {
 		t.Fatalf("decode the stored state: %v", err)
 	}
-	markdown, err := renderDocument(live)
-	if err != nil {
-		t.Fatalf("render the loaded room: %v", err)
-	}
 	decoded, err := decodeStoredCopy(state, maxUpdateItems)
 	if err != nil {
 		t.Fatalf("decode the stored state's copy: %v", err)
 	}
 	service := calibratedService()
 	service.budget.limit = roomBudgetBytes
-	replica := service.keepReplica(live, live.OpenUpdateLog(), &markdown, decoded.doc)
+	replica := service.keepReplica(live, live.OpenUpdateLog(), liveRendering(t, live), decoded.doc)
 	replica.scans.rescanned(decoded.scans)
 	charge := service.chargeLoadedRoom("room", live, replica)
 	live.OnUpdate(func([]byte, any) { replica.observe("room") })

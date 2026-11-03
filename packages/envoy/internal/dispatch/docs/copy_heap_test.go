@@ -247,7 +247,7 @@ func measureCopyPaths(t *testing.T, state []byte, atCap bool) {
 			}
 			markdown = rendered
 		}, stored, func() any {
-			replica := &renderedReplica{measurer: &service.measurer, markdown: &markdown, roomWeighing: &roomWeighing{}}
+			replica := &renderedReplica{measurer: &service.measurer, rendering: &replicaRendering{markdown: markdown}, roomWeighing: &roomWeighing{}, paths: &service.renderPaths}
 			replica.start(artifactID, state)
 			if replica.doc == nil {
 				t.Fatal("the replica took no copy of the base")

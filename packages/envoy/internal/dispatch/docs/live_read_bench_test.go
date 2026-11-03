@@ -153,13 +153,9 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 				continue
 			}
 			b.Run(name, func(b *testing.B) {
-				rendering, err := renderDocument(live)
-				if err != nil {
-					b.Fatal(err)
-				}
 				service := calibratedService()
 				service.budget.limit = roomBudgetBytes
-				replica := observedReplica(b, service, live, &rendering)
+				replica := observedReplica(b, service, live, liveRendering(b, live))
 				service.chargeLoadedRoom("bench", live, replica)
 				for b.Loop() {
 					stop := make(chan struct{})
@@ -230,12 +226,8 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 func BenchmarkPeerUpdateWeighing(b *testing.B) {
 	const weighings = 1_000
 	live := residentRoomDocument(b, 524<<10)
-	rendering, err := renderDocument(live)
-	if err != nil {
-		b.Fatal(err)
-	}
 	service := calibratedService()
-	replica := service.keepReplica(live, nil, &rendering, nil)
+	replica := service.keepReplica(live, nil, liveRendering(b, live), nil)
 	update := benchmarkKeystrokeUpdate(b, live)
 	published, _, measured := replica.size()
 	if !measured || published+int64(len(update)) >= pmdoc.MaxDocumentBytes {
@@ -290,16 +282,16 @@ func benchmarkKeystrokeUpdate(b *testing.B, live *crdt.Doc) []byte {
 	return crdt.EncodeStateAsUpdateV1(browser, live.StateVector())
 }
 
-// observedReplica is live's replica as a room's update observer keeps it (keepReplica), published
-// from markdown, live's rendering, as a room's load publishes it (nil publishes none until the
-// replica's first rendering), and holding every update live has committed: an empty transaction
-// gives its update log the base it starts from. The log is closed when the test or benchmark ends,
-// so live does not go on logging for it.
-func observedReplica(tb testing.TB, service *Service, live *crdt.Doc, markdown *string) *renderedReplica {
+// observedReplica is live's replica as a room's update observer keeps it (keepReplica), with
+// rendering, live's rendering as a room's load hands it over (nil hands over none, so the replica
+// renders the base its first drain starts from), and holding every update live has committed: an
+// empty transaction gives its update log the base it starts from. The log is closed when the test
+// or benchmark ends, so live does not go on logging for it.
+func observedReplica(tb testing.TB, service *Service, live *crdt.Doc, rendering *replicaRendering) *renderedReplica {
 	tb.Helper()
 	log := live.OpenUpdateLog()
 	tb.Cleanup(log.Close)
-	replica := service.keepReplica(live, log, markdown, nil)
+	replica := service.keepReplica(live, log, rendering, nil)
 	live.Transact(func(*crdt.Transaction) {})
 	replica.observe("bench")
 	if replica.hold() == nil {

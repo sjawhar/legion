@@ -19,7 +19,7 @@ related_issues:
 symptoms:
   - "`pr-blocked` wakes on every push to a PR whose failing check is external and expected"
   - "`legion handoff complete` → 409 `Phase for <KEY> is no longer owned by this worker` for the worker the architect just prompted"
-  - "the review App cannot push its handoff commit (`remote: Repository not found.`) or resolve review threads (`Resource not accessible by integration`)"
+  - "the review App cannot push (`remote: Repository not found.`) or resolve review threads (`Resource not accessible by integration`)"
 ---
 
 # A By-Design Red PR Exhausts fixAttempts, and worker/started Stole the Active Phase (fixed in LEGION-37)
@@ -44,11 +44,15 @@ the daemon emitted a `pr-blocked` wake per push — noise the architect had to t
 ignore.
 
 **What a worker should do:** nothing. Report the red's external cause in the PR body's CI line so
-the merge queue and the reviewer know why it is red. Handoff pushes no longer count, so a
-`pr-blocked` wake on such a PR means real fixes were pushed onto the red, not bookkeeping.
-**Landed in LEGION-33:** a head whose push changed only `.legion/` paths no longer counts toward
-`fixAttempts` (the listener forwards `changed_paths`; the daemon classifies), and `pr-blocked`
-fires once per exhausted count. An expected-external red still counts real fixes as before.
+the merge queue and the reviewer know why it is red. A `pr-blocked` wake on such a PR means fixes
+were pushed onto the red, which is what the counter is for.
+**Landed in LEGION-33, and since removed:** a head whose push changed only `.legion/` paths did
+not count toward `fixAttempts` — the listener forwarded `changed_paths` and the daemon's
+`classifyPush` read them — and `pr-blocked` fires once per exhausted count. sjawhar/legion#2354
+made a handoff a Dispatch record, so no push is handoff-only and the classifier is deleted; every
+new head counts again. dispatch://INFRA-609 then removes `changed_paths`,
+`changed_paths_truncated` and `forced` from the listener's push envelope, no daemon having been
+left to read them. An expected-external red still counts real fixes as before.
 
 **Superseded 2026-10-23 (dispatch://INFRA-83):** there is no PR body CI line to report the external
 cause in — the template (`skills/legion-worker/references/pr-body.md`) carries no `CI:` line, and no
@@ -57,9 +61,9 @@ GitHub at the head they are judging and record none of it (the reviewer's own fo
 in `skills/legion-worker/references/merge-gate.md`), where an external red is visible to each of
 them with its failing job and step. Report the red's external cause to the architect over Envoy,
 as §2 below has a worker report a 409, and the architect carries it to the roles whose phase it
-touches. The finding itself is untouched: a worker fixes nothing about an external red, a
-handoff-only push does not count toward `fixAttempts` (LEGION-33), and a `pr-blocked` wake on such
-a PR means real fixes were pushed onto the red.
+touches. The finding itself is untouched: a worker fixes nothing about an external red, and a
+`pr-blocked` wake on such a PR means real fixes were pushed onto the red. LEGION-33's exemption
+for a handoff-only push went with the handoff commit in sjawhar/legion#2354.
 
 ## 2. `/worker/started` overwrote `phases[issue]` unconditionally — fixed in LEGION-37 (#991)
 
@@ -101,12 +105,13 @@ When this was written, the `legion-reviewer` GitHub App held `pull_requests: wri
 integration`, and its `git push` was refused with `remote: Repository not found.` (GitHub hides the
 repository from a token without `contents` over git; the REST text appears only on API writes).
 The resolve refusal still holds; the push refusal does not. Since LEGION-42 (#1021) the planner,
-tester, and architects act as the review App too, so the same rule applies to their handoff commits
-(`../legion/one-role-keyed-table-decides-which-github-app-acts.md`): they never push. So in every
-round:
+tester, and architects act as the review App too, so the same rule applied to the commits they
+made (`../legion/one-role-keyed-table-decides-which-github-app-acts.md`): they never pushed. So in
+every round of that workflow:
 
-- the reviewer's `.legion/review.json` commit exists only in the shared workspace until the
-  implementer's next push carries it (check `jj log` that it is an ancestor before building on it);
+- the reviewer's `.legion/review.json` commit existed only in the shared workspace until the
+  implementer's next push carried it (check `jj log` that another role's commit is an ancestor
+  before building on it; since sjawhar/legion#2354 no role has a handoff commit to carry);
 - the reviewer answers each thread it opened with one of `Accepted: fixed in <commit> — <one line>`,
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`, and the **implementer**
   runs `legion threads resolve --pr <number> --repo <owner>/<repo>` (LEGION-34) after its next
@@ -120,10 +125,12 @@ round:
   thread and GitHub's message when GitHub refuses one (report it to the architect; a human
   resolves that thread). The merger runs it once more before READY. Never a hand-written GraphQL
   mutation and never a bulk resolve;
-- the reviewer's approval is the review itself; the head it approves by name is the
-  implementer-pushed `.legion/` deletion.
+- the reviewer's approval is the review itself; the head it approved by name was the
+  implementer-pushed `.legion/` deletion. There is no deletion head now — the reviewer approves
+  the code head by SHA.
 
-Thread ids are the `PRRT_…` node ids the reviewer records in `review.json` (`findings[*].threadId`);
+Thread ids are the `PRRT_…` node ids the reviewer records in its handoff (`findings[*].threadId`
+in `review.json` while a handoff was a file; in the Dispatch record since sjawhar/legion#2354);
 they are stable across pushes even when the thread goes `isOutdated`. On `sjawhar/legion`, `main`'s
 ruleset (id 12331919, read with `legion gh -- api repos/sjawhar/legion/rules/branches/main`) sets
 `required_review_thread_resolution: false`, so an unresolved thread does not stop the merge queue

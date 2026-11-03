@@ -21,6 +21,29 @@ import (
 // measurer counts does not wait out roomCountInterval for it.
 const noInterval = time.Nanosecond
 
+// loadRendering is markdown as a room's load hands it to its replica (keepReplica,
+// replicaRendering), for a test whose replica renders nothing of its own: it carries no layout,
+// which only a replica splicing an update into the rendering reads (spliceTouched).
+func loadRendering(markdown string) *replicaRendering {
+	return &replicaRendering{markdown: markdown}
+}
+
+// liveRendering is live's rendering as a room's load makes it, the markdown and the layout of one
+// render (documentRenderingWithLayout), for a test whose replica follows the room's commits and
+// splices an update into that rendering.
+func liveRendering(tb testing.TB, live *crdt.Doc) *replicaRendering {
+	tb.Helper()
+	tree, err := treeOf(live)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	markdown, _, layout, err := documentRenderingWithLayout(tree)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return &replicaRendering{markdown: markdown, layout: layout}
+}
+
 // waitIdle blocks until the measurer has no worker running and no room waiting out the interval, so
 // a test reads what the measurer stored once it has stored it, rather than sleeping past a count it
 // cannot see.
@@ -93,7 +116,7 @@ func TestTheMeasurerCountsARenderingAnUpdatePublishes(t *testing.T) {
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), nil, &loaded, nil)
+	replica := service.keepReplica(newDocumentCopy(), nil, loadRendering(loaded), nil)
 	rendering := headings(1)
 	replica.publishSize(&rendering)
 	if bytes, _, measured := replica.size(); !measured || bytes != int64(len(rendering)) {
@@ -119,7 +142,7 @@ func TestARoomsLoadMeasuresItsRenderingAtOnce(t *testing.T) {
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
 	rendering := headings(1)
-	replica := service.keepReplica(newDocumentCopy(), nil, &rendering, nil)
+	replica := service.keepReplica(newDocumentCopy(), nil, loadRendering(rendering), nil)
 	if _, elements, measured := replica.size(); !measured || elements != countElements(rendering) {
 		t.Fatalf("the loaded room published %d elements (measured %t), want %d", elements, measured, countElements(rendering))
 	}
@@ -137,7 +160,7 @@ func TestASmallRenderingIsCountedToo(t *testing.T) {
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), nil, &loaded, nil)
+	replica := service.keepReplica(newDocumentCopy(), nil, loadRendering(loaded), nil)
 	if _, elements, _ := replica.size(); elements != countElements(loaded) || elements == 0 {
 		t.Fatalf("the loaded room published %d elements, want its count %d", elements, countElements(loaded))
 	}
@@ -159,7 +182,7 @@ func TestTheMeasurerCountsARoomsLatestRenderingRatherThanEach(t *testing.T) {
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), nil, &loaded, nil)
+	replica := service.keepReplica(newDocumentCopy(), nil, loadRendering(loaded), nil)
 	first, second, third := headings(1), headings(2), headings(3)
 	replica.publishSize(&first)
 	<-recorder.started
@@ -189,7 +212,7 @@ func TestTheMeasurerCountsARoomAtMostOncePerInterval(t *testing.T) {
 	close(recorder.release)
 	loaded := "# Title\n"
 	start := time.Now()
-	replica := service.keepReplica(newDocumentCopy(), nil, &loaded, nil)
+	replica := service.keepReplica(newDocumentCopy(), nil, loadRendering(loaded), nil)
 	first, second, third := headings(1), headings(2), headings(3)
 	replica.publishSize(&first)
 	if bytes, _, _ := replica.size(); bytes != int64(len(first)) {
@@ -223,8 +246,8 @@ func TestAnUnreadableRenderingPublishesNoMeasurement(t *testing.T) {
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
-	counting := service.keepReplica(newDocumentCopy(), nil, &loaded, nil)
-	waiting := service.keepReplica(newDocumentCopy(), nil, &loaded, nil)
+	counting := service.keepReplica(newDocumentCopy(), nil, loadRendering(loaded), nil)
+	waiting := service.keepReplica(newDocumentCopy(), nil, loadRendering(loaded), nil)
 	first, second := headings(1), headings(2)
 	counting.publishSize(&first)
 	<-recorder.started
@@ -255,7 +278,7 @@ func TestTheMeasurerKeepsNoRetiredRoomsReplica(t *testing.T) {
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
-	counting := service.keepReplica(newDocumentCopy(), nil, &loaded, nil)
+	counting := service.keepReplica(newDocumentCopy(), nil, loadRendering(loaded), nil)
 	first := headings(1)
 	counting.publishSize(&first)
 	<-recorder.started
@@ -294,7 +317,7 @@ func TestTheMeasurerKeepsNoRetiredRoomsReplicaWaitingOutTheInterval(t *testing.T
 // every reference to the room but a weak one to its replica.
 func queueRetiredRoom(service *Service, rendering string) weak.Pointer[renderedReplica] {
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), nil, &loaded, nil)
+	replica := service.keepReplica(newDocumentCopy(), nil, loadRendering(loaded), nil)
 	replica.publishSize(&rendering)
 	return weak.Make(replica)
 }
@@ -306,7 +329,7 @@ func TestTheMeasurerStopsWithTheService(t *testing.T) {
 	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
-	replica := service.keepReplica(newDocumentCopy(), nil, &loaded, nil)
+	replica := service.keepReplica(newDocumentCopy(), nil, loadRendering(loaded), nil)
 	first := headings(1)
 	replica.publishSize(&first)
 	<-recorder.started
@@ -348,13 +371,14 @@ func BenchmarkElementCountAgainstRender(b *testing.B) {
 	} {
 		for _, size := range shape.sizes {
 			live := shape.build(b, size)
-			markdown, _, err := renderDocumentForUpdate(live)
+			fragment := live.GetXmlFragment(fragmentName)
+			markdown, _, _, err := renderDocumentForUpdate(fragment)
 			if err != nil {
 				b.Fatal(err)
 			}
 			b.Run(fmt.Sprintf("%s/%dKiB/render", shape.name, size>>10), func(b *testing.B) {
 				for b.Loop() {
-					if _, _, err := renderDocumentForUpdate(live); err != nil {
+					if _, _, _, err := renderDocumentForUpdate(fragment); err != nil {
 						b.Fatal(err)
 					}
 				}

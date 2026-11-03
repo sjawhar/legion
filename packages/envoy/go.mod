@@ -19,6 +19,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/google/pprof v0.0.0-20261026192309-dbd0ed30aa88
 	github.com/google/uuid v1.6.0
 	github.com/googleapis/gax-go/v2 v2.23.0
 	github.com/gorilla/websocket v1.5.3
@@ -148,8 +149,10 @@ require (
 // (#331); a document logs each commit's update in commit order under its own lock (UpdateLog,
 // #332), against which the room's update observer measures each update; a remote update's scans
 // can be bounded (#333); parked delete ranges are capped, and a room loads its stored state with
-// the cap lifted (#334); a map-valued text format no longer panics with the lock held (#335);
-// ChangedTypes and Parent (#336); awareness reaches its sending peer and a read-only peer gets a
+// the cap lifted (#334); a map-valued text format no longer panics with the lock held (#335); a
+// transaction names the shared types it changed and every shared type its container
+// (ChangedTypes and Parent, #336), so the room's update observer renders only the top-level blocks
+// an update touched; awareness reaches its sending peer and a read-only peer gets a
 // bounded empty awareness response, so an idle provider stays connected (#338); a failed write
 // closes the peer (#339); the pending cap refuses an update before it changes the document (#340);
 // a relay-injected update that fails partway reaches the node's peers (#341); a per-peer write

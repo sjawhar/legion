@@ -464,11 +464,7 @@ func scanCeilingRoom(b *testing.B, runner crdt.ClientID, run int) (*crdt.Doc, *r
 		b.Fatal(err)
 	}
 	chainedRun(b, room, lastCharacter(b, room), runner, run)
-	rendering, err := renderDocument(room)
-	if err != nil {
-		b.Fatal(err)
-	}
-	replica := observedReplica(b, calibratedService(), room, &rendering)
+	replica := observedReplica(b, calibratedService(), room, liveRendering(b, room))
 	unlocked := new(time.Time)
 	room.OnUpdate(func([]byte, any) {
 		if unlocked.IsZero() {
@@ -672,7 +668,7 @@ func TestAUsedUpRoomStillTakesTypingAndRefusesALargerApplyAsNeedingARebuild(t *t
 		t.Fatal(err)
 	}
 	service := calibratedService()
-	replica := service.keepReplica(room, nil, &rendering, nil)
+	replica := service.keepReplica(room, nil, loadRendering(rendering), nil)
 	loaded, err := rescan(state)
 	if err != nil {
 		t.Fatal(err)

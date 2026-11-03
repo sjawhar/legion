@@ -301,17 +301,13 @@ func TestAPreloadNoLoadWillTakeGivesUpItsCopy(t *testing.T) {
 // gap was filled, the room's state.
 func TestAPeerUpdateThatParksBehindAGapLeavesTheReplicaHoldingWhatTheRoomHolds(t *testing.T) {
 	service, live, _ := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
-	rendering, err := renderDocument(live)
-	if err != nil {
-		t.Fatal(err)
-	}
 	decoded := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(decoded, crdt.EncodeStateAsUpdateV1(live, nil), nil); err != nil {
 		t.Fatal(err)
 	}
 	log := live.OpenUpdateLog()
 	t.Cleanup(log.Close)
-	replica := service.keepReplica(live, log, &rendering, decoded)
+	replica := service.keepReplica(live, log, liveRendering(t, live), decoded)
 
 	// Two of one browser's transactions, the second built on the first, sent out of order: the
 	// room is given the second alone, whose struct names the first's as its origin.
@@ -329,8 +325,9 @@ func TestAPeerUpdateThatParksBehindAGapLeavesTheReplicaHoldingWhatTheRoomHolds(t
 		if err != nil {
 			t.Fatalf("%s: render the room: %v", when, err)
 		}
-		if replica.markdown == nil || *replica.markdown != room {
-			t.Fatalf("%s: the replica renders %s, want the room's %q", when, describeRendering(replica.markdown), room)
+		held := markdownAt(replica.rendering)
+		if held == nil || *held != room {
+			t.Fatalf("%s: the replica renders %s, want the room's %q", when, describeRendering(held), room)
 		}
 		roomPending, replicaPending := live.PendingStats(), replica.doc.PendingStats()
 		if roomPending.Items != replicaPending.Items || roomPending.DeleteRanges != replicaPending.DeleteRanges ||
@@ -357,8 +354,8 @@ func TestAPeerUpdateThatParksBehindAGapLeavesTheReplicaHoldingWhatTheRoomHolds(t
 		t.Fatalf("the room still parks %+v once the gap is filled", parked)
 	}
 	requireReplicaHoldsTheRoom("once the update filling the gap is in")
-	if want := "# second first Title\n"; !strings.Contains(*replica.markdown, want) {
-		t.Fatalf("the replica renders %q, want it to hold %q", *replica.markdown, want)
+	if want := "# second first Title\n"; !strings.Contains(replica.rendering.markdown, want) {
+		t.Fatalf("the replica renders %q, want it to hold %q", replica.rendering.markdown, want)
 	}
 	runtime.KeepAlive(replica)
 }
