@@ -52,8 +52,11 @@ with the person. A root waiting on a person gets no `design-approved` notice: wh
 "this resume is your design-approved wake", act on it as on `design-approved`.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
-change since the version they approved: Dispatch records an `approved` review in their name at
-that version, the daemon reopens the gate and sends `design-approved`, and you request nothing.
+change since the version they approved, and a version whose text is exactly the text of the
+version they approved with no decision block in it decided since, such as an accidental edit
+undone exactly: Dispatch records an `approved` review in their name at that version, the daemon
+reopens the gate and sends `design-approved`, and you request nothing. When the spec does not
+read Approved at such a version, request approval as after any change.
 After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
 when to repeat the two reviews, and when a rewrite means requesting approval again. After
 revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
