@@ -1,8 +1,21 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { askgateState } from "../askgate-marker";
+import { basename, join } from "node:path";
+import {
+  askgateState,
+  pidNamespace,
+  processStart,
+  selfOwner,
+  writeAskgateRecord,
+} from "../askgate-marker";
 
 // Two Oh My Pi processes can bind one session id at the same time (the same session resumed
 // twice). Each one stays an owner of the session's AskGate record: a write by one never drops the
@@ -84,3 +97,23 @@ while (!(await stdin.read()).done);
     await Promise.all(children.map((child) => child.exited));
   }
 }, 30_000);
+
+// A pid and a start time name a process only in the pid namespace they were read in, and an agent
+// box is a namespace of its own over the host's state directory. The owner carries its namespace in
+// its file and in its store's name, so a reader of another namespace knows it cannot look it up,
+// and two boxes' processes with one pid and start time never share a store.
+test("an owner names its pid namespace in its record and in its store's name", () => {
+  const ns = /^pid:\[([0-9]+)\]$/.exec(readlinkSync("/proc/self/ns/pid"))?.[1];
+  expect(pidNamespace()).toBe(ns ?? null);
+  const owner = selfOwner(root);
+  const start = processStart(process.pid);
+  expect(owner).toMatchObject({ pid: process.pid, start, ns });
+  expect(basename(owner.store)).toBe(`${process.pid}-${start}-${ns}`);
+  const dir = join(root, "sessions", "ses-1");
+  writeAskgateRecord(dir, owner, "block");
+  expect(readdirSync(join(dir, "askgate"))).toEqual([`${process.pid}-${start}-${ns}.json`]);
+  expect(
+    JSON.parse(readFileSync(join(dir, "askgate", `${process.pid}-${start}-${ns}.json`), "utf8"))
+  ).toEqual({ v: 2, pid: process.pid, start, ns, store: owner.store, mode: "block" });
+  expect(askgateState(dir)).toEqual({ kind: "on", stores: [owner.store], mode: "block" });
+});

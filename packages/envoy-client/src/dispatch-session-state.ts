@@ -292,7 +292,7 @@ export function pruneSessions(root: string, now: number): void {
     if (!entry.isDirectory()) continue;
     const dir = join(sessions, entry.name);
     try {
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir, now).kind === "off") {
         rmSync(dir, { recursive: true, force: true });
       }
     } catch (error) {

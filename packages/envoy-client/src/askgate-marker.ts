@@ -6,10 +6,12 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmSync,
   statSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -20,13 +22,18 @@ import { hasErrnoCode, messageFor } from "./errors";
  *
  * The record. While an Oh My Pi process whose gate is bound runs a session, pi-envoy keeps an
  * owner file in the `askgate/` directory of that session's CLI state directory
- * (`<root>/sessions/<id>/askgate/<pid>-<start>.json`): the process's id, its Linux start time
- * (field 22 of `/proc/<pid>/stat`, null elsewhere) and its marker store. Each process writes and
- * removes only its own file, so two processes that bind one session at the same time never drop
- * each other. An owner counts while its process lives and, on Linux, has that start time, so a
- * crashed session's file, or one whose pid another process took, is inert. A session no live
- * process records (a terminal, CI, Claude Code, a pod without pi-envoy, a session with Dispatch
- * or AskGate off) needs no marker.
+ * (`<root>/sessions/<id>/askgate/<pid>-<start>-<ns>.json`): the process's id, its Linux start time
+ * (field 22 of `/proc/<pid>/stat`, null elsewhere), its pid namespace (the inode of
+ * `/proc/self/ns/pid`, null elsewhere) and its marker store. Each process writes and removes only
+ * its own file, so two processes that bind one session at the same time never drop each other. An
+ * owner counts while its process lives and, on Linux, has that start time, so a crashed session's
+ * file, or one whose pid another process took, is inert. A pid and a start time mean something only
+ * in the namespace they were read in, and one state directory is shared by the host and every agent
+ * box on it, each box its own pid namespace. So a process judges by pid only an owner of its own
+ * namespace; an owner of another one counts while its store changed within MARKER_MAX_AGE_MS, which
+ * a live process keeps true by touching its store every STORE_BEAT_MS (`keepStore`). A session no
+ * live process records (a terminal, CI, Claude Code, a pod without pi-envoy, a session with
+ * Dispatch or AskGate off) needs no marker.
  *
  * The marker. For each literal `dispatch` call it lets run, the gate mints one file in the store,
  * `<store>/markers/<sha256 of the argv>.<32 random hex>`, created owner-only and exclusively,
@@ -39,10 +46,12 @@ import { hasErrnoCode, messageFor } from "./errors";
  * and consumes one matching marker by unlinking it: exactly one process wins an unlink, so a
  * marker posts one write and a replay finds none. A file whose bytes differ from the reviewed ones
  * matches no marker. An upload's `--path` sends the bytes the CLI read for that check. A record
- * that is there but cannot be read, or names a store that is gone, is a refusal. Each owner file
- * of the session's record carries that owner's check mode, so the mode is the session's and no
- * other session of the same process can change it: `block` refuses an unmarked write, and `warn`,
- * which is a file with no mode, lets it post with a warning.
+ * that is there but cannot be read, or names a store that is gone, is a refusal; the process makes
+ * its store again before each write of its own owner file (`keepStore`), so a store another process
+ * removed never outlives the owner's next call. Each owner file of the session's record carries
+ * that owner's check mode, so the mode is the session's and no other session of the same process
+ * can change it: `block` refuses an unmarked write, and `warn`, which is a file with no mode, lets
+ * it post with a warning.
  */
 
 /** The record's directory in a session's state directory: one file for each owner. */
@@ -55,6 +64,12 @@ export const ASKGATE_RECORD = "askgate";
  * backgrounded call's, or a killed session's.
  */
 export const MARKER_MAX_AGE_MS = 2 * 60 * 60_000;
+/**
+ * How often a live process touches its store (`keepStore`). Well inside MARKER_MAX_AGE_MS, the age
+ * past which a process in another pid namespace counts the store's owner gone, so a process that
+ * runs is never taken for one that ended.
+ */
+export const STORE_BEAT_MS = 10 * 60_000;
 
 const PRIVATE_DIR = 0o700;
 const PRIVATE_FILE = 0o600;
@@ -67,6 +82,11 @@ export interface AskgateOwner {
   readonly pid: number;
   /** Field 22 of `/proc/<pid>/stat`; null where there is no `/proc`. */
   readonly start: string | null;
+  /**
+   * The inode of the process's pid namespace (`/proc/self/ns/pid`); null where there is none, and
+   * in a record written before the namespace was kept, whose pid is read in the reader's own.
+   */
+  readonly ns: string | null;
   readonly store: string;
 }
 
@@ -183,23 +203,71 @@ export function processStart(pid: number): string | null {
   }
 }
 
-/** `<pid>-<start>`, or `<pid>` with no start time: an owner's name, for its store and its file. */
-function ownerName(pid: number, start: string | null): string {
-  return start === null ? String(pid) : `${pid}-${start}`;
+let ownNamespace: string | null | undefined;
+
+/**
+ * The inode of this process's pid namespace, from `/proc/self/ns/pid` (`pid:[4026531836]`); null
+ * where there is none. A pid and a start time read from `/proc` name a process only in this
+ * namespace: an agent box is a namespace of its own over the host's state directory.
+ */
+export function pidNamespace(): string | null {
+  if (ownNamespace === undefined) {
+    try {
+      ownNamespace = /^pid:\[([0-9]+)\]$/.exec(readlinkSync("/proc/self/ns/pid"))?.[1] ?? null;
+    } catch {
+      ownNamespace = null;
+    }
+  }
+  return ownNamespace;
 }
 
-/** `<root>/askgate/<pid>-<start>`: a store of its own for each process, never reused by a pid's next owner. */
-export function askgateStore(root: string, pid: number, start: string | null): string {
-  return join(root, "askgate", ownerName(pid, start));
+/** The parts of an owner its name is made of. */
+type OwnerIdentity = Pick<AskgateOwner, "pid" | "start" | "ns">;
+
+/**
+ * `<pid>-<start>-<ns>`, `<pid>-<start>` with no namespace, or `<pid>` with no start time: an
+ * owner's name, for its store and its file. The namespace keeps apart two boxes' processes that
+ * have the same pid and started in the same clock tick.
+ */
+function ownerName({ pid, start, ns }: OwnerIdentity): string {
+  if (start === null) return String(pid);
+  return ns === null ? `${pid}-${start}` : `${pid}-${start}-${ns}`;
+}
+
+/** `<root>/askgate/<name>`: a store of its own for each process, never reused by a pid's next owner. */
+export function askgateStore(
+  root: string,
+  pid: number,
+  start: string | null,
+  ns: string | null = null
+): string {
+  return join(root, "askgate", ownerName({ pid, start, ns }));
 }
 
 /** This process as an owner, its store under the CLI state root `root`. */
 export function selfOwner(root: string): AskgateOwner {
   const start = processStart(process.pid);
-  return { pid: process.pid, start, store: askgateStore(root, process.pid, start) };
+  const ns = pidNamespace();
+  return { pid: process.pid, start, ns, store: askgateStore(root, process.pid, start, ns) };
 }
 
-function ownerLive(owner: AskgateOwner): boolean {
+/**
+ * Whether `owner`'s process runs, as this process can tell at `now`. An owner of this pid
+ * namespace, or of none recorded, counts while its pid is live with its start time. One of another
+ * namespace (an agent box's process seen from the host or from another box, which share the state
+ * directory) cannot be looked up here: its pid may be free or another process's in this namespace.
+ * It counts while its store changed within MARKER_MAX_AGE_MS, which its process keeps true by
+ * touching the store every STORE_BEAT_MS while it runs.
+ */
+function ownerLive(owner: AskgateOwner, now: number): boolean {
+  if (owner.ns !== null && owner.ns !== pidNamespace()) {
+    try {
+      return now - storeTouched(owner.store) <= MARKER_MAX_AGE_MS;
+    } catch {
+      // The store is gone: its process removed it at exit, or it ended long ago.
+      return false;
+    }
+  }
   if (owner.start !== null) return processStart(owner.pid) === owner.start;
   try {
     process.kill(owner.pid, 0);
@@ -210,14 +278,19 @@ function ownerLive(owner: AskgateOwner): boolean {
   }
 }
 
-function isOwner(value: unknown): value is AskgateOwner {
+/**
+ * Whether `value` is an owner file's content: its pid, start time and store, and its pid namespace,
+ * which a file written before the namespace was kept does not carry.
+ */
+function isOwnerText(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null) return false;
-  const { pid, start, store } = value as Record<string, unknown>;
+  const { pid, start, ns, store } = value as Record<string, unknown>;
   return (
     typeof pid === "number" &&
     Number.isSafeInteger(pid) &&
     pid > 0 &&
     (start === null || typeof start === "string") &&
+    (ns === undefined || ns === null || (typeof ns === "string" && /^[0-9]+$/.test(ns))) &&
     typeof store === "string" &&
     store.startsWith("/")
   );
@@ -235,10 +308,10 @@ function parseOwner(text: string): { owner: AskgateOwner; mode: AskgateMode } | 
   } catch {
     return undefined;
   }
-  if (!isOwner(data) || !("v" in data) || data.v !== 2) return undefined;
-  const { pid, start, store, mode } = data as Record<string, unknown>;
+  if (!isOwnerText(data) || data.v !== 2) return undefined;
+  const { pid, start, ns, store, mode } = data;
   return {
-    owner: { pid, start, store } as AskgateOwner,
+    owner: { pid, start, ns: ns ?? null, store } as AskgateOwner,
     mode: mode === "block" ? "block" : "warn",
   };
 }
@@ -254,16 +327,24 @@ const OWNER_FILE = ".json";
 
 /** `owner`'s own file in session directory `dir`'s record. */
 function ownerFile(dir: string, owner: AskgateOwner): string {
-  return join(dir, ASKGATE_RECORD, `${ownerName(owner.pid, owner.start)}${OWNER_FILE}`);
+  return join(dir, ASKGATE_RECORD, `${ownerName(owner)}${OWNER_FILE}`);
 }
 
 /**
  * Makes `owner` an owner of session directory `dir`'s record, carrying `mode` for the CLI's marker
- * check of that session, and removes the files of owners whose process is gone. A gone owner with a
- * start time never writes again, since no later process has its pid and start time; one with none
- * is left, as its pid can return.
+ * check of that session, and removes the files of owners whose process is gone. It makes the owner's
+ * store first (`keepStore`), so the file never names a store that is not there. A gone owner with a
+ * start time is removed: no later process of its namespace has its pid and start time, and one of
+ * another namespace that only seemed gone writes its own file again at its next call
+ * (`setRecordMode`). One with no start time is left, as its pid can return.
  */
-export function writeAskgateRecord(dir: string, owner: AskgateOwner, mode: AskgateMode): void {
+export function writeAskgateRecord(
+  dir: string,
+  owner: AskgateOwner,
+  mode: AskgateMode,
+  now = Date.now()
+): void {
+  keepStore(owner.store, now);
   const record = join(dir, ASKGATE_RECORD);
   mkdirSync(record, { recursive: true, mode: PRIVATE_DIR });
   const own = ownerFile(dir, owner);
@@ -277,7 +358,7 @@ export function writeAskgateRecord(dir: string, owner: AskgateOwner, mode: Askga
     } catch {
       continue;
     }
-    if (other !== undefined && other.owner.start !== null && !ownerLive(other.owner)) {
+    if (other !== undefined && other.owner.start !== null && !ownerLive(other.owner, now)) {
       rmSync(file, { force: true });
     }
   }
@@ -286,9 +367,18 @@ export function writeAskgateRecord(dir: string, owner: AskgateOwner, mode: Askga
 /**
  * Rewrites `owner`'s own file in session directory `dir`'s record with `mode`, for the gate to set
  * the current session's check mode on each main-agent call. It touches no other owner's file, so a
- * session this process also bound keeps the mode its own calls recorded.
+ * session this process also bound keeps the mode its own calls recorded. Like the bind, it makes
+ * the owner's store and the record's directory when another process removed them (a prune that took
+ * this process for a gone one), so the record is whole again before the call it runs for.
  */
-export function setRecordMode(dir: string, owner: AskgateOwner, mode: AskgateMode): void {
+export function setRecordMode(
+  dir: string,
+  owner: AskgateOwner,
+  mode: AskgateMode,
+  now = Date.now()
+): void {
+  keepStore(owner.store, now);
+  mkdirSync(join(dir, ASKGATE_RECORD), { recursive: true, mode: PRIVATE_DIR });
   writeAtomically(ownerFile(dir, owner), ownerText(owner, mode));
 }
 
@@ -307,7 +397,8 @@ export function recordedOwnerMode(dir: string, owner: AskgateOwner): AskgateMode
 }
 
 function ownerText(owner: AskgateOwner, mode: AskgateMode): string {
-  return JSON.stringify({ v: 2, pid: owner.pid, start: owner.start, store: owner.store, mode });
+  const { pid, start, ns, store } = owner;
+  return JSON.stringify({ v: 2, pid, start, ns, store, mode });
 }
 
 /**
@@ -323,13 +414,25 @@ export function openStore(store: string): void {
   mkdirSync(join(store, MARKERS), { recursive: true, mode: PRIVATE_DIR });
 }
 
+/**
+ * Makes `store` when it is gone and marks it changed at `now`. A live process calls it every
+ * STORE_BEAT_MS, so a process of another pid namespace counts it live and its prune keeps the
+ * store, and before each write of its own owner file. A store made again holds no marker, so
+ * nothing it lacks is taken for reviewed.
+ */
+export function keepStore(store: string, now: number): void {
+  openStore(store);
+  const at = new Date(now);
+  utimesSync(store, at, at);
+}
+
 /** Removes a store and every marker in it. */
 export function closeStore(store: string): void {
   rmSync(store, { recursive: true, force: true });
 }
 
-/** A store's name under `<root>/askgate/`, as `askgateStore` makes it: `<pid>-<start>`, or `<pid>`. */
-const STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
+/** A store's name under `<root>/askgate/`, as `askgateStore` makes it (`ownerName`). */
+const STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+)(?:-([0-9]+))?)?$/;
 
 /** The last change to a store: its own or its markers directory's, whichever is later. */
 function storeTouched(store: string): number {
@@ -344,9 +447,11 @@ function storeTouched(store: string): number {
 
 /**
  * Removes each store under `<root>/askgate/` whose process is gone (a crashed process's, whose
- * markers no CLI reads) and that nothing changed for MARKER_MAX_AGE_MS. The age also keeps the
- * store of a process this one cannot see, as in another pid namespace, while that process mints.
- * A store it cannot remove stays: this is tidiness, so it never stops a call.
+ * markers no CLI reads) and that nothing changed for MARKER_MAX_AGE_MS. A store of another pid
+ * namespace's process counts gone only by that age (`ownerLive`), which its process keeps from
+ * passing while it runs; a store named before the namespace was kept has only its pid and start
+ * time, read in this namespace. A store it cannot remove stays: this is tidiness, so it never
+ * stops a call.
  */
 export function sweepStores(root: string, now: number): void {
   const parent = join(root, "askgate");
@@ -361,7 +466,8 @@ export function sweepStores(root: string, now: number): void {
     if (match === null) continue;
     const store = join(parent, name);
     try {
-      if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store })) continue;
+      const owner = { pid: Number(match[1]), start: match[2] ?? null, ns: match[3] ?? null, store };
+      if (ownerLive(owner, now)) continue;
       if (now - storeTouched(store) <= MARKER_MAX_AGE_MS) continue;
       rmSync(store, { recursive: true, force: true });
     } catch {
@@ -377,11 +483,11 @@ export type AskgateState =
   | { readonly kind: "broken"; readonly problem: string };
 
 /**
- * The state of session directory `dir`'s record: off when there is none or no owner lives, on with
- * each live owner's store (block when any one's session chose block, else warn), broken when the
- * record or an owner file cannot be read or a live owner's store is gone.
+ * The state of session directory `dir`'s record at `now`: off when there is none or no owner
+ * lives, on with each live owner's store (block when any one's session chose block, else warn),
+ * broken when the record or an owner file cannot be read or a live owner's store is gone.
  */
-export function askgateState(dir: string): AskgateState {
+export function askgateState(dir: string, now = Date.now()): AskgateState {
   const record = join(dir, ASKGATE_RECORD);
   let names: string[];
   try {
@@ -406,7 +512,9 @@ export function askgateState(dir: string): AskgateState {
     const parsed = parseOwner(text);
     if (parsed === undefined)
       return { kind: "broken", problem: `${file}, is not an AskGate record` };
-    if (ownerLive(parsed.owner)) live.push({ file, store: parsed.owner.store, mode: parsed.mode });
+    if (ownerLive(parsed.owner, now)) {
+      live.push({ file, store: parsed.owner.store, mode: parsed.mode });
+    }
   }
   if (live.length === 0) return { kind: "off" };
   for (const { file, store } of live) {
