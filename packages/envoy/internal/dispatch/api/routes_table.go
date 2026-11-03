@@ -189,12 +189,14 @@ type apiRoute struct {
 	// TestHook marks a route TestHooksEnabled mounts: a test's own route is neither admitted nor
 	// bounded by a deadline.
 	TestHook bool
-	// Deadline replaces the server's read deadline (defaultReadDeadline) for a read that bounds
-	// the work it does before its answer rather than the whole of it: it stops at the answer's
-	// first byte, after which the answer's transfer bound alone decides how long the bytes may
-	// take (servedAsRead, admission.WithDeadlineUntilAnswer). Only a read has a deadline, and
-	// download, the only row constructor that sets one, is given one only by reads.
-	Deadline time.Duration
+	// Download marks a file version download: the read whose deadline bounds the work it does
+	// before its answer rather than the whole of it (downloadDeadline, or the test's
+	// Deps.DownloadDeadline), stopping at the answer's first byte, after which the answer's
+	// transfer bound alone decides how long the bytes may take (servedAsRead,
+	// admission.WithDeadlineUntilAnswer). A download pins no connection either (pinsConnection).
+	// Only a read is one, and download, the only row constructor that marks one, is used only by
+	// reads.
+	Download bool
 	// Weight is how many of its class's admission units a request takes (admission.Limiter): the
 	// most request-pool connections it holds at once. Zero is one.
 	Weight int
@@ -222,13 +224,13 @@ type apiRoute struct {
 // each waited for a connection of its own. Every admitted read pins but two kinds:
 //   - a read of weight two (concurrentReadWeight), whose reads run side by side, each on a
 //     connection of its own (store.ForConcurrentRead), which one pinned connection cannot serve;
-//   - a read with a Deadline of its own, a file version download, which moves the file's bytes
-//     from the file store for minutes after its last statement, holding no connection meanwhile.
+//   - a file version download (Download), which moves the file's bytes from the file store for
+//     minutes after its last statement, holding no connection meanwhile.
 //
 // A write never pins: it waits for its documents' writer gates between statements, which a caller
 // holding a connection is refused (docs.ErrGateWhileHoldingConnection).
 func (r apiRoute) pinsConnection() bool {
-	return r.Method == http.MethodGet && !r.TestHook && r.Weight <= 1 && r.Deadline == 0
+	return r.Method == http.MethodGet && !r.TestHook && r.Weight <= 1 && !r.Download
 }
 
 // downloadDeadline is the deadline of the four file version downloads: five minutes for the work
@@ -282,7 +284,7 @@ func replays(route apiRoute, replay keyedReplay) apiRoute {
 // download is a file version download, whose work before its answer is read under
 // downloadDeadline instead of the server's.
 func download(row routeRow) apiRoute {
-	return apiRoute{routeRow: row, Deadline: downloadDeadline}
+	return apiRoute{routeRow: row, Download: true}
 }
 
 // concurrentReads is a row whose requests run two reads side by side, each on a connection of

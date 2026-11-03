@@ -144,6 +144,118 @@ func TestAStoreBackedDownloadToAReaderThatStopsIsCutAndLogged(t *testing.T) {
 	}
 }
 
+// downloadStalledMessage is the line serveFileVersion logs for a download its store cut.
+const downloadStalledMessage = "a file version's download was cut: the file store stopped sending"
+
+// A store that sends a download's first bytes and then stops, keeping its connection open, is
+// cut within the same idle bound a reader that stops is cut within: the store's reads are armed
+// with it as the answer's writes are (storeBody), so the handler's goroutine, the store's
+// connection and the read's admission unit come back instead of being held until the client
+// hangs up. Before, nothing bounded that read - the download's own deadline had stopped at the
+// answer's first byte - so enough patient clients during a bucket incident filled the read
+// class and every read was answered 429 OVERLOADED.
+func TestAStoreThatStopsSendingMidDownloadIsCutWithinTheIdleBound(t *testing.T) {
+	const idle, first, size = 300 * time.Millisecond, 16 << 10, 256 << 10
+	// A loaded pod's scheduling, on top of the bound the handler is cut within.
+	const margin = 10 * time.Second
+
+	logged := captureLog(t)
+	// One read unit, so the unit this download holds is every read unit the server has: a read
+	// that follows is admitted only once this one has given it back.
+	limiter := admission.New(admission.Limits{Read: 1, Write: 4})
+	stalling := &stalledStore{Memory: filestest.NewMemory(), first: first}
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
+		files: stalling, admission: limiter, downloadDeadline: time.Minute,
+	})
+	served.transfer = transferBounds{idle: idle}
+	artifact, _ := storeBackedVersion(t, handler, database, size)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	started := time.Now()
+	response := downloadOverARealConnection(t, httpServer.Listener.Addr().String(), "/api/v1/artifacts/"+artifact+"/versions/1", first)
+	// The client keeps reading: what ends this download is the store, not its reader.
+	read, err := io.Copy(io.Discard, response.Body)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatalf("the download ended as if whole after %d of %d bytes: the store stopped sending", read, size)
+	}
+	if elapsed < idle {
+		t.Fatalf("the download was cut %v in, want it given the store its %v idle bound at the least", elapsed, idle)
+	}
+	if elapsed > idle+margin {
+		t.Fatalf("the download was cut %v in, want it within its %v idle bound and a margin", elapsed, idle)
+	}
+
+	line := awaitLineWith(t, logged, downloadStalledMessage, margin)
+	if line == "" {
+		t.Fatalf("a store that stopped sending was not reported within %v; the log holds:\n%s", margin, logged.String())
+	}
+	if !strings.Contains(line, "level=ERROR") || !strings.Contains(line, "artifact="+artifact) ||
+		logField(line, "version") != "1" || logField(line, "size") != strconv.Itoa(size) ||
+		logField(line, "written") != strconv.Itoa(first) {
+		t.Fatalf("the stall line names the wrong download, or is not the ERROR line a store's doing is: %s", line)
+	}
+	if access := awaitAccessLineOfRoute(t, logged, "/api/v1/artifacts/{id}/versions/{number}"); !strings.Contains(access, "aborted=true") {
+		t.Fatalf("the cut download's access line is not marked aborted:\n%s", access)
+	}
+	// The read class is whole again: the handler returned, so its unit went back.
+	for deadline := time.Now().Add(margin); ; time.Sleep(10 * time.Millisecond) {
+		held := limiter.Stats()[admission.Read].InFlight
+		if held == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d read units were still held %v after the stalled download was cut", held, margin)
+		}
+	}
+	// And serves the next reader: a read admitted on the one unit the download held.
+	if next := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifact, nil, "alice"); next.Code != http.StatusOK {
+		t.Fatalf("the read after the stalled download: status=%d body=%s, want it admitted on the unit that download gave back", next.Code, next.Body.String())
+	}
+}
+
+// stalledStore is a file store whose objects send their first bytes and then nothing at all,
+// holding the body's read until the context the object was opened under ends: the bucket that
+// stops mid-object and keeps its connection open. Its uploads are the memory store's, so a
+// version uploaded through it is stored and read back as any other.
+type stalledStore struct {
+	*filestest.Memory
+	// first is how many bytes of the object the body answers before it stops sending.
+	first int64
+}
+
+func (s *stalledStore) Get(ctx context.Context, sha string) (*files.Object, error) {
+	object, err := s.Memory.Get(ctx, sha)
+	if err != nil {
+		return nil, err
+	}
+	return &files.Object{Body: &stalledBody{ctx: ctx, body: object.Body, left: s.first}, Size: object.Size}, nil
+}
+
+// stalledBody answers the object's first bytes and then blocks until its context ends, as a read
+// of a bucket's connection that has stopped sending blocks.
+type stalledBody struct {
+	ctx  context.Context
+	body io.ReadCloser
+	left int64
+}
+
+func (b *stalledBody) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		<-b.ctx.Done()
+		return 0, context.Cause(b.ctx)
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.body.Read(p)
+	b.left -= int64(n)
+	return n, err
+}
+
+func (b *stalledBody) Close() error { return b.body.Close() }
+
 // downloadTestServer is a server whose uploads go to a fake bucket on loopback, reached through
 // the real SDK (files.NewS3, as a deployment opens its store), whose file version downloads are
 // bounded at deadline before their answers begin and whose transfers are bounded by bounds.
@@ -618,4 +730,107 @@ func TestAReaderThatStopsReadingIsCutWithinTheSendBuffersDrain(t *testing.T) {
 		t.Fatalf("a reader that stopped reading was not cut within %v: the %v idle bound and the %d-byte send buffer draining at %d bytes a second",
 			bound+margin, idle, maxSendBuffer(), int64(floor))
 	}
+}
+
+// The last bytes of an answer leave under the answer's own bound. net/http holds what the
+// handler wrote last in its response buffer and the connection's and writes them after the
+// handler returns, over a connection whose deadline servedAsRead had lifted and a server that
+// sets no WriteTimeout, so a reader that stopped just before the end held the goroutine and the
+// connection until TCP gave up, its access line reading status=200 with every byte of its
+// Content-Length counted. servedAsRead flushes them itself instead, armed as every other write
+// is, and a download whose last bytes are not taken is cut as one cut mid-stream is: one INFO
+// line and an abort, so the access line carries aborted=true.
+//
+// Only an answer past what net/http measures a Content-Length from is flushed (answerSniffed):
+// one that stays inside that buffer has nothing on the connection to block on, and flushing it
+// would send it chunked where net/http would have measured it.
+//
+// The writer here answers the flush itself, because a real connection cannot be held to this
+// deterministically: the answer must be large enough to reach the connection and small enough
+// that the handler's own writes are all taken, and where that falls is the sockets' own
+// buffering rather than any bound the server sets.
+func TestTheLastBytesOfAnAnswerGoOutUnderItsBound(t *testing.T) {
+	// Past the buffer net/http measures an answer in, so what is left of it is the connection's
+	// to flush; a shorter answer is left to net/http, which the last case here holds.
+	answer := strings.Repeat("the file version's bytes, ", 200)
+	logged := captureLog(t)
+	served := &server{transfer: transferBounds{idle: 50 * time.Millisecond}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/a1/versions/1", nil)
+	run := func(download bool, failure error, body string) (*flushRecorder, any) {
+		writer := &flushRecorder{ResponseRecorder: httptest.NewRecorder(), failure: failure}
+		var ended any
+		func() {
+			defer func() { ended = recover() }()
+			served.servedAsRead(time.Minute, download, false, func(w http.ResponseWriter, _ *http.Request) {
+				if body == "" {
+					return
+				}
+				if _, err := w.Write([]byte(body)); err != nil {
+					t.Errorf("write the answer: %v", err)
+				}
+			})(writer, request)
+		}()
+		return writer, ended
+	}
+
+	cut, ended := run(true, os.ErrDeadlineExceeded, answer)
+	if ended != http.ErrAbortHandler {
+		t.Fatalf("a download whose last bytes were not taken ended with %v, want http.ErrAbortHandler", ended)
+	}
+	if cut.flushes != 1 {
+		t.Fatalf("the answer was flushed %d times, want the one flush that sends what net/http still holds", cut.flushes)
+	}
+	if armed := cut.deadlines[cut.armedAtFlush-1]; !armed.After(time.Now().Add(-time.Minute)) || armed.IsZero() {
+		t.Fatalf("the flush ran under the deadline %v, want the bound armed before it", armed)
+	}
+	line := awaitLineWith(t, logged, "a file version's download was cut: its reader did not take its last bytes", time.Second)
+	if line == "" {
+		t.Fatalf("the download cut at its last bytes was not logged; the log holds:\n%s", logged.String())
+	}
+	if !strings.Contains(line, "level=INFO") || logField(line, "written") != strconv.Itoa(len(answer)) {
+		t.Fatalf("the cut line is not the INFO line a reader's doing is, or does not say what it took: %s", line)
+	}
+
+	// A flush that succeeds ends nothing, and a read that is no download is left to net/http
+	// whatever its flush says: only a download is cut here.
+	if whole, ended := run(true, nil, answer); ended != nil || whole.flushes != 1 {
+		t.Fatalf("a download whose last bytes went out ended with %v after %d flushes, want nothing after one", ended, whole.flushes)
+	}
+	if read, ended := run(false, os.ErrDeadlineExceeded, answer); ended != nil || read.flushes != 1 {
+		t.Fatalf("an ordinary read whose flush failed ended with %v after %d flushes, want nothing after one", ended, read.flushes)
+	}
+	// A handler that wrote nothing is flushed nothing: flushing it would answer the 200 it did
+	// not write, where a client that went away is answered nothing at all (accesslog.ClientGone).
+	if silent, ended := run(true, os.ErrDeadlineExceeded, ""); ended != nil || silent.flushes != 0 {
+		t.Fatalf("a read that answered nothing ended with %v after %d flushes, want nothing after none", ended, silent.flushes)
+	}
+	// Nor is an answer net/http still measures: flushed, it would go out chunked where net/http
+	// sends it under a Content-Length, and it is not on the connection to block on anyway.
+	if short, ended := run(true, os.ErrDeadlineExceeded, "a short answer"); ended != nil || short.flushes != 0 {
+		t.Fatalf("an answer inside net/http's own buffer ended with %v after %d flushes, want nothing after none", ended, short.flushes)
+	}
+}
+
+// flushRecorder is an answer's writer with a connection of its own: it takes the write deadlines
+// the bound sets and answers the flush that sends what net/http still holds with failure, as a
+// connection whose reader has stopped answers it.
+type flushRecorder struct {
+	*httptest.ResponseRecorder
+	failure error
+	flushes int
+	// armedAtFlush is how many deadlines had been set when the flush ran, so a test can read
+	// the one it ran under.
+	armedAtFlush int
+	deadlines    []time.Time
+}
+
+func (w *flushRecorder) FlushError() error {
+	w.flushes++
+	w.armedAtFlush = len(w.deadlines)
+	return w.failure
+}
+
+func (w *flushRecorder) SetWriteDeadline(at time.Time) error {
+	w.deadlines = append(w.deadlines, at)
+	return nil
 }

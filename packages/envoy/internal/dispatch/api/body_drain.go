@@ -801,6 +801,37 @@ func (a *boundedAnswer) Flush() {
 	_ = a.control.Flush()
 }
 
+// answerSniffed is how much of an answer net/http holds before it writes a header: the 2 KiB
+// buffer it measures a Content-Length from where the handler set none (its
+// bufferBeforeChunkingSize). An answer that stays inside it has not reached the connection at
+// all, so the write that follows the handler cannot block on it; one past it is already on the
+// wire, header and all.
+const answerSniffed = 2 << 10
+
+// sent writes out what net/http still holds of the answer, under the bound, once the handler has
+// returned (returned; a panic unwinding leaves the connection to net/http), and answers what the
+// flush answered. Without it the response buffer (answerSniffed) and the connection's 4 KiB went
+// out after the bound was lifted, with no deadline on the connection and no WriteTimeout on the
+// server, so a download whose reader stopped before its last bytes held that reader's connection
+// and this goroutine until TCP gave up.
+//
+// Only an answer past what net/http measures is flushed. One inside it has nothing on the
+// connection to block on, and flushing it would send it chunked where net/http would have
+// measured its Content-Length; an answer that wrote nothing would be answered the 200 a handler
+// that wrote nothing is not answering (accesslog.ClientGone, refuseUnreadBody). A writer with no
+// connection of its own, a test's recorder, holds nothing back and reports none of this
+// (http.ErrNotSupported), as its deadline reports nothing (movingDeadline).
+func (a *boundedAnswer) sent(returned bool) error {
+	if !returned || a.moved <= answerSniffed {
+		return nil
+	}
+	a.arm()
+	if err := a.control.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	return nil
+}
+
 // Unwrap is the connection's own writer, for http.ResponseController.
 func (a *boundedAnswer) Unwrap() http.ResponseWriter {
 	return a.ResponseWriter

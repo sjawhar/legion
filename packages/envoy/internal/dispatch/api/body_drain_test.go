@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -911,5 +912,45 @@ func TestAKeyedWriteWhoseBodyStopsArrivingIsNotTakenForAGoneClient(t *testing.T)
 	if strings.Contains(logged.String(), "request's client went away") {
 		t.Fatalf("the keyed write whose body stopped logged:\n%s\nwant nothing taking its client for gone: it was there to read the 400",
 			logged.String())
+	}
+}
+
+// A keyed body Dispatch spooled and could not read back is Dispatch's own failure, and is
+// answered as one: 500 with the key echoed, which the client asks again under, where it was the
+// 400 of an unreadable body - a client told to fix a body that arrived whole. It is the only
+// read failure that reaches that answer: every keyed body is a drainedBody, so the bound's
+// deadline, a client that went away, a connection that broke and a refusal of the units the
+// body asked back are all the drain's to answer once this layer has returned
+// (drainedBody.failure, drainedBody.refusal, TestAKeyedWriteWhoseBodyStopsArrivingIsNotTakenForAGoneClient),
+// which leaves the re-read of the spool a request read itself into before it asked for room
+// (drainedBody.readWhole): a temporary file Dispatch wrote and cannot read.
+func TestAKeyedBodyWhoseSpoolCannotBeReadBackIsTheServersFault(t *testing.T) {
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	route := apiRoute{routeRow: routeRow{Method: http.MethodPost, Pattern: "/api/v1/issues", Auth: authAny,
+		Handler: func(http.ResponseWriter, *http.Request) {
+			t.Error("the handler ran on a body the server could not read")
+		}}}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues", nil)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", "alice")
+	request.Header.Set(contracts.IdempotencyKeyHeader, "spoilt-spool")
+	// The body arrived whole and went into its spool before the request asked for room; the
+	// read back from it fails, and nothing of the request failed.
+	request.Body = &drainedBody{
+		ReadCloser: http.NoBody,
+		ctx:        request.Context(),
+		length:     -1,
+		limit:      maxJSONRequestBytes,
+		spool:      iotest.ErrReader(errors.New("input/output error")),
+	}
+
+	recorder := httptest.NewRecorder()
+	served.keyedWrites(route, route.Handler)(recorder, request)
+	if recorder.Code != http.StatusInternalServerError || refusalCode(recorder.Body.Bytes()) != codeInternal {
+		t.Fatalf("a keyed body whose spool could not be read back: status=%d body=%s, want 500 %s",
+			recorder.Code, recorder.Body.String(), codeInternal)
+	}
+	if got := recorder.Header().Get(contracts.IdempotencyKeyHeader); got != "spoilt-spool" {
+		t.Fatalf("the answer echoed the key %q, want the request's own: nothing claimed it, so the client asks again under it", got)
 	}
 }

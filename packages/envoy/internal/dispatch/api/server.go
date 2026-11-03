@@ -125,11 +125,11 @@ type Deps struct {
 	// Limiter at admission.DefaultLimits. A test sets a small one to fill it.
 	Admission *admission.Limiter
 	// ReadDeadline bounds every table route's read (GET, HEAD) that the route itself does not bound
-	// otherwise (apiRoute.Deadline); zero is defaultReadDeadline. A test sets a short one. A write
+	// otherwise (apiRoute.Download); zero is defaultReadDeadline. A test sets a short one. A write
 	// has no deadline.
 	ReadDeadline time.Duration
 	// DownloadDeadline replaces the deadline of the four file version downloads
-	// (downloadDeadline, apiRoute.Deadline), which bounds the work each does before its answer
+	// (downloadDeadline, apiRoute.Download), which bounds the work each does before its answer
 	// begins; zero is the row's own five minutes. Only a test sets one, so a download whose
 	// deadline passes under it is the test's choice rather than five minutes of wall clock.
 	DownloadDeadline time.Duration
@@ -703,14 +703,13 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 	handler = s.refuseUnstorableParameters(route.Pattern, handler)
 	if !route.TestHook {
 		if route.Method == http.MethodGet {
-			// A row with a deadline of its own is a download (downloadDeadline), which the
-			// deployment leaves at the row's five minutes and a test shortens
-			// (Deps.DownloadDeadline); it is also the read whose deadline stops at its answer.
-			untilAnswer := route.Deadline != 0
-			if untilAnswer {
-				deadline = cmp.Or(s.deps.DownloadDeadline, route.Deadline)
+			// A download's work before its answer is bounded at the row's five minutes
+			// (downloadDeadline), which a test shortens (Deps.DownloadDeadline); it is also the
+			// read whose deadline stops at its answer.
+			if route.Download {
+				deadline = cmp.Or(s.deps.DownloadDeadline, downloadDeadline)
 			}
-			handler = s.servedAsRead(deadline, untilAnswer, route.pinsConnection(), handler)
+			handler = s.servedAsRead(deadline, route.Download, route.pinsConnection(), handler)
 		}
 		handler = admitted(limiter, route.Weight, handler)
 	}
@@ -805,19 +804,31 @@ func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) 
 // them (drainBeforeAnswer).
 //
 // An ordinary read is bounded for its whole length (admission.WithDeadline): its work is the
-// database's, and an answer it has begun is written from what it already read. A read whose
-// deadline is its row's own, the file version downloads (untilAnswer, apiRoute.Deadline), is
-// bounded only until its answer begins (admission.WithDeadlineUntilAnswer): the deadline bounds
-// the work before the first byte - the row's read and the store's open - and the answer's own
-// transfer bound decides how long the bytes that follow may take, since from there the read is
-// waiting on its reader's pace and nothing else. boundedAnswer stops it at the answer's first
-// header or byte (boundedAnswer.beginsAnswer).
-func (s *server) servedAsRead(deadline time.Duration, untilAnswer bool, pin bool, handler http.HandlerFunc) http.HandlerFunc {
+// database's, and an answer it has begun is written from what it already read. A file version
+// download (download, apiRoute.Download) is bounded only until its answer begins
+// (admission.WithDeadlineUntilAnswer): the deadline bounds the work before the first byte - the
+// row's read and the store's open - and the answer's own transfer bound decides how long the
+// bytes that follow may take, since from there the read is waiting on its reader's pace and
+// nothing else. boundedAnswer stops it at the answer's first header or byte
+// (boundedAnswer.beginsAnswer).
+//
+// The last of an answer leaves under the bound as the rest of it did: net/http holds what the
+// handler wrote last in its response buffer and the connection's, and writes them after the
+// handler returns, over a connection whose deadline was lifted and a server that sets no
+// WriteTimeout, so a reader that stopped just before the end held the goroutine and the
+// connection until TCP gave up and the access line read status=200 with every byte accounted
+// for. The flush sends them here instead, armed as every other write is (boundedAnswer.sent),
+// and a download whose last bytes are not taken is cut as one cut mid-stream is: logged at INFO
+// and aborted, so the access line carries aborted=true. A panic unwinding - a download's own
+// abort - flushes nothing, since the connection is already going; recover() would report it,
+// but only by swallowing the panic a deferred function cannot re-raise faithfully, so the
+// handler's own return sets the flag instead.
+func (s *server) servedAsRead(deadline time.Duration, download bool, pin bool, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var ctx context.Context
 		var cancel context.CancelFunc
 		var beginsAnswer func()
-		if untilAnswer {
+		if download {
 			ctx, cancel, beginsAnswer = admission.WithDeadlineUntilAnswer(r.Context(), deadline)
 		} else {
 			ctx, cancel = admission.WithDeadline(r.Context(), deadline)
@@ -836,7 +847,16 @@ func (s *server) servedAsRead(deadline time.Duration, untilAnswer bool, pin bool
 			ctx, unpin = store.PinConnection(ctx)
 			defer unpin()
 		}
+		returned := false
+		defer func() {
+			if err := answer.sent(returned); err != nil && download {
+				slog.Info("dispatch: a file version's download was cut: its reader did not take its last bytes",
+					"path", r.URL.Path, "written", answer.moved, "error", err)
+				panic(http.ErrAbortHandler)
+			}
+		}()
 		handler(answer, r.WithContext(ctx))
+		returned = true
 	}
 }
 

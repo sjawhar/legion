@@ -24,7 +24,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -285,16 +284,22 @@ func (s *server) keyedWrites(route apiRoute, handler http.HandlerFunc) http.Hand
 			// since net/http cancels the request of a connection whose read fails, so the line
 			// carried 499 while the drain wrote that client its 400.
 			//
-			// Every other read failure is answered here as before: nothing for a client that
-			// went away, and the refusal of the units the request asked back where that is what
-			// ended the body (admission.WriteUnserved).
+			// What is left is a server fault, answered as one. Every keyed body is a
+			// drainedBody, so a read that failed on the connection - the bound's deadline, a
+			// client that went away, a refusal of the units the request asked back, a framing
+			// the server cannot read - is one of the failures above and returns there; the
+			// reads that reach this line are reads of the spool the request was read into
+			// before it asked for room (drainedBody.readWhole), whose temporary file Dispatch
+			// wrote and could not read back. That is the request's body arriving whole and
+			// Dispatch losing it, so it is the 500 a spoilt spool is answered with
+			// (drainingWriter.refuseUnreadBody) rather than the 400 that tells a client its
+			// body was unreadable: the client's body was fine, and asking it to fix one that
+			// was never at fault tells it to stop retrying work it should retry.
 			if body, drained := r.Body.(*drainedBody); drained && (body.failure != nil || body.refusal != nil) {
 				return
 			}
-			if admission.WriteUnserved(w, r.Context(), err) {
-				return
-			}
-			writeError(w, "REQUEST_BODY_UNREADABLE", http.StatusBadRequest, "could not read the request body: "+err.Error())
+			w.Header().Set(contracts.IdempotencyKeyHeader, key)
+			s.writeHandlerError(w, r, fmt.Errorf("reread a keyed request's body: %w", err))
 			return
 		}
 		replayable, err := body.reader()

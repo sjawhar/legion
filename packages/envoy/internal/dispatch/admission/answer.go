@@ -47,13 +47,14 @@ func WithDeadline(ctx context.Context, timeout time.Duration) (context.Context, 
 
 // WithDeadlineUntilAnswer bounds a read's context at timeout as WithDeadline does, and hands back
 // a stop that takes that bound off: a read whose answer has begun is no longer bounded by it, and
-// nothing but the answer's own transfer bound (the api package's boundedAnswer) decides how long
-// the rest of it may take. Until stop is called the context ends at timeout with
+// nothing but the answer's own transfer bound (the api package's boundedAnswer, which bounds a
+// download's reads of the file store as well as the answer's writes) decides how long the rest
+// of it may take. Until stop is called the context ends at timeout with
 // ErrRequestDeadline as its cause, so DeadlinePassed tells this deadline from every other one
 // exactly as it does WithDeadline's; after it the context ends only with its parent, or with
 // cancel.
 //
-// A file version download is the read that needs it (apiRoute.Deadline): the deadline bounds the
+// A file version download is the read that needs it (apiRoute.Download): the deadline bounds the
 // work the server does for itself - the row's read and the store's open - and the bytes that
 // follow move at the reader's pace, which the transfer bound already measures. Its context
 // carries no deadline of its own (ctx.Deadline), since nothing says when it ends: a statement run
