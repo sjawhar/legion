@@ -4,20 +4,21 @@
 #
 # Builds and starts a NATS server of its own (internal/testnats/cmd/natsd) and the
 # listener, then leaves evidence in out/e2e/.
-# The listener needs ENVOY_HOST_BRIDGE=127.0.0.1 because it runs on this host and
-# delivers to the host-local fake session. ENVOY_CI_DEBOUNCE=250ms keeps this
-# bounded acceptance run responsive while retaining the production settle logic.
+# ENVOY_CI_DEBOUNCE=250ms keeps this bounded acceptance run responsive while retaining the
+# production settle logic.
 #
 # Role messages: the run proves the listener's kept lane end to end. A publish to a role nobody
 # holds, and one to a role whose holder's registration is gone, are each kept rather than refused
 # and answered 202 with kept_reason unclaimed or holder_lapsed; each kept message then reaches the
-# fake session that claims the role exactly once, carrying kept_at. A publish to a role that live
-# session holds still answers 200 naming the holder, with no kept field.
+# session stand-in that claims the role exactly once, as a frame of its own consumer carrying
+# kept_at. A publish to a role that live session holds still answers 200 naming the holder, with
+# no kept field.
 #
 # Ports: the OS chooses each one, and each URL is built from the port its own process reports
 # (natsd's "Listening for client connections on" line, the listener's "envoy-listener listening"
-# addr, the fake session's "ready <port>"). E2E_NATS_PORT, E2E_PORT and E2E_SESSION_PORT set a port
-# explicitly; it is used as given, and one already in use fails with "address already in use".
+# addr). E2E_NATS_PORT and E2E_PORT set a port explicitly; it is used as given, and one already in
+# use fails with "address already in use". The session opens no port of its own: it takes its
+# messages from its session consumer over NATS, as every shipped plugin does.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -29,14 +30,15 @@ usage() {
 Usage: e2e-local.sh [--help]
 
 Boot a throwaway NATS and the local Envoy listener, submit signed public GitHub
-fixtures plus one direct message, prove how a send to an unknown session and a
-send whose bus is gone are refused, prove the kept lane — a role message nobody
-holds and one whose holder's claim has lapsed are kept and answered 202, and
-each reaches the session that claims the role next exactly once, carrying
-kept_at, while a role a live session holds still answers 200 — and write raw and
-rendered acceptance evidence to packages/envoy/out/e2e/. NATS is a server of
-this checkout's own build (internal/testnats/cmd/natsd), so no container runtime
-is needed.
+fixtures plus one direct message to a session that takes them from its own NATS
+consumer, prove that a registration naming a port is refused and how a send to
+an unknown session and a send whose bus is gone are refused, prove the kept
+lane — a role message nobody holds and one whose holder's claim has lapsed are
+kept and answered 202, and each reaches the session that claims the role next
+exactly once, carrying kept_at, while a role a live session holds still answers
+200 — and write raw and rendered acceptance evidence to
+packages/envoy/out/e2e/. NATS is a server of this checkout's own build
+(internal/testnats/cmd/natsd), so no container runtime is needed.
 EOF
 }
 
@@ -74,13 +76,14 @@ absent_session_id="ses_e2e_local_absent"
 readonly absent_session_id
 
 readonly envelopes_file="${out_dir}/envelopes.jsonl"
-readonly session_prompts_file="${out_dir}/session-prompts.jsonl"
+readonly session_frames_file="${out_dir}/session-frames.jsonl"
 readonly rendered_ts_file="${out_dir}/rendered-ts.txt"
-readonly rendered_go_file="${out_dir}/rendered-go.txt"
 readonly direct_response_file="${out_dir}/direct-send-response.json"
 readonly registry_session_response_file="${out_dir}/registry-session-response.json"
 readonly registry_missing_response_file="${out_dir}/registry-missing-response.json"
+readonly subscribe_response_file="${out_dir}/subscribe-response.json"
 readonly unwired_response_file="${out_dir}/unwired-subscribe-response.json"
+readonly port_registration_response_file="${out_dir}/port-registration-response.json"
 readonly unheld_role_response_file="${out_dir}/unheld-role-response.json"
 readonly role_claim_response_file="${out_dir}/role-claim-response.json"
 readonly held_role_response_file="${out_dir}/held-role-response.json"
@@ -153,8 +156,8 @@ trap 'cleanup "$?"' EXIT
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
 
-rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
-  "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
+rm -f "$envelopes_file" "$session_frames_file" "$rendered_ts_file" \
+  "$direct_response_file" "$subscribe_response_file" "$unwired_response_file" "$port_registration_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
   "$lapsed_role_claim_response_file" "$lapsed_registry_response_file" "$lapsed_role_response_file" "$lapsed_role_reclaim_response_file" \
   "$keep_false_role_response_file" \
   "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
@@ -163,7 +166,7 @@ rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_g
   "$listener_binary" "$nats_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
 rm -rf "$nats_store_dir"
 : >"$envelopes_file"
-: >"$session_prompts_file"
+: >"$session_frames_file"
 # Every log file is created before the process that writes it, so a wait that reads one cannot
 # race the redirect that creates it: wait_for_listener's jq and wait_for_nats's grep would
 # otherwise read a file that is not there yet — jq exits non-zero on it, which under set -e ends
@@ -249,7 +252,6 @@ PORT="${E2E_PORT:-0}" \
   ENVOY_WEBHOOKS=github \
   ENVOY_GITHUB_WEBHOOK_SECRET="$webhook_secret" \
   ENVOY_REVIEWER_APP_ID=1 \
-  ENVOY_HOST_BRIDGE=127.0.0.1 \
   ENVOY_CI_DEBOUNCE=250ms \
   "$listener_binary" >"$listener_log_file" 2>&1 &
 listener_pid=$!
@@ -300,46 +302,71 @@ wait_for_health() {
 printf 'waiting for listener health\n'
 wait_for_health
 
-E2E_SESSION_PROMPTS_FILE="$session_prompts_file" E2E_SESSION_PORT="${E2E_SESSION_PORT:-0}" \
-  bun -e '
+# The session: a NATS consumer stand-in, which is what every shipped plugin is. The listener opens
+# no connection to a session at all, so the session takes each stored message of its agent subject
+# and its followed topics as a relay frame of its own durable consumer, on the deliver subject
+# (bus.DeliverSubjectPrefix; packages/envoy-client/src/consumer-delivery.ts and
+# packages/envoy/loadtest/relay.go are the two clients this follows). Each frame is answered
+# `received` at once, its data — the stored envelope — is appended to the frames file, and it is
+# answered `done`, which is what acks the message and moves the resume point.
+#
+# The stand-in holds that NATS connection, so it also holds its own agent subject, where the role
+# lane forwards a role message and waits for its holder's receipt; the capture subscriber below
+# answers no receipt of its own.
+(
+  cd "$repo_root"
+  exec env E2E_NATS_URL="$nats_url" E2E_SESSION_FRAMES_FILE="$session_frames_file" \
+    E2E_SESSION_ID="$session_id" bun -e '
     import { appendFileSync } from "node:fs";
+    import { connect, StringCodec } from "nats";
 
-    const output = process.env.E2E_SESSION_PROMPTS_FILE;
-    const port = Number(process.env.E2E_SESSION_PORT);
-    if (output === undefined || !Number.isInteger(port) || port < 0) {
-      throw new Error("fake-session configuration is invalid");
+    const url = process.env.E2E_NATS_URL;
+    const output = process.env.E2E_SESSION_FRAMES_FILE;
+    const sessionID = process.env.E2E_SESSION_ID;
+    if ([url, output, sessionID].some((value) => value === undefined)) {
+      throw new Error("session stand-in configuration is invalid");
     }
-    let server;
-    try {
-      server = Bun.serve({
-        hostname: "127.0.0.1",
-        port,
-        async fetch(request) {
-          const url = new URL(request.url);
-          if (request.method !== "POST" || !url.pathname.endsWith("/prompt_async")) {
-            return new Response("not found", { status: 404 });
-          }
-          appendFileSync(output, `${await request.text()}\n`);
-          return new Response(null, { status: 204 });
-        },
-      });
-    } catch (error) {
-      // Bun says "Is port N in use?"; this names the failure as the other servers here do.
-      if (error?.code !== "EADDRINUSE") throw error;
-      process.stderr.write(`fake session: listen 127.0.0.1:${port}: address already in use\n`);
-      process.exit(1);
+    const codec = StringCodec();
+    const connection = await connect({ servers: url, name: "envoy-e2e-session" });
+    const agent = connection.subscribe(`notifications.agent.${sessionID}`);
+    const frames = connection.subscribe(`notifications.envoy.deliver.${sessionID}`);
+    // Every relay frame carries these; Envoy-Gap is left out because it marks only the first
+    // frame after a retention gap, which a run that creates its own stream never has.
+    const headers = ["Envoy-Subject", "Envoy-Stream-Seq", "Envoy-Stream-Id", "Envoy-Delivered", "Envoy-Stored-At"];
+    void (async () => {
+      for await (const message of agent) {
+        // A role forward: an envelope naming another topic, sent to this subject and asking for a
+        // reply, which the publish route waits for before it answers the sender (envoy-client
+        // expectsLaneReceipt). Messages this session sends arrive here too, from the publish into
+        // the stream, and name this subject; that reply belongs to the sender, not to a receipt.
+        if (!message.reply) continue;
+        let topic;
+        try {
+          topic = JSON.parse(codec.decode(message.data)).topic;
+        } catch {}
+        if (topic !== undefined && topic !== message.subject) message.respond();
+      }
+    })();
+    await connection.flush();
+    process.stdout.write("ready\n");
+    for await (const message of frames) {
+      if (!message.reply) throw new Error("a relay frame carries no reply subject");
+      for (const header of headers) {
+        if (!message.headers?.get(header)) throw new Error(`a relay frame carries no ${header} header`);
+      }
+      message.respond(codec.encode("received"));
+      appendFileSync(output, `${codec.decode(message.data)}\n`);
+      message.respond(codec.encode("done"));
     }
-    process.stdout.write(`ready ${server.port}\n`);
-  ' >"$session_ready_fifo" 2>"$session_log_file" &
+  ' >"$session_ready_fifo" 2>"$session_log_file"
+) &
 session_pid=$!
 
-if ! IFS= read -r -t 5 session_ready <"$session_ready_fifo" || [[ ! "$session_ready" =~ ^ready\ ([0-9]+)$ ]]; then
-  printf 'ERR: the fake session did not report its port.\n' >&2
+if ! IFS= read -r -t 10 session_ready <"$session_ready_fifo" || [[ "$session_ready" != "ready" ]]; then
+  printf 'ERR: the session consumer stand-in did not become ready.\n' >&2
   cat "$session_log_file" >&2
   exit 3
 fi
-session_port="${BASH_REMATCH[1]}"
-readonly session_port
 
 (
   cd "$repo_root"
@@ -352,6 +379,10 @@ readonly session_port
     if (url === undefined || output === undefined) throw new Error("capture configuration is invalid");
     const codec = StringCodec();
     const connection = await connect({ servers: url, name: "envoy-e2e-capture" });
+    // Everything the listener publishes, except the relay frames of the session above: a frame
+    // carries a copy of a stored envelope, on notifications.envoy.deliver.<session id>, so
+    // counting one here would count its message twice. The frames are evidence of their own, and
+    // the stand-in that writes them also answers the role-forward receipts answered here before.
     const subscription = connection.subscribe("notifications.>");
     process.stdout.write("ready\n");
     for await (const message of subscription) {
@@ -360,18 +391,8 @@ readonly session_port
       // envelope and is captured; the cursor is bookkeeping of the listener alone, which carries
       // no envelope and reaches no session, so this capture of envelopes skips it.
       if (message.subject.startsWith("notifications.envoy.kept.cursor.")) continue;
-      const raw = codec.decode(message.data);
-      appendFileSync(output, `${raw}\n`);
-      // The fake session holds the role below, and the publish route answers a role message only
-      // once its holder confirms the forward to its agent subject with an empty receipt, as the
-      // plugins do for a frame whose envelope names another topic (envoy-client expectsLaneReceipt).
-      if (message.reply && message.subject.startsWith("notifications.agent.")) {
-        let topic;
-        try {
-          topic = JSON.parse(raw).topic;
-        } catch {}
-        if (topic !== undefined && topic !== message.subject) message.respond();
-      }
+      if (message.subject.startsWith("notifications.envoy.deliver.")) continue;
+      appendFileSync(output, `${codec.decode(message.data)}\n`);
     }
   ' >"$subscriber_ready_fifo" 2>"$subscriber_log_file"
 ) &
@@ -383,15 +404,42 @@ if ! IFS= read -r -t 5 subscriber_ready <"$subscriber_ready_fifo" || [[ "$subscr
   exit 3
 fi
 
+# The registration every shipped plugin sends: no port — one above 0 is refused below — and a
+# consumer delivery carrying the epoch of the NATS connection the stand-in above holds.
+session_epoch="$(openssl rand -hex 6)"
+readonly session_epoch
 subscribe_body="$(jq -nc \
   --arg session_id "$session_id" \
   --arg dir "/tmp/envoy-e2e-local" \
   --arg title "Envoy local acceptance" \
   --arg topic "notifications.github.example-org.example-repo.>" \
-  --argjson port "$session_port" \
-  '{session_id:$session_id,dir:$dir,title:$title,topics:[$topic],port:$port,driving:true}')"
+  --arg epoch "$session_epoch" \
+  '{session_id:$session_id,dir:$dir,title:$title,topics:[$topic],driving:true,self_subscribed:true,delivery:{consumer:true,epoch:$epoch}}')"
 curl -fsS -X POST -H 'Content-Type: application/json' \
-  "${listener_url}/v1/interests/subscribe" -d "$subscribe_body" >/dev/null
+  "${listener_url}/v1/interests/subscribe" -d "$subscribe_body" >"$subscribe_response_file"
+jq -e '.delivery.mode == "consumer"' "$subscribe_response_file" >/dev/null || {
+  printf 'ERR: the registration was not answered a consumer delivery, so the session has nothing to receive on.\n' >&2
+  cat "$subscribe_response_file" >&2
+  exit 1
+}
+
+# The run's negative control. This listener opens no connection to a session, so a registration
+# naming a port is refused by name rather than stored: were it accepted, a session could still ask
+# to be pushed to and then wait forever, and every consumer assertion below would prove nothing
+# about what such a session receives.
+printf 'posting a registration that names a port\n'
+port_registration_body="$(jq -nc --arg session_id "ses_e2e_local_ported" \
+  '{session_id:$session_id,topics:[],port:1}')"
+port_registration_status="$(curl -sS -o "$port_registration_response_file" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/interests/subscribe" -d "$port_registration_body")"
+if [[ "$port_registration_status" != 400 ]] || ! jq -e '.expected == ["port"]' "$port_registration_response_file" >/dev/null; then
+  printf 'ERR: a registration naming port 1 was answered HTTP %s, want 400 naming port: this listener still takes a port it will never deliver to.\n' "$port_registration_status" >&2
+  cat "$port_registration_response_file" >&2
+  exit 1
+fi
+printf 'port registration: HTTP %s %s (expected %s)\n' "$port_registration_status" \
+  "$(jq -r '.error' "$port_registration_response_file")" "$(jq -rc '.expected' "$port_registration_response_file")"
 
 unwired_subscribe_body="$(jq -nc \
   --arg session_id "$session_id" \
@@ -445,18 +493,20 @@ wait_for_topic_count() {
   return 1
 }
 
-wait_for_prompt_count() {
+# wait_for_consumer_frame_count returns once the session has taken at least expected frames of its
+# consumer: one line of the frames file per frame it answered done.
+wait_for_consumer_frame_count() {
   local expected=$1
   local deadline=$((SECONDS + 20))
   local count
   while ((SECONDS < deadline)); do
-    count="$(wc -l <"$session_prompts_file")"
+    count="$(wc -l <"$session_frames_file")"
     if ((count >= expected)); then
       return 0
     fi
     sleep 0.25
   done
-  printf 'ERR: expected %s fake-session prompts within 20 seconds.\n' "$expected" >&2
+  printf 'ERR: expected %s consumer frames at the session within 20 seconds.\n' "$expected" >&2
   return 1
 }
 
@@ -568,19 +618,19 @@ fi
 # left to queue it: the listener keeps the message and hands it to whoever claims the role within
 # the hour. Both windows the keep covers are proved here, each on a role of its own: (i) nobody
 # holds the role, and (ii) a holder whose registration is gone, its claim lapsed. In each, the
-# fake session then claims the role and must be handed the kept message exactly once, carrying
+# session stand-in then claims the role and must be handed the kept message exactly once, carrying
 # kept_at, the time the listener took it in.
 
-# count_session_prompts reports how many prompts the fake session was pushed that name event_id.
-# Every prompt carries its message's "Event ID: <id>" line (session.Deliverer.Text), so this
-# counts the session's own deliveries of one message, which is what exactly once is about: the bus
-# holds two copies of a kept message — the one on the kept lane and the forward the drain made of
-# it — and only the second is a delivery.
-count_session_prompts() {
+# count_session_frames reports how many frames of its own consumer the session took that carry
+# event_id. The drain forwards a kept copy to the holder's agent subject, which the stream stores
+# and the session's consumer delivers, so this counts the session's own deliveries of one message,
+# which is what exactly once is about: the bus holds two copies of a kept message — the one on the
+# kept lane and the forward the drain made of it — and only the second reaches the session.
+count_session_frames() {
   local event_id=$1
   jq -rs --arg event_id "$event_id" \
-    '[.[] | .parts[]? | select(.type == "text") | select((.text // "") | contains("Event ID: " + $event_id))] | length' \
-    "$session_prompts_file"
+    '[.[] | select(.event_id == $event_id)] | length' \
+    "$session_frames_file"
 }
 
 # count_kept_forwards reports how many captured frames are the drain's forward of event_id: the
@@ -596,26 +646,26 @@ count_kept_forwards() {
 
 # wait_for_kept_delivery proves one window of the kept lane: the message the kept answer named
 # reaches the session that has just claimed the role, exactly once and carrying kept_at. The
-# forward and the prompt are written by two processes of their own, so this waits for both to
-# arrive rather than racing either, and then fails on any count but one — a control notice
-# delivered twice is as wrong as one never delivered.
+# capture of the forward and the session's own frame are written by two processes of their own, so
+# this waits for both to arrive rather than racing either, and then fails on any count but one — a
+# control notice delivered twice is as wrong as one never delivered.
 wait_for_kept_delivery() {
   local window=$1
   local event_id=$2
   local deadline=$((SECONDS + 20))
-  local prompts=0
+  local frames=0
   local forwards=0
   while ((SECONDS < deadline)); do
-    prompts="$(count_session_prompts "$event_id")"
+    frames="$(count_session_frames "$event_id")"
     forwards="$(count_kept_forwards "$event_id")"
-    if ((prompts != 0 && forwards != 0)); then
+    if ((frames != 0 && forwards != 0)); then
       break
     fi
     sleep 0.25
   done
-  if ((prompts != 1)); then
-    printf 'ERR: the %s kept message %s reached the fake session %s times within 20 seconds, not exactly once.\n' \
-      "$window" "$event_id" "$prompts" >&2
+  if ((frames != 1)); then
+    printf 'ERR: the %s kept message %s reached the session %s times within 20 seconds, not exactly once.\n' \
+      "$window" "$event_id" "$frames" >&2
     return 1
   fi
   if ((forwards != 1)); then
@@ -623,10 +673,10 @@ wait_for_kept_delivery() {
       "$window" "$event_id" "$forwards" >&2
     return 1
   fi
-  printf '%s: kept message %s reached the fake session exactly once, carrying kept_at\n' "$window" "$event_id"
+  printf '%s: kept message %s reached the session exactly once, carrying kept_at\n' "$window" "$event_id"
 }
 
-# wait_for_unregistered returns once the listener reports the fake session's registration gone.
+# wait_for_unregistered returns once the listener reports the session's registration gone.
 # The registry read and the publish route's first resolution of a role's holder read a session the
 # same way (liveSessionEntry, through a cache the delete evicts), so this is the point from which
 # a claim that names that session is a lapsed one rather than a live holder.
@@ -669,7 +719,7 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/roles/set" \
   -d "{\"session_id\":\"${session_id}\",\"role\":\"${role}\"}" >"$role_claim_response_file"
 jq -e --arg session_id "$session_id" '.session_id == $session_id' "$role_claim_response_file" >/dev/null || {
-  printf 'ERR: fake session did not claim the role.\n' >&2
+  printf 'ERR: the session did not claim the role.\n' >&2
   exit 1
 }
 wait_for_kept_delivery 'unclaimed-role window' "$unheld_event_id"
@@ -712,13 +762,13 @@ held_status="$(curl -sS -o "$held_role_response_file" -w '%{http_code}' \
 if [[ "$held_status" != 200 ]] || ! jq -e --arg session_id "$session_id" \
   '.holder == $session_id and (has("kept") | not) and (has("kept_reason") | not)' \
   "$held_role_response_file" >/dev/null; then
-  printf 'ERR: a publish to the role the fake session holds answered HTTP %s, not a 200 naming the holder with no kept field.\n' \
+  printf 'ERR: a publish to the role the session holds answered HTTP %s, not a 200 naming the holder with no kept field.\n' \
     "$held_status" >&2
   cat "$held_role_response_file" >&2
   exit 1
 fi
 
-# Window (ii): a claim that lapsed. The fake session claims a role of its own, and then its
+# Window (ii): a claim that lapsed. The session claims a role of its own, and then its
 # registration is removed through the listener, rather than waiting out the five minutes a claim
 # takes to go stale. A registration and a role claim are separate records, and removing the first
 # leaves the second naming a session nothing can reach: the role has a holder on paper and none
@@ -729,7 +779,7 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/roles/set" \
   -d "{\"session_id\":\"${session_id}\",\"role\":\"${lapsed_role}\"}" >"$lapsed_role_claim_response_file"
 jq -e --arg session_id "$session_id" '.session_id == $session_id' "$lapsed_role_claim_response_file" >/dev/null || {
-  printf 'ERR: fake session did not claim the role whose claim is about to lapse.\n' >&2
+  printf 'ERR: the session did not claim the role whose claim is about to lapse.\n' >&2
   exit 1
 }
 curl -fsS -X DELETE "${listener_url}/v1/sessions/${session_id}" >/dev/null
@@ -756,15 +806,15 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/roles/set" \
   -d "{\"session_id\":\"${session_id}\",\"role\":\"${lapsed_role}\"}" >"$lapsed_role_reclaim_response_file"
 jq -e --arg session_id "$session_id" '.session_id == $session_id' "$lapsed_role_reclaim_response_file" >/dev/null || {
-  printf 'ERR: the re-registered fake session did not claim the lapsed role again.\n' >&2
+  printf 'ERR: the re-registered session did not claim the lapsed role again.\n' >&2
   exit 1
 }
 wait_for_kept_delivery 'lapsed-claim window' "$lapsed_event_id"
 
 # The keep-false control, read now: its claim went in before the lapsed window, whose own bounded
 # wait has since seen a kept message delivered, so a drain of the unkept role would have run by
-# now. The fake session was handed nothing for it, and the bus holds no copy of it either.
-if grep -q 'Unkept role delivery.' "$session_prompts_file"; then
+# now. The session was handed nothing for it, and the bus holds no copy of it either.
+if grep -q 'Unkept role delivery.' "$session_frames_file"; then
   printf 'ERR: a message published with keep false reached the role claimant; nothing should have been kept.\n' >&2
   exit 1
 fi
@@ -806,46 +856,53 @@ post_github workflow_run "${fixture_dir}/workflow-run-without-pr.json"
 post_github check_run "${fixture_dir}/check-run-actions-job-without-pr.json"
 post_github check_run "${fixture_dir}/check-run-actions-job-merge-queue.json"
 post_github push "${fixture_dir}/push.json"
-wait_for_prompt_count 14
+wait_for_consumer_frame_count 17
+
+# What the session itself took, which is the whole point of a consumer: every GitHub delivery, the
+# direct message and all three role forwards reached it as frames of its own consumer, each
+# exactly once, with no connection opened to it from anywhere. Two of the role forwards are the
+# reviewer role's — the copy kept while nobody held it and the publish its live holder took — and
+# the third is the escalation role's copy, kept while its holder's claim had lapsed.
+printf 'consumer frames by topic:\n'
+jq -r '.topic' "$session_frames_file" | sort | uniq -c
+jq -es --arg session_id "$session_id" --arg role_topic "notifications.role.${role}" \
+  --arg lapsed_role_topic "notifications.role.${lapsed_role}" --arg message "$direct_message" '
+  (map(select(.topic == "notifications.agent." + $session_id)) | length == 1 and .[0].payload == $message)
+  and (map(select(.topic == $role_topic)) | length) == 2
+  and (map(select(.topic == $lapsed_role_topic)) | length) == 1
+  and (map(select(.topic | startswith("notifications.github.example-org.example-repo."))) | length) == 13
+' "$session_frames_file" >/dev/null || {
+  printf 'ERR: the session did not take its GitHub deliveries, its direct message and its three role forwards from its consumer.\n' >&2
+  exit 1
+}
 
 (
   cd "$repo_root/packages/envoy-client"
   E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
-    E2E_RENDERED_GO_FILE="$rendered_go_file" E2E_SESSION_PROMPTS_FILE="$session_prompts_file" \
     E2E_SESSION_ID="$session_id" bun -e '
       import { readFileSync, writeFileSync } from "node:fs";
       import { renderInbound } from "@legion/envoy-client/delivery";
 
       const envelopesFile = process.env.E2E_ENVELOPES_FILE;
       const renderedTSFile = process.env.E2E_RENDERED_TS_FILE;
-      const renderedGoFile = process.env.E2E_RENDERED_GO_FILE;
-      const promptsFile = process.env.E2E_SESSION_PROMPTS_FILE;
       const sessionID = process.env.E2E_SESSION_ID;
-      if ([envelopesFile, renderedTSFile, renderedGoFile, promptsFile, sessionID].some((value) => value === undefined)) {
+      if ([envelopesFile, renderedTSFile, sessionID].some((value) => value === undefined)) {
         throw new Error("renderer configuration is invalid");
       }
       const envelopes = readFileSync(envelopesFile, "utf8").trim().split("\n").filter(Boolean);
       const rendered = envelopes.map((raw) => renderInbound(raw, sessionID).content);
       writeFileSync(renderedTSFile, `${rendered.join("\n\n")}\n`);
-      const texts = readFileSync(promptsFile, "utf8").trim().split("\n").filter(Boolean).map((raw) => {
-        const prompt = JSON.parse(raw);
-        const text = prompt.parts?.find((part) => part.type === "text")?.text;
-        if (typeof text !== "string") throw new Error("prompt_async body has no text part");
-        return text;
-      });
-      writeFileSync(renderedGoFile, `${texts.join("\n\n")}\n`);
     '
 )
 
 E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
-  E2E_RENDERED_GO_FILE="$rendered_go_file" E2E_SESSION_ID="$session_id" bun -e '
+  E2E_SESSION_ID="$session_id" bun -e '
     import { readFileSync } from "node:fs";
 
     const envelopesFile = process.env.E2E_ENVELOPES_FILE;
     const renderedTSFile = process.env.E2E_RENDERED_TS_FILE;
-    const renderedGoFile = process.env.E2E_RENDERED_GO_FILE;
     const sessionID = process.env.E2E_SESSION_ID;
-    if ([envelopesFile, renderedTSFile, renderedGoFile, sessionID].some((value) => value === undefined)) {
+    if ([envelopesFile, renderedTSFile, sessionID].some((value) => value === undefined)) {
       throw new Error("assertion configuration is invalid");
     }
     const envelopes = readFileSync(envelopesFile, "utf8").trim().split("\n").filter(Boolean).map((raw) => JSON.parse(raw));
@@ -956,17 +1013,13 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     for (const suffix of obsolete) require(withTopic(topic(suffix)).length === 0, `obsolete topic was published: ${suffix}`);
 
     const tsFirst = readFileSync(renderedTSFile, "utf8").split("\n\nenvoy:")[0];
-    const goFirst = readFileSync(renderedGoFile, "utf8").split("\n[NOTIFICATION")[0];
-    // The direct summary is the message head, so both renderers drop the separate summary line
-    // and print the full message once: the summary text appears only where the message opens.
-    const assertDirectRender = (rendered, fullMessage, renderer) => {
-      require(rendered.split(fullMessage).length === 2, `${renderer} did not render the full direct message exactly once`);
-      require(rendered.split(directSummary).length === 2, `${renderer} repeats the direct summary outside the message it opens`);
-    };
-    assertDirectRender(tsFirst, `message: ${JSON.stringify(directBody)}`, "TypeScript");
-    assertDirectRender(goFirst, `Message:\n${directBody}`, "Go");
+    // The direct summary is the message head, so the renderer drops the separate summary line and
+    // prints the full message once: the summary text appears only where the message opens.
+    const fullMessage = `message: ${JSON.stringify(directBody)}`;
+    require(tsFirst.split(fullMessage).length === 2, "the renderer did not render the full direct message exactly once");
+    require(tsFirst.split(directSummary).length === 2, "the renderer repeats the direct summary outside the message it opens");
 
-    console.log("PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract");
+    console.log("PASS: topic set, structured payloads, checks settlement, and what renderInbound shows a session match the local acceptance contract");
   '
 
 # Last of all, because it ends this rig's NATS and every step above needs the bus. A send the bus

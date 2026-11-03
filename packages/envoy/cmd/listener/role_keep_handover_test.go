@@ -155,7 +155,7 @@ func (l *keptLaneUnderClaim) keys() []string {
 // claims no second time. A lane of more copies than one walk forwards therefore used to strand
 // every copy past the twentieth until it aged out unread, with every sender answered 202 kept.
 func TestOneClaimHandsOverAKeptLaneLongerThanOneWalkOfIt(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-handover-budget"
 		holder = "ses_kept_handover_budget"
@@ -183,7 +183,7 @@ func TestOneClaimHandsOverAKeptLaneLongerThanOneWalkOfIt(t *testing.T) {
 // no keep follows a role that has one. The handover walks the lane again itself, after a back-off,
 // so the copy reaches the holder its sender was told it was kept for.
 func TestAKeptCopyWhoseForwardFailedReachesTheHolderWithNoSecondClaim(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-handover-retry"
 		holder = "ses_kept_handover_retry"
@@ -211,7 +211,7 @@ func TestAKeptCopyWhoseForwardFailedReachesTheHolderWithNoSecondClaim(t *testing
 // holder from the registry's watched copy before each copy instead, leaves the lane when it is no
 // longer its own session's, and the handover walks it again for the holder it finds then.
 func TestADrainStopsWhenTheRoleChangesHolderUnderIt(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role    = "kept-handover-moved"
 		first   = "ses_kept_handover_first"
@@ -255,7 +255,7 @@ func TestADrainStopsWhenTheRoleChangesHolderUnderIt(t *testing.T) {
 // answered 202 kept and a live holder waiting - was stranded until it expired too. A walk that
 // moved the role's cursor made progress, so the handover goes on to the copies behind them.
 func TestAHandoverWalksPastMoreExpiredCopiesThanItsIdleWalksAllow(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role    = "kept-handover-expired"
 		holder  = "ses_kept_handover_expired"
@@ -309,7 +309,7 @@ func TestAHandoverWalksPastMoreExpiredCopiesThanItsIdleWalksAllow(t *testing.T) 
 // another handover while that holder holds the role. The handover retries on a cadence that widens
 // instead (roleKeepDrainBackoff), for longer than roleKeepDrainIdleRounds walks.
 func TestAHandoverRetriesMoreFailedWalksThanItsIdleWalksAllow(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role     = "kept-handover-failures"
 		holder   = "ses_kept_handover_failures"
@@ -339,7 +339,7 @@ func TestAHandoverRetriesMoreFailedWalksThanItsIdleWalksAllow(t *testing.T) {
 // this walk's session lost it (roleKeepDrainHolds), so the copies went to a session that had
 // released the role and the cursor moved past them.
 func TestAHandoverResolvesTheHolderOfAWalkAfterThePauseBeforeIt(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-handover-released"
 		holder = "ses_kept_handover_released"
@@ -397,7 +397,7 @@ func TestAHandoverResolvesTheHolderOfAWalkAfterThePauseBeforeIt(t *testing.T) {
 // only while a role has no live holder, and a live holder claims no second time. One pass of the
 // sweep hands such a lane to the role's live holder with no claim and no keep behind it.
 func TestTheSweepHandsOverALaneNoHandoverIsDraining(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-sweep-stranded"
 		holder = "ses_kept_sweep_stranded"
@@ -479,7 +479,7 @@ func countSessionBucketReads(t *testing.T, sessions *session.SessionRegistry) *a
 // handover came to read the session registry under a test that was replacing it. The pass opens
 // with the lane instead, and ends there when the lane holds nothing.
 func TestAHandoverOfAnEmptyKeptLaneResolvesNoHolder(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		empty  = "kept-empty-lane"
 		full   = "kept-filled-lane"
@@ -525,7 +525,7 @@ func TestAHandoverOfAnEmptyKeptLaneResolvesNoHolder(t *testing.T) {
 // every message it finds no live holder for, so the listener keeps this one, and the role's next
 // claim is handed it.
 func TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-dispatch-route"
 		holder = "ses_kept_dispatch_route"
@@ -575,7 +575,7 @@ func TestAHandoverRetriesALaneHeadReadThatFailedOnlyForAClaimedRole(t *testing.T
 		{name: "unclaimed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			harness := newListenerDeliveryHarness(t, nil)
+			harness := newListenerDeliveryHarness(t)
 			role := "kept-head-read-" + test.name
 			holder := "ses_kept_head_read_" + test.name
 			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, role+"-00")
@@ -694,7 +694,7 @@ func claimRoleBeyondTheSessionCache(t *testing.T, harness listenerDeliveryHarnes
 // roleKeepWindow. The role's cached claim names the session that claimed it, so the read is
 // retried and the copy reaches the holder its sender was told it was kept for.
 func TestAHandoverOfAClaimedRoleRetriesAHolderResolutionThatFailed(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-holder-read-failed"
 		holder = "ses_kept_holder_read_failed"
@@ -791,7 +791,7 @@ func TestAHandoverReportsAHolderReadThatFailedAndNotOneItsShutdownCancelled(t *t
 		{name: "stalled", stalled: true, wantErr: true, wantErrorLines: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			harness := newListenerDeliveryHarness(t, nil)
+			harness := newListenerDeliveryHarness(t)
 			role := "kept-shutdown-" + test.name
 			holder := "ses_kept_shutdown_" + test.name
 			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, role+"-00")

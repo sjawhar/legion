@@ -720,7 +720,6 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 	keptSubject := bus.KeptRoleSubject(role)
 	lane := &roleKeepLaneCursor{cfg: cfg, role: role, holder: holder, subject: bus.KeptRoleCursorSubject(role), seq: head.cursorSeq}
 	subject := contracts.AgentSubject(holder)
-	storedOnly := roleForwardStoredOnly(entry)
 	// The record the role lane judges a forward against, read the same way here: what the holder
 	// already took, and what is already on its way to it.
 	seen := func(key, recipient string) bool {
@@ -764,7 +763,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 			result.end, err = roleKeepWriteFailed(err)
 			return result, err
 		}
-		handed := roleForward{item: item, sessionID: holder, storedOnly: storedOnly}
+		handed := roleForward{item: item, sessionID: holder}
 		// The copy goes under the envelope the lane's own forward of it carries
 		// (roleForward.forwarded), with the time the stream stored it beside it.
 		forward := handed.forwarded()
@@ -779,7 +778,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 		// The forward is named as the lane's own forward of this message to this holder is
 		// (roleForward.msgID), so the stream keeps one copy of it for this holder however many
 		// walks forward it.
-		forwarded := cfg.forwardAndWait(subject, forward, handed.msgID(subject), roleReceiptTimeout, storedOnly)
+		forwarded := cfg.forwardAndWait(subject, forward, handed.msgID(subject), roleReceiptTimeout)
 		if forwarded != nil && !errors.Is(forwarded, bus.ErrReceiptTimeout) {
 			// This walk is ending with the copy claimed and unforwarded, so it releases the
 			// claim: the cursor goes back to what it was before the claim, and the role's next

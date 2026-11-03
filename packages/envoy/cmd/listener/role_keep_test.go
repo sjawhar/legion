@@ -344,7 +344,7 @@ func TestAClaimForwardsEachKeptRoleMessageToItsNewHolderExactlyOnce(t *testing.T
 // The age is measured against the stream's own store time, which no caller may choose, so the test
 // moves the drain's clock rather than holding a copy for an hour.
 func TestAKeptRoleMessageOlderThanTheKeepWindowIsDroppedAndTheCursorMovesPastIt(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-expired"
 		holder = "ses_kept_expired_claimant"
@@ -411,7 +411,7 @@ func TestTheRoleLanesGiveUpBranchesKeepTheMessageWithNoException(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			harness := newListenerDeliveryHarness(t, nil)
+			harness := newListenerDeliveryHarness(t)
 			topic := contracts.RoleTopicPrefix + tc.role
 			if tc.holder != "" {
 				if _, err := harness.registry.SetRole(tc.holder, "test-machine", tc.role, false); err != nil {
@@ -516,7 +516,7 @@ func TestADeliveredSendAndAReceiptTimeoutBothKeepNothing(t *testing.T) {
 // handed the role's new holder nothing while every sender had been answered 202 kept. The walk
 // is bounded by roleKeepScanMax instead, so a claim forwards every copy still inside the window.
 func TestADrainSpendsItsBudgetOnForwardsRatherThanOnExpiredCopies(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-drain-budget"
 		holder = "ses_kept_budget_claimant"
@@ -568,7 +568,7 @@ func TestADrainSpendsItsBudgetOnForwardsRatherThanOnExpiredCopies(t *testing.T) 
 // the claim stops there; a cursor written once at the end of the walk let both of them forward
 // everything they had read.
 func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-two-drains"
 		holder = "ses_kept_drain_holder"
@@ -680,7 +680,7 @@ func TestTheDrainJudgesAKeptCopyByTheRulesEveryForwardPathApplies(t *testing.T) 
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			harness := newListenerDeliveryHarness(t, nil)
+			harness := newListenerDeliveryHarness(t)
 			holder := "ses_" + strings.ReplaceAll(tc.role, "-", "_") + "_claimant"
 			cfg := harness.config
 			var forwards atomic.Int32
@@ -795,7 +795,7 @@ func TestAPublishToARoleNoClaimCanNameIsRefusedAndKeepsNothing(t *testing.T) {
 // (keepForNextHolder, runKeptRoleDrain). The claim and its drain are made here before the keep,
 // which is the order that race leaves behind, and no second claim follows.
 func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-claimed-under-the-keep"
 		holder = "ses_kept_under_claim"
@@ -839,7 +839,7 @@ func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
 // publish, Dispatch's role-routed events among them, is kept and raises no exception.
 func TestTheRoleLaneKeepsARawRolePublishForTheRolesNextHolder(t *testing.T) {
 	const role = "lane-keep-raw"
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	topic := contracts.RoleTopicPrefix + role
 	probe, err := harness.client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + topic)
 	if err != nil {
@@ -877,7 +877,7 @@ func TestTheRoleLaneKeepsNothingForAClaimTheRestartGraceRetained(t *testing.T) {
 	if _, err := writer.SetRole(holder, "test-machine", role, false); err != nil {
 		t.Fatalf("claim %s for a session the store does not hold: %v", role, err)
 	}
-	harness := newListenerDeliveryHarnessOn(t, client, nil)
+	harness := newListenerDeliveryHarnessOn(t, client)
 
 	topic := contracts.RoleTopicPrefix + role
 	probe, err := harness.client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + topic)
@@ -930,7 +930,7 @@ func TestAPublishToTheListenersKeptLaneIsRefused(t *testing.T) {
 // to the copy behind it, where counting it delivered said one word for it here and another on the
 // lane for the same event.
 func TestAKeptCopyThatDrewNoReceiptIsReportedReceiptTimeout(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-receipt-timeout"
 		holder = "ses_kept_receipt_timeout"

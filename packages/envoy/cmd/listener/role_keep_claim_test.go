@@ -32,7 +32,7 @@ import (
 // and confirmed, so it is not handed over twice, and the two copies after it were never read by
 // the drain that failed and must still be delivered.
 func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-forward-failed"
 		holder = "ses_kept_forward_failed"
@@ -103,7 +103,7 @@ func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testi
 // killed there and is deterministic. Nothing released that claim, so the role's next drain takes
 // it over once it is past bus.KeptRoleClaimWindow.
 func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCopy(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-confirm-lost"
 		holder = "ses_kept_confirm_lost"
@@ -113,9 +113,9 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 		t.Fatalf("keep the copy; the listener log says why:\n%s", harness.logs.String())
 	}
 	key := roleForwardDedupePrefix + item.DedupeKey
-	// A session on a serving port answers no receipt: its forward counts as delivered once the
-	// stream has stored it on the session's agent subject (roleForwardStoredOnly), which is the
-	// copy this test counts.
+	// This holder answers no receipt: no listener pushes to a session's port, so only a session
+	// consumer of its own reaches it. Its forward ends in bus.ErrReceiptTimeout with the stream's
+	// stored copy on its agent subject, which is the copy this test counts.
 	entry := session.SessionEntry{MachineID: "test-machine", Port: 1}
 	subject := contracts.AgentSubject(holder)
 
@@ -123,10 +123,10 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 	defer cancel()
 	claimRoleWith(t, harness, holder, role, entry)
 	var handed []string
-	record := func(cfg listenerDeliveryHandlerConfig, after func()) func(string, contracts.Envelope, string, time.Duration, bool) (func() error, error) {
+	record := func(cfg listenerDeliveryHandlerConfig, after func()) func(string, contracts.Envelope, string, time.Duration) (func() error, error) {
 		forward := cfg.forwardRole
-		return func(subject string, forwarded contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
-			wait, err := forward(subject, forwarded, msgID, timeout, storedOnly)
+		return func(subject string, forwarded contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
+			wait, err := forward(subject, forwarded, msgID, timeout)
 			if err != nil {
 				return nil, err
 			}
@@ -189,7 +189,7 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 // wrote it can still be forwarding that copy, no other drain forwards it a second time, and once
 // it cannot be, the copy reaches the role's holder rather than nobody.
 func TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-claim-abandoned"
 		holder = "ses_kept_claim_abandoned"

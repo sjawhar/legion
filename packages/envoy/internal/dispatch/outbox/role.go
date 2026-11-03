@@ -19,10 +19,10 @@ import (
 )
 
 // roleReceiptTimeout bounds the wait for a role holder's answer to a forward: its empty receipt,
-// or the stream's acknowledgement of the stored copy for a holder with a serving port. A holder
-// that never answers holds back its own owner's later events for that long and nothing else: the
-// batch waiting on it settles and releases every other owner as their own sends come in, and the
-// batches beside it read and publish the owners it does not hold (Outbox.scan, lanes).
+// or the stream's acknowledgement of the stored copy for a holder whose entry records a port. A
+// holder that never answers holds back its own owner's later events for that long and nothing
+// else: the batch waiting on it settles and releases every other owner as their own sends come
+// in, and the batches beside it read and publish the owners it does not hold (Outbox.scan, lanes).
 const roleReceiptTimeout = 5 * time.Second
 
 // errNoRoleReaders is a role route's holder resolved with no role-claim or session reader in Deps.
@@ -47,7 +47,8 @@ var errNoRoleReaders = errors.New("the outbox has no role-claim or session reade
 //
 // holder is the claim's holder whenever it is known, so the destination's key is the holder's agent
 // subject (destination.key) even while it stays pending; a keep carries none, since it reaches no
-// session. streamAck is a holder with a serving port.
+// session. streamAck is a holder whose session entry records a port, which only a listener of an
+// earlier release stored and which lapses with the entry.
 type roleForward struct {
 	holder    string
 	keptFor   string
@@ -217,11 +218,10 @@ func (f *roleForward) send(ctx context.Context, deps Deps, sender bus.Sender, it
 // holder's receipt and dedupe apply as to any role forward. It goes to the holder's agent subject
 // with a Request under the forward's MsgId (bus.ForwardMsgID), so the stream, which captures agent
 // subjects, stores one copy however often it is sent. The answer is the holder's empty receipt for
-// a self-subscribed holder (or one with neither a port nor a subscription of its own, which nothing
-// answers, so it stays pending). For a holder with a serving port it is the stream's
-// acknowledgement of the stored copy, since a holder delivered by its listener from the stream
-// never answers the request itself; that is true once the listener delivers to such holders from
-// the stream and acknowledges each stored copy.
+// a self-subscribed holder (or one with no subscription of its own, which nothing answers, so it
+// stays pending). For a holder whose entry records a port it is the stream's acknowledgement of
+// the stored copy alone: no listener pushes to a port, so such a holder answers nothing itself
+// and only a session consumer of its own reaches it.
 func (f *roleForward) forward(sender bus.Sender, item contracts.Envelope) <-chan error {
 	item.DedupeKey = contracts.RoleForwardDedupePrefix + item.DedupeKey
 	subject := contracts.AgentSubject(f.holder)
@@ -336,11 +336,11 @@ func (f *roleForward) keep(ctx context.Context, deps Deps, sender bus.Sender, it
 //
 // The forward carries the time of the keep itself (contracts.Envelope.KeptAt), as the drain's
 // forward of a copy carries the stream's store time of it, so a holder can judge the message's
-// age however it was reached. It is the copy the holder sees: for a holder with a serving port
-// the stream collapses the two forwards into whichever arrives first, which is this one unless a
-// drain that read the cursor before this handover reaches the agent subject ahead of it. A keep
-// the outbox retried stamps the retry's own time, the stream having kept the copy the first
-// publish stored.
+// age however it was reached. It is the copy the holder sees: every holder is reached through the
+// stream, which collapses the two forwards into whichever arrives first, and that is this one
+// unless a drain that read the cursor before this handover reaches the agent subject ahead of it.
+// A keep the outbox retried stamps the retry's own time, the stream having kept the copy the
+// first publish stored.
 func handOverKept(ctx context.Context, deps Deps, sender bus.Sender, role string, item contracts.Envelope, keptAt time.Time, handed *keptHandovers) {
 	if err := handOverKeptCopy(ctx, deps, sender, role, item, keptAt, handed); err != nil && !lostToContextEnd(ctx, err) {
 		slog.Warn("dispatch outbox: the copy kept for a role was not handed to the holder that claimed it",

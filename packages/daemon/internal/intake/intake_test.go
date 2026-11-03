@@ -270,7 +270,8 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch artifact version",
 			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.version",
 			file:    "dispatch/artifact-version.json",
-			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactVersion, Version: 2, Mark: mark(2, "2026-09-23T00:46:19.000081Z")},
+			want: DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactVersion, Version: 2,
+				Mark: mark(2, "2026-09-23T00:46:19.000081Z"), Actor: dispatch.Actor{Kind: "user", ID: "smoke"}},
 		},
 		{
 			name:    "Dispatch artifact approved",
@@ -315,14 +316,14 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
 			file:    "dispatch/comment-ask-agent.json",
 			want: DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "agent", Actor: dispatch.Actor{Kind: "user", ID: "human"},
-				Mark: mark(7, "2026-09-23T00:46:32Z")},
+				Mark: mark(7, "2026-09-23T00:46:32Z"), Comment: "4c4b2a5f-93df-4aeb-a2ca-b5c74187c8bf"},
 		},
 		{
 			name:    "Dispatch ask reply leaving the turn with the human (hand-built)",
 			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
 			file:    "dispatch/comment-ask-human.json",
 			want: DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"},
-				Mark: mark(8, "2026-09-23T00:46:33Z")},
+				Mark: mark(8, "2026-09-23T00:46:33Z"), Comment: "65f690c1-bd91-4a42-81aa-aaf136fcc51c"},
 		},
 		{
 			name:    "Dispatch issue claimed (hand-built)",

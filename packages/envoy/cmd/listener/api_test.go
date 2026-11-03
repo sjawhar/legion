@@ -87,16 +87,13 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, map[string][]string{
 		"ses_source": nil,
-	}, map[string]int{
-		"ses_source": 1,
-		"ses_target": 1,
-	})
+	}, []string{"ses_source", "ses_target"})
 	claimRoles(t, registry, "ses_source", "reviewer", "maintainer")
 	if err := sessions.Put("ses_source", session.SessionEntry{
-		Port:      1,
-		MachineID: "test-machine",
-		Dir:       "/test/ses_source",
-		Title:     "Release sender",
+		SelfSubscribed: true,
+		MachineID:      "test-machine",
+		Dir:            "/test/ses_source",
+		Title:          "Release sender",
 	}); err != nil {
 		t.Fatalf("register source session: %v", err)
 	}
@@ -167,9 +164,9 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 // is an opaque JSON string on this HTTP API, rather than an embedded JSON value.
 func TestDispatchClientSendUsesListenerWireContract(t *testing.T) {
 	publisher := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
 	if err := sessions.Put("ses_target", session.SessionEntry{
-		Port: 1, MachineID: "test-machine", Dir: "/test/ses_target",
+		SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/ses_target",
 		Title: "planner", Capabilities: []string{"btw"},
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
@@ -233,11 +230,11 @@ func TestSendHandlerRefusesTargetThatDoesNotAdvertiseFrameMode(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	if err := sessions.Put("ses_target", session.SessionEntry{
-		Port:         1,
-		MachineID:    "test-machine",
-		Dir:          "/test/ses_target",
-		Title:        "planner",
-		Capabilities: []string{"aside", "btw"},
+		SelfSubscribed: true,
+		MachineID:      "test-machine",
+		Dir:            "/test/ses_target",
+		Title:          "planner",
+		Capabilities:   []string{"aside", "btw"},
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
@@ -285,11 +282,11 @@ func TestSendHandlerAllowsAdvertisedFrameModeAndUntaggedSends(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	if err := sessions.Put("ses_target", session.SessionEntry{
-		Port:         1,
-		MachineID:    "test-machine",
-		Dir:          "/test/ses_target",
-		Title:        "planner",
-		Capabilities: []string{"aside", "btw"},
+		SelfSubscribed: true,
+		MachineID:      "test-machine",
+		Dir:            "/test/ses_target",
+		Title:          "planner",
+		Capabilities:   []string{"aside", "btw"},
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
@@ -337,11 +334,11 @@ func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	if err := sessions.Put("ses_target", session.SessionEntry{
-		Port:         1,
-		MachineID:    "test-machine",
-		Dir:          "/test/ses_target",
-		Title:        "planner",
-		Capabilities: []string{"aside"},
+		SelfSubscribed: true,
+		MachineID:      "test-machine",
+		Dir:            "/test/ses_target",
+		Title:          "planner",
+		Capabilities:   []string{"aside"},
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
@@ -390,11 +387,11 @@ func TestSendHandlerRefusesAModeThatIsNotADeliveryMode(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	if err := sessions.Put("ses_target", session.SessionEntry{
-		Port:         1,
-		MachineID:    "test-machine",
-		Dir:          "/test/ses_target",
-		Title:        "planner",
-		Capabilities: []string{"aside", "btw", "steer", "agentstream"},
+		SelfSubscribed: true,
+		MachineID:      "test-machine",
+		Dir:            "/test/ses_target",
+		Title:          "planner",
+		Capabilities:   []string{"aside", "btw", "steer", "agentstream"},
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
@@ -428,7 +425,7 @@ func TestSendHandlerRefusesUnadvertisedModeFromDerivedPayload(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	if err := sessions.Put("ses_target", session.SessionEntry{
-		Port: 1, MachineID: "test-machine", Dir: "/test/ses_target", Title: "planner",
+		SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/ses_target", Title: "planner",
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
@@ -470,7 +467,7 @@ func TestDispatchClientSendFrameModeIsGuardedEndToEnd(t *testing.T) {
 	publisher := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	if err := sessions.Put("ses_target", session.SessionEntry{
-		Port: 1, MachineID: "test-machine", Dir: "/test/ses_target",
+		SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/ses_target",
 		Title: "planner", Capabilities: []string{"aside"},
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
@@ -508,7 +505,7 @@ func mustJSONString(t *testing.T, value string) string {
 
 func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	cases := []struct {
@@ -561,7 +558,7 @@ func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 
 func TestMessageHandlersRejectBlankMessage(t *testing.T) {
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	cases := []struct {
@@ -892,6 +889,41 @@ func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
 	}
 }
 
+// A role claim refreshes the claimant's session entry, and the entry it writes names no serving
+// port. An entry an earlier listener stored with one would otherwise be renewed by every claim
+// its client makes, while each of that client's registrations is refused (subscribeHandler); and
+// while such an entry lives, Resolve passes the session over as self-subscribed and Dispatch's
+// outbox counts the stream's ack as its delivery, so its messages are reported delivered when
+// nobody delivered them.
+func TestARoleClaimWritesTheServingPortOutOfTheClaimantsEntry(t *testing.T) {
+	const sessionID = "ses_ported_claimant"
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put(sessionID, session.SessionEntry{Port: 8080, MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("store the entry an earlier listener wrote: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	// withRoleClaimDrain, because a claim that lands hands the role's kept lane to its new
+	// holder (runKeptRoleDrain), which needs the delivery configuration and a bus.
+	deps := withRoleClaimDrain(t, &listenerDeps{client: setupPublishTestClient(t), registry: registry, sessions: sessions})
+	roleSetHandler(deps, "test-machine", logging.New("test")).ServeHTTP(recorder,
+		httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"`+sessionID+`","role":"ported-claimant"}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("%s claims ported-claimant: status %d %s", sessionID, recorder.Code, recorder.Body.String())
+	}
+
+	entry, err := sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("read the claimant's entry back: %v", err)
+	}
+	if entry.Port != 0 {
+		t.Fatalf("the refreshed entry names port %d, want none: this listener delivers nothing to a port, and a renewed entry that names one is a session reported as receiving messages nobody hands it", entry.Port)
+	}
+	if !entry.SelfSubscribed || entry.MachineID != "test-machine" {
+		t.Fatalf("the refreshed entry %+v, want it still self-subscribed on test-machine", entry)
+	}
+}
+
 // A listener's session cache trails the session bucket, so a holder another listener registered and
 // gave a role a moment ago can be in the bucket and not yet in this listener's cache. A lookup there
 // answers that holder. Releasing the claim as lapsed on the cache's word deletes the claim the other
@@ -1073,7 +1105,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		}
 	})
 	t.Run("role delivery", func(t *testing.T) {
-		harness := newListenerDeliveryHarness(t, nil)
+		harness := newListenerDeliveryHarness(t)
 		claimant := &listenerDeps{client: harness.client, registry: harness.registry, delivery: &harness.config}
 		var err error
 		if claimant.sessions, err = session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1)); err != nil {
@@ -1093,7 +1125,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 			forwards.Add(1)
 			return nil
 		})
-		cfg = wireTestDeliveryWorkers(t, cfg)
+		cfg = wireTestRoleForwarder(t, cfg)
 		item := listenerTestEnvelope(contracts.RoleTopicPrefix+"unread", "unread-holder-delivery")
 		probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
 		if err != nil {
@@ -2014,7 +2046,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
 		"session_id":"ses_unroutable",
-		"port":34751,
+		"self_subscribed":true,
 		"topics":["notifications.github.example-org.example-repo.pr.>"]
 	}`))
 	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
@@ -2104,16 +2136,13 @@ func TestSessionsHandlerFiltersAndReportsRoles(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, map[string][]string{
 		"ses_match": nil,
 		"ses_other": nil,
-	}, map[string]int{
-		"ses_match": 1,
-		"ses_other": 1,
-	})
+	}, []string{"ses_match", "ses_other"})
 	claimRoles(t, registry, "ses_match", "reviewer", "maintainer")
 	claimRoles(t, registry, "ses_other", "observer")
-	if err := sessions.Put("ses_match", session.SessionEntry{Port: 1, MachineID: "test-machine", Dir: "/work/example", Title: "Release work"}); err != nil {
+	if err := sessions.Put("ses_match", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine", Dir: "/work/example", Title: "Release work"}); err != nil {
 		t.Fatalf("set matching session: %v", err)
 	}
-	if err := sessions.Put("ses_other", session.SessionEntry{Port: 1, MachineID: "test-machine", Dir: "/work/other", Title: "Other work"}); err != nil {
+	if err := sessions.Put("ses_other", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine", Dir: "/work/other", Title: "Other work"}); err != nil {
 		t.Fatalf("set nonmatching session: %v", err)
 	}
 
@@ -2149,10 +2178,10 @@ func TestSessionsHandlerFiltersAndReportsRoles(t *testing.T) {
 // plugin predates the field falls back to machine_id instead of an empty string.
 func TestSessionsHandlerReportsHostWithFallbackToMachineID(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	if err := sessions.Put("ses_reported", session.SessionEntry{Port: 1, MachineID: "example-listener", Host: "example-host-a"}); err != nil {
+	if err := sessions.Put("ses_reported", session.SessionEntry{SelfSubscribed: true, MachineID: "example-listener", Host: "example-host-a"}); err != nil {
 		t.Fatalf("put reported-host session: %v", err)
 	}
-	if err := sessions.Put("ses_legacy", session.SessionEntry{Port: 1, MachineID: "example-listener"}); err != nil {
+	if err := sessions.Put("ses_legacy", session.SessionEntry{SelfSubscribed: true, MachineID: "example-listener"}); err != nil {
 		t.Fatalf("put legacy session: %v", err)
 	}
 
@@ -2188,7 +2217,7 @@ func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, map[string][]string{
 		"ses_source": nil,
-	}, map[string]int{"ses_target": 1})
+	}, []string{"ses_target"})
 	claimRoles(t, registry, "ses_source", "reviewer", "maintainer")
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
@@ -2251,7 +2280,7 @@ func TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket(t *testin
 	} {
 		t.Run(route.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
-			registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1})
+			registry, sessions := setupSessionsTest(t, nil, []string{target})
 			endCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			registry.EndWatch(endCtx)
 			cancel()
@@ -2351,7 +2380,7 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 // as the listener's own failure.
 func TestMessageHandlersAnswerAMessageNATSCannotTakeWholeWith413(t *testing.T) {
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, map[string][]string{}, map[string]int{"ses_target": 1})
+	registry, sessions := setupSessionsTest(t, map[string][]string{}, []string{"ses_target"})
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	message := strings.Repeat("m", 2<<20)
 	for _, tc := range []struct {
@@ -2401,7 +2430,7 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	if err := sessions.Put("ses_live", session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+	if err := sessions.Put("ses_live", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register ses_live: %v", err)
 	}
 	mux := http.NewServeMux()
@@ -2620,7 +2649,7 @@ func TestPublishHandler_RefusesAChosenKeyOnADispatchEnvelope(t *testing.T) {
 // send keyed by its idempotency_key (LEGION-108, architect ruling).
 func TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey(t *testing.T) {
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	recorder := httptest.NewRecorder()
 	sendHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"target_session":"ses_target","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
@@ -2667,7 +2696,7 @@ func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 // a key minted once for its message can.
 func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	send := func(t *testing.T, body string) sendResponse {
@@ -2723,7 +2752,7 @@ func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 }
 func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
 	deps := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	for _, tc := range []struct {
 		path, body, field string
@@ -2752,7 +2781,7 @@ func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {
 
 func TestMessageHandlersUseFirstNonEmptyLine(t *testing.T) {
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_target"})
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	for _, tc := range []struct{ path, body string }{
 		{"/v1/messages/send", `{"target_session":"ses_target","message":"\n  \nFirst paragraph.\n\nSecond paragraph."}`},
@@ -2863,63 +2892,6 @@ func TestSubscribeHandlerStoresAndListsThePluginAndItsVersion(t *testing.T) {
 	}
 }
 
-// A session on a serving port is reached at the host its registration records, so a registration
-// whose host could move the delivery to another authority or path is refused before anything is
-// written: neither the session's interests nor its session entry appear. The same registration
-// without a host is accepted, as an older plugin's is, and a host on a registration with no port,
-// which nothing dials, is stored as it came.
-func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
-	registry, sessions := setupSessionsTest(t, nil, nil)
-	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
-	subscribe := func(t *testing.T, body map[string]any) *httptest.ResponseRecorder {
-		t.Helper()
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(encoded))))
-		return recorder
-	}
-	for index, host := range []string{"example-host:80", "example-host/path", "user@example-host", "[::1]", "example host", "example-host?x", "example-host#x", "example%2fhost", "example-host\n"} {
-		t.Run(fmt.Sprintf("%q", host), func(t *testing.T) {
-			sessionID := fmt.Sprintf("ses_malformed_host_%d", index)
-			recorder := subscribe(t, map[string]any{"session_id": sessionID, "topics": []string{"notifications.team.example"}, "port": 4242, "host": host})
-			if recorder.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
-			}
-			var answer apiError
-			if err := json.NewDecoder(recorder.Body).Decode(&answer); err != nil {
-				t.Fatalf("decode the refusal: %v", err)
-			}
-			if answer.Error != "host is not a host name or address" || !reflect.DeepEqual(answer.Expected, []string{"host"}) {
-				t.Fatalf("refusal = %+v, want error %q expecting [host]", answer, "host is not a host name or address")
-			}
-			if interest, err := registry.Get(context.Background(), sessionID); err == nil {
-				t.Fatalf("a refused registration wrote interests %+v", interest)
-			}
-			if entry, err := sessions.Get(sessionID); err == nil {
-				t.Fatalf("a refused registration wrote the session entry %+v", entry)
-			}
-		})
-	}
-
-	recorder := subscribe(t, map[string]any{"session_id": "ses_no_host", "topics": []string{"notifications.team.example"}, "port": 4242})
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("the registration without a host: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
-	}
-	if _, err := sessions.Get("ses_no_host"); err != nil {
-		t.Fatalf("the registration without a host wrote no session entry: %v", err)
-	}
-	recorder = subscribe(t, map[string]any{"session_id": "ses_no_port", "topics": []string{}, "self_subscribed": true, "host": "example-host:80"})
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("the registration with no port: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
-	}
-	if entry, err := sessions.Get("ses_no_port"); err != nil || entry.Host != "example-host:80" {
-		t.Fatalf("the registration with no port stored %+v, %v; want its host as it came", entry, err)
-	}
-}
-
 // sessionEntryRoute asks d's per-session route for sessionID, as a caller holding a session id and
 // about to address it does.
 func sessionEntryRoute(t *testing.T, d *listenerDeps, sessionID string) *httptest.ResponseRecorder {
@@ -2946,13 +2918,12 @@ func decodeSessionInfo(t *testing.T, recorder *httptest.ResponseRecorder) sessio
 func TestSessionEntryRouteAnswersASessionTheCacheHasNotRefilled(t *testing.T) {
 	claimant, observer := trailingListeners(t)
 	entry := session.SessionEntry{
-		Port:           4242,
+		SelfSubscribed: true,
 		MachineID:      "test-machine",
 		Host:           "worker-7",
 		Dir:            "/test/ses_unseen",
 		Title:          "a session this cache has not seen",
 		Capabilities:   []string{"aside", "btw"},
-		SelfSubscribed: true,
 	}
 	if err := claimant.sessions.Put("ses_unseen", entry); err != nil {
 		t.Fatalf("register ses_unseen: %v", err)
@@ -2977,7 +2948,7 @@ func TestSessionEntryRouteAnswersASessionTheCacheHasNotRefilled(t *testing.T) {
 // text is the contract: Dispatch classifies a delivery failure on the "no live session " prefix
 // (internal/dispatch/api/comment_delivery.go). A session that is registered answers itself.
 func TestSessionEntryRouteAnswers404OnlyForAGoneRecord(t *testing.T) {
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_live": 4242})
+	registry, sessions := setupSessionsTest(t, nil, []string{"ses_live"})
 	state := &listenerDeps{registry: registry, sessions: sessions}
 
 	gone := sessionEntryRoute(t, state, "ses_gone")
@@ -3035,7 +3006,7 @@ func TestSessionEntryRouteAnswersServiceUnavailableWhenTheStoreReadDoesNotAnswer
 func TestSessionEntryRouteAnswersTheSameBodyAsTheSessionsRow(t *testing.T) {
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{"ses_listed": nil},
-		map[string]int{"ses_listed": 4242})
+		[]string{"ses_listed"})
 	claimRoles(t, registry, "ses_listed", "reviewer")
 	state := &listenerDeps{registry: registry, sessions: sessions}
 

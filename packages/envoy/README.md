@@ -67,12 +67,14 @@ packages/envoy/scripts/e2e-local.sh
 It builds `cmd/listener` and a throwaway NATS server of its own
 (`internal/testnats/cmd/natsd`), so it needs no container runtime, starts both, and
 submits signed public GitHub fixtures plus a three-paragraph direct agent
-message. The driver asserts the one-warning response for a never-seen GitHub
-repository, keeps an unheld role's publish and hands it to the fake session that
-claims that role, refuses a `keep: false` publish to an unheld role, validates
-settled pull-request checks, lifecycle
-and comment topics, PR-less workflow and Actions-job behavior, obsolete-topic absence, and
-both renderers' direct-message summary/body contract.
+message to a stand-in session that takes every delivery from its own NATS
+consumer. The driver asserts the one-warning response for a never-seen GitHub
+repository, refuses a registration naming a port, keeps an unheld role's
+publish and hands it to the stand-in session that claims that role, refuses a
+`keep: false` publish to an unheld role, validates settled pull-request checks,
+lifecycle and comment topics, PR-less workflow and Actions-job behavior,
+obsolete-topic absence, and the direct-message summary/body contract
+`renderInbound` prints.
 
 The NATS server is a process of this checkout's own build, stopped on exit with
 the listener and the two fake clients.
@@ -80,16 +82,16 @@ the listener and the two fake clients.
 Evidence remains in `packages/envoy/out/e2e/` after the run:
 
 - `envelopes.jsonl` captures the raw NATS frames.
-- `session-prompts.jsonl` captures raw fake-session `prompt_async` bodies.
+- `session-frames.jsonl` captures the envelopes the session's own consumer
+  delivered to it.
 - `rendered-ts.txt` is every frame rendered by
-  `@legion/envoy-client`'s `renderInbound`.
-- `rendered-go.txt` is the equivalent Go `Deliverer.Text` output.
+  `@legion/envoy-client`'s `renderInbound`, the one inbound renderer.
 
-The OS chooses the NATS, listener and fake-session ports, and the run builds
-each URL from the port its own process reports. `E2E_NATS_PORT`, `E2E_PORT` or
-`E2E_SESSION_PORT` sets a port explicitly: it is used as given, and one already
-in use fails the run with `address already in use`. CI runs it as the
-`envoy-e2e-local` job of `.github/workflows/ci.yaml`.
+The OS chooses the NATS and listener ports, and the run builds each URL from
+the port its own process reports. `E2E_NATS_PORT` or `E2E_PORT` sets a port
+explicitly: it is used as given, and one already in use fails the run with
+`address already in use`. The session opens no port of its own. CI runs the
+driver as the `envoy-e2e-local` job of `.github/workflows/ci.yaml`.
 
 ## Contract source of truth
 

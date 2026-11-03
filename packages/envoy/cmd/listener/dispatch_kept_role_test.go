@@ -114,7 +114,7 @@ func publishedEventAt(t *testing.T, database *dispatchstore.Store, eventID int64
 // an event has to a session. The copy carries the envelope Dispatch published, on its own role
 // topic, so the holder is handed the message as Dispatch sent it.
 func TestAnEventDispatchRoutedToAnUnheldRoleReachesTheRolesNextHolder(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-from-the-outbox"
 		holder = "ses_kept_from_the_outbox"
@@ -248,7 +248,7 @@ func keptRoleCopies(t *testing.T, client *bus.Client, role string) []contracts.E
 // here is made on the buckets rather than through POST /v1/roles/set, so no drain of this
 // listener's starts and the outbox's handover is the one path the copy has to the holder.
 func TestTheOutboxHandsACopyOverPastTheCursorTheListenersDrainWrote(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role   = "kept-past-the-drains-cursor"
 		holder = "ses_past_the_drains_cursor"

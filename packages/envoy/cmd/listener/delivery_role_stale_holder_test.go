@@ -15,7 +15,7 @@ import (
 
 // storeSessionHeartbeat registers sessionID with the heartbeat the test chose, by writing its
 // entry into the session bucket itself: SessionRegistry.Put stamps UpdatedAt with the moment of
-// the write (mergeForClaim), so a holder that last heartbeated a while ago is written the way
+// the write, so a holder that last heartbeated a while ago is written the way
 // another writer's entry arrives, through the bucket. The session cache dates its copy from the
 // bucket entry's own creation (SessionRegistry.applyWatched), so the entry is in the cache and in
 // the bucket for as long as the test runs while its heartbeat is as old as the test says.
@@ -78,7 +78,7 @@ type staleHolderRig struct {
 
 func newStaleHolderRig(t *testing.T, role, holder string, since time.Duration) staleHolderRig {
 	t.Helper()
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	storeSessionHeartbeat(t, harness.client, holder, time.Now().Add(-since))
 	if _, err := harness.registry.SetRole(holder, "test-machine", role, false); err != nil {
 		t.Fatalf("claim the role: %v", err)
