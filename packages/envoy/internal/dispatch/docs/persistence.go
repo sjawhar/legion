@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -675,7 +677,16 @@ func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, sour
 			return errRoomLockBusy
 		}
 	}
-	defer func() { _, _ = conn.Exec(context.Background(), `select pg_advisory_unlock(hashtext($1))`, room) }()
+	// The unlock is bounded and its answer read (duty.FreeSessionLock): fn may send nothing on
+	// this connection (passRoomLock), so nothing else bounds the wait on a half-open connection,
+	// and this room's writers queue on lock until it ends. A connection fn's cancelled statement
+	// already closed cannot run an unlock: Postgres drops its locks when the session ends. It says
+	// nothing here, since that statement's caller has its error.
+	defer func() {
+		if err := duty.FreeSessionLock(conn, `select pg_advisory_unlock(hashtext($1))`, room); err != nil && !errors.Is(err, duty.ErrSessionClosed) {
+			slog.Error("dispatch: free the document room lock", "room", room, "error", err)
+		}
+	}()
 	return fn(conn)
 }
 

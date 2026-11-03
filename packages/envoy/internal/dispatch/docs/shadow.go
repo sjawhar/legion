@@ -270,11 +270,15 @@ func (sh *roomShadow) applyLocked(room string, update []byte) {
 	}
 }
 
-// renderLocked takes the shadow's rendering. The caller holds sh.mu.
+// renderLocked takes the shadow's rendering. A shadow holding no document renders none. The
+// caller holds sh.mu.
 func (sh *roomShadow) renderLocked() {
-	markdown, _, err := renderDocumentForUpdate(sh.doc)
+	sh.markdown = nil
+	if sh.doc == nil {
+		return
+	}
+	markdown, err := renderFragmentMarkdown(sh.doc.GetXmlFragment(fragmentName))
 	if err != nil {
-		sh.markdown = nil
 		return
 	}
 	sh.markdown = &markdown

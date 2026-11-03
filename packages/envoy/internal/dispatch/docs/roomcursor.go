@@ -65,12 +65,13 @@ type roomLoad struct {
 	noticed documentHeadNotice
 	recheck func(documentHeadNotice)
 	// size is the encoded bytes of the history the load read, which the room counts as resident
-	// once it loads (onLoadDocument). tree is the tree a document socket's admission read and
-	// rendered from the state the load took (takePreload), which the room's load takes rather
-	// than reading and rendering the room again (takeLoaded); nil when the load read the store
-	// itself.
-	size int
-	tree *pmdoc.Node
+	// once it loads (onLoadDocument). tree is the tree a document socket's admission read from the
+	// state the load took (takePreload), and rendering what that admission rendered of it, which
+	// the room's load takes rather than reading and rendering the room again (takeLoaded) and hands
+	// the room's replica (keepReplica); both nil when the load read the store itself.
+	size      int
+	tree      *pmdoc.Node
+	rendering *replicaRendering
 }
 
 // beginRoomLoad records that room is loading, before the load reads the store: every version
@@ -87,13 +88,14 @@ func (s *Service) beginRoomLoad(room string) *roomLoad {
 
 // read records what the load's read of the store saw: the head, the version the room it loads
 // holds every update through, the state through that head, which the room's load applies next
-// (takeState), and tree, the tree a document socket's admission rendered from that state when the
-// load took that socket's preload, nil when the load read the store itself (takeLoaded).
-func (load *roomLoad) read(head persistence.Version, state []byte, tree *pmdoc.Node) {
+// (takeState), and tree and rendering, the tree a document socket's admission read from that state
+// and what it rendered of it, when the load took that socket's preload, nil when the load read the
+// store itself (takeLoaded).
+func (load *roomLoad) read(head persistence.Version, state []byte, tree *pmdoc.Node, rendering *replicaRendering) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
 	load.head = int64(head)
-	load.state, load.size, load.tree = state, len(state), tree
+	load.state, load.size, load.tree, load.rendering = state, len(state), tree, rendering
 }
 
 // takeState hands over the state the load read, once, so the record holds no copy of it for as
@@ -106,15 +108,15 @@ func (load *roomLoad) takeState() []byte {
 	return state
 }
 
-// takeLoaded is the size of the history the load read and the tree a socket's admission rendered
-// from it, and drops the tree: the load's record stays with the room's document for as long as it
-// is resident (keepInstance), and the tree is a whole copy of it.
-func (load *roomLoad) takeLoaded() (size int, tree *pmdoc.Node) {
+// takeLoaded is the size of the history the load read, and the tree a socket's admission read from
+// it with the rendering it made of that tree, and drops both: the load's record stays with the
+// room's document for as long as it is resident (keepInstance), and the tree is a whole copy of it.
+func (load *roomLoad) takeLoaded() (size int, tree *pmdoc.Node, rendering *replicaRendering) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	size, tree = load.size, load.tree
-	load.tree = nil
-	return size, tree
+	size, tree, rendering = load.size, load.tree, load.rendering
+	load.tree, load.rendering = nil, nil
+	return size, tree, rendering
 }
 
 // takeLoadedState is the state room's load read (servicePersistenceAdapter.LoadDoc), taken off its

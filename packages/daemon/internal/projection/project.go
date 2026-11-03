@@ -74,6 +74,8 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			State:          string(current.State),
 			Locator:        current.Locator,
 			PluginContract: current.PluginContract,
+			UpdateRound:    current.UpdateRound,
+			UpdateHead:     current.UpdateHead,
 		}
 		if report, reported := reports[current.Token]; reported {
 			view.Capabilities = api.CapabilityReportViewOf(report)

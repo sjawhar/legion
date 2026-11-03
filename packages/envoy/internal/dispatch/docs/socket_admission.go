@@ -23,46 +23,49 @@ import (
 
 // preloadedDocument is the durable state a document socket's admission check decoded, kept for the
 // load ygo makes of the room next (servicePersistenceAdapter.LoadDoc), so a cold connection reads
-// and decodes the history once, and the tree the check read from it and rendered, which the room's
-// load takes in place of reading and rendering the room again (onLoadDocument), so a cold
-// connection renders the document once too. The map holds the first socket's offer of a room
+// and decodes the history once, and the tree the check read from it with the rendering it made of
+// that tree (replicaRendering: the markdown and its pmdoc.Layout), which the room's load takes in
+// place of reading and rendering the room again (onLoadDocument) and hands its replica as the
+// rendering of the state the replica starts from (keepReplica), so a cold connection renders the
+// document once too. The map holds the first socket's offer of a room
 // (offerPreload): a socket whose offer loses keeps no reference to its own, and the entry holds
 // its state only until a load takes it (takePreload), so neither outlasts the room's load by the
 // socket's whole lifetime.
 type preloadedDocument struct {
-	loaded persistence.LoadResult
-	tree   *pmdoc.Node
+	loaded    persistence.LoadResult
+	tree      *pmdoc.Node
+	rendering *replicaRendering
 }
 
 // takePreload is the update a socket's admission check loaded for room, with the tree it read from
-// it (nil for an empty history), while the durable head is still the one it loaded: every write
+// it and the rendering it made of that tree (nil for an empty history), while the durable head is still the one it loaded: every write
 // that changes a document's stored state raises its head (an append, a rebuild), and compaction
 // keeps both the head and the state. The head is the head tracker's when it trusts itself
 // (headTracker.head), which costs no read, and otherwise read from the store. A stale or absent
 // preload is no answer, and the caller loads the room itself. Either way the entry gives up the
 // state it held: the socket that offered it holds the entry until it ends (offerPreload). The
 // preload's hold on room's head-tracker entry ends once the head is read.
-func (s *Service) takePreload(room string) (persistence.LoadResult, *pmdoc.Node, bool) {
+func (s *Service) takePreload(room string) (persistence.LoadResult, *pmdoc.Node, *replicaRendering, bool) {
 	value, ok := s.preloads.LoadAndDelete(room)
 	if !ok {
-		return persistence.LoadResult{}, nil, false
+		return persistence.LoadResult{}, nil, nil, false
 	}
 	defer s.heads.release(room)
 	preload := value.(*preloadedDocument)
-	loaded, tree := preload.loaded, preload.tree
-	preload.loaded, preload.tree = persistence.LoadResult{}, nil
+	loaded, tree, rendering := preload.loaded, preload.tree, preload.rendering
+	preload.loaded, preload.tree, preload.rendering = persistence.LoadResult{}, nil, nil
 	head, trusted := s.heads.head(room)
 	if !trusted {
 		stored, err := s.persistence.Head(context.Background(), room)
 		if err != nil {
-			return persistence.LoadResult{}, nil, false
+			return persistence.LoadResult{}, nil, nil, false
 		}
 		head = int64(stored)
 	}
 	if head != int64(loaded.Version) {
-		return persistence.LoadResult{}, nil, false
+		return persistence.LoadResult{}, nil, nil, false
 	}
-	return loaded, tree, true
+	return loaded, tree, rendering, true
 }
 
 // documentSchemaCloseCode closes a document websocket whose room is outside the Proof schema
@@ -204,11 +207,13 @@ func (s *Service) admitDocument(ctx context.Context, room string) (withdraw func
 		return nil, ErrDocOutsideSchema
 	}
 	tree, loaded, err := s.loadTree(ctx, room)
+	var rendering *replicaRendering
 	if err == nil && tree != nil {
 		if s.admissionRendered != nil {
 			s.admissionRendered(room)
 		}
-		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
+		var renderErr error
+		if rendering, renderErr = replicaRenderingOf(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
 			err = renderErr
 		}
 	}
@@ -218,11 +223,13 @@ func (s *Service) admitDocument(ctx context.Context, room string) (withdraw func
 	if loaded == nil {
 		return func() {}, nil
 	}
-	return s.offerPreload(room, loaded, tree), nil
+	return s.offerPreload(room, loaded, tree, rendering), nil
 }
 
-// offerPreload offers loaded, the durable state a cold socket's admission read for room, and tree,
-// the tree it read from it and rendered, to the room's load (takePreload). The first offer stands
+// offerPreload offers loaded, the durable state a cold socket's admission read for room, tree, the
+// tree it read from it, and rendering, what it rendered of that tree (nil when the render failed
+// for a reason other than the schema, which the room's load then renders again), to the room's
+// load (takePreload). The first offer stands
 // (LoadOrStore): every offer is of a state the load checks against the head before it takes it,
 // and a socket whose offer lost keeps no reference to it, so its whole history is released at
 // once rather than when the socket ends, which can be hours later. It returns what the socket's
@@ -230,8 +237,8 @@ func (s *Service) admitDocument(ctx context.Context, room string) (withdraw func
 // head-tracker entry (headTracker.hold) from before it is stored until a load takes it or the
 // socket withdraws it, so the head the load checks it against is one the tracker heard of while
 // the offer stood, or else one read from the store.
-func (s *Service) offerPreload(room string, loaded *persistence.LoadResult, tree *pmdoc.Node) (withdraw func()) {
-	preload := &preloadedDocument{loaded: *loaded, tree: tree}
+func (s *Service) offerPreload(room string, loaded *persistence.LoadResult, tree *pmdoc.Node, rendering *replicaRendering) (withdraw func()) {
+	preload := &preloadedDocument{loaded: *loaded, tree: tree, rendering: rendering}
 	s.heads.hold(room)
 	_, lost := s.preloads.LoadOrStore(room, preload)
 	if s.afterSocketPreload != nil {
