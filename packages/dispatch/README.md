@@ -260,7 +260,14 @@ It writes two issues in `PROJECT`: the first holds the spec, comments, messages 
 `cites.md`, `decisions.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an
 ask the script rewords, a comment on a quote of its spec and a reply, a message and a reply, and the
 uploads `notes.txt` and `pixel.png`. It resolves the ask and closes both issues, also when a check
-fails. Against `bun run dispatch:local`:
+fails.
+
+Its `A9` section needs a server with an embedder, so the harness is started with
+`DISPATCH_E2E_EMBEDDER=1`, which gives it the development embedder beside its dev sign-in
+(`e2e/run-server.sh`); without one that section prints its `SKIP:` line and every other section
+runs. The harness leaves the embedder off by default, so that a suite whose assertions count
+search hits counts the keyword answers Dispatch gives a deployment with no embedder.
+Against `bun run dispatch:local`:
 
 ```bash
 DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \

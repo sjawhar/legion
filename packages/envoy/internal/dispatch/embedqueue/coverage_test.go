@@ -1248,11 +1248,12 @@ func (p *pausingProxy) serve(client net.Conn) {
 // Run's coverage pass and its scan loop run side by side, so each must hold a connection of its
 // own: the pass is never refused as a second connection of one caller (store.ErrNestedAcquire)
 // because the scan loop has a cursor open at that moment, which ends the pass until the next tick,
-// 10 minutes later, and leaves content no trigger saw without a row. Here the scan loop's claim
-// has received its first row (a long title) and waits for the rest, cursor open, while the pass's
-// first statement waits on an uncommitted insert of the row it would add. The insert commits, the
-// pass's next statement starts while the claim's cursor is still open, and the pass must still
-// reach the comment no trigger saw, which the scan then embeds.
+// 10 minutes later, and leaves content no trigger saw with no vector of its own. Here the scan
+// loop's claim has received its first row (a long title) and waits for the rest, cursor open,
+// while the pass's insert of the issue row it would add waits on an uncommitted insert of that
+// same row. The insert commits, the pass's next statement - the repair of the issue whose title
+// changed with the triggers off - starts while the claim's cursor is still open, and the pass
+// must still reach that issue, which the scan then embeds.
 func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -1263,7 +1264,15 @@ func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) 
 		mustExec(t, q, `
 			insert into issues (key, project_key, number, title, created_by, rank)
 			values ('SIDE-1', 'SIDE', 1, $1, '{"kind":"user","id":"alice"}', 'A')`, blockedTitle)
-		mustExec(t, q, `insert into comments (issue_key, author, body) values ('SIDE-1', '{"kind":"user","id":"alice"}', 'Written before the triggers')`)
+	})
+	// SIDE-3 is the content no trigger saw: its row is embedded at the title a trigger did see,
+	// and its title then changes with the triggers off, so only the pass's repair statement
+	// reaches the title it holds now. It is seeded and embedded before SIDE-2, so the scan
+	// loop's first claim holds the long title alone.
+	seedIssue(t, database, "SIDE", "SIDE-3", "Title the trigger saw")
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)})
+	withTriggersOff(t, database, func(q querier) {
+		mustExec(t, q, `update issues set title = 'Title changed with the triggers off' where key = 'SIDE-3'`)
 	})
 	seedIssue(t, database, "SIDE", "SIDE-2", longTitle)
 
@@ -1290,7 +1299,7 @@ func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) 
 	proxied := &store.Store{Pool: store.NewPool(opened)}
 	defer proxied.Pool.Close()
 
-	// The pass's first statement, the issue kind's insert of missing rows, waits on this one.
+	// The pass's insert of the issue kind's missing rows waits on this one.
 	insert, err := database.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin the inserting transaction: %v", err)
@@ -1349,7 +1358,7 @@ func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) 
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after Run: items %d current %d lacking %d failed %d, want all 3 current: the coverage pass stopped before the comment no trigger saw", items, current, lacking, failed)
+			t.Fatalf("after Run: items %d current %d lacking %d failed %d, want all 3 current: the coverage pass stopped before the issue no trigger saw", items, current, lacking, failed)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
