@@ -311,13 +311,13 @@ func scanFixture(t *testing.T, tx pgx.Tx, what, statement string, args ...any) s
 	return id
 }
 
-// backlinkCountOracle is the first arm of the count main runs over the whole graph_edges view,
-// the reading the arms of this package's count must add up to: the view, filtered and grouped.
-// It is held here as a literal, copied from main rather than built from this package's helpers,
-// on purpose - built from the helpers, a change to the count's own builders would move the
-// oracle and the count together and the comparison would pass whatever either said. $1 is the
-// target kind, $2 the ids, $3 the node kinds this build reads; $4, when the statement carries
-// backlinkCountOracleExcluded, is the excluded edge kinds.
+// backlinkCountOracle is the first arm of the count the release before this change runs over the
+// whole graph_edges view, the reading the arms of this package's count must add up to: the view,
+// filtered and grouped. It is held here as a literal, copied from that release rather than built
+// from this package's helpers, on purpose - built from the helpers, a change to the count's own
+// builders would move the oracle and the count together and the comparison would pass whatever
+// either said. $1 is the target kind, $2 the ids, $3 the node kinds this build reads; $4, when the
+// statement carries backlinkCountOracleExcluded, is the excluded edge kinds.
 const backlinkCountOracle = `select g.to_id from graph_edges g
 where g.to_kind = $1 and g.to_id = any($2)`
 
@@ -352,7 +352,7 @@ const backlinkCountOracleNarrow = `
 const backlinkCountOracleExcluded = `
   and not (g.kind = any($4))`
 
-// oracleBacklinkCountSQL is main's whole statement for toKind: the view's own arm, the arm over
+// oracleBacklinkCountSQL is the release before this change's whole statement for toKind: the view's own arm, the arm over
 // the item's current blocks where the kind has one, and the group. excluded says whether the
 // caller binds excluded edge kinds as $4. The timing harness measures this text as the before
 // side of the backlink pair, so it is built in one place rather than assembled twice.

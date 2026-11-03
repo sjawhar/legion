@@ -27,10 +27,10 @@ import (
 //     conservative reading of the text's own gain. Seam 7's two-commit run takes the whole gain
 //     under protocol 2.
 //
-//   - The two backlink counts are protocol 1 pairs since main's #2546. The release before this
-//     change counts over the whole graph_edges view (this package holds that read as
-//     backlinkCountOracle, with the arm over a counted item's own current blocks that #2546
-//     added), and that text runs on this release's schema, so one database holds both sides.
+//   - The two backlink counts are protocol 1 pairs. The release before this change counts over
+//     the whole graph_edges view (this package holds that read as backlinkCountOracle, with the
+//     arm over a counted item's own current blocks), and that text runs on this release's schema,
+//     so one database holds both sides.
 //     The before side is read with ask_followers_session_id present, the index migration
 //     20261101182419 adds for the followed_by arm, which only helps it, so each pair is the
 //     conservative reading of the head text's own gain.

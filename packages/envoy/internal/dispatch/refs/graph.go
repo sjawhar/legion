@@ -59,9 +59,6 @@ type Query struct {
 // the ask's own text. The count on a card and the rows its panel opens read the same exclusion.
 var AskBacklinkExclusions = []string{"replies_to", "part_of"}
 
-// BacklinkCounts and the statement it runs live in backlink_counts.go, which reads the arms of
-// graph_edges that can point at a node of the counted kind rather than the whole view.
-
 // resolvedEdge is a graph edge plus the ref_key of an artifact node, which the legacy
 // referenced-by shape still reports.
 type resolvedEdge struct {
