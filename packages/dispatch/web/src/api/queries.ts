@@ -18,6 +18,7 @@ import type {
   DeliveryTimelineResponse,
   InboxRow,
   IssueDetails,
+  LegionBoardResponse,
 } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
@@ -241,6 +242,7 @@ interface DeliveryLiveBodies {
   readonly timeline: DeliveryTimelineResponse;
   readonly measures: DeliveryMeasuresResponse;
   readonly pipeline: DeliveryPipelineResponse;
+  readonly legion: LegionBoardResponse;
 }
 
 /** The live view's answer, which is the body of the GET route its kind mirrors. */
@@ -298,4 +300,27 @@ export const deliverySettingsQuery = () =>
   queryOptions({
     queryKey: ["delivery-settings"],
     queryFn: () => api.getDeliverySettings(),
+  });
+
+/** The Legion view on a project's Issues page, live: one subscription per project, since the
+ *  board has no window and `project` is all `GET /api/v1/legion/board` reads. Its answer carries
+ *  the columns in the order the view draws them — the queue in the daemon's own order, which the
+ *  view never re-sorts — the header's slots and queue length, the last read's freshness or
+ *  failure, and the daemon's settings with where each came from. A settings change arrives as a
+ *  delta on this same subscription, so the settings panel reads nothing of its own. */
+export const legionBoardQuery = (view: DeliveryLiveView & { kind: "legion" }) =>
+  queryOptions({
+    ...LIVE,
+    queryKey: ["legion", "board", view],
+    queryFn: (context) => subscribeLive(context, view),
+  });
+
+/** Every project's Legion setting, by project key, read once for the whole app: the Issues page's
+ *  view selector asks it whether this project has a Legion view, and the Delivery page's Legion
+ *  section which projects its picker offers. `[]` is a deployment where no project names a
+ *  daemon, not a failure. */
+export const legionSettingsQuery = () =>
+  queryOptions({
+    queryKey: ["legion-settings"],
+    queryFn: () => api.listLegionSettings(),
   });

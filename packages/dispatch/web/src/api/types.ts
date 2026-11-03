@@ -1,3 +1,5 @@
+import type { Actor } from "@legion/contracts";
+
 export type {
   Actor,
   ActorOrigin,
@@ -166,6 +168,13 @@ export type {
   IssueSummary,
   ItemBlock,
   ItemBlocks,
+  LegionBoardCard,
+  LegionBoardColumn,
+  LegionBoardColumnID,
+  LegionBoardHeader,
+  LegionBoardResponse,
+  LegionBoardWait,
+  LegionSettingSource,
   ListUsersResponse,
   LiveAgentFrame,
   LiveClientFrame,
@@ -355,3 +364,32 @@ export interface MachineLogin {
 export interface MachineLoginsResponse {
   credentials: MachineLogin[];
 }
+
+// One project's Legion setting, as `GET /api/v1/settings/legion` lists it and
+// `PUT /api/v1/settings/legion/{project}` answers it
+// (packages/envoy/internal/dispatch/legion/store.go, `Settings`). Dispatch-side only: the daemon
+// never sees this row, so it is no Envoy event contract and does not live in @legion/contracts.
+export interface LegionSetting {
+  /** The project key the daemon serves. */
+  project: string;
+  /** The base URL Dispatch reads `GET /legion/v1/state` from. */
+  state_url: string;
+  /** Who first named this project's daemon; a later write keeps it and moves `updated_at`. */
+  created_by: Actor;
+  updated_at: string;
+}
+
+/** What one key of a relayed settings change was decided: applied at once, by rebuilding the
+ *  client or listener that held it, or at the next worker launch — or refused, with the daemon's
+ *  own reason. The daemon decides each key and Dispatch passes its body back unchanged
+ *  (packages/envoy/internal/dispatch/api/settings_legion.go, `putLegionProjectSettings`), so this
+ *  is the daemon's shape, read loosely: a verdict word this build does not know is shown as the
+ *  daemon wrote it rather than dropped. */
+export interface LegionSettingVerdict {
+  applied?: string;
+  refused?: string;
+}
+
+/** `PUT /api/v1/legion/{project}/settings`: the daemon's answer, one verdict per key of the
+ *  change, by the dotted legion.yaml path. */
+export type LegionSettingsChangeResponse = Readonly<Record<string, LegionSettingVerdict>>;

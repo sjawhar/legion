@@ -76,6 +76,8 @@ import type {
   IssueReferences,
   IssueSummary,
   ItemBlocks,
+  LegionSetting,
+  LegionSettingsChangeResponse,
   ListUsersResponse,
   MachineLoginsResponse,
   Message,
@@ -335,6 +337,15 @@ export function isDeliveryNotConfigured(error: unknown): boolean {
   );
 }
 
+// A project that names no Legion daemon answers this 404 on the board and on the settings relay:
+// definitive like the delivery one above, and the answer that shows no Legion view at all rather
+// than a failure a reader could retry.
+export function isLegionNotConfigured(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 404 && error.code === "LEGION_NOT_CONFIGURED"
+  );
+}
+
 // A stored document outside the Proof schema is a repairable state, not a transient failure:
 // retrying the read cannot repair it, while opening its live editor could let the browser rewrite it.
 export function isDocumentSchemaError(error: unknown): boolean {
@@ -354,16 +365,17 @@ export function isDocumentUnloadable(error: unknown): boolean {
 }
 
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
-// source, an unconfigured credential broker or delivery timeline, a stored document outside
-// Proof's schema, or a stored history that cannot load is definitive and retrying it changes
-// nothing; any other failure (dropped connection, a read past its deadline, 5xx) is worth a couple
-// of automatic attempts before surfacing a Retry affordance to the user.
+// source, an unconfigured credential broker, delivery timeline or Legion daemon, a stored document
+// outside Proof's schema, or a stored history that cannot load is definitive and retrying it
+// changes nothing; any other failure (dropped connection, a read past its deadline, 5xx) is worth
+// a couple of automatic attempts before surfacing a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
     !isSourceNotFound(error) &&
     !isCredentialFeatureOff(error) &&
     !isDeliveryNotConfigured(error) &&
+    !isLegionNotConfigured(error) &&
     !isDocumentSchemaError(error) &&
     !isDocumentUnloadable(error)
   );
@@ -1415,6 +1427,32 @@ export class DispatchApiClient {
     bounds: WriteBounds
   ): Promise<DeliverySettings> {
     return this.put<DeliverySettings>("/api/v1/settings/delivery", input, bounds);
+  }
+
+  /** Every project's Legion setting, by project key; `[]` when no project names a daemon. The
+   *  Issues page's view selector reads it to decide whether this project has a Legion view at
+   *  all, so having none is an ordinary answer rather than a failure. */
+  listLegionSettings(): Promise<LegionSetting[]> {
+    return this.json<LegionSetting[]>("/api/v1/settings/legion");
+  }
+
+  /** Relays an operator's `legion.yaml` change to the project's daemon, by dotted path, and
+   *  answers what the daemon decided for each key: applied at once, by a rebuild or at the next
+   *  launch, or refused with its reason. Dispatch passes the daemon's status and body back
+   *  unchanged and names the caller as the change's author, so the refusals this can raise are
+   *  Dispatch's own: `404 LEGION_NOT_CONFIGURED` for a project naming no daemon,
+   *  `503 LEGION_DAEMON_UNAVAILABLE` for one that could not be reached, and the deployment-scope
+   *  refusal a credential naming one project gets. */
+  putLegionProjectSettings(
+    project: string,
+    changes: Readonly<Record<string, unknown>>,
+    bounds: WriteBounds
+  ): Promise<LegionSettingsChangeResponse> {
+    return this.put<LegionSettingsChangeResponse>(
+      `/api/v1/legion/${pathSegment(project)}/settings`,
+      { changes },
+      bounds
+    );
   }
 
   /** Creates a Delivery session group: its sessions' pull requests take it as their Parent agent.
