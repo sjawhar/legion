@@ -259,10 +259,59 @@ func loopCommentBody(proposal, thread, reply int, n int64) string {
 	return loopFillText(fmt.Sprintf("REQ-%04d-%06d.%03d ", proposal, thread, reply), int(n))
 }
 
-// loopPageText is one review page's markdown, of exactly the bytes the plan drew for it: a
-// heading and one paragraph.
-func loopPageText(proposal, page int, n int64) string {
-	return loopFillText(fmt.Sprintf("# review page %04d of proposal %04d\n\n", page+1, proposal), int(n))
+// loopPageHead is the heading of review page page of proposal proposal: the line the page keeps
+// over every version of itself, since a verdict replaces the paragraph under it and never the
+// heading - a find that spanned both blocks would be refused 400 TARGET_SPANS_BLOCKS
+// (internal/dispatch/api/server.go:851-853).
+func loopPageHead(proposal, page int) string {
+	return fmt.Sprintf("# review page %04d of proposal %04d\n\n", page+1, proposal)
+}
+
+// loopPageGenerationPrefix opens a review page's paragraph and names the generation the paragraph
+// was drawn at, as a spec's revision token names its revision: it is what a run reads a page's
+// generation back out of when an edit of its own did not apply (loopPageGeneration,
+// (*writer).resyncPage).
+const loopPageGenerationPrefix = "generation g"
+
+// loopPageBody is the paragraph under that heading at one generation: the text a verdict replaces,
+// of the page's planned size n less its heading, so a page rewritten at any generation is the size
+// the plan drew for it. Generation 0 is what the seed writer wrote and each verdict writes the one
+// after, drawn afresh - the filler starts a generation further into itself - so no two generations
+// of a page read alike.
+func loopPageBody(proposal, page, generation int, n int64) string {
+	head := fmt.Sprintf("%s%d of review page %04d of proposal %04d. ",
+		loopPageGenerationPrefix, generation, page+1, proposal)
+	size := max(int(n)-len(loopPageHead(proposal, page)), 0)
+	if size <= len(head) {
+		return head[:size]
+	}
+	var b strings.Builder
+	b.Grow(size)
+	b.WriteString(head)
+	for at := generation % len(loopFiller); b.Len() < size; at = 0 {
+		b.WriteString(loopFiller[at:min(len(loopFiller), at+size-b.Len())])
+	}
+	return b.String()
+}
+
+// loopPageText is one review page's markdown at one generation, of exactly the bytes the plan drew
+// for it: the heading and the one paragraph under it. The seed writer writes generation 0 and a
+// verdict replaces the paragraph with the next generation's (events.go, case kindVerdict), so both
+// sides draw a page's text from this one function and the run reproduces a page without reading
+// it.
+func loopPageText(proposal, page, generation int, n int64) string {
+	head := loopPageHead(proposal, page)
+	if int(n) <= len(head) {
+		return head[:max(int(n), 0)]
+	}
+	return head + loopPageBody(proposal, page, generation, n)
+}
+
+// loopPageGeneration reads the generation out of a review page's text, as currentRevision reads a
+// spec's revision token: the first one its paragraph names. A page whose text names none is one
+// this run did not write and cannot reproduce, which its reader reports rather than guesses at.
+func loopPageGeneration(text string) (int, bool) {
+	return firstNumberAfter(text, loopPageGenerationPrefix)
 }
 
 // loopIndexText is one live proposal's review index: the document loopReviewIndexBytes counts, its
@@ -696,7 +745,9 @@ func (w *loopWriter) thread(ctx context.Context, key, doc string, th loopThread)
 // review writes one live proposal's review pages and then its review index, which names them.
 func (w *loopWriter) review(ctx context.Context, key string, proposal int) error {
 	for _, page := range w.pages[proposal] {
-		text := loopPageText(proposal, page.Index, page.Bytes)
+		// The seed writes a page's first generation; a verdict of a run writes the next of the
+		// same size over it (events.go, case kindVerdict).
+		text := loopPageText(proposal, page.Index, 0, page.Bytes)
 		if _, _, err := w.send(ctx, loopSend{
 			kind: loopKindPage, path: loopPagePath(proposal, page.Index),
 			route:  "POST /api/v1/issues/{key}/artifacts",

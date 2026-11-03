@@ -121,9 +121,15 @@ type loopWriteCall struct {
 // the writer reads and records every request:
 //
 //	POST /api/v1/artifacts/{id}/edits    200 {"version": {"number": n}}
+//	GET  /api/v1/artifacts/{id}/text     200 {"markdown": <the text it holds>}
 //	POST /api/v1/issues/{key}/comments   201 {"id": <uuid>}
 //	POST /api/v1/comments/{id}/resolve   200 {"id": <the comment in the path>}
 //	POST /api/v1/issues/{key}/artifacts  201 {"artifact": {"id": <uuid>}}
+//
+// A document a test gives it (hold) is text the stub keeps: an edits request's replace ops are
+// applied to it, as Dispatch applies them, and its text route serves what they left. A document
+// no test gave it answers its edits 200 and changes nothing, which is what every test of the
+// other kinds asks of it.
 //
 // refuse, when it is not nil, answers a status and an error code to refuse a request with, as
 // Dispatch's writeError writes one.
@@ -134,6 +140,7 @@ type loopWriteStub struct {
 	mu    sync.Mutex
 	n     int
 	calls []loopWriteCall
+	docs  map[string]string
 }
 
 func newLoopWriteStub(t *testing.T) *loopWriteStub {
@@ -154,14 +161,24 @@ func (s *loopWriteStub) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if s.refuse != nil {
 		if status, code := s.refuse(r.URL.Path, n); status != 0 {
-			w.WriteHeader(status)
-			_ = json.NewEncoder(w).Encode(map[string]any{"error": "refused by the stub", "code": code})
+			s.writeError(w, status, code)
 			return
 		}
 	}
 	answer, status := map[string]any{"id": id}, http.StatusCreated
 	switch {
+	case strings.HasSuffix(r.URL.Path, "/text"):
+		text, held := s.text(loopStubArtifact(r.URL.Path))
+		if !held {
+			s.writeError(w, http.StatusNotFound, "ARTIFACT_NOT_FOUND")
+			return
+		}
+		answer, status = map[string]any{"markdown": text}, http.StatusOK
 	case strings.HasSuffix(r.URL.Path, "/edits"):
+		if refusal, code := s.edit(loopStubArtifact(r.URL.Path), body); refusal != 0 {
+			s.writeError(w, refusal, code)
+			return
+		}
 		answer, status = map[string]any{"version": map[string]any{"number": n}}, http.StatusOK
 	case strings.HasSuffix(r.URL.Path, "/resolve"):
 		answer, status = map[string]any{"id": strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/comments/"), "/resolve")}, http.StatusOK
@@ -170,6 +187,70 @@ func (s *loopWriteStub) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(answer)
+}
+
+func (s *loopWriteStub) writeError(w http.ResponseWriter, status int, code string) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": "refused by the stub", "code": code})
+}
+
+// loopStubArtifact is the document id of /api/v1/artifacts/{id}/<tail>.
+func loopStubArtifact(path string) string {
+	rest, ok := strings.CutPrefix(path, "/api/v1/artifacts/")
+	if !ok {
+		return ""
+	}
+	id, _, _ := strings.Cut(rest, "/")
+	return id
+}
+
+// hold gives the stub one document of its own, which it then serves and rewrites.
+func (s *loopWriteStub) hold(artifact, text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.docs == nil {
+		s.docs = map[string]string{}
+	}
+	s.docs[artifact] = text
+}
+
+func (s *loopWriteStub) text(artifact string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	text, held := s.docs[artifact]
+	return text, held
+}
+
+// edit applies one edits request to a document the stub holds, and answers the refusal Dispatch
+// would answer instead: text the document does not hold is 404 TARGET_NOT_FOUND and text it holds
+// twice 409 TARGET_AMBIGUOUS (internal/dispatch/api/server.go:851-869), neither writing anything.
+// A document the stub does not hold is answered without being written, as it always was.
+func (s *loopWriteStub) edit(artifact string, body map[string]any) (int, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	text, held := s.docs[artifact]
+	if !held {
+		return 0, ""
+	}
+	ops, _ := body["ops"].([]any)
+	for _, raw := range ops {
+		op, _ := raw.(map[string]any)
+		find, _ := op["find"].(string)
+		with, _ := op["with"].(string)
+		if op["op"] != "replace" || find == "" {
+			return http.StatusBadRequest, "INVALID_OP"
+		}
+		switch strings.Count(text, find) {
+		case 1:
+			text = strings.Replace(text, find, with, 1)
+		case 0:
+			return http.StatusNotFound, "TARGET_NOT_FOUND"
+		default:
+			return http.StatusConflict, "TARGET_AMBIGUOUS"
+		}
+	}
+	s.docs[artifact] = text
+	return 0, ""
 }
 
 func (s *loopWriteStub) sent() []loopWriteCall {
@@ -195,14 +276,33 @@ func loopRequestCount(t *testing.T, w *writer, class string) int {
 	return 0
 }
 
-// TestLoopVerdictWritesAReviewPageVersion: a verdict is one POST to the review page's edits route,
-// whose op and summary carry the run's marker, so the artifact.version it commits is the write's
-// own event.
+// loopVerdictOp is the one replace op of a verdict's request: the text it looked for and the text
+// it wrote in its place.
+func loopVerdictOp(t *testing.T, call loopWriteCall) (find, with string) {
+	t.Helper()
+	ops, _ := call.body["ops"].([]any)
+	if len(ops) != 1 {
+		t.Fatalf("a verdict sent %d ops, want one: %+v", len(ops), call.body)
+	}
+	op, _ := ops[0].(map[string]any)
+	if op["op"] != "replace" {
+		t.Fatalf("the verdict's op is %+v, want one replace of the page's text", op)
+	}
+	find, _ = op["find"].(string)
+	with, _ = op["with"].(string)
+	return find, with
+}
+
+// TestLoopVerdictWritesAReviewPageVersion: a verdict is one POST to the review page's edits route
+// that replaces the page's paragraph with the next generation of it, and its summary carries the
+// run's marker, so the artifact.version it commits is the write's own event.
 func TestLoopVerdictWritesAReviewPageVersion(t *testing.T) {
 	ls := loopTestSeed(t)
+	page := ls.Proposals[0].ReviewPages[1]
 	stub := newLoopWriteStub(t)
+	stub.hold(page.ArtifactID, loopPageText(0, page.Index, 0, page.Bytes))
 	w := loopWriteTestWriter(t, stub, ls)
-	rec := w.do(context.Background(), eventPlan{marker: 3, kind: kindVerdict, issue: 0, artifact: "page-a1"})
+	rec := w.do(context.Background(), eventPlan{marker: 3, kind: kindVerdict, issue: 0, page: 1})
 	if rec.Status != http.StatusOK || rec.TransportErr != "" {
 		t.Fatalf("the verdict answered %d %q", rec.Status, rec.TransportErr)
 	}
@@ -210,7 +310,7 @@ func TestLoopVerdictWritesAReviewPageVersion(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("a verdict sent %d requests, want one: %+v", len(calls), calls)
 	}
-	if calls[0].method != "POST" || calls[0].path != "/api/v1/artifacts/page-a1/edits" {
+	if calls[0].method != "POST" || calls[0].path != "/api/v1/artifacts/"+page.ArtifactID+"/edits" {
 		t.Fatalf("the verdict sent %s %s", calls[0].method, calls[0].path)
 	}
 	tag := markerTag(42, 3)
@@ -218,16 +318,162 @@ func TestLoopVerdictWritesAReviewPageVersion(t *testing.T) {
 	if !strings.Contains(summary, tag) {
 		t.Errorf("the verdict's summary %q carries no marker", summary)
 	}
-	ops, _ := calls[0].body["ops"].([]any)
-	if len(ops) != 1 {
-		t.Fatalf("the verdict sent %d ops", len(ops))
+	find, with := loopVerdictOp(t, calls[0])
+	if want := loopPageBody(0, page.Index, 0, page.Bytes); find != want {
+		t.Errorf("the verdict looked for %d bytes, want the page's %d at generation 0", len(find), len(want))
 	}
-	op, _ := ops[0].(map[string]any)
-	if op["op"] != "insert" || op["after"] != "end" || !strings.Contains(op["markdown"].(string), tag) {
-		t.Fatalf("the verdict's op is %v", op)
+	if want := loopPageBody(0, page.Index, 1, page.Bytes); with != want {
+		t.Errorf("the verdict wrote %d bytes, want the page's %d at generation 1", len(with), len(want))
+	}
+	if text, _ := stub.text(page.ArtifactID); text != loopPageText(0, page.Index, 1, page.Bytes) {
+		t.Errorf("the page the verdict left is %d bytes at generation %v", len(text), generationOf(text))
 	}
 	if n := loopRequestCount(t, w, loopClassVerdict); n != 1 {
 		t.Errorf("the verdict class counts %d requests, want 1", n)
+	}
+}
+
+// generationOf is what loopPageGeneration read of a page, for a failure to name.
+func generationOf(text string) any {
+	if n, ok := loopPageGeneration(text); ok {
+		return n
+	}
+	return "none"
+}
+
+// TestLoopVerdictCarriesThePageAndLeavesItTheSameSize: a verdict's request carries the page's own
+// bytes - the text it finds and the text it writes are each the page's size - and the page it
+// leaves is the size the plan drew, after ten verdicts as after one. The loop's verdict rewrites
+// a review page; a step whose verdicts grew it would send a load the loop never sends and would
+// walk the page towards the 1 MiB markdown cap.
+func TestLoopVerdictCarriesThePageAndLeavesItTheSameSize(t *testing.T) {
+	ls := loopTestSeed(t)
+	page := ls.Proposals[0].ReviewPages[1]
+	stub := newLoopWriteStub(t)
+	stub.hold(page.ArtifactID, loopPageText(0, page.Index, 0, page.Bytes))
+	w := loopWriteTestWriter(t, stub, ls)
+	ctx := context.Background()
+	var afterFirst int
+	for i := range 10 {
+		rec := w.do(ctx, eventPlan{marker: int64(i + 1), kind: kindVerdict, issue: 0, page: 1})
+		if rec.Status != http.StatusOK {
+			t.Fatalf("verdict %d answered %d %q", i, rec.Status, rec.TransportErr)
+		}
+		text, _ := stub.text(page.ArtifactID)
+		if i == 0 {
+			afterFirst = len(text)
+		}
+		if len(text) != afterFirst {
+			t.Fatalf("the page is %d bytes after verdict %d and was %d after the first", len(text), i, afterFirst)
+		}
+	}
+	if int64(afterFirst) != page.Bytes {
+		t.Errorf("the page is %d bytes, want the %d the plan drew for it", afterFirst, page.Bytes)
+	}
+	// Each request carries the page twice, within a few percent of its planned size: the
+	// heading the op leaves alone is the only part of the page it does not carry.
+	for i, call := range stub.sent() {
+		find, with := loopVerdictOp(t, call)
+		for what, text := range map[string]string{"find": find, "with": with} {
+			if off := math.Abs(float64(len(text))-float64(page.Bytes)) / float64(page.Bytes); off > 0.03 {
+				t.Errorf("verdict %d sent a %s of %d bytes, want the page's %d within 3%%",
+					i, what, len(text), page.Bytes)
+			}
+		}
+	}
+	if n := loopRequestCount(t, w, loopClassVerdict); n != 10 {
+		t.Errorf("the verdict class counts %d requests, want 10", n)
+	}
+	if n := w.loopRecord().PageResyncs; n != 0 {
+		t.Errorf("ten verdicts on a page this run alone wrote resynchronised %d times", n)
+	}
+}
+
+// TestLoopVerdictResynchronisesAPageItsFindMissed: an edit whose find the page does not hold - a
+// response this run lost, a page another run wrote - re-reads the page for the generation it
+// stands at, so the next verdict on it finds its text; the step's summary counts that.
+func TestLoopVerdictResynchronisesAPageItsFindMissed(t *testing.T) {
+	ls := loopTestSeed(t)
+	page := ls.Proposals[0].ReviewPages[1]
+	stub := newLoopWriteStub(t)
+	// The page stands five generations on from the seed's, where this run's verdict will not
+	// look, and the first edit is refused outright.
+	stub.hold(page.ArtifactID, loopPageText(0, page.Index, 5, page.Bytes))
+	stub.refuse = func(path string, n int) (int, string) {
+		if n == 1 && strings.HasSuffix(path, "/edits") {
+			return http.StatusConflict, "PRECONDITION_FAILED"
+		}
+		return 0, ""
+	}
+	w := loopWriteTestWriter(t, stub, ls)
+	ctx := context.Background()
+	if rec := w.do(ctx, eventPlan{marker: 1, kind: kindVerdict, issue: 0, page: 1}); rec.Status != http.StatusConflict {
+		t.Fatalf("the refused verdict answered %d %q", rec.Status, rec.TransportErr)
+	}
+	rec := w.do(ctx, eventPlan{marker: 2, kind: kindVerdict, issue: 0, page: 1})
+	if rec.Status != http.StatusOK || rec.TransportErr != "" {
+		t.Fatalf("the verdict after the resynchronisation answered %d %q", rec.Status, rec.TransportErr)
+	}
+	if text, _ := stub.text(page.ArtifactID); text != loopPageText(0, page.Index, 6, page.Bytes) {
+		t.Errorf("the page is at generation %v of %d bytes, want 6 of %d",
+			generationOf(text), len(text), page.Bytes)
+	}
+	if n := w.loopRecord().PageResyncs; n != 1 {
+		t.Errorf("the loop record counts %d resynchronisations, want 1", n)
+	}
+	// The re-read is the page's text route, and it is no verdict: the class counts the two
+	// verdicts and no more.
+	calls := stub.sent()
+	if len(calls) != 3 || calls[1].method != "GET" || calls[1].path != "/api/v1/artifacts/"+page.ArtifactID+"/text" {
+		t.Fatalf("the writer sent %d requests, want the refused edit, the page's text and the edit: %+v", len(calls), calls)
+	}
+	if n := loopRequestCount(t, w, loopClassVerdict); n != 2 {
+		t.Errorf("the verdict class counts %d requests, want 2", n)
+	}
+}
+
+// TestLoopVerdictsOnOnePageSerialise: two verdicts drawn on one page do not interleave. Each
+// looks for the text the one before it wrote, which is why the page's lock is held across the
+// request and not only across the draw.
+func TestLoopVerdictsOnOnePageSerialise(t *testing.T) {
+	ls := loopTestSeed(t)
+	page := ls.Proposals[0].ReviewPages[1]
+	stub := newLoopWriteStub(t)
+	stub.hold(page.ArtifactID, loopPageText(0, page.Index, 0, page.Bytes))
+	w := loopWriteTestWriter(t, stub, ls)
+	ctx := context.Background()
+	recs := make([]writeRec, 2)
+	var wg sync.WaitGroup
+	for i := range recs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recs[i] = w.do(ctx, eventPlan{marker: int64(i + 1), kind: kindVerdict, issue: 0, page: 1})
+		}()
+	}
+	wg.Wait()
+	for i, rec := range recs {
+		if rec.Status != http.StatusOK {
+			t.Fatalf("verdict %d answered %d %q", i, rec.Status, rec.TransportErr)
+		}
+	}
+	calls := stub.sent()
+	if len(calls) != 2 {
+		t.Fatalf("two verdicts sent %d requests, want two: %+v", len(calls), calls)
+	}
+	firstFind, firstWith := loopVerdictOp(t, calls[0])
+	secondFind, secondWith := loopVerdictOp(t, calls[1])
+	if firstFind != loopPageBody(0, page.Index, 0, page.Bytes) {
+		t.Errorf("the first verdict looked for text that is no generation of the page")
+	}
+	if secondFind != firstWith {
+		t.Error("the second verdict looked for text the first had not written: the two interleaved")
+	}
+	if text, _ := stub.text(page.ArtifactID); text != loopPageHead(0, page.Index)+secondWith {
+		t.Errorf("the page the two verdicts left is %d bytes at generation %v", len(text), generationOf(text))
+	}
+	if n := w.loopRecord().PageResyncs; n != 0 {
+		t.Errorf("two serialised verdicts resynchronised %d times", n)
 	}
 }
 
@@ -446,8 +692,8 @@ func TestLoopEventPlanDrawsItsShares(t *testing.T) {
 		pr := &ls.Proposals[p.issue]
 		switch p.kind {
 		case kindVerdict:
-			if !slices.Contains(pr.ReviewPages, p.artifact) {
-				t.Fatalf("a verdict drew page %q, which proposal %s does not hold", p.artifact, pr.Name)
+			if p.page < 0 || p.page >= len(pr.ReviewPages) {
+				t.Fatalf("a verdict drew page %d of proposal %s, which holds %d", p.page, pr.Name, len(pr.ReviewPages))
 			}
 		case kindRequirement:
 			if pr.LastPart < 0 || p.body < 1 {

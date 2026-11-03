@@ -83,8 +83,8 @@ type loopSeedProposal struct {
 	SpareQuotes []string `json:"spare_quotes"`
 	// ReviewPages and ReviewIndex are the live proposal's review records; empty for a proposal the
 	// driver is not live on, which has none.
-	ReviewPages []string `json:"review_page_artifact_ids"`
-	ReviewIndex string   `json:"review_index_artifact_id"`
+	ReviewPages []loopSeedPage `json:"review_pages"`
+	ReviewIndex string         `json:"review_index_artifact_id"`
 	// OpenThreads are thread roots Dispatch holds open and ResolvedThreads roots it holds
 	// resolved, at most ThreadsPerProposal of each (loopSample).
 	OpenThreads     []string `json:"open_thread_ids"`
@@ -98,6 +98,16 @@ type loopSeedPart struct {
 	Index      int    `json:"index"`
 	ArtifactID string `json:"artifact_id"`
 	Slug       string `json:"slug"`
+}
+
+// loopSeedPage is one review page of a proposal: the id a verdict writes a new version of, where
+// the page stands in the proposal's pages, and the byte size the plan drew for it. A verdict
+// draws the page's own text from the last two (loopPageText), so it replaces the page's paragraph
+// with text of the page's size without reading the page first.
+type loopSeedPage struct {
+	Index      int    `json:"index"`
+	ArtifactID string `json:"artifact_id"`
+	Bytes      int64  `json:"bytes"`
 }
 
 // loopSeedMissing counts what the export could not fill: the records the plan holds that the id
@@ -335,8 +345,8 @@ func (ls *loopSeed) exportThreads(seed uint64, pr *loopProposal, sp *loopSeedPro
 	}
 }
 
-// exportReview records the live proposal's review pages, in the plan's order, and its review
-// index.
+// exportReview records the live proposal's review pages, in the plan's order, each with the index
+// and the byte size its text is drawn from, and its review index.
 func (ls *loopSeed) exportReview(pr *loopProposal, sp *loopSeedProposal, pages []loopReviewPage, index bool, ids map[string]string) {
 	for _, page := range pages {
 		id, ok := ids[loopPagePath(sp.Index, page.Index)]
@@ -344,7 +354,8 @@ func (ls *loopSeed) exportReview(pr *loopProposal, sp *loopSeedProposal, pages [
 			ls.Missing.ReviewPages++
 			continue
 		}
-		sp.ReviewPages = append(sp.ReviewPages, id)
+		sp.ReviewPages = append(sp.ReviewPages,
+			loopSeedPage{Index: page.Index, ArtifactID: id, Bytes: page.Bytes})
 	}
 	if len(pages) > 0 && len(sp.ReviewPages) == 0 {
 		ls.Missing.ProposalsWithoutReviewPage++

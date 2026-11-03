@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -212,6 +213,13 @@ func (s *loopMemIDs) put(_ context.Context, kind, path, local string) error {
 	}
 	s.m[path] = local
 	return nil
+}
+
+// all is the whole id map the run built, which buildLoopSeed joins a plan to.
+func (s *loopMemIDs) all() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.m)
 }
 
 func (s *loopMemIDs) held() map[string]int {
@@ -446,6 +454,84 @@ func TestLoopSeedWriteWholePlan(t *testing.T) {
 	}
 	if len(roots) != p.Totals.Threads {
 		t.Errorf("%d distinct thread roots, want %d", len(roots), p.Totals.Threads)
+	}
+}
+
+// --- the review page's text --------------------------------------------------------------------
+
+// TestLoopPageTextIsOneGenerator: a review page's text is a pure function of the page, the size
+// the plan drew for it and its generation, so two draws of one generation are one text and two
+// generations are not. Each page is its heading and the paragraph under it, which is the part a
+// verdict replaces, and each names the generation it was drawn at, which is how a run that lost
+// an answer reads back where the page stands.
+func TestLoopPageTextIsOneGenerator(t *testing.T) {
+	const proposal, page, size = 4, 2, loopPageMean
+	first := loopPageText(proposal, page, 0, size)
+	if len(first) != size || loopPageText(proposal, page, 0, size) != first {
+		t.Fatalf("one page at one generation draws %d bytes, want the planned %d twice over", len(first), size)
+	}
+	for gen := range 3 {
+		text := loopPageText(proposal, page, gen, size)
+		if len(text) != size {
+			t.Errorf("generation %d of the page is %d bytes, want %d", gen, len(text), size)
+		}
+		if n, ok := loopPageGeneration(text); !ok || n != gen {
+			t.Errorf("generation %d of the page reads back as %v", gen, generationOf(text))
+		}
+		head := loopPageHead(proposal, page)
+		if !strings.HasPrefix(text, head) || text[len(head):] != loopPageBody(proposal, page, gen, size) {
+			t.Errorf("generation %d of the page is not its heading and the paragraph a verdict replaces", gen)
+		}
+		if gen > 0 && text == first {
+			t.Errorf("generation %d of the page is generation 0 over again", gen)
+		}
+	}
+	if loopPageText(proposal, page+1, 0, size) == first {
+		t.Error("two pages of one proposal draw one text")
+	}
+	if loopPageText(proposal+1, page, 0, size) == first {
+		t.Error("one page of two proposals draws one text")
+	}
+}
+
+// TestLoopVerdictFindsThePageTheSeedWriterWrote: the seed writer and a run draw a page's text from
+// the one generator, so a verdict reproduces generation 0 of a page it has never read. The proof
+// is from both call sites: the seed writer writes the page here, and the run's verdict is sent
+// against that very text, which the stub rewrites only for a find the document holds.
+func TestLoopVerdictFindsThePageTheSeedWriterWrote(t *testing.T) {
+	p := loopTestPlanOf(t, 3, loopTestRows(), map[int]int{0: 4})
+	ctx := context.Background()
+	seed := newLoopStub(t)
+	ids := newLoopMemIDs()
+	if err := loopTestWriter(t, p, seed, ids).run(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	ls, err := buildLoopSeed("loopseed.plan.json", p, ids.all(), loopThreadSample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped := ls.prepare(); dropped != 0 {
+		t.Fatalf("prepare dropped %d proposals of a seed written whole", dropped)
+	}
+	rec := ls.Proposals[0].ReviewPages[1]
+	written := seed.docs[rec.ArtifactID]
+	if want := loopPageText(0, rec.Index, 0, rec.Bytes); written != want {
+		t.Fatalf("the seed wrote %d bytes of review page %d, and the run draws %d at generation 0",
+			len(written), rec.Index, len(want))
+	}
+	run := newLoopWriteStub(t)
+	run.hold(rec.ArtifactID, written)
+	w := loopWriteTestWriter(t, run, ls)
+	got := w.do(ctx, eventPlan{marker: 1, kind: kindVerdict, issue: 0, page: 1})
+	if got.Status != http.StatusOK || got.TransportErr != "" {
+		t.Fatalf("a verdict on the page the seed wrote answered %d %q", got.Status, got.TransportErr)
+	}
+	if text, _ := run.text(rec.ArtifactID); text != loopPageText(0, rec.Index, 1, rec.Bytes) {
+		t.Errorf("the verdict left %d bytes at generation %v, want %d at generation 1",
+			len(text), generationOf(text), rec.Bytes)
+	}
+	if n := w.loopRecord().PageResyncs; n != 0 {
+		t.Errorf("a verdict on a page it drew right resynchronised %d times", n)
 	}
 }
 

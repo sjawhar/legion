@@ -28,8 +28,9 @@ const (
 // (-loop-seed, loopseed_export.go) and no other.
 const (
 	// kindVerdict is a new version of one function's review page: POST /api/v1/artifacts/{id}/edits
-	// on a review page of the proposal. The version Dispatch stores is the whole page, which the
-	// loop's pages average loopPageMean (9,954) bytes of, wherever in it the op writes.
+	// on a review page of the proposal, replacing the page's paragraph with one of the same size
+	// drawn afresh, as the loop's verdict rewrites the review text it reads. The page, and so the
+	// op's find and its with, average loopPageMean (9,954) bytes.
 	kindVerdict = "verdict"
 	// kindRequirement is a new requirement: an anchored thread on the proposal's last part
 	// document, on a spare quote row of that document (loopSpareRow).
@@ -242,12 +243,13 @@ type eventPlan struct {
 	human   bool
 	quote   string
 	replyTo string
-	// The loop mix's own draws, all zero without -loop-seed: artifact is the review page a
-	// verdict writes a new version of, body the byte size of the write's text, and reopen makes
-	// a status change the reply-alone form that reopens a resolved thread.
-	artifact string
-	body     int
-	reopen   bool
+	// The loop mix's own draws, all zero without -loop-seed: page is where the review page a
+	// verdict writes a new version of stands in the proposal's pages, body the byte size of the
+	// write's text, and reopen makes a status change the reply-alone form that reopens a
+	// resolved thread.
+	page   int
+	body   int
+	reopen bool
 }
 
 // planEvent draws one write from the event stream: a session, one of its watched issues, a
@@ -286,8 +288,7 @@ func planLoopEvent(r *rand.Rand, ls *loopSeed, p eventPlan) eventPlan {
 	switch p.kind {
 	case kindVerdict:
 		p.issue = ls.pick(loopNeedReviewPage, r.Float64())
-		pages := ls.Proposals[p.issue].ReviewPages
-		p.artifact = pages[r.IntN(len(pages))]
+		p.page = r.IntN(len(ls.Proposals[p.issue].ReviewPages))
 	case kindRequirement:
 		p.issue = ls.pick(loopNeedLastPart, r.Float64())
 		p.body = loopDrawBytes(r, loopRequirementMeanBytes)
@@ -323,7 +324,13 @@ func revisionToken(n int) string { return fmt.Sprintf("Revision token r%d", n) }
 
 // currentRevision reads the first "Revision token r<N>" in text.
 func currentRevision(text string) (int, bool) {
-	const prefix = "Revision token r"
+	return firstNumberAfter(text, "Revision token r")
+}
+
+// firstNumberAfter reads the decimal number the first prefix in text is followed by: how both
+// resyncs read back the state of a document they lost the answer to, the spec's revision token
+// and a review page's generation (loopPageGeneration).
+func firstNumberAfter(text, prefix string) (int, bool) {
 	i := strings.Index(text, prefix)
 	if i < 0 {
 		return 0, false
@@ -340,7 +347,8 @@ func currentRevision(text string) (int, bool) {
 // writer sends planned writes, each with the run's marker nonce. Edits and uploads to one issue
 // are serialized, and each issue's revision token is tracked from r0 (the seed's), re-read from
 // the document when a response was lost. Under a loop seed it also holds each proposal's
-// inventory of spare quote rows, which the requirement kind takes one of per write.
+// inventory of spare quote rows, which the requirement kind takes one of per write, and each
+// review page's generation, which the verdict kind writes the next of.
 type writer struct {
 	a     *api
 	sf    seedFile
@@ -349,8 +357,10 @@ type writer struct {
 	locks []sync.Mutex
 	revs  []int
 	lg    *log.Logger
-	// quotes is the requirement kind's state per proposal, by the index of the step's issues.
+	// quotes is the requirement kind's state per proposal, by the index of the step's issues, and
+	// pages the verdict kind's state per review page of each of them.
 	quotes []loopQuotes
+	pages  [][]loopPage
 
 	// mu guards what the loop's writes record beyond their one writeRec: the requests each class
 	// sent, since a status change sends two, and what the run met on the way.
@@ -360,6 +370,7 @@ type writer struct {
 	reopens     int
 	capExceeded int
 	newParts    int
+	pageResyncs int
 }
 
 // loopQuotes is the requirement kind's inventory on one proposal: the part document its threads
@@ -372,6 +383,17 @@ type loopQuotes struct {
 	rows  []string
 	parts int
 	full  bool
+}
+
+// loopPage is the verdict kind's state on one review page: the generation of the text this run
+// believes the page holds, which starts at 0 (what the seed writer wrote, loopPageText) and is
+// re-read from the page when a verdict's op did not apply (resyncPage), and the lock that keeps
+// two verdicts off one page, as the issue's lock keeps two edits off one spec. A verdict's find
+// is the page's current text, so two verdicts that drew it at once would send the same find and
+// the second would be refused for a page the first had already rewritten.
+type loopPage struct {
+	mu  sync.Mutex
+	gen int
 }
 
 // The classes of request the loop's writes send. A write kind's own request and the extra
@@ -411,6 +433,10 @@ type loopRun struct {
 	// the part documents those refusals, and the inventories they exhausted, made this run open.
 	CapExceeded int `json:"cap_exceeded"`
 	NewParts    int `json:"new_parts"`
+	// PageResyncs counts the verdicts whose op did not apply and made the run re-read its review
+	// page for the generation the page stands at (resyncPage): a response this run lost, or a
+	// page another run has written since.
+	PageResyncs int `json:"page_resyncs"`
 }
 
 func newWriter(a *api, sf seedFile, loop *loopSeed, nonce int64, lg *log.Logger) *writer {
@@ -421,6 +447,7 @@ func newWriter(a *api, sf seedFile, loop *loopSeed, nonce int64, lg *log.Logger)
 		return w
 	}
 	w.quotes = make([]loopQuotes, len(loop.Proposals))
+	w.pages = make([][]loopPage, len(loop.Proposals))
 	for i := range loop.Proposals {
 		pr := &loop.Proposals[i]
 		// A proposal whose last part document the seed does not hold starts with no inventory:
@@ -428,6 +455,7 @@ func newWriter(a *api, sf seedFile, loop *loopSeed, nonce int64, lg *log.Logger)
 		if pr.serves(loopNeedLastPart) {
 			w.quotes[i] = loopQuotes{doc: pr.Parts[pr.LastPart].ArtifactID, rows: pr.SpareQuotes}
 		}
+		w.pages[i] = make([]loopPage, len(pr.ReviewPages))
 	}
 	return w
 }
@@ -467,7 +495,7 @@ func (w *writer) loopRecord() *loopRun {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	out := &loopRun{Requests: []loopRequests{}, Reopens: w.reopens,
-		CapExceeded: w.capExceeded, NewParts: w.newParts}
+		CapExceeded: w.capExceeded, NewParts: w.newParts, PageResyncs: w.pageResyncs}
 	for _, class := range loopClasses {
 		c := w.reqs[class]
 		if c == nil {
@@ -526,13 +554,25 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 		body = map[string]any{"name": specName, "content": content, "summary": fmt.Sprintf("%s upload revision %d", tag, old+1)}
 		w.revs[p.issue] = old
 	case kindVerdict:
-		// The op is small and the version Dispatch writes is the whole review page, which is
-		// where the write's cost is: the loop's pages average loopPageMean bytes. An insert at
-		// the document's end lands whatever the page holds already, so a page a step writes a
-		// second verdict on takes it as the first did.
-		path = "/api/v1/artifacts/" + p.artifact + "/edits"
+		// A verdict rewrites the page it lands on, as the loop's does: the op replaces the page's
+		// paragraph with one of the same size drawn at the next generation, so the request
+		// carries the page's own bytes twice - the text it finds and the text it writes - and the
+		// version Dispatch stores stays the page the loop measured (loopPageMean, 9,954 bytes).
+		// An insert would make the request a few hundred bytes and grow the stored page by every
+		// verdict the step sends, which the loop never does.
+		//
+		// The page's lock is one verdict's at a time: two that drew the page's text together
+		// would send one find, and the second would look for text the first had replaced.
+		pg := &w.pages[p.issue][p.page]
+		pg.mu.Lock()
+		defer pg.mu.Unlock()
+		pr := &w.loop.Proposals[p.issue]
+		page := pr.ReviewPages[p.page]
+		path = "/api/v1/artifacts/" + page.ArtifactID + "/edits"
 		body = map[string]any{
-			"ops":     []map[string]any{{"op": "insert", "after": "end", "markdown": tag + " verdict: " + sentence(r, 20)}},
+			"ops": []map[string]any{{"op": "replace",
+				"find": loopPageBody(pr.Index, page.Index, pg.gen, page.Bytes),
+				"with": loopPageBody(pr.Index, page.Index, pg.gen+1, page.Bytes)}},
 			"summary": tag + " verdict",
 		}
 	case kindRequirement:
@@ -574,6 +614,18 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 	switch p.kind {
 	case kindVerdict:
 		w.record(loopClassVerdict, res)
+		// The page's lock is still held, so the generation and the page move together. A verdict
+		// Dispatch answered holds the page at the generation it wrote; one it refused 429
+		// EDIT_QUEUE_FULL never reached the document (internal/dispatch/api/server.go:832-834),
+		// so the page is where this run left it; any other answer - a find Dispatch did not
+		// match, a response this run lost - leaves the page where only the page can say.
+		pg := &w.pages[p.issue][p.page]
+		switch {
+		case res.ok():
+			pg.gen++
+		case res.status != http.StatusTooManyRequests:
+			w.resyncPage(ctx, pg, p, is.Key)
+		}
 	case kindRequirement:
 		w.record(loopClassRequirement, res)
 		// A part document whose margin is full answers 413: the next requirement write on this
@@ -689,7 +741,13 @@ func (w *writer) resolveThread(ctx context.Context, p eventPlan, id who) {
 // specText reads the issue's spec text: the GET's result and the document's markdown, "" when
 // the read failed or its body did not decode.
 func (w *writer) specText(ctx context.Context, issue int, id who) (callResult, string) {
-	res := w.a.call(ctx, "GET", "/api/v1/artifacts/"+w.sf.Issues[issue].ArtifactID+"/text", id, nil)
+	return w.artifactText(ctx, w.sf.Issues[issue].ArtifactID, id)
+}
+
+// artifactText reads one document's text: the GET's result and the document's markdown, "" when
+// the read failed or its body did not decode.
+func (w *writer) artifactText(ctx context.Context, artifact string, id who) (callResult, string) {
+	res := w.a.call(ctx, "GET", "/api/v1/artifacts/"+artifact+"/text", id, nil)
 	var doc struct {
 		Markdown string `json:"markdown"`
 	}
@@ -706,4 +764,26 @@ func (w *writer) resync(ctx context.Context, issue int) {
 	if n, ok := currentRevision(markdown); ok {
 		w.revs[issue] = n
 	}
+}
+
+// resyncPage reads a review page's current text after a verdict whose op did not apply, and takes
+// the generation the page's paragraph names as the one the next verdict finds, as resync takes
+// the spec's revision token. Without it a page this run's generation had drifted from - a
+// response the run lost, a page another run wrote - would refuse this run's every later verdict,
+// since each would look for text the page no longer holds. A page whose text names no generation
+// is one this run cannot reproduce, which it logs rather than guesses at. The page's lock is the
+// caller's.
+func (w *writer) resyncPage(ctx context.Context, pg *loopPage, p eventPlan, key string) {
+	page := w.loop.Proposals[p.issue].ReviewPages[p.page]
+	w.mu.Lock()
+	w.pageResyncs++
+	w.mu.Unlock()
+	res, markdown := w.artifactText(ctx, page.ArtifactID, who{})
+	n, ok := loopPageGeneration(markdown)
+	if !ok {
+		w.lg.Printf("write %s %s: read review page %s for its generation: %d %s %v",
+			p.kind, key, page.ArtifactID, res.status, trunc(res.body), res.err)
+		return
+	}
+	pg.gen = n
 }

@@ -233,7 +233,7 @@ func (r route) renderLoop(ls *loopSeed, at int, rng *rand.Rand) string {
 	}
 	page := ""
 	if n := len(pr.ReviewPages); n > 0 {
-		page = pr.ReviewPages[rng.IntN(n)]
+		page = pr.ReviewPages[rng.IntN(n)].ArtifactID
 	}
 	return strings.NewReplacer(
 		"{key}", pr.Key,

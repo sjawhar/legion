@@ -27,9 +27,12 @@ func loopTestSeedProposals() []loopSeedProposal {
 				{Index: 0, ArtifactID: "part-a0", Slug: "part-001.md"},
 				{Index: 1, ArtifactID: "part-a1", Slug: "part-002.md"},
 			},
-			LastPart:        1,
-			SpareQuotes:     []string{loopSpareRow(0, 0), loopSpareRow(0, 1), loopSpareRow(0, 2)},
-			ReviewPages:     []string{"page-a0", "page-a1"},
+			LastPart:    1,
+			SpareQuotes: []string{loopSpareRow(0, 0), loopSpareRow(0, 1), loopSpareRow(0, 2)},
+			ReviewPages: []loopSeedPage{
+				{Index: 0, ArtifactID: "page-a0", Bytes: loopPageMedian},
+				{Index: 1, ArtifactID: "page-a1", Bytes: loopPageMean},
+			},
 			ReviewIndex:     "index-a",
 			OpenThreads:     []string{"open-a0", "open-a1"},
 			ResolvedThreads: []string{"done-a0", "done-a1"},
@@ -223,8 +226,17 @@ func TestLoopSeedExportFromAWrittenSeed(t *testing.T) {
 		t.Fatalf("proposal 0 exports %d review pages and index %q, want 3 and one", len(sp.ReviewPages), sp.ReviewIndex)
 	}
 	for i, page := range sp.ReviewPages {
-		if pathOf[page] != loopPagePath(0, i) {
-			t.Errorf("review page %d is id %q, created as %q", i, page, pathOf[page])
+		if pathOf[page.ArtifactID] != loopPagePath(0, i) || page.Index != i {
+			t.Errorf("review page %d is id %q, created as %q, at index %d",
+				i, page.ArtifactID, pathOf[page.ArtifactID], page.Index)
+		}
+		// The planned size travels with the id: a verdict draws the page's own text from it
+		// without reading the page, and the page the seed wrote is that many bytes.
+		if want := p.ReviewPages[i].Bytes; page.Bytes != want {
+			t.Errorf("review page %d exports %d bytes, want the plan's %d", i, page.Bytes, want)
+		}
+		if got := int64(len(stub.docs[page.ArtifactID])); got != page.Bytes {
+			t.Errorf("review page %d was written as %d bytes and exports %d", i, got, page.Bytes)
 		}
 	}
 	if pathOf[sp.ReviewIndex] != loopIndexPath(0) {
