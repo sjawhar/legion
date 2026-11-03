@@ -224,6 +224,7 @@ describe("app-logins.ts", () => {
 
   test("a token command runs as the daemon runs it: no NATS seed, stdin closed, owner and read-only set empty", async () => {
     // An unset variable prints `unset`, so a set-empty owner and read-only flag print nothing.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a shell parameter expansion, not a template
     const probe =
       'printf "%s|%s|%s|%s|%s|%s" "$NATS_NKEY_SEED" "$NATS_DAEMON_NKEY_SEED" "$NATS_NKEY_SEED_FILE" "${LEGION_GITHUB_OWNER-unset}" "${LEGION_GITHUB_READ_ONLY-unset}" "$(cat)" >&2; exit 4';
     const { code, stderr } = await run(config(app("101", probe), app("202")), {
@@ -840,13 +841,13 @@ write_github_apps --token-dir "$TOKEN_DIR" implement review`
       expect(ran.stdout.toString()).toBe(want);
     }
     // An owner the file layout could not name reads no file outside the directory.
-    const escape = Bun.spawnSync([...busyboxSh, "-c", command], {
+    const outside = Bun.spawnSync([...busyboxSh, "-c", command], {
       env: { PATH: process.env.PATH, LEGION_GITHUB_OWNER: "../review/x" },
       stdout: "pipe",
       stderr: "pipe",
     });
-    expect(escape.exitCode).toBe(2);
-    expect(escape.stdout.toString()).toBe("");
+    expect(outside.exitCode).toBe(2);
+    expect(outside.stdout.toString()).toBe("");
   });
 
   test("the refresher's files and the --token-dir block are proved alone, agent-secrets broken after the mint", async () => {
