@@ -72,6 +72,9 @@ type runConfig struct {
 	// recoveryRefP99 is -recovery-ref-p99, the reference request p99 in ms of the recovery
 	// criterion; nil takes it from the last windows of the step (computeRecovery).
 	recoveryRefP99 *float64
+	// copyMeta is the -copy-meta file's JSON object, which meta.json records under copy; nil
+	// without the flag.
+	copyMeta json.RawMessage
 	// replay is the replay's plan and roster under -source replay; nil under -source requests.
 	replay *replaySetup
 }
@@ -108,6 +111,7 @@ func runLoad(args []string) error {
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
+	copyMetaPath := fs.String("copy-meta", "", "JSON object file that describes the copy a foreign run measures, recorded verbatim in meta.json under copy")
 	delivery := fs.String("session-delivery", envOr("LOADTEST_SESSION_DELIVERY", sessionDeliveryCore), "how the sessions take their messages: core (their core subscriptions) or consumer (the listener's relay of their consumers); default $LOADTEST_SESSION_DELIVERY, else core")
 	source := fs.String("source", sourceRequests, "request source: "+sourceRequests+" (the route mix) or "+sourceReplay+" (a replay bundle's logged writes, replay_plan.go)")
 	rf := registerReplayFlags(fs)
@@ -184,6 +188,12 @@ func runLoad(args []string) error {
 	if *out == "" {
 		return fmt.Errorf("-out is required")
 	}
+	var copyMeta json.RawMessage
+	if *copyMetaPath != "" {
+		if copyMeta, err = readCopyMeta(*copyMetaPath); err != nil {
+			return err
+		}
+	}
 	var sf seedFile
 	var rs *replaySetup
 	if replay {
@@ -207,13 +217,8 @@ func runLoad(args []string) error {
 		if sf, err = readSeed(*seedPath); err != nil {
 			return err
 		}
-		for _, is := range sf.Issues {
-			if mix.Weights[kindReply] > 0 && len(is.AnchoredCommentIDs)+len(is.PlainCommentIDs) == 0 {
-				return fmt.Errorf("seed %s: issue %s has no root comment ids for replies; reseed with this loadgen", *seedPath, is.Key)
-			}
-			if mix.Weights[kindAnchored] > 0 && len(is.Quotes) == 0 {
-				return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", *seedPath, is.Key)
-			}
+		if err := checkSeedMix(sf, mix, *seedPath); err != nil {
+			return err
 		}
 	}
 	if *live < 0 {
@@ -232,7 +237,7 @@ func runLoad(args []string) error {
 		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, schedule: sched, recoveryRefP99: refP99,
 		sessionDelivery: *delivery,
 		buildCommit:     *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
-		replay: rs,
+		copyMeta: copyMeta, replay: rs,
 	}, sf)
 }
 
@@ -446,6 +451,11 @@ type metaFile struct {
 	AllowForeign         bool            `json:"allow_foreign"`
 	PIDs                 map[string]int  `json:"pids"`
 	MarkerNonce          string          `json:"marker_nonce"`
+	// PGClock is Postgres's clock against loadgen's on -pg, read at the step's start and after its
+	// window (readPGClock).
+	PGClock *pgClocks `json:"pg_clock,omitempty"`
+	// Copy is the -copy-meta file's JSON object, verbatim; absent without the flag.
+	Copy json.RawMessage `json:"copy,omitempty"`
 	// Replay is the replay's inputs, build and heap-profile times under -source replay.
 	Replay *replayMetaRecord `json:"replay,omitempty"`
 }
@@ -529,6 +539,9 @@ func execute(cfg runConfig, sf seedFile) error {
 
 	sum := st.buildSummary(ns, reg, writes, reqs, live, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
+	end := readPGClock(context.Background(), cfg.ep.pg)
+	logPGClock(lg, "end", end)
+	meta.PGClock.End = &end
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	committed := fmt.Sprintf("committed %d, receipts %d of %d", sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts)
@@ -641,13 +654,15 @@ func (st *step) startDashboard(ctx context.Context, url string) *liveSockets {
 	return ls
 }
 
-// openLoop is an open-loop Poisson schedule whose rate per second the plan gives (ratePlan), from
-// stream `stream` of rngSeed: it draws the next arrival from the plan's start until one is at or
-// after winEnd, sleeps until it, and calls fire with the stream, the arrival and whether it is in
-// the window [winStart, winEnd). fire draws what the arrival does from the same stream, so the
-// draws alternate, an arrival then its plan, and one seed gives one schedule. A plan whose rates
-// are all 0 or less fires nothing. It returns when the schedule ends or ctx does.
-func openLoop(ctx context.Context, rngSeed, stream uint64, plan []rateSegment, winStart, winEnd time.Time, fire func(r *rand.Rand, at time.Time, in bool)) {
+// openLoopPlan walks an open-loop Poisson schedule whose rate per second the plan gives
+// (ratePlan), from stream `stream` of rngSeed, without a clock: it draws the next arrival from
+// the plan's start until one is at or after winEnd, and calls fn with the stream, the arrival and
+// whether it is in the window [winStart, winEnd). fn draws what the arrival does from the same
+// stream, so the draws alternate, an arrival then its plan, and one seed gives one schedule; it
+// returns false to end the walk. A plan whose rates are all 0 or less plans nothing. The schedule
+// is a pure function of the seed, the stream, the rate plan and the two window times, so loadgen
+// plan-docs walks the very schedule a run sends (plandocs.go).
+func openLoopPlan(rngSeed, stream uint64, plan []rateSegment, winStart, winEnd time.Time, fn func(r *rand.Rand, next time.Time, in bool) bool) {
 	if !slices.ContainsFunc(plan, func(s rateSegment) bool { return s.rate > 0 }) {
 		return
 	}
@@ -655,11 +670,23 @@ func openLoop(ctx context.Context, rngSeed, stream uint64, plan []rateSegment, w
 	for next := plan[0].from; ; {
 		var ok bool
 		next, ok = nextArrival(plan, next, r.ExpFloat64())
-		if !ok || !next.Before(winEnd) || !sleepUntil(ctx, next) {
+		if !ok || !next.Before(winEnd) || !fn(r, next, inWindow(next, winStart, winEnd)) {
 			return
 		}
-		fire(r, next, inWindow(next, winStart, winEnd))
 	}
+}
+
+// openLoop is openLoopPlan's schedule, sent: it sleeps until each arrival and calls fire with the
+// stream, the arrival and whether it is in the window. It returns when the schedule ends or ctx
+// does.
+func openLoop(ctx context.Context, rngSeed, stream uint64, plan []rateSegment, winStart, winEnd time.Time, fire func(r *rand.Rand, at time.Time, in bool)) {
+	openLoopPlan(rngSeed, stream, plan, winStart, winEnd, func(r *rand.Rand, next time.Time, in bool) bool {
+		if !sleepUntil(ctx, next) {
+			return false
+		}
+		fire(r, next, in)
+		return true
+	})
 }
 
 // runEvents starts the event generator, open-loop on stream 1; done closes once every write it
@@ -683,6 +710,18 @@ func (st *step) runEvents(ctx context.Context, wr *writer) (writes *collector[wr
 		})
 	}()
 	return writes, closed
+}
+
+// planWrites walks the event generator's schedule without a clock and calls fn with every write
+// the step plans and whether its arrival is in the window: the plans runEvents sends, in its
+// order, since both walk openLoopPlan's stream 1 and draw each plan with planEvent.
+func (st *step) planWrites(fn func(p eventPlan, in bool)) {
+	var marker int64
+	openLoopPlan(st.cfg.rngSeed, 1, st.ratePlan(st.cfg.events), st.winStart, st.winEnd, func(r *rand.Rand, _ time.Time, in bool) bool {
+		marker++
+		fn(planEvent(r, st.cfg, st.sessions, st.sf, marker), in)
+		return true
+	})
 }
 
 // requestLoad is what the request generator sent in the window, and what the in-flight cap
@@ -776,7 +815,10 @@ func (p *probes) waitSampler() { <-p.smpDone }
 
 // profile fetches Dispatch's profiles. The CPU profile covers the whole window; the goroutine
 // dump and the heap profile are taken once it has finished, outside it, and under -source replay
-// after the replay's window-end reads (heap-end.pprof, then Dispatch's /proc read).
+// after the replay's window-end reads (heap-end.pprof, then Dispatch's /proc read). heap.txt is the
+// run's one read of /debug/pprof/heap?debug=1 (the sampler reads the binary profile), for
+// codepaths' runtime.MemStats; it has 10 minutes: with a heap of tens of GiB it is over 500 MB,
+// and 60 s cut it before its runtime.MemStats block.
 func (st *step) profile(ctx context.Context) {
 	if !sleepUntil(ctx, st.winStart) {
 		return
@@ -793,7 +835,7 @@ func (st *step) profile(ctx context.Context) {
 	}
 	fetchTo(pprof+"/debug/pprof/goroutine?debug=2", filepath.Join(out, "goroutines.txt"), 120*time.Second, st.lg)
 	fetchTo(pprof+"/debug/pprof/heap", filepath.Join(out, "heap.pprof"), 60*time.Second, st.lg)
-	fetchTo(pprof+"/debug/pprof/heap?debug=1", filepath.Join(out, "heap.txt"), 60*time.Second, st.lg)
+	fetchTo(pprof+"/debug/pprof/heap?debug=1", filepath.Join(out, "heap.txt"), 10*time.Minute, st.lg)
 }
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
@@ -1028,6 +1070,10 @@ func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	} else {
 		m.PostgresVersion = v
 	}
+	start := readPGClock(ctx, cfg.ep.pg)
+	logPGClock(lg, "start", start)
+	m.PGClock = &pgClocks{Start: &start}
+	m.Copy = cfg.copyMeta
 	if b, err := os.ReadFile(filepath.Join(loadtestRoot(), "seed.meta.json")); err == nil && json.Valid(b) {
 		m.SeedMeta = b
 	}

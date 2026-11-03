@@ -1,0 +1,11 @@
+kind: Changed
+body: |-
+    The architect's design-gate reference names a second version that keeps the approval: one
+    whose text is exactly the text of the version a person approved, with no decision block in it
+    decided since, such as an accidental edit undone exactly. Dispatch records the approval at that
+    version and emits `artifact.approved`, so the daemon reopens the gate. The reference tells the
+    architect to undo an accidental edit of an approved root spec exactly, to request nothing when
+    the spec then reads Approved, and to request approval again when it does not.
+time: 2026-11-03T03:30:05.000000000Z
+custom:
+    Issue: pr2703

@@ -29,6 +29,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -653,6 +654,27 @@ func (r *Runtime) storedPod(name string) *corev1.Pod {
 	return obj.(*corev1.Pod)
 }
 
+// PodAt is the uid of the project's pod whose address is addr, as the synced store holds it, and
+// false for an address no running pod of the project holds: the operator's machine, the daemon
+// itself. A pod's traffic to the daemon's Service keeps the pod's own address, so this is the pod
+// a request from addr came from (api's Options.CallerPod). A pod that has run to its end is passed
+// over, since the address it last held may already be a new pod's.
+func (r *Runtime) PodAt(addr netip.Addr) (string, bool) {
+	for _, obj := range r.pods.GetStore().List() {
+		pod, ok := obj.(*corev1.Pod)
+		if !ok || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		held := append([]corev1.PodIP{{IP: pod.Status.PodIP}}, pod.Status.PodIPs...)
+		for _, ip := range held {
+			if parsed, err := netip.ParseAddr(ip.IP); err == nil && parsed.Unmap() == addr.Unmap() {
+				return string(pod.UID), true
+			}
+		}
+	}
+	return "", false
+}
+
 // ownedBy reports whether p is controller-owned by the Sandbox with uid: the one relationship
 // that makes a pod the Sandbox's (sandbox_controller.go:1460). A same-named pod without it is not
 // the Sandbox's process, whatever its name says.
@@ -953,6 +975,39 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 		return fmt.Errorf("adopt %s's working copy for %s <%s>: %w", loc.Claim, id.Name, id.Email, err)
 	}
 	return nil
+}
+
+// RescueUnpushed has the claim's shim run the push check of its issue pod's disk over the claim's
+// connection (internal/rescue): the shim runs git and jj as the role, with the role's gh files
+// answering the clone's credential helper, so no credential leaves the pod and none reaches the
+// daemon. The recorded process must still be the claim's running pod: the connection is its.
+func (r *Runtime) RescueUnpushed(ctx context.Context, k runtime.Known, request runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	if err := k.Validate(); err != nil {
+		return nil, fmt.Errorf("sandbox runtime: push check: %w", err)
+	}
+	if k.Locator == nil {
+		return nil, fmt.Errorf("push check of %s: the claim records no process to ask", k.Claim)
+	}
+	loc := *k.Locator
+	if err := r.checkLocator(loc); err != nil {
+		return nil, err
+	}
+	view, err := r.view(loc.Sandbox.Name)
+	if err != nil {
+		return nil, fmt.Errorf("push check of %s's pod: %w", loc.Claim, err)
+	}
+	if view.pod == nil || string(view.pod.UID) != loc.Sandbox.PodUID || terminal(view.pod) {
+		return nil, fmt.Errorf("push check of %s: its recorded role process %s is not in its running issue pod", loc.Claim, loc.Incarnation)
+	}
+	conn, ok := r.conns.Conn(loc.Claim)
+	if !ok {
+		return nil, fmt.Errorf("push check of %s's pod: the claim has no connection to ask over", loc.Claim)
+	}
+	report, err := conn.RescueUnpushed(ctx, request)
+	if err != nil {
+		return nil, fmt.Errorf("push check of %s's pod: %w", loc.Claim, err)
+	}
+	return report, nil
 }
 
 // ReconcileOrphans deletes the project's Sandboxes nothing owns, once older than grace. An issue

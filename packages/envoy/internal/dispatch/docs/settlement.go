@@ -929,11 +929,12 @@ func (p *settlementPass) commitVersion(ctx context.Context) (settleStep, settleO
 	// Settlement writes a version only when the document now reads differently from the latest
 	// one. Indexing an ask block writes an `asks` row and an `ask.opened` event over words the
 	// edit that wrote the block already versioned, so a version for that event alone would be
-	// byte-identical, credited to nobody, and stale an approval pinned to what an agent had just
-	// written (LEGION-273). Its tree writes - stamping block ids, restoring an ask block's
-	// server-owned attributes - move the stored Proof state and often render the same markdown,
-	// and a version for one of those would repeat the version before it too (LEGION-229
-	// requirement 2).
+	// byte-identical and credited to nobody (LEGION-273, where it staled an approval pinned to what
+	// an agent had just written; carryApproval now carries that approval to such a version
+	// instead, an event nothing in the log would explain). Its tree writes - stamping block ids,
+	// restoring an ask block's server-owned attributes - move the stored Proof state and often
+	// render the same markdown, and a version for one of those would repeat the version before it
+	// too (LEGION-229 requirement 2).
 	// contentChanged stays the first half of the test: a version an older renderer wrote is not
 	// this settlement's to canonicalise when nothing has touched the document since.
 	contentChanged, err := contentChangedSinceVersion(ctx, p.tx, room, p.latest.docUpdateVersion)

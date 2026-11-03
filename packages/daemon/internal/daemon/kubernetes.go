@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -182,7 +184,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners, cfg.RepositoryRenames)
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -474,13 +476,13 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // sandbox.New's own refusal names what is missing. Boot has already run the cluster check
 // (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this one —
 // per-claim pods, or issue pods on one tree volume — remains.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string) runtimeFactory {
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string, renames ghrepo.Renames) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
 		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
 		if apps != nil {
-			opts.Tokens = implementTokens{apps}
-			opts.GitHubCredential = appauth.GitHubCredential(apps, owners)
+			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames)}
+			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)
 		}
 		rt, err := sandbox.New(ctx, rc, opts)
 		if err != nil {
@@ -491,11 +493,46 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 	}
 }
 
+// servingOwner is the owner whose installation holds the repositories of owner now: the owner a
+// configured rename moved them to, where the project owns that one and not owner itself
+// (ghrepo.Renames.OwnerAliases, the daemon's one rule for it), and owner unchanged otherwise,
+// which is every owner of a deployment that configures no rename. The owners it reads are the
+// mapping's, which changes as Dispatch's mapping does, so it is read per mint rather than once.
+func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner string) string {
+	return func(owner string) string {
+		aliases, _ := renames.OwnerAliases(func(name string) bool {
+			return slices.ContainsFunc(owners(), func(o string) bool { return strings.EqualFold(o, name) })
+		})
+		if to, alias := aliases[strings.ToLower(owner)]; alias {
+			return to
+		}
+		return owner
+	}
+}
+
 // implementTokens is the workflow's implement App as a sandbox's provisioning token source: every
-// pod's workspace-fetch clones with an installation token minted for the repository's owner.
-type implementTokens struct{ apps appauth.Tokens }
+// pod's workspace-fetch clones with an installation token minted for the repository's owner. It
+// is the one token source the Sandbox runtime's three mint sites share (runtime/sandbox's
+// provision, its gh credential refresh and its repository cache Secret), so the owner a
+// configured rename moved a repository away from is mapped here, once, to the owner whose
+// installation holds it now (serving): nothing under runtime/sandbox knows of a rename.
+//
+// Only the token follows the rename. Every address those three sites build — the pod's feed, its
+// clone, and the repository cache's volume and Service — stays the repository the record names,
+// which a transfer must not move: GitHub's own documentation of a transfer says "All links to the
+// previous repository location are automatically redirected to the new location. When you use
+// `git clone`, `git fetch`, or `git push` on a transferred repository, these commands will
+// redirect to the new repository location or URL", so a clone or a fetch addressed at the name
+// the record keeps reaches the repository GitHub holds today.
+type implementTokens struct {
+	apps    appauth.Tokens
+	serving func(owner string) string
+}
 
 func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
+	if t.serving != nil {
+		owner = t.serving(owner)
+	}
 	lease, err := t.apps.Token(ctx, appauth.Implement, owner)
 	if err != nil {
 		return "", err

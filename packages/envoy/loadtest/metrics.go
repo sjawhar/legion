@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"maps"
@@ -159,7 +160,7 @@ func splitMetricKey(key string) (string, map[string]string) {
 // the endpoint).
 func scrapeMetrics(base string) (map[string]float64, error) {
 	url := base + "/metrics"
-	body, err := getOK(shortClient, url)
+	body, err := getOK(context.Background(), shortClient, url)
 	if err != nil {
 		return nil, err
 	}

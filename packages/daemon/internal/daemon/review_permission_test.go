@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -415,7 +417,186 @@ func reviewPermissionPool(t *testing.T) *pgxpool.Pool {
 }
 
 func reviewPermissionRuntime(pool *pgxpool.Pool, githubAPI string, log *slog.Logger) *workflowRuntime {
+	return reviewPermissionRuntimeRenamed(pool, githubAPI, log, ghrepo.Renames{})
+}
+
+// reviewPermissionRuntimeRenamed is reviewPermissionRuntime under the deployment's repository
+// equivalence renames (repositories.renames): the one line of the runtime a configured rename
+// changes.
+func reviewPermissionRuntimeRenamed(pool *pgxpool.Pool, githubAPI string, log *slog.Logger, renames ghrepo.Renames) *workflowRuntime {
 	tokens := &forgettingTokens{}
 	return &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"}, tokens: tokens, forget: tokens,
-		githubAPI: githubAPI, log: log, reviewAppLogin: "legion-reviewer[bot]"}
+		githubAPI: githubAPI, log: log, reviewAppLogin: "legion-reviewer[bot]", repositories: newRepositories("LEGION", renames)}
+}
+
+// A review on a pull request already open when its repository was transferred finds the record:
+// the row keeps acme/widgets, the name the pull request opened under, while the review names
+// cybermonklabs/widgets, so the record is read under both names of the configured pair
+// (ghrepo.Under). The permission is then read on the repository the review names, the
+// one GitHub serves. With no pair configured no name finds the row, the review is one the daemon
+// does not record, and GitHub is asked nothing at all.
+func TestAReviewNamingARenamedRepositoryReadsThePermissionOfTheRecordedPullRequest(t *testing.T) {
+	pool := reviewPermissionPool(t)
+	for _, tc := range []struct {
+		name    string
+		renames ghrepo.Renames
+		// asked is the GitHub path the permission read asks for, none when no read is made.
+		asked []string
+		want  bool
+	}{
+		{name: "the pair configured", renames: ghrepo.MustRenames(renamedWidgets), want: true,
+			asked: []string{"/repos/cybermonklabs/widgets/collaborators/a-writer/permission"}},
+		{name: "no pair configured", renames: ghrepo.Renames{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				asked = append(asked, r.URL.Path)
+				fmt.Fprint(w, `{"permission":"write","user":{"login":"a-writer"}}`)
+			}))
+			defer server.Close()
+			w := reviewPermissionRuntimeRenamed(pool, server.URL, quietLogger(), tc.renames)
+			review := intake.PullRequestReview{Repo: "cybermonklabs/widgets", Number: 42, State: "approved", Author: "a-writer"}
+			got, err := w.reviewerCanWrite(context.Background(), review)
+			if err != nil {
+				t.Fatalf("a-writer's permission on the renamed repository: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("a-writer can write = %v, want %v", got, tc.want)
+			}
+			if !slices.Equal(asked, tc.asked) {
+				t.Errorf("GitHub was asked %q, want %q", asked, tc.asked)
+			}
+		})
+	}
+}
+
+// reviewPermissionTransferredPool is a store recording sjawhar/legion#42 for LEGION-209, the tree
+// whose pull request was open when its repository was transferred, and no other pull request:
+// both the issue and the pull request keep the name they were recorded under for their whole
+// life, which after the transfer is the name the repository moved away from.
+func reviewPermissionTransferredPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "LEGION", Tree: "LEGION-209", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"})
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.PutPullRequest(context.Background(), tx, record.PullRequest{Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head", State: record.PullRequestOpen})
+	}); err != nil {
+		t.Fatalf("put the pull request: %v", err)
+	}
+	return pool
+}
+
+// A review GitHub published before the transfer and the daemon processed after it names
+// sjawhar/legion — the daemon hears both names of a configured pair (heardRepositories), so a
+// review arrives under the old name whenever the daemon was down or behind across the transfer,
+// or its delivery was redelivered across it, and that is also the name the record keeps. Both
+// GitHub reads such a review costs are made on cybermonklabs/legion, the repository GitHub holds
+// it under now (reviewAppClient, through repositories.serving), since only cybermonklabs'
+// installation covers the repository: this token source mints for that owner alone and refuses
+// every other, as GitHub's does after a transfer (servedOwnerTokens).
+//
+// Both callers of the mint are driven: a person's review, whose permission read decides the
+// round, and the review App's own, whose body is read fresh for the footer. With no pair
+// configured the mint is made for the owner the review names and refused, which is the failure
+// the pair exists to prevent: a permission read refused decides nothing, and a body read refused
+// is naked and redelivered.
+func TestAReviewPublishedBeforeATransferIsReadOnTheRepositoryGitHubHoldsItUnderNow(t *testing.T) {
+	pool := reviewPermissionTransferredPool(t)
+	// review is the review as it reaches the daemon: published under the name the repository
+	// moved away from, which is the name the pull request is recorded under too.
+	review := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 7, State: "approved", CommitID: "head"}
+	for _, caller := range []struct {
+		name string
+		// asked is the path the read asks for when it is made on the repository GitHub serves.
+		asked string
+		// answers is what that path answers.
+		answers string
+		// read drives the caller, asserting what it answered, and returns what it refused with.
+		read func(t *testing.T, w *workflowRuntime) error
+	}{
+		{
+			name:    "a person's review, whose permission decides the round",
+			asked:   "/repos/cybermonklabs/legion/collaborators/a-writer/permission",
+			answers: `{"permission":"write","user":{"login":"a-writer"}}`,
+			read: func(t *testing.T, w *workflowRuntime) error {
+				t.Helper()
+				author := review
+				author.Author = "a-writer"
+				canWrite, err := w.reviewerCanWrite(context.Background(), author)
+				if err != nil {
+					return err
+				}
+				if !canWrite {
+					t.Errorf("a-writer can write = false, want true: GitHub gives write access on the repository it holds the review's under now")
+				}
+				return nil
+			},
+		},
+		{
+			name:    "the review App's own review, whose body is read for its footer",
+			asked:   "/repos/cybermonklabs/legion/pulls/42/reviews/7",
+			answers: `{"body":"Approved.\n\n<!-- legion:review -->"}`,
+			read: func(t *testing.T, w *workflowRuntime) error {
+				t.Helper()
+				own := review
+				own.Author, own.Body, own.BodyTruncated = "legion-reviewer[bot]", "Approved.", true
+				body, err := w.reviewBody(context.Background(), own)
+				if err != nil {
+					return err
+				}
+				if body != "Approved.\n\n<!-- legion:review -->" {
+					t.Errorf("the review's body = %q, want the full one GitHub answered", body)
+				}
+				return nil
+			},
+		},
+	} {
+		t.Run(caller.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name    string
+				renames ghrepo.Renames
+				// asked is every path GitHub was asked for, none when the mint was refused first.
+				asked []string
+				// refused is what the read answered, empty when it was made.
+				refused string
+			}{
+				{name: "the pair configured", renames: transferredLegion, asked: []string{caller.asked}},
+				{name: "no pair configured", renames: ghrepo.Renames{},
+					refused: "mint the review App token for sjawhar: no installation of the review App on sjawhar covers the repository"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					var asked []string
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						asked = append(asked, r.URL.Path)
+						if r.URL.Path != caller.asked {
+							// GitHub's own refusal of a read addressed at a repository the
+							// token's installation does not cover.
+							w.WriteHeader(http.StatusNotFound)
+							fmt.Fprint(w, `{"message":"Not Found"}`)
+							return
+						}
+						fmt.Fprint(w, caller.answers)
+					}))
+					defer server.Close()
+					w := reviewPermissionRuntimeRenamed(pool, server.URL, quietLogger(), tc.renames)
+					// Dispatch maps the repository under the name it moved to, which is what
+					// makes cybermonklabs the owner whose installation holds it.
+					w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("cybermonklabs/legion"), Default: true}}, nil)
+					w.tokens = servedOwnerTokens{owner: "cybermonklabs"}
+					err := caller.read(t, w)
+					switch {
+					case tc.refused == "" && err != nil:
+						t.Fatalf("the read of the review on %s: %v", review.Repo, err)
+					case tc.refused != "" && (err == nil || err.Error() != tc.refused):
+						t.Fatalf("the read of the review on %s = %v, want it refused with %q", review.Repo, err, tc.refused)
+					}
+					if !slices.Equal(asked, tc.asked) {
+						t.Errorf("GitHub was asked %q, want %q", asked, tc.asked)
+					}
+				})
+			}
+		})
+	}
 }
