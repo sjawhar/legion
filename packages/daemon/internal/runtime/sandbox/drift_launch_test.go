@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -84,6 +85,67 @@ func TestALaunchReplacesAPodNoRoundCoversWhoseShapeHasDrifted(t *testing.T) {
 				t.Errorf("the controller's new pod is built from %s, want the configuration as it now reads, %s", shape(), want)
 			case !tc.replaced && shape() != built:
 				t.Errorf("the kept pod's template records %s, want the shape that pod was built from, %s", shape(), built)
+			}
+		})
+	}
+}
+
+// A launch key change reaches the controller's pod through its own relaunch path (acceptance
+// A5's last sentence). No update round covers that pod (roundCovers), so PodDrift answers
+// nothing for it and no round will ever replace it: its next launch is the only way a changed
+// `instructions`, `provider_keys`, `daemon_url` or any other launch key reaches the controller
+// at all. Without this, the project's controller would go on running for the deployment's whole
+// life with the launch keys of the day its pod was created.
+//
+// A launch that installs a stale-plugin pair keeps the pod, as it does for every other kind of
+// drift, and a daemon restarted on the launch keys its pod was built from replaces nothing.
+func TestALaunchReplacesTheControllersPodWhoseLaunchKeysMoved(t *testing.T) {
+	plugins := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
+	for name, tc := range map[string]struct {
+		move     func(*config.Config)
+		plugins  *runtime.PluginInstall
+		replaced bool
+	}{
+		"the same launch keys":      {func(*config.Config) {}, nil, false},
+		"another instructions file": {func(cfg *config.Config) { cfg.InstructionsPath = "/etc/legion/instructions-2.md" }, nil, true},
+		"a rotated provider key":    {func(cfg *config.Config) { cfg.ProviderKeys[0].Secret = "fixture-anthropic-secret-2" }, nil, true},
+		"another daemon url":        {func(cfg *config.Config) { cfg.DaemonURL = "http://legion-daemon.legion.svc:13371" }, nil, true},
+		"an installing launch into a pod whose instructions moved": {
+			func(cfg *config.Config) { cfg.InstructionsPath = "/etc/legion/instructions-2.md" }, plugins, false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			built := LaunchSettings(launchFixture())
+			g := newRig(t, nil, withOptions(func(o *Options) { o.LaunchSettings = built }))
+			spec := controllerSpec(t)
+			loc := g.spawn(spec)
+			moved := launchFixture()
+			tc.move(moved)
+			r2 := secondRuntime(t, g, func(o *Options) { o.LaunchSettings = LaunchSettings(moved) })()
+			g.connectRunning(controllerToken, loc.Sandbox.Generation)
+			g.eventually("the controller's launcher to report its child to the restarted daemon", func() bool {
+				state, connected := r2.launchers.state(controllerToken, loc.Sandbox.PodUID)
+				return connected && state.Child != nil
+			})
+			if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) > 0 {
+				t.Fatalf("PodDrift = %q of a pod no round covers, want nothing: its launch is what replaces it", drifted)
+			}
+
+			spec.Generation, spec.BootToken, spec.ResumeSessionFile, spec.Plugins = 2, "boot-controller-g2", controllerSession, tc.plugins
+			next, err := r2.Resume(g.ctx, &loc, spec)
+			if err != nil {
+				t.Fatalf("Resume the controller: %v", err)
+			}
+			if replaced := next.Sandbox.PodUID != loc.Sandbox.PodUID; replaced != tc.replaced {
+				t.Fatalf("Resume replaced the controller's pod: %t, want %t (pod %s, then %s)",
+					replaced, tc.replaced, loc.Sandbox.PodUID, next.Sandbox.PodUID)
+			}
+			recorded := g.sandbox(loc.Sandbox.Name).Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation]
+			switch want := LaunchSettings(moved); {
+			case tc.replaced && recorded != want:
+				t.Errorf("the controller's new pod records %s, want the launch keys as they now read, %s", recorded, want)
+			case !tc.replaced && recorded != built:
+				t.Errorf("the kept pod's template records %s, want the launch keys its pod was built with, %s", recorded, built)
 			}
 		})
 	}

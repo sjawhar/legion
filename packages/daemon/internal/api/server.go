@@ -69,6 +69,10 @@ type Options struct {
 	// when one of those settings changes (NewLiveSettings, LiveSettings.Store), so the change
 	// takes effect without rebinding the listening socket or dropping a request.
 	Settings *LiveSettings
+	// ApplySettings is how `PUT /legion/v1/operator/settings` changes a setting: the daemon's one
+	// settings holder and the store of what the route changed (internal/settings' Keeper.Route).
+	// Nil, which every caller but the daemon means, answers that route 503.
+	ApplySettings ApplySettings
 	// Controller is the project's controller record, which the controller secret route mints,
 	// the claim registration route registers a session on, and the grants route authenticates
 	// the registered session against.
@@ -206,6 +210,10 @@ type HeldSettings struct {
 	RepositoryRenames ghrepo.Renames
 	// MergeRules is the merge policy an issue's project configures. Nil has no special policy.
 	MergeRules func(project string) config.MergeRules
+	// SettingsRoute is the settings route's projected-token arm: the verifier of the cluster
+	// issuer and audience `settings_route` names, and the ServiceAccounts it admits. The zero
+	// value leaves that route to the operator bearer alone.
+	SettingsRoute SettingsRouteAuth
 }
 
 // LiveSettings is HeldSettings behind the pointer every request reads through. The holder hashes
@@ -282,6 +290,9 @@ type server struct {
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
+	// applySettings is Options.ApplySettings, the settings route's one way into the daemon's
+	// settings holder.
+	applySettings ApplySettings
 	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
 	stopping  context.Context
 	drained   context.Context
@@ -311,6 +322,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		dispatchProject:    opts.DispatchProject,
 		controller:         opts.Controller,
 		settings:           opts.Settings,
+		applySettings:      opts.ApplySettings,
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
 		noPluginInstall:    opts.NoPluginInstall,
@@ -393,6 +405,10 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/retry", s.operator(s.retryClaim))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/forget-session", s.operator(s.forgetSession))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/close", s.operator(s.closeTree))
+	// The settings route authenticates its caller itself (settingsChange): the operator bearer,
+	// or a projected ServiceAccount token this deployment names, which is how Dispatch calls it
+	// without holding a copy of the operator token.
+	mux.HandleFunc("PUT /legion/v1/operator/settings", s.settingsChange)
 
 	// The catch-all answers every unrouted request, including a known path asked for with the
 	// wrong method: "no route" is the whole story the plugin, the operator's CLI, or a proof

@@ -185,6 +185,10 @@ type Config struct {
 	// records keep the name each was written under. The zero value, which answers as
 	// strings.EqualFold does, while the file configures none.
 	RepositoryRenames ghrepo.Renames
+	// SettingsRoute is `settings_route`: the cluster OIDC issuer, audience and ServiceAccounts
+	// the settings route admits a projected ServiceAccount token from, beside the operator
+	// bearer. The zero value, which admits none, while the file configures none.
+	SettingsRoute SettingsRoute
 }
 
 const (
@@ -300,6 +304,7 @@ type fileConfig struct {
 	WorkerBackends         map[claim.Role]runtime.Backend
 	RoleConfigFiles        map[claim.Role][]string
 	RepositoryRenames      []ghrepo.Rename
+	SettingsRoute          *SettingsRoute
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -448,6 +453,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
 			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
+		case settingsRouteKey:
+			file.SettingsRoute, err = readSettingsRoute(value, key)
 		case "controller":
 			file.Controller, err = readString(value, key)
 		case "capabilities":
@@ -990,6 +997,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 	if file.Capabilities != nil {
 		cfg.Capabilities = *file.Capabilities
+	}
+	if file.SettingsRoute != nil {
+		cfg.SettingsRoute = *file.SettingsRoute
 	}
 	cfg.WorkerBackends = file.WorkerBackends
 	cfg.RoleConfigFiles = file.RoleConfigFiles

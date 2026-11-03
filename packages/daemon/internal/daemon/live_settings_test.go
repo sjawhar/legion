@@ -23,7 +23,11 @@ import (
 
 // liveSettings is the settings holder of a daemon whose configuration is a real legion.yaml: the
 // one thing config.Settled cannot stand in for, since a settings change is applied by reading
-// that file again under the overlay. lines are appended to the file.
+// that file again under the overlay. lines are appended to the file, each a key the body below
+// does not carry — a file holding one key twice is a file no operator writes. `envoy_url` is
+// among them: the body leaves it out and the loader settles its default
+// (http://127.0.0.1:9020), so a test that wants the daemon's notices to reach a listener of its
+// own names it here.
 func liveSettings(t *testing.T, lines ...string) *config.Live {
 	t.Helper()
 	dir := t.TempDir()
@@ -51,7 +55,6 @@ launch_failure_limit: 3
 prompt_failure_limit: 3
 prompt_retire_limit: 2
 operator_token_file: %s
-envoy_url: http://127.0.0.1:9020
 controller: operator
 `, randomSuffix(t), port, testDSN(t), shortTempDir(t), port, tokenFile)
 	path := filepath.Join(dir, "legion.yaml")

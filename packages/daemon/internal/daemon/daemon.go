@@ -37,6 +37,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
@@ -47,6 +48,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
+	"github.com/sjawhar/legion/daemon/internal/settings"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -233,9 +235,28 @@ func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, 
 	if log == nil {
 		log = slog.Default()
 	}
-	// The boot-time value: every read that happens once — the sockets, the store, the state
-	// directory, the runtime's own options — is this one, and every reader that must see a change
-	// goes through live instead.
+	// The store opens first, before anything is built from the configuration: the settings
+	// changes this daemon took from its route are laid back over the file here, so the holders
+	// the boot then builds, the credentials it reads and the launch specs it settles are built
+	// from what the daemon is actually running on, and not from a file a change of that key sits
+	// above (internal/settings' Keeper.Restore). Nothing of the schema is written yet — the
+	// cluster's refusals still run before Migrate — and a database this release has not migrated
+	// yet carries no such change.
+	opening, cancelOpening := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
+	defer cancelOpening()
+	st, err := store.Open(opening, live.Snapshot().PostgresDSN)
+	if err != nil {
+		return err
+	}
+	keeper := settings.New(live, settings.NewStore(st.Pool(), live.Snapshot().Project), log)
+	restored, err := keeper.Restore(opening)
+	if err != nil {
+		st.Close()
+		return err
+	}
+	// The boot-time value: every read that happens once — the sockets, the state directory, the
+	// runtime's own options — is this one, and every reader that must see a change goes through
+	// live instead.
 	cfg := *live.Snapshot()
 	rebuild := newRebuilder(log)
 	live.OnChange(rebuild.observe)
@@ -244,8 +265,10 @@ func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, 
 	}
 	plan, err := prepare(cfg, log, o)
 	if err != nil {
+		st.Close()
 		return err
 	}
+	plan.settings, plan.restored = keeper, restored
 	plan.live, plan.rebuild, plan.commit = live, rebuild, build.Revision
 	if cfg.Runtime.Name == "kubernetes" {
 		logPlugins(log, plan.plugins, plan.pluginsSource)
@@ -256,6 +279,7 @@ func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, 
 	}
 	if plan.gate != nil {
 		if err := plan.gate(ctx); err != nil {
+			st.Close()
 			if ctx.Err() != nil {
 				log.Info("legion daemon stopped before its plugin gate passed", "project", cfg.Project)
 				return nil
@@ -266,20 +290,18 @@ func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, 
 
 	boot, cancelBoot := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 	defer cancelBoot()
-	// The cluster's refusals run before the store opens, so before any schema write, image probe or
-	// reconcile: Agent Sandbox must be installed, and no per-claim Sandbox of the layout before issue
-	// pods may remain. The claims' half of that layout fence runs once the store opens, before it
-	// migrates.
+	// The cluster's refusals run before any schema write, image probe or reconcile: Agent Sandbox
+	// must be installed, and no per-claim Sandbox of the layout before issue pods may remain. The
+	// claims' half of that layout fence runs next, and the schema is migrated after both — the
+	// store's connection is already open, since the settings this daemon runs on were read
+	// through it before anything was built.
 	if plan.clusterCheck != nil {
 		if err := plan.clusterCheck(boot); err != nil {
+			st.Close()
 			return err
 		}
 	}
 
-	st, err := store.Open(boot, cfg.PostgresDSN)
-	if err != nil {
-		return err
-	}
 	if plan.claimsCheck != nil {
 		if err := plan.claimsCheck(boot, st); err != nil {
 			st.Close()
@@ -575,6 +597,12 @@ type plan struct {
 	// read live through live.
 	live    *config.Live
 	rebuild *rebuilder
+	// settings is the daemon's two settings arms over live: the route's (the settings route's
+	// ApplySettings) and the file's (the watcher's), and the store that keeps what the route
+	// changed. restored is what Restore laid back over the file at this boot, which the state's
+	// provenance takes as the source of those paths (api.SettingProvenance.Restore).
+	settings *settings.Keeper
+	restored []settings.Change
 	// commit is the commit this binary was built from (Build.Revision), which the state's daemon
 	// block names so a reader can tell which release runs; "" in a build that is not a release.
 	commit string
@@ -1640,15 +1668,23 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
 	}
 	// The settings the API server holds, behind the pointer its routes read through: the operator
-	// bearer, the design gate, the repository equivalence and the projects' merge rules. Its
-	// socket is the one boot took and is never rebound.
+	// bearer, the design gate, the repository equivalence, the projects' merge rules and the
+	// settings route's own admission rule. Its socket is the one boot took and is never rebound.
 	held := newAPIHolder(cfg, p.operatorToken)
 	p.rebuild.register(held)
+	// What the state reports as `settings`, rebuilt from the configuration at every applied
+	// change rather than read at every request: a change through either arm moves the value the
+	// state shows, which is what a reader of the Legion view's settings control sees (A5).
+	reported := newReportedSettings(cfg)
+	p.live.OnChange(reported.observe)
 	// Where each setting of the running daemon came from, which the state carries beside its
 	// settings: the file this boot read, until a change of that path names another source. It is
 	// an observer of the one settings holder, as the rebuilder is, so a change by the file and a
-	// change by the route are recorded on the one path both take (config.Live.Apply).
+	// change by the route are recorded on the one path both take (config.Live.Apply). The route
+	// changes this boot laid back over the file are its first word: they are what the daemon is
+	// running on, and the state names them the route's, with who asked and when.
 	sources := api.NewSettingProvenance(startedAt)
+	sources.Restore(restoredSources(p.restored))
 	p.live.OnChange(sources.Observe)
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
@@ -1664,7 +1700,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			reports:      s.capabilityReports,
 			repositories: p.repositories,
 			caches:       repositoryCachesOf(s.runtime),
-			settings:     api.SettingsOf(cfg),
+			settings:     reported.get,
 			sources:      sources,
 			commit:       p.commit,
 		},
@@ -1676,6 +1712,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Project:            p.project,
 		DispatchProject:    cfg.Project,
 		Settings:           held.settings,
+		ApplySettings:      p.settings.Route,
 		Controller:         st,
 		ControllerLaunched: keeper != nil,
 		PluginRelaunchable: p.pluginRelaunchable,
@@ -1710,6 +1747,29 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve the API on %s: %w", server.Addr, err)
 		}
+		return nil
+	})
+	// Every applied settings change, by either arm, reaches the daemon's log and the project's
+	// controller (settingsAnnouncer), and the file under the daemon is watched for the other arm
+	// (settings.Watcher). Both are registered here, after the boot's own restore: what the boot
+	// laid back over the file is what the daemon booted on, not a change to announce.
+	publisher := newPublisherHolder(notify.New(cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"]))
+	p.rebuild.register(publisher)
+	// The controller's topic is the project token's, as every other notice of its is
+	// (notify.ControllerTopic), never the Dispatch project key.
+	announcer := newSettingsAnnouncer(p.project, publisher, s.log)
+	p.live.OnChange(announcer.observe)
+	group.Go(func() error {
+		announcer.run(serving)
+		return nil
+	})
+	watcher := settings.NewWatcher(p.settings, s.log)
+	// A credential rotated in place names no changed setting — its path is what the
+	// configuration holds, and the path has not moved — so the file arm is also what asks every
+	// holder that reads a credential file to read it again (rebuilder.rereadCredentials).
+	watcher.Settled = func(settled *config.Config, _ []config.Change) { p.rebuild.rereadCredentials(settled) }
+	group.Go(func() error {
+		watcher.Run(serving)
 		return nil
 	})
 	// The report is advisory: its transaction must never sit in the path from restored claims to a
@@ -1817,9 +1877,10 @@ type source struct {
 	// caches is the Kubernetes runtime's repository caches with their last health reads
 	// (sandbox.Runtime.RepositoryCaches); nil under a runtime that keeps none.
 	caches func() []sandbox.CacheStatus
-	// settings is the resolved configuration as the state shows it, built once here: Load reads
-	// legion.yaml once and an edit to it restarts the daemon, so once-at-boot is live.
-	settings api.Settings
+	// settings is the resolved configuration as the state shows it, read at every read of the
+	// state: it is rebuilt at every applied settings change (reportedSettings), so the state
+	// reports the value the daemon is running on beside where that value came from.
+	settings func() api.Settings
 	// sources is where each setting came from (api.SettingProvenance), read at every read of the
 	// state: it moves with every change the daemon applies, so the state names the file or the
 	// route per path as it stands now.
@@ -1959,7 +2020,9 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		FirstBootAt:   firstBootAt,
 		StartedAt:     s.startedAt,
 	}
-	state.Settings = s.settings
+	if s.settings != nil {
+		state.Settings = s.settings()
+	}
 	if s.sources != nil {
 		state.SettingSources = s.sources.Sources()
 	}

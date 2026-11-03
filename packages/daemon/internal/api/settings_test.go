@@ -176,6 +176,10 @@ var settingsExcluded = map[string]string{
 	"PodConfig.ServiceAccount":      "runtime.kubernetes.pod: the operator's ServiceAccount, which every pod runs as and reads from its own spec",
 	"Kubernetes.PluginsFromBinary":  "derived: where the settled plugins pair came from, not a setting",
 	"PathPattern.Regexp":            "compiled from Expression, not a setting",
+	"Config.SettingsRoute":          "not for an unauthenticated reader: who may change this daemon's settings",
+	"SettingsRoute.OIDCIssuer":      "not for an unauthenticated reader: the cluster whose tokens open the settings route",
+	"SettingsRoute.Audience":        "not for an unauthenticated reader: the audience a token must be projected for to open the settings route",
+	"SettingsRoute.ServiceAccounts": "not for an unauthenticated reader: the ServiceAccounts the settings route admits",
 }
 
 // The three keys this release adds to the state — `daemon.commit`, a pull request's

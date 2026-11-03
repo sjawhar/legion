@@ -189,6 +189,14 @@ var Classes = []Row{
 	{Field: "Config.DispatchTokenFile", Path: "dispatch_token_file", Class: ClassRebuild, Holder: HolderDispatchClient, Secret: true},
 	// The bearer the operator routes compare against: the API server holds its hash.
 	{Field: "Config.OperatorTokenFile", Path: "operator_token_file", Class: ClassRebuild, Holder: HolderAPIServer, Secret: true},
+	// The settings route's own admission rule: the API server holds the verifier it checks a
+	// projected ServiceAccount token with, and a change of any of the three builds that verifier
+	// again (internal/daemon's apiHolder). Building one reads nothing — the issuer is discovered
+	// at the first token it verifies — so the rebuild costs the running daemon no network read.
+	{Field: "Config.SettingsRoute", Path: "settings_route", Class: ClassRebuild, Holder: HolderAPIServer, Block: true},
+	{Field: "SettingsRoute.OIDCIssuer", Path: "settings_route.oidc_issuer", Class: ClassRebuild, Holder: HolderAPIServer},
+	{Field: "SettingsRoute.Audience", Path: "settings_route.audience", Class: ClassRebuild, Holder: HolderAPIServer},
+	{Field: "SettingsRoute.ServiceAccounts", Path: "settings_route.service_accounts", Class: ClassRebuild, Holder: HolderAPIServer},
 	// The repository equivalence the API server and the workflow compare names with.
 	{Field: "Config.RepositoryRenames", Path: "repository_renames", Class: ClassRebuild, Holder: HolderAPIServer},
 	// The projects block: the API server holds each project's merge rules, and the supervisor's

@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/sjawhar/envoy/oidc"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
@@ -363,15 +366,22 @@ func (h *appsHolder) Forget(role appauth.AppRole, owner string) {
 }
 
 // apiHolder is the settings the API server holds (config.HolderAPIServer): the operator bearer,
-// the design gate, the repository equivalence and each project's merge rules. Its socket is never
-// rebound — the listener is boot's, and LEGION_LISTEN_FD may have handed the daemon one it never
-// bound — so a rebuild reads the operator bearer again (readOperatorToken) and stores the new
-// settings behind the pointer every request reads through (api.LiveSettings). Nothing drains: a
-// request already in a route keeps the settings it began on.
+// the design gate, the repository equivalence, each project's merge rules and the settings
+// route's own admission rule. Its socket is never rebound — the listener is boot's, and
+// LEGION_LISTEN_FD may have handed the daemon one it never bound — so a rebuild reads the
+// operator bearer again (readOperatorToken), builds the verifier again where the deployment
+// moved it, and stores the new settings behind the pointer every request reads through
+// (api.LiveSettings). Nothing drains: a request already in a route keeps the settings it began
+// on.
 type apiHolder struct {
 	settings *api.LiveSettings
 	// mergeRules is how a project's merge policy is read from a configuration (projectMergeRules).
 	mergeRules func(cfg config.Config) func(project string) config.MergeRules
+	// route is the settings route's projected-token arm as it now stands, and issuer and
+	// audience what it was built for: a rebuild for some other setting keeps the verifier it has,
+	// with the issuer's keys it has already read.
+	route            api.SettingsRouteAuth
+	issuer, audience string
 }
 
 func newAPIHolder(cfg config.Config, operatorToken string) *apiHolder {
@@ -381,6 +391,7 @@ func newAPIHolder(cfg config.Config, operatorToken string) *apiHolder {
 		DesignGate:        cfg.Gates.Design,
 		RepositoryRenames: cfg.RepositoryRenames,
 		MergeRules:        h.mergeRules(cfg),
+		SettingsRoute:     h.settingsRoute(cfg),
 	})
 	return h
 }
@@ -397,8 +408,33 @@ func (h *apiHolder) rebuild(cfg *config.Config) error {
 		DesignGate:        cfg.Gates.Design,
 		RepositoryRenames: cfg.RepositoryRenames,
 		MergeRules:        h.mergeRules(*cfg),
+		SettingsRoute:     h.settingsRoute(*cfg),
 	})
 	return nil
+}
+
+// settingsRoute is who the settings route admits besides the operator bearer, as cfg names them
+// (`settings_route`): a verifier of the cluster's OIDC issuer for the audience the deployment's
+// tokens are projected with, and the ServiceAccounts it takes. A deployment that names none
+// leaves that route to the operator bearer alone.
+//
+// Building a verifier reads nothing: it discovers its issuer at the first token it verifies
+// (oidc.NewLazyVerifier), so this runs under the settings holder's lock with no network call,
+// and a daemon whose cluster issuer is unreachable still boots and still serves. A rebuild for
+// another setting keeps the verifier already built, with whatever of the issuer's key set it has
+// read; only a changed issuer or audience builds a new one.
+func (h *apiHolder) settingsRoute(cfg config.Config) api.SettingsRouteAuth {
+	route := cfg.SettingsRoute
+	if !route.Configured() {
+		h.route, h.issuer, h.audience = api.SettingsRouteAuth{}, "", ""
+		return h.route
+	}
+	if h.route.Verifier == nil || h.issuer != route.OIDCIssuer || h.audience != route.Audience {
+		h.route.Verifier = oidc.NewLazyVerifier(route.OIDCIssuer, route.Audience)
+		h.issuer, h.audience = route.OIDCIssuer, route.Audience
+	}
+	h.route.ServiceAccounts = slices.Clone(route.ServiceAccounts)
+	return h.route
 }
 
 // workerStreamHolder is the worker stream listener's held settings (config.HolderWorkerStream):

@@ -390,6 +390,19 @@ func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
 	return podShapeDrift(s, r.podShapes[kind])
 }
 
+// launchDrift is which launch keys the pod of the Sandbox read as s was launched with that a
+// launch now reads otherwise (launchSettingsDrift against the record this runtime holds,
+// r.launchSettings), read from the stored template as shapeDrift reads the shape.
+//
+// It is the launch's own reading of what a round names in its reasons (PodDrift), so the two can
+// never disagree about whether a pod's launch keys have moved. A pod a round covers is never
+// read by it: that pod's launch keeps the pod and leaves it to its round, which replaces the pod
+// only once every worker in it has pushed. A pod no round covers — the project controller's — is
+// replaced by its own next launch, which is the only way such a change reaches it.
+func (r *Runtime) launchDrift(s *sandbox) []string {
+	return launchSettingsDrift(s.Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation], r.launchSettings)
+}
+
 // PodDrift satisfies runtime.Runtime: why the pod k's process runs in no longer matches the
 // configuration a pod created now is built from, each reason a phrase an operator reads in a task
 // and in a log line, nil when nothing drifted.

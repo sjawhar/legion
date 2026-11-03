@@ -135,6 +135,59 @@ func (l *Live) Normalize(fn func(*Config) error) error {
 // Snapshot is the configuration the daemon is running on, never nil.
 func (l *Live) Snapshot() *Config { return l.settled.Load() }
 
+// Path is the configuration file this holder reads, "" for a holder built from a configuration
+// value (Settled). The file watcher watches the directory holding it (internal/settings).
+func (l *Live) Path() string { return l.path }
+
+// FileValues is what the file itself says about each of paths, with no overlay over it: the
+// value as written, encoded canonically, and "" for a path the file does not carry. It parses
+// the document and reads nothing else — no credential file, no App private key command — so a
+// caller may ask it as often as a file changes.
+//
+// It is how the daemon tells a file that has changed a key from one that has not, which no
+// resolved configuration can say once a route change of that key is laid over it: the store of
+// route changes keeps the digest of the file's own value at the moment each change was applied,
+// and a path whose file value has moved since is the file taking its key back
+// (internal/settings).
+func (l *Live) FileValues(paths []string) (map[string]string, error) {
+	if l.path == "" {
+		return nil, errors.New("this settings holder was built from a configuration value (config.Settled) and has no file to read")
+	}
+	document, err := readDocument(l.path)
+	if err != nil {
+		return nil, err
+	}
+	root, err := rootMapping(document)
+	if err != nil {
+		return nil, err
+	}
+	values := make(map[string]string, len(paths))
+	for _, path := range paths {
+		node := root
+		for _, name := range strings.Split(path, ".") {
+			if node == nil || node.Kind != yaml.MappingNode {
+				node = nil
+				break
+			}
+			node = mappingMember(node, name)
+		}
+		if node == nil || node.Tag == "!!null" {
+			values[path] = ""
+			continue
+		}
+		var value any
+		if err := node.Decode(&value); err != nil {
+			return nil, fmt.Errorf("read the file's own %s: %w", path, err)
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("read the file's own %s: %w", path, err)
+		}
+		values[path] = string(encoded)
+	}
+	return values, nil
+}
+
 // OnChange registers an observer of every applied change. Apply calls each one after it has
 // swapped the pointer, in registration order, so an observer reads the new configuration from its
 // argument or from Snapshot and rebuilds what the changes name. An observer runs under the
@@ -147,11 +200,14 @@ func (l *Live) OnChange(fn func(cfg *Config, applied []Change)) {
 
 // Apply settles one settings change and reports what it did.
 //
-// source is SourceFile, where overlay is nil and the file is read again under the stored route
-// overlay, or SourceRoute, where overlay is the requested dotted path to value changes: a path the
-// class table does not hold is refused as an unknown setting, a fixed path is refused by name with
-// its reason, and the rest are merged into the stored overlay. by is whoever asked, which every
-// Change carries.
+// source is SourceFile, where the file is read again under the stored route overlay and overlay
+// names the paths the file has taken back — each mapped to nil, dropped from the stored overlay
+// so the file's own value settles again (internal/settings reads the file's own values and
+// decides which those are); a value there is the route's business and is refused. Or source is
+// SourceRoute, where overlay is the requested dotted path to value changes: a path the class
+// table does not hold is refused as an unknown setting, a fixed path is refused by name with its
+// reason, a path mapped to nil is withdrawn from the overlay, and the rest are merged into it.
+// by is whoever asked, which every Change carries.
 //
 // The merged overlay is laid over the file's own document and resolved through the loader. A
 // resolution that fails changes nothing: the error comes back with the pointer and the stored
@@ -164,8 +220,11 @@ func (l *Live) Apply(source, by string, overlay map[string]any) (applied []Chang
 	maps.Copy(merged, l.overlay)
 	switch source {
 	case SourceFile:
-		if len(overlay) > 0 {
-			return nil, nil, errors.New(`a "file" apply carries no overlay of its own: it reads the file again and keeps the stored route overlay`)
+		for _, path := range slices.Sorted(maps.Keys(overlay)) {
+			if overlay[path] != nil {
+				return nil, nil, errors.New(`a "file" apply carries no value of its own: it reads the file again, keeps the stored route overlay, and drops only the paths the file has taken back`)
+			}
+			delete(merged, path)
 		}
 	case SourceRoute:
 		for _, path := range slices.Sorted(maps.Keys(overlay)) {
@@ -174,6 +233,8 @@ func (l *Live) Apply(source, by string, overlay map[string]any) (applied []Chang
 				refused = append(refused, Refusal{Path: path, Reason: "unknown setting"})
 			case row.Class == ClassFixed:
 				refused = append(refused, Refusal{Path: path, Reason: row.Why})
+			case overlay[path] == nil:
+				delete(merged, path)
 			default:
 				merged[path] = overlay[path]
 			}
@@ -268,14 +329,17 @@ func overlayDocument(document *yaml.Node, overlay map[string]any) error {
 	return nil
 }
 
-// mappingMember is the value node a mapping holds under name, nil when it holds none.
+// mappingMember is the value node a mapping holds under name, nil when it holds none. A file that
+// carries one key twice is read as readKeys reads it — the last member wins — so an overlay laid
+// over such a file changes the value the loader would have taken, not the one it discards.
 func mappingMember(mapping *yaml.Node, name string) *yaml.Node {
+	var member *yaml.Node
 	for i := 0; i+1 < len(mapping.Content); i += 2 {
 		if mapping.Content[i].Value == name {
-			return mapping.Content[i+1]
+			member = mapping.Content[i+1]
 		}
 	}
-	return nil
+	return member
 }
 
 func scalarNode(value string) *yaml.Node {
