@@ -566,7 +566,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	humanPeer := http.Header{"X-Dispatch-User": []string{"bob"}}
-	askerPeer := http.Header{"Authorization": []string{"Bearer agent-token"}, "X-Dispatch-Actor": []string{`{"kind":"session","id":"` + asker.ID + `"}`}}
+	secondHumanPeer := http.Header{"X-Dispatch-User": []string{"carol"}}
 	edit := func(t *testing.T, handler http.Handler, artifactID string, body map[string]any) {
 		t.Helper()
 		body["ops"] = []map[string]string{{"op": "replace", "find": "A spec", "with": "A revised spec"}}
@@ -592,7 +592,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		doc := &document{broker: events.NewBroker()}
 		doc.handler, doc.database = newInteractionHandler(t, func(database *store.Store) docs.API {
 			doc.documentService = docs.New(docs.Deps{
-				Store: database, Events: doc.broker, Settle: settle, AgentTokens: sharedAgentTokens(t, "agent-token"),
+				Store: database, Events: doc.broker, Settle: settle,
 				Identity: headerIdentity(database),
 			})
 			t.Cleanup(func() { _ = doc.documentService.Shutdown(context.Background()) })
@@ -698,7 +698,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			}
 		}, 1, asker, false},
 		{"two connected peers where the second types", time.Hour, func(t *testing.T, doc *document) {
-			connect(t, doc, askerPeer)
+			connect(t, doc, secondHumanPeer)
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 		}, 2, docs.SettlementActor, true},
 		{"an earlier author and the next browser editor", time.Hour, func(t *testing.T, doc *document) {
@@ -748,9 +748,6 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		{"the only connected peer types", time.Hour, func(t *testing.T, doc *document) {
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 		}, 1, bob, true},
-		{"the asking session alone types over its connection", time.Hour, func(t *testing.T, doc *document) {
-			typeNote(t, connect(t, doc, askerPeer), "A note from the asker.")
-		}, 1, asker, false},
 	} {
 		t.Run(write.name, func(t *testing.T) {
 			doc := open(t, write.settle)
@@ -806,7 +803,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 				t.Fatalf("approval events for %s: edits=%d resolved=%d, want one move and no resolution", doc.askID, edited, resolved)
 			}
 
-			deliveries := eventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+			deliveries := eventDeliveries(t, doc.database, "ask.edited", doc.askID)
 			if heard := slices.Contains(deliveries[0].Destinations, contracts.AgentSubject(asker.ID)); heard != write.askerHears {
 				t.Fatalf("the outbox published the move to %v; the asking session's topic among them = %t, want %t", deliveries[0].Destinations, heard, write.askerHears)
 			}
@@ -877,7 +874,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		}
 		typeVersion("A fourth note.", 5)
 
-		deliveries := eventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+		deliveries := eventDeliveries(t, doc.database, "ask.edited", doc.askID)
 		if len(deliveries) != 4 {
 			t.Fatalf("ask.edited events = %#v, want one move to each of versions 2 to 5", deliveries)
 		}
@@ -913,13 +910,15 @@ type eventDelivery struct {
 
 // eventDeliveries runs the outbox until it has published every eventType event whose payload's id
 // is id (an ask's, or a comment's), and returns what each one reached, oldest first.
-func eventDeliveries(t *testing.T, database *store.Store, documentService docs.API, eventType, id string) []eventDelivery {
+func eventDeliveries(t *testing.T, database *store.Store, eventType, id string) []eventDelivery {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		outbox.Run(ctx, outbox.Deps{Store: database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: documentService})
+		outbox.New(outbox.Deps{
+			Store: database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Listen: database.Pool.Listener,
+		}).Run(ctx)
 	}()
 	defer func() {
 		cancel()
@@ -956,13 +955,25 @@ func eventDeliveries(t *testing.T, database *store.Store, documentService docs.A
 }
 
 // acceptingPublisher takes every envelope the outbox publishes; the outbox records each topic on
-// its event.
+// its event. It is always connected, so its connection never changes.
 type acceptingPublisher struct{}
 
-func (p acceptingPublisher) Window() bus.Sender { return p }
+func (acceptingPublisher) Connected() bool { return true }
+
+func (acceptingPublisher) ConnectionChanged() <-chan struct{} { return nil }
+
+func (p acceptingPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
 
 func (acceptingPublisher) PublishAsync(contracts.Envelope) <-chan error {
 	accepted := make(chan error, 1)
 	accepted <- nil
 	return accepted
 }
+
+func (acceptingPublisher) Request(string, contracts.Envelope, bus.RequestOptions) <-chan error {
+	accepted := make(chan error, 1)
+	accepted <- nil
+	return accepted
+}
+
+func (acceptingPublisher) Probe(time.Duration) error { return nil }

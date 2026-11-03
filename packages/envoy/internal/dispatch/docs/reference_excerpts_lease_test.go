@@ -2,19 +2,17 @@ package docs
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// excerptLeases is the pool a reconciliation tick takes its lease on, the one cmd/dispatch gives
+// excerptLeases is the pool a reconciliation pass takes its lease on, the one cmd/dispatch gives
 // the loop.
 func excerptLeases(t *testing.T, database *store.Store) *pgxpool.Pool {
 	t.Helper()
@@ -38,12 +36,13 @@ func countExcerptLeaseLines(logs *storetest.LockedLog, message, lease string) in
 
 // Two envoy-dispatch processes reconcile one database's reference excerpts, each through
 // RunReferenceExcerptReconciliation itself and each on a pool of its own (storetest.SecondProcess,
-// as a second process has): one takes the reference-excerpts lease and runs the tick, the other
-// finds it held and skips rather than cutting the same excerpts from the same documents. The
-// first tick is held inside its own first statement by a lock this test takes on refs, which is
-// the moment the lease is about - both processes' loops ticking at once - and both runners are
-// stopped before that lock is released, so the tick runs exactly once.
-func TestTwoReconciliationRunnersRunTheTickOnceAndSkipOnce(t *testing.T) {
+// as a second process has): one takes the reference-excerpts lease and runs its pass, and the
+// other finds it held and does not run the same pass beside it. The first pass is held inside its
+// own first statement by a lock this test takes on refs, which is the moment the lease is about -
+// both processes' loops woken at once. The second keeps trying, and once the first pass is done
+// it runs a pass of its own: the first may have read before whatever woke the second, so a woken
+// loop never gives its pass up to another process's.
+func TestTwoExcerptReconciliationRunnersNeverPassAtOnceAndBothPass(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
 	second := storetest.SecondProcess(t, database)
@@ -53,17 +52,8 @@ func TestTwoReconciliationRunnersRunTheTickOnceAndSkipOnce(t *testing.T) {
 		`insert into refs (from_kind, from_id, to_kind, to_id) values ('artifact', $1, 'issue', 'CORE-1')`, document); err != nil {
 		t.Fatalf("index the document's mention: %v", err)
 	}
-	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-
-	newRunner := func(database *store.Store) *Service {
-		service := New(Deps{Store: database, Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: time.Hour})
-		t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
-		return service
-	}
-	first, other := newRunner(database), newRunner(second)
+	logs := captureLogs(t)
+	first, other := newExcerptService(t, database, nil), newExcerptService(t, second, nil)
 
 	gate, err := database.Pool.Begin(ctx)
 	if err != nil {
@@ -74,51 +64,26 @@ func TestTwoReconciliationRunnersRunTheTickOnceAndSkipOnce(t *testing.T) {
 		t.Fatalf("hold refs: %v", err)
 	}
 
-	firstCtx, stopFirst := context.WithCancel(ctx)
-	defer stopFirst()
-	firstDone := make(chan struct{})
-	go func() {
-		defer close(firstDone)
-		first.RunReferenceExcerptReconciliation(firstCtx, firstLeases)
-	}()
+	runExcerpts(t, func(ctx context.Context) { first.RunReferenceExcerptReconciliation(ctx, firstLeases, nil) })
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 30*time.Second); waiting < 1 {
-		t.Fatal("the first runner's tick never reached the refs lock: it never took the lease")
+		t.Fatal("the first runner's pass never reached the refs lock: it never took the lease")
+	}
+	runExcerpts(t, func(ctx context.Context) { other.RunReferenceExcerptReconciliation(ctx, secondLeases, nil) })
+	// The second runner's boot attempt and at least one retry find the lease held.
+	waitFor(t, 30*time.Second, "the second runner to find the lease held twice", func() bool {
+		return countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", referenceExcerptLease) >= 2
+	})
+	if ran := countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", referenceExcerptLease); ran != 0 {
+		t.Fatalf("%d passes ran while the first one was held inside its pass; want none:\n%s", ran, logs.Lines("lease="))
 	}
 
-	secondCtx, stopSecond := context.WithCancel(ctx)
-	defer stopSecond()
-	secondDone := make(chan struct{})
-	go func() {
-		defer close(secondDone)
-		other.RunReferenceExcerptReconciliation(secondCtx, secondLeases)
-	}()
-	for deadline := time.Now().Add(30 * time.Second); countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", referenceExcerptLease) == 0; {
-		if time.Now().After(deadline) {
-			t.Fatalf("the second runner never skipped the %s lease:\n%s", referenceExcerptLease, logs.Lines("lease="))
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Both runners stop while the lock still holds the first one's tick: whatever each did, it
-	// did before the gate let go, so the counts below are the two loops' one round. The first
-	// runner's tick is therefore one its own shutdown cut short, which since INFRA-66's third
-	// round reports itself as that rather than as a pass that ran - it serves no period, since
-	// it did not finish its work. What this row is about is unchanged and is counted below: one
-	// of the two loops got into the tick and the other found the lease held.
-	stopSecond()
-	<-secondDone
-	stopFirst()
-	<-firstDone
 	if err := gate.Rollback(context.Background()); err != nil {
 		t.Fatalf("release refs: %v", err)
 	}
-
-	entered := countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", referenceExcerptLease) +
-		countExcerptLeaseLines(logs, "dispatch duty: leased pass cut short by shutdown; its period is left unserved", referenceExcerptLease)
-	if entered != 1 {
-		t.Fatalf("the two runners got into the tick %d times; want once:\n%s", entered, logs.Lines("lease="))
-	}
-	if skipped := countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", referenceExcerptLease); skipped == 0 {
-		t.Fatalf("neither runner skipped:\n%s", logs.Lines("lease="))
+	waitFor(t, 30*time.Second, "both runners to run a pass of their own", func() bool {
+		return countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", referenceExcerptLease) == 2
+	})
+	if isOwed(t, database, document) {
+		t.Fatal("the document's mention is still owed after both passes")
 	}
 }

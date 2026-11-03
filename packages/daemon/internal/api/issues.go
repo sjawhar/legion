@@ -8,7 +8,9 @@ type IssueStatusRequest struct {
 	Status  string `json:"status"`
 }
 
-// IssueStatusResponse confirms Dispatch accepted the controller's synchronous status update.
+// IssueStatusResponse confirms Dispatch accepted the controller's synchronous status update and the
+// record took it (applyOwnStatusWrite): an issue the controller parks stops before the answer, not
+// when the move's event comes back through the Dispatch consumer.
 type IssueStatusResponse struct{}
 
 func (s *server) issueStatus(w http.ResponseWriter, r *http.Request) {
@@ -28,7 +30,7 @@ func (s *server) issueStatus(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusForbidden, "CONTROLLER_REQUIRED", "issue status requires a controller grant")
 		return
 	}
-	if _, ok := s.setDispatchStatus(w, r, req.Issue, req.Status); ok {
+	if written, ok := s.setDispatchStatus(w, r, req.Issue, req.Status); ok && s.applyOwnStatusWrite(w, r, written) {
 		writeJSON(w, http.StatusOK, IssueStatusResponse{})
 	}
 }

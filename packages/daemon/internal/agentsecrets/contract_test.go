@@ -24,12 +24,12 @@ import (
 )
 
 // newBrokerRig is brokertest.NewRig, failing rather than skipping on GitHub Actions when
-// BROKER_TEST_DATABASE_URL is unset: the Tests workflow's test job names its Postgres service
+// BROKER_TEST_DATABASE_URL is unset: ci.yaml's test job names its Postgres service
 // there, and a silent skip would let the contract tests stop running unnoticed.
 func newBrokerRig(t *testing.T) *brokertest.Rig {
 	t.Helper()
 	if os.Getenv("BROKER_TEST_DATABASE_URL") == "" && os.Getenv("GITHUB_ACTIONS") == "true" {
-		t.Fatal("BROKER_TEST_DATABASE_URL is unset on GitHub Actions: the Tests workflow's test job names its Postgres service")
+		t.Fatal("BROKER_TEST_DATABASE_URL is unset on GitHub Actions: ci.yaml's test job names its Postgres service")
 	}
 	return brokertest.NewRig(t)
 }
@@ -145,7 +145,7 @@ func TestContractARenewalKeepsTheCredentialAndItsPods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := c.cred.Load()
+	before := c.snapshot().cred
 	enrolled := enrollPod(t, rig, c, "pod-uid-1")
 	time.Sleep(10 * time.Millisecond)
 	// The kubelet's next token, which outlives the first, so the renewed credential expires later.
@@ -154,11 +154,11 @@ func TestContractARenewalKeepsTheCredentialAndItsPods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	after := c.cred.Load()
+	after := c.snapshot().cred
 	if after.id != before.id || after.key != before.key || !renewed.After(first) {
 		t.Fatalf("renewal moved the credential from %s to %s (same key %v), expiry %v to %v; want the same credential, later", before.id, after.id, after.key == before.key, first, renewed)
 	}
-	c.cred.Store(before)
+	c.state.Store(&loginState{cred: before})
 	if err := c.Revoke(ctx, enrolled.ID); err != nil {
 		t.Fatalf("a proof under the credential as it was before the renewal: %v", err)
 	}

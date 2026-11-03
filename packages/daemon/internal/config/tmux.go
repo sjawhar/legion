@@ -25,16 +25,19 @@ type Tmux struct {
 	// command line.
 	PaneEnv map[string]string
 	// PiConfigFiles is `runtime.tmux.pi_config_files`: Oh My Pi settings overlays every pane names
-	// in PI_CONFIG_FILES, in file order, before the turn-scoping overlay the runtime writes, so the
-	// later of them outranks the earlier and the turn-scoping overlay's two keys outrank them all. A
-	// relative path is resolved against the file's directory.
+	// in PI_CONFIG_FILES, in file order and before the pane's own role overlays
+	// (`role_config_files`), so the later of them outranks the earlier; Legion names no overlay of
+	// its own, so these and the role's own are the whole of the list. A relative path is resolved
+	// against the file's directory.
 	PiConfigFiles []string
 	// TakeOver is `runtime.tmux.take_over`: the runtime whose claims this daemon takes over from
 	// the project's store, "" for none, and TakeOverKubernetes the one value accepted. With it, a
 	// claim whose recorded process a daemon running the project under that runtime left in the
-	// store (a Sandbox role process) is relaunched in a pane, charged nothing, starting a fresh
-	// agent when its session file is found nowhere on this host; without it, the tmux runtime
-	// refuses such a claim, and boot fails naming it and this key. The operator stops every process
+	// store (a Sandbox role process) is relaunched in a pane, charged nothing; and while the key
+	// is set, every claim whose session file is found nowhere on this host starts a fresh agent,
+	// this host's own claims among them, since nothing tells the two apart. Without it, the tmux
+	// runtime refuses such a claim, and boot fails naming it and this key, and a missing session
+	// is a refusal again. The operator stops every process
 	// of the other runtime first: nothing else keeps two daemons from driving one store.
 	TakeOver string
 }

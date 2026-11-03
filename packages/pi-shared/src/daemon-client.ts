@@ -13,6 +13,7 @@ import {
   LegionIssueStatusRequest,
   LegionPhaseBackwardRequest,
   LegionPhaseRetryRequest,
+  type LegionReadyForUpdateRequest,
   type LegionReadyRequest,
   LegionRegisterResponse,
   type LegionRegistration,
@@ -52,6 +53,13 @@ export interface RegisterInput {
  * controller's ready carries none. */
 export type ReadyInput = z.input<typeof LegionReadyRequest>;
 
+/** `claim.ReadyForUpdateRequest`: the worker's answer to its pod's update task, saying it has
+ * pushed everything it wants kept and the process holding this claim may be replaced. `round` is
+ * the round the update task named, which the daemon takes the answer for and no other. `head` is
+ * the commit it reports as the head of `legion/<issue>@origin`, left out when the branch is not
+ * there. */
+export type ReadyForUpdateInput = z.input<typeof LegionReadyForUpdateRequest>;
+
 /** `claim.ExitRequest`: the agent reporting its own end, and why. */
 export interface ExitInput {
   readonly claimToken: string;
@@ -62,12 +70,16 @@ export interface ExitInput {
 }
 
 export interface LegionDaemonClient {
-  readonly state: () => Promise<LegionState>;
+  /** The daemon's whole state. `signal` aborts the request, its answer's body included: a caller
+   * that stops waiting for a daemon that does not answer (the phase reminder's bounded record
+   * check) aborts it rather than leave it open. */
+  readonly state: (options?: { readonly signal?: AbortSignal }) => Promise<LegionState>;
   readonly register: (input: RegisterInput) => Promise<LegionRegistration>;
   /** The same route, for the operator-launched controller: `bootToken` is the capability `legion
    * controller start` fetched, and the answer is the controller's registration. */
   readonly registerController: (input: RegisterInput) => Promise<LegionControllerRegistration>;
   readonly ready: (input: ReadyInput) => Promise<void>;
+  readonly readyForUpdate: (input: ReadyForUpdateInput) => Promise<void>;
   readonly exit: (input: ExitInput) => Promise<void>;
   readonly grant: (
     input: z.input<typeof LegionGrantRequest>
@@ -337,18 +349,19 @@ export function createLegionDaemonClient(
   const call = async (
     method: "GET" | "POST",
     path: string,
-    body?: object
+    body?: object,
+    signal?: AbortSignal
   ): Promise<{ readonly status: number; readonly text: string }> => {
-    const response = await fetchFn(
-      `${endpoint}${path}`,
-      body === undefined
-        ? undefined
+    const response = await fetchFn(`${endpoint}${path}`, {
+      ...(body === undefined
+        ? {}
         : {
             method,
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
-          }
-    );
+          }),
+      ...(signal === undefined ? {} : { signal }),
+    });
     const text = await response.text();
     if (response.ok) return { status: response.status, text };
     const refusal = parseStrictly(LegionErrorResponse, text);
@@ -372,9 +385,10 @@ export function createLegionDaemonClient(
     method: "GET" | "POST",
     path: string,
     schema: z.ZodType<T>,
-    body?: object
+    body?: object,
+    signal?: AbortSignal
   ): Promise<T> => {
-    const { status, text } = await call(method, path, body);
+    const { status, text } = await call(method, path, body, signal);
     const parsed = parseStrictly(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
@@ -404,11 +418,13 @@ export function createLegionDaemonClient(
   };
 
   return {
-    state: () => read("GET", "/legion/v1/state", LegionStateResponse),
+    state: (options) =>
+      read("GET", "/legion/v1/state", LegionStateResponse, undefined, options?.signal),
     register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) =>
       read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
+    readyForUpdate: (input) => acknowledge("/legion/v1/claims/ready-for-update", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
     grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) =>

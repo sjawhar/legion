@@ -232,7 +232,8 @@ func TestSnapshotIsNotBlockedByTheOwnerLock(t *testing.T) {
 }
 
 // The live-document path is the same cycle with the worst loser. A browser edit reaches
-// AppendUpdateWithCredit through websocket.go, which takes the room lock on its own connection
+// AppendRoomFlush through websocket.go - and AppendUpdateWithCredit, the append this exercises,
+// when its room recorded no class for it - which takes the room lock on its own connection
 // and then the artifact row through doc_updates' foreign key; when the owner lock was
 // `for update` and an event append held it, Postgres killed one of them, and on this path the
 // loser is failRoom - it evicts the room and drops the in-flight update rather than returning

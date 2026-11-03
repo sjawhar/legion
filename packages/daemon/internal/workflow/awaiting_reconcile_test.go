@@ -262,17 +262,16 @@ func TestTheResumeTaskNamesEveryItemStillWithThePerson(t *testing.T) {
 // A root waiting on a person gets no design-approved notice, so the architect's instructions must
 // take the resume task that says the gate is open as that wake: the skill's release rule, the
 // design gate reference, the wake routing table and the root architect's prompt each name the
-// resume's phrase, and so do the claude-envoy plugin's generated copies of the skill. (Round 2,
-// adversarial P2-1 and outside-whole P2-1.)
+// resume's phrase. The claude-envoy plugin's copies under packages/claude-envoy/legion/ are
+// generated from these three skill files on main by the Rebuild Claude Envoy plugin workflow, so a
+// pull request's tree holds main's copies and they are not read here. (Round 2, adversarial P2-1
+// and outside-whole P2-1.)
 func TestTheArchitectsInstructionsTakeTheResumeAsTheDesignApprovedWake(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "..")
 	for _, file := range []string{
 		"skills/legion-architect/SKILL.md",
 		"skills/legion-architect/references/design-gate.md",
 		"skills/legion-architect/references/wake-routing.md",
-		"packages/claude-envoy/legion/skills/legion-architect/SKILL.md",
-		"packages/claude-envoy/legion/skills/legion-architect/references/design-gate.md",
-		"packages/claude-envoy/legion/skills/legion-architect/references/wake-routing.md",
 		"packages/daemon/internal/prompts/roles/architect-root.md",
 	} {
 		body, err := os.ReadFile(filepath.Join(root, file))

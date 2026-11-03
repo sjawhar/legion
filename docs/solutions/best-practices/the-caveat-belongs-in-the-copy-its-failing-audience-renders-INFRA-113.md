@@ -7,7 +7,7 @@ tags:
   - tool-contracts
   - review
 date: 2026-10-22
-status: active
+status: superseded in part by sjawhar/legion#2423 — correcting a tool description no longer carries a bundle rebuild in the pull request, since main's Rebuild Claude Envoy plugin workflow commits the bundle after each merge; enumerating every copy and placing the caveat in the copy its failing audience renders stand
 module: envoy
 related_issues:
   - "INFRA-113"

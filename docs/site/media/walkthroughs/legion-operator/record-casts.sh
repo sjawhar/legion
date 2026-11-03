@@ -2,7 +2,7 @@
 # Records the Legion section's two terminal casts, `state.cast` and `controller.cast` beside this
 # file, which the `legion-state` and `legion-controller` walkthroughs render. Both come from one
 # local Go daemon in the shape scripts/e2e/controller-start-tmux.sh builds: this checkout's `legion`
-# on a scratch postgres:16, a NATS server and an Envoy listener of its own, and this checkout's two
+# on a scratch PostgreSQL 18, a NATS server and an Envoy listener of its own, and this checkout's two
 # plugins in an Oh My Pi profile under the run's own HOME. Every name on screen is example data: the
 # project is SHOP, its one running claim is the architect of SHOP-2, and the model the agents are
 # configured with is an example provider served by a local listener that accepts each request and
@@ -21,7 +21,35 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_
 check=setup
 note() { echo "   $*"; }
 fail() { echo "FAIL $check: $*" >&2; exit 1; }
-for tool in go docker jq curl tmux bun mise jj asciinema; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl python3 tmux bun mise jj asciinema; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+# The real gh `legion controller start` hands its `legion gh` wrapper, resolved as the controller
+# resolves it (controllerRealGH): LEGION_GH_PATH when set, else the first gh on PATH, which must not
+# be a script. The operator's shell below starts from `env -i`, so it names it.
+real_gh() {
+  local dir gh first
+  if [ -n "${LEGION_GH_PATH:-}" ]; then
+    [[ $LEGION_GH_PATH == /* ]] || fail "LEGION_GH_PATH $LEGION_GH_PATH is not an absolute path"
+    if [ ! -f "$LEGION_GH_PATH" ] || [ ! -x "$LEGION_GH_PATH" ]; then
+      fail "LEGION_GH_PATH $LEGION_GH_PATH is not an executable file"
+    fi
+    printf '%s\n' "$LEGION_GH_PATH"
+    return
+  fi
+  local IFS=:
+  for dir in $PATH; do
+    [[ $dir == /* ]] || continue
+    gh=$dir/gh
+    if [ ! -f "$gh" ] || [ ! -x "$gh" ]; then continue; fi
+    first=
+    IFS= read -r -n 2 first <"$gh" || true
+    [ "$first" != '#!' ] ||
+      fail "the first gh on PATH, $gh, is a script, not the real gh, which legion controller start refuses: set LEGION_GH_PATH to the real gh's install path (mise which gh)"
+    printf '%s\n' "$gh"
+    return
+  done
+  fail "gh is not on PATH: legion controller start's gh wrapper runs it; install gh or set LEGION_GH_PATH"
+}
+legion_gh_path=$(real_gh)
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../../../.." && pwd)
@@ -38,6 +66,7 @@ timeout_hook=
 pg_container=legion-docs-casts-pg-$$
 nats_container=legion-docs-casts-nats-$$
 daemon_pid=
+daemon_keeper_pid=
 listener_pid=
 model_pid=
 daemon_port=
@@ -56,6 +85,7 @@ cleanup() {
   TMUX_TMPDIR=$work/tmux tmux -L legion-shop kill-server >/dev/null 2>&1
   stop_pid "$listener_pid"
   stop_pid "$model_pid"
+  stop_pid "$daemon_keeper_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1
   rm -rf "$work"
@@ -82,13 +112,15 @@ printf '#!/bin/sh\nexec %q "$@"\n' "$(mise where "$pin")/bin/omp" >"$work/bin/om
 chmod +x "$work/bin/omp"
 (cd "$root/packages/daemon" && nice -n 19 go build -o "$work/bin/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && nice -n 19 go build -o "$work/envoy-listener" ./cmd/listener)
-pick_port daemon_port
-pick_port envoy_port
-pick_port model_port
+# Every port is one the kernel chose, held from that choice until its process serves on it
+# (lib/rig.sh): the daemon's by a keeper, so legion.yaml and controller.yaml can name it before the
+# daemon starts; the listener's by the helper that becomes the listener; and the model stub binds
+# port 0 itself and prints the port it got.
+keep_port daemon_keeper daemon_port
 
 check=services
-docker run -d --name "$pg_container" --cpus 0.5 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
-  -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16 >/dev/null
+docker run -d --name "$pg_container" --cpus 0.5 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
+  -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4 >/dev/null
 pg_port=$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')
 until_true 60 "Postgres" docker exec "$pg_container" pg_isready -h 127.0.0.1 -U legion -d legion
 docker run -d --name "$nats_container" --cpus 0.5 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
@@ -96,15 +128,14 @@ until_true 90 "NATS" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server
 nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | sed 's/.*://')"
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$operator/envoy-token")
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$operator/operator-token")
-ENVOY_API_TOKEN="$(cat "$operator/envoy-token")" PORT=$envoy_port ENVOY_LISTEN_HOST=127.0.0.1 \
-  ENVOY_MACHINE_ID=example-host-legion NATS_URLS=$nats_url "$work/envoy-listener" >"$evidence/logs/listener.log" 2>&1 &
-listener_pid=$!
+ENVOY_API_TOKEN="$(cat "$operator/envoy-token")" ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID=example-host-legion NATS_URLS=$nats_url \
+  start_held listener envoy_port ENVOY_LISTEN_FD --env 'PORT={port}' -- "$work/envoy-listener"
 until_true 60 "the Envoy listener" curl -fsS -H "Authorization: Bearer $(cat "$operator/envoy-token")" "http://127.0.0.1:$envoy_port/v1/sessions"
 # The agents' model: accepts every request and never answers.
-bun -e "Bun.serve({ hostname: '127.0.0.1', port: $model_port, idleTimeout: 0, fetch: () => new Promise(() => {}) })" \
-  >"$evidence/logs/model.log" 2>&1 &
-model_pid=$!
-until_true 30 "the example model listener" bash -c "exec 3<>/dev/tcp/127.0.0.1/$model_port"
+start_process model bun -e \
+  "const s = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 0, fetch: () => new Promise(() => {}) }); console.log('model listening port=' + s.port)"
+await_start model "$model_pid" 30 "the example model listener to report its port" report_port "$evidence/logs/model.log" 'model listening port='
+model_port=$(report_port "$evidence/logs/model.log" 'model listening port=')
 
 check=plugin
 (cd "$root" && nice -n 19 bun install --frozen-lockfile >/dev/null)
@@ -164,21 +195,27 @@ nats_urls: [$nats_url]
 state_dir: ./controller-state
 EOF
 
-# The operator's shell: this checkout's `legion` first on PATH, the run's HOME and profile, and
-# none of the running session's own Oh My Pi or Envoy variables.
+# The operator's shell: this checkout's `legion` first on PATH, the run's HOME and profile, the real
+# gh `legion controller start` runs (real_gh), and none of the running session's own Oh My Pi or
+# Envoy variables.
 shell_env=(env -i "PATH=$work/bin:$PATH" "HOME=$omp_home" "OMP_PROFILE=$profile" "TERM=xterm-256color"
   "LANG=C.UTF-8" "XDG_STATE_HOME=$work/xdg" "TMUX_TMPDIR=$work/tmux" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
-  "MISE_DATA_DIR=$MISE_DATA_DIR" "JJ_CONFIG=$JJ_CONFIG" "LEGION_OMP_PATH=$work/bin/omp")
+  "MISE_DATA_DIR=$MISE_DATA_DIR" "JJ_CONFIG=$JJ_CONFIG" "LEGION_OMP_PATH=$work/bin/omp"
+  "LEGION_GH_PATH=$legion_gh_path")
 legion() { (cd "$operator" && "${shell_env[@]}" "$work/bin/legion" "$@"); }
 
 check=daemon
-(cd "$operator" && exec "${shell_env[@]}" "$work/bin/legion" start --config legion.yaml >>"$evidence/logs/daemon.log" 2>&1) &
-daemon_pid=$!
+# The daemon runs in the operator's directory ($operator), whose legion.yaml names its files
+# relative to it, on a copy of the socket its keeper holds. `env -i` clears the descriptor's
+# variable the helper sets, so the daemon's environment names its own: the helper hands the socket
+# over as descriptor 3.
+start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
+  env -C "$operator" "${shell_env[@]}" LEGION_LISTEN_FD=3 "$work/bin/legion" start --config legion.yaml
 # until_true silences its command, so a daemon that exited says why on the script's own stderr.
 exec 3>&2
 daemon_up() {
   kill -0 "$daemon_pid" 2>/dev/null || fail "the daemon exited: $(tail -3 "$evidence/logs/daemon.log")" 2>&3
-  curl -fs "http://127.0.0.1:$daemon_port/healthz"
+  curl -fs --max-time 5 "http://127.0.0.1:$daemon_port/healthz"
 }
 until_true 180 "the daemon to answer /healthz" daemon_up
 

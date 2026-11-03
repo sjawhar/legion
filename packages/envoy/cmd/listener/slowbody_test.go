@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,7 +27,7 @@ type slowBodyPublisher struct {
 	published []contracts.Envelope
 }
 
-func (p *slowBodyPublisher) Publish(e contracts.Envelope) error {
+func (p *slowBodyPublisher) PublishWithin(_ context.Context, e contracts.Envelope) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.published = append(p.published, e)
@@ -35,8 +36,8 @@ func (p *slowBodyPublisher) Publish(e contracts.Envelope) error {
 
 type noCI struct{}
 
-func (noCI) Record(contracts.CIObservation) error      { return nil }
-func (noCI) RecordSuite(contracts.CIObservation) error { return nil }
+func (noCI) Record(context.Context, contracts.CIObservation) error      { return nil }
+func (noCI) RecordSuite(context.Context, contracts.CIObservation) error { return nil }
 
 // serveWebhook serves handler at path the way main does: the outer mux sends the path to an open
 // webhook startingGate, whose mux holds the handler, all on the listener's own HTTP server

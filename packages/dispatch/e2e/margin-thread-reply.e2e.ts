@@ -3,7 +3,13 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { createComment, createIssue, createProject, resolveComment } from "./api";
 import { documentEditor, marginCard, openedThreadCard, openSpec, setSheet } from "./editor";
 import { resetDatabase } from "./seed";
-import { answeredPost, navigateInApp, refusePosts } from "./sends";
+import {
+  answeredPost,
+  navigateInApp,
+  refusePosts,
+  WRITE_REFUSED,
+  WRITE_REFUSED_TEXT,
+} from "./sends";
 import { asUser } from "./users";
 
 // A margin thread's own reply holds its draft until the server answers, like every composer.
@@ -12,7 +18,7 @@ import { asUser } from "./users";
 // the Pinned tab, the margin's rail, another page - and expect the draft and the refusal back in
 // the thread the reply was sent from.
 const spec = "The quick brown fox";
-const refused = "Couldn't send — the server is down";
+const refused = WRITE_REFUSED_TEXT;
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -35,7 +41,7 @@ async function seed(title: string) {
 
 /** The refusal `refusePosts` hands the reply, once the page has it. */
 function refusal(page: Page, issueKey: string) {
-  return answeredPost(page, `/api/v1/issues/${issueKey}/comments`, 503);
+  return answeredPost(page, `/api/v1/issues/${issueKey}/comments`, WRITE_REFUSED.status);
 }
 
 /** On a phone the Thread dialog's Back waits for the reply until the send's deadline; past it,
@@ -68,7 +74,7 @@ async function sendReply(card: Locator, body: string): Promise<{ field: Locator;
   return { field, form };
 }
 
-test("a margin thread someone else resolves while its reply is out keeps the reply's draft and refusal", async ({
+test("a margin thread someone else resolves while its reply is out keeps the reply's draft and refusal @phone", async ({
   browser,
 }, testInfo) => {
   const { comments, first, issueKey } = await seed("Resolved under a margin reply");
@@ -97,7 +103,7 @@ test("a margin thread someone else resolves while its reply is out keeps the rep
 // The margin expands one thread at a time, so opening another collapses this one: its card keeps
 // the reply composer, hidden, for the return. On a phone the thread fills the screen, and its Back
 // and Escape wait for the reply instead.
-test("leaving a margin thread while its reply is out keeps the reply's draft and refusal for the return", async ({
+test("leaving a margin thread while its reply is out keeps the reply's draft and refusal for the return @phone", async ({
   browser,
 }, testInfo) => {
   const { comments, first, issueKey, second } = await seed("Left under a margin reply");
@@ -135,7 +141,7 @@ test("leaving a margin thread while its reply is out keeps the reply's draft and
 
 // The reader's own Resolve moves a thread to the resolved ones, but not while its reply is out:
 // the thread stays, with the reply's draft and its refusal, until the reader drops the reply.
-test("the reader's own Resolve while a margin reply is out keeps the reply's draft and refusal", async ({
+test("the reader's own Resolve while a margin reply is out keeps the reply's draft and refusal @phone", async ({
   browser,
 }, testInfo) => {
   const { comments, first, issueKey, second } = await seed("Own resolve under a margin reply");
@@ -172,7 +178,7 @@ test("the reader's own Resolve while a margin reply is out keeps the reply's dra
 // The Pinned tab takes the Comments tab's place, its threads' cards with it; the reply is the
 // margin's, so the thread finds it again. On a phone the thread fills the screen and Back waits for
 // the reply, so the Pinned tab is reachable only once Back lets go at the send's deadline.
-test("the Pinned tab while a margin thread's reply is out keeps the reply's draft and refusal", async ({
+test("the Pinned tab while a margin thread's reply is out keeps the reply's draft and refusal @phone", async ({
   browser,
 }, testInfo) => {
   const { comments, first, issueKey } = await seed("Pinned under a margin reply");
@@ -215,8 +221,7 @@ test("the Pinned tab while a margin thread's reply is out keeps the reply's draf
 // them; the reply is the margin's, so the thread finds it again when the margin comes back.
 test("collapsing the margin to its rail while a thread's reply is out keeps the reply's draft and refusal", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+}) => {
   const { comments, first, issueKey } = await seed("Rail under a margin reply");
   const alice = await asUser(browser, "alice");
 
@@ -224,7 +229,9 @@ test("collapsing the margin to its rail while a thread's reply is out keeps the 
     const page = await alice.newPage();
     await page.setViewportSize({ height: 900, width: 1440 });
     await openSpec(page, issueKey, spec);
-    const card = await openThread(page, testInfo.project.name, first.id);
+    // The test sets a desktop viewport itself, so the margin is the desktop margin, not the sheet,
+    // on any project.
+    const card = await openThread(page, "chromium", first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply under the rail");
 
@@ -248,7 +255,7 @@ test("collapsing the margin to its rail while a thread's reply is out keeps the 
 // Leaving the document takes its margin's cards with it; the reply is the margin's, and it holds
 // the send while the reader is away, so the thread they come back to has the draft, the refusal
 // and a Retry that still answers the thread.
-test("leaving the document while a margin thread's reply is out keeps the reply's draft and refusal for the return", async ({
+test("leaving the document while a margin thread's reply is out keeps the reply's draft and refusal for the return @phone", async ({
   browser,
 }, testInfo) => {
   const { comments, first, issueKey } = await seed("Left under a margin reply");
@@ -296,8 +303,7 @@ test("leaving the document while a margin thread's reply is out keeps the reply'
 // expands a thread from the keyboard to type into it.
 test("a margin thread expanded a second time from the keyboard has its reply field focused", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "a phone opens a thread in its Thread dialog");
+}) => {
   const { first, issueKey } = await seed("Reopened from the keyboard");
   const alice = await asUser(browser, "alice");
 

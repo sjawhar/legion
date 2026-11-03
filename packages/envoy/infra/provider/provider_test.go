@@ -53,6 +53,7 @@ type schema struct {
 		InputProperties map[string]property `json:"inputProperties"`
 		RequiredInputs  []string            `json:"requiredInputs"`
 		Properties      map[string]property `json:"properties"`
+		Required        []string            `json:"required"`
 	} `json:"resources"`
 	Types map[string]struct {
 		Properties map[string]property `json:"properties"`
@@ -81,6 +82,7 @@ func TestSchemaTypes(t *testing.T) {
 		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
 		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:nats:Rules",
 		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions", "envoy-infra:gcp:HubListener", "envoy-infra:gcp:SessionUser",
+		"envoy-infra:gcp:ClusteredHubTailnet", "envoy-infra:gcp:ClusteredHubListener",
 	}, slices.Collect(maps.Keys(servedSchema(t).Types)))
 }
 
@@ -130,6 +132,7 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.Contains(t, user.Properties, "nkey")
 	require.NotContains(t, user.Properties, "publicKey")
 	require.Contains(t, user.Properties, "dispatchMachineId")
+	require.Contains(t, user.Properties, "listenerMachineId")
 	require.Equal(t, "boolean", user.Properties["daemon"].Type)
 	for _, direction := range []string{"publish", "subscribe"} {
 		require.Equal(t, "#/types/envoy-infra:nats:Rules",
@@ -137,6 +140,55 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	}
 	// core refuses an empty allow, so the schema requires it, and a generated SDK says so.
 	require.ElementsMatch(t, []string{"allow"}, s.Types["envoy-infra:nats:Rules"].Required)
+}
+
+func TestSchemaServesTheClusteredNatsHubComponent(t *testing.T) {
+	s := servedSchema(t)
+	hub, ok := s.Resources["envoy-infra:gcp:ClusteredNatsHub"]
+	require.True(t, ok, "the schema lists envoy-infra:gcp:ClusteredNatsHub")
+	require.True(t, hub.IsComponent)
+	require.ElementsMatch(t, []string{
+		"kubeconfig", "namespace", "name", "serviceName", "natsImage", "reloaderImage", "exporterImage",
+		"natsReplicas", "streamMaxBytes", "maxFileStoreGb", "diskSizeGb", "storageClassName", "natsCpu", "natsMemory",
+		"priorityClassName", "clientNamespaces", "monitorNamespaces", "metricsNamespaces", "users", "sessionUser",
+		"tailnet", "tailnetAuthKey",
+	}, slices.Collect(maps.Keys(hub.InputProperties)))
+	require.ElementsMatch(t, []string{
+		"kubeconfig", "namespace", "name", "serviceName", "natsImage", "reloaderImage", "exporterImage", "clientNamespaces",
+	}, hub.RequiredInputs)
+	for name, in := range hub.InputProperties {
+		require.Equal(t, name == "kubeconfig" || name == "tailnetAuthKey", in.Secret, "only kubeconfig and tailnetAuthKey are secret inputs, not %s", name)
+	}
+	for _, input := range []string{"natsReplicas", "streamMaxBytes", "maxFileStoreGb", "diskSizeGb"} {
+		require.Equal(t, "integer", hub.InputProperties[input].Type, input)
+	}
+	require.Equal(t, "#/types/envoy-infra:gcp:NatsUser", hub.InputProperties["users"].Items.Ref)
+	require.Equal(t, "#/types/envoy-infra:gcp:SessionUser", hub.InputProperties["sessionUser"].Ref)
+	// Generated SDKs append Args to an object type's name for its input type, so the Go names
+	// ClusteredHubTailnetArgs and ClusteredHubListenerArgs would reach consumers doubled.
+	require.Equal(t, "#/types/envoy-infra:gcp:ClusteredHubTailnet", hub.InputProperties["tailnet"].Ref)
+	tailnet := s.Types["envoy-infra:gcp:ClusteredHubTailnet"]
+	require.Equal(t, "#/types/envoy-infra:gcp:ClusteredHubListener", tailnet.Properties["listener"].Ref)
+	require.ElementsMatch(t, []string{"serviceName", "tailnetDnsName", "tags", "replicas", "tailscaleImage", "listener"},
+		slices.Collect(maps.Keys(tailnet.Properties)))
+	require.ElementsMatch(t, []string{"serviceName", "tailnetDnsName", "tags", "tailscaleImage", "listener"}, tailnet.Required)
+	require.Equal(t, "integer", tailnet.Properties["replicas"].Type)
+	listener := s.Types["envoy-infra:gcp:ClusteredHubListener"]
+	require.ElementsMatch(t, []string{"image", "machineId", "nkey", "seedSecretName", "seedSecretKey", "allowedHosts", "cpu", "memory"},
+		slices.Collect(maps.Keys(listener.Properties)))
+	require.ElementsMatch(t, []string{"image", "nkey", "seedSecretName", "seedSecretKey"}, listener.Required)
+
+	require.ElementsMatch(t, []string{"serviceUrl", "podSelector", "statefulSetName", "tailnetNatsUrl", "tailnetEnvoyUrl"},
+		slices.Collect(maps.Keys(hub.Properties)))
+	for name, out := range hub.Properties {
+		require.False(t, out.Secret, "%s is no secret", name)
+	}
+	require.Equal(t, "object", hub.Properties["podSelector"].Type)
+	require.Equal(t, "string", hub.Properties["tailnetNatsUrl"].Type)
+	// The tailnet URLs are null without tailnet, yet listed required: pulumi-go-provider keys a
+	// component's outputs by the whole pulumi tag, so an output takes no optional tag.
+	require.ElementsMatch(t, []string{"serviceUrl", "podSelector", "statefulSetName", "tailnetNatsUrl", "tailnetEnvoyUrl"},
+		hub.Required)
 }
 
 func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
@@ -168,19 +220,39 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.Equal(t, "integer", dispatch.InputProperties["pprofPort"].Type)
 	require.False(t, dispatch.InputProperties["pprofPort"].Secret)
 	require.NotContains(t, dispatch.RequiredInputs, "pprofPort")
-	// The app container's size is two optional plain strings, Kubernetes quantities.
-	for _, input := range []string{"appCpu", "appMemory"} {
+	// The app pod's container sizes, envoy-dispatch's and cloud-sql-proxy's, are six optional
+	// plain strings, Kubernetes quantities.
+	for _, input := range []string{"appCpu", "appMemory", "proxyCpu", "proxyMemory", "appEphemeralStorage", "proxyEphemeralStorage"} {
 		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
-	// The app pod's disruption protection is an optional plain string and an optional plain integer.
-	for input, typ := range map[string]string{"appPriorityClassName": "string", "appPdbMinAvailable": "integer"} {
+	// The pods' disruption protection, the front door's and the listener's replica counts, the
+	// database's availability and the image cert-publish runs on are optional plain strings and
+	// integers. Every input that configures Dispatch is optional in the schema: a generated Go
+	// SDK's constructor refuses a nil required input, so a cluster-only consumer could not call
+	// the component at all while one stayed required, and the resolver is what requires it with
+	// clusterOnly off.
+	for input, typ := range map[string]string{
+		"priorityClassName": "string", "appPdbMinAvailable": "integer",
+		"frontDoorPdbMinAvailable": "integer", "listenerPdbMinAvailable": "integer",
+		"frontDoorReplicas": "integer", "listenerReplicas": "integer",
+		"databaseAvailabilityType": "string", "frontDoorToolsImage": "string",
+	} {
 		require.Equal(t, typ, dispatch.InputProperties[input].Type, input)
 		require.True(t, dispatch.InputProperties[input].Plain, input)
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
+	// clusterOnly, which builds the cluster alone, is an optional plain boolean: it decides which
+	// resources register, so it is never another resource's output, and a stack that sets nothing
+	// sends no property at all, leaving an applied stack's inputs where they are.
+	require.Equal(t, "boolean", dispatch.InputProperties["clusterOnly"].Type)
+	require.True(t, dispatch.InputProperties["clusterOnly"].Plain)
+	require.False(t, dispatch.InputProperties["clusterOnly"].Secret)
+	// region and hostname, which name every cloud resource, are the only inputs the schema
+	// requires: every other input configures Dispatch itself, which clusterOnly does not build.
+	require.ElementsMatch(t, []string{"region", "hostname"}, dispatch.RequiredInputs)
 	require.True(t, dispatch.Properties["agentToken"].Secret)
 	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
 		require.Equal(t, "string", dispatch.Properties[output].Type, output)
@@ -271,6 +343,7 @@ func TestConstructRefusesAFractionInEveryIntegerInput(t *testing.T) {
 	}
 	// aws:NatsService logRetentionDays; aws:WebhookListener logRetentionDays and natsReplicas;
 	// gcp:Dispatch replicas, pprofPort and azureEmbedTokensPerMinute; gcp:NatsHub diskSizeGb;
-	// host:Listener port.
-	require.GreaterOrEqual(t, covered, 8)
+	// gcp:ClusteredNatsHub natsReplicas, streamMaxBytes, maxFileStoreGb and diskSizeGb; host:Listener
+	// port.
+	require.GreaterOrEqual(t, covered, 12)
 }

@@ -2,6 +2,7 @@ export type {
   Actor,
   ActorOrigin,
   Agent,
+  AgentLiveView,
   AgentToken,
   Anchor,
   AnchorInput,
@@ -46,6 +47,7 @@ export type {
   BlockAttributeKind,
   BlockAttributeSchema,
   BlockContentRule,
+  BlockPin,
   BlockSchema,
   BlockTypeSchema,
   Broadcast,
@@ -73,6 +75,9 @@ export type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  Decision,
+  DecisionKeep,
+  DecisionLink,
   DeliveryCapability,
   DeliveryColorFacet,
   DeliveryComponent,
@@ -89,18 +94,15 @@ export type {
   DeliveryLeadTimeDay,
   DeliveryLeadTimeTiming,
   DeliveryLiveBody,
-  DeliveryLiveClientFrame,
   DeliveryLiveCounts,
   DeliveryLiveDelta,
-  DeliveryLiveError,
   DeliveryLiveFreshness,
   DeliveryLiveList,
   DeliveryLiveMap,
+  DeliveryLiveResume,
   DeliveryLiveRevChanges,
   DeliveryLiveRevs,
-  DeliveryLiveServerFrame,
   DeliveryLiveSnapshot,
-  DeliveryLiveSubscribe,
   DeliveryLiveView,
   DeliveryLiveWindow,
   DeliveryMeasures,
@@ -126,15 +128,21 @@ export type {
   DispatchEvent,
   DispatchUser,
   DocEditOp,
+  DocumentRead,
+  DocumentReferenceSummary,
   DuplicateCandidate,
   EditAskInput,
   EditCommentInput,
   EditOp,
   Event,
+  EventsLiveResume,
+  EventsLiveView,
   EventType,
   ExternalLink,
   GraphEdge,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   InboxDocument,
   InboxRow,
   Issue,
@@ -145,15 +153,31 @@ export type {
   IssueClaimEventPayload,
   IssueComponents,
   IssueComponentsInput,
+  IssueDecisions,
   IssueDetails,
   IssuePriority,
   IssueProgress,
   IssueRankInput,
   IssueRead,
+  IssueReferenceSummary,
+  IssueReferenceSummaryDocument,
   IssueReferences,
   IssueRouteReach,
   IssueSummary,
+  ItemBlock,
+  ItemBlocks,
   ListUsersResponse,
+  LiveAgentFrame,
+  LiveClientFrame,
+  LiveEnded,
+  LiveError,
+  LiveEventFrame,
+  LiveEventsStart,
+  LiveHeartbeat,
+  LiveServerFrame,
+  LiveSubscribe,
+  LiveUnsubscribe,
+  LiveView,
   Message,
   MessageDelivery,
   MessageDeliveryEventPayload,
@@ -171,6 +195,7 @@ export type {
   ProjectDefaultAssigneeInput,
   RepoProject,
   SearchArtifactRef,
+  SearchAsk,
   SearchOwner,
   SearchResponse,
   SearchResult,
@@ -179,6 +204,7 @@ export type {
   Subscriber,
   SubscriptionRemovedEventPayload,
   Suggestion,
+  Suggestions,
   TargetCandidate,
   UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
@@ -188,6 +214,7 @@ export type {
   UserIssueState,
   UserState,
   Version,
+  WriteSuggestion,
 } from "@legion/contracts";
 
 // Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (its UI routes, in the
@@ -220,6 +247,10 @@ export interface CredentialPendingRow {
   identifiers: string[]; // secret rule keys, or [hostname] for a launcher_credential
   requested_at: string; // RFC3339
   session?: CredentialSession;
+  /** An `agent_secret` row's page on the secrets broker, where a person signed in to the broker
+   *  decides it (`<BROKER_PUBLIC_URL>/approve/<record>`). Absent on a machine login's row, and on
+   *  every row from a broker older than that page. */
+  approve_url?: string;
 }
 export interface CredentialPendingResponse {
   pending: CredentialPendingRow[];
@@ -259,14 +290,13 @@ export interface CredentialRecord {
 
 export interface CredentialApproval {
   state: "approved";
-  grant_id: string | null;
   credential_id: string | null;
 }
 export interface CredentialDenial {
   state: "denied";
 }
-/** What approve and deny answer, relayed verbatim from the broker: an approval names the grant or
- *  the launcher credential it made, and a denial is `{state: "denied"}` alone. */
+/** What a machine login's approve and deny answer, relayed verbatim from the broker: an approval
+ *  names the launcher credential it made, and a denial is `{state: "denied"}` alone. */
 export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
 
 interface CredentialGrantFields {

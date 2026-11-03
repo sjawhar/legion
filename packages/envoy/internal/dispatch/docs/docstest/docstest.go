@@ -1,13 +1,15 @@
-// Package docstest speaks the Hocuspocus websocket sync that docs.Service.ServeHTTP serves, and
-// writes the deep trees a crafted client sends, for Dispatch tests in more than one package. It is
-// an ordinary package rather than a _test.go file because api, docs and pmdoc cannot import one
-// another's test helpers, and it imports none of them.
+// Package docstest speaks the Hocuspocus websocket sync that docs.Service.ServeHTTP serves,
+// writes the deep trees a crafted client sends, and builds the load harness's spec, for Dispatch
+// tests in more than one package. It is an ordinary package rather than a _test.go file because
+// api, docs and pmdoc cannot import one another's test helpers, and it imports none of them.
 package docstest
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"testing"
@@ -17,6 +19,8 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs/crafted"
 )
 
 // Peer is a writable connection to a document's room that behaves as a browser's provider does: it
@@ -45,19 +49,34 @@ type Peer struct {
 // ends.
 func Dial(t testing.TB, url string, header http.Header, artifactID string, doc *crdt.Doc) *Peer {
 	t.Helper()
-	connection, response, err := gws.DefaultDialer.Dial(url, header)
+	peer, err := DialContext(context.Background(), url, header, artifactID, doc)
 	if err != nil {
-		t.Fatalf("connect a peer to document %s: response=%#v err=%v", artifactID, response, err)
+		t.Fatal(err)
+	}
+	t.Cleanup(peer.Close)
+	return peer
+}
+
+// DialContext is Dial for a caller that is not a test, such as a load driver: ctx bounds the
+// connection's opening, a failure is returned, and the caller closes the peer.
+func DialContext(ctx context.Context, url string, header http.Header, artifactID string, doc *crdt.Doc) (*Peer, error) {
+	connection, response, err := gws.DefaultDialer.DialContext(ctx, url, header)
+	if err != nil {
+		if response != nil {
+			// A refused handshake's response carries the server's reason in its status and body.
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+			return nil, fmt.Errorf("connect a peer to document %s: %s %q: %w", artifactID, response.Status, bytes.TrimSpace(body), err)
+		}
+		return nil, fmt.Errorf("connect a peer to document %s: %w", artifactID, err)
 	}
 	answers, ended := make(chan []byte, 16), make(chan struct{})
 	peer := &Peer{Doc: doc, Answers: answers, Ended: ended, artifactID: artifactID, connection: connection}
-	t.Cleanup(peer.Close)
 	go func() {
 		peer.read(answers)
 		peer.endedAt = time.Now()
 		close(ended)
 	}()
-	return peer
+	return peer, nil
 }
 
 // Write sends syncMessage to the room as Hocuspocus carries it: the document's name, then the sync
@@ -177,65 +196,13 @@ func WriteDeepChain(txn *crdt.Transaction, fragment *crdt.YXmlFragment, textLeve
 	run.Insert(txn, 0, text, nil)
 }
 
-// NestedLinkUpdate marks every character of the first text in doc's prosemirror fragment with a
-// link whose "nested" attribute is nested, and returns the update a crafted client sends for that
-// change. ygo's own writers refuse a mark nested past the 100 levels YText takes, so the change is
-// made with a placeholder and the update rewritten: a V1 update carries a mark's attributes as JSON
-// text, which ygo reads back as deep as encoding/json does. doc keeps the placeholder, so it is a
-// copy the caller throws away.
+// NestedLinkUpdate is crafted.NestedLinkUpdate failing t on its error: the update a crafted client
+// sends to mark the first text of doc with a link whose "nested" attribute is nested.
 func NestedLinkUpdate(t testing.TB, doc *crdt.Doc, nested any) []byte {
 	t.Helper()
-	text := FirstText(doc.GetXmlFragment("prosemirror"))
-	if text == nil {
-		t.Fatal("the document holds no text to link")
+	update, err := crafted.NestedLinkUpdate(doc, nested)
+	if err != nil {
+		t.Fatal(err)
 	}
-	link := func(nested any) map[string]any {
-		return map[string]any{"href": "https://example.com", "nested": nested}
-	}
-	before := doc.StateVector()
-	doc.Transact(func(txn *crdt.Transaction) {
-		text.Format(txn, 0, text.Len(), crdt.Attributes{"link": link("placeholder")})
-	})
-	update := crdt.EncodeStateAsUpdateV1(doc, before)
-	// ygo writes the JSON with sorted keys and, depending on its release, with or without escaping
-	// <, > and &, none of which the link holds, so json.Marshal spells it as ygo wrote it.
-	written := func(v any) []byte {
-		text, err := json.Marshal(v)
-		if err != nil {
-			t.Fatalf("encode %T as JSON: %v", v, err)
-		}
-		return encoding.EncodeBytes(func(encoder *encoding.Encoder) { encoder.WriteVarString(string(text)) })
-	}
-	placeholder := written(link("placeholder"))
-	if count := bytes.Count(update, placeholder); count != 1 {
-		t.Fatalf("the link's update holds its placeholder %d times, want once", count)
-	}
-	return bytes.Replace(update, placeholder, written(link(nested)), 1)
-}
-
-// FirstText is the first text node in document order under fragment, or nil for a fragment
-// without one.
-func FirstText(fragment *crdt.YXmlFragment) *crdt.YXmlText {
-	for _, child := range fragment.Children() {
-		switch node := child.(type) {
-		case *crdt.YXmlText:
-			return node
-		case *crdt.YXmlElement:
-			if text := FirstText(&node.YXmlFragment); text != nil {
-				return text
-			}
-		}
-	}
-	return nil
-}
-
-// NestedValue is the string "x" inside depth arrays, each nested inside the next. It builds arrays
-// only; pmdoc's attribute bound counts arrays and objects alike, so depth is the value's nesting as
-// that bound counts it.
-func NestedValue(depth int) any {
-	var value any = "x"
-	for range depth {
-		value = []any{value}
-	}
-	return value
+	return update
 }

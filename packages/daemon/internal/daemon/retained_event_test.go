@@ -121,10 +121,10 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 			client := &detailDispatch{resolved: map[string]string{root.Key: "acme/gadgets"}}
 			spec := intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}, AckWait: time.Second, Logger: quietLogger()}
 			if tc.prepared {
-				w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: newRepositories("LEGION")}
+				w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: newRepositories("LEGION", ghrepo.Renames{})}
 				spec.PrepareRepository = w.prepareRepository
 			}
-			consumers, err := intake.OpenConsumers(ctx, js, spec)
+			consumers, err := intake.OpenConsumers(ctx, js, pool, spec)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,7 +145,7 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 			}
 			run, cancel := context.WithCancel(ctx)
 			done := make(chan error, 1)
-			go func() { done <- consumers.Run(run, pool, engine, admission) }()
+			go func() { done <- consumers.Run(run, engine, admission) }()
 			t.Cleanup(func() {
 				cancel()
 				if err := <-done; err != nil {
@@ -200,13 +200,13 @@ func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *test
 	}
 	client := &detailDispatch{resolved: map[string]string{"LEGION-301": "acme/widgets"}, seq: 4, failures: 1}
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@release/v7.1"})
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos,
-		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+		defaultBranches: newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)}
 	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
-	consumers, err := intake.OpenConsumers(ctx, js, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
+	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
 		AckWait: time.Second, NakDelay: 10 * time.Millisecond, Logger: quietLogger(), PrepareRepository: w.prepareRepository})
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *test
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(run, pool, engine, admission) }()
+	go func() { done <- consumers.Run(run, engine, admission) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -262,10 +262,10 @@ func TestAnAdmissionWhoseApplyFailedIsAppliedAsDispatchNowShowsIt(t *testing.T) 
 	}
 	client := &detailDispatch{resolved: map[string]string{"LEGION-310": "acme/widgets"}, seq: 5}
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main"})
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos,
-		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+		defaultBranches: newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)}
 	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 	// The first apply fails, as a database error would, while the person withdraws the issue; each
@@ -283,7 +283,7 @@ func TestAnAdmissionWhoseApplyFailedIsAppliedAsDispatchNowShowsIt(t *testing.T) 
 		}
 		return intake.Result{}, nil
 	})
-	consumers, err := intake.OpenConsumers(ctx, js, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
+	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
 		AckWait: time.Second, NakDelay: 10 * time.Millisecond, Logger: quietLogger(), PrepareRepository: w.prepareRepository})
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +295,7 @@ func TestAnAdmissionWhoseApplyFailedIsAppliedAsDispatchNowShowsIt(t *testing.T) 
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(run, pool, failOnce, engine, admission) }()
+	go func() { done <- consumers.Run(run, failOnce, engine, admission) }()
 	stopped := false
 	t.Cleanup(func() {
 		if !stopped {

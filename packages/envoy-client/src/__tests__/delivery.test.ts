@@ -36,7 +36,14 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
   };
 }
 
-function dispatchEvent(type: string, payload: object, eventActor = actor, notify = true): string {
+// `quiet` left out is a frame published before Dispatch stated it, which a reader judges by
+// `notify` instead.
+function dispatchEvent(
+  type: string,
+  payload: object,
+  eventActor = actor,
+  { notify = true, quiet }: { notify?: boolean; quiet?: boolean } = {}
+): string {
   return JSON.stringify(
     envelope({
       event_id: "dispatch-1",
@@ -51,6 +58,7 @@ function dispatchEvent(type: string, payload: object, eventActor = actor, notify
         type,
         actor: eventActor,
         notify,
+        ...(quiet === undefined ? {} : { quiet }),
         created_at: "2026-09-09T00:00:00Z",
         payload,
       }),
@@ -508,6 +516,58 @@ describe("renderInbound dispatch events", () => {
     }
   });
 
+  // The reply settles the delivery attempt, so it is a write like any other: one key for the
+  // reply, asked again under it when Dispatch is briefly down, and Dispatch's refusal carried as
+  // its own error.
+  test("posts a delivery reply as one keyed write, asked again under its key", async () => {
+    const keys: Array<string | null> = [];
+    let answers = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        const key = request.headers.get("Idempotency-Key");
+        keys.push(key);
+        answers += 1;
+        // Dispatch's keyed layer echoes the key on every answer to a keyed request, which is what
+        // tells the client a repeat is answered from the key rather than run again.
+        const headers: Record<string, string> = key === null ? {} : { "Idempotency-Key": key };
+        if (answers === 1)
+          return Response.json({ code: "UNAVAILABLE", error: "down" }, { status: 503, headers });
+        if (answers === 2) return Response.json({ reply: { id: "reply-1" } }, { headers });
+        return Response.json(
+          { code: "ATTEMPT_ANSWERED", error: "already answered" },
+          { status: 409, headers }
+        );
+      },
+    });
+    const delivery: DispatchDelivery = {
+      resource: "message",
+      id: "message-1",
+      attempt: 2,
+      mode: "btw",
+      replyPath: "/api/v1/messages/message-1/reply",
+      replyFields: {},
+      issueKey: null,
+      body: "status?",
+    };
+    const config = { url: `http://127.0.0.1:${server.port}`, token: "reply-token" };
+
+    try {
+      await postDeliveryReply(config, reader, delivery, { body: "green" });
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toBeString();
+      expect(keys[1]).toBe(keys[0] as string);
+
+      await expect(postDeliveryReply(config, reader, delivery, { body: "again" })).rejects.toThrow(
+        expect.objectContaining({ code: "ATTEMPT_ANSWERED", status: 409 })
+      );
+      expect(keys).toHaveLength(3);
+      expect(keys[2]).not.toBe(keys[0] as string);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("renders an issue-less targeted BTW with a reply address and an issue-less reply hint", () => {
     const frame = JSON.parse(targetedDispatchPayload) as {
       event: { issue_key: string | null; payload: { issue_key: string | null; target: string } };
@@ -771,6 +831,38 @@ describe("renderInbound dispatch events", () => {
     );
 
     expect(renderInbound(raw, reader)).toMatchObject({ skip: true, content: "" });
+  });
+
+  test("renders a person's spec edit as its versions and editor, then the diff in a fenced block", () => {
+    const edit = {
+      artifact_id: "artifact-1",
+      name: "spec.md",
+      from_version: 4,
+      to_version: 7,
+      editors: ["person@example.com"],
+      diff: "--- previous\n+++ current\n@@ -1 +1 @@\n-The export runs at 02:00 UTC.\n+The export runs at 04:00 UTC.\n",
+      diff_truncated: false,
+    };
+    const person = { kind: "user", id: "person@example.com" };
+    const whole = renderInbound(dispatchEvent("artifact.human_edited", edit, person), reader);
+    const [card, block] = whole.content.split("\n\n```diff\n");
+    expect(decode(card ?? "")).toMatchObject({
+      envoy: {
+        dispatch: {
+          owner: "DSP-1",
+          type: "artifact.human_edited",
+          edit: "spec.md v4 to v7, edited by person@example.com",
+        },
+      },
+    });
+    expect(card).not.toContain("02:00");
+    expect(block).toBe(`${edit.diff}\`\`\``);
+
+    const cut = renderInbound(
+      dispatchEvent("artifact.human_edited", { ...edit, diff_truncated: true }, person),
+      reader
+    );
+    expect(cut.content.endsWith(`${edit.diff}\`\`\`\n(diff cut at 4,096 bytes)`)).toBe(true);
   });
 
   test("renders subscription.removed as a short plain-text notice, not the generic TOON envelope", () => {
@@ -1255,7 +1347,9 @@ describe("renderInbound dispatch events", () => {
 
   test("renders a non-notifying Dispatch event on an agent subject", () => {
     const rendered = renderInbound(
-      dispatchEvent("message.created", { body: "Agent subject remains visible" }, actor, false),
+      dispatchEvent("message.created", { body: "Agent subject remains visible" }, actor, {
+        notify: false,
+      }),
       reader,
       `notifications.agent.${reader}`
     );
@@ -1270,7 +1364,9 @@ describe("renderInbound dispatch events", () => {
 
   test("renders a non-notifying Dispatch event on a role subject", () => {
     const rendered = renderInbound(
-      dispatchEvent("message.created", { body: "Role subject remains visible" }, actor, false),
+      dispatchEvent("message.created", { body: "Role subject remains visible" }, actor, {
+        notify: false,
+      }),
       reader,
       "notifications.role.legion-controller"
     );
@@ -1286,10 +1382,85 @@ describe("renderInbound dispatch events", () => {
   test("drops an event that does not request an agent wake", () => {
     expect(
       renderInbound(
-        dispatchEvent("message.created", { body: "Persist without steering" }, actor, false),
+        dispatchEvent("message.created", { body: "Persist without steering" }, actor, {
+          notify: false,
+        }),
         reader
       )
     ).toMatchObject({ skip: true, content: "" });
+  });
+
+  // The one thing `envoy_subscribe notifications.dispatch.issue.<KEY>.>` is for
+  // (skills/dispatch/SKILL.md): a session following an issue hears what the agents on it do.
+  // Every such event carries notify false, because notify asks whether to wake the issue's route
+  // and claimant, so a reader that skipped on notify saw none of them.
+  test("shows an agent's comment on the issue topic it subscribed to", () => {
+    const rendered = renderInbound(
+      dispatchEvent("comment.created", { id: "comment-9", body: "Slice 3 is pushed." }, actor, {
+        notify: false,
+        quiet: false,
+      }),
+      reader,
+      dispatchIssueSubject("DSP-1", "comment.created")
+    );
+
+    expect(rendered.skip).toBe(false);
+    expect(decode(rendered.content)).toMatchObject({
+      envoy: {
+        dispatch: { type: "comment.created", payload: { body: "Slice 3 is pushed." } },
+      },
+    });
+  });
+
+  test("drops a quiet event on an issue topic however it was authored", () => {
+    expect(
+      renderInbound(
+        dispatchEvent("comment.delivery", { id: "comment-9", state: "delivered" }, actor, {
+          notify: false,
+          quiet: true,
+        }),
+        reader,
+        dispatchIssueSubject("DSP-1", "comment.delivery")
+      )
+    ).toMatchObject({ skip: true, content: "" });
+    expect(
+      renderInbound(
+        dispatchEvent(
+          "artifact.version",
+          { version: { number: 4, named: false } },
+          { kind: "user", id: "alice" },
+          { notify: false, quiet: true }
+        ),
+        reader,
+        dispatchIssueSubject("DSP-1", "artifact.version")
+      )
+    ).toMatchObject({ skip: true, content: "" });
+  });
+
+  // The stream holds 72 hours of frames published before Dispatch stated `quiet`, and a replay
+  // of those must not start showing their receipts and autosaves.
+  test("judges a frame published before `quiet` by its notify flag", () => {
+    expect(
+      renderInbound(
+        dispatchEvent("comment.created", { id: "comment-9", body: "Older frame" }, actor, {
+          notify: false,
+        }),
+        reader,
+        dispatchIssueSubject("DSP-1", "comment.created")
+      )
+    ).toMatchObject({ skip: true, content: "" });
+    expect(
+      renderInbound(
+        dispatchEvent(
+          "comment.created",
+          { id: "comment-9", body: "Older frame a person wrote" },
+          { kind: "user", id: "alice" },
+          { notify: true }
+        ),
+        reader,
+        dispatchIssueSubject("DSP-1", "comment.created")
+      ).skip
+    ).toBe(false);
   });
 
   test("drops an event authored by the reader session", () => {

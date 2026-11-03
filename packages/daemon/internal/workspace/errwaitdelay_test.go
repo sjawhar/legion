@@ -28,7 +28,7 @@ func TestRunCheckedSucceedsWhenACommandExitsZeroWithAChildStillHoldingItsOutputO
 
 	run := NewRunner(5*time.Second, map[string]string{"git": fakeGit})
 
-	result, err := RunChecked(context.Background(), run, []string{"git"}, nil, "")
+	result, err := RunChecked(context.Background(), run, []string{"git"}, nil, dir)
 	if err != nil {
 		t.Fatalf("RunChecked = %v, want no error: the command exited 0 on its own", err)
 	}

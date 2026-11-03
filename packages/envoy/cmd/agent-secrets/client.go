@@ -36,6 +36,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 type client struct {
@@ -46,18 +48,21 @@ type client struct {
 // terminalRenewal is the closed set of renewal refusals `agent-secrets renew` stops on, exiting
 // exitRenewRefused (76) so the worker shim does not restart it; every other refusal keeps the retry
 // backoff. Each member is an answer no retry can change: POD_TOKEN_REQUIRED is a pod enrollment's
-// renewal that carried no token, and ENROLLMENT_NOT_LIVE an enrollment that has ended, lapsed or
-// never existed. A broker that predates ENROLLMENT_NOT_LIVE answers an ended enrollment
+// renewal that carried no token and VM_TOKEN_REQUIRED a vm enrollment's, VM_NOT_LISTED a VM its
+// fleet's broker settings no longer allow (only an operator's change of them can), and
+// ENROLLMENT_NOT_LIVE an enrollment that has ended, lapsed or never existed. A broker that predates
+// ENROLLMENT_NOT_LIVE answers an ended enrollment
 // PROOF_INVALID with a message saying "not live" (its renew handler's "enrollment is not live" and
 // its proof check's "proof invalid: not live"), which no recoverable proof failure says.
 // POD_IDENTITY_MISMATCH is not a member: the broker also answers it for a token it could not
 // verify while its issuer or key set was unreachable, and a real mismatch ends with the lease,
-// after which the next renewal is ENROLLMENT_NOT_LIVE.
+// after which the next renewal is ENROLLMENT_NOT_LIVE. VM_IDENTITY_MISMATCH and VM_TOKEN_EXPIRED
+// are not members for the same reason as their pod counterparts.
 var terminalRenewal = struct {
 	Codes                     []string
 	LegacyCode, LegacyMessage string
 }{
-	Codes:         []string{"POD_TOKEN_REQUIRED", "ENROLLMENT_NOT_LIVE"},
+	Codes:         []string{"POD_TOKEN_REQUIRED", "VM_TOKEN_REQUIRED", "VM_NOT_LISTED", "ENROLLMENT_NOT_LIVE"},
 	LegacyCode:    "PROOF_INVALID",
 	LegacyMessage: "not live",
 }
@@ -101,14 +106,17 @@ type unreachableError struct {
 	// in time, a peer that answered but failed the exchange, or a request that failed in a way
 	// none of those names.
 	what string
-	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried.
+	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried;
+	// Error prints base through redact.URL and url through redact.Call, so a credential the
+	// variable carries never prints, while an id the call path-escaped still does.
 	base, method, url string
-	// cause is the transport's own error, with net/http's repetition of the URL unwrapped away.
+	// cause is the transport's own error through redact.Cause: without net/http's *url.Error
+	// wrapper, which repeats the URL, or its class alone where its text may not print.
 	cause error
 }
 
 func (e *unreachableError) Error() string {
-	return fmt.Sprintf("%s: %s %s (%s names %s): %v", e.what, e.method, e.url, brokerURLVar, e.base, e.cause)
+	return fmt.Sprintf("%s: %s %s (%s names %s): %v", e.what, e.method, redact.Call(e.base, e.url), brokerURLVar, redact.URL(e.base), e.cause)
 }
 
 func (e *unreachableError) Unwrap() error { return e.cause }
@@ -121,11 +129,7 @@ func (e *unreachableError) Unwrap() error { return e.cause }
 // which TLS or a proxy fixes. An error that fits none says no more than that the request failed,
 // rather than name a layer it cannot prove.
 func unreachable(base, method, callURL string, err error) error {
-	cause := err
-	var wrapped *url.Error
-	if errors.As(err, &wrapped) {
-		cause = wrapped.Err
-	}
+	cause := redact.Cause(err, base)
 	host := brokerHost(base)
 	failed := func(what string) error { return &unreachableError{what, base, method, callURL, cause} }
 	var dns *net.DNSError
@@ -151,8 +155,9 @@ func unreachable(base, method, callURL string, err error) error {
 }
 
 // peerAnswered reports whether err shows a peer took the connection and then broke the exchange:
-// a TLS record that is not TLS (an HTTP server answering an https URL), a TLS alert or certificate
-// it would not trust, or the stream ending or being reset once it existed.
+// a TLS record that is not TLS (an HTTP server answering an https URL, which net/http reports as
+// its fixed http.ErrSchemeMismatch in place of the record error), a TLS alert or certificate it
+// would not trust, or the stream ending or being reset once it existed.
 func peerAnswered(err error) bool {
 	var record tls.RecordHeaderError
 	var alert tls.AlertError
@@ -160,7 +165,7 @@ func peerAnswered(err error) bool {
 	var authority x509.UnknownAuthorityError
 	var hostname x509.HostnameError
 	var invalid x509.CertificateInvalidError
-	return errors.As(err, &record) || errors.As(err, &alert) || errors.As(err, &verify) ||
+	return errors.As(err, &record) || errors.Is(err, http.ErrSchemeMismatch) || errors.As(err, &alert) || errors.As(err, &verify) ||
 		errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &invalid) ||
 		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
@@ -169,13 +174,28 @@ func peerAnswered(err error) bool {
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes
 // the broker's error envelope into an *apiError.
 func (c *client) do(ctx context.Context, method, url string, body []byte, headers map[string]string) ([]byte, error) {
+	_, data, err := c.doStatus(ctx, method, url, body, headers)
+	return data, err
+}
+
+// doStatus is do, also answering the 2xx status itself, which tells apart the two answers a
+// route gives for success — POST /v1/enrollments's 201 for a new enrollment and 200 for the one
+// this key already holds.
+func (c *client) doStatus(ctx context.Context, method, url string, body []byte, headers map[string]string) (int, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		return nil, err
+		// With a base redact.URL prints, the part that did not parse is the path this client
+		// built, so the error says so (through redact.Error, which prints it as net/url wrote it
+		// only where that is clean). With any other base, the parser's own text could quote a bad
+		// escape in a password, so the message says only that the address is not valid.
+		if redact.Clean(c.baseURL) {
+			return 0, nil, fmt.Errorf("the request could not be built: %w", redact.Error(err, c.baseURL))
+		}
+		return 0, nil, &unreachableError{"the broker's address is not a valid URL", c.baseURL, method, url, errNothingSent}
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -185,12 +205,12 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, unreachable(c.baseURL, method, url, err)
+		return 0, nil, unreachable(c.baseURL, method, url, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: read response: %w", method, url, err)
+		return 0, nil, fmt.Errorf("%s %s: read response: %w", method, redact.Call(c.baseURL, url), redact.Error(err, c.baseURL))
 	}
 	if resp.StatusCode/100 != 2 {
 		var envelope struct {
@@ -201,20 +221,29 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 		if envelope.Error == "" {
 			envelope.Error = string(data)
 		}
-		return nil, &apiError{Status: resp.StatusCode, Code: envelope.Code, Message: envelope.Error}
+		return resp.StatusCode, nil, &apiError{Status: resp.StatusCode, Code: envelope.Code, Message: envelope.Error}
 	}
-	return data, nil
+	return resp.StatusCode, data, nil
 }
+
+// errNothingSent is the cause of a call this client could not even build a request for.
+var errNothingSent = errors.New("nothing was sent")
 
 // doProof signs the request with signer.Sign against exactly this method and URL (no query
 // string appended after signing), the shape proof.Verifier.Verify compares htm/htu against.
 func (c *client) doProof(ctx context.Context, signer proofSigner, method, path string, body []byte) ([]byte, error) {
+	_, data, err := c.doProofStatus(ctx, signer, method, path, body)
+	return data, err
+}
+
+// doProofStatus is doProof, also answering the 2xx status (doStatus).
+func (c *client) doProofStatus(ctx context.Context, signer proofSigner, method, path string, body []byte) (int, []byte, error) {
 	url := c.baseURL + path
 	token, err := signer.Sign(method, url)
 	if err != nil {
-		return nil, fmt.Errorf("sign proof: %w", err)
+		return 0, nil, fmt.Errorf("sign proof: %w", err)
 	}
-	return c.do(ctx, method, url, body, map[string]string{"Proof": token})
+	return c.doStatus(ctx, method, url, body, map[string]string{"Proof": token})
 }
 
 // --- POST /v1/requests, GET /v1/requests/{id}, POST /v1/requests/{id}/cancel ---
@@ -227,7 +256,9 @@ type SecretDecision struct {
 
 // RequestResult is POST /v1/requests's exact response shape. LifetimeSeconds is the lifetime the
 // broker gave the request's grant, nil for until its session ends; a broker from before
-// lifetime_seconds sends no such field, and it decodes as nil.
+// lifetime_seconds sends no such field, and it decodes as nil. ApproveURL is the record's page on
+// the broker, where its approver signs in and decides it, while the request is pending; empty
+// once it is not, and from a broker from before that page.
 type RequestResult struct {
 	RequestID       string           `json:"request_id"`
 	State           string           `json:"state"`
@@ -237,6 +268,7 @@ type RequestResult struct {
 	Approver        *string          `json:"approver"`
 	LifetimeSeconds *int             `json:"lifetime_seconds"`
 	Coalesced       bool             `json:"coalesced,omitempty"`
+	ApproveURL      string           `json:"approve_url"`
 }
 
 // createRequestBody is POST /v1/requests's exact shape in the broker's HTTP API: a signed
@@ -282,17 +314,38 @@ type requestDecision struct {
 	At time.Time `json:"at"`
 }
 
-// RequestStatus is GET /v1/requests/{id}'s exact response shape.
+// RequestStatus is GET /v1/requests/{id}'s exact response shape. ApproveURL is as RequestResult's.
 type RequestStatus struct {
-	State     string           `json:"state"`
-	GrantID   *string          `json:"grant_id"`
-	RecordID  *string          `json:"record_id"`
-	Approver  *string          `json:"approver"`
-	DecidedAt *time.Time       `json:"decided_at"`
-	Decision  *requestDecision `json:"decision"`
+	State      string           `json:"state"`
+	GrantID    *string          `json:"grant_id"`
+	RecordID   *string          `json:"record_id"`
+	Approver   *string          `json:"approver"`
+	DecidedAt  *time.Time       `json:"decided_at"`
+	Decision   *requestDecision `json:"decision"`
+	ApproveURL string           `json:"approve_url"`
+}
+
+// refusedBeforeCall is a refusal this client made before it sent anything, so refusalText adds
+// no "asked the broker" ending to it.
+type refusedBeforeCall struct{ text string }
+
+func (e *refusedBeforeCall) Error() string { return e.text }
+
+// pathID refuses id, naming it as kind, when it would not appear in a call's path as written: the
+// proof signs the URL this client builds, and the broker checks it against its public URL and the
+// path it decoded, so an id url.PathEscape would change (a '%', a space, a '/') could only be
+// escaped into a proof the broker refuses, or sent raw into a different path.
+func pathID(kind, id string) error {
+	if url.PathEscape(id) != id {
+		return &refusedBeforeCall{fmt.Sprintf("%q is not %s", id, kind)}
+	}
+	return nil
 }
 
 func (c *client) GetRequest(ctx context.Context, signer Signer, id string) (RequestStatus, []byte, error) {
+	if err := pathID("a request id", id); err != nil {
+		return RequestStatus{}, nil, err
+	}
 	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/requests/"+id, nil)
 	if err != nil {
 		return RequestStatus{}, nil, err
@@ -305,6 +358,9 @@ func (c *client) GetRequest(ctx context.Context, signer Signer, id string) (Requ
 }
 
 func (c *client) CancelRequest(ctx context.Context, signer Signer, id string) error {
+	if err := pathID("a request id", id); err != nil {
+		return err
+	}
 	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/requests/"+id+"/cancel", nil)
 	return err
 }
@@ -330,6 +386,9 @@ type GrantValues struct {
 // GrantValues releases grantID's values, asking the broker to narrow its GitHub App tokens when
 // narrowing is not nil; nil sends no body, the release as the grant holds it.
 func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string, narrowing *GitHubNarrowing) (GrantValues, error) {
+	if err := pathID("a grant id", grantID); err != nil {
+		return GrantValues{}, err
+	}
 	var body []byte
 	if narrowing != nil {
 		encoded, err := json.Marshal(struct {
@@ -352,6 +411,9 @@ func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string,
 }
 
 func (c *client) RevokeGrant(ctx context.Context, signer Signer, grantID string) error {
+	if err := pathID("a grant id", grantID); err != nil {
+		return err
+	}
 	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/revoke", nil)
 	return err
 }
@@ -389,13 +451,17 @@ func (c *client) Self(ctx context.Context, signer Signer) (SelfResult, []byte, e
 
 // RenewEnrollment is the one Signer-taking method that still needs enrollmentID explicitly: the
 // broker route is /v1/enrollments/{id}/renew, so the id is in the URL path, not just the signed
-// payload. A pod's renewal carries its current projected token as pod_token; podToken "" sends no
-// body at all, a box's renewal.
-func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, podToken string) (time.Time, error) {
+// payload. A pod's renewal carries its current projected token as pod_token and a VM's its
+// current metadata token as vm_token; an empty field or token sends no body at all, a box's
+// renewal.
+func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, tokenField, token string) (time.Time, error) {
+	if err := pathID("an enrollment id", enrollmentID); err != nil {
+		return time.Time{}, err
+	}
 	var body []byte
-	if podToken != "" {
+	if tokenField != "" && token != "" {
 		var err error
-		if body, err = json.Marshal(map[string]string{"pod_token": podToken}); err != nil {
+		if body, err = json.Marshal(map[string]string{tokenField: token}); err != nil {
 			return time.Time{}, err
 		}
 	}
@@ -500,9 +566,12 @@ func (c *client) OperatorMachines(ctx context.Context, signer proofSigner) (Oper
 }
 
 // RevokeOperatorMachine ends one of the calling machine login's operator's own machines' logins.
-// id goes into the path escaped, so whatever a person types names one path segment.
+// An id that would not name one path segment as written is refused (pathID).
 func (c *client) RevokeOperatorMachine(ctx context.Context, signer proofSigner, id string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/machines/"+url.PathEscape(id)+"/revoke", nil)
+	if err := pathID("a machine id", id); err != nil {
+		return err
+	}
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/machines/"+id+"/revoke", nil)
 	return err
 }
 
@@ -545,9 +614,12 @@ func (c *client) OperatorGrants(ctx context.Context, signer proofSigner) (Operat
 	return out, raw, nil
 }
 
-// RevokeOperatorGrant ends grant id as the calling machine login's operator. id goes into the path
-// escaped, so whatever a person types names one path segment.
+// RevokeOperatorGrant ends grant id as the calling machine login's operator. An id that would
+// not name one path segment as written is refused (pathID).
 func (c *client) RevokeOperatorGrant(ctx context.Context, signer proofSigner, id string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/grants/"+url.PathEscape(id)+"/revoke", nil)
+	if err := pathID("a grant id", id); err != nil {
+		return err
+	}
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/grants/"+id+"/revoke", nil)
 	return err
 }

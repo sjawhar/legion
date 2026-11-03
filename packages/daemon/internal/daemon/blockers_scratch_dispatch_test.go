@@ -67,8 +67,9 @@ import (
 //     takes back and nothing else, so step 8 cannot pass by checking everything;
 //  10. the roots of step 8 are admitted when that blocker closes.
 func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
-	// The NATS server is taken first: testnats.URL empties it of every stream, and Dispatch's own
-	// start reconciles ENVOY_NOTIFICATIONS on it, which the daemon then consumes from.
+	// The NATS server is taken first: testnats.URL empties it of every stream, and Dispatch
+	// reconciles ENVOY_NOTIFICATIONS on it on its first connection, which the daemon then consumes
+	// from.
 	natsURL := testnats.URL(t)
 	baseURL, token := startScratchDispatchWithNATS(t, natsURL)
 
@@ -911,7 +912,8 @@ func blockersDatabase(t *testing.T) string {
 	}
 	t.Cleanup(admin.Close)
 	name := "legion_blockers_test_" + outboxSuffix(t)
-	if _, err := admin.Exec(context.Background(), "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -1006,7 +1008,9 @@ func dispatchCall(t *testing.T, baseURL, method, path string, body, into any) {
 
 // createBlockersIssue creates one issue of project through Dispatch's own API, carrying the legion
 // label that hands it to Legion, optionally under parent, and waiting on waits. It is created in
-// triage, where every Dispatch issue starts; the test moves it on with its own write.
+// triage, where every Dispatch issue starts, by a session (createDispatchIssue): the label is a
+// session's, so the root is the controller's triage wake and never a person's handover the daemon
+// would queue as todo itself (LEGION-755) ahead of the test's own write, which moves it on.
 func createBlockersIssue(t *testing.T, baseURL, project, title, parent string, waits []string) string {
 	t.Helper()
 	body := map[string]any{"project": project, "title": title, "labels": []string{"legion"}}
@@ -1016,23 +1020,25 @@ func createBlockersIssue(t *testing.T, baseURL, project, title, parent string, w
 	if len(waits) > 0 {
 		body["blocked_by"] = waits
 	}
-	return createDispatchIssue(t, baseURL, title, body)
+	return createDispatchIssue(t, baseURL, title, body, asSession)
 }
 
 // createUnhandedIssue creates one issue of project through Dispatch's own API without the legion
-// label: someone else's work, which nobody hands to Legion. It is created in triage.
+// label, as the person: someone else's work, which nobody hands to Legion. It is created in triage.
 func createUnhandedIssue(t *testing.T, baseURL, project, title string) string {
 	t.Helper()
-	return createDispatchIssue(t, baseURL, title, map[string]any{"project": project, "title": title})
+	return createDispatchIssue(t, baseURL, title, map[string]any{"project": project, "title": title}, asPerson)
 }
 
-// createDispatchIssue posts body as a new issue to Dispatch and answers the key Dispatch gave it.
-func createDispatchIssue(t *testing.T, baseURL, title string, body map[string]any) string {
+// createDispatchIssue posts body as a new issue to Dispatch as identity — the person `smoke`, or a
+// session through the server's agent bearer with the session named in the body's actor
+// (dispatchCallAs) — and answers the key Dispatch gave it.
+func createDispatchIssue(t *testing.T, baseURL, title string, body map[string]any, identity scratchIdentity) string {
 	t.Helper()
 	var created struct {
 		Key string `json:"key"`
 	}
-	dispatchCall(t, baseURL, http.MethodPost, "/api/v1/issues", body, &created)
+	dispatchCallAs(t, baseURL, http.MethodPost, "/api/v1/issues", body, &created, identity)
 	if created.Key == "" {
 		t.Fatalf("Dispatch created %q without a key", title)
 	}

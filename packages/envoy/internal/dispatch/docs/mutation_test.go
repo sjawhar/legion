@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -582,10 +583,12 @@ func TestNamedVersionCreditsNoAuthorOfAnEditMadeAfterItsForkRead(t *testing.T) {
 	}
 }
 
-// A room-backed snapshot takes its authors before it copies the document. A browser edit between
-// those steps is in that snapshot but credited afterwards, so it stays pending for the next version
-// that holds it (LEGION-503).
-func TestSnapshotCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *testing.T) {
+// A room-backed snapshot bounds the in-flight credits it lists before it reads the room. A browser
+// edit between those steps is in that snapshot, and the snapshot stores its update, with its
+// credit, before it versions (Ledger.flushThrough), so the edit's append writes its author to the
+// pending authors the snapshot then lists: the snapshot credits the author although the credit
+// followed the bound, and no later version credits them again.
+func TestSnapshotCreditsAnEditMadeBetweenItsCreditBoundAndReadOnce(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -616,10 +619,10 @@ func TestSnapshotCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *te
 		t.Fatalf("snapshot document: %v", err)
 	}
 	if !snapshot.Wrote || release == nil {
-		t.Fatalf("snapshot = %#v, release=%t, want a version and the author-to-copy window", snapshot, release != nil)
+		t.Fatalf("snapshot = %#v, release=%t, want a version and the bound-to-read window", snapshot, release != nil)
 	}
-	if !reflect.DeepEqual(snapshot.Version.Authors, []model.Actor{alice}) {
-		t.Fatalf("snapshot authors = %#v, want alice alone: Bob's credit follows the take", snapshot.Version.Authors)
+	if !reflect.DeepEqual(snapshot.Version.Authors, []model.Actor{alice, bob}) {
+		t.Fatalf("snapshot authors = %#v, want alice and bob: the snapshot stored Bob's edit with his credit", snapshot.Version.Authors)
 	}
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit snapshot: %v", err)
@@ -637,8 +640,8 @@ func TestSnapshotCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *te
 		t.Fatalf("carol's edit: %v", err)
 	}
 	settleCurrentGeneration(t, service, artifactID)
-	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{bob, carol}) {
-		t.Fatalf("version %d authors = %#v, want Bob and Carol", latestVersionNumber(t, service, artifactID), authors)
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{carol}) {
+		t.Fatalf("version %d authors = %#v, want Carol alone: the snapshot listed Bob", latestVersionNumber(t, service, artifactID), authors)
 	}
 }
 
@@ -697,6 +700,95 @@ func TestReplaceTextAcceptsUnchangedEmptyDocument(t *testing.T) {
 	if _, err := joinedReplaceText(service, artifactID, "", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace unchanged empty document: %v", err)
 	}
+}
+
+// A joined write whose transaction changes nothing writes nothing, though ygo hands the fork's
+// observers an update for that transaction too: it appends no update, writes no version, leaves
+// the document's owed settlement marked when it was and naming whom it named, and keeps the
+// transaction's fork for the transaction's next write. That holds for an ask-state write naming
+// the state the block already holds and for any rewrite whose edit changes nothing. The write
+// that first resolved the block changed the document, and appended its update and marked the
+// settlement owed.
+func TestAJoinedWriteWhoseTransactionChangesNothingAppendsNoUpdateAndKeepsItsSettlementMark(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Context\n\n"+regionBlock)
+	settleCurrentGeneration(t, service, artifactID)
+	closer := model.Actor{Kind: "user", ID: "carol"}
+	withdrawn := []model.Ask{withdrawnAsk(blockAskOn(t, service, artifactID, "region"), closer)}
+
+	settled := liveWritesOf(t, service, artifactID)
+	writeIssueAskStates(t, service, withdrawn, closer, false)
+	resolved := liveWritesOf(t, service, artifactID)
+	if resolved.updates != settled.updates+1 || resolved.markedAt == "none" {
+		t.Fatalf("the write resolving the block left %+v after %+v, want one more update and an owed settlement", resolved, settled)
+	}
+
+	for _, unchanged := range []struct {
+		name    string
+		write   func(ctx context.Context) error
+		answers error
+	}{
+		{name: "an ask-state write naming the state the block holds", write: func(ctx context.Context) error {
+			_, err := service.WriteIssueAskStates(ctx, "DOC-1", withdrawn, closer, true)
+			return err
+		}},
+		{name: "a rewrite whose edit changes nothing", answers: ygws.ErrNoChanges, write: func(ctx context.Context) error {
+			return service.applyLive(ctx, artifactID, closer, func(doc *crdt.Doc, _ pmdoc.ValidDocument, _ func(func(*crdt.Transaction))) error {
+				_, _, err := rewriteLive(doc, nil, func(*pmdoc.Node) bool { return false })
+				return err
+			})
+		}},
+	} {
+		t.Run(unchanged.name, func(t *testing.T) {
+			before := liveWritesOf(t, service, artifactID)
+			var answered error
+			if err := joinedWrite(service, func(ctx context.Context) error {
+				tx, _ := txFromContext(ctx)
+				// The issue route holds the issue's row before it writes any document.
+				if _, err := tx.Exec(ctx, `select 1 from issues where key = 'DOC-1' for no key update`); err != nil {
+					return fmt.Errorf("lock the issue: %w", err)
+				}
+				if answered = unchanged.write(ctx); answered != nil && !errors.Is(answered, ygws.ErrNoChanges) {
+					return answered
+				}
+				if write := joinedLiveWrite(ctx, artifactID); write == nil || write.fork == nil {
+					return errors.New("the write let the transaction's fork go")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if after := liveWritesOf(t, service, artifactID); after != before {
+				t.Fatalf("the write left %+v, want %+v as before it", after, before)
+			}
+			if !errors.Is(answered, unchanged.answers) {
+				t.Fatalf("the write answered %v, want %v", answered, unchanged.answers)
+			}
+		})
+	}
+}
+
+// liveWrites is what a document's live writes have left in the store: its updates, its versions,
+// and its owed settlement's mark and latest edit source, "none" when it owes none.
+type liveWrites struct {
+	updates, versions   int
+	markedAt, lastActor string
+}
+
+func liveWritesOf(t *testing.T, service *Service, artifactID string) liveWrites {
+	t.Helper()
+	var writes liveWrites
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select
+			(select count(*) from doc_updates where artifact_id = $1),
+			(select count(*) from artifact_versions where artifact_id = $1),
+			coalesce((select marked_at::text from doc_settlements_pending where artifact_id = $1), 'none'),
+			coalesce((select coalesce(last_actor::text, 'null') from doc_settlements_pending where artifact_id = $1), 'none')
+	`, artifactID).Scan(&writes.updates, &writes.versions, &writes.markedAt, &writes.lastActor); err != nil {
+		t.Fatalf("read the document's live writes: %v", err)
+	}
+	return writes
 }
 
 func TestRefreshAnchorsClosesRowsBeforeUpdating(t *testing.T) {
@@ -914,7 +1006,12 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("name version: %v", err)
 	}
-	want = []model.ChangedReference{{Kind: "ask", ID: askIDs[1], IssueKey: &issueKey}}
+	// The new mention lands in the paragraph that holds the first one, so the first ask's edge is
+	// kept but the block its referenced-by panel shows moved: it is named too, after the new one.
+	want = []model.ChangedReference{
+		{Kind: "ask", ID: askIDs[1], IssueKey: &issueKey},
+		{Kind: "ask", ID: askIDs[0], IssueKey: &issueKey},
+	}
 	if !reflect.DeepEqual(named.Changes.Targets, want) {
 		t.Fatalf("named version changes = %#v, want %#v", named.Changes.Targets, want)
 	}

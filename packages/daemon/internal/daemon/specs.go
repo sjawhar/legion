@@ -41,9 +41,11 @@ type specs struct {
 	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
-	// identity is the role's App bot identity every pane commits as, minted for the owner of the
-	// repository the launch works; nil for a daemon with no GitHub Apps.
-	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
+	// identity is the role's App bot identity every pane commits as, minted for the owner whose
+	// installation holds the repository the launch works — the record's name over a transfer, the
+	// mint's owner its serving one (workflowRuntime.identity); nil for a daemon with no GitHub
+	// Apps.
+	identity func(ctx context.Context, role claim.Role, repository ghrepo.Repository) (runtime.GitIdentity, error)
 	// repository is the repository an issue works and its default branch
 	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
 	// workflow does not record); nil for a daemon with no workflow, whose launches work no
@@ -105,7 +107,7 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	if part != "" {
 		spec.Prompt.RolePromptPaths = append(spec.Prompt.RolePromptPaths, part)
 	}
-	spec.Plugins = s.stalePluginInstall(c)
+	spec.Plugins = s.stalePluginInstall(c, spec.Backend)
 	return spec, nil
 }
 
@@ -169,22 +171,56 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		DeploymentInstructionsPath: s.instructions,
 	}
 	if s.identity != nil {
-		id, err := s.identity(ctx, c.Role, spec.Repository.Owner())
+		id, err := s.identity(ctx, c.Role, spec.Repository)
 		if err != nil {
 			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
 		}
 		spec.Env = id.Env()
 	}
+	// After the git identity, which replaces spec.Env rather than merging into it: the stall
+	// limits are merged into whatever map the launch holds by then (stallLimitVariables).
+	for _, name := range stallLimitVariables {
+		if value, ok := os.LookupEnv(name); ok {
+			spec.Env[name] = value
+		}
+	}
 	return spec, nil
 }
 
+// stallLimitVariables are the four numbers a phase worker's end-of-turn reminder runs on, in name
+// order: how many delivered reminders in a row change nothing before the architect is told, how
+// long the worker waits for a reminder after a settle, how long after a resume on an open phase,
+// and how long a reply that said what it waits on buys. A worker told none of them runs on the
+// defaults its plugin holds (packages/pi-shared/src/stall-limits.ts), so the daemon passes exactly
+// the ones its own environment holds and no more. Both runtimes forward spec.Env verbatim — a
+// pane's -e pairs (runtime/tmux's panePairs) and a pod launcher's start command (runtime/sandbox's
+// mainEnvironment) — so workerSpawnSpec is the one seam that serves both.
+var stallLimitVariables = []string{
+	"LEGION_STALL_ARCHITECT_AFTER",
+	"LEGION_STALL_REMINDER_MS",
+	"LEGION_STALL_RESUME_MS",
+	"LEGION_STALL_WAITING_MS",
+}
+
 // stalePluginInstall is spec.Plugins for c's launch (LEGION-164): the daemon's resolved pair,
-// with Contract already api.DaemonAPIVersion, iff the runtime is Kubernetes, c has registered a
-// session, and its recorded contract differs from this daemon's — never for a launch that is not
-// replacing a process on another plugin contract, and never when the daemon knows no pair
-// (s.plugins nil, the degraded mode). A fresh copy, so a caller mutating one launch's spec never
-// reaches another's.
-func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
+// with Contract already api.DaemonAPIVersion, iff the launch runs on Oh My Pi, the runtime is
+// Kubernetes, c has registered a session, and its recorded contract differs from this daemon's —
+// never for a launch that is not replacing a process on another plugin contract, and never when
+// the daemon knows no pair (s.plugins nil, the degraded mode). A fresh copy, so a caller mutating
+// one launch's spec never reaches another's.
+//
+// backend is the launch's, as SpawnSpec resolved it (launchBackend). A Claude Code launch gets
+// nothing: that install is `@sjawhar/pi-legion` and `@sjawhar/pi-envoy` from npm
+// (runtime/sandbox's plugins.go), no workflow releases claude-envoy, and a Claude worker's plugin
+// is the image's — so a plugin-contract change for such a role is answered by a new image, not by
+// an install. Such a claim whose recorded contract differs still relaunches: it is the image's
+// plugin that decides, and the image probe is what refuses a wrong one. The daemon-launched
+// controller runs on Oh My Pi (runtime.Backends runs Claude Code for phase workers alone), so its
+// launch is covered here exactly as before.
+func (s specs) stalePluginInstall(c supervise.Claim, backend runtime.Backend) *runtime.PluginInstall {
+	if runtime.Of(backend) == runtime.BackendClaude {
+		return nil
+	}
 	if s.runtimeName != "kubernetes" || c.Session == "" || c.PluginContract == api.DaemonAPIVersion || s.plugins == nil {
 		return nil
 	}

@@ -9,7 +9,7 @@ tags:
   - check-dist
   - contract-change-census
 date: 2026-10-21
-status: active
+status: superseded in part by sjawhar/legion#2423 — a contract bump no longer budgets a bundle rebuild, and a pull request runs no `check-dist`; main's Rebuild Claude Envoy plugin workflow commits the bundle after each merge; that the bundle is a strict parser of the state, the re-census at a forward merge and the four declarers stand
 module: packages/daemon/internal/api
 related_issues:
   - "LEGION-791"

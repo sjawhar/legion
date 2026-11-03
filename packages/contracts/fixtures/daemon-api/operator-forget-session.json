@@ -1,0 +1,20 @@
+{
+  "token": "legion-legion-legion-208-architect",
+  "tree": "LEGION-208",
+  "issue": "LEGION-208",
+  "role": "architect",
+  "generation": 4,
+  "state": "failed",
+  "session": "",
+  "sessionFile": "",
+  "forgottenSession": "ses_architect",
+  "forgottenSessionFile": "/sessions/ses_architect.jsonl",
+  "budgets": {
+    "launchFailures": 3,
+    "deaths": 0,
+    "promptFailures": 0,
+    "promptRetires": 0
+  },
+  "uncertainStreak": 0,
+  "pluginContract": 38
+}

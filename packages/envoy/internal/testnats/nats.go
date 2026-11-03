@@ -39,15 +39,16 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
-// Image is the NATS server image every Envoy test container runs. The envoy-go CI job reads this
-// declaration and pulls the image before its first test step, so no test reaches the registry
-// mid-run; keep it a single-line string constant.
-const Image = "mirror.gcr.io/library/nats:2.10"
+// Image is the NATS server image every Envoy test container runs: ghcr.io/sjawhar/legion/ci, the
+// copy of nats:2.10 (.github/ci-images.yaml). The envoy-go CI job reads this declaration and pulls
+// the image before its first test step, so no test reaches the registry mid-run; keep it a
+// single-line string constant.
+const Image = "ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f"
 
-// HubImage is the NATS server image the GCP hub runs, pinned by digest. The envoy-go and
-// envoy-infra-go CI jobs read this declaration and pull the image before their tests run; keep it
-// a single-line string constant.
-const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
+// HubImage is the NATS server image the GCP hub runs: ghcr.io/sjawhar/legion/ci, the copy of
+// nats:2.15.1-alpine (.github/ci-images.yaml). The envoy-go and envoy-infra-go CI jobs read this
+// declaration and pull the image before their tests run; keep it a single-line string constant.
+const HubImage = "ghcr.io/sjawhar/legion/ci@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
 
 // Images are the two NATS server images the real-server tests run on, Image and HubImage, each
 // with the short name its subtest takes.
@@ -243,6 +244,8 @@ type Server struct {
 	log        *logCapture
 	relay      *relay
 	url        string
+	// name is the server_name StartCluster gives a member, "" for a lone server.
+	name string
 
 	mu        sync.Mutex
 	srv       *natsserver.Server
@@ -253,6 +256,10 @@ type Server struct {
 // URL is the server's client URL, which stays the same across every Stop and Start: it names the
 // relay's port, not the server's own.
 func (s *Server) URL() string { return s.url }
+
+// Name is the server_name of a cluster member (StartCluster), the name JetStream reports it by in
+// a stream's or a consumer's cluster information. A lone server has none and answers "".
+func (s *Server) Name() string { return s.name }
 
 // MonitorURL is the server's monitoring endpoint, where /varz and /connz are. The monitoring
 // listener is the server's own rather than the relay's, so a Stop and a Start give it a new port
@@ -271,16 +278,52 @@ func (s *Server) Stop(t testing.TB) {
 }
 
 func (s *Server) stop() {
-	s.mu.Lock()
-	srv := s.srv
-	s.srv = nil
-	s.monitor = ""
-	s.mu.Unlock()
+	srv := s.detach()
 	if srv == nil {
 		return
 	}
 	srv.Shutdown()
 	srv.WaitForShutdown()
+}
+
+// detach takes the running nats-server off s and returns it, or nil when none runs, for the caller
+// to shut down: from then on the relay refuses every new connection, as it does for a stopped
+// server, and Start treats the server as stopped.
+func (s *Server) detach() *natsserver.Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	srv := s.srv
+	s.srv = nil
+	s.monitor = ""
+	return srv
+}
+
+// LameDuck shuts the server down as an operator's lame-duck signal does: the server stops
+// accepting clients, hands off the JetStream leaderships it holds, and closes its clients over its
+// lame-duck window (rigLameDuck), so they move to the other servers they know rather than all at
+// once. It returns once the server has shut down, keeping its store and URL for a later Start as
+// Stop does. A stopped server does nothing. A lame duck that has not finished within connectTimeout
+// is shut down at once and returned as an error rather than failing the test here, so a caller may
+// run it on a goroutine of its own and fail on the test's goroutine (testing allows FailNow there
+// only).
+func (s *Server) LameDuck() error {
+	srv := s.detach()
+	if srv == nil {
+		return nil
+	}
+	go srv.LameDuckShutdown()
+	down := make(chan struct{})
+	go func() {
+		srv.WaitForShutdown()
+		close(down)
+	}()
+	select {
+	case <-down:
+		return nil
+	case <-time.After(connectTimeout):
+		srv.Shutdown()
+		return fmt.Errorf("the NATS server did not finish its lame duck within %s: %s", connectTimeout, s.log.String())
+	}
 }
 
 // Start runs the server again on the store and the configuration it had, and returns once it
@@ -389,6 +432,31 @@ func (s *Server) address() (string, error) {
 	return addr.String(), nil
 }
 
+// clusterAddress is where the server listens for routes at this moment, which its route relay
+// dials (StartCluster). A stopped server has none, as address says.
+func (s *Server) clusterAddress() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.srv == nil {
+		return "", errors.New("the NATS server is stopped")
+	}
+	addr := s.srv.ClusterAddr()
+	if addr == nil {
+		return "", errors.New("the NATS server has no route address")
+	}
+	return addr.String(), nil
+}
+
+// natsServer is the running nats-server, or nil while the server is stopped.
+func (s *Server) natsServer() *natsserver.Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.srv
+}
+
+// running reports whether the server is running: started and not stopped since.
+func (s *Server) running() bool { return s.natsServer() != nil }
+
 // hostOnlyConfig is the configuration of a server a test starts with none of its own:
 // nats-server warns on an empty configuration file ("config has no values or is empty"), and the
 // host it names here is the one this rig imposes on every server anyway. The file is never empty,
@@ -468,11 +536,22 @@ func (s *Server) launch(t testing.TB) {
 // ReloadOptions merges it over the options it is given, whichever server made it.
 var flagsMu sync.Mutex
 
+// rigLameDuck is the lame_duck_duration and rigLameDuckGrace the lame_duck_grace_period of every
+// server whose configuration sets neither: nats-server's two minutes would hold a test that long
+// in each Server.LameDuck, and its configuration file refuses a duration under 30 seconds, so the
+// rig sets them on the options it parsed. Four seconds still spreads the closing of the server's
+// clients over time, after a second in which they hear the server is going.
+const (
+	rigLameDuck      = 4 * time.Second
+	rigLameDuckGrace = time.Second
+)
+
 // serverOptions parses the configuration at path and serverArgs as nats-server parses its own
 // command line, then imposes what this rig owns: loopback, a client and a monitoring port the
-// server picks, the test's own store, no signal handlers, and path as the configuration file.
-// serverArgs replace nats-server's defaults rather than add to them, as the arguments after the
-// image's own command do.
+// server picks, the test's own store, no signal handlers, path as the configuration file, and the
+// lame duck's timing when the configuration sets none (rigLameDuck). serverArgs replace
+// nats-server's defaults rather than add to them, as the arguments after the image's own command
+// do.
 func serverOptions(path string, serverArgs []string, store string) (*natsserver.Options, error) {
 	flags := flag.NewFlagSet("nats-server", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -494,6 +573,10 @@ func serverOptions(path string, serverArgs []string, store string) (*natsserver.
 	opts.StoreDir = store
 	opts.NoSigs = true
 	opts.ConfigFile = path
+	if opts.LameDuckDuration == 0 && opts.LameDuckGracePeriod == 0 {
+		opts.LameDuckDuration = rigLameDuck
+		opts.LameDuckGracePeriod = rigLameDuckGrace
+	}
 	return opts, nil
 }
 

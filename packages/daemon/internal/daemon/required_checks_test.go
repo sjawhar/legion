@@ -10,11 +10,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -76,9 +78,9 @@ func mergeableStandIn(t *testing.T, state string) *httptest.Server {
 }
 
 // seedUnjudgedRound records a round as a live tree had one before the daemon read required sets:
-// the reviewer's round open at its own handoff head, and the code head's settlement that stands
-// for it red only on two workflow_dispatch lanes and an advisory review check, beside a required
-// gate that passed. No required set is recorded, so no verdict stands for the head.
+// the reviewer's round open at the code head, whose settlement is red only on two
+// workflow_dispatch lanes and an advisory review check, beside a required gate that passed. No
+// required set is recorded, so no verdict stands for the head.
 func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	records := record.NewStore()
@@ -89,10 +91,10 @@ func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 			return err
 		}
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "CAPTURE-1", Repo: "acme/widgets",
-			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "handoff", CheckedHead: "code",
+			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code", CheckedHead: "code",
 			Failing:    []string{"dev-apply / dev-chain-tripwire", "dev-apply / staging-e2e / staging-e2e", "review"},
 			CheckRuns:  []record.AttemptRun{{Name: "dev-apply / dev-chain-tripwire", ID: 2}, {Name: "pr-checks-result", ID: 1}, {Name: "review", ID: 3}},
-			Generation: 1, Snapshot: "settled", Pushes: []record.ClassifiedPush{{SHA: "handoff", Before: "code", HandoffOnly: true}}}); err != nil {
+			Generation: 1, Snapshot: "settled"}); err != nil {
 			return err
 		}
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim"}); err != nil {
@@ -105,13 +107,26 @@ func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 }
 
 // requiredRuntime is a workflow runtime over pool whose required-checks read goes to api, logging
-// to log.
+// to log, serving acme/widgets alone (servedAcme), with testReviewAppID as the review App's id.
 func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
-		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api,
+		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api, repositories: servedAcme(),
+		reviewAppID: testReviewAppID,
 	}
+}
+
+// testReviewAppID is the review App's id a test runtime is configured with, the App GitHub names
+// as the creator of a check run it made.
+const testReviewAppID = "271000"
+
+// servedAcme is a repository mapping that serves acme/widgets alone, the repository whose open
+// pull requests a pass lists.
+func servedAcme() *repositories {
+	served := newRepositories("CAPTURE", ghrepo.Renames{})
+	served.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
+	return served
 }
 
 func capturePhase(t *testing.T, pool *pgxpool.Pool) (phase.Phase, *record.PullRequest) {
@@ -161,7 +176,7 @@ func TestTheBootReadOfRequiredChecksJudgesTheHeadByTheSetItRecords(t *testing.T)
 			if tc.want == phase.Reviewing && len(reasons) != 0 {
 				t.Fatalf("checks-red notices %q, want none: no required check is red", reasons)
 			}
-			if want := "CI is red at handoff: review"; tc.want == phase.Implementing && (len(reasons) != 1 || reasons[0] != want) {
+			if want := "CI is red at code: review"; tc.want == phase.Implementing && (len(reasons) != 1 || reasons[0] != want) {
 				t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
 			}
 		})
@@ -199,15 +214,15 @@ func TestAnUnreadableRulesetLeavesTheHeadUndecided(t *testing.T) {
 	if got, _ := capturePhase(t, pool); got != phase.Implementing {
 		t.Fatalf("after the next pass read the set the issue is in %s, want implementing: the required review check is red", got)
 	}
-	if reasons := noticeReasons(t, pool, "checks-red"); len(reasons) != 1 || reasons[0] != "CI is red at handoff: review" {
+	if reasons := noticeReasons(t, pool, "checks-red"); len(reasons) != 1 || reasons[0] != "CI is red at code: review" {
 		t.Fatalf("checks-red notices %q, want one naming the required review check", reasons)
 	}
 }
 
 // A rate-limit answer ends the pass: every further read on the installation meets the same limit,
-// and the panes share it, so the pass reads no other pull request until the next one. Any other
-// refusal skips only the pull request it answered. The stand-in refuses every read; two open pull
-// requests are recorded.
+// and the panes share it, so the pass reads no other pull request, and lists no repository, until
+// the next one. Any other refusal skips only the pull request, or the listing, it answered. The
+// stand-in refuses every read; two open pull requests are recorded, on the one served repository.
 func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -221,7 +236,7 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 		{"403 with retry-after", http.StatusForbidden, map[string]string{"Retry-After": "60"}, "", 1},
 		{"403 for a secondary rate limit named only by its message", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4321"},
 			`{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`, 1},
-		{"403 that is not a rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4999"}, "", 2},
+		{"403 that is not a rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4999"}, "", 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -480,5 +495,114 @@ func TestAFailedRulesetsReadNeverDiscardsAnAlreadyDecodedConflict(t *testing.T) 
 	reasons := noticeReasons(t, pool, "checks-red")
 	if len(reasons) != 1 || !strings.Contains(reasons[0], want) {
 		t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
+	}
+}
+
+// A red held while its head waits for the push that reached it is decided by the required-checks
+// pass once the hold lapses, though the pass reads the required set unchanged: a push webhook lost
+// for good holds it no longer. The pass decides it once - the next pass sends nothing back again -
+// and a hold that has not lapsed is left held.
+func TestThePassDecidesARedWhoseHoldLapsed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		arrived time.Duration
+		want    phase.Phase
+		red     int
+	}{
+		{"an hour after the head arrived", -time.Hour, phase.Implementing, 1},
+		{"a minute after the head arrived", -time.Minute, phase.Testing, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+			setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
+				pr.HeadSHA, pr.CheckedHead, pr.Failing, pr.Required = "code", "code", []string{"pr-checks-result"}, []string{"pr-checks-result"}
+				pr.CheckRuns = []record.AttemptRun{{Name: "pr-checks-result", ID: 3}}
+				pr.Run = &record.HeadRun{Steps: []record.RunStep{{Head: "code", At: time.Now().Add(tc.arrived)}},
+					Anchor: record.Judgement{HeadSHA: "prev", Failing: []string{}, Required: []string{"pr-checks-result"}, Workflows: []record.RequiredWorkflow{}}}
+			})
+			w := requiredRuntime(pool, mergeableStandIn(t, "true").URL, quietLogger())
+			for range 3 {
+				w.readRequiredChecks(context.Background())
+			}
+			got, pr := capturePhase(t, pool)
+			if red := noticeReasons(t, pool, "checks-red"); got != tc.want || len(red) != tc.red {
+				t.Fatalf("after three passes the issue is in %s with checks-red notices %q, want %s and %d", got, red, tc.want, tc.red)
+			}
+			if decided := pr.Run != nil && pr.Run.Decided == "code"; decided != (tc.red == 1) {
+				t.Fatalf("the lapse recorded as decided: %v, want %v (run %+v)", decided, tc.red == 1, pr.Run)
+			}
+		})
+	}
+}
+
+// A head the branch returns to inside one open head run, after the pass already decided that
+// head's lapse, is held from its new arrival, and the pass decides its red once that hold lapses,
+// though every read it makes is unchanged: the head's push is lost for good, so its run stays open;
+// the pass decides its green once the hold lapses; the branch moves on and back, and the head
+// settles red.
+func TestThePassDecidesARedAtAHeadTheBranchReturnedTo(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+	w := requiredRuntime(pool, mergeableStandIn(t, "true").URL, quietLogger())
+	start := time.Now().Add(-2 * time.Hour)
+	var now time.Time
+	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: func() time.Time { return now }}, quietLogger())
+	w.handlers = []intake.Handler{w.engine}
+	apply := func(at time.Duration, facts ...intake.Fact) {
+		t.Helper()
+		now = start.Add(at)
+		for i, fact := range facts {
+			if _, err := intake.ApplyFact(context.Background(), pool, "github", strconv.Itoa(int(at))+"-"+strconv.Itoa(i), fact, w.handlers...); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	pass := func(at time.Duration) {
+		now = start.Add(at)
+		for range 3 {
+			w.readRequiredChecks(context.Background())
+		}
+	}
+	synced := func(head string) intake.Fact {
+		return intake.PullRequestSynchronized{Repo: "acme/widgets", Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: head}
+	}
+	settled := func(head string, attempt int64, failing ...string) intake.Fact {
+		return intake.PullRequestChecks{Repo: "acme/widgets", Number: 86, HeadSHA: head, CheckRuns: []record.AttemptRun{{Name: "pr-checks-result", ID: attempt}},
+			Generation: attempt, Snapshot: head + "-" + strconv.FormatInt(attempt, 10), Failing: append([]string{}, failing...), Cancelled: []string{}}
+	}
+	apply(0, synced("h3"))
+	apply(time.Minute, settled("h3", 2))
+	pass(11 * time.Minute)
+	if got, pr := capturePhase(t, pool); got != phase.Testing || pr.Run == nil || pr.Run.Decided != "h3" {
+		t.Fatalf("the pass after h3's green hold lapsed leaves the issue in %s with run %+v, want testing, the run open and its lapse decided at h3", got, pr.Run)
+	}
+	apply(12*time.Minute, synced("h4"), intake.Push{Repo: "acme/widgets", Branch: "legion/CAPTURE-1", Before: "h3", After: "h4", Pusher: "legion-implementer[bot]"})
+	apply(13*time.Minute, synced("h3"))
+	apply(14*time.Minute, settled("h3", 5, "pr-checks-result"))
+	pass(20 * time.Minute)
+	if got := noticeReasons(t, pool, "checks-red"); len(got) != 0 {
+		t.Fatalf("the pass seven minutes after the return told checks-red %q, want nothing: h3 is held from its return", got)
+	}
+	pass(time.Hour)
+	got, pr := capturePhase(t, pool)
+	if red := noticeReasons(t, pool, "checks-red"); got != phase.Implementing || len(red) != 1 {
+		t.Fatalf("the pass after the return's hold lapsed leaves the issue in %s with checks-red notices %q (run %+v), want implementing and 1", got, red, pr.Run)
+	}
+}
+
+// setCapturePullRequest rewrites CAPTURE-1's pull request record with change.
+func setCapturePullRequest(t *testing.T, pool *pgxpool.Pool, change func(*record.PullRequest)) {
+	t.Helper()
+	records := record.NewStore()
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		pr, err := records.PullRequest(context.Background(), tx, "CAPTURE-1")
+		if err != nil {
+			return err
+		}
+		change(pr)
+		return records.PutPullRequest(context.Background(), tx, *pr)
+	}); err != nil {
+		t.Fatalf("rewrite CAPTURE-1's pull request: %v", err)
 	}
 }

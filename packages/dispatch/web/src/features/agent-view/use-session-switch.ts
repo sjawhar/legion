@@ -43,14 +43,21 @@ export interface SessionSwitch {
   /** The line the header shows about the latest switch, or undefined before any. */
   readonly status: string | undefined;
   /**
-   * Starts a switch whose send is `post`, and resolves with Dispatch's answer to it. A send
-   * Dispatch refused rejects, and the switch is dropped: nothing reached the session, and the
-   * caller shows the refusal as it shows a refused Send.
+   * Starts a switch whose send is `post`, and resolves with Dispatch's answer to it - `null` for a
+   * switch Dispatch made and has no answer to give for, whose reply the thread shows when it
+   * comes. A send Dispatch refused rejects, and the switch is dropped: nothing reached the
+   * session, and the caller shows the refusal as it shows a refused Send.
    */
-  readonly run: (request: SwitchRequest, post: () => Promise<Message>) => Promise<Message>;
+  readonly run: (
+    request: SwitchRequest,
+    post: () => Promise<Message | null>
+  ) => Promise<Message | null>;
 }
 
 const NO_ANSWER = `No answer came from the session within ${SWITCH_ANSWER_DEADLINE_MS / 1000} seconds. The header shows the model and thinking level the session last reported.`;
+
+const ANSWER_LOST =
+  "The switch was sent, but Dispatch lost its answer; the session's reply shows in the thread. The header shows the model and thinking level the session last reported.";
 
 /**
  * The session's answer to the switch `messageId`, as the stored thread holds it: its reply, quoted
@@ -131,7 +138,10 @@ export function useSessionSwitch(
   }, [active, sessionId, stored]);
 
   const run = useCallback(
-    async (request: SwitchRequest, post: () => Promise<Message>): Promise<Message> => {
+    async (
+      request: SwitchRequest,
+      post: () => Promise<Message | null>
+    ): Promise<Message | null> => {
       latest.current += 1;
       const id = latest.current;
       window.clearTimeout(deadline.current);
@@ -144,12 +154,18 @@ export function useSessionSwitch(
             ? `Switching model to ${request.value}…`
             : `Switching thinking level to ${request.value}…`,
       });
-      let answer: Message;
+      let answer: Message | null;
       try {
         answer = await post();
       } catch (error) {
         setCurrent((previous) => (previous?.id === id ? null : previous));
         throw error;
+      }
+      if (answer === null) {
+        setCurrent((previous) =>
+          previous?.id === id ? { ...previous, phase: "ended", status: ANSWER_LOST } : previous
+        );
+        return answer;
       }
       const attempt = answer.deliveries.at(-1);
       if (attempt?.state === "failed") {

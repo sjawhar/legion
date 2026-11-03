@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -23,14 +24,15 @@ import (
 // held phase; with --failed, every failed claim. close is the tree's close, through its root claim,
 // for a tree no workflow issue backs: the root, then every other claim of the tree.
 var claimsCommands = map[string]command{
-	"spawn":   runClaimsSpawn,
-	"deliver": runClaimsDeliver,
-	"suspend": runClaimsSuspend,
-	"resume":  claimRequest("resume"),
-	"stop":    claimRequest("stop"),
-	"retry":   runClaimsRetry,
-	"close":   claimRequest("close"),
-	"list":    runClaimsList,
+	"spawn":          runClaimsSpawn,
+	"deliver":        runClaimsDeliver,
+	"suspend":        runClaimsSuspend,
+	"resume":         claimRequest("resume"),
+	"stop":           claimRequest("stop"),
+	"retry":          runClaimsRetry,
+	"forget-session": runClaimsForgetSession,
+	"close":          claimRequest("close"),
+	"list":           runClaimsList,
 }
 
 func runClaims(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -84,8 +86,10 @@ func decodeAnswer(answer []byte, into any) error {
 	return decoder.Decode(into)
 }
 
-// printClaim is the one line a claim prints as: token, role, issue, state, generation, and the
-// plugin contract its registration declared (0 when none is recorded).
+// printClaim is the one line a claim prints as: token, role, issue, state, generation, the plugin
+// contract its registration declared (0 when none is recorded), and the update round the claim is
+// in with the head its worker reported when it answered (`-` for a claim in no round, and `-` for
+// a head no worker has reported yet).
 func printClaim(w io.Writer, answer []byte) error {
 	var c api.OperatorClaim
 	if err := decodeAnswer(answer, &c); err != nil {
@@ -107,7 +111,27 @@ func printClaims(w io.Writer, answer []byte) error {
 }
 
 func writeClaimLine(w io.Writer, c api.OperatorClaim) {
-	fmt.Fprintf(w, "%s %s %s %s %d %d\n", c.Token, c.Role, c.Issue, c.State, c.Generation, c.PluginContract)
+	fmt.Fprintf(w, "%s %s %s %s %d %d %s %s\n", c.Token, c.Role, c.Issue, c.State, c.Generation, c.PluginContract,
+		orNone(c.UpdateRound), quotedOrNone(c.UpdateHead))
+}
+
+// orNone is a field a claim need not have, as the line prints it.
+func orNone(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+// quotedOrNone is a field a worker supplies, as the line prints it: Go-quoted, so a newline or any
+// other control character in it is an escape rather than another row of this listing. The head a
+// worker reports when it answers an update round is its own word, which nothing verifies
+// (api.OperatorClaim.UpdateHead).
+func quotedOrNone(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return strconv.Quote(value)
 }
 
 // runClaimsSpawn creates the claim on --role of --issue, in the tree --tree roots, and launches
@@ -170,6 +194,23 @@ func claimRequest(request string) command {
 		}
 		return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/"+request, nil, printClaim)
 	}
+}
+
+// runClaimsForgetSession clears the recorded session of a stopped claim. The operator must name
+// the session being abandoned, so it cannot clear a newly registered session by mistake.
+func runClaimsForgetSession(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	c := newClaimsCall("forget-session", stdout, stderr)
+	token := c.flags.String("claim", "", "the claim's token (required)")
+	session := c.flags.String("session", "", "the claim's recorded session to abandon (required)")
+	if code, ok := c.parse(args, "claim", "session"); !ok {
+		return code
+	}
+	op, ok := c.connect()
+	if !ok {
+		return 1
+	}
+	return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/forget-session",
+		api.ForgetSessionRequest{Session: *session}, printClaim)
 }
 
 // runClaimsRetry retries --claim, or with --failed every claim the daemon holds failed, in the

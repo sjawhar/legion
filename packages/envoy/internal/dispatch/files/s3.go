@@ -49,7 +49,7 @@ func NewS3(ctx context.Context, bucket string) (*S3, error) {
 
 // LogSDK hands the AWS SDK's log lines to slog, so they are structured like Dispatch's own and its
 // debug lines stay below slog's default level. Every AWS client Dispatch builds (this store, the
-// retained-asset store in routes) loads its configuration with it, so the SDK logs one way.
+// Bedrock embedder in embed) loads its configuration with it, so the SDK logs one way.
 func LogSDK(classification logging.Classification, format string, v ...any) {
 	level := slog.LevelDebug
 	if classification == logging.Warn {

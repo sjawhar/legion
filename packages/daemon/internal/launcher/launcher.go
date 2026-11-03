@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/sessionproxy"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -48,7 +50,11 @@ type Config struct {
 	Connect, Token, Sandbox, Role, PodUID, PrivateDir string
 	RolesDir                                          string
 	Roles                                             []string
-	Stdout, Stderr                                    io.Writer
+	// TestPostgres has this launcher serve the pod's own PostgreSQL for tests (testpg.go), which
+	// only an issue pod's container does (RolesDir set). The deployment asks for it with
+	// `runtime.kubernetes.test_postgres`.
+	TestPostgres   bool
+	Stdout, Stderr io.Writer
 	// StopGrace is the container shutdown and natural-exit descendant cleanup budget. Every role
 	// of an issue pod's container is given it whole, since they stop together.
 	StopGrace time.Duration
@@ -95,14 +101,22 @@ func Run(ctx context.Context, cfg Config) error {
 	// of their own, whose init reaps theirs, but anything else started in the container (a
 	// `kubectl exec` and what it leaves behind) is this process's. The reaper never waits on a
 	// generation's own process, whose exit its manager reads.
+	guard := &pidGuard{}
 	if os.Getpid() == 1 {
 		exits := make(chan os.Signal, 1)
 		signal.Notify(exits, syscall.SIGCHLD)
 		defer signal.Stop(exits)
-		go reapOrphans(ctx, exits, managers)
+		go reapOrphans(ctx, exits, managers, guard)
 	}
 	if cfg.RolesDir == "" {
 		return managers[0].serveUntil(ctx, address)
+	}
+	// The pod's own test database, before any role starts: a role that starts at once finds the
+	// server serving its DSN (serveTestPG). Its ticker is waited on with the roles below, so Run
+	// returns with nothing of the launcher's still running.
+	var testPG <-chan struct{}
+	if cfg.TestPostgres {
+		testPG = serveTestPG(ctx, cfg, managers[0].log, guard)
 	}
 	var running sync.WaitGroup
 	for _, m := range managers {
@@ -113,6 +127,9 @@ func Run(ctx context.Context, cfg Config) error {
 		}()
 	}
 	running.Wait()
+	if testPG != nil {
+		<-testPG
+	}
 	return ctx.Err()
 }
 
@@ -349,7 +366,14 @@ type child struct {
 	// configured. It belongs to the generation: it outlives the child it serves, through the
 	// child's stop grace however the stop arrives, and is closed once the child has exited (wait).
 	proxy *sessionproxy.Proxy
-	done  chan struct{}
+	// keeper keeps a Claude Code child's session in the session table, nil for any other child
+	// (claudeKeeper). It saves until the child has exited, then makes its last save before the
+	// proxy closes (wait).
+	keeper *claudeKeeper
+	// stopBy is when the stop under way, if any, gives up on the child: the end of its grace
+	// (endGeneration), which bounds the keeper's last save. Guarded by manager.mu.
+	stopBy time.Time
+	done   chan struct{}
 }
 
 // manager serves one role: its own daemon connection, its own launcher id, its own token and
@@ -435,22 +459,36 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 		return refuse(err.Error())
 	}
 	proxy, clientURL, err := m.startSession(ctx, command.Generation, dir)
-	if err != nil {
+	var keeper *claudeKeeper
+	// abandon refuses a start that made the generation's directory, undoing what it made first.
+	abandon := func(message string) shimwire.LauncherStartResult {
+		keeper.close()
 		endSession(proxy, dir)
-		return refuse(err.Error())
+		return refuse(message)
+	}
+	if err != nil {
+		return abandon(err.Error())
+	}
+	// A Claude Code child's session is kept in the session table (claudeKeeper): the order is
+	// the resume's lookup, which decides the recreated-workspace notice from the row's last save,
+	// then the restore of the session's files from their rows, then the child, then the saves.
+	if keeper, err = newClaudeKeeper(env, command.ResumeFile, clientURL, m.stderr); err != nil {
+		return abandon(err.Error())
 	}
 	recreated := false
+	var sessions *pgx.Conn
 	if command.ResumeFile != "" {
-		if recreated, err = resumable(ctx, env, command.ResumeFile, clientURL, m.stderr); err != nil {
-			endSession(proxy, dir)
-			return refuse(err.Error())
+		if recreated, sessions, err = resumable(ctx, env, command.ResumeFile, clientURL, m.stderr); err != nil {
+			return abandon(err.Error())
 		}
+	}
+	if err := keeper.open(ctx, sessions); err != nil {
+		return abandon(err.Error())
 	}
 	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
 	process, err := m.command(command, env)
 	if err != nil {
-		endSession(proxy, dir)
-		return refuse(err.Error())
+		return abandon(err.Error())
 	}
 	// The orphan reaper must see this PID as the direct child before it can observe its exit, and
 	// stopActive, which takes the lock, either sees this generation or finds the container
@@ -458,23 +496,22 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	m.mu.Lock()
 	if ctx.Err() != nil {
 		m.mu.Unlock()
-		endSession(proxy, dir)
 		if process.status != nil {
 			_ = process.status.Close()
 			_ = process.write.Close()
 		}
-		return refuse("the launcher's container is stopping; no generation starts")
+		return abandon("the launcher's container is stopping; no generation starts")
 	}
 	if err := process.start(); err != nil {
 		m.mu.Unlock()
-		endSession(proxy, dir)
-		return refuse(fmt.Sprintf("start child: %v", err))
+		return abandon(fmt.Sprintf("start child: %v", err))
 	}
-	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, process: process.cmd.Process, dir: dir, status: process.status, output: process.output, proxy: proxy, done: make(chan struct{})}
+	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, process: process.cmd.Process, dir: dir, status: process.status, output: process.output, proxy: proxy, keeper: keeper, done: make(chan struct{})}
 	m.child = active
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
 	m.mu.Unlock()
+	go keeper.run()
 	go m.wait(process.cmd, active)
 	_ = m.state()
 	return result
@@ -524,12 +561,15 @@ func (m *manager) command(start shimwire.LauncherStart, env []string) (*roleProc
 // served through the whole of its stop grace however the stop arrives, the daemon's stop or the
 // container's own SIGTERM; and after every process of the generation has ended (its PID namespace's
 // init gone in an issue pod, cleanExitedGeneration in the controller's PID 1), and so every
-// connection they held. Close is bounded by sessionDrain however many holders remain: off PID 1
-// cleanExitedGeneration returns at once and a socket holder outside the child's process group
-// outlives it, and Close closes that holder's connection once the drain is over rather than wait on
-// it. It is closed before the generation's directory goes, so nothing is left listening over a
-// socket that has been removed, and between generations nothing is bound at all. active.done is
-// closed last, so endGeneration, and with it Run's stopActive, returns only once the proxy is closed.
+// connection they held. A Claude Code child's keeper makes its last save between the two
+// (claudeKeeper.finish), until the stop's grace less the proxy's drain is over, so that save and
+// the keeper's own connection are done before the proxy closes. Close is bounded by sessionDrain
+// however many holders remain: off PID 1 cleanExitedGeneration returns at once and a socket holder
+// outside the child's process group outlives it, and Close closes that holder's connection once
+// the drain is over rather than wait on it. It is closed before the generation's directory goes, so
+// nothing is left listening over a socket that has been removed, and between generations nothing is
+// bound at all. active.done is closed last, so endGeneration, and with it Run's stopActive, returns
+// only once the proxy is closed.
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	var reported *syscall.WaitStatus
 	if active.status != nil {
@@ -557,6 +597,14 @@ func (m *manager) wait(cmd *exec.Cmd, active *child) {
 		m.logf("launcher: generation %d of role %s: role-init failed before it started the shim; its own lines above say why",
 			active.generation, m.role)
 	}
+	m.mu.Lock()
+	end := active.stopBy
+	m.mu.Unlock()
+	// A child that exited on its own is given the whole grace a stop would have given it.
+	if end.IsZero() {
+		end = time.Now().Add(m.cfg.StopGrace)
+	}
+	active.keeper.finish(end.Add(-sessionDrain))
 	if active.proxy != nil {
 		_ = active.proxy.Close()
 	}
@@ -839,24 +887,15 @@ func endSession(proxy *sessionproxy.Proxy, dir string) {
 	_ = os.RemoveAll(dir)
 }
 
-// resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included;
-// a test shortens it. A start's whole budget is the proof dial, at most proofTimeout (StopGrace/2),
-// then this lookup: 35 s at the daemon's defaults, inside its wait on the start, its boot timeout
-// plus its stop grace (120 s + 10 s: runtime/sandbox's relaunch), whenever the launcher is connected
-// as that wait begins, which is every relaunch into a running pod. Only a launcher that connects late
-// in a new pod's boot window has less: at least the grace remains, and the proof's half of it is
-// still inside.
-var resumeLookupTimeout = 30 * time.Second
-
-// resumeLookupBackoff is the wait before each retry of a session table lookup that could not reach
-// the database, doubling up to its last value until resumeLookupTimeout; a test shortens it.
-var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
-
 // resumable refuses a resume of a session nothing holds, so it is a launch failure and never a fresh
 // agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
 // Oh My Pi will, in the session table (the runtime's runtime.kubernetes.session_store, which must
-// keep sessions in a database: no issue disk holds one), through clientURL when the generation has
-// a session database of its own and otherwise the URL file OMP_SESSION_SQL_DSN_FILE names.
+// keep sessions in a database: no issue disk holds one), reached as sessionDial reaches it. A
+// Claude Code resume's file is its transcript's path, `<CLAUDE_CONFIG_DIR>/projects/<dir>/<id>.jsonl`
+// (the session a claude-envoy claim records), which is the very key its launcher kept the
+// transcript's row under (claudeKeeper): the row's mtime_ms is that file's mtime at its last save.
+// It returns the connection it looked through, open, which the generation's keeper keeps
+// (claudeKeeper.open), so a resume reaches the database once.
 //
 // It also reports whether the workspace the child works in, LEGION_WORKSPACE, was recreated since the
 // session was last written: provisioning recorded its creation later than that write
@@ -864,75 +903,47 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // only what was pushed. A workspace with no record, or a child with no workspace (the controller),
 // was not. A record that cannot be read, which an init container killed mid-write can leave, only
 // decides that notice: it is written to log and taken as no record, and the resume goes ahead.
-func resumable(ctx context.Context, env []string, file, clientURL string, log io.Writer) (recreated bool, err error) {
-	written, err := sessionWritten(ctx, env, file, clientURL)
+func resumable(ctx context.Context, env []string, file, clientURL string, log io.Writer) (recreated bool, conn *pgx.Conn, err error) {
+	sessions, err := newSessionDial(env, clientURL)
 	if err != nil {
-		return false, err
+		return false, nil, fmt.Errorf("resume session %s: %v", file, err)
+	}
+	written, conn, err := sessionWritten(ctx, sessions, file)
+	if err != nil {
+		return false, nil, err
 	}
 	dir := envValue(env, "LEGION_WORKSPACE")
 	if dir == "" {
-		return false, nil
+		return false, conn, nil
 	}
 	created, ok, err := workspace.Created(dir)
 	if err != nil {
 		if log != nil {
 			fmt.Fprintf(log, "legion launcher: resume session %s: %v; the workspace is taken as not recreated\n", file, err)
 		}
-		return false, nil
+		return false, conn, nil
 	}
-	return ok && written.Before(created), nil
+	return ok && written.Before(created), conn, nil
 }
 
 // sessionWritten is when the session a resume names was last written, read from the session table
-// the child's Oh My Pi keeps it in (resumable), refusing a session nothing holds. clientURL is the
-// generation's own session database through the socket its proxy has already bound; with none it is
-// "" and the table is reached through the URL file the child's environment points at, read afresh
-// at each attempt, since that file is a projection something else may replace. A session table it
-// cannot reach is asked again after each of resumeLookupBackoff's waits until resumeLookupTimeout,
-// as a database that is briefly unreachable must not fail the launch; a session the table answers
-// it does not hold, or a URL file that is missing or empty, is refused at once. parent's end (the
-// container's stop) ends the wait as the timeout does.
-func sessionWritten(parent context.Context, env []string, file, clientURL string) (time.Time, error) {
-	dsnFile := ""
-	if clientURL == "" {
-		if dsnFile = strings.TrimSpace(envValue(env, ompsessions.DSNFileVariable)); dsnFile == "" {
-			return time.Time{}, fmt.Errorf("resume session %s: %s names no file", file, ompsessions.DSNFileVariable)
-		}
-	}
-	ctx, cancel := context.WithTimeout(parent, resumeLookupTimeout)
-	defer cancel()
-	for attempt := 0; ; attempt++ {
-		dsn := clientURL
-		if dsnFile != "" {
-			var err error
-			if dsn, err = ompsessions.ReadDSN(dsnFile); err != nil {
-				return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
-			}
-		}
-		written, found, err := lookupWritten(ctx, dsn, file)
-		switch {
-		case err == nil && found:
-			return written, nil
-		case err == nil:
-			return time.Time{}, fmt.Errorf("resume session %s: the session table holds no such session", file)
-		}
-		wait := resumeLookupBackoff[min(attempt, len(resumeLookupBackoff)-1)]
-		select {
-		case <-ctx.Done():
-			return time.Time{}, fmt.Errorf("resume session %s: %v (after %d attempts in %s)", file, err, attempt+1, resumeLookupTimeout)
-		case <-time.After(wait):
-		}
-	}
-}
-
-// lookupWritten is one session table lookup of file in the database at dsn.
-func lookupWritten(ctx context.Context, dsn, file string) (time.Time, bool, error) {
-	conn, err := ompsessions.ConnectURL(ctx, dsn)
+// the child's Oh My Pi keeps it in (resumable) through a connection sessions dials, which it returns
+// open. A session the table answers it does not hold is refused at once.
+func sessionWritten(parent context.Context, sessions sessionDial, file string) (time.Time, *pgx.Conn, error) {
+	var written time.Time
+	var found bool
+	conn, err := sessions.dial(parent, func(ctx context.Context, conn *pgx.Conn) (err error) {
+		written, found, err = ompsessions.Written(ctx, conn, file)
+		return err
+	})
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, nil, fmt.Errorf("resume session %s: %v", file, err)
 	}
-	defer conn.Close(context.Background())
-	return ompsessions.Written(ctx, conn, file)
+	if !found {
+		closeSessions(conn)
+		return time.Time{}, nil, fmt.Errorf("resume session %s: the session table holds no such session", file)
+	}
+	return written, conn, nil
 }
 
 // envValue is name's value in env, the last entry naming it, "" when none does.

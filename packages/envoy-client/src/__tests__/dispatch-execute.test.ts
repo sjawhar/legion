@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   type Artifact,
+  ASK_QUESTION_MAX,
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
@@ -20,12 +21,19 @@ import { cliRefusals } from "../dispatch-cli";
 import type { ExecFn } from "../dispatch-cwd";
 import {
   type DispatchToolResult,
+  dispatchRefFromUrl,
   executeDispatchTool,
   positionText,
   resolveIssueDocumentId,
 } from "../dispatch-execute";
-import { DispatchClient } from "../dispatch-http";
+import {
+  DISPATCH_WRITE_RETRY,
+  DispatchClient,
+  DispatchWriteLandedError,
+  type DispatchWriteRetry,
+} from "../dispatch-http";
 import { followedAsk } from "../dispatch-subscribe";
+import { renderSessionAnswersList } from "../session-answers";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -35,6 +43,19 @@ function response(body: unknown, status = 200): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
+
+/**
+ * The production attempts at each write, without waiting out the pauses between them: the write
+ * clock moves only by the pauses, so a write's windows bound its attempts as they would in time.
+ */
+let writeClock = 0;
+const writeRetry: DispatchWriteRetry = {
+  ...DISPATCH_WRITE_RETRY,
+  pause: async (ms) => {
+    writeClock += ms;
+  },
+  now: () => writeClock,
+};
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -79,14 +100,19 @@ function executeAsk(args: Record<string, unknown>, fetchImpl: typeof fetch) {
     env: {},
     exec: repoExec("owner/repo"),
     fetchImpl,
+    writeRetry,
   });
 }
 
 const architectureComponentsGuidance =
   'Project LEGION has an architecture model, but this issue is not linked to any of its current components. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
-const createdIssueLine =
-  "Created LEGION-216: Architecture work → http://dispatch.test/issues/LEGION-216";
+/** A new issue's result as these fixtures' server answers it: the created line, then the
+ *  not-made form a server that sends no related-item check result gets. */
+const createdIssueLines = [
+  "Created LEGION-216: Architecture work → http://dispatch.test/issues/LEGION-216",
+  "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project LEGION --query 'Architecture work'",
+].join("\n");
 
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
@@ -152,12 +178,15 @@ async function createIssueWithComponents(
     const target = new URL(String(url));
     requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
     if (target.pathname === "/api/v1/issues") {
-      return response({
-        key: "LEGION-216",
-        title: "Architecture work",
-        project: "LEGION",
-        components,
-      });
+      return response(
+        {
+          key: "LEGION-216",
+          title: "Architecture work",
+          project: "LEGION",
+          components,
+        },
+        201
+      );
     }
     if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
       if (source.startsWith("older-")) {
@@ -263,6 +292,7 @@ describe("executeDispatchTool", () => {
     expect(result.details).not.toHaveProperty("topic");
     expect(result.text).toBe(
       `Asked ask-1 on DSP-41 (urgency med): ${releaseQuestion}\n` +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project DSP --query 'release ready should'\n" +
         "You follow this ask: its answer and replies reach you directly."
     );
   });
@@ -324,6 +354,7 @@ describe("executeDispatchTool", () => {
         env: {},
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
+        writeRetry,
       }).then(
         () => "",
         (error: Error) => error.message
@@ -338,7 +369,10 @@ describe("executeDispatchTool", () => {
       "so the write may or may not have reached Dispatch: check whether it took effect before retrying it."
     );
     expect(write).not.toContain("a retry may succeed");
-    expect(requests).toEqual(["POST /api/v1/issues/DSP-1/messages"]);
+    // Nothing here says this Dispatch runs the keyed layer: the gateway answers its /healthz too,
+    // so the write is asked once and reported, and the read goes once.
+    expect(requests).toEqual(["POST /api/v1/issues/DSP-1/messages", "GET /healthz"]);
+    requests.length = 0;
 
     const read = await run("dispatch_read", { issue: "DSP-1" });
     expect(read).toStartWith(
@@ -346,12 +380,16 @@ describe("executeDispatchTool", () => {
     );
     expect(read).not.toContain("<");
     expect(read).toEndWith("so a retry may succeed.");
+    // A read is never asked again: each route the read touched went once.
+    expect(requests.every((request) => request.startsWith("GET "))).toBe(true);
+    expect(new Set(requests).size).toBe(requests.length);
   });
 
   // Whether a write a gateway answered may have reached Dispatch decides what the agent does next.
   // A 5xx can come back after Dispatch applied it, so the agent checks before posting again; a 408
   // or 429 is the gateway's own timeout or rate limit, sent before it forwards the request, so the
-  // message was not posted and a retry may succeed.
+  // message was not posted and a retry may succeed. The gateway answers every attempt the same, so
+  // the last attempt's answer is the one the agent reads.
   test("tells dispatch_message whether a gateway's answer may have reached Dispatch", async () => {
     const gateway = ", which looks like a proxy or gateway page rather than Dispatch's own answer";
     for (const [status, statusText, advice] of [
@@ -380,6 +418,7 @@ describe("executeDispatchTool", () => {
         env: {},
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as unknown as typeof fetch,
+        writeRetry,
       }).then(
         () => "",
         (error: Error) => error.message
@@ -457,18 +496,19 @@ describe("executeDispatchTool", () => {
       throw new Error("network must not be called");
     }) as unknown as typeof fetch;
 
-    // 790 + "\n\nRef: " (7) + 24 = 821 UTF-16 units.
+    // The question at the cap less 10, plus "\n\nRef: " (7) and the 24-unit ref, is 21 over.
     await expect(
       executeAsk(
         {
           issue: "DSP-41",
-          question: "x".repeat(790),
+          question: "x".repeat(ASK_QUESTION_MAX - 10),
           ref: "dispatch://DSP-41/ask/ab",
         },
         fetchImpl
       )
     ).rejects.toThrow(
-      "question plus ref is 21 characters over the 800-character limit (821/800); shorten the question or drop the ref"
+      `question plus ref is 21 characters over the ${ASK_QUESTION_MAX}-character limit ` +
+        `(${ASK_QUESTION_MAX + 21}/${ASK_QUESTION_MAX}); shorten the question or drop the ref`
     );
   });
 
@@ -516,14 +556,14 @@ describe("executeDispatchTool", () => {
     expect(replying.problems).toEqual([
       "--body is required (string)",
       "unknown flag --message",
-      "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+      "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
     ]);
     expect(replying.message).toBe(
       [
         "dispatch message was not called: 3 problems",
         "- --body is required (string)",
         "- unknown flag --message",
-        "- in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+        "- in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
         "- Allowed flags: --issue, --issue-file, --body, --body-file, --in-reply-to, --in-reply-to-file, --image, --clear-images, --help, --dry-run",
         "- Example: dispatch message --issue DSP-1 --body 'Implementation started.'",
       ].join("\n")
@@ -908,6 +948,145 @@ describe("executeDispatchTool", () => {
     expect(refResult.text).toBe(posted);
   });
 
+  test("a message reply to a block reference names the block", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname !== "/api/v1/issues/DSP-42/messages") {
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }
+      bodies.push(JSON.parse(init?.body as string));
+      return response({ id: "message-2", issue_key: "DSP-42" });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: {
+        issue: "DSP-42",
+        body: "Sounds good",
+        in_reply_to: `dispatch://DSP-42/message/${parent}#b-b2`,
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(bodies).toEqual([
+      {
+        body: "Sounds good",
+        in_reply_to: parent,
+        in_reply_to_block: "b2",
+        actor: expect.anything(),
+      },
+    ]);
+    expect(result.text).toBe("Posted message message-2 (dispatch://DSP-42/message/message-2)");
+  });
+
+  test("a message reply refuses a block of a comment, naming the reply that answers it", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const comment = `dispatch://DSP-42/comment/${parent}#b-b2`;
+    const error = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { issue: "DSP-42", body: "Sounds good", in_reply_to: comment },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: (() => {
+        throw new Error("network must not be called");
+      }) as unknown as typeof fetch,
+    }).then(
+      () => undefined,
+      (thrown: unknown) => thrown
+    );
+
+    if (!(error instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(error.problems).toEqual([
+      `in_reply_to ${comment} names a block of a comment, but a message reply answers a block of a message (dispatch://KEY/message/<id>#b-<block id>); answer it with dispatch comment --reply-to '${comment}'`,
+    ]);
+  });
+
+  test("a read of a message conversation prints the block each reply answers", async () => {
+    const long = `${"Ship the build tonight. ".repeat(6)}Then tell the team.`;
+    const block = (text: string, removed: boolean) => ({
+      node: "message/message-42#b2",
+      ref: "dispatch://DSP-42/message/message-42#b-b2",
+      block_id: "b2",
+      text,
+      removed,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42/messages/message-42") {
+        return response({
+          message: {
+            id: "message-42",
+            issue_key: "DSP-42",
+            author: { kind: "session", id: "writer-1" },
+            body: `Plan.\n\n${long}`,
+            in_reply_to: null,
+            created_at: "2026-09-09T00:00:00Z",
+            reply_block: null,
+          },
+          replies: [
+            {
+              id: "message-43",
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "Sounds good.",
+              in_reply_to: "message-42",
+              created_at: "2026-09-09T00:01:00Z",
+              reply_block: block(long, false),
+            },
+            {
+              id: "message-44",
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "Never mind.",
+              in_reply_to: "message-42",
+              created_at: "2026-09-09T00:02:00Z",
+              reply_block: block("Gone.", true),
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("message"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/message/message-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(0, 12)).toEqual([
+      "Message:",
+      "message-42 · session writer-1",
+      "Body: Plan.",
+      "",
+      long,
+      "Reply chain:",
+      "message-43 · user sami",
+      // The block's text reads as its head, as every other quoted text on a read does.
+      `Re: block b2: ${long.slice(0, 120)}…`,
+      "Body: Sounds good.",
+      "message-44 · user sami",
+      "Re: block b2 (removed)",
+      "Body: Never mind.",
+    ]);
+  });
+
   // A human's direct message to a session (the Agents page, POST /api/v1/agents/{id}/messages)
   // belongs to no issue, and only POST /api/v1/messages/{id}/reply can carry an answer into that
   // conversation. The route the tool picks is decided by what the caller named, not by what the
@@ -1173,7 +1352,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference"
+      "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)"
     );
   });
 
@@ -1989,6 +2168,99 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("dispatch_answers prints every item of the 72 hours newest first, in full and uncapped", async () => {
+    const requests: string[] = [];
+    const at = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+    const items = Array.from({ length: 10 }, (_, index) => ({
+      kind: "message" as const,
+      relation: "sent_you_a_message" as const,
+      id: `m-${index}`,
+      at: at(index + 1),
+      author: { kind: "user" as const, id: "ana@example.com" },
+      text: `${index} ${"w".repeat(1_000)}`,
+      owner: { issue: { key: "DSP-42", title: "Native workspace" } },
+      ref: `dispatch://DSP-42/message/m-${index}`,
+      href: `/issues/DSP-42#message-m-${index}`,
+    }));
+    const since = at(72);
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response({ session_id: "session-1", since, total: 10, items });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_answers",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual(["/api/v1/agents/session-1/answers"]);
+    expect(result.text).toBe(renderSessionAnswersList(items, { now: Date.now() }));
+    expect(result.text.length).toBeGreaterThan(10_000);
+    expect(result.text.split("\n")[0]).toBe(
+      "10 items people wrote to this session in the last 72 hours, newest first, word for word:"
+    );
+    for (const item of items) expect(result.text).toContain(item.text);
+    expect(result.details).toEqual({ session: "session-1", since, total: 10 });
+  });
+
+  test("dispatch_answers against a Dispatch without the route says its build is older than the answers route", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> =>
+      response(
+        { code: "NOT_FOUND", error: `no route for GET ${new URL(String(url)).pathname}` },
+        404
+      );
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_answers",
+        args: {},
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      "This Dispatch (http://dispatch.test) has no answers route yet: its build is older than the answers route."
+    );
+  });
+
+  test("dispatch_answers against a proxy's 404 page reports that page, never an old Dispatch build", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      new Response("<html><body><h1>404 Not Found</h1><hr>nginx</body></html>", {
+        status: 404,
+        statusText: "Not Found",
+        headers: { "Content-Type": "text/html" },
+      });
+
+    const error: unknown = await executeDispatchTool({
+      tool: "dispatch_answers",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    }).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /answered 404 Not Found with a body that is not Dispatch's error JSON .*which looks like a proxy or gateway page rather than Dispatch's own answer/
+    );
+    expect((error as Error).message).not.toContain("no answers route");
+  });
+
   test("dispatch_claim claims for the calling session and releases with release: true", async () => {
     const calls: Array<{ method: string; pathname: string; body: unknown }> = [];
     const claim = {
@@ -2032,6 +2304,10 @@ describe("executeDispatchTool", () => {
     });
     expect(claimed.text).toContain("DSP-1: claimed by you since 2026-09-24T06:00:00Z");
     expect(claimed.text).toContain("move it to in_progress");
+    // The claim itself delivers a person's answers, comments and messages on the issue.
+    expect(claimed.text).toContain(
+      "A person's answers, comments and messages on DSP-1 now reach you directly."
+    );
     expect(claimed.details).toMatchObject({ issue: "DSP-1", status: "todo", claim });
 
     const released = await run({ issue: "DSP-1", release: true });
@@ -2075,12 +2351,16 @@ describe("executeDispatchTool", () => {
       "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
     );
     expect(claimed.text).not.toContain("issue-update");
+    expect(claimed.text).toContain(
+      "Release the claim when you stop. A person's answers, comments and messages on DSP-1 now reach you directly."
+    );
 
     const released = await run({ issue: "DSP-1", release: true });
     expect(released.text).toContain(
       "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
     );
     expect(released.text).not.toContain("issue-update");
+    expect(released.text).not.toContain("now reach you directly");
   });
 
   test("dispatch_claim reads an omitted legion_managed_status as not Legion-managed", async () => {
@@ -2758,12 +3038,15 @@ describe("executeDispatchTool", () => {
         return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
-      return response({
-        key: "LEGION-13",
-        title: "New global search work",
-        project: "LEGION",
-        components: issueComponents("inherit", []),
-      });
+      return response(
+        {
+          key: "LEGION-13",
+          title: "New global search work",
+          project: "LEGION",
+          components: issueComponents("inherit", []),
+        },
+        201
+      );
     };
 
     const result = await executeDispatchTool({
@@ -2778,7 +3061,8 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13"
+      "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13\n" +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project LEGION --query 'global search work'"
     );
     expect(result.details).toEqual({ issue: "LEGION-13" });
     expect(followedAsk(result.details)).toBeNull();
@@ -2797,13 +3081,16 @@ describe("executeDispatchTool", () => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
         return noSources();
       }
-      return response({
-        key: "LEGION-13",
-        title: "New global search work",
-        project: "LEGION",
-        assignee,
-        components: issueComponents("inherit", []),
-      });
+      return response(
+        {
+          key: "LEGION-13",
+          title: "New global search work",
+          project: "LEGION",
+          assignee,
+          components: issueComponents("inherit", []),
+        },
+        201
+      );
     };
 
     const result = await executeDispatchTool({
@@ -2822,7 +3109,8 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said}`
+      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said}\n` +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project LEGION --query 'global search work'"
     );
   });
 
@@ -2835,7 +3123,7 @@ describe("executeDispatchTool", () => {
       source
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -2849,12 +3137,15 @@ describe("executeDispatchTool", () => {
       requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
       if (target.pathname === "/api/v1/issues") {
         expect(JSON.parse(String(init?.body))).toMatchObject({ project: " LEGION " });
-        return response({
-          key: "LEGION-216",
-          title: "Architecture work",
-          project: "LEGION",
-          components: issueComponents("inherit", []),
-        });
+        return response(
+          {
+            key: "LEGION-216",
+            title: "Architecture work",
+            project: "LEGION",
+            components: issueComponents("inherit", []),
+          },
+          201
+        );
       }
       if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
         return response([architectureSource("LEGION")]);
@@ -2890,12 +3181,15 @@ describe("executeDispatchTool", () => {
           project: "",
           external: "owner/repo#42",
         });
-        return response({
-          key: "LEGION-216",
-          title: "Architecture work",
-          project: "LEGION",
-          components: issueComponents("inherit", []),
-        });
+        return response(
+          {
+            key: "LEGION-216",
+            title: "Architecture work",
+            project: "LEGION",
+            components: issueComponents("inherit", []),
+          },
+          201
+        );
       }
       if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
         return response([architectureSource("LEGION")]);
@@ -2927,7 +3221,7 @@ describe("executeDispatchTool", () => {
       "none"
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -2942,7 +3236,7 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       [
-        createdIssueLine,
+        createdIssueLines,
         'Could not check whether project LEGION has an architecture model: not found. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.',
       ].join("\n")
     );
@@ -2963,7 +3257,7 @@ describe("executeDispatchTool", () => {
       source
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -2977,7 +3271,7 @@ describe("executeDispatchTool", () => {
       "older-one"
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -2990,7 +3284,7 @@ describe("executeDispatchTool", () => {
       issueComponents("explicit", ["web"], [], null, "LEGION-200")
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual(["POST /api/v1/issues"]);
   });
 
@@ -2999,7 +3293,7 @@ describe("executeDispatchTool", () => {
       issueComponents("none", [], [], "hiring, not code")
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual(["POST /api/v1/issues"]);
   });
 
@@ -3008,7 +3302,7 @@ describe("executeDispatchTool", () => {
       issueComponents("explicit", [], ["legacy-ui"])
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3021,7 +3315,7 @@ describe("executeDispatchTool", () => {
       "fails"
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureSourceUnavailableGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureSourceUnavailableGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3033,7 +3327,7 @@ describe("executeDispatchTool", () => {
       issueComponents("explicit", ["web"])
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual(["POST /api/v1/issues"]);
   });
 
@@ -3252,7 +3546,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
       if (pathname === "/api/v1/projects/LEGION/architecture-sources") return noSources();
-      return response(olderIssue);
+      return response(olderIssue, pathname === "/api/v1/issues" ? 201 : 200);
     };
     const run = (tool: string, args: Record<string, unknown>) =>
       executeDispatchTool({
@@ -3366,8 +3660,14 @@ describe("executeDispatchTool", () => {
     });
 
     expect(requests).toEqual(["/api/v1/whoami"]);
-    expect(result.details).toEqual({ session: "session-1", owner: "alice", service: null });
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
     expect(result.text).toContain("alice");
+    expect(result.text).not.toContain("which is not this host session");
   });
 
   test("dispatch_whoami reports a null owner under the shared token", async () => {
@@ -3386,7 +3686,12 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
-    expect(result.details).toEqual({ session: "session-1", owner: null, service: null });
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: null,
+      service: null,
+      project: null,
+    });
     expect(result.text).toContain("shared token");
   });
 
@@ -3416,9 +3721,267 @@ describe("executeDispatchTool", () => {
       session: "session-1",
       owner: null,
       service: "system:serviceaccount:legion:legion-worker",
+      project: null,
     });
     expect(result.text).toContain("runs as service legion/legion-worker");
     expect(result.text).not.toContain("shared token");
+  });
+
+  describe("handoffs", () => {
+    const handoffId = "0b7c2c5e-8f6d-4b8a-9a43-5d2e8c1f0a11";
+    const firstId = "6f1d3a2b-4c5e-4f60-8a7b-9c0d1e2f3a4b";
+    const author = { kind: "session", id: "session-1" };
+    // Spacing and key order a re-serialization would lose.
+    const body = '{ "schemaVersion": 1,\n  "b": 2, "a": 1 }\n';
+    const summary = (id: string, version: number) => ({
+      id,
+      issue_key: "DSP-1",
+      phase: "implement",
+      version,
+      author,
+      created_at: `2026-10-26T00:00:0${version}Z`,
+    });
+    const run = (tool: string, args: Record<string, unknown>, fetchImpl: typeof fetch) =>
+      executeDispatchTool({
+        tool,
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      });
+    const serve = (requests: string[], answer: (method: string, pathname: string) => Response) =>
+      (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const method = init?.method ?? "GET";
+        const { pathname } = new URL(String(url));
+        requests.push(`${method} ${pathname}`);
+        if (init?.body !== undefined) requests.push(String(init.body));
+        return answer(method, pathname);
+      }) as typeof fetch;
+
+    test("dispatch_handoff_write sends the body text as written, as this session", async () => {
+      const requests: string[] = [];
+      const result = await run(
+        "dispatch_handoff_write",
+        { issue: "DSP-1", phase: "implement", body },
+        serve(requests, () => response(summary(handoffId, 2), 201))
+      );
+      expect(requests[0]).toBe("POST /api/v1/issues/DSP-1/handoffs/implement");
+      const sent = JSON.parse(requests[1] ?? "{}") as { actor: unknown; body: unknown };
+      expect(sent.body).toBe(body);
+      expect(sent.actor).toMatchObject({ kind: "session", id: "session-1" });
+      expect(result.text).toBe(
+        `Recorded the implement handoff of DSP-1, version 2 (id ${handoffId})`
+      );
+      expect(result.details).toEqual({
+        issue: "DSP-1",
+        phase: "implement",
+        version: 2,
+        handoff: handoffId,
+      });
+    });
+
+    test("dispatch_handoff_write refuses a body that is not one JSON object before any request", async () => {
+      const requests: string[] = [];
+      const noRequest = serve(requests, () => {
+        throw new Error("no request expected");
+      });
+      for (const notAnObject of ["[1, 2]", "not json", '"text"']) {
+        await expect(
+          run(
+            "dispatch_handoff_write",
+            { issue: "DSP-1", phase: "implement", body: notAnObject },
+            noRequest
+          )
+        ).rejects.toThrow("body is not one JSON object");
+      }
+      await expect(
+        run("dispatch_handoff_write", { issue: "DSP-1", phase: "Implement", body }, noRequest)
+      ).rejects.toThrow("phase is not a handoff phase");
+      expect(requests).toEqual([]);
+    });
+
+    test("dispatch_handoff_write passes a refusal's code on", async () => {
+      await expect(
+        run(
+          "dispatch_handoff_write",
+          { issue: "DSP-1", phase: "implement", body },
+          serve([], () => response({ code: "ISSUE_CLOSED", error: "issue DSP-1 is closed" }, 409))
+        )
+      ).rejects.toThrow("ISSUE_CLOSED: issue DSP-1 is closed");
+    });
+
+    test("dispatch_handoff_read prints one line about the newest record, then its body as stored", async () => {
+      const requests: string[] = [];
+      const result = await run(
+        "dispatch_handoff_read",
+        { issue: "DSP-1", phase: "implement" },
+        serve(requests, () => response({ ...summary(handoffId, 2), body }))
+      );
+      expect(requests).toEqual(["GET /api/v1/issues/DSP-1/handoffs/implement/latest"]);
+      expect(result.text).toBe(
+        `DSP-1 implement handoff, version 2 (id ${handoffId}), written by session session-1 at 2026-10-26T00:00:02Z\n${body}`
+      );
+      expect(result.details).toEqual({
+        issue: "DSP-1",
+        phase: "implement",
+        version: 2,
+        handoff: handoffId,
+      });
+    });
+
+    test("dispatch_handoff_read with a version finds that version's id in the list and reads it", async () => {
+      const requests: string[] = [];
+      const result = await run(
+        "dispatch_handoff_read",
+        { issue: "DSP-1", phase: "implement", version: 1 },
+        serve(requests, (_method, pathname) =>
+          pathname === "/api/v1/issues/DSP-1/handoffs"
+            ? response([
+                summary(handoffId, 2),
+                { ...summary(handoffId, 1), id: "plan-id", phase: "plan" },
+                summary(firstId, 1),
+              ])
+            : response({ ...summary(firstId, 1), body })
+        )
+      );
+      expect(requests).toEqual([
+        "GET /api/v1/issues/DSP-1/handoffs",
+        `GET /api/v1/handoffs/${firstId}`,
+      ]);
+      expect(result.text).toBe(
+        `DSP-1 implement handoff, version 1 (id ${firstId}), written by session session-1 at 2026-10-26T00:00:01Z\n${body}`
+      );
+    });
+
+    test("dispatch_handoff_read refuses a version or phase that has no record with HANDOFF_NOT_FOUND", async () => {
+      const requests: string[] = [];
+      const listed = serve(requests, () => response([summary(handoffId, 2), summary(firstId, 1)]));
+      await expect(
+        run("dispatch_handoff_read", { issue: "DSP-1", phase: "implement", version: 3 }, listed)
+      ).rejects.toThrow(
+        "HANDOFF_NOT_FOUND: issue DSP-1 has no implement handoff version 3; its newest implement handoff is version 2"
+      );
+      await expect(
+        run("dispatch_handoff_read", { issue: "DSP-1", phase: "test", version: 1 }, listed)
+      ).rejects.toThrow(
+        "HANDOFF_NOT_FOUND: issue DSP-1 has no test handoff version 1; it has no test handoff at all"
+      );
+      // Only the list was read: no version matched, so no record was asked for by id.
+      expect(requests).toEqual([
+        "GET /api/v1/issues/DSP-1/handoffs",
+        "GET /api/v1/issues/DSP-1/handoffs",
+      ]);
+      await expect(
+        run(
+          "dispatch_handoff_read",
+          { issue: "DSP-1", phase: "plan" },
+          serve([], () =>
+            response({ code: "HANDOFF_NOT_FOUND", error: "issue DSP-1 has no plan handoff" }, 404)
+          )
+        )
+      ).rejects.toThrow("HANDOFF_NOT_FOUND: issue DSP-1 has no plan handoff");
+    });
+  });
+
+  // The three cases the tool's text distinguishes, now that a credential can prove a session of
+  // its own: the server names the host's session, it names another, or it names none at all,
+  // which is a Dispatch older than broker-issued tokens and not an answer of "no session".
+  test("dispatch_whoami reports the session the credential proved when it is this host's", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: "alice",
+        service: null,
+        session: "session-1",
+        project: "INFRA",
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: "INFRA",
+    });
+    expect(result.text).toContain("Session session-1 acts for alice");
+    expect(result.text).toContain("It may write project INFRA and no other.");
+    expect(result.text).not.toContain("which is not this host session");
+  });
+
+  test("dispatch_whoami says plainly when the credential names another session", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: "alice",
+        service: null,
+        session: "ses_from_the_broker",
+        project: null,
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "ses_from_the_broker",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
+    expect(result.text).toContain("Session ses_from_the_broker acts for alice");
+    expect(result.text).toContain(
+      "Your credential names session ses_from_the_broker, which is not this host session (session-1): Dispatch records every write you make as ses_from_the_broker."
+    );
+    expect(result.text).not.toContain("may write project");
+  });
+
+  test("dispatch_whoami reads an omitted session as an older Dispatch, not as none", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({ kind: "agent", owner: "alice", service: null });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: "alice",
+      service: null,
+      project: null,
+    });
+    expect(result.text).toContain("Session session-1 acts for alice");
+    expect(result.text).not.toContain("which is not this host session");
   });
 
   test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {
@@ -3628,6 +4191,7 @@ describe("executeDispatchTool", () => {
         env: {},
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
+        writeRetry,
       })
     ).rejects.toThrow(
       `INTERNAL: internal server error; one of ${pullRequest} may already be linked from another issue (a URL links exactly one issue)`
@@ -3664,6 +4228,7 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl: fetchImpl as typeof fetch,
+      writeRetry,
     }).then(
       () => "",
       (error: Error) => error.message
@@ -3748,18 +4313,31 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/title is 1 characters over the 1000-character limit \(1001\/1000\)/);
   });
 
-  /** Records every request; the messages route and the PATCH answer with the given responses. */
+  /**
+   * Records every request; the messages route and the PATCH answer with the given responses. This
+   * Dispatch runs the keyed layer: its own answers (JSON) echo the request's key and its /healthz
+   * says `idempotency_keys`, so a write that fails without an answer of Dispatch's own is resent.
+   */
   function closingServer(answers: { message: () => Response; patch: () => Response }) {
     const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
       const method = init?.method ?? "GET";
+      if (pathname === "/healthz") return response({ status: "ok", idempotency_keys: true });
       requests.push({
         method,
         pathname,
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       });
-      if (pathname === "/api/v1/issues/ACME-175/messages") return answers.message();
+      const key = new Headers(init?.headers).get("Idempotency-Key");
+      const echoed = (given: Response): Response => {
+        if (key === null || !(given.headers.get("Content-Type") ?? "").includes("application/json"))
+          return given;
+        const copy = new Response(given.body, given);
+        copy.headers.set("Idempotency-Key", key);
+        return copy;
+      };
+      if (pathname === "/api/v1/issues/ACME-175/messages") return echoed(answers.message());
       if (pathname !== "/api/v1/issues/ACME-175") {
         throw new Error(`unexpected request: ${method} ${pathname}`);
       }
@@ -3773,7 +4351,7 @@ describe("executeDispatchTool", () => {
           external_links: [],
         });
       }
-      return answers.patch();
+      return echoed(answers.patch());
     };
     return { requests, fetchImpl: fetchImpl as typeof fetch };
   }
@@ -3795,6 +4373,7 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl,
+      writeRetry,
     });
 
   test("dispatch_issue_update posts the reason as a message, then closes the issue", async () => {
@@ -3856,21 +4435,30 @@ describe("executeDispatchTool", () => {
     });
 
   // A request that got no answer, the client's timeout and a transport error, each with the
-  // message the client reports for it. The reason's post and the close's PATCH each add their own
-  // account after it, as a sentence of its own, since both messages end one.
+  // message the client reports for it (given the request it names) and the attempts the write
+  // made: a timeout is the call's deadline and ends it, saying the write may or may not have taken
+  // effect, while a transport failure is asked again under the write's key until its five attempts
+  // run out. The reason's post and the close's PATCH each add their own account after it, as a
+  // sentence of its own, since both messages end one.
   const unanswered = [
     [
       (): Response => {
         throw new DOMException("The operation timed out.", "TimeoutError");
       },
-      "The operation timed out.",
+      (request: string) =>
+        `${request} had no definitive answer when its deadline ended it (its only attempt), and ` +
+        "an attempt of the write may have reached Dispatch, so it may or may not have taken " +
+        "effect: check whether it did before retrying it.",
+      1,
     ],
     [
       (): Response => {
         throw new TypeError("fetch failed");
       },
-      "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
+      (_request: string) =>
+        "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
         "changed, restart this agent process so it picks up the new configuration.",
+      5,
     ],
   ] as const;
 
@@ -3880,7 +4468,9 @@ describe("executeDispatchTool", () => {
   // where the client's advice that a retry may succeed stands) or a status that cannot clear. A
   // 5xx, Dispatch's own included (it can fail after it committed), a timeout or a transport error
   // leaves the reason possibly posted, and that account replaces the client's advice. After an
-  // error's own message it joins a clause, or starts a sentence where the message ended one.
+  // error's own message it joins a clause, or starts a sentence where the message ended one. Every
+  // failure but a timeout and a refusal that cannot clear is asked again until the write's five
+  // attempts run out, each failing the same way, so the last attempt's account is the agent's.
   test("dispatch_issue_update says whether a failed post of the reason leaves it posted", async () => {
     const answered = (status: string, page: string) =>
       `HTTP_${status.slice(0, 3)}: POST http://dispatch.test/api/v1/issues/ACME-175/messages ` +
@@ -3899,40 +4489,54 @@ describe("executeDispatchTool", () => {
     const reset =
       "The socket connection was closed unexpectedly. For more information, pass `verbose: true` " +
       "in the second argument to fetch()";
-    for (const [message, expected] of [
+    for (const [message, expected, attempts] of [
       [
         () => gatewayPage(502, "Bad Gateway"),
         `${answered("502 Bad Gateway", "502 Bad Gateway")}${unknown}`,
+        5,
       ],
       [
         () => refusal(500, "INTERNAL", "internal server error"),
         `INTERNAL: internal server error${unknown}`,
+        5,
       ],
-      ...unanswered.map(([fail, told]) => [fail, `${told}${unknownSentence}`] as const),
+      ...unanswered.map(
+        ([fail, told, tries]) =>
+          [
+            fail,
+            `${told("POST http://dispatch.test/api/v1/issues/ACME-175/messages")}${unknownSentence}`,
+            tries,
+          ] as const
+      ),
       [
         (): Response => {
           throw new Error(refused);
         },
         `${refused}${unknownSentence}`,
+        5,
       ],
       [
         (): Response => {
           throw new Error(reset);
         },
         `${reset}${unknown}`,
+        5,
       ],
       [
         () => gatewayPage(408, "Request Timeout"),
         `${answered("408 Request Timeout", "408 Request Timeout")}${retry}${notPosted}`,
+        5,
       ],
       [
         () => gatewayPage(429, "Too Many Requests"),
         `${answered("429 Too Many Requests", "429 Too Many Requests")}${retry}${notPosted}`,
+        5,
       ],
       [
         () => gatewayPage(404, "Not Found"),
         `${answered("404 Not Found", "404 Not Found")}, so a retry gets the same answer until the ` +
           `Dispatch URL, or whatever answers in its place, is fixed${notPosted}`,
+        1,
       ],
     ] as const) {
       const server = closingServer({
@@ -3948,7 +4552,10 @@ describe("executeDispatchTool", () => {
       );
 
       expect(failure).toBe(expected);
-      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+      expect(server.requests.map(({ method }) => method)).toEqual([
+        "GET",
+        ...Array<string>(attempts).fill("POST"),
+      ]);
     }
   });
 
@@ -4009,7 +4616,11 @@ describe("executeDispatchTool", () => {
           "Retrying this call posts its reason again, so retry with a reason that points at " +
           "message message-7"
       );
-      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+      expect(server.requests.map(({ method }) => method)).toEqual([
+        "GET",
+        "POST",
+        ...Array<string>(5).fill("PATCH"),
+      ]);
     }
   });
 
@@ -4029,14 +4640,22 @@ describe("executeDispatchTool", () => {
       "and the close may or may not have taken effect. Read the issue's status before retrying: " +
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
-    for (const [patch, expected] of [
-      ...unanswered.map(([fail, told]) => [fail, `${told}${unknownSentence}`] as const),
-      [() => refusal(502, "HTTP_502", "Bad Gateway"), `HTTP_502: Bad Gateway${unknown}`],
+    for (const [patch, expected, attempts] of [
+      ...unanswered.map(
+        ([fail, told, tries]) =>
+          [
+            fail,
+            `${told("PATCH http://dispatch.test/api/v1/issues/ACME-175")}${unknownSentence}`,
+            tries,
+          ] as const
+      ),
+      [() => refusal(502, "HTTP_502", "Bad Gateway"), `HTTP_502: Bad Gateway${unknown}`, 5],
       [
         () => gatewayPage(502, "Bad Gateway"),
         "HTTP_502: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 502 Bad Gateway " +
           'with a body that is not Dispatch\'s error JSON ("502 Bad Gateway"), which looks like a ' +
           `proxy or gateway page rather than Dispatch's own answer${unknown}`,
+        5,
       ],
     ] as const) {
       const server = closingServer({
@@ -4050,7 +4669,100 @@ describe("executeDispatchTool", () => {
       expect(failure.message).toBe(expected);
       expect(failure.message).not.toContain("did not close");
       expect(failure.message).not.toContain("a retry may succeed");
-      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+      expect(server.requests.map(({ method }) => method)).toEqual([
+        "GET",
+        "POST",
+        ...Array<string>(attempts).fill("PATCH"),
+      ]);
+    }
+  });
+
+  // KEY_COMMITTED says a write landed and its answer was lost. On the close's own PATCH, the call's
+  // last write, that is the call's landing, which the CLI reports as done; on the closing reason,
+  // a step before it, the close was never sent, so the call fails and says the reason is there.
+  test("dispatch_issue_update reads KEY_COMMITTED as a landing on the close, and a failure on the reason", async () => {
+    const committed = () =>
+      refusal(409, "KEY_COMMITTED", "the write landed and its answer was lost");
+    const closed = closingServer({
+      message: () => response({ id: "message-7", issue_key: "ACME-175" }),
+      patch: committed,
+    });
+    const landing = await closeCall(closed.fetchImpl).catch((error: unknown) => error);
+    expect(landing).toBeInstanceOf(DispatchWriteLandedError);
+    expect(closed.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+
+    const reasoned = closingServer({
+      message: committed,
+      patch: () => {
+        throw new Error("the close must not be sent");
+      },
+    });
+    const failure = await closeCall(reasoned.fetchImpl).catch((error: unknown) => error);
+    expect(failure).not.toBeInstanceOf(DispatchWriteLandedError);
+    expect((failure as Error).message).toBe(
+      "POST http://dispatch.test/api/v1/issues/ACME-175/messages was made, but its answer was " +
+        "lost on the way back (KEY_COMMITTED), so this command cannot print what it made: read it " +
+        "back with `dispatch read`, or with the matching list for something it created. That was " +
+        "the closing reason, so the close was not sent: read the issue's messages for it, then " +
+        "close with a reason that points at it, since retrying this call posts its reason again."
+    );
+    expect(reasoned.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+  });
+
+  // A close whose last attempt alone says it never reached Dispatch (a gateway's 429), or that
+  // Dispatch still runs an earlier attempt (409 KEY_IN_FLIGHT), after an attempt that may have
+  // reached it (a 502, a transport failure), may have closed the issue: the agent is told to read
+  // the status before retrying, never that the issue did not close.
+  test("dispatch_issue_update says the close is unknown when an earlier attempt may have reached Dispatch", async () => {
+    const unknownSentence =
+      " The reason already landed as message message-7 (dispatch://ACME-175/message/message-7), " +
+      "and the close may or may not have taken effect. Read the issue's status before retrying: " +
+      "done means it closed; otherwise retry with a reason that points at message message-7, " +
+      "since retrying this call posts its reason again";
+    // This Dispatch runs the keyed layer, so each message also says that it finishes the close.
+    const keyedTail =
+      ". Dispatch finishes an attempt it received whatever this command does, so read the write " +
+      "back before you send it again: a new command sends it under a new key.";
+    const inFlight = () =>
+      refusal(409, "KEY_IN_FLIGHT", "an earlier request with this key is still running");
+    // A KEY_IN_FLIGHT says Dispatch may still be running the close, so it is asked every 3 s at
+    // most until 55 s rather than five times: 20 attempts.
+    for (const [first, then, expected, attempts] of [
+      [
+        () => gatewayPage(502, "Bad Gateway"),
+        () => gatewayPage(429, "Too Many Requests"),
+        "PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 429 Too Many Requests with " +
+          'a body that is not Dispatch\'s error JSON ("429 Too Many Requests"), which looks like ' +
+          "a proxy or gateway page rather than Dispatch's own answer (the last of 5 attempts), " +
+          "and an earlier attempt of the write may have reached Dispatch, so it may or may not " +
+          `have taken effect${keyedTail}${unknownSentence}`,
+        5,
+      ],
+      [
+        (): Response => {
+          throw new TypeError("fetch failed");
+        },
+        inFlight,
+        "KEY_IN_FLIGHT (the last of 20 " +
+          "attempts), and Dispatch was still running an earlier attempt of the write, so it may " +
+          `or may not have taken effect${keyedTail}${unknownSentence}`,
+        20,
+      ],
+    ] as const) {
+      let patches = 0;
+      const server = closingServer({
+        message: () => response({ id: "message-7", issue_key: "ACME-175" }),
+        patch: () => (++patches === 1 ? first() : then()),
+      });
+
+      const failure = await closeCall(server.fetchImpl).then(
+        () => "",
+        (error: Error) => error.message
+      );
+
+      expect(failure).toBe(expected);
+      expect(failure).not.toContain("did not close");
+      expect(patches).toBe(attempts);
     }
   });
 
@@ -4235,7 +4947,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_ask",
-        args: { issue: "DSP-41", question: "x".repeat(801) },
+        args: { issue: "DSP-41", question: "x".repeat(ASK_QUESTION_MAX + 1) },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -4734,7 +5446,10 @@ describe("executeDispatchTool", () => {
     expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec?q=workspace" })).toEqual(
       spec
     );
-    expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec#b-ship-it" })).toEqual(spec);
+    // A block's link on the Spec tab names that block, so the read is the block's, not the spec's.
+    expect(
+      (await read({ ref: "http://dispatch.test/issues/DSP-42/spec#b-ship-it" })).text
+    ).toStartWith("Block: ship-it\nDocument: dispatch://DSP-42/spec\n");
     expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec" })).toEqual(spec);
     expect(
       await read({ ref: "http://dispatch.test/issues/DSP-42/artifacts/notes-md?q=workspace" })
@@ -4746,6 +5461,804 @@ describe("executeDispatchTool", () => {
     expect(requests).toContain(
       `/api/v1/references?to=${encodeURIComponent("dispatch://DSP-42/artifact/notes-md")}`
     );
+  });
+
+  describe("a block reference", () => {
+    const blockRef = "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1";
+    const blockNode = {
+      kind: "block",
+      id: "CORE-1/spec#décision:1",
+      block_id: "décision:1",
+      issue_key: "CORE-1",
+      project: "CORE",
+      ref: blockRef,
+      document: "dispatch://CORE-1/spec",
+    };
+    const notFound = (error: string) => response({ error, code: "NOT_FOUND" }, 404);
+    /** A read of `ref` against a server whose references route answers `to` and `from`: the
+     *  pending result, and the requests it sends. */
+    const readBlock = (
+      ref: string,
+      to: () => Response,
+      from: () => Response = () => response({ node: blockNode, edges: [] })
+    ) => {
+      const requests: string[] = [];
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        requests.push(target.pathname + target.search);
+        if (target.pathname === "/api/v1/references" && target.searchParams.get("to") === ref) {
+          return to();
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.get("from") === ref) {
+          return from();
+        }
+        throw new Error(`unexpected request: ${target.pathname}${target.search}`);
+      };
+      const result = executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return { result, requests };
+    };
+
+    test("reads the block: its document, the version its text last changed in, its text and its links", async () => {
+      const commentRef = "dispatch://CORE-1/comment/cccccccc-0000-4000-8000-000000000042";
+      const { result, requests } = readBlock(
+        blockRef,
+        () =>
+          response({
+            node: {
+              ...blockNode,
+              changed_version: 3,
+              changed_at: "2026-10-20T00:00:00Z",
+              text: "We ship on Friday.\n\nThe release waits for OPS-1.",
+            },
+            edges: [
+              {
+                kind: "mentions",
+                direction: "in",
+                node: {
+                  kind: "comment",
+                  id: "cccccccc-0000-4000-8000-000000000042",
+                  ref: commentRef,
+                },
+                excerpt: { text: "See the decision." },
+                created_at: "2026-10-21T00:00:00Z",
+                source_seq: 7,
+              },
+            ],
+          }),
+        () =>
+          response({
+            node: blockNode,
+            edges: [
+              {
+                kind: "mentions",
+                direction: "out",
+                node: { kind: "issue", id: "OPS-1", ref: "dispatch://OPS-1" },
+                created_at: "2026-10-20T00:00:00Z",
+                source_seq: 5,
+              },
+              {
+                kind: "part_of",
+                direction: "out",
+                node: {
+                  kind: "artifact",
+                  id: "artifact-1",
+                  ref: "dispatch://CORE-1/artifact/spec",
+                },
+                created_at: "2026-10-19T00:00:00Z",
+                source_seq: null,
+              },
+            ],
+          })
+      );
+
+      expect(await result).toEqual({
+        text: [
+          "Block: décision:1",
+          "Document: dispatch://CORE-1/spec",
+          "Changed in version: 3",
+          "Text:",
+          "We ship on Friday.\n\nThe release waits for OPS-1.",
+          "Referenced by:",
+          `- mentions comment ${commentRef} (See the decision. · 2026-10-21T00:00:00Z)`,
+          "Links:",
+          "- mentions issue dispatch://OPS-1 (2026-10-20T00:00:00Z)",
+          "- part_of artifact dispatch://CORE-1/artifact/spec (2026-10-19T00:00:00Z)",
+        ].join("\n"),
+        details: { issue: "CORE-1", block: "décision:1" },
+      });
+      // The block's own node, both ways, and nothing of the issue or the document.
+      expect(requests.sort()).toEqual([
+        `/api/v1/references?from=${encodeURIComponent(blockRef)}`,
+        `/api/v1/references?to=${encodeURIComponent(blockRef)}`,
+      ]);
+    });
+
+    test("a pinned block says how it stands against its version and shows that version's text", async () => {
+      const pinned = "dispatch://CORE-1/spec#b-ship%5Fit@v1";
+      const node = {
+        ...blockNode,
+        id: "CORE-1/spec#ship_it",
+        block_id: "ship_it",
+        ref: "dispatch://CORE-1/spec#b-ship%5Fit",
+        changed_version: 2,
+        changed_at: "2026-10-22T00:00:00Z",
+        text: "Ship on Monday.",
+      };
+      const pinRead = (state: "changed" | "unchanged", text: string) =>
+        readBlock(pinned, () =>
+          response({
+            node: { ...node, pin: { version: 1, ref: pinned, text, state } },
+            edges: [],
+          })
+        ).result;
+      const head = [
+        "Block: ship_it",
+        "Document: dispatch://CORE-1/spec",
+        "Changed in version: 2",
+        "Text:",
+        "Ship on Monday.",
+        "Pinned to version: 1",
+      ];
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      expect((await pinRead("changed", "Ship on Friday.")).text).toBe(
+        [
+          ...head,
+          "Changed since version 1; last changed in version 2.",
+          "Text at version 1:",
+          "Ship on Friday.",
+          ...sections,
+        ].join("\n")
+      );
+      expect((await pinRead("unchanged", "Ship on Monday.")).text).toBe(
+        [
+          ...head,
+          "Unchanged since version 1.",
+          "Text at version 1:",
+          "Ship on Monday.",
+          ...sections,
+        ].join("\n")
+      );
+    });
+
+    test("a pinned block that was removed shows its version's text and no links, and the read succeeds", async () => {
+      const pinned = `${blockRef}@v2`;
+      const { result } = readBlock(pinned, () =>
+        response({
+          node: {
+            ...blockNode,
+            pin: {
+              version: 2,
+              ref: pinned,
+              text: "We ship on Friday.",
+              state: "removed",
+              removed_version: 3,
+            },
+          },
+          edges: [],
+        })
+      );
+
+      expect((await result).text).toBe(
+        [
+          "Block: décision:1",
+          "Document: dispatch://CORE-1/spec",
+          "Pinned to version: 2",
+          "Removed in version 3.",
+          "Text at version 2:",
+          "We ship on Friday.",
+          "Referenced by:",
+          "- none",
+          "Links:",
+          "- none",
+        ].join("\n")
+      );
+    });
+
+    test("a block read prints the Node line, pinned and removed too", async () => {
+      const facts = {
+        made_by: [{ kind: "user", id: "alice@example.com" }],
+        made_at: "2026-10-18T00:00:00Z",
+        changed_by: [{ kind: "session", id: "s1" }],
+        parent: { kind: "artifact", id: "artifact-1", ref: "dispatch://CORE-1/spec" },
+      };
+      const current = {
+        ...blockNode,
+        ...facts,
+        changed_version: 3,
+        changed_at: "2026-10-20T00:00:00Z",
+        parent_version: 3,
+        text: "We ship on Friday.",
+      };
+      const head = [
+        "Block: décision:1",
+        "Document: dispatch://CORE-1/spec",
+        "Changed in version: 3",
+        "Text:",
+        "We ship on Friday.",
+      ];
+      const nodeLine = `Node: block ${blockRef} · made by user alice@example.com at 2026-10-18T00:00:00Z · changed by session s1 at 2026-10-20T00:00:00Z · part of dispatch://CORE-1/spec (version 3)`;
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      expect(
+        (await readBlock(blockRef, () => response({ node: current, edges: [] })).result).text
+      ).toBe([...head, nodeLine, ...sections].join("\n"));
+
+      const pinned = `${blockRef}@v3`;
+      const pin = { version: 3, ref: pinned, text: "We ship on Friday.", state: "unchanged" };
+      expect(
+        (await readBlock(pinned, () => response({ node: { ...current, pin }, edges: [] })).result)
+          .text
+      ).toBe(
+        [
+          ...head,
+          "Pinned to version: 3",
+          "Unchanged since version 3.",
+          "Text at version 3:",
+          "We ship on Friday.",
+          nodeLine,
+          ...sections,
+        ].join("\n")
+      );
+
+      // A removed block's last change is the version that removed it, and it belongs to the
+      // last version known to hold it.
+      const removedPin = `${blockRef}@v2`;
+      const removed = {
+        ...blockNode,
+        ...facts,
+        changed_at: "2026-10-21T00:00:00Z",
+        parent_version: 2,
+        pin: {
+          version: 2,
+          ref: removedPin,
+          text: "We ship on Friday.",
+          state: "removed",
+          removed_version: 3,
+        },
+      };
+      expect(
+        (await readBlock(removedPin, () => response({ node: removed, edges: [] })).result).text
+      ).toBe(
+        [
+          "Block: décision:1",
+          "Document: dispatch://CORE-1/spec",
+          "Pinned to version: 2",
+          "Removed in version 3.",
+          "Text at version 2:",
+          "We ship on Friday.",
+          `Node: block ${blockRef} · made by user alice@example.com at 2026-10-18T00:00:00Z · changed by session s1 at 2026-10-21T00:00:00Z · part of dispatch://CORE-1/spec (version 2)`,
+          ...sections,
+        ].join("\n")
+      );
+    });
+
+    test("a block no current version holds is an error naming the block and its document", async () => {
+      const absent = () => notFound('no block "décision:1" in dispatch://CORE-1/spec');
+      const { result } = readBlock(blockRef, absent, absent);
+
+      await expect(result).rejects.toThrow(
+        new Error("No block décision:1 in dispatch://CORE-1/spec.")
+      );
+      // A pinned ref's 404 says which of the version, its record or the block is missing.
+      const pinned = `${blockRef}@v9`;
+      const noVersion = () => notFound("no version 9 of dispatch://CORE-1/spec");
+      await expect(readBlock(pinned, noVersion, noVersion).result).rejects.toThrow(
+        "no version 9 of dispatch://CORE-1/spec"
+      );
+    });
+
+    test("a tool that would act on the block's owner refuses it before any request", async () => {
+      const problemsOf = (tool: string, args: Record<string, unknown>) =>
+        executeDispatchTool({
+          tool,
+          args,
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: (() => {
+            throw new Error("network must not be called");
+          }) as unknown as typeof fetch,
+        }).then(
+          () => {
+            throw new Error(`${tool} was not refused`);
+          },
+          (error: unknown) => {
+            if (!(error instanceof ToolInputError)) throw error;
+            return error.problems;
+          }
+        );
+
+      expect(
+        await problemsOf("dispatch_comment", { ref: "dispatch://CORE-1/spec#b-x", body: "Agreed." })
+      ).toEqual([
+        "ref dispatch://CORE-1/spec#b-x names block x on CORE-1; dispatch comment would act on CORE-1 and drop the block: read it with dispatch read, or name CORE-1 with issue CORE-1",
+      ]);
+      // A document tool acts on the issue's primary document unless named, so the hint names
+      // the block's own document.
+      const notesBlock = "dispatch://CORE-1/artifact/notes-md#b-x@v2";
+      expect(
+        await problemsOf("dispatch_doc_edit", {
+          ref: notesBlock,
+          ops: [{ op: "replace", find: "old line", with: "new line" }],
+        })
+      ).toEqual([
+        `ref ${notesBlock} names block x on CORE-1; dispatch doc-edit would act on CORE-1 and drop the block: read it with dispatch read, or name CORE-1 with issue CORE-1 and artifact notes-md`,
+      ]);
+      const handbookBlock = "dispatch://CORE/artifact/handbook-md#b-x";
+      expect(await problemsOf("dispatch_doc_read", { ref: handbookBlock })).toEqual([
+        `ref ${handbookBlock} names block x on CORE/handbook-md; dispatch doc-read would act on CORE/handbook-md and drop the block: read it with dispatch read, or name CORE/handbook-md with project CORE and artifact handbook-md`,
+      ]);
+      // A read of the block names its document, so another document beside it is refused.
+      expect(
+        await problemsOf("dispatch_read", {
+          ref: "dispatch://CORE-1/spec#b-x",
+          artifact: "notes-md",
+        })
+      ).toEqual([
+        "artifact notes-md and ref dispatch://CORE-1/spec#b-x name two documents; --ref dispatch://CORE-1/spec#b-x alone names spec, and --issue CORE-1 --artifact notes-md names notes-md",
+      ]);
+    });
+
+    test("a document read names the document's block each link is at", async () => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/projects/CORE/artifacts/handbook-md") {
+          return response({
+            id: "artifact-7",
+            slug: "handbook-md",
+            name: "handbook.md",
+            project: "CORE",
+            versions: [{ version: 1 }],
+          });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+          return response({
+            node: { kind: "artifact", id: "CORE/artifact/handbook-md" },
+            edges: [
+              {
+                kind: "mentions",
+                direction: "in",
+                node: { kind: "issue", id: "OPS-1", ref: "dispatch://OPS-1" },
+                block: {
+                  kind: "block",
+                  id: "CORE/artifact/handbook-md#ship-it",
+                  ref: "dispatch://CORE/artifact/handbook-md#b-ship-it",
+                },
+                created_at: "2026-10-21T00:00:00Z",
+                source_seq: 9,
+              },
+            ],
+          });
+        }
+        if (target.pathname === "/api/v1/references") return response(emptyGraph("artifact"));
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: "dispatch://CORE/artifact/handbook-md" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+      expect(result.text).toContain(
+        "Referenced by:\n- mentions issue dispatch://OPS-1 (2026-10-21T00:00:00Z) (block dispatch://CORE/artifact/handbook-md#b-ship-it)\nLinks:"
+      );
+    });
+
+    // A block of a comment or message reads as one line naming the block, its item and the comment
+    // revision its text last changed in, then its text; a comment's pin names a revision of the
+    // comment. A block of a comment or message citing the node is listed as its item, then the block.
+    describe("of a comment or message", () => {
+      const comment = "11111111-1111-4111-8111-111111111111";
+      const message = "33333333-3333-4333-8333-333333333333";
+      const commentRef = `dispatch://CORE-1/comment/${comment}`;
+      const messageRef = `dispatch://CORE-1/message/${message}`;
+      const commentBlock = {
+        kind: "block",
+        id: `comment/${comment}#b2`,
+        block_id: "b2",
+        issue_key: "CORE-1",
+        project: "CORE",
+        ref: `${commentRef}#b-b2`,
+        parent: { kind: "comment", id: comment, ref: commentRef },
+      };
+      const messageBlock = {
+        kind: "block",
+        id: `message/${message}#b1`,
+        block_id: "b1",
+        issue_key: "CORE-1",
+        project: "CORE",
+        ref: `${messageRef}#b-b1`,
+        parent: { kind: "message", id: message, ref: messageRef },
+      };
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      test("read prints a block of a comment", async () => {
+        const block = `dispatch://DSP-1/comment/${comment}#b-b2`;
+        const node = {
+          ...commentBlock,
+          issue_key: "DSP-1",
+          project: "DSP",
+          ref: block,
+          parent: { kind: "comment", id: comment, ref: `dispatch://DSP-1/comment/${comment}` },
+          changed_version: 1,
+          made_by: [{ kind: "user", id: "alice@example.com" }],
+          made_at: "2026-10-20T00:00:00Z",
+          changed_by: [{ kind: "user", id: "alice@example.com" }],
+          changed_at: "2026-10-20T00:00:00Z",
+          parent_version: 1,
+          text: "Beta.\nIts second line.",
+        };
+        const { result } = readBlock(
+          block,
+          () => response({ node, edges: [] }),
+          () => response({ node, edges: [] })
+        );
+
+        expect(await result).toEqual({
+          text: [
+            `Block b2 of comment ${comment} (changed in revision 1):`,
+            "Beta.\nIts second line.",
+            `Node: block ${block} · made by user alice@example.com at 2026-10-20T00:00:00Z · changed by user alice@example.com at 2026-10-20T00:00:00Z · part of dispatch://DSP-1/comment/${comment} (revision 1)`,
+            ...sections,
+          ].join("\n"),
+          details: { issue: "DSP-1", block: "b2" },
+        });
+
+        // Once an edit removed the block, no current revision holds it: the read fails, naming it.
+        const removed = () => notFound(`no block "b2" in comment ${comment}`);
+        await expect(readBlock(block, removed, removed).result).rejects.toThrow(
+          new Error(`No block b2 in dispatch://DSP-1/comment/${comment}.`)
+        );
+      });
+
+      test("a pinned comment block prints the revision its text last changed in and how it stands against its pin", async () => {
+        const pinned = `${commentRef}#b-b2@v1`;
+        const { result } = readBlock(
+          pinned,
+          () =>
+            response({
+              node: {
+                ...commentBlock,
+                changed_version: 2,
+                made_by: [{ kind: "user", id: "alice@example.com" }],
+                changed_by: [{ kind: "user", id: "alice@example.com" }],
+                changed_at: "2026-10-20T00:00:00Z",
+                parent_version: 2,
+                text: "Beta, as edited.",
+                pin: { version: 1, ref: pinned, text: "Beta.", state: "changed" },
+              },
+              edges: [
+                {
+                  kind: "mentions",
+                  direction: "in",
+                  node: messageBlock,
+                  excerpt: { block_id: "b1", text: "The message cites it." },
+                  created_at: "2026-10-21T00:00:00Z",
+                  source_seq: 7,
+                },
+              ],
+            }),
+          () => response({ node: commentBlock, edges: [] })
+        );
+
+        expect(await result).toEqual({
+          text: [
+            `Block b2 of comment ${comment} (changed in revision 2):`,
+            "Beta, as edited.",
+            "Pinned to revision: 1",
+            "Changed since revision 1; last changed in revision 2.",
+            "Text at revision 1:",
+            "Beta.",
+            `Node: block ${commentRef}#b-b2 · made by user alice@example.com · changed by user alice@example.com at 2026-10-20T00:00:00Z · part of ${commentRef} (revision 2)`,
+            "Referenced by:",
+            `- mentions message ${messageRef} block b1 (The message cites it. · 2026-10-21T00:00:00Z)`,
+            "Links:",
+            "- none",
+          ].join("\n"),
+          details: { issue: "CORE-1", block: "b2" },
+        });
+      });
+
+      test("a message block prints its message and its text", async () => {
+        const block = `${messageRef}#b-b1`;
+        const node = { ...messageBlock, text: "The first paragraph." };
+        const expected = [
+          `Block b1 of message ${message}:`,
+          "The first paragraph.",
+          ...sections,
+        ].join("\n");
+        expect(
+          (
+            await readBlock(
+              block,
+              () => response({ node, edges: [] }),
+              () => response({ node, edges: [] })
+            ).result
+          ).text
+        ).toBe(expected);
+      });
+
+      test("a comment block no current revision holds is an error naming the block and its comment", async () => {
+        const absent = () => notFound(`no block "b9" in comment ${comment}`);
+        await expect(readBlock(`${commentRef}#b-b9`, absent, absent).result).rejects.toThrow(
+          new Error(`No block b9 in ${commentRef}.`)
+        );
+      });
+
+      test("a tool that would act on the block's owner refuses it as it refuses the comment", async () => {
+        const refused = await executeDispatchTool({
+          tool: "dispatch_comment",
+          args: { ref: `${commentRef}#b-b2`, body: "Agreed." },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: (() => {
+            throw new Error("network must not be called");
+          }) as unknown as typeof fetch,
+        }).then(
+          () => [],
+          (error: unknown) => {
+            if (!(error instanceof ToolInputError)) throw error;
+            return error.problems;
+          }
+        );
+        expect(refused).toEqual([
+          `ref ${commentRef}#b-b2 names block b2 of a comment on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply in its thread with reply_to ${comment} and issue CORE-1`,
+        ]);
+      });
+    });
+
+    // A part of an ask reads as one line naming what the part is - the question, an option or the
+    // answer - the part's id, its ask and the revision of the ask's parts its text last changed
+    // in, then its text. No node carries a part's type, so the read asks the ask itself which
+    // part the id names.
+    describe("of an ask", () => {
+      const ask = "22222222-2222-4222-8222-222222222222";
+      const askRef = `dispatch://CORE-1/ask/${ask}`;
+      const part = (id: string, extra: Record<string, unknown> = {}) => ({
+        kind: "block",
+        id: `ask/${ask}#${id}`,
+        block_id: id,
+        issue_key: "CORE-1",
+        project: "CORE",
+        ref: `${askRef}#b-${id}`,
+        parent: { kind: "ask", id: ask, ref: askRef },
+        changed_version: 2,
+        parent_version: 2,
+        ...extra,
+      });
+      /** The ask its own read answers: its options and its answer carry the part ids the index
+       *  minted for them, so b1, which is neither, is its question. */
+      const askBody = {
+        id: ask,
+        issue_key: "CORE-1",
+        author: { kind: "session", id: "author-1" },
+        question: "Ship on Friday?",
+        options: [
+          { id: "b2", label: "Yes" },
+          { id: "b3", label: "No" },
+        ],
+        multiple: false,
+        urgency: "med",
+        anchor: null,
+        state: "answered",
+        answer: {
+          id: "b4",
+          user: "sami",
+          selected: ["Yes"],
+          text: null,
+          at: "2026-10-21T00:00:00Z",
+        },
+        revision: 2,
+        created_at: "2026-10-20T00:00:00Z",
+      };
+      /** A read of part `ref`, whose node the references route answers, against a server whose
+       *  ask read answers `askBody` with `ask` written over it. */
+      const readPart = (ref: string, node: unknown, overrides: Record<string, unknown> = {}) => {
+        const requests: string[] = [];
+        const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+          const target = new URL(String(url));
+          requests.push(target.pathname + target.search);
+          if (target.pathname === `/api/v1/asks/${ask}`) {
+            return response({ ask: { ...askBody, ...overrides }, replies: [], answers: [] });
+          }
+          if (target.pathname === "/api/v1/references") return response({ node, edges: [] });
+          throw new Error(`unexpected request: ${target.pathname}`);
+        };
+        const result = executeDispatchTool({
+          tool: "dispatch_read",
+          args: { ref },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        });
+        return { result, requests };
+      };
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      test.each([
+        ["b1", "Question", "Ship on Friday?"],
+        ["b2", "Option", "Yes"],
+        ["b4", "Answer", "Yes"],
+      ])("read prints part %s of an ask as its %s", async (id, noun, text) => {
+        const { result, requests } = readPart(`${askRef}#b-${id}`, part(id, { text }));
+        expect((await result).text).toBe(
+          [`${noun} ${id} of ask ${ask} (changed in revision 2):`, text, ...sections].join("\n")
+        );
+        expect(requests).toContain(`/api/v1/asks/${ask}`);
+      });
+
+      // An ask's parts are numbered by revision, so the `Node:` line of a part says which revision
+      // of the ask's parts it belongs to, as a comment block's says its comment's revision.
+      test("read prints an ask part's facts, its parent version a revision", async () => {
+        const { result } = readPart(
+          `${askRef}#b-b2`,
+          part("b2", {
+            text: "Yes",
+            made_by: [{ kind: "session", id: "author-1" }],
+            made_at: "2026-10-20T00:00:00Z",
+            changed_by: [{ kind: "session", id: "author-1" }],
+            changed_at: "2026-10-21T00:00:00Z",
+          })
+        );
+        expect((await result).text).toBe(
+          [
+            `Option b2 of ask ${ask} (changed in revision 2):`,
+            "Yes",
+            `Node: block ${askRef}#b-b2 · made by session author-1 at 2026-10-20T00:00:00Z · changed by session author-1 at 2026-10-21T00:00:00Z · part of ${askRef} (revision 2)`,
+            ...sections,
+          ].join("\n")
+        );
+      });
+
+      test("a pinned reference to a part the ask has moved past names it a part", async () => {
+        const pinned = `${askRef}#b-b5@v1`;
+        const { result } = readPart(pinned, {
+          ...part("b5"),
+          changed_version: undefined,
+          pin: { version: 1, ref: pinned, text: "Maybe", state: "removed", removed_version: 2 },
+        });
+        expect((await result).text).toBe(
+          [
+            `Part b5 of ask ${ask}:`,
+            "Pinned to revision: 1",
+            "Removed in revision 2.",
+            "Text at revision 1:",
+            "Maybe",
+            ...sections,
+          ].join("\n")
+        );
+      });
+
+      // An ask whose parts the index has not placed - revision 0 and no part id - says only that
+      // the block is a part of the ask.
+      test("a part of an ask whose parts carry no id is named a part", async () => {
+        const { result } = readPart(`${askRef}#b-b2`, part("b2", { text: "Yes" }), {
+          options: [{ label: "Yes" }, { label: "No" }],
+          answer: { user: "sami", selected: ["Yes"], text: null, at: "2026-10-21T00:00:00Z" },
+          revision: undefined,
+        });
+        expect((await result).text).toBe(
+          [`Part b2 of ask ${ask} (changed in revision 2):`, "Yes", ...sections].join("\n")
+        );
+      });
+
+      // The ask's read only chooses the heading's word, so a server that cannot answer it leaves
+      // the part under the general heading rather than failing the read of the part.
+      test("a part whose ask the server cannot read is named a part, with the rest of the read unchanged", async () => {
+        const node = part("b2", {
+          text: "Yes",
+          made_by: [{ kind: "session", id: "author-1" }],
+          changed_by: [{ kind: "session", id: "author-1" }],
+        });
+        const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+          const target = new URL(String(url));
+          if (target.pathname === `/api/v1/asks/${ask}`) {
+            return response({ error: "internal server error", code: "INTERNAL" }, 500);
+          }
+          if (target.pathname === "/api/v1/references") return response({ node, edges: [] });
+          throw new Error(`unexpected request: ${target.pathname}`);
+        };
+        const result = await executeDispatchTool({
+          tool: "dispatch_read",
+          args: { ref: `${askRef}#b-b2` },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        });
+
+        expect(result.text).toBe(
+          [
+            `Part b2 of ask ${ask} (changed in revision 2):`,
+            "Yes",
+            `Node: block ${askRef}#b-b2 · made by session author-1 · changed by session author-1 · part of ${askRef} (revision 2)`,
+            ...sections,
+          ].join("\n")
+        );
+        expect(result.details).toEqual({ issue: "CORE-1", block: "b2" });
+      });
+
+      // A part that cites a node shows in that node's read as its ask, then the part, as a block
+      // of a comment shows as its comment: `blockItem`'s rule, one set of item kinds.
+      test("a part of an ask citing a block shows as its ask, then the part", async () => {
+        const { result } = readBlock(blockRef, () =>
+          response({
+            node: blockNode,
+            edges: [
+              {
+                kind: "mentions",
+                direction: "in",
+                node: part("b1"),
+                excerpt: { text: "Ship on Friday?" },
+                created_at: "2026-10-21T00:00:00Z",
+                source_seq: 9,
+              },
+            ],
+          })
+        );
+        expect((await result).text).toContain(
+          `Referenced by:\n- mentions ask ${askRef} block b1 (Ship on Friday? · 2026-10-21T00:00:00Z)\nLinks:`
+        );
+      });
+
+      // `reply_to_ask` answers a part, so the refusal hands it the whole reference rather than
+      // the ask's id, which would drop the part. A pin goes: `reply_to_ask` refuses a part
+      // pinned to a revision.
+      test("a tool that would act on the part's owner refuses it, naming the part reply_to_ask answers", async () => {
+        const refused = async (ref: string) =>
+          await executeDispatchTool({
+            tool: "dispatch_comment",
+            args: { ref, body: "Yes, Friday." },
+            cwd: "/workspace",
+            host: "omp",
+            config,
+            env: {},
+            exec: repoExec("owner/repo"),
+            fetchImpl: (() => {
+              throw new Error("network must not be called");
+            }) as unknown as typeof fetch,
+          }).then(
+            () => [],
+            (error: unknown) => {
+              if (!(error instanceof ToolInputError)) throw error;
+              return error.problems;
+            }
+          );
+
+        expect(await refused(`${askRef}#b-b2`)).toEqual([
+          `ref ${askRef}#b-b2 names block b2 of an ask on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply under it with reply_to_ask ${askRef}#b-b2 and issue CORE-1`,
+        ]);
+        expect(await refused(`${askRef}#b-b2@v2`)).toEqual([
+          `ref ${askRef}#b-b2@v2 names block b2 of an ask on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply under it with reply_to_ask ${askRef}#b-b2 and issue CORE-1`,
+        ]);
+      });
+    });
   });
 
   test("reads a named artifact version from a singular dispatch URI", async () => {
@@ -4762,8 +6275,10 @@ describe("executeDispatchTool", () => {
             {
               id: "ask-1",
               state: "open",
+              author: { kind: "session", id: "session-1" },
               question: "Which API?",
-              anchor: { artifact_id: "artifact-42" },
+              anchor: { artifact_id: "artifact-42", quote: "the API" },
+              created_at: "2026-10-20T09:00:00Z",
             },
           ],
         });
@@ -4787,14 +6302,323 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
+      text: [
+        "Version three",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-1 · session session-1 · 2026-10-20T09:00:00Z",
+        "> the API",
+        "Question: Which API?",
+      ].join("\n"),
       details: { issue: "DSP-42" },
     });
     expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
-      "/api/v1/issues/DSP-42/comments?artifact=artifact-42",
+      "/api/v1/issues/DSP-42/comments",
+    ]);
+  });
+
+  // A reply carries no anchor, so a read of the comments anchored on the document misses every
+  // reply: a thread a person reopened by replying read as its root's id alone, and the reply's text
+  // never reached the agent (sjawhar/legion#2366). A person's reply under an open ask is the same:
+  // the ask printed its question alone.
+  test("dispatch_doc_read prints each open anchored thread with its root and every reply", async () => {
+    const requests: string[] = [];
+    const agent = { kind: "session", id: "session-1" };
+    const sami = { kind: "user", id: "sami" };
+    const comment = (fields: Record<string, unknown>) => ({
+      issue_key: "DSP-42",
+      author: agent,
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+      ...fields,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          open_asks: [
+            {
+              id: "ask-open",
+              state: "open",
+              author: agent,
+              question: "Which release carries it?",
+              anchor: { artifact_id: "artifact-42", quote: "the release" },
+              created_at: "2026-10-20T09:00:00Z",
+            },
+            {
+              id: "ask-elsewhere",
+              state: "open",
+              author: agent,
+              question: "Asked on another document?",
+              anchor: { artifact_id: "artifact-99", quote: "other" },
+              created_at: "2026-10-20T09:30:00Z",
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Spec", version: 4, token: "sha256:spec" });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") {
+        return response([
+          comment({
+            id: "c-root",
+            body: "Can this ship Friday?",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-1", quote: "ship Friday" },
+            created_at: "2026-10-20T10:00:00Z",
+          }),
+          comment({
+            id: "c-resolved",
+            body: "Old nit.",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-2", quote: "nit" },
+            resolved: true,
+            resolved_by: agent,
+            resolved_at: "2026-10-20T12:00:00Z",
+            created_at: "2026-10-20T10:30:00Z",
+          }),
+          comment({
+            id: "c-other-document",
+            body: "On another document.",
+            anchor: { artifact_id: "artifact-99", mark_id: "m-3", quote: "other" },
+            created_at: "2026-10-20T10:40:00Z",
+          }),
+          comment({ id: "c-issue", body: "An issue comment.", created_at: "2026-10-20T10:50:00Z" }),
+          comment({
+            id: "c-ask-reply",
+            body: "The 4.2 release, if QA passes.",
+            ask_id: "ask-open",
+            author: sami,
+            created_at: "2026-10-20T10:55:00Z",
+          }),
+          comment({
+            id: "c-ask-elsewhere-reply",
+            body: "Reply under the ask on another document.",
+            ask_id: "ask-elsewhere",
+            author: sami,
+            created_at: "2026-10-20T10:56:00Z",
+          }),
+          comment({
+            id: "c-resolved-ask-reply",
+            body: "Reply under a resolved ask.",
+            ask_id: "ask-resolved",
+            author: sami,
+            created_at: "2026-10-20T10:57:00Z",
+          }),
+          comment({
+            id: "c-reply-agent",
+            body: "Closing: shipped.",
+            reply_to: "c-root",
+            created_at: "2026-10-21T10:00:00Z",
+          }),
+          comment({
+            id: "c-resolved-reply",
+            body: "Fixed.",
+            reply_to: "c-resolved",
+            created_at: "2026-10-21T11:00:00Z",
+          }),
+          // Sami's reply reopened the root, which reads resolved: false again.
+          comment({
+            id: "c-reply-sami",
+            body: "Not yet: QA found a crash on resume.",
+            reply_to: "c-root",
+            author: sami,
+            created_at: "2026-10-22T10:00:00Z",
+          }),
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "# Spec",
+        "",
+        "Document token: sha256:spec",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-open · session session-1 · 2026-10-20T09:00:00Z",
+        "> the release",
+        "Question: Which release carries it?",
+        "reply c-ask-reply · user sami · 2026-10-20T10:55:00Z",
+        "Body: The 4.2 release, if QA passes.",
+        "",
+        "comment c-root · session session-1 · 2026-10-20T10:00:00Z",
+        "> ship Friday",
+        "Body: Can this ship Friday?",
+        "reply c-reply-agent · session session-1 · 2026-10-21T10:00:00Z",
+        "Body: Closing: shipped.",
+        "reply c-reply-sami · user sami · 2026-10-22T10:00:00Z",
+        "Body: Not yet: QA found a crash on resume.",
+      ].join("\n"),
+      details: { issue: "DSP-42" },
+    });
+    // One read of the issue's comments, unfiltered, so the replies come back with their roots.
+    expect(requests).toEqual([
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/artifact-42/text",
+      "/api/v1/issues/DSP-42/comments",
+    ]);
+  });
+
+  test("dispatch_doc_read prints a project document's open anchored threads with their replies", async () => {
+    const requests: string[] = [];
+    const agent = { kind: "session", id: "session-1" };
+    const sami = { kind: "user", id: "sami" };
+    const notes = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/notes",
+      slug: "notes",
+      name: "notes.md",
+      kind: "doc",
+      primary: false,
+      created_by: agent,
+      created_at: "2026-09-18T00:00:00Z",
+      versions: [],
+    };
+    const comment = (fields: Record<string, unknown>) => ({
+      issue_key: null,
+      artifact_id: "artifact-42",
+      author: agent,
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+      ...fields,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Notes", version: 1 });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/asks") {
+        return response([
+          {
+            id: "ask-answered",
+            state: "answered",
+            author: agent,
+            question: "Already settled?",
+            anchor: { artifact_id: "artifact-42", quote: "settled" },
+            created_at: "2026-10-19T09:00:00Z",
+          },
+          {
+            id: "ask-open",
+            state: "open",
+            author: agent,
+            question: "Keep the runbook?",
+            anchor: { artifact_id: "artifact-42", quote: "runbook" },
+            created_at: "2026-10-20T09:00:00Z",
+          },
+        ]);
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/comments") {
+        return response([
+          comment({
+            id: "c-root",
+            body: "Is step 3 still right?",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-1", quote: "step 3" },
+            created_at: "2026-10-20T10:00:00Z",
+          }),
+          comment({
+            id: "c-reply",
+            body: "No: it now runs before step 2.",
+            reply_to: "c-root",
+            author: sami,
+            created_at: "2026-10-21T10:00:00Z",
+          }),
+          comment({
+            id: "c-answered-ask-reply",
+            body: "Settled: keep it.",
+            ask_id: "ask-answered",
+            anchor: { artifact_id: "artifact-42", quote: "settled" },
+            author: sami,
+            created_at: "2026-10-21T11:00:00Z",
+          }),
+          comment({
+            id: "c-ask-reply",
+            body: "Keep it, but trim the rollback section.",
+            ask_id: "ask-open",
+            author: sami,
+            created_at: "2026-10-21T12:00:00Z",
+          }),
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { project: "CORE", artifact: "notes" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "# Notes",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-open · session session-1 · 2026-10-20T09:00:00Z",
+        "> runbook",
+        "Question: Keep the runbook?",
+        "reply c-ask-reply · user sami · 2026-10-21T12:00:00Z",
+        "Body: Keep it, but trim the rollback section.",
+        "",
+        "comment c-root · session session-1 · 2026-10-20T10:00:00Z",
+        "> step 3",
+        "Body: Is step 3 still right?",
+        "reply c-reply · user sami · 2026-10-21T10:00:00Z",
+        "Body: No: it now runs before step 2.",
+      ].join("\n"),
+      details: { project: "CORE", document: "CORE/notes" },
+    });
+    expect(requests.filter((request) => request.endsWith("/comments"))).toEqual([
+      "/api/v1/artifacts/artifact-42/comments",
     ]);
   });
 
@@ -5023,7 +6847,18 @@ describe("executeDispatchTool", () => {
       "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
         "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
         "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " +
-        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " +
+        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " +
+        "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
+        "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
+        "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
+        "dispatch read), dispatch://KEY-1/ask/<uuid>#b-<part id> or " +
+        "dispatch://PROJECT/artifact/<slug>/ask/<uuid>#b-<part id> (one part of an ask: its question, " +
+        "one of its options or its answer, optionally pinned to a revision of the ask's parts with " +
+        "@v<N> after it; for dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
+        "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " +
+        "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " +
+        "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " +
+        "read), or " +
         "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
         "for dispatch doc-read)"
     );
@@ -5564,6 +7399,40 @@ describe("executeDispatchTool", () => {
         ["b-1", "b-2"],
         [opening("b-1", "answered"), opening("b-2", "resolved")],
         [blockAsk("b-1", "answered"), blockAsk("b-2", "resolved")]
+      );
+
+      expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
+    });
+
+    // The renderer writes an id the `#` shortcut cannot hold as `id="…"`, its `&` as `&amp;`
+    // (pmdoc.TypedBlockIDAttribute): the opener is found by that spelling.
+    const quotedOpening = (written: string, block: string, state: string) =>
+      `:::ask{id="${written}" urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
+
+    test('refuses over open blocks whose ids are written id="…"', async () => {
+      const { outcome, posts } = await requestOver(
+        ["a b", "R&D"],
+        [quotedOpening("a b", "a b", "open"), quotedOpening("R&amp;D", "R&D", "open")],
+        [blockAsk("a b", "open"), blockAsk("R&D", "open")]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n").slice(1, 3)).toEqual([
+        '- "Question of a b?" (block a b, ask ask-a b)',
+        '- "Question of R&D?" (block R&D, ask ask-R&D)',
+      ]);
+      expect(posts).toEqual([]);
+    });
+
+    test('requests approval once blocks whose ids are written id="…" are answered or resolved', async () => {
+      const { outcome, posts } = await requestOver(
+        ["a b", "R&D"],
+        [quotedOpening("a b", "a b", "answered"), quotedOpening("R&amp;D", "R&D", "resolved")],
+        [blockAsk("a b", "answered"), blockAsk("R&D", "resolved")]
       );
 
       expect((await outcome).text).toStartWith("Approval requested for spec.md");
@@ -6170,32 +8039,19 @@ describe("executeDispatchTool", () => {
       fetchImpl,
     });
 
-  test("a bare project reference that is one document's slug and another's filename is refused", async () => {
+  // Dispatch's own document routes take a reference's slug match first, and a filename only when
+  // no slug matches (resolveDocumentReference), so a bare reference that is one document's slug and
+  // another's filename is the slug's document here too: the pairs an older Dispatch stored, a
+  // `plan-v2-2` named `plan-v2` beside `plan v2`, stay readable and editable by slug.
+  test("a bare project reference that is one document's slug and another's filename is the slug's document", async () => {
     const documents = [
       projectDocument("artifact-v2", "plan-v2", "plan v2"),
       projectDocument("artifact-v2-2", "plan-v2-2", "plan-v2"),
     ];
     const requests: string[] = [];
     const fetchImpl = projectDispatch(documents, requests);
-    const refusal =
-      '"plan-v2" names 2 documents on this project; use the id: artifact-v2 (plan-v2, plan v2), artifact-v2-2 (plan-v2-2, plan-v2)';
-    await expect(readDocument({ project: "GREF", artifact: "plan-v2" }, fetchImpl)).rejects.toThrow(
-      refusal
-    );
-    await expect(
-      executeDispatchTool({
-        tool: "dispatch_comment",
-        args: { project: "GREF", artifact: "plan-v2", body: "Looks good." },
-        cwd: "/workspace",
-        host: "omp",
-        config,
-        env: {},
-        exec: repoExec("owner/repo"),
-        fetchImpl,
-      })
-    ).rejects.toThrow(refusal);
-    expect(requests.filter((request) => !request.startsWith("GET "))).toEqual([]);
     for (const [reference, id] of [
+      ["plan-v2", "artifact-v2"],
       ["plan v2", "artifact-v2"],
       ["plan-v2-2", "artifact-v2-2"],
       ["artifact-v2", "artifact-v2"],
@@ -6203,6 +8059,7 @@ describe("executeDispatchTool", () => {
       const result = await readDocument({ project: "GREF", artifact: reference }, fetchImpl);
       expect(result.text).toBe(`# ${id}`);
     }
+    expect(requests.filter((request) => !request.startsWith("GET "))).toEqual([]);
   });
 
   test("a bare project reference that is one document's id and another's slug resolves as the id", async () => {
@@ -6267,8 +8124,9 @@ describe("executeDispatchTool", () => {
   });
 
   // A dispatch:// reference's document part is a slug, the address the dashboard and Dispatch's
-  // own routes use, so it names one document even where the same text is another's filename.
-  test("a dispatch:// document reference resolves by slug, never refused for a filename clash", async () => {
+  // own routes use, so it names one document even where the same text is another's filename; a
+  // bare reference reads the same way.
+  test("a dispatch:// or bare document reference resolves by slug, never refused for a filename clash", async () => {
     const requests: string[] = [];
     const documents = [
       projectDocument("artifact-v2", "plan-v2", "plan v2"),
@@ -6292,9 +8150,8 @@ describe("executeDispatchTool", () => {
       const issue = await readDocument({ ref }, clashing);
       expect(issue.text).toBe("# artifact-v2");
     }
-    await expect(readDocument({ issue: "DSP-42", artifact: "spec-v2" }, clashing)).rejects.toThrow(
-      '"spec-v2" names 2 documents on this issue; use the id'
-    );
+    const bare = await readDocument({ issue: "DSP-42", artifact: "spec-v2" }, clashing);
+    expect(bare.text).toBe("# artifact-v2");
   });
 
   test("renders a no-new-version document edit and forwards its summary and precondition", async () => {
@@ -6588,6 +8445,161 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(
       `document "primary" not found by slug; this issue's documents: spec (spec.md), notes (notes.md)`
     );
+  });
+
+  test("on a busy issue names the closest documents first, counts the rest and names the read that lists them", async () => {
+    // 12 artifacts, oldest first as Dispatch lists them: the spec, the uploaded prediction, then
+    // ten notes. The reference differs from the prediction's slug in letter case alone.
+    const artifacts = [
+      { id: "artifact-42", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+      {
+        id: "a-p",
+        slug: "prediction-p1-md",
+        name: "prediction-P1.md",
+        kind: "file",
+        primary: false,
+      },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        id: `a-${index}`,
+        slug: `notes-${index}-md`,
+        name: `notes-${index}.md`,
+        kind: "doc",
+        primary: false,
+      })),
+    ];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-1234") {
+        return response({ key: "DSP-1234", primary_artifact_id: "artifact-42", artifacts });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+    const notes = [9, 8, 7, 6, 5, 4, 3].map((n) => `notes-${n}-md (notes-${n}.md)`).join(", ");
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "DSP-1234", artifact: "prediction-P1-md" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `document "prediction-P1-md" not found by slug; this issue's 12 documents and files include: ` +
+        `prediction-p1-md (prediction-P1.md), ${notes}; dispatch read --issue DSP-1234 lists them all`
+    );
+  });
+
+  // The cases of Dispatch's TestDocumentsNearestRanksByExactDistanceAndFoldsOnlyASCII: a name
+  // holding the reference ranks by how much longer it is, and only ASCII letters fold.
+  test.each([
+    [
+      "Plan",
+      [
+        "plan.md",
+        ...["alpha", "beta", "gamma", "delta", "omega", "kappa", "sigma", "theta"].map(
+          (n) => `plan-${n}-archive.md`
+        ),
+      ],
+      [
+        "plan.md",
+        "plan-beta-archive.md",
+        "plan-theta-archive.md",
+        "plan-sigma-archive.md",
+        "plan-kappa-archive.md",
+        "plan-omega-archive.md",
+        "plan-delta-archive.md",
+        "plan-gamma-archive.md",
+      ],
+    ],
+    [
+      "Plan.",
+      [
+        "plan.v1.md",
+        ...["alpha", "beta", "gamma", "delta", "omega", "kappa", "sigma", "theta"].map(
+          (n) => `plan.${n}-archive.md`
+        ),
+      ],
+      [
+        "plan.v1.md",
+        ...["beta", "theta", "sigma", "kappa", "omega", "delta", "gamma"].map(
+          (n) => `plan.${n}-archive.md`
+        ),
+      ],
+    ],
+    [
+      "İİİİ-md",
+      ["iiii.md", ...[0, 1, 2, 3, 4, 5, 6, 7].map((n) => `notes-${n}.md`)],
+      [7, 6, 5, 4, 3, 2, 1, 0].map((n) => `notes-${n}.md`),
+    ],
+  ])("ranks %s as Dispatch does", async (reference, names, shown) => {
+    const slug = (name: string) => name.replaceAll(".", "-");
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-7") {
+        return response({
+          key: "DSP-7",
+          primary_artifact_id: "none",
+          artifacts: names.map((name) => ({
+            id: name,
+            slug: slug(name),
+            name,
+            kind: "doc",
+            primary: false,
+          })),
+        });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "DSP-7", artifact: reference },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `this issue's 9 documents include: ${shown.map((name) => `${slug(name)} (${name})`).join(", ")}; dispatch read`
+    );
+  });
+
+  test("a project read with no document lists the project's documents", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(`${target.pathname}${target.search}`);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") {
+        return response([
+          { id: "r-1", slug: "runbook-md", name: "runbook.md", kind: "doc", primary: false },
+          { id: "r-2", slug: "chart-png", name: "chart.png", kind: "image", primary: false },
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { project: "CORE" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      "Project: CORE\nDocuments:\n- runbook-md (runbook.md, doc)\n- chart-png (chart.png, image)"
+    );
+    expect(result.details).toEqual({ project: "CORE" });
+    expect(requests).toEqual(["/api/v1/projects/CORE/artifacts?unlinked=true"]);
   });
 
   test.each([
@@ -6952,7 +8964,10 @@ describe("executeDispatchTool", () => {
 
       expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42" });
       expect(requests).toHaveLength(1);
-      const form = requests[0]?.init.body as FormData;
+      const sent = requests[0]?.init ?? {};
+      const form = await new Response(sent.body, {
+        headers: sent.headers as Record<string, string>,
+      }).formData();
       const file = form.get("file");
       expect(file).toBeInstanceOf(Blob);
       expect(await (file as Blob).text()).toBe("artifact from Dispatch cwd");
@@ -7046,6 +9061,73 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow("Exactly one of path or content is required.");
   });
 
+  test.each([
+    "rows.jsonl",
+    "size-table-rows.tsv",
+    "mustfail.json",
+    "notes.TXT",
+    "rows.jsonl_",
+    "rows.jsonl ",
+    "отчёт.данные",
+    "rows.jsonl.1",
+    "tool.1",
+    "row data.jsonl.1",
+    "plan v1.2",
+  ])("refuses inline content named %j before it sends anything, naming --path", async (name) => {
+    const requests: string[] = [];
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_artifact",
+        args: { issue: "DSP-42", name, content: '{"row_id": 1}\n{"row_id": 2}\n' },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (async (url: RequestInfo | URL) => {
+          requests.push(String(url));
+          return response({});
+        }) as unknown as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `${JSON.stringify(name)} is not a Markdown name. Upload the file under the same name with path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged`
+    );
+    expect(requests).toEqual([]);
+  });
+
+  test.each([
+    "spec.md",
+    "Plan.MD",
+    "notes.markdown",
+    "Design notes",
+    "plan v1.2.md",
+    "notes v2. draft",
+    "Dr. Smith's notes",
+  ])("sends inline content named %j as a Markdown document", async (name) => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({ url: String(url), init: init ?? {} });
+      return response({
+        artifact: { id: "artifact-42", issue_key: "DSP-42", name, slug: "slug" },
+        version: { number: 1 },
+      });
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_artifact",
+      args: { issue: "DSP-42", name, content: "# Notes\n" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0]?.init.body as string)).toMatchObject({ name });
+  });
+
   for (const input of [
     {
       tool: "dispatch_message" as const,
@@ -7105,12 +9187,15 @@ describe("executeDispatchTool", () => {
       requests.push(request);
       const target = new URL(request.url);
       if (target.pathname === "/api/v1/issues") {
-        return response({
-          key: "TEST-1",
-          title: "External issue",
-          project: "TEST",
-          components: issueComponents("inherit", []),
-        });
+        return response(
+          {
+            key: "TEST-1",
+            title: "External issue",
+            project: "TEST",
+            components: issueComponents("inherit", []),
+          },
+          201
+        );
       }
       if (target.pathname === "/api/v1/projects/TEST/architecture-sources") {
         return noSources();
@@ -7327,6 +9412,158 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  // Each option of an ask and its answer is a part of its own in the reference graph, so the read
+  // names the reference of each and lists the edges on that option under it. Every other edge
+  // stays under the ask, the ones at its question among them: no read carries the question's part
+  // id, so nothing places them on it.
+  describe("an ask's parts", () => {
+    const ask = "aaaaaaaa-0000-4000-8000-000000000042";
+    const askRef = `dispatch://DSP-42/ask/${ask}`;
+    const part = (id: string) => ({
+      kind: "block",
+      id: `ask/${ask}#${id}`,
+      block_id: id,
+      issue_key: "DSP-42",
+      project: "DSP",
+      ref: `${askRef}#b-${id}`,
+      parent: { kind: "ask", id: ask, ref: askRef },
+    });
+    const citer = (kind: string, id: string, ref: string) => ({ kind, id, ref });
+    const edge = (blockId: string, node: unknown, text: string) => ({
+      kind: "mentions",
+      direction: "in",
+      node,
+      block: part(blockId),
+      excerpt: { text },
+      created_at: "2026-09-10T08:00:00Z",
+      source_seq: 918,
+    });
+    /** A read of the ask against a server answering `GET /api/v1/asks/{id}` with `ask`, whose
+     *  inbound graph carries one edge at an option, one at the answer and one at the question. */
+    const readAsk = async (askBody: Record<string, unknown>) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === `/api/v1/asks/${ask}`) {
+          return response({ ask: askBody, replies: [], answers: [] });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+          return response({
+            node: { kind: "ask", id: ask },
+            edges: [
+              edge(
+                "b2",
+                citer("comment", "comment-9", "dispatch://DSP-42/comment/comment-9"),
+                "I'd take JSON."
+              ),
+              edge("b4", citer("issue", "OPS-1", "dispatch://OPS-1"), "The answer decides it."),
+              edge(
+                "b1",
+                citer("message", "message-7", "dispatch://ACME-3/message/message-7"),
+                "Which API?"
+              ),
+            ],
+          });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("from")) {
+          return response({ node: { kind: "ask", id: ask }, edges: [] });
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: askRef },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return result.text.split("\n");
+    };
+    const askBody = {
+      id: ask,
+      issue_key: "DSP-42",
+      author: { kind: "session", id: "author-1" },
+      question: "The service needs a public API. Which approach should we use?",
+      options: [
+        { id: "b2", label: "JSON API", description: "Use the HTTP API." },
+        { id: "b3", label: "MCP API" },
+      ],
+      multiple: false,
+      urgency: "high",
+      anchor: null,
+      state: "answered",
+      answer: {
+        id: "b4",
+        user: "sami",
+        selected: ["JSON"],
+        text: "Ship JSON.",
+        at: "2026-09-09T00:00:00Z",
+      },
+      revision: 2,
+      created_at: "2026-09-09T00:00:00Z",
+    };
+
+    test("the read names each option and its answer, and lists the edges on that option under it", async () => {
+      expect(await readAsk(askBody)).toEqual([
+        "Question: The service needs a public API. Which approach should we use?",
+        "Options:",
+        `- JSON API — Use the HTTP API. (${askRef}#b-b2)`,
+        "  Referenced by:",
+        "  - mentions comment dispatch://DSP-42/comment/comment-9 (I'd take JSON. · 2026-09-10T08:00:00Z)",
+        `- MCP API (${askRef}#b-b3)`,
+        "State: answered",
+        `Ask id: ${ask}`,
+        "Answer:",
+        "- By: sami",
+        "- Selected: JSON",
+        "- Text: Ship JSON.",
+        `- Reference: ${askRef}#b-b4`,
+        "  Referenced by:",
+        "  - mentions issue dispatch://OPS-1 (The answer decides it. · 2026-09-10T08:00:00Z)",
+        "Replies:",
+        "- none",
+        "Referenced by:",
+        `- mentions message dispatch://ACME-3/message/message-7 (Which API? · 2026-09-10T08:00:00Z) (block ${askRef}#b-b1)`,
+        "Links:",
+        "- none",
+      ]);
+    });
+
+    // Until the index has run, `revision` is 0 and no part carries an id: the options read as
+    // they did before an ask had parts, and every edge is listed under the ask.
+    test("an ask whose parts are not indexed yet prints its options as before", async () => {
+      expect(
+        await readAsk({
+          ...askBody,
+          options: [{ label: "JSON API", description: "Use the HTTP API." }, { label: "MCP API" }],
+          answer: { ...askBody.answer, id: undefined },
+          revision: undefined,
+        })
+      ).toEqual([
+        "Question: The service needs a public API. Which approach should we use?",
+        "Options:",
+        "- JSON API — Use the HTTP API.",
+        "- MCP API",
+        "State: answered",
+        `Ask id: ${ask}`,
+        "Answer:",
+        "- By: sami",
+        "- Selected: JSON",
+        "- Text: Ship JSON.",
+        "Replies:",
+        "- none",
+        "Referenced by:",
+        `- mentions comment dispatch://DSP-42/comment/comment-9 (I'd take JSON. · 2026-09-10T08:00:00Z) (block ${askRef}#b-b2)`,
+        `- mentions issue dispatch://OPS-1 (The answer decides it. · 2026-09-10T08:00:00Z) (block ${askRef}#b-b4)`,
+        `- mentions message dispatch://ACME-3/message/message-7 (Which API? · 2026-09-10T08:00:00Z) (block ${askRef}#b-b1)`,
+        "Links:",
+        "- none",
+      ]);
+    });
+  });
+
   test("posts a comment reply to an ask using reply_to_ask", async () => {
     const requests: Array<{ pathname: string; body: unknown }> = [];
     const askID = "01234567-0000-4000-8000-000000000042";
@@ -7476,28 +9713,110 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
-  test("reports a moved approval ask's derived turn instead of the replying agent's turn", async () => {
+  test("a reply on a moved approval request says why it still waits on the agent and how to hand it back", async () => {
     const askID = "01234567-0000-4000-8000-000000000045";
+    const requests: Array<{ method: string; pathname: string }> = [];
+    const approvalAsk = (artifact: { primary: boolean; issue: string | null }) => ({
+      ask: {
+        id: askID,
+        issue_key: artifact.issue,
+        kind: "approval",
+        question: "Approve spec.md at version 36?",
+        state: "open",
+        waiting_on: "agent",
+        approval: {
+          artifact_id: "artifact-7",
+          name: "spec.md",
+          version: 37,
+          requested_version: 36,
+        },
+        approval_artifact: {
+          project: "DSP",
+          slug: "spec",
+          name: "spec.md",
+          primary: artifact.primary,
+        },
+      },
+      replies: [],
+      edits: [],
+      answers: [],
+      followers: [],
+    });
+    const run = async (artifact: { primary: boolean; issue: string | null }) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-42", body: "The revision is ready.", reply_to_ask: askID },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (async (url: RequestInfo | URL, init?: RequestInit) => {
+          const target = new URL(String(url));
+          requests.push({ method: init?.method ?? "GET", pathname: target.pathname });
+          if (target.pathname === `/api/v1/asks/${askID}`) return response(approvalAsk(artifact));
+          return response({
+            id: "comment-3",
+            issue_key: "DSP-42",
+            ask_id: askID,
+            turn: "human",
+            ask_waiting_on: "agent",
+          });
+        }) as unknown as typeof fetch,
+        subscriptions: async () => ["notifications.dispatch.issue.DSP-42.>"],
+      });
+
+    const result = await run({ primary: true, issue: "DSP-42" });
+    expect(result.text).toBe(
+      [
+        `Replied on ask ${askID} (comment comment-3; ask now waiting on agent). ` +
+          "You follow this ask: its answer and replies reach you directly.",
+        "The reply did not hand the ask to the human: it is the approval request for spec.md at " +
+          "version 36, and spec.md is now version 37. No reply hands a moved approval request " +
+          "back. Once the human has agreed to every point in version 37, run: " +
+          "dispatch request-approval --issue DSP-42 --summary '<what changed since version 36>'",
+      ].join("\n")
+    );
+    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
+    expect(requests).toEqual([
+      { method: "POST", pathname: "/api/v1/issues/DSP-42/comments" },
+      { method: "GET", pathname: `/api/v1/asks/${askID}` },
+    ]);
+
+    expect((await run({ primary: false, issue: "DSP-42" })).text).toContain(
+      "run: dispatch request-approval --issue DSP-42 --artifact artifact-7 --summary"
+    );
+    expect((await run({ primary: false, issue: null })).text).toContain(
+      "run: dispatch request-approval --project DSP --artifact artifact-7 --summary"
+    );
+  });
+
+  test("a progress note on an approval request reads no ask", async () => {
+    const askID = "01234567-0000-4000-8000-000000000046";
+    const requests: string[] = [];
     const result = await executeDispatchTool({
       tool: "dispatch_comment",
-      args: { issue: "DSP-42", body: "The revision is ready.", reply_to_ask: askID },
+      args: { issue: "DSP-42", body: "Revising.", reply_to_ask: askID, turn: "agent" },
       cwd: "/workspace",
       host: "omp",
       config,
       env: {},
       exec: repoExec("owner/repo"),
-      fetchImpl: (async () =>
-        response({
-          id: "comment-3",
+      fetchImpl: (async (url: RequestInfo | URL) => {
+        requests.push(new URL(String(url)).pathname);
+        return response({
+          id: "comment-4",
           issue_key: "DSP-42",
           ask_id: askID,
-          turn: "human",
+          turn: "agent",
           ask_waiting_on: "agent",
-        })) as unknown as typeof fetch,
+        });
+      }) as unknown as typeof fetch,
+      subscriptions: async () => ["notifications.dispatch.issue.DSP-42.>"],
     });
 
-    expect(result.text).toContain("ask now waiting on agent");
-    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
+    expect(result.text).not.toContain("request-approval");
+    expect(requests).toEqual(["/api/v1/issues/DSP-42/comments"]);
   });
 
   test("rejects a comment turn without reply_to_ask before calling the server", async () => {
@@ -7706,6 +10025,219 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/reply_to and reply_to_ask/);
   });
 
+  test("a comment reply to a block reference names the block", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname !== "/api/v1/issues/DSP-1/comments") {
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }
+      bodies.push(JSON.parse(init?.body as string));
+      return response({ id: "comment-2", issue_key: "DSP-1", ask_id: null, reply_to: parent });
+    };
+    const reply = (replyTo: string) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Yes", reply_to: replyTo },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const toBlock = await reply(`dispatch://DSP-1/comment/${parent}#b-b2`);
+    // A reply to the comment itself names no block.
+    await reply(parent);
+
+    expect(bodies).toEqual([
+      { body: "Yes", reply_to: parent, reply_to_block: "b2", actor: expect.anything() },
+      { body: "Yes", reply_to: parent, actor: expect.anything() },
+    ]);
+    expect(toBlock.text).toBe("Posted comment comment-2");
+  });
+
+  test("a comment reply to an ask's part names the part", async () => {
+    const askID = "01234567-0000-4000-8000-000000000042";
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname !== "/api/v1/issues/DSP-1/comments") {
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }
+      bodies.push(JSON.parse(init?.body as string));
+      return response({ id: "comment-2", issue_key: "DSP-1", ask_id: askID, reply_to: null });
+    };
+    const reply = (replyToAsk: string) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Monday works", reply_to_ask: replyToAsk },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const toPart = await reply(`dispatch://DSP-1/ask/${askID}#b-b2`);
+    // A reply to the ask itself names no part.
+    await reply(askID);
+
+    expect(bodies).toEqual([
+      { body: "Monday works", ask_id: askID, reply_to_block: "b2", actor: expect.anything() },
+      { body: "Monday works", ask_id: askID, actor: expect.anything() },
+    ]);
+    expect(toPart.details).toMatchObject({ issue: "DSP-1", comment: "comment-2", ask: askID });
+  });
+
+  test("a comment reply refuses a block reference that names no block of a comment", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+    const problems = async (replyTo: string) => {
+      const error = await executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Yes", reply_to: replyTo },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+      if (!(error instanceof ToolInputError)) throw new Error("expected ToolInputError");
+      return error.problems;
+    };
+    const message = `dispatch://DSP-1/message/${parent}#b-b2`;
+
+    expect(await problems(message)).toEqual([
+      `reply_to ${message} names a block of a message, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>); answer it with dispatch message --in-reply-to '${message}'`,
+    ]);
+    expect(await problems("dispatch://DSP-1/spec#b-goal")).toEqual([
+      "reply_to dispatch://DSP-1/spec#b-goal names a block of a document, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>)",
+    ]);
+    expect(await problems(`dispatch://DSP-1/comment/${parent}#b-b2@v1`)).toEqual([
+      `reply_to dispatch://DSP-1/comment/${parent}#b-b2@v1 names revision 1 of the block, but a reply answers the block whatever its text becomes: drop @v1`,
+    ]);
+    // An ask's parts are blocks of their own, so a part names a block - of the wrong item, and
+    // the refusal names the field that answers a part.
+    const part = `dispatch://DSP-1/ask/${parent}#b-b3`;
+    expect(await problems(part)).toEqual([
+      `reply_to ${part} names a block of an ask, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>); answer it with dispatch comment --reply-to-ask '${part}'`,
+    ]);
+  });
+
+  test("a comment reply refuses a reply_to_ask that names no part of an ask", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const problems = async (replyToAsk: string) => {
+      const error = await executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Yes", reply_to_ask: replyToAsk },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (() => {
+          throw new Error("network must not be called");
+        }) as unknown as typeof fetch,
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+      if (!(error instanceof ToolInputError)) throw new Error("expected ToolInputError");
+      return error.problems;
+    };
+    const block = `dispatch://DSP-1/comment/${parent}#b-b2`;
+
+    // A block of another item is no part of an ask: what `reply_to_ask` answers is a part of the
+    // ask it names, so the refusal hands the block to the field that answers it.
+    expect(await problems(block)).toEqual([
+      `reply_to_ask ${block} names a block of a comment, but reply_to_ask answers a part of the ask it names (dispatch://KEY/ask/<id>#b-<block id>); answer it with dispatch comment --reply-to '${block}'`,
+    ]);
+    expect(await problems(`dispatch://DSP-1/ask/${parent}#b-b2@v2`)).toEqual([
+      `reply_to_ask dispatch://DSP-1/ask/${parent}#b-b2@v2 names revision 2 of the block, but a reply answers the block whatever its text becomes: drop @v2`,
+    ]);
+  });
+
+  test("a read of a reply that names a block prints the block before the reply's body", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const replyId = "22222222-2222-4222-8222-222222222222";
+    const node = `comment/${parent}#b2`;
+    const ref = `dispatch://DSP-1/comment/${parent}#b-b2`;
+    const comment = (id: string, body: string, replyBlock: unknown) => ({
+      id,
+      issue_key: "DSP-1",
+      author: { kind: "session", id: "reviewer-1" },
+      body,
+      anchor: null,
+      reply_to: parent,
+      resolved: false,
+      suggestion: null,
+      created_at: "2026-09-09T00:00:00Z",
+      reply_block: replyBlock,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === `/api/v1/comments/${replyId}`) {
+        return response({
+          comment: comment(replyId, "Yes", {
+            node,
+            ref,
+            block_id: "b2",
+            text: "Beta.",
+            removed: false,
+          }),
+          replies: [
+            comment("comment-3", "Still yes", {
+              node,
+              ref,
+              block_id: "b2",
+              text: "Beta.",
+              removed: true,
+            }),
+            comment("comment-4", "Agreed", null),
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: `dispatch://DSP-1/comment/${replyId}` },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(0, 12)).toEqual([
+      "Comment:",
+      `${replyId} · session reviewer-1`,
+      "Re: block b2: Beta.",
+      "Body: Yes",
+      "Reply chain:",
+      "comment-3 · session reviewer-1",
+      "Re: block b2 (removed)",
+      "Body: Still yes",
+      "comment-4 · session reviewer-1",
+      "Body: Agreed",
+      "Referenced by:",
+      "- none",
+    ]);
+  });
+
   test("reads the targeted comment and quoted reply chain from a Dispatch comment reference", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -7790,6 +10322,119 @@ describe("executeDispatchTool", () => {
       "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
     ]);
   });
+
+  describe("the Node line of a read", () => {
+    const commentId = "cccccccc-0000-4000-8000-000000000042";
+    const commentRef = `dispatch://DSP-1/comment/${commentId}`;
+    /** The text of a read of `commentRef` against a server whose `?to=` answer names `node`. */
+    const readComment = async (node: Record<string, unknown>) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === `/api/v1/comments/${commentId}`) {
+          return response({
+            comment: {
+              id: commentId,
+              issue_key: "DSP-1",
+              author: { kind: "session", id: "s1" },
+              body: "Ship it.",
+              anchor: null,
+              reply_to: null,
+              resolved: false,
+              suggestion: null,
+              created_at: "2026-10-24T10:00:00Z",
+            },
+            replies: [],
+          });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+          return response({
+            node: { kind: "comment", id: commentId, ref: commentRef, ...node },
+            edges: [],
+          });
+        }
+        if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      return (
+        await executeDispatchTool({
+          tool: "dispatch_read",
+          args: { ref: commentRef },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        })
+      ).text;
+    };
+
+    test("read prints the node's maker, last change and parent before its edges", async () => {
+      const text = await readComment({
+        made_by: [{ kind: "session", id: "s1" }],
+        made_at: "2026-10-24T10:00:00Z",
+        changed_by: [{ kind: "user", id: "alice@example.com" }],
+        changed_at: "2026-10-25T09:00:00Z",
+        parent: {
+          kind: "artifact",
+          id: "aaaaaaaa-0000-4000-8000-000000000001",
+          ref: "dispatch://DSP-1/spec",
+        },
+        parent_version: 3,
+      });
+
+      expect(text).toBe(
+        [
+          "Comment:",
+          `${commentId} · session s1`,
+          "Body: Ship it.",
+          "Reply chain:",
+          "- none",
+          `Node: comment ${commentRef} · made by session s1 at 2026-10-24T10:00:00Z · changed by user alice@example.com at 2026-10-25T09:00:00Z · part of dispatch://DSP-1/spec (version 3)`,
+          "Referenced by:",
+          "- none",
+          "Links:",
+          "- none",
+        ].join("\n")
+      );
+    });
+
+    test("a node with no recorded maker, no parent and no version says so", async () => {
+      const unrecorded = {
+        made_by: [],
+        made_at: null,
+        changed_by: [],
+        changed_at: null,
+        parent: null,
+        parent_version: null,
+      };
+
+      expect(await readComment(unrecorded)).toContain(
+        `\nNode: comment ${commentRef} · made by nobody recorded · changed by nobody recorded\nReferenced by:\n`
+      );
+      // A parent with no reference is named by its kind and id; several actors read as a list.
+      expect(
+        await readComment({
+          ...unrecorded,
+          made_by: [
+            { kind: "session", id: "s1" },
+            { kind: "user", id: "alice@example.com" },
+          ],
+          parent: { kind: "session", id: "s1" },
+        })
+      ).toContain(
+        `\nNode: comment ${commentRef} · made by session s1, user alice@example.com · changed by nobody recorded · part of session s1\nReferenced by:\n`
+      );
+    });
+
+    test("a server older than the facts prints no Node line", async () => {
+      const text = await readComment({ changed_at: "2026-10-25T09:00:00Z" });
+
+      expect(text).not.toContain("Node:");
+      expect(text).toEndWith("Reply chain:\n- none\nReferenced by:\n- none\nLinks:\n- none");
+    });
+  });
+
   test("prints where an anchored comment's block stands after its quote", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
@@ -8305,6 +10950,16 @@ describe("executeDispatchTool", () => {
             { url: "https://github.com/owner/repo/pull/7", kind: "github_pr" },
             { url: "https://example.com/runs/3" },
           ],
+          artifacts: [
+            { id: "artifact-42", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+            {
+              id: "artifact-43",
+              slug: "chart-png",
+              name: "chart.png",
+              kind: "image",
+              primary: false,
+            },
+          ],
           open_asks: [],
           progress: { tasks: { done: 1, total: 4 }, children: null },
           last_seq: 0,
@@ -8410,7 +11065,12 @@ describe("executeDispatchTool", () => {
     // The pull request a person linked is on the read, as on the issue page; the reference graph
     // at the end carries none of it.
     expect(result.text).toContain(
-      "Progress: tasks 1/4\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nOpen asks:"
+      "Progress: tasks 1/4\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nDocuments:"
+    );
+    // Every artifact the issue holds, by slug, filename and kind, which a missing document's hint
+    // names this read for.
+    expect(result.text).toContain(
+      "Documents:\n- spec (spec.md, doc)\n- chart-png (chart.png, image)\nOpen asks:"
     );
     expect(
       result.text.endsWith(
@@ -8564,7 +11224,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toContain(
-      "References:\n- unavailable: GET http://dispatch.test/api/v1/issues/DSP-42/references " +
+      "References:\n- unavailable: GET http://dispatch.test/api/v1/issues/DSP-42/references?versions=latest " +
         "answered 404 Not Found with a body that is not Dispatch's error JSON"
     );
     expect(result.text).toContain(
@@ -8719,6 +11379,21 @@ describe("executeDispatchTool", () => {
             created_at: "2026-09-09T00:08:00Z",
             payload: { question: reopenQuestion },
           },
+          {
+            seq: 9,
+            type: "artifact.human_edited",
+            actor: { kind: "user", id: "person@example.com" },
+            created_at: "2026-09-09T00:09:00Z",
+            payload: {
+              artifact_id: "artifact-1",
+              name: "spec.md",
+              from_version: 4,
+              to_version: 7,
+              editors: ["person@example.com"],
+              diff: "--- previous\n+++ current\n",
+              diff_truncated: false,
+            },
+          },
         ]);
       }
       throw new Error(`unexpected request: ${target.pathname}`);
@@ -8746,6 +11421,7 @@ describe("executeDispatchTool", () => {
         "- #6 issue.updated · user sami · 2026-09-09T00:06:00Z · status in_progress",
         "- #7 comment.anchor_refreshed · user sami · 2026-09-09T00:07:00Z · Anchor moved after the document edit.",
         `- #8 ask.anchor_refreshed · user sami · 2026-09-09T00:08:00Z · ${reopenQuestion}`,
+        "- #9 artifact.human_edited · user person@example.com · 2026-09-09T00:09:00Z · spec.md v4 to v7, edited by person@example.com",
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
@@ -9016,6 +11692,17 @@ describe("executeDispatchTool", () => {
       "Body: Hi"
     );
     expect(requested).toContain(`/api/v1/issues/DSP-42/messages/${message}`);
+  });
+
+  // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
+  // whatever its fragment, as the SPA and the server read the same page.
+  test("maps the SPA's decisions page to the issue's decisions.md", () => {
+    const server = "http://dispatch.test";
+    for (const page of ["/issues/DSP-42/decisions", "/issues/DSP-42/decisions#b-ship-it"]) {
+      expect(dispatchRefFromUrl(`${server}${page}`, server)).toBe(
+        "dispatch://DSP-42/artifact/decisions-md"
+      );
+    }
   });
 
   test("resolves an 8-character ask id prefix against the issue's asks", async () => {
@@ -9955,10 +12642,11 @@ test("an issue document reference resolves to the document's id as the Dispatch 
 });
 
 // Dispatch suffixes a slug two documents would share, so on one issue a document's filename can be
-// another's slug: `spec v2` has slug `spec-v2`, and a document named `spec-v2` gets `spec-v2-2`.
-// Such a reference names two documents, so it is refused rather than taken by slug, and the hint
-// names each document's id. A reference only one document answers to still resolves.
-test("a reference that is one document's slug and another's filename is refused as ambiguous", async () => {
+// another's slug: `spec v2` has slug `spec-v2`, and a document an older Dispatch stored under the
+// name `spec-v2` has `spec-v2-2`. Such a reference is the slug's document, as Dispatch's own routes
+// resolve it (the slug first, then a filename). Only a reference two documents answer to the same
+// way, a filename they share, is refused, and its hint names each one's slug.
+test("a reference that is one document's slug and another's filename is the slug's document", async () => {
   const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
     response({
       key: "DSP-42",
@@ -9968,13 +12656,19 @@ test("a reference that is one document's slug and another's filename is refused 
         { id: "artifact-notes", slug: "notes-md", name: "notes.md", primary: false },
         { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc", primary: false },
         { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", kind: "doc", primary: false },
+        { id: "artifact-draft", slug: "draft-md", name: "draft.md", kind: "doc", primary: false },
+        {
+          id: "artifact-draft-2",
+          slug: "draft-md-2",
+          name: "draft.md",
+          kind: "doc",
+          primary: false,
+        },
       ],
     });
   const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
-  await expect(resolveIssueDocumentId(client, "DSP-42", "spec-v2")).rejects.toThrow(
-    '"spec-v2" names 2 documents on this issue; use the id: artifact-v2 (spec-v2, spec v2), artifact-v2-2 (spec-v2-2, spec-v2)'
-  );
   for (const [reference, id] of [
+    ["spec-v2", "artifact-v2"],
     ["spec v2", "artifact-v2"],
     ["spec-v2-2", "artifact-v2-2"],
     ["artifact-v2-2", "artifact-v2-2"],
@@ -9982,6 +12676,9 @@ test("a reference that is one document's slug and another's filename is refused 
   ] as const) {
     expect(await resolveIssueDocumentId(client, "DSP-42", reference)).toBe(id);
   }
+  await expect(resolveIssueDocumentId(client, "DSP-42", "draft.md")).rejects.toThrow(
+    '"draft.md" names 2 documents on this issue; use a slug: draft-md (draft.md), draft-md-2 (draft.md)'
+  );
 });
 
 const anchoredRow: TablePosition = {

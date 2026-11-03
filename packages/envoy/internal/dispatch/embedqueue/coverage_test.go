@@ -3,6 +3,7 @@ package embedqueue
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -334,6 +334,168 @@ func TestCoverRepairsAStaleRow(t *testing.T) {
 	}
 }
 
+// seedSpec gives issueKey its primary document, as issue creation does, with spec as its first
+// version, and returns the document's id.
+func seedSpec(t *testing.T, q querier, project, issueKey, spec string) string {
+	t.Helper()
+	var artifactID string
+	if err := q.QueryRow(context.Background(), `
+		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+		values ($1, $2, 'spec', 'spec.md', 'doc', true, '{"kind":"user","id":"alice"}')
+		returning id::text
+	`, issueKey, project).Scan(&artifactID); err != nil {
+		t.Fatalf("seed the primary document of %s: %v", issueKey, err)
+	}
+	addVersion(t, q, artifactID, 1, spec)
+	return artifactID
+}
+
+func addVersion(t *testing.T, q querier, artifactID string, number int, markdown string) {
+	t.Helper()
+	mustExec(t, q, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, $2, $3, '[]')`,
+		artifactID, number, markdown)
+}
+
+// issueRow reads an issue's embeddings row: its text and whether it waits for a vector.
+func issueRow(t *testing.T, database *store.Store, issueKey string) (text string, pending bool) {
+	t.Helper()
+	if err := database.Pool.QueryRow(context.Background(), `
+		select text_snapshot, embedded_hash is distinct from content_hash from embeddings where kind = 'issue' and id = $1
+	`, issueKey).Scan(&text, &pending); err != nil {
+		t.Fatalf("read the embeddings row of %s: %v", issueKey, err)
+	}
+	return text, pending
+}
+
+func embeddedTexts(e *placeEmbedder) map[string]bool {
+	texts := map[string]bool{}
+	for _, call := range e.calls {
+		for _, text := range call {
+			texts[text] = true
+		}
+	}
+	return texts
+}
+
+// An issue embeds its title and its spec: a new version of its primary document queues the issue
+// again at the title, a blank line and that version's markdown, a title change keeps the spec,
+// and the coverage pass builds the same text, so it changes nothing the triggers wrote.
+func TestASpecEditRequeuesTheIssueWithItsTitleAndSpec(t *testing.T) {
+	database := storetest.Open(t)
+	const title = "Ünïcödé title — 日本語 ✓"
+	seedIssue(t, database, "SPEC", "SPEC-1", title)
+	spec := seedSpec(t, database.Pool, "SPEC", "SPEC-1", "")
+	embedder := newPlaceEmbedder(configuredIdentity)
+	deps := Deps{Store: database, Embedder: embedder}
+	drain(t, deps)
+
+	const markdown = "## Problem\n\nNaïve café — the spec 🚀\n"
+	addVersion(t, database.Pool, spec, 2, markdown)
+	want := title + "\n\n" + markdown
+	if text, pending := issueRow(t, database, "SPEC-1"); text != want || !pending {
+		t.Fatalf("after the spec edit the issue's row holds %q (pending %t), want %q pending", text, pending, want)
+	}
+	drain(t, deps)
+	if !embeddedTexts(embedder)[want] {
+		t.Errorf("the embedder never received %q: %v", want, embedder.calls)
+	}
+
+	before := snapshotRows(t, database)
+	cover(t, deps)
+	if after := snapshotRows(t, database); after["issue/SPEC-1"] != before["issue/SPEC-1"] {
+		t.Errorf("Cover changed the issue's row the trigger wrote:\n before %+v\n after  %+v", before["issue/SPEC-1"], after["issue/SPEC-1"])
+	}
+
+	mustExec(t, database.Pool, `update issues set title = 'Renamed' where key = 'SPEC-1'`)
+	if text, _ := issueRow(t, database, "SPEC-1"); text != "Renamed\n\n"+markdown {
+		t.Errorf("after the title change the issue's row holds %q, want the new title and the spec", text)
+	}
+}
+
+// Only the issue's primary document is its spec: a version of another document on the issue
+// leaves the issue's row as it was.
+func TestAVersionOfAnotherDocumentLeavesTheIssuesTextAlone(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "NPRI", "NPRI-1", "Title")
+	seedSpec(t, database.Pool, "NPRI", "NPRI-1", "The spec")
+	var notes string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+		values ('NPRI-1', 'NPRI', 'notes', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+		returning id::text
+	`).Scan(&notes); err != nil {
+		t.Fatalf("seed another document: %v", err)
+	}
+	addVersion(t, database.Pool, notes, 1, "Notes, first")
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)})
+	if text, _ := issueRow(t, database, "NPRI-1"); text != "Title\n\nThe spec" {
+		t.Fatalf("the issue's row holds %q, want its title and its primary document's text", text)
+	}
+
+	before := snapshotRows(t, database)["issue/NPRI-1"]
+	addVersion(t, database.Pool, notes, 2, "Notes, second")
+	if after := snapshotRows(t, database)["issue/NPRI-1"]; after != before {
+		t.Errorf("a version of another document wrote the issue's row:\n before %+v\n after  %+v", before, after)
+	}
+}
+
+// An issue whose row a release before 0140 embedded at its title alone is queued again by the
+// coverage pass at its title and spec, and then embedded at that text.
+func TestCoverRequeuesAnIssueEmbeddedWithItsTitleAlone(t *testing.T) {
+	database := storetest.Open(t)
+	withTriggersOff(t, database, func(q querier) {
+		mustExec(t, q, `insert into projects (key, name) values ('OLDE', 'Test')`)
+		mustExec(t, q, `
+			insert into issues (key, project_key, number, title, created_by, rank)
+			values ('OLDE-1', 'OLDE', 1, 'Old title', '{"kind":"user","id":"alice"}', 'A')`)
+		seedSpec(t, q, "OLDE", "OLDE-1", "What the old issue's spec says")
+	})
+	mustExec(t, database.Pool, `select embeddings_enqueue('issue', 'OLDE-1', 'Old title')`)
+	embedder := newPlaceEmbedder(configuredIdentity)
+	deps := Deps{Store: database, Embedder: embedder}
+	drain(t, deps)
+
+	cover(t, deps)
+	want := "Old title\n\nWhat the old issue's spec says"
+	if text, pending := issueRow(t, database, "OLDE-1"); text != want || !pending {
+		t.Fatalf("after Cover the issue's row holds %q (pending %t), want %q pending", text, pending, want)
+	}
+	drain(t, deps)
+	if !embeddedTexts(embedder)[want] {
+		t.Errorf("the embedder never received %q: %v", want, embedder.calls)
+	}
+	if items, current, _, _, _ := coverage(t, database, configuredIdentity); current != items {
+		t.Errorf("after the drain %d of %d items are current, want all", current, items)
+	}
+}
+
+// A spec that is empty or holds only white space adds nothing to the issue's text: the issue
+// embeds its title alone, and the coverage pass agrees.
+func TestAnIssueWhoseSpecIsBlankEmbedsItsTitleAlone(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "BLNK", "BLNK-1", "Title")
+	spec := seedSpec(t, database.Pool, "BLNK", "BLNK-1", "")
+	if text, _ := issueRow(t, database, "BLNK-1"); text != "Title" {
+		t.Fatalf("with an empty spec the issue's row holds %q, want the title alone", text)
+	}
+	addVersion(t, database.Pool, spec, 2, "A spec")
+	if text, _ := issueRow(t, database, "BLNK-1"); text != "Title\n\nA spec" {
+		t.Fatalf("with a spec the issue's row holds %q, want the title and the spec", text)
+	}
+	addVersion(t, database.Pool, spec, 3, " \n\t\n")
+	if text, _ := issueRow(t, database, "BLNK-1"); text != "Title" {
+		t.Fatalf("with a blank spec the issue's row holds %q, want the title alone", text)
+	}
+
+	deps := Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)}
+	drain(t, deps)
+	before := snapshotRows(t, database)["issue/BLNK-1"]
+	cover(t, deps)
+	if after := snapshotRows(t, database)["issue/BLNK-1"]; after != before {
+		t.Errorf("Cover changed the issue's row:\n before %+v\n after  %+v", before, after)
+	}
+}
+
 // The repair is a compare-and-swap: a trigger write that commits after the pass read the row and
 // before it updated it wins, keeping the trigger's text, hash, claim and counters. The trigger's
 // transaction holds the row while the pass's update waits on it, so the interleaving is exact.
@@ -624,7 +786,7 @@ func TestASuccessfulEmbedProvesTheEmbedderForThePass(t *testing.T) {
 	seedForeignRows(t, database, "PRVN")
 	seedIssue(t, database, "PRVN", "PRVN-3", "Pending here")
 	embedder := newPlaceEmbedder(configuredIdentity)
-	deps := Deps{Store: database, Embedder: embedder, proven: new(atomic.Bool)}
+	deps := Deps{Store: database, Embedder: embedder, proven: newProof()}
 	drain(t, deps)
 	if !deps.embedderProven() {
 		t.Fatal("a drain that embedded PRVN-3 did not record the embedder as proven")
@@ -714,24 +876,119 @@ func TestTwoConcurrentPassesLeaveTheStateOnePassLeaves(t *testing.T) {
 	}
 }
 
-// A rolling deploy that changes the identity converges: a vector the old configuration's process
-// commits after the new one's pass is dropped by its next pass and embedded again under the new.
-func TestTheNextPassDropsAVectorTheOldConfigurationCommittedAfterThePass(t *testing.T) {
-	database := storetest.Open(t)
-	ctx := context.Background()
-	seedIssue(t, database, "ROLL", "ROLL-1", "Rolling title")
-	current := Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)}
-	cover(t, current)
-	drain(t, Deps{Store: storetest.SecondProcess(t, database), Embedder: newPlaceEmbedder(foreignIdentity)})
+// shortenIdentityRecheck sets identityRecheckInterval to d for the test. Register it before
+// runQueue, so the interval is restored only once Run has returned.
+func shortenIdentityRecheck(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := identityRecheckInterval
+	identityRecheckInterval = d
+	t.Cleanup(func() { identityRecheckInterval = old })
+}
+
+// modelOf is the identity of the vector the row holds, empty when it holds none.
+func modelOf(t *testing.T, database *store.Store, id string) string {
+	t.Helper()
 	var model string
-	if err := database.Pool.QueryRow(ctx, `select model from embeddings where kind = 'issue' and id = 'ROLL-1'`).Scan(&model); err != nil || model != foreignIdentity {
-		t.Fatalf("model after the old process's drain = %q, %v; want %q", model, err, foreignIdentity)
+	if err := database.Pool.QueryRow(context.Background(), `
+		select case when embedding is null then '' else coalesce(model, '') end from embeddings where kind = 'issue' and id = $1`, id).Scan(&model); err != nil {
+		t.Fatalf("read %s's model: %v", id, err)
 	}
-	cover(t, current)
-	drain(t, current)
-	if err := database.Pool.QueryRow(ctx, `select model from embeddings where kind = 'issue' and id = 'ROLL-1'`).Scan(&model); err != nil || model != configuredIdentity {
-		t.Fatalf("model after the next pass and a drain = %q, %v; want %q", model, err, configuredIdentity)
+	return model
+}
+
+// commitForeignVector writes id a vector of foreignIdentity at its current text, as an
+// old-configuration process's commitEmbeddings does during a rolling deploy.
+func commitForeignVector(t *testing.T, database *store.Store, id string) {
+	t.Helper()
+	mustExec(t, database.Pool, `
+		update embeddings set embedding = $1::vector, model = $2, embedded_hash = content_hash, embedded_at = now()
+		where kind = 'issue' and id = $3`, embed.Literal(oneVector()), foreignIdentity, id)
+}
+
+// A rolling deploy that changes the identity converges: the boot pass found another identity's
+// rows, so the coverage loop runs the identity steps again after identityRecheckInterval, and a
+// vector the old configuration's process commits after the boot pass is dropped by that run and
+// embedded again under the new identity.
+func TestTheIdentityRecheckDropsAVectorTheOldConfigurationCommitsAfterTheBootPass(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "ROLL", "ROLL-1", "Rolling title")
+	seedIssue(t, database, "ROLL", "ROLL-2", "Embedded before the roll")
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(foreignIdentity)})
+	mustExec(t, database.Pool, `update embeddings set embedding = null, model = null, embedded_hash = null, next_attempt_at = now() where id = 'ROLL-1'`)
+	shortenIdentityRecheck(t, 3*time.Second)
+	runQueue(t, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity)})
+	// The boot pass has dropped ROLL-2's vector, and the queue has embedded ROLL-1 here.
+	eventually(t, 10*time.Second, "the boot pass and the boot drain", func() bool {
+		return modelOf(t, database, "ROLL-1") == configuredIdentity && modelOf(t, database, "ROLL-2") != foreignIdentity
+	})
+	commitForeignVector(t, database, "ROLL-1")
+	eventually(t, 15*time.Second, "ROLL-1 dropped by the recheck and embedded again here", func() bool {
+		return modelOf(t, database, "ROLL-1") == configuredIdentity
+	})
+}
+
+// runCoverage holds no timer once a run finds no row of another identity: with none at boot it
+// returns after the boot pass, and with some it returns after the first recheck that finds none
+// left, having dropped and re-admitted them.
+func TestTheCoverageLoopStopsOnceNoForeignRowRemains(t *testing.T) {
+	for name, tc := range map[string]struct {
+		seed    func(t *testing.T, database *store.Store)
+		recheck time.Duration
+	}{
+		// An hour's interval: a loop that armed a recheck would not return within the test.
+		"none at boot": {
+			seed: func(t *testing.T, database *store.Store) {
+				seedIssue(t, database, "NONE", "NONE-1", "Embedded here")
+				drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(configuredIdentity)})
+			},
+			recheck: time.Hour,
+		},
+		"some at boot": {
+			seed:    func(t *testing.T, database *store.Store) { seedForeignRows(t, database, "SOME") },
+			recheck: 200 * time.Millisecond,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			database := storetest.Open(t)
+			tc.seed(t, database)
+			shortenIdentityRecheck(t, tc.recheck)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			runCoverage(ctx, Deps{Store: database, Embedder: newSyncEmbedder(configuredIdentity), proven: newProof()})
+			if ctx.Err() != nil {
+				t.Fatal("the coverage loop still waited after 10s, want it returned once no foreign row remained")
+			}
+			var foreign bool
+			if err := database.Pool.QueryRow(context.Background(), foreignRows, coverageKinds, configuredIdentity).Scan(&foreign); err != nil {
+				t.Fatalf("look for foreign rows: %v", err)
+			}
+			if foreign {
+				t.Error("foreign rows remain after the loop returned")
+			}
+		})
 	}
+}
+
+// A boot pass that skipped the identity steps because the embedder had not answered its canary
+// runs them as soon as the queue's first embed succeeds, not identityRecheckInterval later.
+func TestTheIdentityStepsRunOnceTheQueueFirstEmbeds(t *testing.T) {
+	database := storetest.Open(t)
+	seedIssue(t, database, "ANSR", "ANSR-1", "Pending here")
+	seedIssue(t, database, "ANSR", "ANSR-2", "Embedded elsewhere")
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(foreignIdentity)})
+	mustExec(t, database.Pool, `update embeddings set embedding = null, model = null, embedded_hash = null, next_attempt_at = now() where id = 'ANSR-1'`)
+	embedder := newSyncEmbedder(configuredIdentity)
+	embedder.setErr(errors.New("simulated: the deployment does not answer yet"))
+	runQueue(t, Deps{Store: database, Embedder: embedder})
+	// Two canaries fail: the boot pass's, and the one confirming ANSR-1's own failed embed.
+	eventually(t, 10*time.Second, "the boot pass's canary", func() bool { return embedder.canaryCalls() >= 2 })
+	if got := modelOf(t, database, "ANSR-2"); got != foreignIdentity {
+		t.Fatalf("ANSR-2 holds %q before the embedder answered, want the foreign vector left in place", got)
+	}
+	embedder.setErr(nil)
+	eventually(t, 20*time.Second, "ANSR-2's foreign vector dropped and embedded again here", func() bool {
+		return modelOf(t, database, "ANSR-2") == configuredIdentity
+	})
 }
 
 // Coverage over every state an item can be in: no row (aging from when it was written), stale

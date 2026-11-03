@@ -25,9 +25,11 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/webhook"
+	"github.com/sjawhar/envoy/listenfd"
 )
 
 // listenerDeps holds the NATS-dependent resources, all open. main builds the /v1 handlers over it
@@ -39,15 +41,35 @@ type listenerDeps struct {
 	sessions *session.SessionRegistry
 	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
 	ciStore *cistore.Store
+	// roleLane is the role lane's own client (bus.ConnectRoleLane), nil in a test that builds the
+	// handlers without it.
+	roleLane *bus.Client
 	// live is the live topics lane's own client (openLiveTopics), nil when ENVOY_SUBSCRIBE_ALL_TOPICS
 	// leaves the lane off.
 	live *bus.Client
+	// consumers manages the session consumers registrations ask for (sessionDelivery); nil in a
+	// test that builds the handlers without it, which answers every such registration with core.
+	// delivery, below, is the delivery handlers' own configuration, which the routes share.
+	consumers *sessionDelivery
 	// caches lists the stores above that are open, for the sites that treat every cache alike.
 	caches []listenerCache
 	// consumer names the durable whose lag /healthz reports.
 	consumer   string
 	streamName string
 	streamInfo streamInfoLookup
+	// delivery is the config main hands the delivery handlers (the role lane, the live lane and the
+	// durable), wired once, so the publish route forwards through its forwardRole, records each
+	// session it confirms in its dedupeCache (so the handlers do not push that key to it again), and
+	// writes each send's delivery line and delivery_status count through its logger and
+	// messagesDelivered, reading as the role lane's do, beside the route's own request record
+	// (request_record.go). The route never reads that dedupeCache, since the handlers also
+	// record a self-subscribed session whose push they skipped without hearing from it.
+	delivery *listenerDeliveryHandlerConfig
+	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
+	// through the route, which only the route writes. A send skips a holder or recipient recorded
+	// there, so envoy-client's retry of a send does not forward again to one the first attempt
+	// confirmed, and no one is counted as confirming a message without having sent its receipt.
+	confirmed *dedupe.Cache
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -88,11 +110,29 @@ func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
 // session bucket itself says so (roleHolderSession), so the reaper never ends a claim another listener
 // accepted a moment ago. A read that did not answer keeps the claim for the next cycle.
 func roleHolderMayBeLive(logger *logging.Logger, sessions *session.SessionRegistry, sessionID string) bool {
-	_, err := roleHolderSession(sessions, sessionID, registered)
+	_, err := roleHolderSession(sessions, sessionID, roles.Registered)
 	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 		logger.Warn("role claim reaper kept a claim whose holder's session it could not read", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	}
 	return !errors.Is(err, nats.ErrKeyNotFound)
+}
+
+// envDuration reads a duration an operator may override through the environment: an unset or
+// empty value leaves fallback standing, and so does one time.ParseDuration refuses, after a
+// single WARN naming the variable - a listener never refuses to start over a malformed duration.
+// The WARN's message and fields are what an operator's log filter matches, so they name the
+// variable exactly as it is written in the environment.
+func envDuration(logger *logging.Logger, name string, fallback time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		logger.Warn("invalid "+name+"; using default", slog.String("value", v), slog.String("error", err.Error()))
+		return fallback
+	}
+	return d
 }
 
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
@@ -122,9 +162,8 @@ func endListenerKVWatchers(ctx context.Context, caches []listenerCache) {
 // isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
 // from transient JetStream deadlines. Rebuild only while the NATS client is
 // connected; a disconnected client owns its own infinite reconnect loop. A
-// missing bucket is terminal too: no watcher notices envoy_roles going, and a
-// rebuild cannot create a bucket, so its failed rebuilds end in a restart,
-// whose store Open creates it again.
+// missing bucket is terminal too: a rebuild cannot create a bucket, so its
+// failed rebuilds end in a restart, whose store Open creates it again.
 func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []listenerCache) bool {
 	if err == nil || !client.Connected() {
 		return false
@@ -144,7 +183,9 @@ func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []li
 // rebuildListenerDependencies rewatches the KV caches and, when the durable probe reports the
 // consumer gone or bound elsewhere, subscribes the durable again. It reports success only once
 // the server reports this listener bound, so the probe that follows a rebuild reads a settled
-// consumer rather than the gap in which the subscription is being replaced.
+// consumer rather than the gap in which the subscription is being replaced. rebound, when not nil,
+// is called once the server reports the durable bound to this listener again: the task holds its
+// machine's durable binding once more (sessionRelays.setOwned).
 func rebuildListenerDependencies(
 	ctx context.Context,
 	client *bus.Client,
@@ -152,6 +193,7 @@ func rebuildListenerDependencies(
 	durableProbe func() error,
 	consumer string,
 	handler nats.MsgHandler,
+	rebound func(),
 ) error {
 	if !client.Connected() {
 		return nats.ErrConnectionClosed
@@ -170,6 +212,9 @@ func rebuildListenerDependencies(
 	if boundErr := awaitDurableBound(ctx, client, consumer, durableRebindInterval, durableRebindDeadline); boundErr != nil {
 		return errors.Join(err, fmt.Errorf("rebind durable consumer: %w", boundErr))
 	}
+	if rebound != nil {
+		rebound()
+	}
 	return err
 }
 
@@ -185,6 +230,13 @@ func rebuildListenerDependencies(
 // defaults: a ping every 2 minutes, 2 outstanding), so there the exit comes about 15 minutes
 // after the stall.
 const disconnectedFailureThreshold = 20
+
+// attemptCacheTTL is how long the attempt cache (below) remembers a (dedupe_key, session_id)
+// pair it recorded before a delivery. It bounds the unplaceable retry window in
+// unplaceable_delivery.go, which clears and re-records one entry per attempt: a window that
+// reached this TTL could let a message's own retries outlive the entry that keeps its redelivery
+// from being swallowed.
+const attemptCacheTTL = 5 * time.Minute
 
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
 // NATS reconnects. A terminal watcher, closed KV handle, or missing durable
@@ -341,14 +393,65 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // once the durable consumer binds, which during a rolling deploy waits out the task being replaced
 // while /v1 already serves; 200 "healthy" with the durable consumer's lag once every dependency
 // answers; 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a
-// cache's watcher has stopped, the durable consumer is gone, or the durable consumer is
+// cache's watcher has stopped, the durable consumer is gone, a bus check did not answer within
+// healthzBudget, or the durable consumer is
 // "not bound to this listener's subscription" because it was recreated server-side and now
 // delivers elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and
-// the NATS reconnect retry. A listener that mounts no GitHub webhook route keeps no CI cache,
-// and its answer carries "ci_cache": "not_applicable". "live_topics" says whether the live topics
-// lane is "subscribed" or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a
-// live client that is not connected or holds no valid subscription is 503 "live subscription
-// inactive", since every topic the stream does not store then reaches no session.
+// the NATS reconnect retry, and for a KV watch rebuild stalled past bus.RepairGrace (below). A
+// role lane client that is not connected or holds no valid subscription is 503 "role lane
+// subscription inactive", since no role message is forwarded then. A listener that mounts no GitHub webhook route keeps no CI cache, and its answer carries
+// "ci_cache": "not_applicable". "live_topics" says whether the live topics lane is "subscribed"
+// or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a live client that is
+// not connected or holds no valid subscription is 503 "live subscription inactive", since every
+// topic the stream does not store then reaches no session.
+//
+// A rewatch of the KV caches that keeps failing after a reconnect ends no watcher and clears no
+// cache, so every other check still passes while the caches follow buckets they no longer watch
+// (INFRA-743). The handler therefore reads the client's HookStall, how long the bus's reconnect
+// hooks have been due without a run that succeeded, and reports the dependency "KV watch rebuild"
+// once it reaches bus.RepairGrace. It reads it last, below every 503 check and immediately before
+// the healthy answer, so a stall never stands in for a worse fault: a durable consumer that is
+// gone, unbound, or whose info read did not answer is still 503, since a listener that receives
+// nothing is not the case the 200 is for. That answer is 200 "degraded" and not 503, because the
+// probes act on /healthz: the ECS container health check is curl -sf /healthz, every 30 s with 3
+// retries (infra/aws/rendering/listener.go:202-203), on a service of one task
+// (infra/aws/webhooklistener.go:227), and GKE's readiness probe reads it too
+// (infra/gcp/dispatch_kube.go, readyProbe). A 503 would replace, or unroute, the only listener
+// there is, and its replacement rebuilds into the same failing rewatch with cold caches that warm
+// up empty, whose fanout then acknowledges general-topic messages as unmatched and loses them
+// (delivery.go, fanoutDelivery), while the running task still serves from the caches it holds,
+// stale but not empty. The paging signal for this state is the bus's ERROR "envoy nats reconnect
+// hooks have not succeeded" (internal/bus/recovery.go, reportHookFailure), which the AWS rendering
+// counts as a log metric filter (infra/aws/rendering/metricfilters.go). A shorter stall is reported
+// nowhere here: the bus runs the hooks again within seconds of a failure (internal/bus/recovery.go,
+// recoverUntilHealthy), so a rebuild under the bound is being repaired, and a listener would
+// otherwise read as degraded over every reconnect. The stall is one bus.Client's, naming no
+// cache, so a listener that keeps no CI cache needs no branch of its own, and the live topics
+// lane's client, which carries no reconnect hook, has no stall to report.
+//
+// The checks that go to the bus share one healthzBudget taken from the request's own context: the
+// flush, each cache's KV ping and the durable consumer's info read. A ping or that read that has
+// not answered when it ends (healthzPing) is 503 unhealthy naming the dependency and the
+// context's deadline, so a stall in JetStream alone, which the flush's core PING does not see,
+// fails the container health check inside the budget, as the 10 s JetStream wait it replaces
+// failed it by running past the check's timeout. A check that answered with a failure keeps its
+// answer.
+//
+// The role claim view is reported too, last of all and as a 200 "degraded" naming it
+// (store.Registry.RoleViewErr): until its watcher's first scan has delivered every claim the view
+// answers no read, so GET /v1/sessions and GET /v1/registry/<session_id> answer 503 while every
+// other check here passes, and the report reads the very state those routes read. It is last so
+// that it hides nothing: it comes after every check that can answer 503, so a degraded view never
+// takes the place of a fault that does not repair itself. A KV ping or durable info read that
+// answered with a transient failure is reported before it, as its own 200 "degraded" carrying
+// only status and error, and returns before the checks after it. The role claim view's degraded
+// answer instead carries the healthy body's own fields, so a reader loses no counter while the
+// view fills. Degraded and not unhealthy, because that view fills itself through its watcher's
+// own rescan and a 503 would take a serving listener out of a load balancer for a state that
+// repairs itself: a readiness check runs curl -f or -sf against /healthz, which a 200 passes.
+// For the same reason the view is no part of Ping or WatchErr, whose terminal failures the
+// self-health monitor self-terminates the listener over: a restart completes no scan that keeps
+// timing out.
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -358,7 +461,9 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "starting"})
 			return
 		}
-		if err := d.client.Conn.FlushTimeout(3 * time.Second); err != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), healthzBudget)
+		defer cancel()
+		if err := d.client.Conn.FlushWithContext(ctx); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "nats unavailable"})
 			return
@@ -366,6 +471,11 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		if !d.client.SubOK() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "subscription inactive"})
+			return
+		}
+		if d.roleLane != nil && (!d.roleLane.Connected() || !d.roleLane.CoreSubOK()) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "role lane subscription inactive"})
 			return
 		}
 		if d.live != nil && (!d.live.Connected() || !d.live.CoreSubOK()) {
@@ -380,10 +490,35 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			}
 		}
 		for _, c := range d.caches {
-			if err := c.cache.Ping(); err != nil {
-				writeDependencyHealth(w, c.name+" KV", err, c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
+			if answered, err := healthzPing(ctx, c.cache); err != nil {
+				writeDependencyHealth(w, c.name+" KV", err, !answered || c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
+		}
+		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer, nats.Context(ctx))
+		if err != nil {
+			// A read ctx ended did not answer, the info read's own form of healthzPing's unanswered.
+			writeDependencyHealth(w, "durable consumer", err, ctx.Err() != nil || errors.Is(err, nats.ErrConsumerNotFound))
+			return
+		}
+		// One read and no confirming second one, unlike durableProbe's: the endpoint reports the
+		// fault the moment a request finds it, and a request landing in a rebuild's own gap simply
+		// answers 503 until the next one.
+		if durableUnbound(consumerInfo, d.client) {
+			writeDependencyHealth(w, "durable consumer", errDurableUnbound, true)
+			return
+		}
+		// Last, below every 503 check: "degraded" is the answer only when nothing worse holds.
+		if stall, hookErr := d.client.HookStall(); stall >= bus.RepairGrace {
+			rebuild := fmt.Errorf("no rebuild has succeeded for %s", stall.Round(time.Second))
+			if hookErr != nil {
+				// The last failure says what is broken; the stall, for how long. A run still in
+				// flight past the grace has no error of its own, and writeDependencyHealth needs
+				// one, so then the stall is the whole report.
+				rebuild = fmt.Errorf("%w (%w)", hookErr, rebuild)
+			}
+			writeDependencyHealth(w, "KV watch rebuild", rebuild, false)
+			return
 		}
 		response := map[string]interface{}{"status": "healthy"}
 		for k, v := range sessionHealthFields(d.sessions) {
@@ -396,23 +531,32 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		if d.live != nil {
 			response["live_topics"] = "subscribed"
 		}
-		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer)
-		if err != nil {
-			writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
-			return
-		}
-		// One read and no confirming second one, unlike durableProbe's: the endpoint reports the
-		// fault the moment a request finds it, and a request landing in a rebuild's own gap simply
-		// answers 503 until the next one.
-		if durableUnbound(consumerInfo, d.client) {
-			writeDependencyHealth(w, "durable consumer", errDurableUnbound, true)
-			return
-		}
 		response["num_pending"] = consumerInfo.NumPending
 		response["num_ack_pending"] = consumerInfo.NumAckPending
+		// Last, so that no fault above is reported as this one: every check before it that can
+		// answer 503 has passed. The answer keeps the fields above it, so a reader of the counters
+		// loses none while the view fills.
+		if err := d.registry.RoleViewErr(); err != nil {
+			response["status"] = "degraded"
+			response["error"] = dependencyUnavailable("role claim view", err)
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(response)
 	}
+}
+
+// healthzBudget bounds the bus checks of one /healthz answer.
+const healthzBudget = 3 * time.Second
+
+// healthzPing is cache's Ping as a /healthz request holding ctx waits for it (bus.Bounded): nats.go's
+// KV Status takes no context, so a ping that has not answered when ctx ends is answered false, with
+// ctx's error, the "context deadline exceeded" a ping that waited out the JetStream MaxWait failed
+// with. The abandoned ping runs on to its answer or that wait; what it can still do then - record a
+// recreated bucket's error on its watcher, or prune the session cache's last-seen times - is what
+// any later ping would do.
+func healthzPing(ctx context.Context, cache kvCache) (answered bool, err error) {
+	_, answered, err = bus.Bounded(ctx, func() (struct{}, error) { return struct{}{}, cache.Ping() })
+	return answered, err
 }
 
 func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, terminal bool) {
@@ -425,8 +569,15 @@ func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, 
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": status,
-		"error":  dependency + " unavailable: " + err.Error(),
+		"error":  dependencyUnavailable(dependency, err),
 	})
+}
+
+// dependencyUnavailable is the `error` field a /healthz answer gives for a dependency, so the
+// degraded answer that keeps the healthy body's fields reads exactly as writeDependencyHealth's
+// does.
+func dependencyUnavailable(dependency string, err error) string {
+	return dependency + " unavailable: " + err.Error()
 }
 
 // webhookRoute is one configured webhook path and the handler it serves over the only
@@ -528,8 +679,32 @@ func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, log
 	logger.Info("envoy-listener /v1 open", slog.Int64("since_listening_ms", time.Since(listeningAt).Milliseconds()))
 }
 
+// listenerStreamOptions are the options envoy-listener starts the stream with
+// (bus.ConnectOwningStream): the deployment's replica count and byte limit, from cfg, and the
+// buckets the listener opens at that count (bus.ListenerBuckets: store.Open's interest and role
+// buckets, session.OpenSessionRegistry's and cistore.Open's, the list its NATS grant is built
+// from), which the client's keeper raises back to it when a concurrent start or an operator
+// lowered one (bus.WithKeptBuckets). The CI bucket is named even on a listener with no GitHub
+// route, which opens none: the keeper skips a bucket that does not exist. main and the tests that
+// start the listener's stream both take them from here.
+//
+// Each connection the client makes declares itself lost two to three seconds after the hub stops
+// answering it (bus.WithSilentCutDetection). A hub whose packets stop closes nothing. On nats.go's
+// default pings (one every two minutes, two outstanding) the connection reads connected for four
+// to six minutes, and the reconnect that finds a hub which answers starts only once it reads lost.
+func listenerStreamOptions(cfg config.Service) []bus.ConnectOption {
+	return []bus.ConnectOption{
+		bus.WithReplicas(cfg.NATSReplicas),
+		bus.WithStreamMaxBytes(cfg.StreamMaxBytes),
+		bus.WithKeptBuckets(bus.ListenerBuckets()...),
+		bus.WithSilentCutDetection(),
+	}
+}
+
 func main() {
-	// Phase 1: Load config (synchronous, fast).
+	// Phase 1: Load config (synchronous, fast). With ENVOY_LISTEN_FD, Load inspects the inherited
+	// socket and takes its address as cfg's, so the API auth fence below judges the address that
+	// serves; Phase 2 adopts it.
 	cfg, err := config.Load(9020)
 	if err != nil {
 		log.Fatal(err)
@@ -544,7 +719,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
+	if err := validateListenerAPIAuth(cfg, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
 		log.Fatal(err)
 	}
 	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer))
@@ -556,11 +731,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Phase 2: Bind HTTP port deterministically in main goroutine before
-	// any NATS work begins. This guarantees /healthz is reachable as soon
-	// as Serve starts, regardless of NATS connection latency.
-	addr := cfg.ListenAddress()
-	ln, err := net.Listen("tcp", addr)
+	// Phase 2: Serve on the socket the listener inherited (ENVOY_LISTEN_FD) or bind its address,
+	// in the main goroutine before any NATS work begins, so /healthz is reachable as soon as Serve
+	// starts, whatever the NATS connection's latency.
+	var ln net.Listener
+	if cfg.ListenSocket != nil {
+		ln, err = listenfd.Adopt(*cfg.ListenSocket)
+	} else {
+		ln, err = net.Listen("tcp", cfg.ListenAddress())
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -578,18 +757,14 @@ func main() {
 	// that mounts it carries the gauge the loop sets.
 	var ciLegacyHeld *metrics.Gauge
 	if webhookCfg.GitHub != nil {
-		ciLegacyHeld = met.NewGauge("envoy_ci_legacy_records_held", "CI records a head-gated listener left unsettled that the last summary tick held back")
+		ciLegacyHeld = met.NewGauge("envoy_ci_legacy_records_held", "CI records a head-gated listener left unsettled that the summary loop's last pass held back")
 	}
 	met.NewGaugeFunc("envoy_active_sessions", "Number of active sessions", func() int64 {
 		d := deps.Load()
 		if d == nil {
 			return 0
 		}
-		entries, err := d.sessions.List()
-		if err != nil {
-			return 0
-		}
-		return int64(len(entries))
+		return int64(d.sessions.LiveCount())
 	})
 	met.NewGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() int64 {
 		d := deps.Load()
@@ -625,7 +800,7 @@ func main() {
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
-	// Phase 4: Start HTTP server (port already bound via net.Listen).
+	// Phase 4: Start HTTP server on the listener Phase 2 holds.
 	server := newHTTPServer(mux)
 	fatal := make(chan error, 1)
 	go func() {
@@ -634,11 +809,14 @@ func main() {
 		}
 	}()
 	listeningAt := time.Now()
-	logger.Info("envoy-listener listening", slog.String("addr", addr))
+	// The address ln is bound to, whether inherited or bound here, so the line names the port a
+	// kernel chose (PORT=0 or a socket a harness opened on port 0).
+	logger.Info("envoy-listener listening", slog.String("addr", ln.Addr().String()))
 
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
-	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
-	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
+	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream) at the
+	// deployment's replica count and byte limit (listenerStreamOptions).
+	client, err := bus.ConnectOwningStream(cfg.NATSURLs, listenerStreamOptions(cfg)...)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -684,25 +862,40 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Wait for the interest cache to finish its initial scan of existing KV
-	// entries before we start accepting NATS messages. Without this gate, real
-	// events that arrive in the warm-up window get "no matching interests"
-	// even when the durable KV entry has subscribers.
+	// Wait for both of the registry's views before accepting NATS messages or HTTP requests.
+	// Without this gate, real events that arrive in the warm-up window get "no matching interests"
+	// even when the durable KV entry has subscribers, and the two routes that report a session's
+	// roles - GET /v1/sessions and GET /v1/registry/<session_id> - answer a live client the
+	// bus-unavailable 503 while the bus is healthy, because the role claim view refuses every read
+	// until its watcher has delivered every claim. So the gate waits for that view to be complete,
+	// not merely ready: a first scan nats.go's idle timer ended releases readiness, and the
+	// watcher's rescan ends this wait.
 	//
-	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds.
-	// If the watcher fails to start, signalReady() unblocks startup and the
-	// health endpoint exposes the unavailable registry while NATS recovers.
+	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds. The wait also
+	// ends before that bound with the role claim watcher's terminal error - a first start that
+	// failed, a bucket recreated under it, the watcher's own end - or its stop, none of which the
+	// watcher completes a scan after.
+	// A warm-up that does not complete still serves, fail open: the warn below names the cache and
+	// carries the cause, whichever of those it was, the registry keeps answering from whatever it
+	// holds, and /healthz reports the role claim view as degraded and the buckets themselves while
+	// NATS recovers.
 	cacheReadyCtx, cacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := registry.WaitForCacheReady(cacheReadyCtx); err != nil {
-		logger.Warn("interest cache warm-up timed out; serving with possibly empty cache",
+		logger.Warn("interest or role claim cache warm-up did not complete; serving with possibly empty cache",
 			slog.String("error", err.Error()))
 	}
 	cacheReadyCancel()
 
+	// A dead session's last heartbeat is kept for as long as the interest reaper can still hold its
+	// interest: the reaper deletes the row only store.InterestReapAllowance after its last write,
+	// so /v1/interests/ can report the session's real last heartbeat (the row's updated_at lags it
+	// by up to store.InterestRefreshAge) for every row it still lists. The allowance is the
+	// reaper's own (store.Registry.Reap), so the two cannot drift apart.
 	sessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(cfg.NATSReplicas),
 		session.WithSessionLogger(logger.Slog()),
+		session.WithLastSeenRetention(store.InterestReapAllowance(store.InterestReapGrace)),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -740,7 +933,6 @@ func main() {
 		MachineID:    cfg.MachineID,
 		HostBridge:   os.Getenv("ENVOY_HOST_BRIDGE"),
 		RequestLimit: 30 * time.Second,
-		Sessions:     sessions,
 	}
 
 	dedupeCache := dedupe.New(10 * time.Minute)
@@ -752,16 +944,23 @@ func main() {
 	// envelopes with the same EventID but distinct DedupeKeys. The existing
 	// dedupeCache records only successful deliveries (post-delivery) and
 	// cannot catch this slow-204 case. See #389.
-	attemptCache := dedupe.New(5 * time.Minute)
+	//
+	// attemptCacheTTL is named because the unplaceable retry below is bounded against it: a
+	// message whose retries outlived its attempt entry would have each redelivery recorded
+	// afresh instead of clearing one, so the bound is pinned by a test
+	// (TestUnplaceableRetryWindowFitsTheBoundsItDependsOn).
+	attemptCache := dedupe.New(attemptCacheTTL)
 
-	roleQueue := bus.ListenerQueue(cfg.MachineID)
+	// The window an agent delivery this listener cannot place is retried within before it is
+	// given up with a record (unplaceable_delivery.go).
+	unplaceableRetryWindow := envDuration(logger, "ENVOY_UNPLACEABLE_RETRY_WINDOW", defaultUnplaceableRetryWindow)
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
 	// Phase 6: Open the role lane and /v1 onto the stores, then bind the durable consumer.
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
-		forwardRole:       client.RequestCoreTo,
+		forwardRole:       startRoleForward(client),
 		registry:          registry,
 		sessions:          sessions,
 		machineID:         cfg.MachineID,
@@ -773,23 +972,45 @@ func main() {
 		messagesDelivered: messagesDelivered,
 		messagesNAKed:     messagesNAKed,
 		deliveryDuration:  deliveryDuration,
-	}
 
-	// The role lane is a core-NATS queue subscription in this machine's group. During a rolling
-	// deploy the task being replaced is a member too, and NATS hands each role message to one member
-	// of a group, so opening the lane before the durable binds forwards no message twice.
-	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig), roleQueue)
+		unplaceableRetryWindow: unplaceableRetryWindow,
+		// One deferral set for the life of the process, shared by construction by the three
+		// handlers built from this one value below - the role lane's, the durable's and the one
+		// the self-health rebind builds - so a rebind after a NATS flap draws on the budget the
+		// handler it replaces was holding rather than opening a second one beside it
+		// (unplaceableDeferrals, unplaceable_delivery.go).
+		deferredUnplaceable: newUnplaceableDeferrals(),
+	}
+	// The durable path's pushes to serving-port sessions run off its handler, on one worker per
+	// session (servePortWorkers), so a port slow to accept holds up no other session's delivery;
+	// the role lane's forwards run off its handler (roleForwarder): the handler resolves each role
+	// message's holder and hands the forward over, and the forwards to one holder are published in
+	// order while each waits for its outcome on its own. Both are wired here, last, so every seam
+	// of the configuration they copy is set (wireDeliveryWorkers).
+	deliveryConfig, stopWorkers := wireDeliveryWorkers(deliveryConfig)
+	roleForwards := deliveryConfig.roleForwards
+
+	// The role lane is a core-NATS queue subscription on a connection of its own with finite pending
+	// limits (bus.RoleLanePendingMsgs, bus.RoleLanePendingBytes; bus.ConnectRoleLane), in the queue
+	// group every listener shares, or this machine's group on a hub whose grant predates it. During a
+	// rolling deploy the task being replaced is a member too, and NATS hands each role message to one
+	// member of a group, so opening the lane before the durable binds forwards no message twice.
+	roleLaneClient, roleQueue, err := bus.ConnectRoleLane(cfg.NATSURLs, cfg.MachineID, coreNATSDeliveryHandler(deliveryConfig))
 	if err != nil {
 		logger.Error("core role subscription failed", slog.String("error", err.Error()))
 		client.Conn.Close()
 		os.Exit(1)
 	}
-	if err := client.Conn.Flush(); err != nil {
-		logger.Error("core role subscription flush failed", slog.String("error", err.Error()))
-		client.Conn.Close()
-		os.Exit(1)
-	}
-	_ = roleSub
+	logger.Info("role lane subscribed", slog.String("subject", contracts.RoleTopicPrefix+">"), slog.String("queue", roleQueue))
+	met.NewGaugeFunc("envoy_role_lane_slow_consumers", "Slow-consumer errors the role lane's connection has reported", func() int64 {
+		return int64(roleLaneClient.SlowConsumers())
+	})
+	met.NewGaugeFunc("envoy_role_forwards_outstanding", "Role forwards queued behind their holder or waiting for their outcome", func() int64 {
+		return int64(roleForwards.outstanding())
+	})
+	roleLaneWatchCtx, roleLaneWatchCancel := context.WithCancel(context.Background())
+	go watchRoleLaneSlowConsumers(roleLaneWatchCtx, roleLaneClient, logger, roleLaneSlowConsumerInterval)
+	lane := roleLane{client: roleLaneClient, forwards: roleForwards, stopWatch: roleLaneWatchCancel}
 
 	// The live topics lane, when ENVOY_SUBSCRIBE_ALL_TOPICS asks for it, opens beside the role lane
 	// and before /v1 and the durable bind, for the same reason: it is a queue subscription in this
@@ -810,6 +1031,35 @@ func main() {
 		logger.Info("live topics subscribed", slog.String("subject", liveTopicsSubject), slog.String("queue", bus.ListenerLiveQueue(cfg.MachineID)))
 	}
 
+	// The session consumers a registration asks for are managed on a connection of their own
+	// (bus.ConnectSessionConsumers). One that fails to connect leaves every session on core
+	// delivery, which a listener of an earlier release serves too, rather than ending the start.
+	delivery := connectSessionDelivery(cfg.NATSURLs, logger)
+	// The relay of those consumers hears registrations from the moment /v1 opens, and relays once
+	// this task holds its machine's durable binding (below). Without its reply inbox no frame could
+	// be answered, so a relay that cannot subscribe one leaves every session on core delivery too.
+	var relays *sessionRelays
+	if delivery.consumers != nil {
+		relays, err = startSessionRelays(delivery, deliveryConfig)
+		if err != nil {
+			logger.Error("session relay reply subscription failed; every session stays on core delivery", slog.String("error", err.Error()))
+			delivery.close()
+			delivery = &sessionDelivery{logger: logger, now: time.Now}
+		}
+	}
+	// The parts a shutdown ends, gathered once: every end of a start that serves /v1 passes them
+	// to shutdownListener.
+	parts := listenerParts{
+		server:      server,
+		client:      client,
+		lane:        lane,
+		live:        live,
+		delivery:    delivery,
+		relays:      relays,
+		stopWorkers: stopWorkers,
+		caches:      caches,
+	}
+
 	// From here a SIGTERM or SIGINT is an ordered shutdown: /v1 serves from the next step, and the
 	// bind can wait out a rolling deploy's old task for most of a minute. Before here, during the
 	// NATS connect and the cache warm-ups, a signal ends the process at once, as it always has.
@@ -818,13 +1068,17 @@ func main() {
 
 	ready := &listenerDeps{
 		client:     client,
+		roleLane:   roleLaneClient,
 		live:       live,
+		consumers:  delivery,
 		registry:   registry,
 		sessions:   sessions,
 		ciStore:    ciStore,
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
+		delivery:   &deliveryConfig,
+		confirmed:  dedupe.New(10 * time.Minute),
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 
@@ -857,10 +1111,14 @@ func main() {
 				slog.Int64("waited_ms", bind.waited.Milliseconds()),
 			)
 		}
-		shutdownListener(logger, server, client, live, caches, listenerLoops{})
+		shutdownListener(logger, parts, listenerLoops{})
 	}
 	deps.Store(ready)
 	logger.Info("envoy-listener ready (NATS connected)")
+	// This task holds its machine's durable binding: among the tasks of one machine id, it alone
+	// relays the session consumers. A task that loses the binding stops relaying, and one that
+	// binds it again in a rebuild starts again (the self-health monitor below).
+	relays.setOwned(true)
 
 	// Phase 6b: Start interest reaper for stale KV cleanup.
 	// Cross-references envoy_sessions (5-min TTL) with envoy_interests (permanent)
@@ -869,7 +1127,7 @@ func main() {
 	// a pass in flight before it drains NATS (kvLoopsDone).
 	kvLoopsCtx, kvLoopsCancel := context.WithCancel(context.Background())
 	kvLoopsDone := []<-chan struct{}{
-		registry.StartReaper(kvLoopsCtx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute),
+		registry.StartReaper(kvLoopsCtx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),
 		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL()),
 	}
 
@@ -884,17 +1142,11 @@ func main() {
 	// Phase 6b2: Start the CI summary loop, on a listener that opened the CI store. It emits one
 	// pr.<n>.checks event once a commit's checks settle, for every commit of a pull request, its
 	// head or not; new runs re-arm settlement. The debounce window is ENVOY_CI_DEBOUNCE (default
-	// 5s).
+	// 5s). The loop runs a pass only on a one-second tick by which a cached record changed or fell
+	// due.
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
 	if ciStore != nil {
-		ciDebounce := 5 * time.Second
-		if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {
-			if d, perr := time.ParseDuration(v); perr == nil {
-				ciDebounce = d
-			} else {
-				logger.Warn("invalid ENVOY_CI_DEBOUNCE; using default", slog.String("value", v), slog.String("error", perr.Error()))
-			}
-		}
+		ciDebounce := envDuration(logger, "ENVOY_CI_DEBOUNCE", 5*time.Second)
 		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 	}
 
@@ -905,7 +1157,13 @@ func main() {
 	// rebind wait run under monitorCtx, each JetStream read included, so the shutdown's monitorCancel
 	// cuts a read the server has not answered and the 10 s shutdown budget is held by neither.
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
-	probeDurable := func() error { return durableProbe(monitorCtx, client, consumer) }
+	probeDurable := func() error {
+		err := durableProbe(monitorCtx, client, consumer)
+		if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, errDurableUnbound) {
+			relays.setOwned(false)
+		}
+		return err
+	}
 	monitorDone := make(chan struct{})
 	go func() {
 		defer close(monitorDone)
@@ -927,6 +1185,7 @@ func main() {
 					probeDurable,
 					consumer,
 					jetStreamDeliveryHandler(deliveryConfig),
+					func() { relays.setOwned(true) },
 				)
 			},
 			func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) },
@@ -942,7 +1201,7 @@ func main() {
 	case <-stopping.Done():
 		logger.Info("received signal, shutting down", slog.String("signal", context.Cause(stopping).Error()))
 	}
-	shutdownListener(logger, server, client, live, caches, listenerLoops{
+	shutdownListener(logger, parts, listenerLoops{
 		stop: func() {
 			monitorCancel()
 			summaryCancel()
@@ -963,23 +1222,46 @@ type listenerLoops struct {
 	kvLoopsDone []<-chan struct{}
 }
 
+// listenerParts are the parts of a started listener that shut down: server is the /v1 HTTP server,
+// client the main bus connection, lane the role lane, live the live topics lane's client (nil when
+// the lane is off), delivery the session-consumer connection, relays the relay of its consumers
+// (nil when it does not run), stopWorkers the end of the delivery workers (wireDeliveryWorkers),
+// and caches the KV caches whose watchers are retired last.
+type listenerParts struct {
+	server      *http.Server
+	client      *bus.Client
+	lane        roleLane
+	live        *bus.Client
+	delivery    *sessionDelivery
+	relays      *sessionRelays
+	stopWorkers func(context.Context)
+	caches      []listenerCache
+}
+
 // shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
 // signal, a fatal error or a bind that did not complete, and exits non-zero so the runtime's
-// restart policy restores the listener. live is the live topics lane's client, nil when the lane
-// is off.
-func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, live *bus.Client, caches []listenerCache, loops listenerLoops) {
+// restart policy restores the listener.
+func shutdownListener(logger *logging.Logger, parts listenerParts, loops listenerLoops) {
 	// Stop background loops before draining NATS.
 	if loops.stop != nil {
 		loops.stop()
 	}
 
 	// Ordered shutdown:
+	// 1. Session relays and serving-port workers — publish no frame, push to no port and ack nothing
+	//    more; the messages they hold are delivered again once their ack wait runs out.
 	// 2. HTTP server — stop accepting new requests, drain in-flight.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	parts.relays.stop(shutdownCtx)
+	parts.stopWorkers(shutdownCtx)
+	if err := parts.server.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}
+	// The session-consumer connection carries the consumer calls registrations make, which the HTTP
+	// server has stopped serving, and the relays' acks, which its drain lets reach the server,
+	// within what is left of the HTTP stop's budget.
+	parts.delivery.drain(shutdownCtx)
 
 	// 3. NATS — wait (within the HTTP deadline) for a self-health rebuild the monitor may still be
 	// running, so nothing re-subscribes or re-watches during the drain, and for a pass of a loop
@@ -1003,22 +1285,29 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 			logger.Warn("a KV bucket pass still running at shutdown")
 		}
 	}
-	// The live lane drains before the main client, within 3 s: a live delivery still in its handler
-	// publishes its exception through the main client, and reads the caches stopped below. Core
-	// NATS retries nothing, so a delivery still blocked at the deadline is lost, as one sent while
-	// no listener runs is.
-	if live != nil {
-		if err := live.Drain(3 * time.Second); err != nil {
-			logger.Warn("live topics drain error", slog.String("error", err.Error()))
-		}
+	// The live lane and the role lane drain before the main client, side by side: a delivery still
+	// in a lane's handler, and each role forward, publishes through the main client and reads the
+	// caches stopped below. The live lane gets 3 s; the role lane 3 s for its handler and the
+	// receipt window on top for the forwards it handed over (roleLane.drain), 5 s. Core NATS retries
+	// nothing, so a delivery still blocked at the deadline is lost, as one sent while no listener
+	// runs is.
+	var lanes sync.WaitGroup
+	if parts.live != nil {
+		lanes.Go(func() {
+			if err := parts.live.Drain(3 * time.Second); err != nil {
+				logger.Warn("live topics drain error", slog.String("error", err.Error()))
+			}
+		})
 	}
-	for _, c := range caches {
+	lanes.Go(func() { parts.lane.drain(logger, 3*time.Second) })
+	lanes.Wait()
+	for _, c := range parts.caches {
 		c.cache.StopWatch()
 	}
 	// 10 s for the deliveries in their handlers, as before the drain hooks, and the hooks' 3 s on
-	// top (bus's drainHookReserve): with the HTTP stop's 10 s and the live lane's 3 s, 26 s, inside
+	// top (bus's drainHookReserve): with the HTTP stop's 10 s and the role lane's 5 s, 28 s, inside
 	// every runtime's 30 s.
-	if err := client.Drain(13 * time.Second); err != nil {
+	if err := parts.client.Drain(13 * time.Second); err != nil {
 		logger.Warn("nats drain error", slog.String("error", err.Error()))
 	}
 

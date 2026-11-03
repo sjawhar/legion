@@ -14,7 +14,7 @@ import {
   selectEditorText,
 } from "./editor";
 import { resetDatabase } from "./seed";
-import { refusePosts } from "./sends";
+import { refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 // The margin composer a selection-bar action opens can switch between Comment, Suggest and Ask;
@@ -156,7 +156,7 @@ test("a send holds every suggestion control and restores its replacement on refu
     await expect(form.getByRole("button", { name: "Close" })).toBeDisabled();
     refusal();
 
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(replacement).toHaveValue("red");
   });
 });
@@ -177,7 +177,7 @@ test("a send holds every ask control", async ({ browser }) => {
     await expect(form.getByRole("button", { name: "Add option" })).toBeDisabled();
     await expect(form.getByLabel("Option 1 label")).toBeDisabled();
     refusal();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
   });
 });
 
@@ -205,7 +205,7 @@ test("an Escape in Send's task cannot open a margin Discard prompt", async ({ br
 
     await expect(form.getByRole("button", { name: "Discard" })).toHaveCount(0);
     refusal();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
   });
 });
 

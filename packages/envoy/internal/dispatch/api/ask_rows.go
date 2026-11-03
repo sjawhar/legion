@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // askRowColumns are docs.AskColumns plus the documents a block ask, a quoted anchor or an
@@ -20,9 +21,13 @@ const askRowColumns = docs.AskColumns + `, ba.id::text, ba.slug, ba.is_primary,
 	aa.project_key, aa.slug, aa.name, aa.is_primary,
 	pa.project_key, pa.slug, pa.name, pa.is_primary`
 
-const askRowFrom = `from asks a
+// askRowFrom is a var, not a const, because its anchor join is built from store.CastableUUID: a
+// stored anchor resolves to the document its artifact_id casts to, whatever the spelling, and one
+// whose artifact_id casts to no uuid resolves to no document instead of failing the read with
+// SQLSTATE 22P02.
+var askRowFrom = `from asks a
 	left join artifacts ba on ba.id = a.block_artifact_id
-	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+	left join artifacts aa on aa.id = ` + store.CastableUUID(`a.anchor->>'artifact_id'`) + `
 	left join artifacts pa on pa.id = (a.approval->>'artifact_id')::uuid`
 
 // newestReply selects the newest comment in the thread of the ask aliased a: the one that
@@ -87,7 +92,7 @@ func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) 
 // never carry WaitingOn.
 const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression + ` as waiting_on`
 
-const askReadFrom = askRowFrom + lastReplyJoin
+var askReadFrom = askRowFrom + lastReplyJoin
 
 // nullableAskArtifactRef holds the nullable columns of one optional document an ask names - a
 // quoted anchor's or an approval request's artifact_id, both resolved through a left join that
@@ -165,6 +170,47 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 		ask.ReferencedByCount = &count
 	}
 	return nil
+}
+
+// attachAskPartIDs reads, in one query over `ask_blocks`, the part id of every listed ask's
+// options and answer and the ask's current part revision (`refs.AskPartIDs`), so every read
+// that shows an ask's options shows the reference of each: `dispatch://<key>/ask/<id>#b-<part
+// id>`, pinned to the ask's `revision` with `@v<N>`. It is read beside attachAskBacklinkCounts,
+// which every list and detail read of an ask already pays for, and never by a write, whose
+// answer carries no id.
+//
+// Which option or answer each stored part stands for, and what an ask the index has not reached
+// or an option no part stands for carries, is refs.AskPartIDs'.
+func attachAskPartIDs(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if len(asks) == 0 {
+		return nil
+	}
+	partIDs, err := refs.AskPartIDs(ctx, q, asks)
+	if err != nil {
+		return err
+	}
+	for index, ask := range asks {
+		ask.Revision = partIDs[index].Revision
+		for option := range ask.Options {
+			ask.Options[option].ID = partIDs[index].Options[option]
+		}
+		if ask.Answer != nil {
+			ask.Answer.ID = partIDs[index].Answer
+		}
+	}
+	return nil
+}
+
+// attachAskReadFields is what every list and detail read of an ask attaches beyond its row: its
+// inbound graph-edge count (attachAskBacklinkCounts), then the part ids of its options and of its
+// answer with its part revision (attachAskPartIDs). A write attaches neither. The two are always
+// read together and in this order, so the reads a caller pays for, and the error it reports, are
+// the same at every site.
+func attachAskReadFields(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if err := attachAskBacklinkCounts(ctx, q, asks); err != nil {
+		return err
+	}
+	return attachAskPartIDs(ctx, q, asks)
 }
 
 func (s *server) loadAskAnchorArtifact(

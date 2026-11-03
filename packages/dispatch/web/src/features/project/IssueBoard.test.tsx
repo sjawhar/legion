@@ -12,6 +12,8 @@ import {
 import type { ReactNode } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type { Issue, IssueSummary, UserState } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -230,16 +232,20 @@ test("a failed move rolls the board back, refetches it and tells the truth about
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const queryKey = ["issues", "project", "CORE"] as const;
   queryClient.setQueryData(queryKey, issues);
-  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
+  const patchIssue = answerIssuePatches().mockRejectedValue(
     new ApiError(400, { code: "RANK_INPUT", error: "rank neighbors are not ordered" })
   );
   const hook = renderMoves(queryClient);
   try {
     await act(() => hook.result.current.moveCard("CORE-1", "todo", 1));
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", {
-      rank: { after: "CORE-2" },
-      status: "todo",
-    });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-1",
+      {
+        rank: { after: "CORE-2" },
+        status: "todo",
+      },
+      keyedAttempt
+    );
     expect(hook.result.current.error).toBe(staleBoardMessage);
     expect(queryClient.getQueryData<IssueSummary[]>(queryKey)).toEqual(issues);
     expect(queryClient.getQueryState(queryKey)?.isInvalidated).toBe(true);
@@ -253,7 +259,7 @@ test("any other failure shows the server's message and still refetches", async (
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const queryKey = ["issues", "project", "CORE"] as const;
   queryClient.setQueryData(queryKey, issues);
-  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
+  const patchIssue = answerIssuePatches().mockRejectedValue(
     new ApiError(403, { code: "FORBIDDEN", error: "not your project" })
   );
   const hook = renderMoves(queryClient);
@@ -272,7 +278,7 @@ test("two rapid moves on one board run one after the other, the second from the 
   const queryKey = ["issues", "project", "CORE"] as const;
   queryClient.setQueryData(queryKey, issues);
   const settle: Array<(issue: Issue) => void> = [];
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(
+  const patchIssue = answerIssuePatches().mockImplementation(
     () =>
       new Promise<Issue>((resolve) => {
         settle.push(resolve);
@@ -297,6 +303,7 @@ test("two rapid moves on one board run one after the other, the second from the 
     expect(patchIssue.mock.calls[0]).toEqual([
       "CORE-1",
       { rank: { after: "CORE-2" }, status: "todo" },
+      keyedAttempt,
     ]);
     await act(async () => {
       settle[0]?.(patched);
@@ -307,6 +314,7 @@ test("two rapid moves on one board run one after the other, the second from the 
     expect(patchIssue.mock.calls[1]).toEqual([
       "CORE-3",
       { rank: { before: "CORE-2" }, status: "todo" },
+      keyedAttempt,
     ]);
     await act(async () => {
       settle[1]?.({ ...patched, key: "CORE-3" });
@@ -330,7 +338,7 @@ const keyboardIssues: IssueSummary[] = [
 /** A PATCH that never answers: the board stays as the move placed it, so a test reads the
  *  optimistic placement rather than the seed the mocked refetch would hand back. */
 function patchInFlight() {
-  return spyOn(api, "patchIssue").mockImplementation(() => new Promise<Issue>(() => {}));
+  return answerIssuePatches().mockImplementation(() => new Promise<Issue>(() => {}));
 }
 
 test("Shift+J moves the focused card down through moveCard, announces the new position and keeps focus on it; Shift+K at the top does nothing", async () => {
@@ -351,9 +359,13 @@ test("Shift+J moves the focused card down through moveCard, announces the new po
     await act(async () => {
       fireEvent.keyDown(alpha, { key: "J", shiftKey: true });
     });
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", {
-      rank: { after: "CORE-2", before: "CORE-3" },
-    });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-1",
+      {
+        rank: { after: "CORE-2", before: "CORE-3" },
+      },
+      keyedAttempt
+    );
     expect(status.textContent).toBe("CORE-1 → Todo, position 2 of 3");
     const todo = within(board).getByRole("region", { name: "Todo" });
     await waitFor(() =>
@@ -386,10 +398,14 @@ test("Shift+L moves the focused card to the top of the next status and focus fol
     await act(async () => {
       fireEvent.keyDown(bravo, { key: "L", shiftKey: true });
     });
-    expect(patchIssue).toHaveBeenCalledWith("CORE-2", {
-      rank: { before: "CORE-4" },
-      status: "in_progress",
-    });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-2",
+      {
+        rank: { before: "CORE-4" },
+        status: "in_progress",
+      },
+      keyedAttempt
+    );
     expect(within(board).getByRole("status", { name: "Board announcements" }).textContent).toBe(
       "CORE-2 → In progress, position 1 of 2"
     );
@@ -481,7 +497,11 @@ test("within a lane, Shift+L moves a card to the next status in the same lane wi
       fireEvent.keyDown(p0Card, { key: "L", shiftKey: true });
     });
     // Same lane, so only status and rank move - priority is not part of this PATCH.
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { rank: {}, status: "in_progress" });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-1",
+      { rank: {}, status: "in_progress" },
+      keyedAttempt
+    );
     const movedInProgress = within(p0Lane).getByRole("region", { name: "In progress" });
     await waitFor(() =>
       expect(within(movedInProgress).getByRole("article", { name: "CORE-1 P0 card" })).toBeDefined()
@@ -562,7 +582,7 @@ test("a board refetch already on the wire when a card moves is dropped: the card
 
 test("a board refetch asked for while a move is unanswered waits for the answer, then reads the moved board", async () => {
   const answer = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => answer.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => answer.promise);
   const { cleanup, listIssues, queryClient } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
@@ -672,7 +692,7 @@ test("Enter and o open the focused card once, p focuses its priority select, Esc
 });
 
 test("Space on a focused card lifts nothing, and the card's instructions name the registry keys, not dnd-kit's grammar", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(patched);
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
   const { cleanup } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
@@ -690,6 +710,169 @@ test("Space on a focused card lifts nothing, and the card's instructions name th
     expect(instructions).toContain("Shift with J, K, H or L");
     expect(instructions).not.toContain("space bar");
   } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+// The click the browser fires after a drop is the drag's, however late the main thread delivers
+// it: a busy tab can take far longer than any window of milliseconds between the drop and the
+// click, and a drop that navigates to the issue page loses the board the reader was arranging.
+/** Press a card and move far enough to lift it, then release it where it was picked up. */
+async function dropInPlace(card: HTMLElement): Promise<void> {
+  await act(async () => {
+    fireEvent.mouseDown(card, { button: 0, clientX: 10, clientY: 10 });
+  });
+  await act(async () => {
+    fireEvent.mouseMove(document, { clientX: 10, clientY: 40 });
+  });
+  expect(card.className).toContain("opacity-50");
+  await act(async () => {
+    fireEvent.mouseUp(document, { clientX: 10, clientY: 40 });
+  });
+}
+
+/** The card as the drop re-rendered it: the drag replaces the node it began on. */
+async function droppedCard(): Promise<HTMLElement> {
+  return within(await screen.findByRole("region", { name: "Project board" })).getByRole("article", {
+    name: "CORE-1 Alpha",
+  });
+}
+
+/** Wait until a click reaches React again: dnd-kit stops click propagation for 50 ms after a
+ * drop, so a route is no evidence of what a click did until that listener is gone. The timer it
+ * waits out was armed before this one, so it has fired by the time this resolves. */
+async function pastDndKitClickGuard(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 80);
+  await act(async () => promise);
+}
+
+test("the click that trails a drop never follows the card's link, however late it arrives", async () => {
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    await dropInPlace(within(board).getByRole("article", { name: "CORE-1 Alpha" }));
+    // The click reaches the page a second later, as a stalled main thread delivers it. What
+    // stops the browser following the anchor is the board cancelling the click
+    // (`defaultPrevented`); a rendered route would say nothing, since dnd-kit's own
+    // `stopPropagation` keeps this click from React for 50 ms after the drop either way.
+    const link = within(await droppedCard()).getByRole("link");
+    const now = spyOn(performance, "now").mockReturnValue(performance.now() + 1000);
+    let trailingFollowed = true;
+    try {
+      await act(async () => {
+        trailingFollowed = fireEvent.click(link, { button: 0 });
+      });
+    } finally {
+      now.mockRestore();
+    }
+    expect(trailingFollowed).toBe(false);
+    expect(screen.getByTestId("current-route").textContent).toBe("/projects/CORE");
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+// Only the drag's own click is the drag's. A drop draws no click of its own on every surface -
+// a touch drag makes no tap, and a cancelled drag releases outside the page - so the mark a
+// drop leaves must not outlive the gesture that follows it, by pointer or by key.
+test("a drop that draws no click leaves the next press on the board working", async () => {
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    await dropInPlace(within(board).getByRole("article", { name: "CORE-1 Alpha" }));
+    const card = await droppedCard();
+    await pastDndKitClickGuard();
+    act(() => card.focus());
+    await act(async () => {
+      fireEvent.keyDown(card, { key: "Enter" });
+    });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1");
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+// Escape cancels a drag, and that key drops the mark like any other press, so the cancel has to
+// put it back: the button is still down, and its release draws the same trailing click a drop
+// does (`onDragCancel` on the board's `DndContext`).
+test("a drag cancelled with Escape keeps its own release off the card's link", async () => {
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
+    await act(async () => {
+      fireEvent.mouseDown(alpha, { button: 0, clientX: 10, clientY: 10 });
+    });
+    await act(async () => {
+      fireEvent.mouseMove(document, { clientX: 10, clientY: 40 });
+    });
+    await act(async () => {
+      // dnd-kit's own cancel reads `code`, not `key` (`core.esm.js` `handleKeydown`).
+      fireEvent.keyDown(document, { code: "Escape", key: "Escape" });
+    });
+    await act(async () => {
+      fireEvent.mouseUp(document, { clientX: 10, clientY: 40 });
+    });
+    // The cancel landed: the lifted card is no longer the one dnd-kit is dragging.
+    expect(board.querySelector(".opacity-50")).toBeNull();
+    let followed = true;
+    await act(async () => {
+      followed = fireEvent.click(within(await droppedCard()).getByRole("link"), { button: 0 });
+    });
+    expect(followed).toBe(false);
+    expect(screen.getByTestId("current-route").textContent).toBe("/projects/CORE");
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+// The press of a pointer drops the mark as a key press does. `fireEvent.mouseDown` emits no
+// `pointerdown`, so the drag above cannot reach that listener; this row presses one itself.
+test("a pointer press on a card after a drop that drew no click follows its link", async () => {
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    await dropInPlace(within(board).getByRole("article", { name: "CORE-1 Alpha" }));
+    const link = within(await droppedCard()).getByRole("link");
+    await pastDndKitClickGuard();
+    await act(async () => {
+      fireEvent.pointerDown(link, { button: 0 });
+      fireEvent.click(link, { button: 0 });
+    });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1");
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+// The mark is the board's own: a link anywhere else on the page follows itself while one is
+// pending, which is the whole point of the containment test on the click's target.
+test("a drop's mark never cancels a click outside the board", async () => {
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  const elsewhere = document.createElement("a");
+  elsewhere.href = "/issues/CORE-2";
+  document.body.append(elsewhere);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    await dropInPlace(within(board).getByRole("article", { name: "CORE-1 Alpha" }));
+    let followed = false;
+    await act(async () => {
+      followed = fireEvent.click(elsewhere, { button: 0 });
+    });
+    expect(followed).toBe(true);
+  } finally {
+    elsewhere.remove();
     cleanup();
     patchIssue.mockRestore();
   }
@@ -724,7 +907,7 @@ test("the strip's search hides board cards, counts the visible column, and drags
     await act(async () => {
       fireEvent.keyDown(alpha, { key: "J", shiftKey: true });
     });
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { rank: { after: "CORE-3" } });
+    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { rank: { after: "CORE-3" } }, keyedAttempt);
     expect(within(board).getByRole("status", { name: "Board announcements" }).textContent).toBe(
       "CORE-1 → Todo, position 2 of 2"
     );
@@ -785,13 +968,17 @@ test("a labelled move writes the rendered list, names its neighbours, and refetc
   // The server answers the labelled query without the unlabelled card.
   queryClient.setQueryData(labelledKey, [alpha, charlie, delta]);
   queryClient.setQueryData(baseKey, [alpha, bravo, charlie, delta]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(patched);
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
   const hook = renderMoves(queryClient, labels);
   try {
     await act(() => hook.result.current.moveCard("CORE-4", "todo", 1));
-    expect(patchIssue).toHaveBeenCalledWith("CORE-4", {
-      rank: { after: "CORE-1", before: "CORE-3" },
-    });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-4",
+      {
+        rank: { after: "CORE-1", before: "CORE-3" },
+      },
+      keyedAttempt
+    );
     expect(
       queryClient.getQueryData<IssueSummary[]>(labelledKey)?.map((entry) => entry.key)
     ).toEqual(["CORE-1", "CORE-4", "CORE-3"]);

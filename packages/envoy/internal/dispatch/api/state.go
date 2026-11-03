@@ -116,6 +116,7 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	previous := value
 	if input.Pinned != nil {
 		value.Pinned = *input.Pinned
 	}
@@ -146,8 +147,21 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// changed names which of pinned, last_read_seq and dismissed this write moved from the row it
+	// read (seq, the write's own precondition, is not one), so another tab refreshes its pinned
+	// list for a pin and not for a read mark. Nothing it moved leaves it [].
+	changed := []string{}
+	if previous.Pinned != value.Pinned {
+		changed = append(changed, "pinned")
+	}
+	if previous.LastReadSeq != value.LastReadSeq {
+		changed = append(changed, "last_read_seq")
+	}
+	if !slices.Equal(previous.Dismissed, value.Dismissed) {
+		changed = append(changed, "dismissed")
+	}
 	event, err := s.appendEvent(r.Context(), tx, projectOwner(project).event(
-		"user_state.updated", actor, map[string]any{"login": actor.ID, "state": value},
+		"user_state.updated", actor, map[string]any{"login": actor.ID, "state": value, "changed": changed},
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)

@@ -143,6 +143,141 @@ func TestSessionsImportCopiesEachClaimsSessionOnceAndReportsPerClaim(t *testing.
 	}
 }
 
+func TestSessionsImportFindsAClosedClaimsSessionByID(t *testing.T) {
+	const (
+		token            = "legion-legion-legion-1-architect"
+		session          = "01a18950-3b61-70b7-82d4-c80464927f8e"
+		missingSession   = "01a18950-3b61-70b7-82d4-c80464927f8f"
+		duplicateSession = "01a18950-3b61-70b7-82d4-c80464927f90"
+	)
+	recorded := agentSessions + "/--legion-workspaces-sjawhar-legion-legion-1--/2026-10-29T20-18-19-105Z_" + session + ".jsonl"
+	r := newSessionsImportRig(t, []map[string]string{{"token": token, "tree": "LEGION-1", "session": session, "sessionFile": ""}})
+
+	t.Run("one matching Oh My Pi UUIDv7 file imports it", func(t *testing.T) {
+		content := "{\"type\":\"session\",\"id\":\"" + session + "\"}\n"
+		r.write(recorded, content)
+		code, out, errb := r.run("--tree", "LEGION-1")
+		if code != 0 || errb != "" || !strings.Contains(out, token+" copied ") {
+			t.Fatalf("import = %d, stdout %q, stderr %q; want the closed session copied", code, out, errb)
+		}
+		if held, ok := r.held(recorded); !ok || held != content {
+			t.Fatalf("table holds %q (%t) for the recorded session path, want its file", held, ok)
+		}
+	})
+
+	t.Run("no matching file names the claim and session", func(t *testing.T) {
+		r := newSessionsImportRig(t, []map[string]string{{"token": token, "tree": "LEGION-1", "session": missingSession, "sessionFile": ""}})
+		code, out, _ := r.run("--tree", "LEGION-1")
+		if code != 1 || !strings.Contains(out, token+" failed session "+missingSession) || !strings.Contains(out, "was not found") {
+			t.Fatalf("import = %d, stdout %q; want the missing session named", code, out)
+		}
+	})
+
+	t.Run("multiple matching files refuse them", func(t *testing.T) {
+		r := newSessionsImportRig(t, []map[string]string{{"token": token, "tree": "LEGION-1", "session": duplicateSession, "sessionFile": ""}})
+		first := agentSessions + "/one/2026-10-08T12-00-00-000Z_" + duplicateSession + ".jsonl"
+		second := agentSessions + "/two/2026-10-08T13-00-00-000Z_" + duplicateSession + ".jsonl"
+		r.write(first, "{\"type\":\"session\",\"id\":\""+duplicateSession+"\"}\n")
+		r.write(second, "{\"type\":\"session\",\"id\":\""+duplicateSession+"\"}\n")
+		code, out, _ := r.run("--tree", "LEGION-1")
+		for _, want := range []string{token + " refused session " + duplicateSession, "multiple files", filepath.Join(r.volume, "sessions", "one"), filepath.Join(r.volume, "sessions", "two")} {
+			if !strings.Contains(out, want) {
+				t.Errorf("import output %q does not name %q", out, want)
+			}
+		}
+		if code != 1 {
+			t.Errorf("import = %d, want 1 for duplicate session files", code)
+		}
+	})
+
+	t.Run("invalid ids cannot shape the search path", func(t *testing.T) {
+		for _, id := range []string{session + "/../../outside", session + "*"} {
+			if _, err := sessionFileForID(id, r.volume); err == nil || !strings.Contains(err.Error(), "not a UUID") {
+				t.Errorf("sessionFileForID(%q) = %v, want the UUID refusal", id, err)
+			}
+		}
+	})
+}
+
+func TestSessionsImportRefusesSymlinkedSessionFiles(t *testing.T) {
+	const (
+		token   = "legion-legion-legion-1-architect"
+		session = "01a18950-3b61-70b7-82d4-c80464927f8e"
+	)
+	recorded := agentSessions + "/--legion-workspaces-sjawhar-legion-legion-1--/2026-10-29T20-18-19-105Z_" + session + ".jsonl"
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	if err := os.WriteFile(outside, []byte("outside session\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		claim map[string]string
+	}{
+		{"recorded path", map[string]string{"token": token, "tree": "LEGION-1", "sessionFile": recorded}},
+		{"closed claim fallback", map[string]string{"token": token, "tree": "LEGION-1", "session": session, "sessionFile": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSessionsImportRig(t, []map[string]string{tc.claim})
+			onVolume := filepath.Join(r.volume, "sessions", strings.TrimPrefix(recorded, agentSessions+"/"))
+			if err := os.MkdirAll(filepath.Dir(onVolume), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, onVolume); err != nil {
+				t.Fatal(err)
+			}
+
+			code, out, _ := r.run("--tree", "LEGION-1")
+
+			if code != 1 || !strings.Contains(out, token+" failed ") || !strings.Contains(out, "read the session file") {
+				t.Fatalf("import = %d, stdout %q; want the symlink refusal", code, out)
+			}
+			if _, found := r.held(recorded); found {
+				t.Fatal("the table contains the symlink target")
+			}
+		})
+	}
+}
+
+func TestSessionsImportRefusesSymlinkedSessionDirectory(t *testing.T) {
+	const (
+		token   = "legion-legion-legion-1-architect"
+		session = "01a18950-3b61-70b7-82d4-c80464927f8e"
+	)
+	name := "2026-10-29T20-18-19-105Z_" + session + ".jsonl"
+	recorded := agentSessions + "/--legion-workspaces-sjawhar-legion-legion-1--/" + name
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, name), []byte("outside session\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		claim map[string]string
+	}{
+		{"recorded path", map[string]string{"token": token, "tree": "LEGION-1", "sessionFile": recorded}},
+		{"closed claim fallback", map[string]string{"token": token, "tree": "LEGION-1", "session": session, "sessionFile": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSessionsImportRig(t, []map[string]string{tc.claim})
+			link := filepath.Join(r.volume, "sessions", "--legion-workspaces-sjawhar-legion-legion-1--")
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+
+			code, out, _ := r.run("--tree", "LEGION-1")
+
+			if code != 1 || !strings.Contains(out, token+" failed ") || !strings.Contains(out, "read the session file") {
+				t.Fatalf("import = %d, stdout %q; want the symlink-directory refusal", code, out)
+			}
+			if _, found := r.held(recorded); found {
+				t.Fatal("the table contains the symlink-directory target")
+			}
+		})
+	}
+}
+
 // The claims list is the one `legion claims list --json` prints, read from stdin with `-`; anything
 // else is refused before the database is opened, as is a missing flag.
 func TestSessionsImportRefusesWhatIsNotAClaimsList(t *testing.T) {

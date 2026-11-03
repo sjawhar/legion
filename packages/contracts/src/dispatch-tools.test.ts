@@ -4,7 +4,9 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
 import {
+  ASK_QUESTION_MAX,
   DISPATCH_BODY_MAX,
+  DISPATCH_HANDOFF_BODY_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
@@ -105,12 +107,16 @@ const validCalls = {
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
+  dispatch_related: { project: "CORE", title: "Retry failed webhook deliveries" },
   dispatch_issues: { project: "ACME" },
   dispatch_project: { key: "CORE", name: "Core" },
   dispatch_projects: {},
   dispatch_architecture_sync: { project: "CORE" },
   dispatch_open_asks: {},
+  dispatch_answers: {},
   dispatch_whoami: {},
+  dispatch_handoff_write: specFor("dispatch_handoff_write").example,
+  dispatch_handoff_read: { issue: "DSP-1", phase: "implement", version: 2 },
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
@@ -132,11 +138,11 @@ describe("zodSchemaApi", () => {
   test("names how far an over-limit string is over its cap", () => {
     const result = schemaFor("dispatch_ask").safeParse({
       issue: "DSP-1",
-      question: "x".repeat(850),
+      question: "x".repeat(ASK_QUESTION_MAX + 50),
     });
     expect(result.success).toBe(false);
     expect(result.error?.issues.map((issue) => issue.message)).toEqual([
-      "is 50 characters over the 800-character limit (850/800)",
+      `is 50 characters over the ${ASK_QUESTION_MAX}-character limit (${ASK_QUESTION_MAX + 50}/${ASK_QUESTION_MAX})`,
     ]);
   });
 
@@ -169,12 +175,16 @@ describe("dispatchToolSpecs", () => {
       "dispatch_artifact",
       "dispatch_read",
       "dispatch_search",
+      "dispatch_related",
       "dispatch_issues",
       "dispatch_project",
       "dispatch_projects",
       "dispatch_architecture_sync",
       "dispatch_open_asks",
+      "dispatch_answers",
       "dispatch_whoami",
+      "dispatch_handoff_write",
+      "dispatch_handoff_read",
     ]);
 
     for (const [name, args] of Object.entries(validCalls) as Array<
@@ -198,7 +208,7 @@ describe("dispatchToolSpecs", () => {
       ref: z.ZodOptional<z.ZodString>;
     };
     expect(argumentsSchema.ref.unwrap().description).toBe(
-      "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
+      "Optional dispatch:// reference (issue, document, block, message, or ask); appended to the question and rendered as a link."
     );
   });
 
@@ -211,12 +221,25 @@ describe("dispatchToolSpecs", () => {
         options: z.ZodType;
       };
       expect(argumentsSchema.question.description, name).toContain(
-        "never enumerate choices in the question"
+        "The question names the concrete case first"
       );
+      expect(argumentsSchema.question.description, name).not.toContain("never enumerate choices");
       expect(argumentsSchema.options.description, name).toContain(
         "description says what that approach costs"
       );
     }
+  });
+
+  test("dispatch_related takes a project key and refuses anything else by name", () => {
+    const schema = schemaFor("dispatch_related");
+
+    expect(schema.safeParse({ project: "CORE", text: "a draft spec" }).success).toBe(true);
+    expect(schema.safeParse({ title: "no project" }).success).toBe(false);
+    const lower = schema.safeParse({ project: "core", title: "Retry deliveries" });
+    expect(lower.success).toBe(false);
+    expect(lower.error?.issues.map((issue) => issue.message)).toEqual([
+      `project is not a project key: ${PROJECT_KEY_RULE}`,
+    ]);
   });
 
   test("dispatch_search rejects a one-character query and a limit above 50", () => {
@@ -283,6 +306,18 @@ describe("dispatchToolSpecs", () => {
     expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
   });
 
+  test("dispatch_project's description says to create a requested project without questions", () => {
+    const description = specFor("dispatch_project").description;
+    expect(description).toContain(
+      "When a person asks for a project, make the key from its name. Check the key with " +
+        "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use."
+    );
+    expect(description).toContain(
+      "When no person asked for a project and an existing project already covers the work, do not create a " +
+        "project. File an issue in that project with dispatch issue."
+    );
+  });
+
   test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {
     const schema = schemaFor("dispatch_architecture_sync");
 
@@ -330,6 +365,14 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ project: "ACME" }).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_answers accepts no arguments and rejects any key", () => {
+    const schema = schemaFor("dispatch_answers");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+    expect(schema.safeParse({ since: "2026-10-27T00:00:00Z" }).success).toBe(false);
   });
 
   test("dispatch_issues requires a project and accepts only a nonnegative integer offset", () => {
@@ -400,6 +443,44 @@ describe("dispatchToolSpecs", () => {
 
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_handoff_write takes one JSON object body up to the byte cap, and a phase slug", () => {
+    const schema = schemaFor("dispatch_handoff_write");
+    const refusals = (args: Record<string, unknown>) =>
+      schema.safeParse(args).error?.issues.map((issue) => issue.message);
+    const call = { issue: "DSP-1", phase: "implement" };
+
+    // A body of exactly the cap, counted in UTF-8 bytes: "é" is two of them.
+    const filler = "é".repeat((DISPATCH_HANDOFF_BODY_MAX - '{"a":""}'.length) / 2);
+    expect(schema.safeParse({ ...call, body: `{"a":"${filler}"}` }).success).toBe(true);
+    expect(refusals({ ...call, body: `{"a":"${filler}x"}` })).toEqual([
+      `body is 1 bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${DISPATCH_HANDOFF_BODY_MAX + 1}/${DISPATCH_HANDOFF_BODY_MAX})`,
+    ]);
+    for (const body of ["[1]", '"text"', "null", "{not json", "{} {}"]) {
+      expect(refusals({ ...call, body }), body).toEqual([
+        'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}',
+      ]);
+    }
+    for (const phase of ["Implement", "1plan", "", "a".repeat(33), "plan/x"]) {
+      expect(refusals({ ...call, phase, body: "{}" }), phase).toEqual([
+        "phase is not a handoff phase: a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement",
+      ]);
+    }
+    expect(schema.safeParse({ ...call, body: "{}", session_id: "other" }).success).toBe(false);
+    expect(specFor("dispatch_handoff_write").description).toContain(
+      `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED`
+    );
+  });
+
+  test("dispatch_handoff_read takes an issue, a phase slug and an optional positive version", () => {
+    const schema = schemaFor("dispatch_handoff_read");
+
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review" }).success).toBe(true);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review", version: 0 }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review", version: 1.5 }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "Review" }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", phase: "review", body: "{}" }).success).toBe(false);
   });
 
   test("dispatch_project takes a key and a name and nothing else", () => {
@@ -879,7 +960,7 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
-  test("requires artifact with project on document tools but not dispatch_artifact", () => {
+  test("requires artifact with project on document tools but not dispatch_artifact or dispatch_read", () => {
     const cases = [
       [
         "dispatch_ask",
@@ -892,7 +973,6 @@ describe("dispatchToolSpecs", () => {
         { project: "CORE", ops: [{ op: "replace", find: "draft", with: "final" }] },
       ],
       ["dispatch_doc_read", { project: "CORE" }],
-      ["dispatch_read", { project: "CORE" }],
     ] as const;
 
     for (const [name, args] of cases) {
@@ -905,6 +985,8 @@ describe("dispatchToolSpecs", () => {
         content: "# Runbook",
       }).success
     ).toBe(true);
+    // A project alone is the read of its documents' list.
+    expect(schemaFor("dispatch_read").safeParse({ project: "CORE" }).success).toBe(true);
   });
 
   test("accepts a project-document ref in place of issue/project on every ref-aware tool", () => {
@@ -1006,6 +1088,16 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
+  test("refuses a withdrawal, which only the close of the issue writes", () => {
+    expect(
+      schemaFor("dispatch_resolve_ask").safeParse({
+        ask: "ask-1",
+        kind: "withdrawn",
+        reason: "The issue is done.",
+      }).success
+    ).toBe(false);
+  });
+
   test("dispatch_resolve_comment takes only the comment reference", () => {
     const schema = schemaFor("dispatch_resolve_comment");
 
@@ -1077,7 +1169,7 @@ describe("dispatchToolSpecs", () => {
     ],
     [
       "dispatch_artifact",
-      "Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version.",
+      "Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md).",
     ],
     [
       "dispatch_ask",
@@ -1103,6 +1195,14 @@ describe("dispatchToolSpecs", () => {
       "dispatch_issue",
       "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it.",
     ],
+    [
+      "dispatch_doc_edit",
+      "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it.",
+    ],
+    [
+      "dispatch_read",
+      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, reads `No block <id> in <document>.`",
+    ],
   ])("%s's description, which --help prints, holds the rule moved from the skill", (name, rule) => {
     expect(specFor(name).description).toContain(rule);
   });
@@ -1118,6 +1218,11 @@ describe("dispatchToolSpecs", () => {
       "dispatch_read",
       "ref",
       "dispatch://PROJECT/artifact/<slug>[@vN], and its /ask/<id> and /comment/<id>; or the dashboard URL of one.",
+    ],
+    [
+      "dispatch_read",
+      "ref",
+      "A block: dispatch://KEY/spec#b-<block id>[@vN], dispatch://KEY/artifact/<slug>#b-<block id>[@vN] or dispatch://PROJECT/artifact/<slug>#b-<block id>[@vN], the id percent-encoded except ASCII letters, digits and -.",
     ],
   ])("%s's %s flag help holds the rule moved from the skill", (name, field, rule) => {
     const fields = specFor(name).arguments(schemaApi) as unknown as Record<

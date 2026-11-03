@@ -16,9 +16,10 @@ import {
   patchIssue,
 } from "./api";
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
+import { askCard, inboxList } from "./inbox-pane";
 import { expectConsecutiveLinksClear } from "./layout";
 import { insertExternalLink, resetDatabase } from "./seed";
-import { refusePosts } from "./sends";
+import { refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -60,7 +61,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the phone shell traps focus, dismisses on Escape at the right nesting level, never wraps a key, and renders a pinned event's own description", async ({
+test("the phone shell traps focus, dismisses on Escape at the right nesting level, never wraps a key, and renders a pinned event's own description @phone", async ({
   browser,
 }, testInfo) => {
   const isPhone = testInfo.project.name === "iphone";
@@ -192,7 +193,9 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
   }
 });
 
-test("a phone thread trap skips a held composer's disabled controls", async ({ browser }) => {
+test("a phone thread trap skips a held composer's disabled controls @phone", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -251,7 +254,7 @@ test("a phone thread trap skips a held composer's disabled controls", async ({ b
 // The wrap's other end. Shift+Tab from the sheet's first control goes to its last enabled one,
 // past the held composer's disabled controls, which a trap that read the `disabled` attribute
 // counted as the last and could not focus, leaving focus where it was.
-test("a phone sheet trap wraps Shift+Tab from its first control past a held composer", async ({
+test("a phone sheet trap wraps Shift+Tab from its first control past a held composer @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -300,14 +303,14 @@ test("a phone sheet trap wraps Shift+Tab from its first control past a held comp
     ).toBe(true);
     await expect(body).toHaveValue("Keep this draft");
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(body).toHaveValue("Keep this draft");
   } finally {
     await alice.close();
   }
 });
 
-test("a project document has no horizontal overflow, 44px controls, and a Comments margin sheet", async ({
+test("a project document has no horizontal overflow, 44px controls, and a Comments margin sheet @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -344,7 +347,7 @@ test("a project document has no horizontal overflow, 44px controls, and a Commen
   }
 });
 
-test("inline @ autocomplete has touch-sized controls and no overflow on iPhone", async ({
+test("inline @ autocomplete has touch-sized controls and no overflow on iPhone @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the 390 px interaction applies on iPhone");
@@ -395,7 +398,7 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
 // to its newest turn lands well after a link first has a box, and the row measures what it
 // placed rather than trusting the page's own placement, since a turn left under the fixed comment
 // composer would have a hit test read the composer and not the link.
-test("an inline link keeps its line and grows its hit box without covering its neighbours", async ({
+test("an inline link keeps its line and grows its hit box without covering its neighbours @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the 390 px interaction applies on iPhone");
@@ -739,7 +742,7 @@ async function expectStacked(control: Locator): Promise<void> {
   }
 }
 
-test("a long name ends in an ellipsis wherever a link or control truncates it", async ({
+test("a long name ends in an ellipsis wherever a link or control truncates it @phone", async ({
   browser,
 }, testInfo) => {
   test.setTimeout(90_000);
@@ -780,7 +783,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
   await patchIssue(labelled.key, { labels: [longLabel] });
   await createIssueArtifact(issue.key, { content: "# Runbook\n", name: longName });
   const document = await createProjectDocument("CORE", { content: "# Runbook\n", name: longName });
-  await createArtifactAsk(
+  const documentAsk = await createArtifactAsk(
     document.artifact.id,
     { question: "Does this runbook cover it?" },
     longTitledSession
@@ -834,15 +837,20 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expect.soft(artifactLink.locator("[title]")).toHaveAttribute("title", longName);
 
     // The long name belongs to a project document, whose ask nobody holds: the cleared filter
-    // is where the Inbox lists it.
+    // is where the Inbox lists it. From 1280 px the owner link is on the short row and again
+    // in the reading column's head (INFRA-575), so each is read where it belongs: the name on
+    // the row of the list, the author chip on the question's own card.
     await page.goto("/?assignee=everyone");
-    const inboxOwner = page.locator("[data-inbox-owner]", { hasText: longName });
+    const inboxOwner = inboxList(page).locator("[data-inbox-owner]", { hasText: longName });
     await expectEllipsis(inboxOwner);
     // The row already opens a RefPreview hover card (referenceTriggerProps); a native title
     // would draw its own tooltip over that card, so this row carries none.
     await expect.soft(inboxOwner.locator("[title]")).toHaveCount(0);
     // The ask's author chip is a flex button that opens the session's handles.
-    const authorChip = page.getByRole("button", { exact: true, name: longTitle });
+    const authorChip = (await askCard(page, documentAsk.id)).getByRole("button", {
+      exact: true,
+      name: longTitle,
+    });
     await expectEllipsis(authorChip);
     await expect
       .soft(authorChip.getByText(longTitle, { exact: true }))

@@ -141,7 +141,7 @@ var listenerSignals = []struct {
 			{"publish-failure-filter", `{ $.level = "ERROR" && $.msg = "listener exception publish failed" }`},
 			{"webhook-publish-failure-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github||source=slack||source=ghostwispr, verb=publish, result=failed*, ...]`},
 		},
-		description: "Envoy listener could not publish to JetStream (`listener exception publish failed` or `<webhook> publish failed`, e.g. `nats: no response from stream`) — a delivery from the Dispatch GitHub App (legion-envoy) waits for Dispatch's redelivery sweep, a Slack event is retried by Slack three times with backoff and lost only if every attempt fails, any other GitHub sender's delivery answered 503 is lost, and delivery-exception notices are lost; read /ecs/envoy-listener for the nats error.",
+		description: "Envoy listener could not publish to JetStream (`listener exception publish failed` or `<webhook> publish failed`, e.g. `nats: no response from stream`) — a delivery from the Dispatch GitHub App (legion-envoy) waits for Dispatch's redelivery sweep, a Slack event is retried by Slack three times with backoff and lost only if every attempt fails, any other GitHub sender's delivery answered 503 is lost, and delivery-exception notices are lost. A GitHub delivery is counted at its first failure in each listener task; a later failure of it is logged `redelivery <delivery>: github publish failed` and not counted. Read /ecs/envoy-listener for the nats error.",
 	},
 	{
 		alarm: "webhook-refused", metric: "WebhookRefusals",
@@ -150,7 +150,14 @@ var listenerSignals = []struct {
 			{"ci-record-refused-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github, w1=ci, w2=record, result=refused*, ...]`},
 			{"ci-head-suite-record-refused-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github, w1=ci, w2=head||w2=suite, w3=record, result=refused*, ...]`},
 		},
-		description: "Envoy listener refused a webhook delivery (`<source> publish refused`, `github ci record refused` or `github ci suite record refused`, answered 422): the envelope is past what NATS takes or the commit's CI record is past its bound, the same input is refused on every attempt, and Dispatch's redelivery sweep does not retry a 4xx, so the delivery is lost (a refused CI record leaves its commit overflowed, never settling). Read /ecs/envoy-listener for the refusal's reason; the fix is a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
+		description: "Envoy listener refused a webhook delivery (`<source> publish refused`, `github ci record refused` or `github ci suite record refused`, answered 422): the envelope is past what NATS takes or the commit's CI record is past its bound, and the same input is refused on every attempt. A GitHub delivery is counted at its first refusal in each listener task: Dispatch's redelivery sweep asks for a failed delivery again for 72 hours, and each later refusal of it is logged `redelivery <delivery>: <action> refused` and not counted. A delivery refused before a fix deploys is recovered once the fix lands within those 72 hours; past them it is lost. A refused CI record leaves its commit overflowed, never settling, whatever is redelivered. Read /ecs/envoy-listener for the refusal's reason; the fix is a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
+	},
+	{
+		alarm: "reconnect-hooks-stalled", metric: "ReconnectHooksStalled",
+		filters: [][2]string{
+			{"reconnect-hooks-stalled-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, level=ERROR, w1=envoy, w2=nats, w3=reconnect, w4=hooks, w5=have, w6=not, w7=succeeded, ...]`},
+		},
+		description: "An Envoy listener's KV watch rebuild has not succeeded for a minute after a NATS reconnect (`envoy nats reconnect hooks have not succeeded`): its interest, role-claim, session and CI caches no longer follow their buckets and serve what they last held, and `/healthz` reports this as 200 `degraded` naming `KV watch rebuild` — deliberately not a 503, which would replace the only task into the same failing rebuild with empty caches. The bus keeps retrying the rebuild with backoff. Read the line's `error` in /ecs/envoy-listener for the failing bucket read: typically a JetStream that refuses or does not answer consumer creation for the KV streams.",
 	},
 	{
 		alarm: "stream-subject-dropped", metric: "StreamSubjectsDropped",
@@ -324,7 +331,7 @@ func TestWebhookListenerTagsEachChildWithItsService(t *testing.T) {
 			tagged++
 		}
 	}
-	require.Equal(t, 9, tagged, "the log group, Cloud Map service, task definition, service and five alarms")
+	require.Equal(t, 10, tagged, "the log group, Cloud Map service, task definition, service and six alarms")
 }
 
 // The task definition comes after the policies its execution role reads the secrets with, and the
@@ -435,7 +442,7 @@ func TestWebhookListenerAlarmsNameItsLogGroup(t *testing.T) {
 			require.Equal(t, "/ecs/example-hooks", c.Inputs["logGroupName"].StringValue(), "%s's log group", name)
 		}
 	}
-	require.Equal(t, 5, alarms)
+	require.Equal(t, 6, alarms)
 }
 
 // natsUrls may be known only in the apply, so core.ListenerConfig.Env refuses a bad one there and

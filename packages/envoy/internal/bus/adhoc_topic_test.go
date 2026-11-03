@@ -48,8 +48,8 @@ func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCaptur
 		{"team.deploy-squad.all", false},
 		{"$KV.envoy_roles.reviewer", false},
 	} {
-		if got := usesCoreTransport(tc.topic); got != tc.core {
-			t.Errorf("usesCoreTransport(%q) = %t, want %t", tc.topic, got, tc.core)
+		if got := UsesCoreTransport(tc.topic); got != tc.core {
+			t.Errorf("UsesCoreTransport(%q) = %t, want %t", tc.topic, got, tc.core)
 		}
 	}
 }

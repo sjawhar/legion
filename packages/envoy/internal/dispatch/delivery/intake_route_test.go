@@ -54,7 +54,7 @@ func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
 	}
 	t.Cleanup(natsClient.Close)
 
-	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), client, events.NewBroker())
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), client, events.NewBroker(), loadedSettingsCache(t, ctx, pool))
 	startIntake(t, intake)
 
 	envelopeFields := map[string]string{
@@ -123,7 +123,7 @@ func TestIntakeAcksAKindItDoesNotRecordWithoutLoggingOrWriting(t *testing.T) {
 	logs := captureLogs(t)
 	fake := newFakeGitHub(t)
 	natsClient := intakeTestClient(t)
-	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker()))
+	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
 	awaitBoundDurable(t, natsClient)
 
 	checks, err := json.Marshal(cistore.Summary{
@@ -178,7 +178,7 @@ func TestIntakeAcksAnEnvelopeWithNoPayloadSilently(t *testing.T) {
 	logs := captureLogs(t)
 	fake := newFakeGitHub(t)
 	natsClient := intakeTestClient(t)
-	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker()))
+	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
 	awaitBoundDurable(t, natsClient)
 
 	publishGitHubEnvelope(t, natsClient, contracts.GithubSubject("unknown", "unknown", "comment"), "")
@@ -214,7 +214,7 @@ func TestIntakeLogsAMalformedEnvelopeOfAKindItRecords(t *testing.T) {
 			logs := captureLogs(t)
 			fake := newFakeGitHub(t)
 			natsClient := intakeTestClient(t)
-			startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker()))
+			startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
 			awaitBoundDurable(t, natsClient)
 
 			publishGitHubEnvelope(t, natsClient, envelope.topic, envelope.payload)
@@ -258,7 +258,7 @@ func TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub(t *testing.T)
 	})
 
 	natsClient := intakeTestClient(t)
-	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker())
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool))
 	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 
@@ -297,11 +297,12 @@ func TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub(t *testing.T)
 }
 
 // TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives holds that a settings change reaches
-// the running intake with no rebind: the durable's filter subject never changes, so the only way
-// a new deploy workflow path takes effect is the poll publishing the new settings to the handler.
-// After the change, an envelope for the new path is handled and one for the old path is discarded
-// with no GitHub call. The run it stores carries GitHub's created_at beside run_started_at, which
-// the served run, a re-run, moves past it.
+// the running intake with no rebind and no poll: the durable's filter subject never changes, so a
+// new deploy workflow path takes effect through the settings cache, which a real pglisten.Hub
+// wakes on the write's notification. The cache holds the new path within 2 s of the write. After
+// the change, an envelope for the new path is handled and one for the old path is discarded with
+// no GitHub call. The run it stores carries GitHub's created_at beside run_started_at, which the
+// served run, a re-run, moves past it.
 func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 	shrinkIntakeFlowControl(t)
 	pool, ctx := deliveryTestPool(t)
@@ -327,7 +328,9 @@ func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 	})
 
 	natsClient := intakeTestClient(t)
-	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker())
+	settingsCache := newSettingsCache(pool, settingsWake(t, pool))
+	runSettingsCache(t, settingsCache)
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker(), settingsCache)
 	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 
@@ -335,9 +338,12 @@ func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 	if _, err := PutSettings(ctx, pool, settings, model.Actor{Kind: "system", ID: "delivery-test"}); err != nil {
 		t.Fatalf("change the deploy workflow path: %v", err)
 	}
-	// Two poll intervals: the change is read on the first tick after the write, whichever side of
-	// a tick the write lands.
-	time.Sleep(2 * settingsPollInterval)
+	waitFor(t, 2*time.Second, func() bool {
+		held := settingsCache.Load()
+		return held != nil && held.DeployWorkflowPath == newPath
+	}, func() string {
+		return fmt.Sprintf("the running intake's settings = %+v two seconds after the write, want deploy workflow path %s", settingsCache.Load(), newPath)
+	})
 
 	const onNewPath, onOldPath = int64(8001), int64(8002)
 	publishWorkflowEnvelope(t, natsClient, "acme", "widgets", newPath, onNewPath)

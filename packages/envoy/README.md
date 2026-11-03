@@ -4,7 +4,7 @@ Docker-first cross-machine notification routing for AI agent sessions.
 
 ## Goals
 
-- Route GitHub, Slack, WhatsApp, and agent-to-agent notifications to the correct opencode session
+- Route GitHub, Slack, WhatsApp, and agent-to-agent notifications to the correct agent session
 - Keep all envoy-owned code and infrastructure in this repo
 - Run every envoy component inside Docker containers
 - Avoid host installs except Docker on remote machines that need it
@@ -21,7 +21,7 @@ This repo owns:
 
 This repo does **not** silently absorb changes to other maintained software.
 
-If envoy needs changes in `opencode`, `@sjawhar/whatsapp-mcp`, or another maintained repo:
+If envoy needs changes in `@sjawhar/whatsapp-mcp` or another maintained repo:
 
 - make that change in the other repo
 - keep it as a separate clear jj change/commit
@@ -84,11 +84,17 @@ Evidence remains in `packages/envoy/out/e2e/` after the run:
   `@legion/envoy-client`'s `renderInbound`.
 - `rendered-go.txt` is the equivalent Go `Deliverer.Text` output.
 
-Set `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` when the default local
-ports are occupied. CI runs it as the `envoy-e2e-local` job of
-`.github/workflows/envoy-and-contracts.yaml`.
+The OS chooses the NATS, listener and fake-session ports, and the run builds
+each URL from the port its own process reports. `E2E_NATS_PORT`, `E2E_PORT` or
+`E2E_SESSION_PORT` sets a port explicitly: it is used as given, and one already
+in use fails the run with `address already in use`. CI runs it as the
+`envoy-e2e-local` job of `.github/workflows/ci.yaml`.
 
 ## Contract source of truth
 
 The authoritative event contract lives in `packages/contracts/`.
 Run `bun run gen:go` in that package before validating or releasing `packages/envoy`.
+
+`.github/workflows/changelog-fold.yaml` folds this package's changelog fragments
+(`.changes/unreleased/`) into `CHANGELOG.md` under the `legion-envoy-v` release that first carried
+each one.

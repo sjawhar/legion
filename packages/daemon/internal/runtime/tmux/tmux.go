@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -122,9 +123,12 @@ type Options struct {
 	// name, and every variable runtime.PaneVariableRefusal refuses. Nil is none.
 	PaneEnv map[string]string
 	// PiConfigFiles is the operator's `runtime.tmux.pi_config_files`: absolute paths of Oh My Pi
-	// settings overlays every pane names in PI_CONFIG_FILES ahead of the turn-scoping overlay, which
-	// stays last so its keys outrank theirs. Nil is none.
+	// settings overlays every pane names first in PI_CONFIG_FILES. Nil is none.
 	PiConfigFiles []string
+	// RoleConfigFiles is the operator's `role_config_files`: absolute paths of Oh My Pi settings
+	// overlays a pane of that role alone names in PI_CONFIG_FILES, after PiConfigFiles, so each
+	// outranks those, by role, the controller's pane included. Nil is none.
+	RoleConfigFiles map[claim.Role][]string
 	// TakeOver is the operator's `runtime.tmux.take_over`: TakeOverKubernetes to take over the
 	// claims a daemon running the project under runtime kubernetes left in the store (foreign), ""
 	// to refuse them, as every locator of another runtime is refused without it.
@@ -177,6 +181,7 @@ type Runtime struct {
 	providerKeys     []string
 	operatorEnv      map[string]string
 	piConfigFiles    []string
+	roleConfigFiles  map[claim.Role][]string
 	// takeOver is the runtime whose locators this runtime takes over (Options.TakeOver):
 	// runtime.RuntimeSandbox under TakeOverKubernetes, "" for none.
 	takeOver string
@@ -188,7 +193,8 @@ type Runtime struct {
 	readProc func(path string) ([]byte, error)
 
 	// launchMu serializes everything that decides which window a pane lands in and every change
-	// to the private server's set of panes the runtime must not race: session creation, window
+	// to the private server's set of panes the runtime must not race: session creation, a launch's
+	// refusal of a claim whose process still runs and the files it then writes for the claim, window
 	// choice, the pane's opening and recording, orphan reaping, and the scrub.
 	launchMu sync.Mutex
 
@@ -273,7 +279,11 @@ func New(opts Options) (*Runtime, error) {
 	if err := checkPaneEnv(opts.PaneEnv, providerKeys); err != nil {
 		return nil, err
 	}
-	for _, path := range opts.PiConfigFiles {
+	overlays := slices.Clone(opts.PiConfigFiles)
+	for _, files := range opts.RoleConfigFiles {
+		overlays = append(overlays, files...)
+	}
+	for _, path := range overlays {
 		if !filepath.IsAbs(path) || strings.Contains(path, ":") {
 			return nil, fmt.Errorf("tmux runtime: Oh My Pi overlay %q is not an absolute path PI_CONFIG_FILES can name", path)
 		}
@@ -317,6 +327,7 @@ func New(opts Options) (*Runtime, error) {
 		providerKeys:     providerKeys,
 		operatorEnv:      opts.PaneEnv,
 		piConfigFiles:    opts.PiConfigFiles,
+		roleConfigFiles:  opts.RoleConfigFiles,
 		takeOver:         takeOver,
 		readProc:         os.ReadFile,
 		tracked:          map[string]*trackedProcess{},
@@ -336,6 +347,14 @@ func New(opts Options) (*Runtime, error) {
 	}
 	sort.Strings(r.environ)
 	r.run = r.runTmux
+	if r.takeOver != "" {
+		// One line at boot, in the log an operator reads first: while the key is set the
+		// same-agent refusal is off for the whole project — every session found nowhere starts a
+		// fresh agent (takingOverSession) — and a forgotten key leaves it off with no other trace
+		// than a per-launch warning and `take_over` in `legion state --json`.
+		r.log.Warn("tmux runtime: runtime.tmux.take_over is set, so every session found nowhere starts a fresh agent and no launch is charged for it; remove the key once the move is done (docs/deployment.md, \"Moving a project onto tmux\", step 5)",
+			"takeOver", opts.TakeOver, "takesOver", r.takeOver)
+	}
 	return r, nil
 }
 
@@ -353,6 +372,19 @@ func (r *Runtime) ProvisionBound() time.Duration { return 0 }
 // LaunchBound is zero, no bound stated: a pane start is a local tmux command with no cluster wait,
 // each invocation already bounded by its own command timeout (runTmux).
 func (r *Runtime) LaunchBound() time.Duration { return 0 }
+
+// PodDrift is nil: a pane is not a place built from a configuration — it has no pod, no image and
+// no template — so no process of this runtime ever drifts from one, and no update round is ever
+// opened over a pane.
+func (r *Runtime) PodDrift(context.Context, runtime.Known) ([]string, error) { return nil, nil }
+
+// ReplacePod does nothing and returns nil: this runtime has no pod to replace, and a pane is
+// ended by the claim's own Suspend and Release. due is never asked, because nothing here waits
+// and nothing here is ended: there is no write for a caller's re-read to come one statement
+// before.
+func (r *Runtime) ReplacePod(context.Context, runtime.Known, func(context.Context) error) error {
+	return nil
+}
 
 // CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
 // each workspace is the outbox's to remove (workspace_remove).

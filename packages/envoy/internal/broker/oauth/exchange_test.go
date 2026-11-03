@@ -136,6 +136,16 @@ func (f *exchangeFixture) podTokenOf(t *testing.T, of, uid string) string {
 	return f.podToken(t, uid, func(claims map[string]any) { claims["sub"] = of })
 }
 
+// registers records that the pod uid of the account of may exchange under session, as the
+// deployment's daemon does through POST /v1/oauth/exchange/pod-sessions before it starts that
+// pod. A pod of an entry that fixes no session writes under nothing else.
+func (f *exchangeFixture) registers(t *testing.T, of, uid, session string) {
+	t.Helper()
+	if _, err := f.provider.RegisterPodSession(context.Background(), of, uid, session); err != nil {
+		t.Fatalf("register %s's pod %s for %s: %v", of, uid, session, err)
+	}
+}
+
 // workflowToken is a continuous-integration workflow run's GitHub token, with change applied to
 // its claims. Each call mints a fresh jti, as a run does: the exchange accepts one once.
 func (f *exchangeFixture) workflowToken(t *testing.T, run string, change func(map[string]any)) string {
@@ -209,6 +219,7 @@ func accessTokenOf(t *testing.T, status int, body map[string]any) string {
 func TestAPodExchangesItsTokenForOneThatIntrospects(t *testing.T) {
 	f := newExchangeFixture(t, func(*oauth.Config) {})
 	key := newKey(t)
+	f.registers(t, account, "pod-uid-1", "implementer-g1")
 	status, body := f.exchange(t, exchangeForm(f.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
 	token := accessTokenOf(t, status, body)
 	if body["issued_token_type"] != "urn:ietf:params:oauth:token-type:access_token" {
@@ -221,8 +232,8 @@ func TestAPodExchangesItsTokenForOneThatIntrospects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Introspect: %v", err)
 	}
-	want := oauth.Introspection{
-		Active: true, Session: "implementer-g1", Person: person, ProjectScope: oauth.ProjectScopeNamed,
+	want := oauthwire.Introspection{
+		Active: true, Session: "implementer-g1", Person: person, ProjectScope: oauthwire.ProjectScopeNamed,
 		Project: project, ClientID: oauthwire.ExchangeClientID, Thumbprint: thumbprint(t, key),
 		ExpiresAt: answer.ExpiresAt,
 	}
@@ -240,6 +251,7 @@ func TestAPodExchangesItsTokenForOneThatIntrospects(t *testing.T) {
 func TestAPodExchangesTheSameTokenTwice(t *testing.T) {
 	f := newExchangeFixture(t, func(*oauth.Config) {})
 	key := newKey(t)
+	f.registers(t, account, "pod-uid-1", "implementer-g1")
 	subject := f.podToken(t, "pod-uid-1", nil)
 	first := f.exchanged(t, exchangeForm(subject, oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
 	second := f.exchanged(t, exchangeForm(subject, oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
@@ -323,6 +335,11 @@ func TestAPodTokenBoundToNoPodIsRefused(t *testing.T) {
 func TestASessionNameAnotherPrincipalHoldsIsRefused(t *testing.T) {
 	f := newExchangeFixture(t, func(*oauth.Config) {})
 	key := newKey(t)
+	// Both pods are registered for what they ask: the refusal below is the claim on the name, not
+	// a missing registration, and a registration names no holder.
+	f.registers(t, account, "pod-uid-1", "implementer-g1")
+	f.registers(t, otherAccount, "pod-uid-2", "implementer-g1")
+	f.registers(t, otherAccount, "pod-uid-2", "implementer-g2")
 	f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
 	status, body := f.exchange(t, exchangeForm(f.podTokenOf(t, otherAccount, "pod-uid-2"), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
 	refusedTheName(t, status, body, "implementer-g1")
@@ -424,7 +441,7 @@ func TestADevBoxSessionExchangesItsMachineToken(t *testing.T) {
 	if !answer.Active || answer.Session != "ada-devbox" || answer.Person != person {
 		t.Fatalf("Introspect = %+v, want a live token of ada-devbox acting for %s", answer, person)
 	}
-	if answer.ProjectScope != oauth.ProjectScopePerson || answer.Project != "" {
+	if answer.ProjectScope != oauthwire.ProjectScopePerson || answer.Project != "" {
 		t.Errorf("Introspect = %+v, want every project the person may write and no project named", answer)
 	}
 	if answer.Thumbprint != thumbprint(t, key) {
@@ -616,7 +633,7 @@ func (f *exchangeFixture) introspectsAs(t *testing.T, token, session, person, pr
 // TestEveryPodOfAFixedSessionAccountWritesUnderItsName: the session name an entry fixes belongs
 // to the account, not to a pod of it, so the replacement pod of a rolling update is answered while
 // the pod it replaces still holds a live token, and the old pod's renewals go on being answered
-// beside it.
+// beside it, neither of them registered for anything.
 func TestEveryPodOfAFixedSessionAccountWritesUnderItsName(t *testing.T) {
 	f := newExchangeFixture(t, func(*oauth.Config) {})
 	key := newKey(t)
@@ -642,6 +659,57 @@ func TestEveryRunOfAFixedSessionWorkflowWritesUnderItsName(t *testing.T) {
 	}
 }
 
+// TestAFixedSessionEntryNeedsNoRegistration: an entry that fixes a session writes under the name
+// its configuration names, so nothing about such a caller is registered and nothing of it is
+// gated. The replacement pod of a fixed-session account and the next run of a fixed-session
+// workflow are each answered with the registration table empty, which is also what a deployment
+// whose daemon registers nothing for them looks like.
+func TestAFixedSessionEntryNeedsNoRegistration(t *testing.T) {
+	f := newExchangeFixture(t, func(*oauth.Config) {})
+	key := newKey(t)
+	for _, uid := range []string{"pod-uid-old", "pod-uid-replacement"} {
+		token := f.exchanged(t, exchangeForm(f.podTokenOf(t, daemonAccount, uid), oauthwire.SubjectTokenTypeKubernetes, ""), key)
+		f.introspectsAs(t, token, daemonSession, person, project)
+	}
+	deploy := func(claims map[string]any) {
+		claims["workflow_ref"] = repository + "/" + deployWorkflow + "@" + ref
+		claims["job_workflow_ref"] = claims["workflow_ref"]
+	}
+	for _, run := range []string{"4242", "4243"} {
+		token := f.exchanged(t, exchangeForm(f.workflowToken(t, run, deploy), oauthwire.SubjectTokenTypeGitHub, deploySession), key)
+		f.introspectsAs(t, token, deploySession, person, project)
+	}
+	if rows := f.count(t, "oauth_pod_sessions"); rows != 0 {
+		t.Fatalf("oauth_pod_sessions holds %d rows, want none: a caller whose entry fixes its session name is registered for nothing", rows)
+	}
+}
+
+// TestAnUnregisteredPodOfTheSameAccountIsRefusedTheName: the residual the registration closes.
+// Two pods of one account are one principal, so the claim on a session name cannot tell them
+// apart and refuses neither; what does is the registration their deployment makes per pod uid. A
+// pod registered for the name writes under it, the pod that replaces it writes under it once it
+// is registered too, and a third pod of that very account, registered for a name of its own and
+// for nothing else, is refused the first name — invalid_grant, since the subject token is sound
+// and it is broker state that refuses — with a refusal that names the session.
+func TestAnUnregisteredPodOfTheSameAccountIsRefusedTheName(t *testing.T) {
+	f := newExchangeFixture(t, func(*oauth.Config) {})
+	key := newKey(t)
+	const role = "implementer-g1"
+	for _, uid := range []string{"pod-uid-1", "pod-uid-replacement"} {
+		f.registers(t, account, uid, role)
+		f.introspectsAs(t, f.exchanged(t, exchangeForm(f.podToken(t, uid, nil), oauthwire.SubjectTokenTypeKubernetes, role), key), role, person, project)
+	}
+	f.registers(t, account, "pod-uid-third", "implementer-g2")
+	status, body := f.exchange(t, exchangeForm(f.podToken(t, "pod-uid-third", nil), oauthwire.SubjectTokenTypeKubernetes, role), key)
+	if status != http.StatusBadRequest || body["error"] != "invalid_grant" || body["access_token"] != nil {
+		t.Fatalf("the exchange of a third pod of %s naming %s = %d %v, want 400 invalid_grant and no access token: a pod writes under a session name its deployment registered for it", account, role, status, body)
+	}
+	if hint, _ := body["error_description"].(string); !strings.Contains(hint, "'"+role+"'") || !strings.Contains(hint, "registration") {
+		t.Errorf("the refusal reads %q, which does not name the session %s and say that a pod writes under a name its deployment registered for it", hint, role)
+	}
+	f.introspectsAs(t, f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-third", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g2"), key), "implementer-g2", person, project)
+}
+
 // TestAnotherPrincipalIsRefusedANameAfterItsHoldersTokenLapses: the review's reproduction. With
 // an access lifetime of one second, a pod writes under a Legion role's session name and its token
 // lapses; a pod of another account, listed for another project and another person, then names the
@@ -651,6 +719,8 @@ func TestAnotherPrincipalIsRefusedANameAfterItsHoldersTokenLapses(t *testing.T) 
 	f := newExchangeFixture(t, func(c *oauth.Config) { c.AccessLifetime = time.Second })
 	key := newKey(t)
 	const role = "019a-role-session"
+	f.registers(t, account, "pod-uid-1", role)
+	f.registers(t, otherAccount, "pod-uid-other", role)
 	first := f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, role), key)
 	time.Sleep(time.Second + 500*time.Millisecond)
 	if answer, err := f.provider.Introspect(context.Background(), first); err != nil || answer.Active {
@@ -674,6 +744,9 @@ func TestANameAnEntryFixesIsRefusedToEveryOtherCaller(t *testing.T) {
 		status, body := f.exchange(t, exchangeForm(machine, oauthwire.SubjectTokenTypeAccessToken, session), key)
 		refusedTheName(t, status, body, session)
 	}
+	// Registered for the name, so what refuses the pod of the other account is the entry that
+	// fixes the name for the daemon's, which no registration of another pod touches.
+	f.registers(t, otherAccount, "pod-uid-other", daemonSession)
 	status, body := f.exchange(t, exchangeForm(f.podTokenOf(t, otherAccount, "pod-uid-other"), oauthwire.SubjectTokenTypeKubernetes, daemonSession), key)
 	refusedTheName(t, status, body, daemonSession)
 	token := f.exchanged(t, exchangeForm(f.podTokenOf(t, daemonAccount, "pod-uid-daemon"), oauthwire.SubjectTokenTypeKubernetes, ""), key)
@@ -712,9 +785,14 @@ func TestARePointedNameIsItsNewEntrysWhicheverReplicaReservesLast(t *testing.T) 
 			{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person},
 			{Repository: repository, Workflow: deployWorkflow, Ref: ref, Project: project, Person: person, Session: deploySession},
 		}))
+	// On the new configuration the daemon's own entry fixes no name, so its pod is registered for
+	// the one it asks for below: what refuses it there is the entry that now fixes that name for
+	// another account, and not a missing registration.
+	next.registers(t, daemonAccount, "pod-uid-daemon", daemonSession)
 	next.introspectsAs(t, otherToken(next), daemonSession, otherPerson, otherProject)
 
 	late := old.replica(t, old.config.Policy)
+	late.registers(t, account, "pod-uid-1", "implementer-g1")
 	late.exchanged(t, exchangeForm(late.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
 	var holder string
 	if err := old.pool.QueryRow(context.Background(), `select principal from oauth_session_bindings where session = $1`, daemonSession).Scan(&holder); err != nil {
@@ -744,6 +822,9 @@ func TestAPrincipalReclaimsItsOwnNameAsOftenAsItLikes(t *testing.T) {
 	const role = "019a-role-session"
 	var token string
 	for _, uid := range []string{"pod-uid-1", "pod-uid-1", "pod-uid-relaunched", "pod-uid-1", "pod-uid-relaunched"} {
+		// Each pod of the account is registered for the name as its deployment starts it; a
+		// relaunch is a second uid registered for the same name, which is why the name survives it.
+		f.registers(t, account, uid, role)
 		token = f.exchanged(t, exchangeForm(f.podToken(t, uid, nil), oauthwire.SubjectTokenTypeKubernetes, role), key)
 		f.introspectsAs(t, token, role, person, project)
 	}
@@ -775,6 +856,7 @@ func TestIntrospectingATokenTheBrokerCannotStandBehind(t *testing.T) {
 	f := newExchangeFixture(t, func(c *oauth.Config) { c.AccessLifetime = time.Second })
 	ctx := context.Background()
 	key := newKey(t)
+	f.registers(t, account, "pod-uid-1", "implementer-g1")
 	revoked := f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
 	if _, err := f.pool.Exec(ctx, `update oauth_access_tokens set active = false`); err != nil {
 		t.Fatalf("revoke the token: %v", err)
@@ -795,7 +877,7 @@ func TestIntrospectingATokenTheBrokerCannotStandBehind(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Introspect = %v, want no error", err)
 			}
-			if answer != (oauth.Introspection{}) {
+			if answer != (oauthwire.Introspection{}) {
 				t.Fatalf("Introspect = %+v, want not live and nothing else", answer)
 			}
 		})
@@ -829,7 +911,7 @@ func TestIntrospectionAnswersOnlyAnAccessToken(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Introspect = %v, want no error", err)
 		}
-		if answer != (oauth.Introspection{}) {
+		if answer != (oauthwire.Introspection{}) {
 			t.Fatalf("Introspect of a refresh token = %+v, want not live and nothing else", answer)
 		}
 	}
@@ -848,6 +930,7 @@ func TestAnIntrospectionFailureNamesItsCause(t *testing.T) {
 	f := newExchangeFixture(t, func(*oauth.Config) {})
 	ctx := context.Background()
 	key := newKey(t)
+	f.registers(t, account, "pod-uid-1", "implementer-g1")
 	token := f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
 
 	t.Run("a stored row naming a client the provider does not register", func(t *testing.T) {
@@ -882,6 +965,7 @@ func TestAnIntrospectionFailureNamesItsCause(t *testing.T) {
 func TestTheExchangeClientAuthenticatesWithNoCredentialAndOnlyThere(t *testing.T) {
 	f := newExchangeFixture(t, func(*oauth.Config) {})
 	key := newKey(t)
+	f.registers(t, account, "pod-uid-1", "implementer-g1")
 	for _, c := range []struct {
 		name   string
 		form   func(*testing.T) url.Values

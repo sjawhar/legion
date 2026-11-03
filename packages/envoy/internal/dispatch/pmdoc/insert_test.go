@@ -15,7 +15,7 @@ func TestBlockInsertAtParagraphAnchorFollowsEnclosingParagraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	position, err := BlockBoundary(doc, anchor, true)
+	position, err := blockBoundary(doc, anchor, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestBlockInsertAtParagraphAnchorFollowsEnclosingParagraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Splice(doc, Range{From: position, To: position}, with)
+	out, err := splice(doc, Range{From: position, To: position}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestBlockInsertAtTableCellAnchorFollowsEnclosingTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	position, err := BlockBoundary(doc, anchor, true)
+	position, err := blockBoundary(doc, anchor, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestBlockInsertAtTableCellAnchorFollowsEnclosingTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Splice(doc, Range{From: position, To: position}, with)
+	out, err := splice(doc, Range{From: position, To: position}, with)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestTableRowInsertAfterCellAnchorExtendsContainingTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, inserted, err := InsertTableRows(doc, anchor, "| A11 | new |\n", true, NewWriteBudget())
+	out, inserted, err := insertTableRows(doc, anchor, "| A11 | new |\n", true, NewWriteBudget())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestTableRowInsertBeforeCellAnchorExtendsContainingTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, inserted, err := InsertTableRows(doc, anchor, "| A11 | new |\n", false, NewWriteBudget())
+	out, inserted, err := insertTableRows(doc, anchor, "| A11 | new |\n", false, NewWriteBudget())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = InsertTableRows(doc, anchor, "| A11 | new | extra |\n", true, NewWriteBudget())
+	_, _, err = insertTableRows(doc, anchor, "| A11 | new | extra |\n", true, NewWriteBudget())
 	if !errors.Is(err, ErrTableWidth) {
 		t.Fatalf("InsertTableRows() error = %v, want ErrTableWidth", err)
 	}
@@ -114,9 +114,9 @@ func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
 // A table-row insert answers as a whole-document write of the same rows does, wherever in the
 // fragment a row stands: both drop a blank cell past the table's width, refuse a cell there
 // holding text, refuse a line the two parsers read as another block, and store an accepted row as
-// the same markdown. Both count the cells as goldmark splits them, so a `|` after an even run of
-// backslashes ends no cell on either path, and a line opening a block that interrupts a paragraph
-// is no table row to either.
+// the same markdown. Both count the cells as the browser editor's parser splits them, so a `|`
+// after an even run of backslashes ends a cell on either path, and a line opening a block that
+// interrupts a paragraph is no table row to either.
 func TestTableRowInsertAnswersAsTheDocumentWrite(t *testing.T) {
 	const table = "| Key | Value |\n| --- | --- |\n| A10 | old |\n"
 	for _, test := range []struct {
@@ -137,7 +137,7 @@ func TestTableRowInsertAnswersAsTheDocumentWrite(t *testing.T) {
 		{row: "| A11 | `x | y` |", refusal: ErrTableWidth},
 		{row: `| A11 | new | z \|`, refusal: ErrTableWidth},
 		{row: `| A11 | new \| extra |`, stored: `| A11 | new \| extra |`},
-		{row: `| A11 | new \\| extra |`, stored: `| A11 | new \\\| extra |`},
+		{row: `| A11 | new \\| extra |`, refusal: ErrTableWidth},
 		// A space outside ASCII at the fragment's first or last edge is a cell's text to goldmark and
 		// to the browser editor's parser, as it is on the fragment's other lines: the browser reads
 		// `| A11 | new |` then U+00A0 as three cells, and a U+00A0 before the row's first `|` moves
@@ -182,7 +182,7 @@ func TestTableRowInsertAnswersAsTheDocumentWrite(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		inserted, rows, insertErr := InsertTableRows(doc, anchor, test.row+"\n", true, NewWriteBudget())
+		inserted, rows, insertErr := insertTableRows(doc, anchor, test.row+"\n", true, NewWriteBudget())
 		written, writeErr := ParseForWrite(table+test.row+"\n", nil)
 		switch {
 		case test.blocks:
@@ -225,7 +225,7 @@ func TestTableRowInsertPadsRowsToContainingTableWidth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, inserted, err := InsertTableRows(doc, anchor, "| A11 |\n", true, NewWriteBudget())
+	out, inserted, err := insertTableRows(doc, anchor, "| A11 |\n", true, NewWriteBudget())
 	if err != nil {
 		t.Fatal(err)
 	}

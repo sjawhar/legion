@@ -1,11 +1,24 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { type ReactNode, useEffect } from "react";
+import { MemoryRouter } from "react-router-dom";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
-import { composerReferences } from "../refs/routes";
+import type { RecordMarkPlacement } from "../doc/editor";
+import { buildIssuePath, composerReferences } from "../refs/routes";
+import { Margin } from "./Margin";
+import {
+  BRIDGE_BIND_WAIT_MS,
+  type DocumentBridge,
+  MarginProvider,
+  REANCHOR_IN_PROGRESS,
+  useMargin,
+} from "./margin-context";
+import { issue, specArtifact, stubDocumentBridge } from "./margin-fixture";
 import type { MarginOwner } from "./useMarginItems";
 
 function Composer({
@@ -152,13 +165,17 @@ test("Composer posts a document ask and comment to the artifact routes", async (
     fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Why this text?" } });
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     await waitFor(() =>
-      expect(createArtifactAsk).toHaveBeenCalledWith("document-1", {
-        anchor: { artifact: "document-1", mark_id: "mark-1" },
-        multiple: false,
-        options: [],
-        question: "Why this text?",
-        urgency: "med",
-      })
+      expect(createArtifactAsk).toHaveBeenCalledWith(
+        "document-1",
+        {
+          anchor: { artifact: "document-1", mark_id: "mark-1" },
+          multiple: false,
+          options: [],
+          question: "Why this text?",
+          urgency: "med",
+        },
+        keyedAttempt
+      )
     );
     ask.unmount();
 
@@ -175,11 +192,15 @@ test("Composer posts a document ask and comment to the artifact routes", async (
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createArtifactComment).toHaveBeenCalledWith("document-1", {
-        anchor: { artifact: "document-1", mark_id: "mark-1" },
-        body: "Please revise.",
-        reply_to: undefined,
-      })
+      expect(createArtifactComment).toHaveBeenCalledWith(
+        "document-1",
+        {
+          anchor: { artifact: "document-1", mark_id: "mark-1" },
+          body: "Please revise.",
+          reply_to: undefined,
+        },
+        keyedAttempt
+      )
     );
     comment.unmount();
   } finally {
@@ -275,13 +296,17 @@ test("Composer submits the configured ask options, multiple selection, and urgen
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
 
     await waitFor(() =>
-      expect(createAsk).toHaveBeenCalledWith("CORE-1", {
-        anchor: { artifact: anchor.artifact, mark_id: anchor.mark_id },
-        multiple: true,
-        options: [{ description: "Proceed now", label: "Ship" }, { label: "Hold" }],
-        question: "Which path?",
-        urgency: "high",
-      })
+      expect(createAsk).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          anchor: { artifact: anchor.artifact, mark_id: anchor.mark_id },
+          multiple: true,
+          options: [{ description: "Proceed now", label: "Ship" }, { label: "Hold" }],
+          question: "Which path?",
+          urgency: "high",
+        },
+        keyedAttempt
+      )
     );
     composer.unmount();
   } finally {
@@ -370,25 +395,427 @@ test("Escape after typing only an ask option prompts before discarding", async (
   }
 });
 
-test("Composer shows the server's missing-anchor error and keeps the draft", async () => {
-  const createComment = spyOn(api, "createComment").mockRejectedValue(
-    new ApiError(409, { code: "ANCHOR_MISSING", error: "anchor mark is not in the document" })
+const MARK_ANCHOR = {
+  artifact: specArtifact.id,
+  mark_id: "m-1",
+  // The words the editor read on each side of the selected ones, in the block it marked them in:
+  // what it reported when the bar wrote the mark, and all the margin has to find them by once
+  // the mark is gone.
+  placement: { blockId: "b-1", prefix: "The quick brown fox ", readings: 1, suffix: "." },
+  quote: "jumps over the lazy dog",
+};
+
+const ANCHOR_MISSING = new ApiError(409, {
+  code: "ANCHOR_MISSING",
+  error: "anchor mark is not in the document",
+});
+
+function RegisterDocument({ bridge }: { bridge: DocumentBridge }): ReactNode {
+  const { registerDocument } = useMargin();
+  useEffect(() => {
+    registerDocument(bridge);
+    return () => registerDocument(undefined);
+  }, [bridge, registerDocument]);
+  return null;
+}
+
+/** The same registration on a press: a document whose editor binds only once it has synced, which
+ *  a resumed send's refusal can beat (`whenBridgeBinds` in margin-context.tsx). */
+function BindDocument({ bridge }: { bridge: DocumentBridge }): ReactNode {
+  const { registerDocument } = useMargin();
+  return (
+    <button onClick={() => registerDocument(bridge)} type="button">
+      Bind the document
+    </button>
   );
+}
+
+function ComposeOnMark({ kind }: { kind: ComposerKind }): ReactNode {
+  const { composeForMark } = useMargin();
+  return (
+    <button
+      onClick={() => {
+        void composeForMark({ anchor: MARK_ANCHOR, kind }).catch(() => {});
+      }}
+      type="button"
+    >
+      Compose on the selection
+    </button>
+  );
+}
+
+/** The margin of an issue whose document `bridge` is, with the selection bar's compose on a
+ *  press, as the document page renders it. `bindOnPress` leaves the document unregistered until
+ *  the test presses for it, as a document still building its editor is. */
+function renderMarginCompose(
+  bridge: DocumentBridge,
+  kind: ComposerKind = "comment",
+  bindOnPress = false
+) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  return render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          {bindOnPress ? <BindDocument bridge={bridge} /> : <RegisterDocument bridge={bridge} />}
+          <ComposeOnMark kind={kind} />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+}
+
+/** Writes the draft `body` in the margin's composer and presses Send. */
+async function sendMarginComment(body: string): Promise<HTMLElement> {
+  fireEvent.click(screen.getByRole("button", { name: "Compose on the selection" }));
+  const composer = await screen.findByRole("form", { name: "Comment composer" });
+  fireEvent.change(within(composer).getByLabelText("Comment"), { target: { value: body } });
+  fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+  return composer;
+}
+
+/** Writes the draft `question` in the margin's ask composer and presses Ask. */
+async function sendMarginAsk(question: string): Promise<HTMLElement> {
+  fireEvent.click(screen.getByRole("button", { name: "Compose on the selection" }));
+  const composer = await screen.findByRole("form", { name: "Comment composer" });
+  fireEvent.change(within(composer).getByLabelText("Question"), { target: { value: question } });
+  // The last "Ask" in the composer is its submit; the first is the kind switch's own button.
+  fireEvent.click(within(composer).getAllByRole("button", { name: "Ask" }).at(-1) as HTMLElement);
+  return composer;
+}
+
+test("the margin marks the words again and sends once more, under a key of its own, when the server refuses the anchor", async () => {
+  const remarked: [string, string, string, RecordMarkPlacement | null][] = [];
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark(markId, kind, quote, placement) {
+      remarked.push([markId, kind, quote, placement]);
+      return { markId: "m-2", placement, quote: MARK_ANCHOR.quote };
+    },
+  });
+  let attempts = 0;
+  const createComment = spyOn(api, "createComment").mockImplementation(async () => {
+    attempts += 1;
+    if (attempts === 1) throw ANCHOR_MISSING;
+    return undefined as never;
+  });
+  const view = renderMarginCompose(bridge);
 
   try {
-    const composer = renderComposer("comment");
-    const comment = screen.getByLabelText<HTMLTextAreaElement>("Comment");
-    fireEvent.change(comment, { target: { value: "Please revise." } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-
-    await waitFor(() =>
-      expect(screen.getByText("anchor mark is not in the document")).toBeTruthy()
-    );
-    expect(comment.value).toBe("Please revise.");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await sendMarginComment("Please revise.");
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
-    composer.unmount();
+    // The words the refused send itself carries reach the editor, and the reading of them the
+    // composer kept with them: the editor may hold nothing else by the time another writer's
+    // change has rebuilt the document.
+    expect(remarked).toEqual([["m-1", "comment", MARK_ANCHOR.quote, MARK_ANCHOR.placement]]);
+    expect(createComment.mock.calls[0]?.[1].anchor).toEqual({
+      artifact: MARK_ANCHOR.artifact,
+      mark_id: "m-1",
+    });
+    // The retry is a press of its own: the mark the margin wrote, under a key Dispatch has not
+    // answered - a second body under the refused one would be refused again.
+    expect(createComment.mock.calls[1]?.[1].anchor).toEqual({
+      artifact: MARK_ANCHOR.artifact,
+      mark_id: "m-2",
+    });
+    expect(createComment.mock.calls[1]?.[1].body).toBe("Please revise.");
+    const keys = createComment.mock.calls.map((call) => call[2].key);
+    expect(keys[0]).not.toBe(keys[1]);
   } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("a second missing anchor after the margin re-anchored is the reader's to see, with no further retry", async () => {
+  let minted = 1;
+  const remarked: string[] = [];
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark(markId) {
+      remarked.push(markId);
+      minted += 1;
+      return { markId: `m-${minted}`, placement: null, quote: MARK_ANCHOR.quote };
+    },
+  });
+  const createComment = spyOn(api, "createComment").mockRejectedValue(ANCHOR_MISSING);
+  const view = renderMarginCompose(bridge);
+
+  try {
+    const composer = await sendMarginComment("Please revise.");
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(within(composer).getByText("anchor mark is not in the document")).toBeTruthy()
+    );
+    expect(remarked).toEqual(["m-1"]);
+    expect(createComment).toHaveBeenCalledTimes(2);
+    expect(within(composer).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe(
+      "Please revise."
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// The held send stays refused while the margin waits for the mark it wrote to reach the server:
+// `readdress` only amends that send, so a composer left with no line of the margin's own falls
+// back to the server's words - "anchor mark is not in the document", about a mark the reader
+// never saw - between the re-mark and the retry (dispatch://INFRA-727).
+test("the composer never shows the server's words between the re-mark and the retry's outcome", async () => {
+  const sent = Promise.withResolvers<void>();
+  let waiting = false;
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark: (_markId, _kind, quote, placement) => ({ markId: "m-2", placement, quote }),
+    whenSent: async () => {
+      waiting = true;
+      return sent.promise;
+    },
+  });
+  let attempts = 0;
+  const createComment = spyOn(api, "createComment").mockImplementation(async () => {
+    attempts += 1;
+    if (attempts === 1) throw ANCHOR_MISSING;
+    return undefined as never;
+  });
+  const view = renderMarginCompose(bridge);
+
+  try {
+    const composer = await sendMarginComment("Please revise.");
+    // The mark is written and the send re-addressed to it, and the retry is waiting on this
+    // browser's edits: what the composer shows now it shows for the whole of that wait.
+    await waitFor(() => expect(waiting).toBe(true));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(within(composer).getByText(REANCHOR_IN_PROGRESS("comment"))).toBeTruthy();
+    expect(within(composer).queryByText("anchor mark is not in the document")).toBeNull();
+    expect(createComment).toHaveBeenCalledTimes(1);
+
+    sent.resolve();
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    // The retry was answered, and the line the recovery put up went with it.
+    await waitFor(() => expect(screen.queryByText(REANCHOR_IN_PROGRESS("comment"))).toBeNull());
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("a refused re-anchor tells the reader the words are gone and keeps the draft", async () => {
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark: () => ({ refused: "gone" }),
+  });
+  const createComment = spyOn(api, "createComment").mockRejectedValue(ANCHOR_MISSING);
+  const view = renderMarginCompose(bridge);
+
+  try {
+    const composer = await sendMarginComment("Please revise.");
+    await waitFor(() =>
+      expect(
+        within(composer).getByText(
+          "The text you selected was changed or deleted, so this comment has nothing to attach to. Your draft is kept — select the text again to attach it."
+        )
+      ).toBeTruthy()
+    );
+    expect(createComment).toHaveBeenCalledTimes(1);
+    expect(within(composer).queryByText("anchor mark is not in the document")).toBeNull();
+    expect(within(composer).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe(
+      "Please revise."
+    );
+    // Retry is still the reader's, and still the draft as it stands.
+    fireEvent.click(within(composer).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// What the reader is told is about what they are writing. An ask is no comment, and a refusal
+// that calls it one tells them about something they never wrote (dispatch://INFRA-727).
+test("a refused re-anchor on an ask calls it an ask, and never a comment", async () => {
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark: () => ({ refused: "gone" }),
+  });
+  const createAsk = spyOn(api, "createAsk").mockRejectedValue(ANCHOR_MISSING);
+  const view = renderMarginCompose(bridge, "ask");
+
+  try {
+    const composer = await sendMarginAsk("Which dog?");
+    await waitFor(() =>
+      expect(
+        within(composer).getByText(
+          "The text you selected was changed or deleted, so this ask has nothing to attach to. Your draft is kept — select the text again to attach it."
+        )
+      ).toBeTruthy()
+    );
+    expect(composer.textContent).not.toContain("this comment");
+    expect(within(composer).getByLabelText<HTMLTextAreaElement>("Question").value).toBe(
+      "Which dog?"
+    );
+  } finally {
+    view.unmount();
+    createAsk.mockRestore();
+  }
+});
+
+// A reload resumes a margin send pressed within `KEPT_SEND_RESUME_MS`, and the server's
+// `ANCHOR_MISSING` for it can land before the reader's own document has bound its bridge - that
+// happens only after `onSynced`, `createEditor` and `bindEditor`. Telling the reader looking at
+// that very document that it "is not open" would be false, so the recovery waits for the bridge
+// and runs when it binds (dispatch://INFRA-727).
+test("a missing anchor that lands before the document binds is recovered once it does", async () => {
+  const remarked: string[] = [];
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark(markId, _kind, quote, placement) {
+      remarked.push(markId);
+      return { markId: "m-2", placement: placement ?? null, quote };
+    },
+  });
+  let attempts = 0;
+  const createComment = spyOn(api, "createComment").mockImplementation(async () => {
+    attempts += 1;
+    if (attempts === 1) throw ANCHOR_MISSING;
+    return undefined as never;
+  });
+  const view = renderMarginCompose(bridge, "comment", true);
+
+  try {
+    const composer = await sendMarginComment("Please revise.");
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    // While no document is registered the margin neither writes a mark nor tells the reader
+    // their document is closed: it is loading, and its bridge is seconds away.
+    expect(remarked).toEqual([]);
+    expect(within(composer).queryByText(/is not open/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Bind the document" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(remarked).toEqual(["m-1"]);
+    expect(createComment.mock.calls[1]?.[1].anchor).toEqual({
+      artifact: MARK_ANCHOR.artifact,
+      mark_id: "m-2",
+    });
+    expect(createComment.mock.calls[1]?.[1].body).toBe("Please revise.");
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// Retry is the reader's throughout the wait, and it sends the mark the server has already
+// refused, which is refused again. A second recovery for that mark would write a second mark
+// when the bridge binds, and the first of the two would stay in the shared document with no
+// record to hold it, so a recovery is marked as running before the wait (dispatch://INFRA-727).
+test("a Retry pressed while the document is still binding leaves one written mark, not two", async () => {
+  let minted = 1;
+  const remarked: string[] = [];
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark(markId, _kind, quote, placement) {
+      remarked.push(markId);
+      minted += 1;
+      return { markId: `m-${minted}`, placement: placement ?? null, quote };
+    },
+  });
+  let attempts = 0;
+  const createComment = spyOn(api, "createComment").mockImplementation(async () => {
+    attempts += 1;
+    if (attempts <= 2) throw ANCHOR_MISSING;
+    return undefined as never;
+  });
+  const view = renderMarginCompose(bridge, "comment", true);
+
+  try {
+    const composer = await sendMarginComment("Please revise.");
+    // While the wait is out the composer says what the margin is doing, in place of the
+    // server's words for a mark the reader never saw.
+    await waitFor(() =>
+      expect(
+        within(composer).getByText(
+          "Re-attaching this comment to the text you selected, and sending it again…"
+        )
+      ).toBeTruthy()
+    );
+    expect(createComment).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(within(composer).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    // That press carried the same stale mark, and the server refused it again.
+    expect(createComment.mock.calls[1]?.[1].anchor).toEqual({
+      artifact: MARK_ANCHOR.artifact,
+      mark_id: "m-1",
+    });
+    expect(remarked).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Bind the document" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(3));
+    // One mark written for the two refusals, and the send that goes out names it.
+    expect(remarked).toEqual(["m-1"]);
+    expect(createComment.mock.calls[2]?.[1].anchor).toEqual({
+      artifact: MARK_ANCHOR.artifact,
+      mark_id: "m-2",
+    });
+    expect(createComment.mock.calls[2]?.[1].body).toBe("Please revise.");
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// The reader is on no document at all - a page that registers no bridge - so nothing can be
+// read about their words from here. The wait ends at `BRIDGE_BIND_WAIT_MS` with the refusal
+// they can act on: opening the document the draft belongs to (dispatch://INFRA-727).
+test("a refusal no document binds for ends at the wait's bound, telling the reader to open that document", async () => {
+  const remarked: string[] = [];
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark(markId) {
+      remarked.push(markId);
+      return { markId: "m-2", placement: null, quote: MARK_ANCHOR.quote };
+    },
+  });
+  const createComment = spyOn(api, "createComment").mockRejectedValue(ANCHOR_MISSING);
+  jest.useFakeTimers();
+  const view = renderMarginCompose(bridge, "comment", true);
+
+  try {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Compose on the selection" }));
+    });
+    const composer = screen.getByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(composer).getByLabelText("Comment"), {
+      target: { value: "Please revise." },
+    });
+    await act(async () => {
+      fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+    });
+    expect(createComment).toHaveBeenCalledTimes(1);
+    expect(within(composer).queryByText(/is not open/)).toBeNull();
+
+    await act(async () => {
+      jest.advanceTimersByTime(BRIDGE_BIND_WAIT_MS);
+    });
+    expect(
+      within(composer).getByText(
+        "The document you selected the text in is not open, so there is nothing here to attach this comment to. Your draft is kept — open that document and send it again to attach it."
+      )
+    ).toBeTruthy();
+    // Nothing was marked, and the draft is where the reader left it.
+    expect(remarked).toEqual([]);
+    expect(within(composer).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe(
+      "Please revise."
+    );
+  } finally {
+    jest.useRealTimers();
+    view.unmount();
     createComment.mockRestore();
   }
 });
@@ -583,10 +1010,14 @@ test("inline Composer posts a reply to its thread root with Ctrl+Enter", async (
     fireEvent.keyDown(reply, { ctrlKey: true, key: "Enter" });
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "Inline reply",
-        reply_to: "root-1",
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "Inline reply",
+          reply_to: "root-1",
+        },
+        keyedAttempt
+      )
     );
     expect(screen.getByRole("button", { name: "Send" })).not.toBeNull();
   } finally {
@@ -619,7 +1050,11 @@ test("edit Composer PATCHes the author comment body and reads Save", async () =>
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith("comment-1", { body: "Revised comment" })
+      expect(editComment).toHaveBeenCalledWith(
+        "comment-1",
+        { body: "Revised comment" },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -653,10 +1088,50 @@ test("edit Composer saves the text in the field at Save time, not the text of th
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith("comment-1", { body: "Edited comment" })
+      expect(editComment).toHaveBeenCalledWith(
+        "comment-1",
+        { body: "Edited comment" },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
     editComment.mockRestore();
+  }
+});
+
+// The composer writes what the reader types into the held-send store a keystroke's wait later
+// (`KEEP_DRAFT_MS`), and the margin's own re-send carries what that store holds. So a reader who
+// goes on typing while the margin waits for its new mark to reach the server would have that text
+// sent nowhere and then cleared off the screen by the send that lands. The margin asks the
+// composer for its draft first; this is the row that fails without that.
+test("the margin's own re-send carries what the reader typed while it waited", async () => {
+  const sent = Promise.withResolvers<void>();
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark: (_markId, _kind, quote, placement) => ({ markId: "m-2", placement, quote }),
+    whenSent: () => sent.promise,
+  });
+  let attempts = 0;
+  const createComment = spyOn(api, "createComment").mockImplementation(async () => {
+    attempts += 1;
+    if (attempts === 1) throw ANCHOR_MISSING;
+    return undefined as never;
+  });
+  const view = renderMarginCompose(bridge);
+
+  try {
+    const composer = await sendMarginComment("Please revise.");
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    // The mark is written again and the margin is waiting for it; the reader is still writing.
+    fireEvent.change(within(composer).getByLabelText("Comment"), {
+      target: { value: "Please revise. And say which dog." },
+    });
+    sent.resolve();
+
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]?.[1].body).toBe("Please revise. And say which dog.");
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
   }
 });

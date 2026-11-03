@@ -1,15 +1,28 @@
-import { expect, jest, spyOn, test } from "bun:test";
+import { expect, jest, type Mock, spyOn, test } from "bun:test";
 import { type MutationKey, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { Agent, Comment, Message } from "../../api/types";
+import type { Agent, Comment, ItemBlock, ItemBlocks, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
+import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
 import type { ComposerOwner, ReplyTarget } from "./composer-model";
 import { MentionComposer, reconcileMentions } from "./MentionComposer";
-import { SEND_DEADLINE_MS } from "./send-request";
+import { KEYED_SEND_LATE_TEXT } from "./send-request";
+
+/** What each attempt of a send is held to, beside the request it carries: its deadline and the
+ *  key that names the press, sent as `Idempotency-Key`. */
+const keyedAttempt = expect.objectContaining({
+  deadlineMs: KEYED_SEND_ATTEMPT_MS,
+  key: expect.any(String),
+});
+
+/** Dispatch's verdict on a comment. A 5xx, a 429 or a failed fetch is not one: the send is tried
+ *  again under its key, so a row that needs a comment refused refuses it with a 4xx. */
+const COMMENT_REFUSED = "the comment was refused";
+const commentRefused = new ApiError(400, { code: "COMMENT_INPUT", error: COMMENT_REFUSED });
 
 const planner: Agent = {
   capabilities: ["btw"],
@@ -126,7 +139,7 @@ test("a comment without a surviving mention preserves /btw and omits delivery", 
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", { body: "/btw hello" })
+      expect(createComment).toHaveBeenCalledWith("CORE-1", { body: "/btw hello" }, keyedAttempt)
     );
   } finally {
     view.unmount();
@@ -150,11 +163,15 @@ test("a selected mention with /btw posts the canonical target and stripped body"
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Planner",
-        delivery: "btw",
-        mentions: [{ target: "session:A" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Planner",
+          delivery: "btw",
+          mentions: [{ target: "session:A" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -175,7 +192,9 @@ test("deleting a selected mention restores verbatim body and omits delivery", as
     fireEvent.change(field, { target: { value: "/btw " } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
-    await waitFor(() => expect(createComment).toHaveBeenCalledWith("CORE-1", { body: "/btw " }));
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith("CORE-1", { body: "/btw " }, keyedAttempt)
+    );
   } finally {
     view.unmount();
     createComment.mockRestore();
@@ -196,7 +215,7 @@ test("deleting an accepted duplicate mention never delivers the indistinguishabl
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", { body: "/btw @Planner" })
+      expect(createComment).toHaveBeenCalledWith("CORE-1", { body: "/btw @Planner" }, keyedAttempt)
     );
   } finally {
     view.unmount();
@@ -220,11 +239,15 @@ test("a session title cannot make its mention text impersonate a different sessi
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@session A",
-        delivery: "steer",
-        mentions: [{ target: "session:A" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@session A",
+          delivery: "steer",
+          mentions: [{ target: "session:A" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -316,7 +339,7 @@ async function pressSend(field: HTMLElement): Promise<void> {
 }
 
 test("a token-only direct-session draft cannot submit an empty message, and Send says why", async () => {
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as never);
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
   const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
 
   try {
@@ -338,7 +361,7 @@ test("a token-only direct-session draft cannot submit an empty message, and Send
 });
 
 test("a direct-session reply inherits its thread delivery", async () => {
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as never);
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
   const { view } = renderComposer({
     owner: { kind: "session", sessionId: "A" },
     replyTo: {
@@ -353,11 +376,15 @@ test("a direct-session reply inherits its thread delivery", async () => {
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Follow up" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createAgentMessage).toHaveBeenCalledWith("A", {
-        body: "Follow up",
-        delivery: "btw",
-        in_reply_to: "message-9",
-      })
+      expect(createAgentMessage).toHaveBeenCalledWith(
+        "A",
+        {
+          body: "Follow up",
+          delivery: "btw",
+          in_reply_to: "message-9",
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -382,12 +409,16 @@ test("a legacy targeted-message reply keeps the message endpoint while a comment
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Legacy reply" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createMessage).toHaveBeenCalledWith("CORE-1", {
-        body: "Legacy reply",
-        delivery: "btw",
-        in_reply_to: "message-9",
-        target: "session:A",
-      })
+      expect(createMessage).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "Legacy reply",
+          delivery: "btw",
+          in_reply_to: "message-9",
+          target: "session:A",
+        },
+        keyedAttempt
+      )
     );
     expect(createComment).not.toHaveBeenCalled();
   } finally {
@@ -413,12 +444,16 @@ test("a command overrides a targeted legacy reply's inherited delivery", async (
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/aside hello" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createMessage).toHaveBeenCalledWith("CORE-1", {
-        body: "hello",
-        delivery: "aside",
-        in_reply_to: "message-9",
-        target: "session:A",
-      })
+      expect(createMessage).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "hello",
+          delivery: "aside",
+          in_reply_to: "message-9",
+          target: "session:A",
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -441,10 +476,14 @@ test("a command on a plain legacy reply stays verbatim and sends no delivery", a
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw hello" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createMessage).toHaveBeenCalledWith("CORE-1", {
-        body: "/btw hello",
-        in_reply_to: "message-9",
-      })
+      expect(createMessage).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "/btw hello",
+          in_reply_to: "message-9",
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -526,11 +565,15 @@ test("a reference append retains every visible accepted mention through the next
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Planner @Worker dispatch://CORE-1",
-        delivery: "btw",
-        mentions: [{ target: "session:A" }, { target: "session:B" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Planner @Worker dispatch://CORE-1",
+          delivery: "btw",
+          mentions: [{ target: "session:A" }, { target: "session:B" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -571,11 +614,15 @@ test("opening autocomplete refetches live agents before selecting a canonical ta
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Worker",
-        delivery: "steer",
-        mentions: [{ target: "session:B" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Worker",
+          delivery: "steer",
+          mentions: [{ target: "session:B" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -614,11 +661,15 @@ test("an accepted mention survives its target going offline before Send", async 
     act(() => queryClient.setQueryData(["agents"], []));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Planner",
-        delivery: "steer",
-        mentions: [{ target: "session:A" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Planner",
+          delivery: "steer",
+          mentions: [{ target: "session:A" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -683,11 +734,15 @@ test("two accepted mentions receive one comment-level delivery mode", async () =
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Planner @legion-planner",
-        delivery: "aside",
-        mentions: [{ target: "session:A" }, { target: "role:legion-planner" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Planner @legion-planner",
+          delivery: "aside",
+          mentions: [{ target: "session:A" }, { target: "role:legion-planner" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -706,11 +761,15 @@ test("/btw in the body and /btwx stay ordinary text despite a mention", async ()
     fireEvent.click(screen.getByRole("option", { name: "Planner" }));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createComment).toHaveBeenLastCalledWith("CORE-1", {
-        body: "hello /btw @Planner",
-        delivery: "steer",
-        mentions: [{ target: "session:A" }],
-      })
+      expect(createComment).toHaveBeenLastCalledWith(
+        "CORE-1",
+        {
+          body: "hello /btw @Planner",
+          delivery: "steer",
+          mentions: [{ target: "session:A" }],
+        },
+        keyedAttempt
+      )
     );
     view.unmount();
 
@@ -721,11 +780,15 @@ test("/btw in the body and /btwx stay ordinary text despite a mention", async ()
     fireEvent.click(screen.getByRole("option", { name: "Planner" }));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createComment).toHaveBeenLastCalledWith("CORE-1", {
-        body: "/btwx @Planner",
-        delivery: "steer",
-        mentions: [{ target: "session:A" }],
-      })
+      expect(createComment).toHaveBeenLastCalledWith(
+        "CORE-1",
+        {
+          body: "/btwx @Planner",
+          delivery: "steer",
+          mentions: [{ target: "session:A" }],
+        },
+        keyedAttempt
+      )
     );
     second.view.unmount();
   } finally {
@@ -743,7 +806,7 @@ test("editing a comment patches only its body and never creates a delivery", asy
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith("comment-1", { body: "/btw @Planner" })
+      expect(editComment).toHaveBeenCalledWith("comment-1", { body: "/btw @Planner" }, keyedAttempt)
     );
     expect(createComment).not.toHaveBeenCalled();
   } finally {
@@ -753,9 +816,196 @@ test("editing a comment patches only its body and never creates a delivery", asy
   }
 });
 
+/** The blocks route's answer for a two-paragraph comment, `Alpha` and `Beta`. */
+function alphaBetaBlocks(indexed: boolean): ItemBlocks {
+  const blocks: ItemBlock[] = [
+    { from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
+    { from: 7, id: "b2", text: "Beta", to: 11, type: "paragraph" },
+  ];
+  return {
+    blocks: indexed ? blocks : [],
+    indexed,
+    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+    revision: 3,
+  };
+}
+
+/** Opens the edit of `Alpha\n\nBeta` once the blocks route answers `blocks`, types a word at
+ *  the end of `Beta`, saves, and hands back what the save sent: the comment id and the input. */
+async function saveEditOfAlphaBeta(blocks: Promise<ItemBlocks>): Promise<unknown[]> {
+  const commentBlocks = spyOn(api, "commentBlocks").mockReturnValue(blocks);
+  const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ edit: { body: "Alpha\n\nBeta", id: "comment-1" } });
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {
+      await blocks.catch(() => {});
+    });
+    fireEvent.change(screen.getByLabelText("Edit comment"), {
+      target: { value: "Alpha\n\nBeta gamma  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editComment).toHaveBeenCalledTimes(1));
+    return [...(editComment.mock.calls[0] ?? [])];
+  } finally {
+    view.unmount();
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+}
+
+test("an edit's save carries each block's id and the revision the blocks route answered", async () => {
+  expect(await saveEditOfAlphaBeta(Promise.resolve(alphaBetaBlocks(true)))).toEqual([
+    "comment-1",
+    {
+      base_revision: 3,
+      blocks: [
+        { from: 0, id: "b1" },
+        { from: 7, id: "b2" },
+      ],
+      body: "Alpha\n\nBeta gamma",
+    },
+    keyedAttempt,
+  ]);
+});
+
+test("an edit's save carries no block ids while the comment is not indexed or the route fails", async () => {
+  expect(await saveEditOfAlphaBeta(Promise.resolve(alphaBetaBlocks(false)))).toEqual([
+    "comment-1",
+    { body: "Alpha\n\nBeta gamma" },
+    keyedAttempt,
+  ]);
+  // An older server has no blocks route.
+  expect(
+    await saveEditOfAlphaBeta(
+      Promise.reject(new ApiError(404, { code: "NOT_FOUND", error: "not found" }))
+    )
+  ).toEqual(["comment-1", { body: "Alpha\n\nBeta gamma" }, keyedAttempt]);
+});
+
+// A browser's textarea holds LF where the value it was given had CR LF, as the followed spans do,
+// while the composer's own draft keeps the comment's stored text. A save made without typing
+// works out its ids from the body it sends, the field's text, so it carries them.
+test("an unchanged edit of a comment stored with CR LF carries each block's id", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+  if (descriptor?.get === undefined || descriptor.set === undefined) {
+    throw new Error("expected HTMLTextAreaElement.prototype.value to be an accessor");
+  }
+  const { get, set } = descriptor;
+  Object.defineProperty(HTMLTextAreaElement.prototype, "value", {
+    ...descriptor,
+    get(this: HTMLTextAreaElement) {
+      return (get.call(this) as string).replaceAll("\r\n", "\n");
+    },
+    set(this: HTMLTextAreaElement, value: string) {
+      set.call(this, value);
+    },
+  });
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue({
+    blocks: [
+      { from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
+      { from: 9, id: "b2", text: "Beta", to: 13, type: "paragraph" },
+    ],
+    indexed: true,
+    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+    revision: 3,
+  });
+  const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ edit: { body: "Alpha\r\n\r\nBeta", id: "comment-1" } });
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editComment).toHaveBeenCalledTimes(1));
+    expect(editComment.mock.calls[0]).toEqual([
+      "comment-1",
+      {
+        base_revision: 3,
+        blocks: [
+          { from: 0, id: "b1" },
+          { from: 7, id: "b2" },
+        ],
+        body: "Alpha\n\nBeta",
+      },
+      keyedAttempt,
+    ]);
+  } finally {
+    view.unmount();
+    Object.defineProperty(HTMLTextAreaElement.prototype, "value", descriptor);
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+});
+
+test("an edit's save an older server refuses keeps the draft", async () => {
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue(alphaBetaBlocks(true));
+  const editComment = spyOn(api, "editComment").mockRejectedValueOnce(
+    new ApiError(400, { code: "INVALID_JSON", error: 'json: unknown field "blocks"' })
+  );
+  const { view } = renderComposer({ edit: { body: "Alpha\n\nBeta", id: "comment-1" } });
+
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {});
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
+    fireEvent.change(field, { target: { value: "Alpha\n\nBeta gamma" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByRole("alert")).textContent).toContain('unknown field "blocks"');
+    expect(field.value).toBe("Alpha\n\nBeta gamma");
+    expect(editComment).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+});
+
+// The field reads each edit's type from the browser's own `beforeinput`, which a cut and a paste
+// fire and React's `onBeforeInput` (the `textInput` event) never carries.
+test("a block cut and pasted elsewhere keeps its id in the edit's save", async () => {
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue(alphaBetaBlocks(true));
+  const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ edit: { body: "Alpha\n\nBeta", id: "comment-1" } });
+  const beforeInput = (field: HTMLTextAreaElement, start: number, end: number, type: string) => {
+    field.setSelectionRange(start, end);
+    field.dispatchEvent(
+      new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: type })
+    );
+  };
+
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {});
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
+    // Cut `Alpha` with the blank line after it, then paste it after `Beta`.
+    beforeInput(field, 0, 7, "deleteByCut");
+    fireEvent.change(field, { target: { value: "Beta" } });
+    beforeInput(field, 4, 4, "insertFromPaste");
+    fireEvent.change(field, { target: { value: "Beta\n\nAlpha" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editComment).toHaveBeenCalledTimes(1));
+    expect(editComment.mock.calls[0]).toEqual([
+      "comment-1",
+      {
+        base_revision: 3,
+        blocks: [
+          { from: 0, id: "b2" },
+          { from: 6, id: "b1" },
+        ],
+        body: "Beta\n\nAlpha",
+      },
+      keyedAttempt,
+    ]);
+  } finally {
+    view.unmount();
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+});
+
 test("a failed send keeps its draft and retries", async () => {
   const createComment = spyOn(api, "createComment")
-    .mockRejectedValueOnce(new ApiError(500, { error: "boom" }))
+    .mockRejectedValueOnce(new ApiError(400, { error: "boom" }))
     .mockResolvedValueOnce(createdComment);
   const { view } = renderComposer();
 
@@ -818,10 +1068,14 @@ test("reply mode shows the quote, sends reply_to, and cancels by chip or Escape"
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "Ship it.",
-        reply_to: "comment-9",
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "Ship it.",
+          reply_to: "comment-9",
+        },
+        keyedAttempt
+      )
     );
     fireEvent.click(screen.getByRole("button", { name: "Cancel reply" }));
     fireEvent.keyDown(screen.getByLabelText("Comment"), { key: "Escape" });
@@ -862,10 +1116,11 @@ for (const capabilities of [["aside"], ["aside", "btw"]]) {
       expect(screen.queryByText(/so sending it records a failed attempt/)).toBeNull();
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
       await waitFor(() =>
-        expect(createAgentMessage).toHaveBeenCalledWith("B", {
-          body: "Ship it.",
-          delivery: "aside",
-        })
+        expect(createAgentMessage).toHaveBeenCalledWith(
+          "B",
+          { body: "Ship it.", delivery: "aside" },
+          keyedAttempt
+        )
       );
     } finally {
       view.unmount();
@@ -908,8 +1163,44 @@ test("a mention of a session that takes only Aside goes as an Aside", async () =
     await waitFor(() =>
       expect(createComment).toHaveBeenCalledWith(
         "CORE-1",
-        expect.objectContaining({ delivery: "aside", mentions: [{ target: "session:A" }] })
+        expect.objectContaining({ delivery: "aside", mentions: [{ target: "session:A" }] }),
+        keyedAttempt
       )
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// Only a send to one session keeps its refused request for an unedited Retry, since its key must
+// survive. A comment carries no key, so its Retry is sent as the composer shows it then: a
+// mentioned session that stopped advertising Send after the refusal gets the Aside the composer
+// says it gets, not the Send the refused comment asked for.
+test("a comment's Retry goes in the mode the composer shows now, not the refused one's", async () => {
+  const createComment = spyOn(api, "createComment")
+    .mockRejectedValueOnce(commentRefused)
+    .mockResolvedValueOnce(createdComment);
+  const steers: Agent = { ...planner, capabilities: ["aside", "btw", "steer"] };
+  const asides: Agent = { ...planner, capabilities: ["aside", "btw"] };
+  const seedMentions = [plannerMention];
+  const { rerender, view } = renderComposer({ agents: [steers], seedMentions });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText(`Couldn't send — ${COMMENT_REFUSED}`);
+    expect(createComment.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ delivery: "steer", mentions: [{ target: "session:A" }] })
+    );
+
+    rerender({ agents: [asides], seedMentions });
+    expect(screen.getByText("Sending as Aside: Planner does not advertise Send.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({ delivery: "aside", mentions: [{ target: "session:A" }] })
     );
   } finally {
     view.unmount();
@@ -989,11 +1280,15 @@ test("a mount seeds the owner's mention and sends it", async () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Planner hello",
-        delivery: "steer",
-        mentions: [{ target: "session:A" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Planner hello",
+          delivery: "steer",
+          mentions: [{ target: "session:A" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -1025,11 +1320,15 @@ test("a draft entering a channel that owes a mention is seeded in front of it, r
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Planner hello @Worker",
-        delivery: "steer",
-        mentions: [{ target: "session:A" }, { target: "session:B" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Planner hello @Worker",
+          delivery: "steer",
+          mentions: [{ target: "session:A" }, { target: "session:B" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -1052,11 +1351,15 @@ test("a draft that already holds the channel's mention is not seeded twice, wher
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "y@Planner x",
-        delivery: "steer",
-        mentions: [{ target: "session:A" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "y@Planner x",
+          delivery: "steer",
+          mentions: [{ target: "session:A" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -1080,11 +1383,15 @@ test("a mention accepted after a reseed lands at its own offset", async () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Planner hello @Worker",
-        delivery: "steer",
-        mentions: [{ target: "session:A" }, { target: "session:B" }],
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Planner hello @Worker",
+          delivery: "steer",
+          mentions: [{ target: "session:A" }, { target: "session:B" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -1106,7 +1413,11 @@ test("the owner's own untouched mention leaves with the channel that seeded it",
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createAgentMessage).toHaveBeenCalledWith("A", { body: "hello", delivery: "steer" })
+      expect(createAgentMessage).toHaveBeenCalledWith(
+        "A",
+        { body: "hello", delivery: "steer" },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -1150,29 +1461,27 @@ test("Discard clears the draft to what a mount shows, wherever the host takes fo
 // A refusal is about the draft it turned down: Retry sends the draft as it stands, so it offers
 // only what Send would, and Discard, which drops the draft, drops the notice with it.
 test("a refused send's Retry asks what Send asks, and Discard takes the notice with the draft", async () => {
-  const createComment = spyOn(api, "createComment").mockRejectedValue(
-    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
-  );
+  const createComment = spyOn(api, "createComment").mockRejectedValue(commentRefused);
   const { view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
     fireEvent.change(field, { target: { value: "@Planner hello" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await screen.findByText("Couldn't send — the server is down");
+    await screen.findByText(`Couldn't send — ${COMMENT_REFUSED}`);
     expect(field.value).toBe("@Planner hello");
     expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
 
     // Nothing Send would send, so nothing Retry may: the button goes, the notice stays.
     fireEvent.change(field, { target: { value: "" } });
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    expect(screen.getByText("Couldn't send — the server is down")).toBeDefined();
+    expect(screen.getByText(`Couldn't send — ${COMMENT_REFUSED}`)).toBeDefined();
 
     fireEvent.change(field, { target: { value: "@Planner hello" } });
     fireEvent.keyDown(field, { key: "Escape" });
     fireEvent.click(screen.getByRole("button", { name: "Discard" }));
     expect(field.value).toBe("@Planner");
-    expect(screen.queryByText("Couldn't send — the server is down")).toBeNull();
+    expect(screen.queryByText(`Couldn't send — ${COMMENT_REFUSED}`)).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(createComment).toHaveBeenCalledTimes(1);
   } finally {
@@ -1201,8 +1510,8 @@ test("a send takes the Discard prompt with it and Escape raises none until the s
     fireEvent.keyDown(field, { key: "Escape" });
     expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
 
-    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
-    await screen.findByText("Couldn't send — the server is down");
+    refused.reject(commentRefused);
+    await screen.findByText(`Couldn't send — ${COMMENT_REFUSED}`);
     expect(field.value).toBe("@Planner hello");
     expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
     expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
@@ -1232,12 +1541,12 @@ test("a send holds every suggestion control and a refusal restores the replaceme
 
     await waitFor(() => expect(holdControls().disabled).toBe(true));
 
-    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
-    await screen.findByText("Couldn't send — the server is down");
+    refused.reject(commentRefused);
+    await screen.findByText(`Couldn't send — ${COMMENT_REFUSED}`);
     expect(replacement.value).toBe("quick");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
-    expect(createComment.mock.calls[1]).toEqual([
+    expect(createComment.mock.calls[1]?.slice(0, 2)).toEqual([
       "CORE-1",
       {
         anchor: { artifact: "artifact-1", mark_id: "mark-1" },
@@ -1265,8 +1574,8 @@ test("an Escape in Send's task cannot offer Discard", async () => {
     });
 
     expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
-    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
-    await screen.findByText("Couldn't send — the server is down");
+    refused.reject(commentRefused);
+    await screen.findByText(`Couldn't send — ${COMMENT_REFUSED}`);
     expect(field.value).toBe("@Planner hello");
   } finally {
     view.unmount();
@@ -1298,8 +1607,8 @@ test("a reference picker request in Send's task is refused until the send answer
     expect(holdControls().disabled).toBe(true);
     expect(screen.queryByRole("dialog", { name: "Reference picker" })).toBeNull();
 
-    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
-    await screen.findByText("Couldn't send — the server is down");
+    refused.reject(commentRefused);
+    await screen.findByText(`Couldn't send — ${COMMENT_REFUSED}`);
     expect(field.value).toBe("@Planner see");
     expect(screen.queryByRole("dialog", { name: "Reference picker" })).toBeNull();
     fireEvent.keyDown(field, { ctrlKey: true, key: "k" });
@@ -1351,8 +1660,8 @@ test("a send closes the mention suggestions open over its draft", async () => {
     await waitFor(() => expect(holdControls().disabled).toBe(true));
     expect(screen.queryByRole("listbox", { name: "Mention suggestions" })).toBeNull();
 
-    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
-    await screen.findByText("Couldn't send — the server is down");
+    refused.reject(commentRefused);
+    await screen.findByText(`Couldn't send — ${COMMENT_REFUSED}`);
     expect(field.value).toBe("hello @Pl");
   } finally {
     view.unmount();
@@ -1387,15 +1696,15 @@ test("a refused reply keeps the reply its send started with until the server ans
     fireEvent.click(cancel);
     expect(cancelled).toBe(0);
 
-    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
-    await screen.findByText("Couldn't send — the server is down");
+    refused.reject(commentRefused);
+    await screen.findByText(`Couldn't send — ${COMMENT_REFUSED}`);
     expect(field.value).toBe("Reply body");
     fireEvent.click(cancel);
     expect(cancelled).toBe(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
-    expect(createComment.mock.calls[1]).toEqual([
+    expect(createComment.mock.calls[1]?.slice(0, 2)).toEqual([
       "CORE-1",
       { body: "Reply body", reply_to: "comment-0" },
     ]);
@@ -1440,7 +1749,7 @@ test("a host that re-addresses the composer in Send's task cannot re-address the
     });
 
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
-    expect(createComment.mock.calls[0]).toEqual([
+    expect(createComment.mock.calls[0]?.slice(0, 2)).toEqual([
       "CORE-1",
       { anchor: { artifact: "artifact-1", mark_id: "mark-1" }, body: "Status please" },
     ]);
@@ -1448,8 +1757,8 @@ test("a host that re-addresses the composer in Send's task cannot re-address the
     expect(createAgentMessage).not.toHaveBeenCalled();
     expect(createAsk).not.toHaveBeenCalled();
 
-    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
-    await screen.findByText("Couldn't send — the server is down");
+    refused.reject(commentRefused);
+    await screen.findByText(`Couldn't send — ${COMMENT_REFUSED}`);
     expect(field.value).toBe("Status please");
   } finally {
     view.unmount();
@@ -1569,8 +1878,8 @@ function renderHostedComposer() {
   return { invalidated, view };
 }
 
-const stillSending =
-  "Still sending — the server has not answered in 30 seconds. The draft stays here until it does.";
+/** What every send says once it is past its deadline: it is still being tried under its key. */
+const stillSending = KEYED_SEND_LATE_TEXT;
 
 // Past its deadline a send is still the server's: a Retry would post it a second time. The
 // composer keeps the draft and the host keeps its Reply, and only the host's Back lets go, so a
@@ -1639,9 +1948,9 @@ test("a refusal after the deadline hands the draft back with Retry", async () =>
     expect(screen.getByText(stillSending)).toBeTruthy();
 
     await act(async () => {
-      answer.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      answer.reject(commentRefused);
     });
-    expect(screen.getByText("Couldn't send — the server is down")).toBeTruthy();
+    expect(screen.getByText(`Couldn't send — ${COMMENT_REFUSED}`)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
     expect(screen.queryByText(stillSending)).toBeNull();
     expect(field.value).toBe("Refused late");
@@ -1651,6 +1960,254 @@ test("a refusal after the deadline hands the draft back with Retry", async () =>
     jest.useRealTimers();
     view.unmount();
     createComment.mockRestore();
+  }
+});
+
+/** The key each send to a session carried (`Idempotency-Key`), in order. */
+function sentKeys(createAgentMessage: Mock<typeof api.createAgentMessage>): string[] {
+  return createAgentMessage.mock.calls.map(([, , bounds]) => bounds.key);
+}
+
+const SEND_KEY = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Dispatch's verdict on a message to a session, which a Retry of the same message meets again. */
+const messageRefused = new ApiError(400, {
+  code: "MESSAGE_INPUT",
+  error: "Dispatch refused the message",
+});
+
+// A message to one session names itself to Dispatch with a key minted when Send builds it, so a
+// repeat of the request is the same message there; the next message is another send, with a key
+// of its own, even in the same words.
+test("a send to one session carries a key", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
+  const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(1));
+    expect(createAgentMessage).toHaveBeenCalledWith(
+      "A",
+      { body: "Status please", delivery: "steer" },
+      expect.objectContaining({ key: expect.stringMatching(SEND_KEY) })
+    );
+
+    await waitFor(() => expect(field.value).toBe(""));
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
+    const [first, second] = sentKeys(createAgentMessage);
+    expect(second).toMatch(SEND_KEY);
+    expect(second).not.toBe(first);
+  } finally {
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
+// Dispatch's refusal is its verdict on the key, which it would answer the same way for a day, so
+// a Retry - even of the same text to the same session - is the reader's new action, under a key
+// of its own. (A Retry after Stop trying, which ended without a verdict, keeps the key: below.)
+test("a Retry after Dispatch's refusal goes under a new key, even of the same text", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage")
+    .mockRejectedValueOnce(messageRefused)
+    .mockResolvedValueOnce(createdMessage);
+  const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Couldn't send — Dispatch refused the message");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
+
+    const [first, retried] = sentKeys(createAgentMessage);
+    expect(first).toMatch(SEND_KEY);
+    expect(retried).toMatch(SEND_KEY);
+    expect(retried).not.toBe(first);
+    await waitFor(() => expect(field.value).toBe(""));
+  } finally {
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
+// After Dispatch's refusal every Retry is a new action: another body, another mode, another reply,
+// and the same message again, each under a key of its own.
+test("after Dispatch's refusal every Retry, edited or not, gets a key of its own", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(messageRefused);
+  const direct = { kind: "session" as const, sessionId: "A" };
+  const { rerender, view } = renderComposer({ owner: direct });
+  const refusedText = "Couldn't send — Dispatch refused the message";
+  /** Once the last attempt's refusal hands its draft back, `edit`s it and retries the draft as
+   *  it then stands. */
+  const retry = async (calls: number, edit?: () => void) => {
+    await screen.findByText(refusedText);
+    edit?.();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(calls));
+  };
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(1));
+
+    await retry(2, () => {
+      // Another body.
+      fireEvent.change(field, { target: { value: "Status please, now" } });
+    });
+    await retry(3, () => {
+      // Another mode.
+      fireEvent.change(field, { target: { value: "/aside Status please, now" } });
+    });
+    await retry(4, () => {
+      // Another reply, which the reader starts afresh, in its thread's mode.
+      rerender({
+        owner: direct,
+        replyTo: {
+          actor: { id: "A", kind: "session", origin: { session_title: "Planner" } },
+          excerpt: "Question",
+          id: "message-9",
+          thread: { delivery: "btw", target: "session:A" },
+        },
+      });
+      fireEvent.change(field, { target: { value: "Status please, now" } });
+    });
+    // And nothing changed since: the same message, under a key of its own all the same.
+    await retry(5);
+
+    const keys = sentKeys(createAgentMessage);
+    expect(new Set(keys).size).toBe(5);
+    expect(createAgentMessage.mock.calls.map(([, input]) => input)).toEqual([
+      { body: "Status please", delivery: "steer" },
+      { body: "Status please, now", delivery: "steer" },
+      { body: "Status please, now", delivery: "aside" },
+      { body: "Status please, now", delivery: "btw", in_reply_to: "message-9" },
+      { body: "Status please, now", delivery: "btw", in_reply_to: "message-9" },
+    ]);
+  } finally {
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
+// Past its deadline a message to one session is still being tried under its key, so the composer
+// says so instead of offering a Retry, and the message lands once when Dispatch answers.
+test("a send to one session past its deadline says it keeps trying, and lands once", async () => {
+  const answer = Promise.withResolvers<Message>();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValueOnce(answer.promise);
+  jest.useFakeTimers();
+  const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Slow but sure" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(SEND_DEADLINE_MS);
+    });
+    expect(screen.getByText(KEYED_SEND_LATE_TEXT)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(field.value).toBe("Slow but sure");
+
+    await act(async () => {
+      answer.resolve(createdMessage);
+    });
+    expect(createAgentMessage).toHaveBeenCalledTimes(1);
+    expect(field.value).toBe("");
+    expect(screen.queryByText(KEYED_SEND_LATE_TEXT)).toBeNull();
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
+/** Moves the fake clock `ms` on and lets every promise the move released run. */
+async function tick(ms: number): Promise<void> {
+  await act(async () => {
+    jest.advanceTimersByTime(ms);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+  });
+}
+
+/** A send that keeps failing, from its press to its 30 s deadline: five attempts, at 0, 1, 3, 7
+ *  and 15 s. */
+async function failToTheDeadline(): Promise<void> {
+  for (const wait of [1_000, 2_000, 4_000, 8_000]) await tick(wait);
+  expect(screen.queryByRole("button", { name: "Stop trying" })).toBeNull();
+  await tick(15_000);
+}
+
+const stoppedText = new SendStoppedError().message;
+
+// A lasting outage would hold a message to one session, its draft and its Send, for good. Once it
+// is late the composer offers Stop trying: no attempt follows, the draft comes back with what a
+// Retry does - send it again under the same key, so it is delivered at most once - and Discard
+// drops it.
+test("a send kept failing shows Stop trying once late, which stops it for Retry or Discard", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  jest.useFakeTimers();
+  const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await failToTheDeadline();
+    expect(screen.getByText(KEYED_SEND_LATE_TEXT)).toBeTruthy();
+    expect(createAgentMessage).toHaveBeenCalledTimes(5);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    expect(screen.getByText(stoppedText)).toBeTruthy();
+    expect(screen.queryByText(KEYED_SEND_LATE_TEXT)).toBeNull();
+    expect(field.value).toBe("Status please");
+    expect(holdControls().disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Discard draft" })).toBeTruthy();
+    await tick(30 * 60_000);
+    expect(createAgentMessage).toHaveBeenCalledTimes(5);
+
+    // Retry: the same message, under the same key.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    });
+    await tick(0);
+    expect(createAgentMessage).toHaveBeenCalledTimes(6);
+    expect(new Set(sentKeys(createAgentMessage)).size).toBe(1);
+
+    // Still down: stopped again, and this time dropped.
+    await failToTheDeadline();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    const tried = createAgentMessage.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+    expect(field.value).toBe("");
+    expect(screen.queryByText(stoppedText)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    await tick(30 * 60_000);
+    expect(createAgentMessage).toHaveBeenCalledTimes(tried);
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    view.unmount();
+    createAgentMessage.mockRestore();
   }
 });
 
@@ -1711,6 +2268,35 @@ test("a pick in the paste's own task cannot move the upload", async () => {
     await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
     expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
     await waitFor(() => expect(field.value).toBe("dispatch://CORE-1/artifact/notes-md"));
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
+// Dispatch stored a pasted file and lost its answer (`409 KEY_COMMITTED`): there is no version to
+// name, so nothing is written into the draft, nothing shows as refused, and the composer says the
+// file was stored and its reference not added - the upload is not made a second time.
+test("a pasted file answered KEY_COMMITTED says it was stored and adds no reference", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "already made" })
+  );
+  const { view } = renderComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "See " } });
+    const file = new File(["# Notes"], "notes.md", { type: "text/markdown" });
+    fireEvent.paste(field, { clipboardData: { files: [file] } });
+
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The upload of notes.md was made, but Dispatch lost its answer, so it may take a moment to appear. Its reference was not added to your message."
+    );
+    expect(field.value).toBe("See ");
+    expect(screen.queryByRole("alert")).toBeNull();
+    await Bun.sleep(20);
+    expect(uploadArtifact).toHaveBeenCalledTimes(1);
   } finally {
     view.unmount();
     uploadArtifact.mockRestore();
@@ -1782,7 +2368,9 @@ test("a send waits for a pasted picture still uploading, by Send and by Ctrl+Ent
     const body = "Look ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)";
     await waitFor(() => expect(field.value).toBe(body));
     fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
-    await waitFor(() => expect(createComment).toHaveBeenCalledWith("CORE-1", { body }));
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith("CORE-1", { body }, keyedAttempt)
+    );
   } finally {
     view.unmount();
     uploadArtifact.mockRestore();
@@ -1903,22 +2491,22 @@ test("a reply composer mounted again while its send is out holds it, and then sh
 
     toggle();
     await act(async () => {
-      refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      refused.reject(commentRefused);
       await refused.promise.catch(() => {});
     });
     toggle();
-    expect(screen.getByText("Couldn't send — the server is down")).toBeTruthy();
+    expect(screen.getByText(`Couldn't send — ${COMMENT_REFUSED}`)).toBeTruthy();
     expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe("Out of view");
     expect(holdControls().disabled).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
-    expect(createComment.mock.calls[1]).toEqual([
+    expect(createComment.mock.calls[1]?.slice(0, 2)).toEqual([
       "CORE-1",
       { body: "Out of view", reply_to: "root" },
     ]);
     await waitFor(() => expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe(""));
-    expect(screen.queryByText("Couldn't send — the server is down")).toBeNull();
+    expect(screen.queryByText(`Couldn't send — ${COMMENT_REFUSED}`)).toBeNull();
   } finally {
     view.unmount();
     createComment.mockRestore();

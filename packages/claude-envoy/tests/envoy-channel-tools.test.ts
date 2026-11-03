@@ -85,6 +85,58 @@ test("sends Envoy messages through the shared transport", async () => {
   })
 })
 
+test("a send that is not confirmed names its key, and a resend under that key sends it again", async () => {
+  const keys: string[] = []
+  let answer: "time out" | "repeat" = "time out"
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (_request, init) => {
+      keys.push((JSON.parse(String(init?.body)) as { idempotency_key: string }).idempotency_key)
+      if (answer === "time out") throw new DOMException("The operation timed out.", "TimeoutError")
+      return Response.json({
+        event_id: "evt-resent",
+        source: "agent",
+        source_event_id: "agent.ses_claude.evt-resent",
+        source_session: "ses_claude",
+        topic: "notifications.agent.ses_receiver",
+        dedupe_key: `agent.ses_receiver.${keys[0]}`,
+        issued_at: 1,
+        payload_summary: "ready",
+        trace_id: "trace-resent",
+        recipient: "ses_receiver",
+        duplicate: true,
+      })
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const failed = await executeEnvoyTool(runtime, "envoy_send", {
+    session_id: "ses_receiver",
+    message: "ready",
+  }).then(
+    () => undefined,
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  )
+  const key = keys[0] as string
+  expect(failed).toContain("The send to ses_receiver is not confirmed delivered")
+  expect(failed).toContain(
+    `Sending it again with idempotency_key ${key} within 72 hours is the safe resend`,
+  )
+
+  answer = "repeat"
+  const resent = await executeEnvoyTool(runtime, "envoy_send", {
+    session_id: "ses_receiver",
+    message: "ready",
+    idempotency_key: key,
+  })
+
+  expect(keys).toEqual([key, key, key])
+  expect(resent).toMatchObject({
+    message:
+      "sent to ses_receiver once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy",
+  })
+})
+
 test("replies in a Slack thread with slack_post, with the token the broker grants", async () => {
   // The broker's client on PATH, standing in for the exec form once LEGION_SLACK_BOT_TOKEN is
   // granted, and a fake Slack Web API at SLACK_POST_API_URL.
@@ -158,7 +210,6 @@ test("a dispatch_* call is an unknown tool even with Dispatch configured, and re
       return Response.json({ error: "unexpected" }, { status: 500 })
     },
   })
-  const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
   const runtime: ChannelToolRuntime = {
@@ -174,7 +225,6 @@ test("a dispatch_* call is an unknown tool even with Dispatch configured, and re
     expect(requests).toEqual([])
   } finally {
     server.stop(true)
-    process.env = previous
   }
 })
 
@@ -212,4 +262,43 @@ test("envoy_list reports the union of live NATS subscriptions and registry inter
       { topic: "notifications.dispatch.issue.DSP-3.>", source: "live" },
     ],
   })
+})
+
+test("envoy_sessions filters by the machine a session runs on and by the listener it registered through", async () => {
+  const sessions = [
+    {
+      session_id: "ses_on_hub",
+      machine_id: "envoy-hub",
+      host: "gke-node-7",
+      dir: "/work",
+      port: 0,
+      title: "",
+      topics: [],
+      self_subscribed: true,
+    },
+    {
+      session_id: "ses_on_devbox",
+      machine_id: "devbox",
+      host: "devbox",
+      dir: "/work",
+      port: 0,
+      title: "",
+      topics: [],
+      self_subscribed: true,
+    },
+  ]
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async () => Response.json(sessions),
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+  const listed = async (machine: string) =>
+    (
+      (await executeEnvoyTool(runtime, "envoy_sessions", { machine })) as { session_id: string }[]
+    ).map((session) => session.session_id)
+
+  expect(await listed("envoy-hub")).toEqual(["ses_on_hub"])
+  expect(await listed("gke-node-7")).toEqual(["ses_on_hub"])
+  expect(await listed("devbox")).toEqual(["ses_on_devbox"])
+  expect(await listed("other")).toEqual([])
 })

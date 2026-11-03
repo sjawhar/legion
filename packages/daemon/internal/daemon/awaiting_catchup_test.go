@@ -794,8 +794,8 @@ func TestTheFirstBootAfterTheUpgradeReplaysNothing(t *testing.T) {
 // A question its architect opened and a person answered while the daemon was down is applied at
 // the boot with the root held out of admission's decision until the whole window is in: one pass
 // then finds nothing still with the person and takes the hand-back in, so the running architect,
-// which had the answer through Dispatch already, is neither suspended nor resumed and keeps its
-// slot. A window that leaves a second question with the person is decided once, on that question.
+// which had the answer through Dispatch already, receives no new task and keeps its slot. A window
+// that leaves a second question with the person is decided once, on that question.
 func TestAnOutageWindowIsDecidedOnceAfterItsCatchUp(t *testing.T) {
 	cursor := catchUpHandout
 	t.Run("answered within the window", func(t *testing.T) {
@@ -825,8 +825,8 @@ func TestAnOutageWindowIsDecidedOnceAfterItsCatchUp(t *testing.T) {
 		if got == nil || !got.AwaitingPerson() || got.Awaiting.Ask != "ask-q2" || got.Awaiting.Since.Seq != 11 || got.Answered() {
 			t.Fatalf("root after the catch-up = %#v, want it waiting on ask-q2 from 11, unanswered", got)
 		}
-		if ops := captureArchitectOps(t, pool); !slices.Equal(ops, []string{"suspend"}) {
-			t.Fatalf("architect operations = %v, want the one suspend of the one decision", ops)
+		if ops := captureArchitectOps(t, pool); len(ops) != 0 {
+			t.Fatalf("architect operations = %v, want none while the root waits", ops)
 		}
 	})
 }
@@ -870,8 +870,8 @@ func TestARootWaitingOnItsGateAtDeployReturnsItsSlot(t *testing.T) {
 			if got == nil || !got.AwaitingPerson() || got.Awaiting.GateVersion != 3 || got.Awaiting.Artifact != "artifact-root" || got.Awaiting.Since.Seq != 9 {
 				t.Fatalf("root after the catch-up = %#v, want it waiting on version 3 of artifact-root from 9", got)
 			}
-			if ops := captureArchitectOps(t, pool); !slices.Equal(ops, []string{"suspend"}) {
-				t.Fatalf("architect operations = %v, want one suspend", ops)
+			if ops := captureArchitectOps(t, pool); len(ops) != 0 {
+				t.Fatalf("architect operations = %v, want none while the root waits", ops)
 			}
 			if !slotHeld(t, pool, "CAPTURE-200") || slotHeld(t, pool, "CAPTURE-100") {
 				t.Fatalf("slot held by CAPTURE-200 %t, by CAPTURE-100 %t, want the root waiting in line to take the one slot",

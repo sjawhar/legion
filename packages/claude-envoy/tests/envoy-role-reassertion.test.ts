@@ -2,8 +2,9 @@ import { expect, test } from "bun:test"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
+import type { Interest, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
+  ChannelConnectionStatus,
   ChannelForwarderConnection,
   ChannelInboundMessage,
   ChannelTopicSubscription,
@@ -15,6 +16,7 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { roleStateFile, SessionIdentity } from "../src/session-identity"
+import { emptyReplay, type FakeClient } from "./channel-session-harness"
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
@@ -41,6 +43,8 @@ class IdleNats implements ChannelForwarderConnection {
   close(): Promise<void> {
     return Promise.resolve()
   }
+
+  async *status(): AsyncGenerator<ChannelConnectionStatus> {}
 }
 
 const notifier: ChannelNotifier = {
@@ -58,6 +62,11 @@ function interest(): Interest {
   }
 }
 
+/** The listener's answer to a registration: the interest, and the core delivery mode. */
+function registered(): SubscribeResult {
+  return { ...interest(), delivery: { mode: "core", reason: "not_answered" } }
+}
+
 test("reasserts a restored role after a successful registration heartbeat loses it", async () => {
   const stateDirectory = join(tmpdir(), `claude-envoy-reassert-${crypto.randomUUID()}`)
   const roleFile = roleStateFile(stateDirectory, "ses_current")
@@ -65,11 +74,8 @@ test("reasserts a restored role after a successful registration heartbeat loses 
   await writeFile(roleFile, JSON.stringify({ session_id: "ses_current", role: "reviewer" }))
   const setRoles: unknown[] = []
   const reasserted = Promise.withResolvers<void>()
-  const client: Pick<
-    EnvoyClient,
-    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
-  > = {
-    subscribe: async () => interest(),
+  const client: FakeClient = {
+    subscribe: async () => registered(),
     getInterest: async () => interest(),
     unsubscribe: async () => undefined,
     unregisterSession: async () => undefined,
@@ -79,6 +85,7 @@ test("reasserts a restored role after a successful registration heartbeat loses 
       return { claimed: true, interest: interest() }
     },
     getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
+    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),
@@ -89,6 +96,8 @@ test("reasserts a restored role after a successful registration heartbeat loses 
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
     stateDirectory,
+    clientInstanceID: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    pluginVersion: "source",
   })
 
   try {
@@ -108,11 +117,8 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
   let holder = "ses_current"
   const regains: string[] = []
   const regained = Promise.withResolvers<void>()
-  const client: Pick<
-    EnvoyClient,
-    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
-  > = {
-    subscribe: async () => interest(),
+  const client: FakeClient = {
+    subscribe: async () => registered(),
     getInterest: async () => interest(),
     unsubscribe: async () => undefined,
     unregisterSession: async () => undefined,
@@ -126,6 +132,7 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
       if (holder === "ses_current" && regains.length === 0) holder = "ses_lost"
       return answer
     },
+    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),
@@ -136,6 +143,8 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
     stateDirectory,
+    clientInstanceID: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    pluginVersion: "source",
   })
   session.onRoleRegained(async (role, reason) => {
     regains.push(`${role} ${reason}`)

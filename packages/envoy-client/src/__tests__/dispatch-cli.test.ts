@@ -3,9 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArtifactBlock } from "@legion/contracts";
-import { DISPATCH_BODY_MAX, PROJECT_KEY_RULE } from "@legion/contracts";
+import { DISPATCH_BODY_MAX, IDEMPOTENCY_KEY_HEADER, PROJECT_KEY_RULE } from "@legion/contracts";
 import { cliRefusals, fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
+import { forgetKeyedLayerMemory, KEYED_LAYER_MEMORY_MS } from "../dispatch-http";
 import { forgetShownPictures } from "../dispatch-picture-tools";
 
 interface Recorded {
@@ -180,6 +181,17 @@ let textReads = 0;
  *  `served` (past `last` once events were written after the issue was read), each a message, by
  *  `after` and `limit` as Dispatch pages them. `queries` records each events request's query. */
 let eventLog = { last: 40, served: 40, queries: [] as string[] };
+/** DSP-1's handoffs as the handoff routes store them, oldest first: each write the next version
+ *  of its phase, written by the actor it names, its body kept as the text sent. */
+const handoffs: {
+  id: string;
+  issue_key: string;
+  phase: string;
+  version: number;
+  author: unknown;
+  created_at: string;
+  body: string;
+}[] = [];
 
 const server = Bun.serve({
   port: 0,
@@ -330,7 +342,45 @@ const server = Bun.serve({
         ],
       });
     }
+    const handoffWrite = pathname.match(/^\/api\/v1\/issues\/DSP-1\/handoffs\/([a-z-]+)$/);
+    if (handoffWrite !== null && request.method === "POST") {
+      const phase = handoffWrite[1] ?? "";
+      const record = {
+        id: `00000000-0000-4000-8000-00000000000${handoffs.length + 1}`,
+        issue_key: "DSP-1",
+        phase,
+        version: handoffs.filter((handoff) => handoff.phase === phase).length + 1,
+        author: body.actor,
+        created_at: `2026-10-26T00:00:0${handoffs.length + 1}Z`,
+        body: body.body,
+      };
+      handoffs.push(record);
+      const { body: _, ...summary } = record;
+      return Response.json(summary, { status: 201 });
+    }
+    const handoffLatest = pathname.match(/^\/api\/v1\/issues\/DSP-1\/handoffs\/([a-z-]+)\/latest$/);
+    if (handoffLatest !== null) {
+      const latest = handoffs.filter((handoff) => handoff.phase === handoffLatest[1]).at(-1);
+      return latest === undefined
+        ? Response.json(
+            { code: "HANDOFF_NOT_FOUND", error: `issue DSP-1 has no ${handoffLatest[1]} handoff` },
+            { status: 404 }
+          )
+        : Response.json(latest);
+    }
+    if (pathname === "/api/v1/issues/DSP-1/handoffs") {
+      return Response.json(handoffs.map(({ body: _, ...summary }) => summary).reverse());
+    }
+    const byId = handoffs.find((handoff) => pathname === `/api/v1/handoffs/${handoff.id}`);
+    if (byId !== undefined) return Response.json(byId);
     if (pathname === "/v1/interests/ses-1") return interests();
+    // A Dispatch build older than the answers route, which it therefore lacks.
+    if (pathname.endsWith("/answers")) {
+      return Response.json(
+        { code: "NOT_FOUND", error: `no route for ${request.method} ${pathname}` },
+        { status: 404 }
+      );
+    }
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
 });
@@ -344,10 +394,12 @@ beforeEach(() => {
   blocksServer = { tableRows: true, editedBetweenReads: false };
   textReads = 0;
   eventLog = { last: 40, served: 40, queries: [] };
+  handoffs.length = 0;
   interests = () => Response.json({ error: "unset" }, { status: 500 });
   stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
   // Each run is its own process in production: nothing the library remembers carries over.
   resetAdviceMemory();
+  forgetKeyedLayerMemory();
 });
 
 function environment(
@@ -365,7 +417,8 @@ function environment(
 async function run(
   argv: readonly string[],
   extra: Record<string, string | undefined>,
-  stdin = ""
+  stdin = "",
+  fetchImpl?: typeof fetch
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";
   let stderr = "";
@@ -378,6 +431,7 @@ async function run(
     },
     readText: (path) => (path === "-" ? stdin : readFileSync(path, "utf-8")),
     cwd: stateDir,
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
   });
   return { code, stdout, stderr };
 }
@@ -386,6 +440,41 @@ async function run(
 function nextProcess(sessionId: string): void {
   resetAdviceMemory();
   forgetShownPictures(sessionId);
+  forgetKeyedLayerMemory();
+}
+
+/**
+ * The test server behind Dispatch's keyed layer: every answer to a write carries its
+ * `Idempotency-Key` back, the first `failing` message posts fail in transport before they reach it,
+ * and `/healthz` never answers within its bound, as under the load that stalls a write.
+ */
+function keyedDispatch(failing: number): {
+  readonly fetchImpl: typeof fetch;
+  readonly keys: string[];
+  readonly probes: string[];
+} {
+  const keys: string[] = [];
+  const probes: string[] = [];
+  let left = failing;
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const { pathname } = new URL(request.url);
+    if (pathname === "/healthz") {
+      probes.push(pathname);
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    }
+    const key = request.headers.get(IDEMPOTENCY_KEY_HEADER);
+    if (request.method === "POST" && pathname === "/api/v1/issues/DSP-1/messages") {
+      keys.push(key ?? "");
+      if (left-- > 0) throw new TypeError("fetch failed");
+    }
+    const answer = await fetch(request);
+    if (key === null) return answer;
+    const headers = new Headers(answer.headers);
+    headers.set(IDEMPOTENCY_KEY_HEADER, key);
+    return new Response(answer.body, { status: answer.status, headers });
+  }) as typeof fetch;
+  return { fetchImpl, keys, probes };
 }
 
 function ledger(sessionId: string): { tool: string; error?: string }[] {
@@ -419,14 +508,105 @@ describe("the dispatch CLI", () => {
     expect(posted?.body).toMatchObject({ actor: { id: "b" } });
   });
 
+  test("under Claude Code, claude-envoy's ENVOY_SESSION_ID override is the session, as on its claim", async () => {
+    const { code } = await run(["message", "--issue", "DSP-1", "--body", "hello"], {
+      DISPATCH_HOST: "claude",
+      ENVOY_SESSION_ID: "qa-ses",
+      CLAUDE_CODE_SESSION_ID: "native-ses",
+    });
+    expect(code).toBe(0);
+    const posted = requests.find((request) => request.path === "/api/v1/issues/DSP-1/messages");
+    expect(posted?.body).toMatchObject({ actor: { id: "qa-ses" } });
+    expect(ledger("qa-ses").map((line) => line.tool)).toEqual(["dispatch_message"]);
+    expect(existsSync(join(stateDir, "sessions", "native-ses"))).toBe(false);
+
+    requests.length = 0;
+    const unset = await run(["message", "--issue", "DSP-1", "--body", "x"], {
+      DISPATCH_HOST: "claude",
+    });
+    expect(unset.code).toBe(2);
+    expect(unset.stdout).toContain("ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID is not set");
+    expect(requests).toEqual([]);
+  });
+
+  test("handoff-write records the body file's text as written, and handoff-read prints it back exactly", async () => {
+    // Spacing, key order and a trailing newline a re-serialization would lose.
+    const text = `{ "schemaVersion": 1,\n  "b": [2, 1], "a": "é\\u0041" }\n`;
+    const file = join(stateDir, "DSP-1-implement.json");
+    writeFileSync(file, text);
+    const first = await run(
+      ["handoff-write", "DSP-1", "--phase", "implement", "--body-file", file],
+      omp
+    );
+    expect(first).toMatchObject({ code: 0, stderr: "" });
+    expect(first.stdout).toBe(
+      "Recorded the implement handoff of DSP-1, version 1 (id 00000000-0000-4000-8000-000000000001)\n"
+    );
+    const second = await run(
+      ["handoff-write", "DSP-1", "--phase", "implement", "--body-file", "-"],
+      omp,
+      '{"round":2}'
+    );
+    expect(second.stdout).toContain("version 2 (id 00000000-0000-4000-8000-000000000002)");
+    const posted = requests.find((request) => request.method === "POST");
+    expect(posted?.body).toMatchObject({ actor: { kind: "session", id: "ses-1" }, body: text });
+
+    const latest = await run(["handoff-read", "DSP-1", "--phase", "implement"], omp);
+    expect(latest.code).toBe(0);
+    expect(latest.stdout).toBe(
+      'DSP-1 implement handoff, version 2 (id 00000000-0000-4000-8000-000000000002), written by session ses-1 at 2026-10-26T00:00:02Z\n{"round":2}\n'
+    );
+    const versionOne = await run(
+      ["handoff-read", "DSP-1", "--phase", "implement", "--version", "1"],
+      omp
+    );
+    expect(versionOne.code).toBe(0);
+    const [line, ...rest] = versionOne.stdout.split("\n");
+    expect(line).toBe(
+      "DSP-1 implement handoff, version 1 (id 00000000-0000-4000-8000-000000000001), written by session ses-1 at 2026-10-26T00:00:01Z"
+    );
+    expect(rest.join("\n")).toBe(text);
+
+    const missing = await run(
+      ["handoff-read", "DSP-1", "--phase", "implement", "--version", "3"],
+      omp
+    );
+    expect(missing.code).toBe(1);
+    expect(missing.stdout).toContain(
+      "HANDOFF_NOT_FOUND: issue DSP-1 has no implement handoff version 3; its newest implement handoff is version 2"
+    );
+  });
+
+  test("handoff-write refuses a body that is not one JSON object, dry run included, sending nothing", async () => {
+    for (const argv of [
+      ["handoff-write", "DSP-1", "--phase", "plan", "--body-file", "-"],
+      ["handoff-write", "DSP-1", "--phase", "plan", "--body-file", "-", "--dry-run"],
+    ]) {
+      const { code, stdout } = await run(argv, omp, "[1, 2]\n");
+      expect(code).toBe(1);
+      expect(stdout.split("\n")[0]).toBe("dispatch handoff-write was not called: 1 problem");
+      expect(stdout).toContain("body is not one JSON object");
+    }
+    expect(requests).toEqual([]);
+  });
+
   test("an empty session id counts as unset", async () => {
     const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "x"], {
-      DISPATCH_HOST: "opencode",
+      DISPATCH_HOST: "omp",
       DISPATCH_SESSION_ID: "",
     });
     expect(code).toBe(2);
     expect(stdout).toContain("DISPATCH_SESSION_ID");
     expect(requests).toEqual([]);
+  });
+
+  test("answers against a Dispatch without the route says its build is older than the answers route, exit 1", async () => {
+    const { code, stdout } = await run(["answers"], omp);
+    expect(code).toBe(1);
+    expect(stdout).toBe(
+      `This Dispatch (http://127.0.0.1:${server.port}) has no answers route yet: its build is older than the answers route.\n`
+    );
+    expect(requests.map((request) => request.path)).toEqual(["/api/v1/agents/ses-1/answers"]);
   });
 
   test("an unknown flag is refused in command syntax, with an example", async () => {
@@ -476,6 +656,21 @@ describe("the dispatch CLI", () => {
     expect(stdout).toContain(
       `- --body is 1 characters over the ${DISPATCH_BODY_MAX}-character limit (${DISPATCH_BODY_MAX + 1}/${DISPATCH_BODY_MAX})`
     );
+    expect(requests).toEqual([]);
+  });
+
+  // --content and --content-file store their text as a Markdown document, so under a .jsonl name
+  // the call is refused before any request, dry run included, naming --path.
+  test("artifact refuses --content-file under a name that is not Markdown, naming --path", async () => {
+    const argv = ["artifact", "--issue", "DSP-1", "--name", "rows.jsonl", "--content-file", "-"];
+    for (const call of [[...argv, "--dry-run"], argv]) {
+      const { code, stdout } = await run(call, omp, '{"row_id": 1}\n{"row_id": 2}\n');
+      expect(code, call.join(" ")).toBe(1);
+      expect(stdout.split("\n").slice(0, 2)).toEqual([
+        "dispatch artifact was not called: 1 problem",
+        `- content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph), and "rows.jsonl" is not a Markdown name. Upload the file under the same name with path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged; content takes a name ending in .md or .markdown or with no extension.`,
+      ]);
+    }
     expect(requests).toEqual([]);
   });
 
@@ -557,6 +752,100 @@ describe("the dispatch CLI", () => {
     expect(first.stdout).toContain("DSP-1 is still in triage");
     expect(second.stdout).not.toContain("is still in triage");
   });
+
+  // Every `dispatch` command is a process of its own, so what one call saw of Dispatch's keyed
+  // layer reaches the next only through the session's state. A later call's write whose attempt
+  // fails is asked again under its key on that alone, without /healthz, which the load that
+  // stalled the write can keep from answering in time.
+  test("a failed write is asked again under its key when an earlier call of the session saw the keyed layer", async () => {
+    const message = ["message", "--issue", "DSP-1", "--body", "Deliverable landed."];
+    const first = keyedDispatch(0);
+    expect((await run(message, omp, "", first.fetchImpl)).code).toBe(0);
+    const state = JSON.parse(
+      readFileSync(join(stateDir, "sessions", "ses-1", "state.json"), "utf-8")
+    );
+    expect(Object.keys(state.keyedLayer)).toEqual([`http://127.0.0.1:${server.port}`]);
+    nextProcess("ses-1");
+    const stalled = keyedDispatch(1);
+    const second = await run(message, omp, "", stalled.fetchImpl);
+    expect(second.code).toBe(0);
+    expect(stalled.keys).toHaveLength(2);
+    expect(stalled.keys[1]).toBe(stalled.keys[0] ?? "");
+    expect(stalled.probes).toEqual([]);
+  });
+
+  // A sighting holds for KEYED_LAYER_MEMORY_MS from the answer that showed it, across processes as
+  // within one. One older than that, one dated ahead of the clock, and anything that is not a
+  // sighting say nothing, so the write asks /healthz and, with no yes from it, is reported rather
+  // than sent twice.
+  test("a carried sighting of the keyed layer is trusted only while it is under five minutes old", async () => {
+    const origin = `http://127.0.0.1:${server.port}`;
+    const message = ["message", "--issue", "DSP-1", "--body", "Deliverable landed."];
+    const dir = join(stateDir, "sessions", "ses-1");
+    mkdirSync(dir, { recursive: true });
+    const sighting = (ago: number) => ({ [origin]: new Date(Date.now() - ago).toISOString() });
+    const call = async (keyedLayer: unknown) => {
+      writeFileSync(
+        join(dir, "state.json"),
+        JSON.stringify({ advice: [], pictures: [], follows: [], keyedLayer })
+      );
+      nextProcess("ses-1");
+      const stalled = keyedDispatch(1);
+      const { code } = await run(message, omp, "", stalled.fetchImpl);
+      return { code, posts: stalled.keys.length, probes: stalled.probes.length };
+    };
+    expect(await call(sighting(60_000))).toEqual({ code: 0, posts: 2, probes: 0 });
+    for (const keyedLayer of [
+      sighting(KEYED_LAYER_MEMORY_MS + 1_000),
+      sighting(-60_000),
+      { [origin]: "yesterday" },
+      { [origin]: Date.now() },
+      "garbage",
+    ]) {
+      expect(await call(keyedLayer), JSON.stringify(keyedLayer)).toEqual({
+        code: 1,
+        posts: 1,
+        probes: 1,
+      });
+    }
+  });
+
+  // Dispatch's own refusal that carries no key back says its keyed layer did not judge the
+  // request, so the carried sighting is set aside: the write asks /healthz instead of being sent
+  // again, and the call's save leaves the sighting out of state.json, so the next call trusts
+  // nothing it carried. A client that kept the sighting would resend through its 15 s of pauses;
+  // the test's 30 s bound lets that show as five posts rather than as a timeout.
+  test("a Dispatch refusal that echoes no key drops the carried sighting from state.json", async () => {
+    const origin = `http://127.0.0.1:${server.port}`;
+    const file = join(stateDir, "sessions", "ses-1", "state.json");
+    mkdirSync(join(stateDir, "sessions", "ses-1"), { recursive: true });
+    const keyedLayer = { [origin]: new Date(Date.now() - 60_000).toISOString() };
+    writeFileSync(file, JSON.stringify({ advice: [], pictures: [], follows: [], keyedLayer }));
+    nextProcess("ses-1");
+    let posts = 0;
+    let probes = 0;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const { pathname } = new URL(request.url);
+      if (pathname === "/healthz") {
+        probes++;
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      }
+      if (request.method === "POST" && pathname === "/api/v1/issues/DSP-1/messages") {
+        posts++;
+        return Response.json({ code: "INTERNAL", error: "database is down" }, { status: 503 });
+      }
+      return fetch(request);
+    }) as typeof fetch;
+    const { code } = await run(
+      ["message", "--issue", "DSP-1", "--body", "Deliverable landed."],
+      omp,
+      "",
+      fetchImpl
+    );
+    expect({ code, posts, probes }).toEqual({ code: 1, posts: 1, probes: 1 });
+    expect(JSON.parse(readFileSync(file, "utf-8")).keyedLayer).toEqual({});
+  }, 30_000);
 
   test("a read from a Dispatch server older than the repository fields answers, warning on stderr", async () => {
     const { code, stdout, stderr } = await run(["read", "--issue", "DSP-3"], omp);
@@ -1054,19 +1343,10 @@ describe("the dispatch CLI's envoy.json", () => {
       ENVOY_CONFIG_FILE: handed,
     });
     expect(namedClaude.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-    // OpenCode likewise.
-    const opencode = await run(["projects"], {
-      ...fromFile,
-      DISPATCH_HOST: "opencode",
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
-      ENVOY_CONFIG_FILE: handed,
-    });
-    expect(opencode.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
   });
 
   test("with DISPATCH_HOST set and no ENVOY_CONFIG_FILE, each host takes its own harness's directory and no other's, else the neutral file", async () => {
     const claude = { DISPATCH_HOST: "claude", CLAUDE_CODE_SESSION_ID: "ses-1" };
-    const opencode = { DISPATCH_HOST: "opencode", DISPATCH_SESSION_ID: "ses-1" };
     const profile = join(stateDir, "profile");
     serverConfig(profile);
     const ompRun = await run(["projects"], {
@@ -1074,7 +1354,6 @@ describe("the dispatch CLI's envoy.json", () => {
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: profile,
       CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
     });
     expect(ompRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
@@ -1099,21 +1378,10 @@ describe("the dispatch CLI's envoy.json", () => {
     });
     expect(emptyHanded.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
-    const own = join(stateDir, "opencode");
-    serverConfig(own);
-    const ownRun = await run(["projects"], {
-      ...fromFile,
-      ...opencode,
-      OPENCODE_CONFIG_DIR: own,
-      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-    });
-    expect(ownRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-
     serverConfig(join(stateDir, ".config", "legion"));
     const neutral = await run(["projects"], {
       ...fromFile,
       CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
     });
     expect(neutral.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
   });
@@ -1171,6 +1439,10 @@ describe("the dispatch CLI's envoy.json", () => {
         ...child,
       });
       expect(stdout).toStartWith("dispatch: DISPATCH_HOST is not set.");
+      // An agent in a Python cell reads this first. With a made-up session id, the CLI finds no
+      // AskGate record, so the write posts with no review.
+      expect(stdout).toContain("From an agent's session, send the command as a bash call.");
+      expect(stdout).toContain("set DISPATCH_SESSION_ID to the id of your own session");
       expect(code).toBe(2);
     }
     expect(requests).toEqual([]);
@@ -1301,6 +1573,29 @@ describe("the dispatch CLI's envoy.json", () => {
     }
     expect(requests).toEqual([]);
   });
+
+  // A Legion pod has no envoy.json: its Dispatch is DISPATCH_URL with DISPATCH_TOKEN_FILE, which
+  // the session's one long-lived shell keeps until a command unsets or empties DISPATCH_URL.
+  test("DISPATCH_TOKEN_FILE with no DISPATCH_URL says the shell lost it, not that envoy.json is missing, and exits 2, sending nothing", async () => {
+    const tokenFile = join(stateDir, "DISPATCH_TOKEN");
+    writeFileSync(tokenFile, "test-token\n");
+    const chosen = join(stateDir, "profile", "envoy.json");
+    for (const variables of [
+      { DISPATCH_TOKEN_FILE: tokenFile },
+      { DISPATCH_TOKEN_FILE: tokenFile, DISPATCH_URL: "" },
+    ]) {
+      const { code, stdout } = await run(["whoami"], {
+        ...fromFile,
+        ENVOY_CONFIG_FILE: chosen,
+        ...variables,
+      });
+      expect(stdout).toBe(
+        "dispatch: DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for\n"
+      );
+      expect(code).toBe(2);
+    }
+    expect(requests).toEqual([]);
+  });
 });
 
 describe("the dispatch CLI's subscription note", () => {
@@ -1393,6 +1688,41 @@ describe("the dispatch CLI's subscription note", () => {
     expect(requests.some((request) => request.path === "/api/v1/issues/DSP-1/messages")).toBe(true);
   });
 
+  // A write that landed before its answer was lost (409 KEY_COMMITTED) is done: the call succeeds,
+  // and its one line says the write was made and to read it back, since there is nothing to print.
+  test("a write answered KEY_COMMITTED exits 0 with one line saying to read it back", async () => {
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/v1/issues/DSP-1/messages")) {
+        return Response.json(
+          { code: "KEY_COMMITTED", error: "the write landed and its answer was lost" },
+          { status: 409 }
+        );
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    let stdout = "";
+    const code = await runDispatchCli(
+      ["message", "--issue", "DSP-1", "--body", "hello"],
+      environment(withListener),
+      {
+        stdout: (text) => {
+          stdout += text;
+        },
+        stderr: () => {},
+        readText: () => "",
+        cwd: stateDir,
+        fetchImpl,
+      }
+    );
+
+    expect(code).toBe(0);
+    expect(stdout.trim().split("\n")).toEqual([
+      expect.stringMatching(
+        /^POST http:\/\/127\.0\.0\.1:\d+\/api\/v1\/issues\/DSP-1\/messages was made, but its answer was lost on the way back \(KEY_COMMITTED\), so this command cannot print what it made: read it back with `dispatch read`, or with the matching list for something it created\.$/
+      ),
+    ]);
+  });
+
   test("a read asks no listener", async () => {
     interests = listed([]);
     const { code } = await run(["projects"], withListener);
@@ -1446,6 +1776,20 @@ describe("cliRefusals", () => {
       expect(stdout, name).toStartWith("dispatch: ");
       expect(cliRefusals(stdout), name).toEqual(refusal(stdout, null));
     }
+    expect(requests).toEqual([]);
+  });
+
+  // The whole line is pinned, not its `dispatch: ` prefix: `opencode` was an accepted host until
+  // it was removed, so the refusal naming it, and naming omp and claude as the ones left, is the
+  // user-visible behaviour that removal produces. A prefix-only assertion passes again the moment
+  // the host comes back, or the message stops naming the hosts it accepts.
+  test("a host the command does not accept is refused by name, with the two it accepts", async () => {
+    const { code, stdout } = await run(["projects"], {
+      DISPATCH_HOST: "opencode",
+      DISPATCH_SESSION_ID: "ses-1",
+    });
+    expect(code).toBe(2);
+    expect(stdout).toBe('dispatch: DISPATCH_HOST is "opencode", not omp or claude.\n');
     expect(requests).toEqual([]);
   });
 

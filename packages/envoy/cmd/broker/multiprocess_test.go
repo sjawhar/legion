@@ -1040,10 +1040,12 @@ func rolloutAccounts(fixer string) string {
 	return strings.Join(entries, " ")
 }
 
-// rolloutBroker is one process of the rollout: what its messages call it, the process whose log a
-// row reads, and a client of that process's own address.
+// rolloutBroker is one process of the rollout: what its messages call it, the account its
+// configuration fixes rolloutSession for, the process whose log a row reads, and a client of that
+// process's own address.
 type rolloutBroker struct {
 	name    string
+	fixer   string
 	process *brokerProcess
 	client  *liveBroker
 }
@@ -1098,16 +1100,23 @@ func TestAFixedSessionNameAcrossARollout(t *testing.T) {
 		t.Helper()
 		process := startBroker(t, brokerOptions{Binary: binary, Env: append(exchangeEnv(t, databaseURL, cluster, github, longAccessSeconds),
 			"BROKER_EXCHANGE_ACCOUNTS="+rolloutAccounts(fixer), "BROKER_DRAIN_SECONDS=0")})
-		return rolloutBroker{name: fmt.Sprintf("%s (%s)", name, process.Addr), process: process, client: newLiveBroker(process.Addr, key)}
+		return rolloutBroker{name: fmt.Sprintf("%s (%s)", name, process.Addr), fixer: fixer, process: process, client: newLiveBroker(process.Addr, key)}
 	}
 	// exchange is a pod of account exchanging its projected token at broker for a token under
-	// session, each pod a fresh one, as each replica of a Deployment's is.
+	// session, each pod a fresh one, as each replica of a Deployment's is. A pod whose entry at
+	// that process fixes no name is registered for the one it asks for first, as its deployment's
+	// daemon registers it: what every row here is about is who a fixed name belongs to, so no row
+	// may turn on a registration the deployment would have made.
+	registrarToken := accountToken(t, cluster, clusterKey, registrarAccount)
 	pods := 0
 	exchange := func(t *testing.T, broker rolloutBroker, account, session string) (int, map[string]any) {
 		t.Helper()
 		pods++
-		podToken := mintPodToken(t, cluster, clusterKey, account, exchangeAudience, fmt.Sprintf("rollout-pod-%d", pods))
-		return broker.client.exchange(t, exchangeForm(podToken, session))
+		uid := fmt.Sprintf("rollout-pod-%d", pods)
+		if account != broker.fixer {
+			broker.client.registered(t, mintPodToken(t, cluster, clusterKey, account, enrolmentAudience, uid), session, registrarToken)
+		}
+		return broker.client.exchange(t, exchangeForm(mintPodToken(t, cluster, clusterKey, account, exchangeAudience, uid), session))
 	}
 	refusedTheName := func(status int, body map[string]any) bool {
 		description, _ := body["error_description"].(string)

@@ -49,7 +49,7 @@ import type {
   suggestReplace,
   unresolve,
 } from "proof-sdk-upstream/src/editor/plugins/marks";
-import type { mermaidDiagramsPlugin } from "proof-sdk-upstream/src/editor/plugins/mermaid-diagrams";
+import type { renderProofMermaidSvg } from "proof-sdk-upstream/src/editor/plugins/mermaid-diagrams";
 import type { placeholderPlugin } from "proof-sdk-upstream/src/editor/plugins/placeholder";
 import type { suggestionsPlugins } from "proof-sdk-upstream/src/editor/plugins/suggestions";
 import type { tableKeyboardPlugin } from "proof-sdk-upstream/src/editor/plugins/table-keyboard";
@@ -113,7 +113,7 @@ export type UpstreamBoundaryIsTyped = [
   Assert<NotAny<typeof suggestReplace>>,
   Assert<NotAny<typeof unresolve>>,
   // editor/plugins/mermaid-diagrams
-  Assert<NotAny<typeof mermaidDiagramsPlugin>>,
+  Assert<NotAny<typeof renderProofMermaidSvg>>,
   // editor/plugins/placeholder
   Assert<NotAny<typeof placeholderPlugin>>,
   // editor/plugins/suggestions

@@ -88,7 +88,7 @@ says to enter the code on the Dispatch credential page.
 Interrupting it (Ctrl-C) leaves the login pending: run it again and it shows the same code, until
 someone approves the login or it expires.
 
-## 3. Approve it in Dispatch
+## 3. Approve it on Dispatch's machine-login page
 
 As the operator the login names, open Dispatch's **Enter machine login code** page
 (`/credentials/machine`; the Inbox's **Machine login** row links there), type the code, and click

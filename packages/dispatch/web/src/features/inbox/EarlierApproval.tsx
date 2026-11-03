@@ -6,19 +6,19 @@ import { api } from "../../api/client";
 import type { AskApproval } from "../../api/types";
 import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { dangerText, textMutedOnSurface } from "../../theme/classes";
+import { ChangeView } from "../doc/ChangeView";
 import { cutDecisionBlocks } from "../doc/decision-blocks";
-import { VersionDiff } from "../doc/VersionDiff";
 import { AgentName } from "../refs/AgentName";
 
 /**
- * The diff between the version a human approved and the version the request names, with every
+ * What changed between the version a human approved and the version the request names, with every
  * decision block cut out of both (`cutDecisionBlocks`), so it shows what changed outside them:
  * the answers to decision blocks between the two are what the human himself decided. Mounted
  * only once the reader asks for it, so nothing is fetched or rendered before. Both reads share
  * the document page's `["artifact", id, "version", n]` keys, and the loading and error copy is
  * its comparison's (`features/artifacts/ArtifactDetails.tsx`).
  */
-function ApprovedVersionDiff({
+function ApprovedChangeView({
   approvedVersion,
   artifactId,
   version,
@@ -50,14 +50,14 @@ function ApprovedVersionDiff({
     return <p className={`text-sm ${dangerText}`}>Could not load versions to compare.</p>;
   }
   if (cut !== undefined) {
-    return <VersionDiff after={cut.after} before={cut.before} />;
+    return <ChangeView after={cut.after} before={cut.before} />;
   }
   return <p className={`text-sm ${textMutedOnSurface}`}>Loading versions to compare…</p>;
 }
 
 /**
  * The approval an approval request follows, when the document has one: `Approved at version N
- * on <date> by <who>.` and a **Show diff** control that reveals `ApprovedVersionDiff`. Renders
+ * on <date> by <who>.` and a **Show diff** control that reveals `ApprovedChangeView`. Renders
  * nothing for a first request, whose `approval` carries no `approved`.
  */
 export function EarlierApproval({ approval }: { approval: AskApproval }): ReactNode {
@@ -82,7 +82,7 @@ export function EarlierApproval({ approval }: { approval: AskApproval }): ReactN
         textClassName={textMutedOnSurface}
       />
       {diffOpen ? (
-        <ApprovedVersionDiff
+        <ApprovedChangeView
           approvedVersion={approved.version}
           artifactId={approval.artifact_id}
           version={approval.version}

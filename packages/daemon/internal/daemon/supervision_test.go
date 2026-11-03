@@ -310,6 +310,8 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	sh.send(shimwire.AgentStart{})
 	testwait.Eventually(t, "the turn to start", func() bool { return d.claim(token).State == string(supervise.StateWorking) })
 	sh.send(shimwire.AgentEnd{})
+	// The prompt's result, which Oh My Pi writes behind that agent_end and the task retires on.
+	sh.send(shimwire.PromptResult{ID: prompt.ID, AgentInvoked: true})
 	testwait.Eventually(t, "the turn to end", func() bool {
 		c := d.claim(token)
 		return c.State == string(supervise.StateIdle) && c.Pending == nil
@@ -1194,6 +1196,10 @@ func TestEveryStreamEventMapsToItsSuperviseEvent(t *testing.T) {
 		{stream.Hello{Claim: token, Generation: 3}, supervise.StreamHello{Claim: token, Generation: 3}},
 		{stream.TurnStart{Claim: token, DeliveryID: "d1"}, supervise.StreamTurnStart{Claim: token, DeliveryID: "d1"}},
 		{stream.TurnEnd{Claim: token}, supervise.StreamTurnEnd{Claim: token}},
+		{stream.PromptResult{Claim: token, DeliveryID: "d1", AgentInvoked: true},
+			supervise.StreamPromptResult{Claim: token, DeliveryID: "d1", AgentInvoked: true}},
+		{stream.PromptResult{Claim: token, DeliveryID: "d1", Error: "no model"},
+			supervise.StreamPromptResult{Claim: token, DeliveryID: "d1", Error: "no model"}},
 		{stream.LateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."},
 			supervise.StreamLateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."}},
 		{stream.LateRefusal{Claim: token, DeliveryID: "d2", Error: "Agent is already processing.", Replayed: true, ConnSequence: 3},
@@ -1210,6 +1216,28 @@ func TestEveryStreamEventMapsToItsSuperviseEvent(t *testing.T) {
 	}
 	if sealed := streamEventTypes(t); len(sealed) != len(mapped) {
 		t.Fatalf("internal/stream seals %d event types %v; this test maps %d — map the new one", len(sealed), sealed, len(mapped))
+	}
+}
+
+// endTurn ends the turn a machine is in as the agent really ends one: the agent_end, and behind
+// it the prompt_result of the prompt whose turn it was (shimwire.PromptResult), which Oh My Pi
+// writes milliseconds later and which the Claude Code bridge writes too. The delivery retires on
+// that result rather than on the agent_end alone, because with background work on a role's own
+// background result starts turns the daemon never prompted and an agent_end names no prompt at
+// all. A turn no confirmed delivery of the daemon's was running in ends with no
+// result behind it, exactly as such a turn does on the wire.
+func endTurn(ctx context.Context, t *testing.T, machine *supervise.Machine, token claim.Token) {
+	t.Helper()
+	pending := machine.Claim().Pending
+	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
+		t.Fatalf("end the turn of %s: %v", token, err)
+	}
+	if pending == nil || pending.ConfirmedAt.IsZero() {
+		return
+	}
+	result := supervise.StreamPromptResult{Claim: token, DeliveryID: pending.ID, AgentInvoked: true}
+	if err := machine.Handle(ctx, result); err != nil {
+		t.Fatalf("report the end of the prompt %s ran: %v", token, err)
 	}
 }
 

@@ -18,14 +18,14 @@ import (
 // Two peers' updates reach the room's persistence in whatever order their read loops hand them
 // on, which need not be the order the room applied them in: ygo fires a transaction's update
 // observers after the transaction has released the document's lock, so one peer's update can be
-// stored while another's is still between the room's update observer, which counts it as pending
-// (recordUpdateClass), and ygo's persistence observer, which hands it to the room's worker.
-// Settlement reads the room only once that count is zero, so a count an out-of-order store left
-// behind would hold the room's settlement off for good: its edits unversioned and its
-// pending-settlement row retried forever. Here the first peer's update is held between those two
-// observers while the second peer's is stored. The room counts the held update, a settlement
-// meanwhile writes nothing, and once the held update is stored the room settles both peers' text.
-func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
+// handed to the room's worker while another's is still between the room's update observer, which
+// counts it as pending (queueUpdateClass), and ygo's persistence observer, which hands it to the
+// worker. Here the first peer's update is held between those two observers while the second
+// peer's is stored. The second peer's append stores the held update first, in the room's commit
+// order (flushThrough); a settlement meanwhile settles both peers' text without waiting for the
+// held hand-over; and once that hand-over runs it stores nothing and leaves the room counting no
+// update as pending, so nothing holds the room's settlement or its record (unusedLocked).
+func TestARoomWhosePeersUpdatesReachItsPersistenceOutOfOrderSettlesBoth(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	var attempts atomic.Int64
@@ -105,8 +105,8 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	waitFor(t, 10*time.Second, "the second peer's update to be stored", func() bool {
 		return storedClock(beta.Doc.ClientID()) > 0
 	})
-	if storedClock(alpha.Doc.ClientID()) != 0 {
-		t.Fatal("the first peer's update was stored while it was held")
+	if storedClock(alpha.Doc.ClientID()) == 0 {
+		t.Fatal("the second peer's update was stored ahead of the first's, which the room committed before it")
 	}
 
 	state := service.room(artifactID)
@@ -117,12 +117,9 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	if attempts.Load() == 0 {
 		t.Fatal("no settlement ran while the first peer's update was held")
 	}
-	if got := latestVersionNumber(t, service, artifactID); got != before {
-		t.Fatalf("a settlement wrote version %d while the first peer's update was not stored", got)
+	if got := latestVersionNumber(t, service, artifactID); got != before+1 {
+		t.Fatalf("latest version = %d, want %d: the settlement's, while the first peer's hand-over is held", got, before+1)
 	}
-
-	releaseHeld()
-	waitForDocumentVersion(t, service.store, artifactID, before+1)
 	var markdown string
 	if err := service.store.Pool.QueryRow(ctx, `
 		select markdown from artifact_versions where artifact_id = $1 and number = $2
@@ -132,6 +129,16 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	if !strings.Contains(markdown, "alpha") || !strings.Contains(markdown, "beta") {
 		t.Fatalf("settled version = %q, want both peers' paragraphs", markdown)
 	}
+
+	stored := storedUpdateCount(t, service.store, artifactID)
+	releaseHeld()
+	waitFor(t, 10*time.Second, "the room to count no update its persistence has not taken", func() bool {
+		return !service.hasPendingUpdates(artifactID) && !service.hasDurableAppend(artifactID)
+	})
+	if after := storedUpdateCount(t, service.store, artifactID); after != stored {
+		t.Fatalf("the first peer's held hand-over left %d stored updates, want %d: it was stored already", after, stored)
+	}
+	assertStoredOrder(t, service, artifactID)
 }
 
 // typeParagraph is one keystroke's transaction that types text into a new first paragraph.

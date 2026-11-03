@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -66,10 +67,16 @@ func newProcessPair(t *testing.T) processPair {
 // fails the room. A browser's provider reconnects and resends there, and so does this.
 func (pair processPair) leaveTaskABehind(t *testing.T, connection uint64, peer model.Actor, markdown string) {
 	t.Helper()
+	pair.leaveTaskABehindWith(t, connection, peer, appendBlocks(t, markdown))
+}
+
+// leaveTaskABehindWith is leaveTaskABehind for a browser edit other than an appended block.
+func (pair processPair) leaveTaskABehindWith(t *testing.T, connection uint64, peer model.Actor, edit func(*pmdoc.Node) *pmdoc.Node) {
+	t.Helper()
 	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
 		t.Fatalf("load task A's room: %v", err)
 	}
-	editAsBrowserPeer(t, pair.taskB, pair.artifactID, connection, peer, appendBlocks(t, markdown))
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, connection, peer, edit)
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if behind := roomBehind(t, pair.taskA, pair.artifactID); !behind {
 		t.Fatal("task A's room stands at the head after task B's edit, so nothing here is tested")
@@ -1323,19 +1330,20 @@ func TestARoomWritesAgainAfterASupersededSettlementAppendsItsRepair(t *testing.T
 
 // A cold write is outside the gate: it holds no room, so nothing says the document it was made
 // on is behind the head. A browser that opens the document behind the write's store read and
-// types moves the head under it, and the write's own append still lands - its update is a Yjs
-// update, which commutes with the browser's, and the room that holds the document after the
-// publish holds both edits. Gated on the head its store read saw, the write answered 503 for a
-// conflict Yjs resolves (coldFork, appendingCursor).
-func TestAColdWriteAppendsAfterAnotherWriterMovedTheHead(t *testing.T) {
+// types reaches a room the write did not read; the browser's append waits on the advisory lock the
+// write holds from its read, so the head cannot move under the write, and the write's own append
+// lands, then the browser's - its update is a Yjs update, which commutes with the browser's, and
+// the room that holds the document after the publish holds both edits. Gated on that room, the
+// write would answer 503 for a conflict Yjs resolves (coldFork, appendingCursor).
+func TestAColdWriteAppendsUnderABrowserThatOpenedBehindItsRead(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
 	closeDocumentRoom(t, service, artifactID)
 	read := storedHead(t, service.store, artifactID)
 
-	// The browser opens the document behind the write's store read and types, and its append is
-	// durable before the write appends: the head the write meets is past the one it forked from.
+	// The browser opens the document behind the write's store read and types; its append queues
+	// behind the write's lock.
 	opened := false
 	service.afterForkRead = func(room string) {
 		if room != artifactID || opened || service.srv.GetDoc(artifactID) != nil {
@@ -1344,18 +1352,18 @@ func TestAColdWriteAppendsAfterAnotherWriterMovedTheHead(t *testing.T) {
 		opened = true
 		editAsConnectedPeer(t, service, artifactID, 1, model.Actor{Kind: "user", ID: "alice"},
 			appendBlocks(t, "Alice's paragraph.\n"))
-		waitForLandedAppends(t, service, artifactID)
 	}
 	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
 	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
-		t.Fatalf("a cold write whose head moved under it: %v", err)
+		t.Fatalf("a cold write under a browser that opened behind its read: %v", err)
 	}
 	if !opened {
-		t.Fatal("the write never read the store, so no head moved under it")
+		t.Fatal("the write never read the store, so no browser opened behind it")
 	}
+	waitForLandedAppends(t, service, artifactID)
 	if head := storedHead(t, service.store, artifactID); head <= read+1 {
-		t.Fatalf("the document's head is %d, want it past %d: the browser's append and the write's own", head, read+1)
+		t.Fatalf("the document's head is %d, want it past %d: the write's append and the browser's", head, read+1)
 	}
 	stored := storedMarkdown(t, service.store, artifactID)
 	for _, want := range []string{"Alice's paragraph.", "Agent's paragraph."} {
@@ -1497,6 +1505,262 @@ func TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow(t *testing.T) 
 	}
 }
 
+// recordedClasses holds what a service's room update observer recorded for each update its rooms
+// applied (documentUpdateClass), read in the moment between that observer and ygo's persistence
+// observer, which takes the record (consumeUpdateClass). An observer registered in
+// OnLoadDocument after the service's own runs there: ygo fires a transaction's update observers in
+// the order they were registered, and the room registers its persistence observer after
+// OnLoadDocument returns. Only rooms loaded after recordClasses installs it are read.
+type recordedClasses struct {
+	mu      sync.Mutex
+	classes []recordedClass
+}
+
+// recordedClass is the class the room recorded for one update and the origin the room applied
+// that update with; found is false when the room recorded none for it.
+type recordedClass struct {
+	origin any
+	class  documentUpdateClass
+	found  bool
+}
+
+// recordClasses installs the recorder on service and reloads artifactID's room, which a seed may
+// have loaded before the recorder was there, so the room it returns is read.
+func recordClasses(t *testing.T, service *Service, artifactID string) (*recordedClasses, *crdt.Doc) {
+	t.Helper()
+	ctx := context.Background()
+	recorded := &recordedClasses{}
+	load := service.srv.OnLoadDocument
+	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
+		if err := load(ctx, room, doc); err != nil {
+			return err
+		}
+		doc.OnUpdate(func(update []byte, origin any) {
+			read := recordedClass{origin: origin}
+			if state := service.lockExistingState(room); state != nil {
+				for _, class := range state.updateClasses {
+					if bytes.Equal(class.update, update) {
+						read.class, read.found = class.documentUpdateClass, true
+						break
+					}
+				}
+				service.unlockState(room, state)
+			}
+			recorded.mu.Lock()
+			recorded.classes = append(recorded.classes, read)
+			recorded.mu.Unlock()
+		})
+		return nil
+	}
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatalf("evict the room loaded before the recorder: %v", err)
+	}
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load the recorded room: %v", err)
+	}
+	return recorded, service.srv.GetDoc(artifactID)
+}
+
+// latest is the class the room recorded for the latest update it applied with an origin matches
+// accepts, failing the test when it applied none or recorded no class for it.
+func (r *recordedClasses) latest(t *testing.T, what string, matches func(origin any) bool) documentUpdateClass {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for index := len(r.classes) - 1; index >= 0; index-- {
+		if !matches(r.classes[index].origin) {
+			continue
+		}
+		if !r.classes[index].found {
+			t.Fatalf("the room recorded no class for %s", what)
+		}
+		return r.classes[index].class
+	}
+	t.Fatalf("the room never applied %s", what)
+	return documentUpdateClass{}
+}
+
+// keptAndFreshRendering is the markdown the resident room's rendered replica keeps for the room's
+// latest commit - what the update observer measures the next update against
+// (updateChangesMarkdown) - and a fresh render of the room's document as of the same moment.
+func keptAndFreshRendering(t *testing.T, service *Service, artifactID string) (kept, fresh string) {
+	t.Helper()
+	live := service.srv.GetDoc(artifactID)
+	if live == nil {
+		t.Fatal("no room is resident")
+	}
+	copied, err := snapshotDocument(live)
+	if err != nil {
+		t.Fatalf("copy the room's document: %v", err)
+	}
+	if fresh, _, _, err = renderDocumentForUpdate(copied.GetXmlFragment(fragmentName)); err != nil {
+		t.Fatalf("render the room's document: %v", err)
+	}
+	_, listed := listedReplica(t, service, artifactID)
+	replica := listed.Value()
+	if replica == nil {
+		t.Fatal("the resident room's rendered replica is gone")
+	}
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	if pending := replica.log.Pending(); pending > 0 {
+		t.Fatalf("the replica has %d committed updates it has not taken", pending)
+	}
+	if replica.rendering == nil {
+		t.Fatal("the replica keeps no rendering")
+	}
+	return replica.rendering.markdown, fresh
+}
+
+// A comment's margin write changes only the marks map, yet the update it publishes can change the
+// room's text: ygo encodes every transaction's update with the whole delete set of the document it
+// was made on, so the update carries every deletion its fork holds. Here task A's room stands
+// behind the head because task B, the other process, appended a browser's deletion of "Second."
+// that the room never took, so the margin write - ProjectMark in a joined transaction, as a reply,
+// a resolve, a reopen and a comment edit run it - forks the stored document (coldFork), which holds
+// that deletion, and its publish carries the deletion into the room. The room's update observer
+// has to render that update as it renders any other: the class it records says the content
+// changed, the ask-block observer is handed the tree (which forgets an ask author whose block the
+// tree no longer holds, observeAskBlocks), and the rendering the replica keeps is the room's own.
+// An observer that took a margin-only update for one that cannot change the text would keep
+// "Second." in that rendering and record the publish as no change, and would then measure the next
+// browser update against the stale rendering: a browser's margin note alone would count as a
+// content change, credited to that browser's person and settled as their edit.
+func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testing.T) {
+	pair := newProcessPair(t)
+	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	pair.leaveTaskABehindWith(t, 1, bob, withoutTopLevelBlock("Second."))
+	// An ask author for a block the document does not hold: the ask-block observer forgets it
+	// whenever it is handed a tree, and only then.
+	const goneAsk = "ask-block-the-document-does-not-hold"
+	state := pair.taskA.lockState(pair.artifactID)
+	if state.askAuthors == nil {
+		state.askAuthors = make(map[string]model.Actor)
+	}
+	state.askAuthors[goneAsk] = bob
+	pair.taskA.unlockState(pair.artifactID, state)
+
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	var cold bool
+	if err := joinedWrite(pair.taskA, func(ctx context.Context) error {
+		if err := pair.taskA.ProjectMark(ctx, pair.artifactID, "comment-on-task-a", MarkRecord{
+			Kind: "comment", By: "user:alice-on-task-a", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "a reply",
+		}, alice); err != nil {
+			return err
+		}
+		cold = joinedLiveWrite(ctx, pair.artifactID).cold
+		return nil
+	}); err != nil {
+		t.Fatalf("a margin write on a room behind the head: %v", err)
+	}
+	if !cold {
+		t.Fatal("the margin write forked task A's room rather than the stored document, so nothing here is tested")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != room {
+		t.Fatal("task A's room was replaced, so the publish did not reach the room this test arranged")
+	}
+
+	published := classes.latest(t, "the published margin write", func(origin any) bool {
+		_, ok := origin.(*liveWriteOrigin)
+		return ok
+	})
+	if !published.contentChanged {
+		t.Error("the room recorded the margin write's publish as no content change, though it deleted \"Second.\" from the room")
+	}
+	state = pair.taskA.lockState(pair.artifactID)
+	_, remembered := state.askAuthors[goneAsk]
+	pair.taskA.unlockState(pair.artifactID, state)
+	if remembered {
+		t.Error("the ask-block observer was not handed the tree the margin write's publish left")
+	}
+	kept, fresh := keptAndFreshRendering(t, pair.taskA, pair.artifactID)
+	if strings.Contains(fresh, "Second.") {
+		t.Fatalf("the room after the publish = %q, want task B's deletion carried in by the margin write", fresh)
+	}
+	if kept != fresh {
+		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)
+	}
+
+	// A browser's margin note, made on a copy synced from the room as a browser's provider holds
+	// it, changes no text.
+	browser := crdt.New()
+	if err := crdt.ApplyUpdateV1(browser, crdt.EncodeStateAsUpdateV1(room, nil), nil); err != nil {
+		t.Fatalf("sync the browser from the room: %v", err)
+	}
+	marks := browser.GetMap(marksMapName)
+	note := docstest.Transact(browser, func(txn *crdt.Transaction) {
+		marks.Set(txn, "browser-note", map[string]any{"kind": "comment", "text": "a browser's note"})
+	})
+	if note == nil {
+		t.Fatal("the browser's margin note made no update")
+	}
+	if err := crdt.ApplyUpdateV1(room, note, "peer"); err != nil {
+		t.Fatalf("apply the browser's margin note to the room: %v", err)
+	}
+	if class := classes.latest(t, "the browser's margin note", func(origin any) bool { return origin == "peer" }); class.contentChanged {
+		t.Error("the room recorded a browser's margin note as a content change: it measured the note against a rendering it kept from before the margin write's publish")
+	}
+}
+
+// A margin write a transaction makes after its own text edit, on a fork warm-built from the room,
+// is published into that room right after the edit, and only the margin write's publish may keep
+// the rendering the replica has. The fork holds the edit's deletion of "Second.", so the margin
+// write's update carries that deletion too, but the edit's own update has already brought it into
+// the room, so the margin update changes no text there (liveWriteOrigin.marginOnly). The edit's
+// publish is a content change the observer has to render: one that kept the rendering for it too -
+// a tag on every update of a warm-forked transaction rather than on its margin writes - would
+// record the edit as no change and keep "Second." in the rendering every later browser update is
+// measured against.
+func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *testing.T) {
+	pair := newProcessPair(t)
+	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	var cold bool
+	if err := joinedWrite(pair.taskA, func(ctx context.Context) error {
+		if _, err := pair.taskA.ReplaceText(ctx, pair.artifactID, "First.\n", alice); err != nil {
+			return err
+		}
+		if err := pair.taskA.ProjectMark(ctx, pair.artifactID, "comment-on-task-a", MarkRecord{
+			Kind: "comment", By: "user:alice-on-task-a", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "a reply",
+		}, alice); err != nil {
+			return err
+		}
+		cold = joinedLiveWrite(ctx, pair.artifactID).cold
+		return nil
+	}); err != nil {
+		t.Fatalf("a text edit and a margin write in one transaction: %v", err)
+	}
+	if cold {
+		t.Fatal("the transaction forked the stored document rather than task A's room, so nothing here is tested")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != room {
+		t.Fatal("task A's room was replaced, so the publishes did not reach the room the fork was built from")
+	}
+
+	kept, fresh := keptAndFreshRendering(t, pair.taskA, pair.artifactID)
+	if strings.Contains(fresh, "Second.") {
+		t.Fatalf("the room after the publishes = %q, want the text edit's deletion of \"Second.\"", fresh)
+	}
+	if kept != fresh {
+		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)
+	}
+	margin := classes.latest(t, "the margin write's publish", func(origin any) bool {
+		published, ok := origin.(*liveWriteOrigin)
+		return ok && published.marginOnly
+	})
+	if margin.contentChanged {
+		t.Error("the room recorded the margin write's publish as a content change")
+	}
+	edit := classes.latest(t, "the text edit's publish", func(origin any) bool {
+		published, ok := origin.(*liveWriteOrigin)
+		return ok && !published.marginOnly
+	})
+	if !edit.contentChanged {
+		t.Error("the room recorded the text edit's publish, which deleted \"Second.\", as no content change")
+	}
+}
+
 // A room that loads while this process's own write commits is not born behind the head. ygo
 // publishes no document for a room that is still loading (Server.GetDoc), so the commit finds no
 // cursor of that room to record its version on and the publish that would is behind the load: the
@@ -1576,30 +1840,27 @@ func TestARoomLoadingWhileThisProcessesWriteCommitsStandsAtTheHead(t *testing.T)
 	}
 }
 
-// A room that loads while a repair of this process's commits is the opposite case, and it is not
-// born at the head. A repair - the block-id backfill's stamp here, settlement's on the same
+// A room that fails under a repair of this process's is not evicted and reloaded while that
+// repair commits. A repair - the block-id backfill's stamp here, settlement's on the same
 // shape - is written into one room instance before it is appended (applySuppressed), and nothing
-// replays it into a room that loaded since: the replacement reads the store, which did not hold
-// the repair when it read. So that room genuinely does not hold the appended version, it stands
-// behind the head, and the gate has to refuse its next durable write - were it credited with the
+// replays it into a room that loaded since: such a room would hold none of the repair, stand
+// behind the head, and have to be refused its next durable write, since crediting it with the
 // version (tookResidentVersion, which a live write's commit does call because its publish then
-// applies the update to the room it reaches), this process would version text it never saw.
-// Standing behind is not where it ends: the refusal fails the room and the reload reads the
-// repair from the store, which is the recovery TestARoomBehindTheHeadIsReloadedAndWritesAgain
-// pins for the two-process case.
+// applies the update to the room it reaches) would let this process version text it never saw.
+// What keeps this process out of that case is the lock: the writer holds the document's advisory
+// lock from before it reads the room's queue until it commits (backfillBlockIDs, settleRoomWithin),
+// and a failed room's eviction compacts under that same lock (Compact), so the eviction stands
+// there until the repair has committed and allowInject holds every loader behind that eviction.
+// The room that loads next therefore reads the repair from the store and is born at the head.
 //
-// The window is the backfill's alone: it holds no room and no document lock between the stamp
-// and the append that stores it, so a failure of that room there evicts it and the document
-// reloads under the append. A settlement cannot reach this window - its transaction holds the
-// document's advisory lock from before it reads the room until it commits, so a failed room's
-// eviction, which compacts under that lock, cannot finish, and allowInject holds every loader
-// behind that eviction.
-func TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads(t *testing.T) {
+// A room of the OTHER process does stand behind the head across such an append, and recovers
+// through the refusal: TestARoomBehindTheHeadIsReloadedAndWritesAgain pins that case.
+func TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
 	// failingBrowserAppendStore fails nothing here; it is the hook that runs just before the
-	// backfill's append, while the backfill holds no lock of its own.
+	// backfill's append, inside the transaction that holds the document's advisory lock.
 	appends := &failingBrowserAppendStore{VersionedStore: NewPgVersioned(database)}
 	service := New(Deps{Store: database, Persistence: appends, Events: events.NewBroker(), Settle: time.Hour})
 	t.Cleanup(func() {
@@ -1609,43 +1870,37 @@ func TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads(t *testing.
 	})
 	alignLatestVersionWithUpdates(t, service, artifactID)
 
-	// The reload is held where the window is: ygo's LoadDoc has read the store and the head it
-	// stands at, and the hook that starts the room's instance has not run. Only the reload the
-	// backfill's own window arms is held - the backfill loads the room itself to stamp it.
-	entered, release := make(chan struct{}), make(chan struct{})
-	var holding sync.Once
-	var hold atomic.Bool
-	loadDocument := service.srv.OnLoadDocument
-	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
-		if room == artifactID && hold.Load() {
-			holding.Do(func() {
-				close(entered)
-				<-release
-			})
-		}
-		return loadDocument(ctx, room, doc)
-	}
-
 	var read int64
-	reloaded := make(chan error, 1)
-	reload := func() {
+	recovered := make(chan error, 1)
+	// The room the backfill stamped fails while the stamp's transaction holds the document's
+	// lock. Its eviction cannot finish there: the compaction it ends with queues on that lock.
+	failUnderTheStamp := func() {
 		read = storedHead(t, service.store, artifactID)
-		hold.Store(true)
 		service.failRoom(artifactID, errors.New("test: the stamped room failed under the backfill"))
-		if err := service.awaitRoomRecovery(context.Background(), artifactID); err != nil {
-			t.Errorf("evict the room the backfill stamped: %v", err)
+		go func() { recovered <- service.awaitRoomRecovery(context.Background(), artifactID) }()
+		queued := false
+		for deadline := time.Now().Add(roomWait(t)); !queued && time.Now().Before(deadline); {
+			waits, err := storetest.CountLockWaits(context.Background(), service.store, "%pg_advisory_lock(hashtext%")
+			if err != nil {
+				t.Errorf("inspect the document's lock waits: %v", err)
+				return
+			}
+			queued = waits > 0
+			if !queued {
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+		if !queued {
+			t.Error("the failed room's eviction never queued on the document's advisory lock")
 			return
 		}
-		go func() { reloaded <- service.warmLiveDocument(context.Background(), artifactID) }()
 		select {
-		case <-entered:
-		case err := <-reloaded:
-			t.Errorf("the reload returned without reaching the load window: %v", err)
-		case <-time.After(roomWait(t)):
-			t.Error("the reload never reached the window it is held in")
+		case err := <-recovered:
+			t.Errorf("the failed room was evicted while the stamp's transaction held the document's lock: %v", err)
+		default:
 		}
 	}
-	appends.beforeTx.Store(&reload)
+	appends.beforeTx.Store(&failUnderTheStamp)
 	reports, err := service.BackfillBlockIDs(context.Background())
 	if err != nil {
 		t.Fatalf("backfill the document's block ids: %v", err)
@@ -1653,38 +1908,36 @@ func TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads(t *testing.
 	if len(reports) != 1 || reports[0].Err != nil || reports[0].Stamped != 1 {
 		t.Fatalf("backfill reports = %#v, want the one document, stamping one block", reports)
 	}
-	close(release)
-	if err := <-reloaded; err != nil {
-		t.Fatalf("reload the room while the stamp committed: %v", err)
+
+	// The commit drops the lock, and the eviction the stamp held up finishes.
+	select {
+	case err := <-recovered:
+		if err != nil {
+			t.Fatalf("evict the room the backfill stamped: %v", err)
+		}
+	case <-time.After(roomWait(t)):
+		t.Fatal("the failed room was never evicted once the stamp had committed")
 	}
 	head := storedHead(t, service.store, artifactID)
 	if head != read+1 {
-		t.Fatalf("the document's head is %d after the stamp, want %d: the load read %d", head, read+1, read)
+		t.Fatalf("the document's head is %d after the stamp, want %d: the stamped room read %d", head, read+1, read)
 	}
 
-	// What makes standing behind the head right here: the room that loaded has none of the stamp.
-	if repairs := pmdoc.BlockIDRepairCount(liveTree(t, service, artifactID)); repairs == 0 {
-		t.Fatal("the room that loaded while the stamp committed holds the stamp, so nothing here is tested")
-	}
-	live := service.srv.GetDoc(artifactID)
-	if at := service.cursorOf(live).heldThrough(); at != read {
-		t.Fatalf("the room that loaded while the stamp committed holds the document through update %d, want the head it read, %d", at, read)
-	}
-
-	// And the recovery that ends it: the browser's edit is refused, which fails the room; the
-	// reload reads the stamp from the store and the resent edit lands on it.
-	editAsBrowserPeer(t, service, artifactID, 1, model.Actor{Kind: "user", ID: "alice"},
-		appendBlocks(t, "Alice types on the room that loaded without the stamp.\n"))
-	if behind := roomBehind(t, service, artifactID); behind {
-		t.Fatal("the room that replaced the one behind the head stands behind it too")
+	// The room that replaces the failed one reads the stamp from the store, so it is born at the
+	// head and writes again with nothing refused.
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("reload the room the stamp's commit released: %v", err)
 	}
 	if repairs := pmdoc.BlockIDRepairCount(liveTree(t, service, artifactID)); repairs != 0 {
 		t.Fatalf("the reloaded room holds %d unstamped block(s), want the stamp the backfill stored", repairs)
 	}
-	if stored := storedMarkdown(t, service.store, artifactID); !strings.Contains(stored, "Alice types on the room that loaded without the stamp.") {
-		t.Fatalf("the stored document = %q, want it to hold the edit the room resent", stored)
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room that loaded once the stamp had committed stands behind the head")
 	}
-	requireRoomStillWrites(t, service, artifactID, 2)
+	requireRoomStillWrites(t, service, artifactID, 1)
+	if stored := storedMarkdown(t, service.store, artifactID); !strings.Contains(stored, "Writing again as peer 1.") {
+		t.Fatalf("the stored document = %q, want it to hold the reloaded room's edit", stored)
+	}
 }
 
 // A room that does stand behind the head - the other process appended what this one's room never

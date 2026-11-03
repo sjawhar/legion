@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // A recovery that is dialling when Drain stops the client neither installs the connection its dial
@@ -27,13 +28,11 @@ func TestARecoveryStoppedMidDialInstallsNothingAndLogsNoError(t *testing.T) {
 
 	var logs bytes.Buffer
 	var logsMu sync.Mutex
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
+	logtest.SetDefault(t, slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
 		logsMu.Lock()
 		defer logsMu.Unlock()
 		return logs.Write(p)
-	}), nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	}), nil))
 
 	proxy.delay.Store(int64(time.Second))
 	client.Conn.Close()
@@ -77,13 +76,12 @@ func TestARecoveryDiallingALostServerEndsAtTheStop(t *testing.T) {
 
 	var logs bytes.Buffer
 	var logsMu sync.Mutex
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
+	logtest.SetDefault(t, slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
 		logsMu.Lock()
 		defer logsMu.Unlock()
 		return logs.Write(p)
-	}), nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	}), nil))
+
 	logged := func(fragment string) bool {
 		logsMu.Lock()
 		defer logsMu.Unlock()

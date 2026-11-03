@@ -35,9 +35,10 @@ const (
 	OutboxKindCheckCompare      OutboxKind = "check_compare"
 	OutboxKindCheckLook         OutboxKind = "check_look"
 	OutboxKindCheckBound        OutboxKind = "check_bound"
+	OutboxKindPhaseEnded        OutboxKind = "phase_ended"
 )
 
-// OutboxLane is which executor of an issue runs a kind. An issue's rows run on two lanes side by
+// OutboxLane is which executor of an issue runs a kind. An issue's rows run on three lanes side by
 // side. The lifecycle lane runs the rows that start, stop and tidy the issue's roles and their
 // resources, one at a time in the order they were queued: each assumes the state its predecessor
 // leaves (a start after the branch it waits for, a workspace removal after the suspend that
@@ -48,19 +49,25 @@ const (
 // (check_compare, check_look, check_bound), which start and end the implementer's looks in order
 // with the starts and suspends they queue. The board lane runs the issue's Dispatch writes and
 // notice publishes beside them, so a status write or a notice never waits behind a start pulling
-// an image, and a slow publish never holds a stop back.
+// an image, and a slow publish never holds a stop back. The role-message lane runs the one kind the
+// daemon addresses to a role of the issue that is not its architect (phase_ended), on a lane of its
+// own because the board lane's architect notices are ordered among themselves and one of them waits
+// for as long as its architect holds no role (the daemon's errNoticeWaits): a role told that its
+// phase ended must hear it while that is news, not after whatever its tree's architect is owed.
 type OutboxLane string
 
 const (
-	LaneLifecycle OutboxLane = "lifecycle"
-	LaneBoard     OutboxLane = "board"
+	LaneLifecycle   OutboxLane = "lifecycle"
+	LaneBoard       OutboxLane = "board"
+	LaneRoleMessage OutboxLane = "role_message"
 )
 
 // laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
-	LaneLifecycle: {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
-	LaneBoard:     {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
+	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+	LaneRoleMessage: {OutboxKindPhaseEnded},
 }
 
 // LaneOf is the lane that runs kind.
@@ -112,6 +119,14 @@ type StatusWrite struct {
 	HandOver       bool   `json:"handOver,omitempty"`
 	HandOverTree   string `json:"handOverTree,omitempty"`
 	HandOverLinger uint64 `json:"handOverLinger,omitempty"`
+	// PersonHandover marks a todo write the daemon queues for a person's handover: a person's
+	// legion label on an unrecorded root in triage, or a person's approval of a parked labelled
+	// root's primary document. The pending-row rule (Store.PersonHandoverPending) reads it to tell
+	// such a row from the workflow's other status rows, which suppress nothing: while one is
+	// pending for an issue, no second one is queued for it. The outbox's status executor also drops
+	// a marked row at delivery when the re-read issue no longer carries the label: a person who took
+	// it off withdrew the handover. A hand-over row (HandOver), also a todo, is not one.
+	PersonHandover bool `json:"personHandover,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }
@@ -203,6 +218,63 @@ type Notice struct {
 	// report, so the controller names each there and takes nothing for it. A tick with nothing
 	// blocked carries none.
 	Blocked []BlockedIssue `json:"blocked,omitempty"`
+	// Update is an update-stalled notice's account of the round that is not finishing, and is
+	// absent from every other kind. Only an UpdateStalledNotice carries one.
+	Update *UpdateStalled `json:"update,omitempty"`
+}
+
+// UpdateStalled is what an update-stalled controller notice carries: the update round the daemon
+// opened over an issue's pod, and why it has not replaced that pod. Round is the round's identity
+// (supervise.Claim.UpdateRound), Pod the pod it was opened over, and Reasons the drift the round
+// was opened for, as the task states it. Waiting is every claim the round is blocked on, so the
+// controller can retry one claim or ask the operator to act on a failed or suspended one rather
+// than read the whole claims list to find out which worker the round waits on; what each entry
+// says, and what the controller does with it, is UpdateWaiting's. The notice's issue is the
+// outbox row's own.
+//
+// Reasons is one string, never a list: a single reason carries ", " inside it already — a moved
+// address reads `<where> <held>, now <handed>`, a pod-shape drift `image <was>, now <now>`, and a
+// plugin round's reason names both contracts — so a list built by splitting what the claim
+// records (supervise.Claim.UpdateReasons, one string) would cut each reason into pieces that read
+// as reasons of their own. It is the drift exactly as the round's task states it to the worker.
+type UpdateStalled struct {
+	Round   string          `json:"round"`
+	Pod     string          `json:"pod,omitempty"`
+	Reasons string          `json:"reasons"`
+	Waiting []UpdateWaiting `json:"waiting"`
+}
+
+// UpdateWaiting is one claim an update round is blocked on: its token, the role it holds, the
+// state it is in (supervise.ClaimState — an operator-suspended claim waits for the operator; a
+// pod round lists no `failed` claim, since it does not wait for one), and Answered for a claim
+// that has already answered this round.
+//
+// The contract the claim's plugin records is not here. A plugin with no ready_for_update op
+// answers by ending the turn its update task started (supervise's askForUpdate and turnEnded),
+// so such a claim is one the round is waiting on like any other, and the controller has nothing
+// of its own to do about it.
+//
+// Answered is what tells the controller which claims are its to prompt. Its playbook publishes
+// the update task to a claim that has not answered, and that publish starts a turn, which takes
+// the claim's answer back (supervise's takeBackSignal): told to do that for a claim that has
+// answered, it would undo the answers of exactly the round the daemon is stuck carrying
+// (skill://legion-controller/references/escalation.md).
+type UpdateWaiting struct {
+	Claim    string     `json:"claim"`
+	Role     claim.Role `json:"role,omitempty"`
+	State    string     `json:"state"`
+	Answered bool       `json:"answered,omitempty"`
+}
+
+// MarshalJSON keeps `waiting` an array on the wire, empty rather than `null`: the plugin's strict
+// reader refuses a null.
+func (u UpdateStalled) MarshalJSON() ([]byte, error) {
+	type wire UpdateStalled
+	out := wire(u)
+	if out.Waiting == nil {
+		out.Waiting = []UpdateWaiting{}
+	}
+	return json.Marshal(out)
 }
 
 // BlockedIssue is one issue Legion is waiting to start and the issues it waits on that are not
@@ -290,8 +362,11 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // the three (skill://legion-controller, "Free slots"). A tick is the daemon's periodic wake, whose
 // issue is the project key. An unslotted notice names a root admission found in the workflow with
 // neither a slot nor a place in the waiting line, which it took out of the workflow; its reason
-// names the status the root stood at. When admission sends each is its rule
-// (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
+// names the status the root stood at. An update-stalled notice names an issue whose pod the
+// daemon opened an update round over and cannot replace: a worker has not answered within
+// `pod_update_notice_hours`, a turn that will not end holds the replacement, or the replacement
+// itself keeps failing (the daemon's reconcilePodUpdates). When admission sends each is its
+// rule (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
 const (
 	TriageNotice         NoticeKind = "triage"
 	SlotFreeNotice       NoticeKind = "slot-free"
@@ -299,6 +374,7 @@ const (
 	TickNotice           NoticeKind = "tick"
 	UnslottedNotice      NoticeKind = "unslotted"
 	AwaitingPersonNotice NoticeKind = "awaiting-person"
+	UpdateStalledNotice  NoticeKind = "update-stalled"
 )
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
@@ -322,6 +398,14 @@ type SuperviseRequest struct {
 	// finishes without acting. It is empty for the architect, which serves every phase, and for a
 	// suspend or a tree's close, which must still act after the issue moves on.
 	Phase phase.Phase `json:"phase,omitempty"`
+	// Assignment is the task the issue's current phase hands the role, as the workflow minted it
+	// for this start (workflow.Engine.start): the same token stands on the role's phases row,
+	// written in the transition's transaction. It travels to the claim's delivery and, once a
+	// confirmed delivery is retired, onto the claim, so a completion can be held to the assignment
+	// the turn reporting it was given (api/handoff.go, HANDOFF_STALE_ASSIGNMENT) rather than to the
+	// run alone, whose value every phase entry of one run shares. Empty for a start that hands no
+	// new task — a resume, a production check's look — and for every other operation.
+	Assignment string `json:"assignment,omitempty"`
 	// ResumeTask marks Task as the phase's resume task (workflow.ResumePhaseTask), the one a
 	// re-admitted tree's promotion gives a mid-phase child: a claim that already holds a task for
 	// the same generation and phase is given it once it is ready, so the start delivers none.
@@ -330,14 +414,6 @@ type SuperviseRequest struct {
 	// budget, the runner finishes this row rather than retrying it as RequestRetry with fresh
 	// budgets: the failed claim stays failed for the boot report to name.
 	RuleResume bool `json:"ruleResume,omitempty"`
-	// Quiesce is the role whose phase a start takes over without that role's completion: CI settled
-	// red while it tested, reviewed a round it had not completed, or worked toward its READY as the
-	// merger (workflow's TriggerChecksRed). The start acts only once that role's claim is out of its
-	// turn (supervise.Machine.Quiesce), so the two never write the shared workspace together. It is
-	// empty for every other start, which a completion or a person's move hands the phase, for a move
-	// between two phases of one role (retro back to implementing on a red, where the implementer
-	// keeps its turn and is handed the new task once it ends), and for every other operation.
-	Quiesce claim.Role `json:"quiesce,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
 	// generation: never in the tree's next run, nor in a later linger of it.
@@ -396,6 +472,10 @@ type WorkspaceRemove struct {
 	// only while the tree lingers at that root generation: once re-admission moves the root on, the
 	// workspace there is the tree's next run's, whatever generation the issue itself keeps.
 	Linger uint64 `json:"linger"`
+	// Tree is the tree whose linger queued the removal. An issue adopted into another tree since
+	// (workflow.Engine.Adopt) works there now, so the removal finishes without acting. A row queued
+	// by an earlier release has none, and is fenced by Linger against the issue's current tree.
+	Tree string `json:"tree,omitempty"`
 }
 
 func (WorkspaceRemove) OutboxKind() OutboxKind { return OutboxKindWorkspaceRemove }
@@ -462,9 +542,10 @@ type ReadyMerge struct {
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 
 // CheckCompare wakes a production check from a build or from a deploy run, whichever of Build and
-// Deploy it carries (exactly one). Build is the commit a daemon boot or a Dispatch start reported
-// itself built from: the executor runs a GitHub compare of the check's merge commit with it, as the
-// implement App, and starts the look Look when the build contains the merge. Deploy is a completed
+// Deploy it carries (exactly one). Build is the commit a daemon boot reported itself built from,
+// or Dispatch announced every server process serves (server.started): the executor runs a GitHub
+// compare of the check's merge commit with it, as the implement App, and starts the look Look when
+// the build contains the merge. Deploy is a completed
 // run attempt of a deploy workflow the project names (`projects.<KEY>.deploys`): the executor reads
 // the run and its jobs from GitHub, and wakes the check once for each job whose named step succeeded
 // after the pull request merged. Cause names what asked for it (`daemon boot`, `dispatch start`,
@@ -512,6 +593,44 @@ func (CheckLook) OutboxKind() OutboxKind { return OutboxKindCheckLook }
 type CheckBound struct{}
 
 func (CheckBound) OutboxKind() OutboxKind { return OutboxKindCheckBound }
+
+// PhaseEnded tells the role whose phase a CI-red transition ended that its phase is over, on that
+// role's own Envoy topic. It is the one message the daemon addresses to a role that is not an
+// architect of its own accord: when CI goes red the implementer starts at once, and without that
+// message nothing tells the tester, the reviewer, the merger or the implementer in retro that the
+// phase it was working is no longer its own, since the daemon's next task for a role waits for that
+// role's turn to end. Role is the recipient, From the phase that ended, To the phase the issue is
+// in now, Reason what the architect's checks-red notice carries, and TaskFollows that the recipient
+// is also the role the new phase starts — the implementer sent back from retro — whose task for
+// that phase follows this message. It stops nothing: the recipient keeps its turn, its jobs, its
+// process and its session.
+type PhaseEnded struct {
+	Role        claim.Role  `json:"role"`
+	From        phase.Phase `json:"from"`
+	To          phase.Phase `json:"to"`
+	Reason      string      `json:"reason"`
+	TaskFollows bool        `json:"taskFollows,omitempty"`
+}
+
+func (PhaseEnded) OutboxKind() OutboxKind { return OutboxKindPhaseEnded }
+
+// Message is what the runner publishes for issue: one sentence that the recipient's phase ended
+// and which phase the issue is in now, the implementer's own sentence where its task follows, the
+// two that keep the role off the working copy the new phase owns without stopping it (the worker
+// prompt says the same, internal/prompts/go/worker-common.md), and the red last, behind the
+// `Reason:` label a started worker's task carries it under (workflow's task), so the GitHub check
+// and workflow names in it are marked off from the daemon's own sentences in both places.
+func (p PhaseEnded) Message(issue string) string {
+	follows := ""
+	if p.TaskFollows {
+		follows = fmt.Sprintf(" Your %s task follows.", p.To)
+	}
+	return fmt.Sprintf("%s: CI went red, so your %s phase has ended and the issue is in %s now.%s"+
+		" Nothing of yours is stopped: your turn, your jobs, your process and your session run on."+
+		" The workspace is the %s phase's now, so stop writing it at once and leave whatever you have uncommitted."+
+		" Reason: %s.",
+		issue, p.From, p.To, follows, p.To, p.Reason)
+}
 
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
@@ -641,6 +760,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindPhaseEnded:
+		value := PhaseEnded{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -690,9 +815,18 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if (value.Kind == "catch-up") != (value.CatchUp != nil) {
 			return fmt.Errorf("a %s notice carries a catch-up only when it is one", value.Kind)
 		}
+		if value.Update != nil {
+			return fmt.Errorf("a %s notice carries an update round; only the controller's update-stalled notice does", value.Kind)
+		}
 	case ControllerNotice:
 		if !controllerOnlyNoticeKind(value.Kind) && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
+		}
+		if (value.Kind == UpdateStalledNotice) != (value.Update != nil) {
+			return fmt.Errorf("a %s notice carries an update round only when it is one", value.Kind)
+		}
+		if update := value.Update; update != nil && (update.Round == "" || len(update.Waiting) == 0) {
+			return fmt.Errorf("an update-stalled notice requires its round and the claims it waits on")
 		}
 	case SuperviseRequest:
 		if !validSuperviseOp(value.Op) {
@@ -709,9 +843,6 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.ResumeTask && (value.Op != "start" || value.Task == "" || value.Phase == "") {
 			return fmt.Errorf("a supervise resume task requires a start with a task and a phase")
-		}
-		if value.Quiesce != "" && (value.Op != "start" || value.Quiesce == value.Role) {
-			return fmt.Errorf("a supervise quiesce names another role than its start's, and only a start carries one")
 		}
 		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || value.Role != claim.RoleImplementer || value.Phase != "") {
 			return fmt.Errorf("a supervise check look names a start of the implementer with no phase, and only a start carries one")
@@ -748,6 +879,19 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Look <= 0 {
 			return fmt.Errorf("check look bound requires the look it bounds")
 		}
+	case PhaseEnded:
+		if !claim.IsRole(value.Role) || value.Role == claim.RoleArchitect {
+			return fmt.Errorf("a phase-ended message goes to the role whose phase ended, never to an architect, which its checks-red notice tells; %q is neither", value.Role)
+		}
+		if value.From == "" || value.To == "" || value.From == value.To {
+			return fmt.Errorf("a phase-ended message names the phase that ended and the different phase the issue is in now; it names %q and %q", value.From, value.To)
+		}
+		if value.Reason == "" {
+			return fmt.Errorf("a phase-ended message carries the reason the architect's notice carries")
+		}
+		if value.TaskFollows && value.Role != claim.RoleImplementer {
+			return fmt.Errorf("only the implementer is told its task follows, since the phase the red opens is its own; the %s is not", value.Role)
+		}
 	default:
 		return fmt.Errorf("unknown outbox payload %T", payload)
 	}
@@ -756,7 +900,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false
@@ -767,7 +911,7 @@ func validNoticeKind(kind NoticeKind) bool {
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice, UpdateStalledNotice:
 		return true
 	default:
 		return false

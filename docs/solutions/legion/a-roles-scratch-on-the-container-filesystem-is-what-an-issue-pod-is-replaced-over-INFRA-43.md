@@ -17,6 +17,8 @@ related_issues:
 
 # A role's scratch on the container filesystem is what an issue pod is replaced over: measure it, then move it to the issue volume
 
+Superseded in part: the issue disk now dies with its pod, so `/legion` keeps the container filesystem small and keeps nothing past a replacement (docs/solutions/legion/a-proof-harness-a-later-round-reruns-lives-on-the-pull-request-not-the-issue-disk-pr2362.md).
+
 Extends docs/solutions/legion/a-gvisor-pods-reservation-is-the-pods-sum-qos-reads-cpu-and-memory-alone-and-ephemeral-storage-is-an-eviction-fence-over-a-small-request-LEGION-632.md.
 
 That document states the mechanism: ephemeral storage is the node's disk a container's root

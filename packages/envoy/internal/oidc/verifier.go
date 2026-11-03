@@ -32,16 +32,18 @@ var (
 // the error a caller returns. It never repeats any part of the token.
 //
 // An error carrying no sentinel is reported as a signature failure, because
-// classify leaves that class as the residue. One real failure still lands
-// there and is not a forgery: a key-set retrieval that fails for its own
-// reasons — the issuer down, its JWKS 500ing, TLS refused — because go-oidc
-// flattens that error with %v and leaves nothing to match on. The cleanly
-// detectable half of that family, a request whose context has ended, is
-// ErrCancelled, so the alarming word is not spent on a caller that hung up.
-// The trade runs the other way too: classify reads the context before the
-// error, so a genuinely bad token presented on an ended request reads
-// cancelled. The class means "no verdict is trustworthy", not "the token was
-// sound".
+// classify leaves that class as the residue. Two neighbours of that class are
+// named rather than left in it. A request whose context has ended is
+// ErrCancelled, so the alarming word is not spent on a caller that hung up;
+// an issuer whose key set could not be read — the issuer down, its JWKS
+// 500ing, TLS refused — is ErrIssuerUnavailable, reported as unavailable,
+// because the key source's own ErrKeySet reaches classify (keyset.go) where
+// go-oidc flattened it with %v. What stays in the signature class is a token
+// the issuer never signed, a token naming a key id it publishes nothing under
+// among them. The trade runs the other way too: classify reads the context
+// before the error, so a genuinely bad token presented on an ended request
+// reads cancelled. Both of the named classes mean "no verdict is
+// trustworthy", not "the token was sound".
 func Reason(err error) string {
 	switch {
 	case errors.Is(err, ErrMalformed):
@@ -54,6 +56,8 @@ func Reason(err error) string {
 		return "expired"
 	case errors.Is(err, ErrCancelled):
 		return "cancelled"
+	case errors.Is(err, ErrIssuerUnavailable):
+		return "unavailable"
 	default:
 		return "signature"
 	}
@@ -101,17 +105,55 @@ type Verifier struct {
 }
 
 // New reads the issuer's OIDC discovery document now and returns a verifier for
-// tokens issued to audience. ctx bounds discovery only: the key set refreshes on
-// its own background context, so a boot context cancelling later never disables
-// key rotation.
+// tokens issued to audience, over a key cache of its own (NewKeys). ctx bounds
+// discovery only: no key is fetched here, the first Verify reads the key set,
+// and that set refreshes on whatever context the verification runs on, so a
+// boot context cancelling later never disables key rotation.
 func New(ctx context.Context, issuer, audience string) (*Verifier, error) {
-	provider, err := gooidc.NewProvider(ctx, issuer)
+	keys, err := NewKeys(ctx, issuer)
 	if err != nil {
-		return nil, fmt.Errorf("oidc: discovering issuer %s: %w", issuer, err)
+		return nil, err
 	}
-	return newVerifier(provider, issuer, audience), nil
+	return NewWithKeys(issuer, audience, keys), nil
 }
 
+// NewWithKeys returns a verifier for tokens issuer issued to audience, checking
+// every signature against keys. It exists so that one key cache serves a
+// process's whole use of an issuer: the broker reads the cluster issuer's set
+// both to verify account, pod and service-login tokens and, for the RFC 8693
+// exchange, to hand the key itself to the OAuth provider (Keys), and building
+// both from one *Keys makes one discovery read at boot, keeps one set in
+// memory, and bounds the reads a token naming an unpublished key id prompts at
+// one per MinRefresh across both of them.
+func NewWithKeys(issuer, audience string, keys *Keys) *Verifier {
+	return &Verifier{
+		// SupportedSigningAlgs is set because gooidc.NewVerifier, unlike the
+		// verifier a discovered provider builds, defaults to RS256 alone: the
+		// pair named here is the pair keySet parses and the pair a cluster
+		// signs its projected tokens with, so an ES256 cluster's tokens go on
+		// verifying.
+		verifier: gooidc.NewVerifier(issuer, keySet{keys: keys}, &gooidc.Config{
+			ClientID:             audience,
+			SupportedSigningAlgs: supportedSigningAlgs(),
+		}),
+		issuer:   issuer,
+		audience: audience,
+	}
+}
+
+// supportedSigningAlgs names keySetAlgorithms as go-oidc's configuration takes them.
+func supportedSigningAlgs() []string {
+	algs := make([]string, 0, len(keySetAlgorithms))
+	for _, alg := range keySetAlgorithms {
+		algs = append(algs, string(alg))
+	}
+	return algs
+}
+
+// newVerifier is the sign-in flow's verifier, built on a discovered provider
+// and so on go-oidc's own RemoteKeySet: a CodeFlow verifies the ID tokens of
+// the person signing in, which no other part of this package reads keys for,
+// so there is no second reader to share a *Keys with (codeflow.go).
 func newVerifier(provider *gooidc.Provider, issuer, audience string) *Verifier {
 	return &Verifier{
 		verifier: provider.Verifier(&gooidc.Config{ClientID: audience}),
@@ -120,14 +162,26 @@ func newVerifier(provider *gooidc.Provider, issuer, audience string) *Verifier {
 	}
 }
 
+// Issues reports whether raw's iss claim, read without verifying anything, names this verifier's
+// issuer. A caller that trusts several issuers picks with it the one verifier a token is for, so
+// a token of one issuer never makes another's verifier fetch its keys; Verify still checks the
+// issuer with everything else.
+func (v *Verifier) Issues(raw string) bool {
+	claims, err := decodeClaims(raw)
+	return err == nil && claims.Issuer == v.issuer
+}
+
 // Verify checks raw against the issuer's published keys, the configured
 // audience, and the token's expiry. Every error wraps exactly one of
-// ErrMalformed, ErrIssuer, ErrAudience, ErrExpired, ErrCancelled, and
-// ErrSignature.
+// ErrMalformed, ErrIssuer, ErrAudience, ErrExpired, ErrCancelled,
+// ErrIssuerUnavailable, and ErrSignature.
 func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
-	token, err := v.verifier.Verify(ctx, raw)
+	// The slot the key source's own error comes back in: go-oidc flattens it
+	// (keyset.go, keySetError).
+	keyCtx, keySetErr := withKeySetError(ctx)
+	token, err := v.verifier.Verify(keyCtx, raw)
 	if err != nil {
-		return Claims{}, v.classify(ctx, raw, err)
+		return Claims{}, v.classify(ctx, raw, err, keySetErr.err)
 	}
 	var person cognitoClaims
 	if err := token.Claims(&person); err != nil {
@@ -153,7 +207,12 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
 // from the verification library's error text, so the reason a caller logs is
 // the same across library versions. The library checks the signature before any
 // claim, so a token that is wrong in two ways is reported by its claims first
-// and only an otherwise-sound token is left as a signature failure.
+// and only an otherwise-sound token is left as a signature failure — or, where
+// the issuer's key set could not be read at all, as ErrIssuerUnavailable:
+// keySetErr is the key source's own error, which keyset.go carries past the %v
+// go-oidc formats it with, and an ErrKeySet in it means no verdict was reached.
+// ErrNoKey is not that case and stays in the signature class, a token signed by
+// something the issuer never had.
 //
 // An ended context is decided first and on the context, never on the error:
 // every fmt.Errorf in go-oidc v3.21.0's verify.go formats with %v, so no error
@@ -166,7 +225,7 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
 // cancelled says "no verdict is trustworthy", where the alternative spends
 // "signature" — the word an operator reads as a forgery attempt — on callers
 // that merely hung up.
-func (v *Verifier) classify(ctx context.Context, raw string, err error) error {
+func (v *Verifier) classify(ctx context.Context, raw string, err, keySetErr error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("%w: %v", ErrCancelled, ctxErr)
 	}
@@ -184,6 +243,8 @@ func (v *Verifier) classify(ctx context.Context, raw string, err error) error {
 		return fmt.Errorf("%w: %q, want %q", ErrAudience, []string(claims.Audience), v.audience)
 	case claims.Expiry != 0 && time.Unix(int64(claims.Expiry), 0).Before(time.Now()):
 		return fmt.Errorf("%w at %s", ErrExpired, time.Unix(int64(claims.Expiry), 0).UTC().Format(time.RFC3339))
+	case errors.Is(keySetErr, ErrKeySet):
+		return fmt.Errorf("%w: %w", ErrIssuerUnavailable, keySetErr)
 	default:
 		return ErrSignature
 	}

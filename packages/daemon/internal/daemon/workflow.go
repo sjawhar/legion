@@ -104,7 +104,9 @@ type workflowRuntime struct {
 	// defaultBranches is each repository as GitHub names it and its default branch, read under
 	// githubAPI and kept defaultBranchTTL: what an issue's record takes its repository and default
 	// branch from when it is first recorded (ResolveRepository), and what the mapping serves each
-	// repository as (nameAccepted).
+	// repository as (nameAccepted). Every read of it is made of the repository the mapping serves
+	// the asked-for one as (repositories.serving), so a name recorded before a configured
+	// rename's transfer is read on the installation that holds the repository now.
 	defaultBranches *defaultBranches
 	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
 	// boot, refreshMapping on a mapping change); installs answers each App's installation on a
@@ -112,19 +114,39 @@ type workflowRuntime struct {
 	// request for a read to refreshOnMappingChange, one waiting at most. mappingRequested counts
 	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
 	// read covers; awaiting is each held admission event's request (awaitMappingRead), by issue key
-	// and then the sequence it was delivered at, under awaitingMu.
-	repositories     *repositories
-	installs         appauth.Installations
-	mappingMu        sync.Mutex
-	mappingChanged   chan struct{}
-	mappingRequested atomic.Uint64
-	mappingApplied   atomic.Uint64
-	awaitingMu       sync.Mutex
-	awaiting         map[string]map[int64]uint64
+	// and then the sequence it was delivered at, under awaitingMu. recovering is each repository,
+	// lowercased, a read of the mapping stopped leaving out for a failed installation read whose
+	// issues are still to recover from Dispatch's listing (markRecovered, recoverRepositories),
+	// under recoveringMu. silenced is, by the same repository, each issue whose apply said nothing
+	// because the repository was unread (noteUnread), which the repository's recovery takes into its
+	// scope whatever the issue resolves to by then; releaseWaits is, by repository, each child a
+	// release_children left unrecorded on it (awaitRecovery), whose tree's architect the recovery
+	// tells of each it did not record; recoveryHeldSince is when a recovery's listing was first
+	// found held with waits to tell (zero for none), so a hold past recoveryHoldBound tells them.
+	// recheckAfter is refreshOnMappingChange's wait before a read of its own, time.After when nil;
+	// a test sees each wait through it.
+	repositories      *repositories
+	installs          appauth.Installations
+	mappingMu         sync.Mutex
+	mappingChanged    chan struct{}
+	mappingRequested  atomic.Uint64
+	mappingApplied    atomic.Uint64
+	awaitingMu        sync.Mutex
+	awaiting          map[string]map[int64]uint64
+	recoveringMu      sync.Mutex
+	recovering        map[string]bool
+	silenced          map[string]map[string]bool
+	releaseWaits      map[string]map[string]releaseWait
+	recoveryHeldSince time.Time
+	recheckAfter      func(time.Duration) <-chan time.Time
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
 	reviewAppLogin string
+	// reviewAppID is the review App's id as the configuration names it (github_apps.review.app_id,
+	// the id GitHub's GET /app answers for it): a check run named tester or architect counts as a
+	// Legion verdict only when that App created it, as Envoy's listener counts it (readSettlement).
+	reviewAppID string
 	// build is the daemon's own build (Build): what the boot fact carries as the revision it
 	// compares the open production checks against, and the guard on whether Dispatch's build is
 	// read and compared too.
@@ -144,11 +166,6 @@ type workflowRuntime struct {
 	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
 	// then. Only the pass touches it.
 	refusedReviews map[int64]bool
-	// openedWarned is when the pass last warned, by repository and pull request number, that it
-	// applies an open pull request GitHub shows for an issue with none recorded
-	// (readUnrecordedPullRequests): one the workflow does not record is found again every pass, and
-	// is told at most once every openedWarnEvery. Only the pass touches it.
-	openedWarned map[string]time.Time
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -257,8 +274,8 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
-		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
-		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
+		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
+		defaultBranches: newDefaultBranches(tokens, repos, githubAPI, defaultBranchTTL, time.Now),
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
 	if err := w.loadMapping(ctx); err != nil {
@@ -282,7 +299,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
-	engineCfg.Repositories = w
+	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
 	// The mirror runs before both deciders, and that order is load-bearing. The engine decides
@@ -293,7 +310,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
 	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
 	w.pool = st.Pool()
-	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
+	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, cfg.RepositoryRenames, log); err != nil {
 		return nil, err
 	}
 	return w, nil
@@ -313,13 +330,14 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 // wake its production checks, and the repository the binary is built from is the one whose open
 // production checks a build is compared against — only for a release build, one with a revision,
 // since nothing else names a commit a merge could be in; a build with none compares nothing,
-// Dispatch's start included.
+// Dispatch's announcement that every server process serves a build (server.started) included.
 func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflow.Config {
 	project := cfg.Projects[cfg.Project]
 	engine := workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
 		ReviewAppLogin: reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
+		RepositoryRenames: cfg.RepositoryRenames,
 	}
 	if build.Revision != "" {
 		engine.BuiltFrom = build.Repository
@@ -358,10 +376,11 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		w.conn = nil
 		return err
 	}
-	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: heard, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+	w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{
+		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, Renames: cfg.RepositoryRenames,
+		AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
-		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository,
+		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
 	})
 	if err != nil {
 		conn.Close()
@@ -455,14 +474,59 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list Dispatch issues for admission: %w", err)
 	}
-	// The transaction performs no I/O: what admission reads of a todo issue's repository is read now.
+	return w.reconcileListing(ctx, issues, nil, true)
+}
+
+// reconcileListing applies issues, a Dispatch listing of the project, as reconcile says: the
+// boot's whole listing (keep nil, boot set, which also holds the roots the boot's catch-up reads
+// out of admission's decision), or a recovery's (recoverRepositories), scoped to the summaries
+// keep keeps, judged against every record, while every summary of the listing is still the walk
+// each chain is read up.
+func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatch.IssueSummary, keep func(records map[string]*record.Issue, summary dispatch.IssueSummary) bool, boot bool) error {
+	// The transaction performs no I/O: what admission reads of a todo issue's repository, the
+	// Dispatch chain above its parent, and who set the label of a labelled triage root the workflow
+	// does not record, are read now, up one walk over the whole listing (listingAncestry); each
+	// listed issue's fact carries that chain, or that setter, to admission.
+	var records map[string]*record.Issue
+	var walk ancestry
+	var err error
+	if keep != nil {
+		if records, walk, err = w.listingAncestry(ctx, issues); err != nil {
+			return err
+		}
+	}
+	scope := make([]dispatch.IssueSummary, 0, len(issues))
+	listed := make([]intake.DispatchIssue, 0, len(issues))
 	for _, summary := range issues {
-		if summary.Status != "todo" {
+		if keep != nil && !keep(records, summary) {
 			continue
 		}
-		if _, err := w.prepareIssue(ctx, intake.ListedIssue(summary), false, false); err != nil {
-			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
+		fact := intake.ListedIssue(summary)
+		labelledTriageRoot := fact.LabelledTriageRoot()
+		if fact.Status == "todo" || labelledTriageRoot {
+			if walk == nil {
+				if records, walk, err = w.listingAncestry(ctx, issues); err != nil {
+					return err
+				}
+			}
 		}
+		switch {
+		case fact.Status == "todo":
+			prepared, err := w.prepareListed(ctx, records, walk, fact)
+			if err != nil {
+				return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
+			}
+			fact.Ancestry = prepared.Ancestry
+		case labelledTriageRoot && records[summary.Key] == nil:
+			// The listing carries no actor, so the setter is read from the log as an event's is;
+			// a recorded root a person moved back to triage is never queued again, so its log is
+			// not read.
+			if fact.LabelSetter, err = w.labelSetter(ctx, summary.Key); err != nil {
+				return fmt.Errorf("prepare who set the label of %s for admission: %w", summary.Key, err)
+			}
+		}
+		scope = append(scope, summary)
+		listed = append(listed, fact)
 	}
 	target, err := w.consumers.DispatchTarget(ctx)
 	if err != nil {
@@ -485,16 +549,18 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		// summary admission defers to the Dispatch consumer: a deferred key's listed status is
 		// still the freshest thing the daemon holds about it, and the sequence fence keeps an
 		// event already applied from being written back over.
-		if err := blockers.Reconcile(scoped, tx, w.records, w.dispatchProject, issues); err != nil {
+		if err := blockers.Reconcile(scoped, tx, w.records, w.dispatchProject, scope); err != nil {
 			return err
 		}
 		// Every root the boot's catch-up will read is held out of the decision whether it waits on
 		// a person before admission's pass here, until its catch-up has applied what Dispatch
 		// recorded while the daemon was down (catchUpAwaiting).
-		if err := w.holdForCatchUp(scoped, tx); err != nil {
-			return err
+		if boot {
+			if err := w.holdForCatchUp(scoped, tx); err != nil {
+				return err
+			}
 		}
-		return w.admission.Reconcile(scoped, tx, issues, target, position)
+		return w.admission.Reconcile(scoped, tx, listed, target, position)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}
@@ -503,9 +569,18 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 }
 
 // identity is the bot a role's commits are authored by: its App's, from the lease the token
-// source mints for owner, the owner of the repository the role works (the identity is fetched once
-// per App and cached).
-func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
+// source mints for the owner whose installation holds the repository the role works (the identity
+// is fetched once per App and cached).
+//
+// recorded is the repository the issue's record names, and the mint is made for the owner GitHub
+// serves it under now (repositories.serving): the record keeps the name it was written under for
+// its whole life, while after a transfer the installation that covers the repository is the owner
+// it moved to's. Taking the repository rather than an owner is what keeps that mapping here, in
+// the one place both callers reach — a launch's spec (specs.SpawnSpec) and a working copy's
+// adoption (adoptIdentity) — so neither can mint on an owner the repository has left and fail
+// every launch of a tree open at the transfer.
+func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, recorded ghrepo.Repository) (runtime.GitIdentity, error) {
+	owner := w.repositories.serving(recorded).Owner()
 	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), owner)
 	if err != nil {
 		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, owner, err)
@@ -524,13 +599,45 @@ func (w *workflowRuntime) ensureWorkspace(ctx context.Context, issue string, rep
 	return w.outbox.ensureWorkspace(ctx, issue, repo, defaultBranch)
 }
 
+// enqueueOutbox writes outbox rows of issue, due now, in one transaction of its own, which owns
+// the commit hook that write registers (projectRecords, intake.OnCommit) so each row's lane is
+// woken as it commits — exactly as the re-hold of a notice does (reholdNotice). It is what
+// supervision's update-round sweep writes its controller notice and its issue message through
+// (supervision.enqueue), and the narrowest thing that gives supervision an outbox at all: rows
+// to write, and no engine, no admission and no Dispatch client behind it. Rows given together
+// land together or not at all, so a stall is never half told.
+func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, payloads ...record.OutboxPayload) error {
+	rows := make([]record.OutboxRow, 0, len(payloads))
+	for _, payload := range payloads {
+		row, err := record.NewOutboxRow(issue, payload, time.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("enqueue a %s row of %s: %w", payload.OutboxKind(), issue, err)
+		}
+		rows = append(rows, row)
+	}
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		for _, row := range rows {
+			if err := w.records.Enqueue(scoped, tx, row); err != nil {
+				return fmt.Errorf("enqueue a %s row of %s: %w", row.Kind, issue, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	committed()
+	return nil
+}
+
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
 		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
-		supervision.plan.tools, w.log)
+		w.repositories, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
+	supervision.enqueue = w.enqueueOutbox
 }
 
 // replayTerminal applies the ready or failure fact of every stored claim in either state that no
@@ -621,7 +728,7 @@ func retryUntilApplied(ctx context.Context, log *slog.Logger, first, most time.D
 // machine and the terminal facts are replayed: it starts, through the outbox's start, every claim
 // that owns its issue's current phase and that the daemon or its own exit suspended, and it
 // compares two builds against the open production checks of the repository the daemon is built
-// from: this binary's own revision, and the build Dispatch reports itself built from
+// from: this binary's own revision, and the build Dispatch's server fleet serves
 // (dispatchBuild), read only when the daemon has a revision to compare — a build with none
 // compares nothing — and a Dispatch client to ask.
 func (w *workflowRuntime) booted(ctx context.Context, bootID int64) error {
@@ -635,10 +742,11 @@ func (w *workflowRuntime) booted(ctx context.Context, bootID int64) error {
 	return nil
 }
 
-// dispatchBuild is the build commit Dispatch reports itself built from (dispatch.Client.BuildCommit),
-// "" when it reports none or could not be asked: the boot never fails on it, since a Dispatch
-// unreachable, or answering 503 while its own dependencies are down, is logged and compared with
-// nothing, and Dispatch's own start reports the same build (intake.ServerStarted).
+// dispatchBuild is the build every Dispatch server process serves, as Dispatch last announced it
+// (dispatch.Client.BuildCommit), "" when it reports none or could not be asked: the boot never
+// fails on it, since a Dispatch unreachable, or answering 503 while its database is down, is
+// logged and compared with nothing, and Dispatch's announcement on the bus reports the same build
+// (intake.ServerStarted).
 func (w *workflowRuntime) dispatchBuild(ctx context.Context) string {
 	commit, err := w.dispatch.BuildCommit(ctx)
 	if err != nil {
@@ -696,7 +804,7 @@ func terminalEventID(c supervise.Claim, state supervise.ClaimState) string {
 func (w *workflowRuntime) run(ctx context.Context) error {
 	group, running := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		if err := w.consumers.Run(running, w.pool, w.handlers...); err != nil {
+		if err := w.consumers.Run(running, w.handlers...); err != nil {
 			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
 			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, w.conn))
 		}
@@ -788,7 +896,11 @@ type positionReader interface {
 // The event id folds in the project and this boot (bootID): processed_events is one table
 // shared by every project's daemon, and a stream a later boot recreates would otherwise repeat an
 // earlier boot's (ack floor, idle) pairs and have its own release swallowed as a duplicate of one
-// that ran under the old boot.
+// that ran under the old boot. It folds in the hold too, admission's count of its holds and the
+// target the hold waits for: a repository's recovery can hold again in the same boot (the boot's
+// hold is not the only one), and its release can read the same (ack floor, idle) as an earlier
+// hold's, which would otherwise be applied as that earlier release's duplicate, or skipped as
+// the reading last applied, and the hold never released.
 func (w *workflowRuntime) pollHoldRelease(ctx context.Context) {
 	w.pollHoldReleaseWith(ctx, w.consumers)
 }
@@ -808,6 +920,7 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	var last intake.DispatchConsumerPosition
+	var lastHold uint64
 	haveLast := false
 	var heldSince, warnedAt time.Time
 	wasHeld := false
@@ -856,15 +969,16 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 			w.log.Warn("admission: a hold has not released", "waiting", waiting.Round(time.Second),
 				"target", w.admission.Target(), "ack_floor", position.AckFloorStream)
 		}
-		if haveLast && position == last {
+		hold := w.admission.Holds()
+		if haveLast && position == last && hold == lastHold {
 			continue
 		}
-		eventID := fmt.Sprintf("dispatch-position:%s:%s:%d:%t", w.dispatchProject, w.bootID, position.AckFloorStream, position.Idle)
+		eventID := fmt.Sprintf("dispatch-position:%s:%s:%d:%d:%d:%t", w.dispatchProject, w.bootID, hold, w.admission.Target(), position.AckFloorStream, position.Idle)
 		if _, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, position, w.handlers...); err != nil {
 			w.log.Warn("apply Dispatch consumer position failed", "error", err)
 			continue
 		}
-		last, haveLast = position, true
+		last, lastHold, haveLast = position, hold, true
 	}
 }
 

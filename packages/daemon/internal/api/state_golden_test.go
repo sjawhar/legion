@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -100,6 +101,8 @@ review_round_cap: 4
 max_fix_attempts: 5
 controller: daemon
 worker_backends: {tester: omp}
+repository_renames:
+  - {from: acme/widgets-legacy, to: acme/widgets}
 capabilities:
   decided:
     pool-capacity: "the pool is sized by hand for the admission cap"
@@ -240,8 +243,13 @@ func populatedState(t *testing.T) State {
 									Container: "roles", Generation: 2,
 								},
 							},
+							// The pod's update round, which every claim of that pod shares: the daemon
+							// replaces the pod only once each has answered. This one has, and reported
+							// the head it pushed.
+							UpdateRound: "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+							UpdateHead:  "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128",
 						},
-						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+						HandoffRecord: &HandoffRecordView{ID: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", Version: 1},
 						Rounds:        0,
 					},
 					claim.RoleImplementer: {
@@ -265,6 +273,9 @@ func populatedState(t *testing.T) State {
 								OK:          []string{"subagents", "dispatch-envoy-tools"},
 								Open:        []CapabilityGap{{Name: "github", Detail: "gh api user: HTTP 401: Bad credentials"}},
 							},
+							// The same round, on the worker that has not answered it yet: no head is
+							// reported until a worker answers.
+							UpdateRound: "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
 						},
 						HandoffCommit: "",
 						Rounds:        2,
@@ -390,12 +401,25 @@ func populatedState(t *testing.T) State {
 				}},
 			},
 			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+			// Dispatch's GitHub App is not installed on zeta/tools, which is served all the same.
+			WithoutWebhookApp: []WebhookAppGapView{{Repo: "zeta/tools", Reason: "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"}},
 			Caches: []CacheView{{
 				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
 			}},
 		},
 		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
 		Settings: SettingsOf(settingsFixtureConfig(t)),
+		// The Dispatch consumer is caught up; the Dispatch-server consumer's info read ran out of the
+		// bound; the GitHub consumer has 412 messages waiting and has handled none for over a
+		// minute.
+		Consumers: ConsumerLagViewsOf([]intake.ConsumerLag{
+			{Name: "legion-go-LEGION-dispatch", LastHandledAt: time.Date(2026, 9, 22, 9, 17, 50, 0, time.UTC)},
+			{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+			{
+				Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: time.Date(2026, 9, 22, 9, 5, 34, 0, time.UTC), OldestAge: 754 * time.Second,
+				LastHandledAt: time.Date(2026, 9, 22, 9, 16, 41, 0, time.UTC), Stalled: true,
+			},
+		}),
 	}
 }
 
@@ -538,6 +562,21 @@ func TestReadyRequestGolden(t *testing.T) {
 	})
 }
 
+// The ready-for-update request is the worker's answer to its pod's update task: the claim it
+// holds, the generation it answers for, the round the task it read named — the one round the
+// answer counts for — and the head of `legion/<issue>@origin` it reports, which the daemon
+// records and verifies nothing of.
+func TestReadyForUpdateRequestGolden(t *testing.T) {
+	golden(t, "ready-for-update.json", claim.ReadyForUpdateRequest{
+		ClaimToken: "legion-legion-legion-208-implementer",
+		SessionID:  "ses_implementer_208",
+		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		Generation: 5,
+		Round:      "pod:9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22",
+		Head:       "9f1c0a7d4b2e6f8a3c5d1e7b9a0f2c4d6e8b1a35",
+	})
+}
+
 // A session's report shows on its claim as the names it proved and the gaps it did not, each side
 // in the report's order, and both sides are arrays on the wire even when empty: a session that
 // proved every row has `"open": []`, not `null`, under the plugin's strict reader.
@@ -650,12 +689,32 @@ func operatorClaim() OperatorClaim {
 			Interrupted: true,
 		},
 		SuspensionHeld: true,
+		// The claim's own plugin round: its process speaks a plugin contract this daemon does not,
+		// and it is replaced only once its worker has pushed its work and answered, which it has.
+		UpdateRound: "plugin:43",
+		UpdateHead:  "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128",
 	}
 }
 
 // What the spawn, deliver, suspend, resume, and stop routes answer.
 func TestOperatorClaimGolden(t *testing.T) {
 	golden(t, "operator-claim.json", operatorClaim())
+}
+
+func TestForgetSessionOperatorClaimGolden(t *testing.T) {
+	golden(t, "operator-forget-session.json", OperatorClaim{
+		Token:                "legion-legion-legion-208-architect",
+		Tree:                 "LEGION-208",
+		Issue:                "LEGION-208",
+		Role:                 claim.RoleArchitect,
+		Generation:           4,
+		State:                "failed",
+		ForgottenSession:     "ses_architect",
+		ForgottenSessionFile: "/sessions/ses_architect.jsonl",
+		Budgets:              BudgetsView{LaunchFailures: 3},
+		UncertainStreak:      0,
+		PluginContract:       38,
+	})
 }
 
 // What the list route answers: a queued claim carries no locator and no delivery yet.

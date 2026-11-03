@@ -36,7 +36,7 @@ test.beforeEach(async () => {
 // "brown". Each record mark keeps its own text in both browsers and in the server's reading of the
 // document, so the anchor refresh a document version runs leaves Bob's quote "quick brown" rather
 // than cutting it to "quick ".
-test("two readers' comments can cover the same text, and neither cuts the other's anchor", async ({
+test("two readers' comments can cover the same text, and neither cuts the other's anchor @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -163,7 +163,9 @@ test("two readers' comments can cover the same text, and neither cuts the other'
 // Bob suggests on "quick brown" and his thread stays selected while Alice suggests on "brown"
 // from the same selection control a person uses. Selecting a thread only highlights its text;
 // both browsers keep Bob's anchor whole, show Alice's inside it, and send both quotes to the server.
-test("two readers' suggestions keep both action-bar anchors", async ({ browser }, testInfo) => {
+test("two readers' suggestions keep both action-bar anchors @phone", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -306,7 +308,7 @@ const overlapOrders: { name: string; quotes: [string, string] }[] = [
 
 for (const { kind, noun } of overlapKinds) {
   for (const order of overlapOrders) {
-    test(`a click on text a wider and a narrower ${noun} both cover opens the narrower one, ${order.name}`, async ({
+    test(`a click on text a wider and a narrower ${noun} both cover opens the narrower one, ${order.name} @phone`, async ({
       browser,
     }, testInfo) => {
       await createProject({ key: "CORE", name: "Core" });

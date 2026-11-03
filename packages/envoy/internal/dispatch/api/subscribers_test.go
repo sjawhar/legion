@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -64,8 +65,11 @@ func TestMatchingTopics(t *testing.T) {
 // sessions surface (cmd/listener/api.go), stateful enough to prove the
 // unsubscribe flow round-trips through it.
 type fakeListener struct {
-	mu              sync.Mutex
-	interests       map[string][]string
+	mu        sync.Mutex
+	interests map[string][]string
+	// lastSeen is the last_seen each interest row carries, as the listener answers it from its
+	// session cache; a row for a session missing here carries none, as an older listener's does.
+	lastSeen        map[string]int64
 	sessions        []map[string]any
 	calls           []unsubscribeCall
 	failUnsubscribe bool
@@ -124,7 +128,11 @@ func newFakeListener(t *testing.T, interests map[string][]string, sessions []map
 		if sessionID == "" {
 			rows := make([]map[string]any, 0, len(state.interests))
 			for id, topics := range state.interests {
-				rows = append(rows, map[string]any{"session_id": id, "topics": topics, "updated_at": 1700000000000})
+				row := map[string]any{"session_id": id, "topics": topics, "updated_at": 1700000000000}
+				if lastSeen, ok := state.lastSeen[id]; ok {
+					row["last_seen"] = lastSeen
+				}
+				rows = append(rows, row)
 			}
 			WriteJSON(w, http.StatusOK, rows)
 			return
@@ -182,7 +190,7 @@ func newSubscribersHandler(t *testing.T, database *store.Store, envoyURL string)
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 
@@ -233,6 +241,46 @@ func TestListIssueSubscribersFiltersEnrichesAndSortsByLastSeen(t *testing.T) {
 	liveTopics, _ := rows[0]["topics"].([]any)
 	if len(liveTopics) != 1 || liveTopics[0] != "notifications.dispatch.issue."+key+".>" {
 		t.Fatalf("live topics = %#v, want only the wildcard form", liveTopics)
+	}
+}
+
+// A subscriber whose session is no longer live is shown with the last heartbeat the listener still
+// knows for it, which is later than its interest row's updated_at, and with that updated_at when
+// the listener sends none. A live subscriber keeps its session's own last_seen. The list is read
+// straight from the listener, so this asks the handler body with no database behind it.
+func TestSubscribersShowADeadSessionsLastHeartbeat(t *testing.T) {
+	const topic = "notifications.dispatch.issue.TEST-1.>"
+	envoyURL, listener := newFakeListener(t, map[string][]string{
+		"live":       {topic},
+		"known_dead": {topic},
+		"lost_dead":  {topic},
+	}, []map[string]any{
+		{"session_id": "live", "title": "planner", "last_seen": 1800000000000},
+	})
+	listener.lastSeen = map[string]int64{"live": 1700000100000, "known_dead": 1700000200000}
+	s := &server{deps: Deps{Envoy: envoy.New(envoyURL)}}
+
+	response := httptest.NewRecorder()
+	s.writeSubscribers(response, httptest.NewRequest(http.MethodGet, "/api/v1/issues/TEST-1/subscribers", nil), issueSubscriberBase("TEST-1"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	rows := decodeBody[[]subscriber](t, response)
+	got := make(map[string]subscriber, len(rows))
+	for _, row := range rows {
+		got[row.SessionID] = row
+	}
+	for id, want := range map[string]struct {
+		live     bool
+		lastSeen int64
+	}{
+		"live":       {live: true, lastSeen: 1800000000000},
+		"known_dead": {live: false, lastSeen: 1700000200000},
+		"lost_dead":  {live: false, lastSeen: 1700000000000},
+	} {
+		if row, ok := got[id]; !ok || row.Live != want.live || row.LastSeen != want.lastSeen {
+			t.Fatalf("subscriber %s = %+v (listed %v), want live %v and last_seen %d; all rows %+v", id, row, ok, want.live, want.lastSeen, rows)
+		}
 	}
 }
 

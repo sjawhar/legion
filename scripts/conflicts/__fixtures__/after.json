@@ -1,0 +1,114 @@
+{
+  "since": "2026-10-27T11:21:00Z",
+  "until": "2026-11-03",
+  "origin_main": "0000000000000000000000000000000000000002",
+  "measured_at": "2026-11-03T11:21:00Z",
+  "selection": "updated-since",
+  "prs": [
+    {
+      "number": 20,
+      "title": "Merged in the window",
+      "state": "MERGED",
+      "baseRefName": "main",
+      "headRefName": "legion/B-1",
+      "headRefOid": "e100",
+      "mergedAt": "2026-10-30T00:00:00Z",
+      "createdAt": "2026-10-27T12:00:00Z",
+      "commit_count": 2,
+      "merges": [
+        {
+          "oid": "n1",
+          "date": "2026-10-28T00:00:00Z",
+          "headline": "merge main",
+          "parents": ["e1", "v1"],
+          "branch_parent": "e1",
+          "upstream_parent": "v1",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["packages/x/CHANGELOG.md"]
+        }
+      ],
+      "force_pushes": []
+    },
+    {
+      "number": 21,
+      "title": "Merged after the window",
+      "state": "MERGED",
+      "baseRefName": "main",
+      "headRefName": "legion/B-2",
+      "headRefOid": "f100",
+      "mergedAt": "2026-11-05T00:00:00Z",
+      "createdAt": "2026-10-27T12:00:00Z",
+      "commit_count": 2,
+      "merges": [
+        {
+          "oid": "n2",
+          "date": "2026-10-29T00:00:00Z",
+          "headline": "merge main",
+          "parents": ["f2", "v2"],
+          "branch_parent": "f2",
+          "upstream_parent": "v2",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["README.md"]
+        }
+      ],
+      "force_pushes": []
+    },
+    {
+      "number": 22,
+      "title": "Open",
+      "state": "OPEN",
+      "baseRefName": "main",
+      "headRefName": "legion/B-3",
+      "headRefOid": "g100",
+      "mergedAt": null,
+      "createdAt": "2026-10-27T12:00:00Z",
+      "commit_count": 3,
+      "merges": [
+        {
+          "oid": "n3",
+          "date": "2026-10-29T00:00:00Z",
+          "headline": "clean merge of main",
+          "parents": ["g3", "v3"],
+          "branch_parent": "g3",
+          "upstream_parent": "v3",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": []
+        },
+        {
+          "oid": "n4",
+          "date": "2026-10-29T12:00:00Z",
+          "headline": "merge main",
+          "parents": ["g4", "v4"],
+          "branch_parent": "g4",
+          "upstream_parent": "v4",
+          "upstream_on_main": true,
+          "upstream_on_base": true,
+          "kind": "forward",
+          "conflicts": ["packages/x/CHANGELOG.md"]
+        }
+      ],
+      "force_pushes": [],
+      "open_conflicts_now": [],
+      "open_behind_base": false
+    },
+    {
+      "number": 23,
+      "title": "Closed unmerged",
+      "state": "CLOSED",
+      "baseRefName": "main",
+      "headRefName": "legion/B-4",
+      "headRefOid": "h100",
+      "mergedAt": null,
+      "createdAt": "2026-10-27T12:00:00Z",
+      "commit_count": 1,
+      "merges": [],
+      "force_pushes": []
+    }
+  ]
+}

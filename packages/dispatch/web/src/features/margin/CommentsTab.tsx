@@ -12,12 +12,20 @@ import {
 } from "../../theme/classes";
 import type { ComposerAnchor, ComposerKind, ComposerOwner } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
+import type { SaveCommentEdit } from "../conversation/send-request";
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
-import { marginComposeSendKey } from "./margin-context";
+import { DecisionList } from "./DecisionCard";
+import { marginComposeSendKey, useMargin } from "./margin-context";
 import { ThreadList } from "./ThreadList";
 import type { CommentActionFailure } from "./useCommentActionQueue";
-import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
+import type {
+  DecisionMarginItem,
+  MarginItemAction,
+  MarginOwner,
+  MarkPlacement,
+  Thread,
+} from "./useMarginItems";
 
 /** The composer on the open document: the compose the reader has open, or the one the held-send
  *  store holds for the document - out, or refused - from Send on. At most one per document. */
@@ -39,6 +47,7 @@ interface CommentsTabProps {
   asksPending: boolean;
   commentsError: boolean;
   commentsPending: boolean;
+  decisions: readonly DecisionMarginItem[];
   expandedThreadKey: string | undefined;
   editingCommentId: string | undefined;
   savingCommentEditId: string | undefined;
@@ -52,7 +61,7 @@ interface CommentsTabProps {
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   needsYou: Ask[];
   onAction: (id: string, action: MarginItemAction) => void;
-  onEdit: (id: string, body: string) => Promise<unknown>;
+  onEdit: SaveCommentEdit;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;
@@ -61,7 +70,7 @@ interface CommentsTabProps {
   onToggleResolved: () => void;
   pendingActionIds: ReadonlySet<string>;
   resolvedThreads: Thread[];
-  retractedAskCount: number;
+  foldedAskCount: number;
   selectedItemId: string | undefined;
   showResolved: boolean;
   threads: Thread[];
@@ -92,6 +101,7 @@ export function MarginComposerSlot({
    *  Comments tab shows. */
   onScreen: boolean;
 }): ReactNode {
+  const { anchorRefusal } = useMargin();
   const sendKey = useMemo(
     () => marginComposeSendKey(composer.anchor.artifact),
     [composer.anchor.artifact]
@@ -109,6 +119,7 @@ export function MarginComposerSlot({
       ) : null}
       <MentionComposer
         anchor={composer.anchor}
+        anchorRefusal={anchorRefusal}
         autoFocus={onScreen}
         closed={isClosed}
         frame="pt-3"
@@ -165,6 +176,7 @@ export function CommentsTab({
   asksPending,
   commentsError,
   commentsPending,
+  decisions,
   expandedThreadKey,
   editingCommentId,
   savingCommentEditId,
@@ -187,7 +199,7 @@ export function CommentsTab({
   onToggleThread,
   pendingActionIds,
   resolvedThreads,
-  retractedAskCount,
+  foldedAskCount,
   selectedItemId,
   showResolved,
   threads,
@@ -267,16 +279,24 @@ export function CommentsTab({
               pendingActionIds={pendingActionIds}
               resolvedThreads={resolvedThreads}
               selectedItemId={selectedItemId}
-              retractedAskCount={retractedAskCount}
+              foldedAskCount={foldedAskCount}
               showResolved={showResolved}
               owner={owner}
               threads={threads}
               viewerLogin={viewerLogin}
             />
+            <DecisionList
+              blockPlacements={blockPlacements}
+              decisions={decisions}
+              hoveredItemId={hoveredItemId}
+              onSelect={onSelectCard}
+              selectedItemId={selectedItemId}
+            />
             {threads.length === 0 &&
             resolvedThreads.length === 0 &&
             historicalAsks.length === 0 &&
             needsYou.length === 0 &&
+            decisions.length === 0 &&
             !asksPending &&
             !commentsPending &&
             !answeredAsksPending ? (

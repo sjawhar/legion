@@ -11,15 +11,19 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 type askTransition struct {
 	EventType      string
 	ReplacesAnswer *time.Time
 	Apply          func(context.Context, pgx.Tx, model.Ask) (model.Ask, error)
-	Payload        func(model.Ask) any
+	// Payload builds the event's payload from the one every transition carries (the ask after
+	// the transition, with its thread_logins); nil appends that payload as it is.
+	Payload func(model.AskEventPayload) any
 	// After runs once the transition's own event is appended, still inside the
 	// transaction; the events it returns are published with it.
 	After func(context.Context, pgx.Tx, model.Ask) ([]model.Event, error)
@@ -94,7 +98,19 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "answer requires a selected option or free-text answer")
 				}
 			}
-			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: time.Now().UTC()}
+			// An answer that chose no option stores an empty list, never null.
+			if selected == nil {
+				selected = []string{}
+			}
+			// The transaction's now(), read under the ask's row lock (transitionAskTx), so it is
+			// the created_at of this answer's ask.answered event too. Each process's host keeps
+			// its own clock, and this `at` is compared with times the database stamped: the carry
+			// rule holds it against an approval's created_at (docs.carryVerdict).
+			var answeredAt time.Time
+			if err := tx.QueryRow(ctx, `select now()`).Scan(&answeredAt); err != nil {
+				return model.Ask{}, err
+			}
+			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: answeredAt.UTC()}
 			if options.WriteBlock != nil {
 				if err := options.WriteBlock(ctx, tx, ask, answer); err != nil {
 					return model.Ask{}, err
@@ -111,9 +127,9 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 			ask.Answer = &answer
 			return ask, nil
 		},
-		Payload: func(ask model.Ask) any {
+		Payload: func(payload model.AskEventPayload) any {
 			return model.AskAnsweredEventPayload{
-				AskEventPayload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+				AskEventPayload: payload,
 				PreviousAnswer:  previousAnswer,
 			}
 		},
@@ -266,7 +282,12 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := strings.TrimSpace(input.Kind)
 	reason := strings.TrimSpace(input.Reason)
-	if (kind != "retracted" && kind != "resolved") || reason == "" {
+	if kind != "retracted" && kind != "resolved" {
+		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest,
+			`resolution kind must be "retracted" or "resolved", not `+strconv.Quote(kind))
+		return
+	}
+	if reason == "" {
 		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest, "resolution requires a kind and reason")
 		return
 	}
@@ -327,22 +348,42 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	return ask, nil
 }
 
-// closeAskTx applies a transition to an open ask inside the caller's transaction, appends the
-// transition's event and runs its After; the caller commits and publishes the events.
+// closeAskTx applies a transition to an open ask inside the caller's transaction, indexes the
+// ask's parts, appends the transition's event and runs its After; the caller commits and
+// publishes the events.
 func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, id string, actor model.Actor, transition askTransition) (model.Ask, []model.Event, error) {
 	ask, err := s.transitionAskTx(ctx, tx, id, transition)
 	if err != nil {
 		return model.Ask{}, nil, err
 	}
-	// A transition writes no question text, so it moves no references and says so.
-	payload := any(model.NewAskEventPayload(ask, model.ReferenceChanges{}))
+	// A transition writes no question text, so it reconciles none of the ask's own references.
+	// An answer is a part of the ask, though, so both transitions index the parts here, where
+	// the ask row they wrote is held: a resolution adds no part, but its indexing still takes
+	// the ask's state row, reconciles the links its parts hold and clears owed_at, and writes
+	// every part of an ask an older build left owed. The answer a transition wrote is in tx, so
+	// the ask's Replies rows are read after it.
+	at := refs.AskPartsAt(ask)
+	changes, err := s.indexAskParts(ctx, tx, ask, at, model.ReferenceChanges{})
+	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	base, err := events.AskEventPayload(ctx, tx, ask, changes)
+	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	payload := any(base)
 	if transition.Payload != nil {
-		payload = transition.Payload(ask)
+		payload = transition.Payload(base)
 	}
 	event, err := s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		transition.EventType, actor, payload,
 	))
 	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	// The answer's part edges are new rows of this transaction, so they take the event's id and
+	// a ?since= read lists them, as a create's and an edit's do.
+	if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
 		return model.Ask{}, nil, err
 	}
 	events := []model.Event{event}

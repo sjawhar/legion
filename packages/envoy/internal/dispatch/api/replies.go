@@ -23,8 +23,9 @@ import (
 // myRepliesUnread is the filter both reads share: the caller's ($1) unread rows, narrowed to one
 // issue ($2, empty for any) or one project document ($3, null for any), less an open ask the Inbox
 // lists, whose row in Waiting on you already shows its reply (api/inbox.go: an open ask on an issue
-// that is not closed, or on a project document). An open ask on a closed issue stays, since the
-// Inbox hides it and nothing else would show its reply.
+// that is not closed, or on a project document). A close withdraws its issue's open asks, so an
+// open ask on a closed issue is one a close by an older release left during a roll; it stays, since
+// the Inbox hides it and nothing else would show its reply.
 const myRepliesUnread = `
 	from user_threads u
 	left join asks a on u.kind = 'ask' and a.id = u.thread_id
@@ -192,10 +193,9 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 //
 // The transaction locks the thread's owner row `for share` before it touches the caller's row:
 // every writer that moves a user_threads row (a comment, an answer, an issue message) holds that
-// owner `for no key update` before its trigger fires, and the answer route can hold the events'
-// commit-order lock by then too (docs/marks.go's anchor refresh appends an event before the answer's
-// update), so a mark that took the row first could wait on a writer waiting on it. Owner first, then
-// the project the event names, is the order every multi-owner transaction takes (LockOwners).
+// owner `for no key update` before its trigger fires, so a mark that took the row first could wait
+// on a writer waiting on it. Owner first, then the project the event names, is the order every
+// multi-owner transaction takes (LockOwners).
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {

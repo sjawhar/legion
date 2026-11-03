@@ -1,9 +1,9 @@
-import { type MutationKey, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type MutationKey, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
-import { userStateQuery, whoAmIQuery } from "../../api/queries";
+import { api, issueStateRequest, type WriteBounds } from "../../api/client";
+import { whoAmIQuery } from "../../api/queries";
 import type {
   Agent,
   Artifact,
@@ -29,6 +29,7 @@ import {
   surfaceMutedHoverBg,
   textMutedOnCanvas,
   textMutedOnSurface,
+  textMutedOnSurfaceMuted,
   textPrimaryOnSurface,
   textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
@@ -36,8 +37,8 @@ import {
 } from "../../theme/classes";
 import { deliveryAttempts } from "../agents/attempts";
 import { AskCard } from "../inbox/AskCard";
+import { writePin } from "../issue/pin-write";
 import { conversationItemId, isPinnedConversation, stateForIssue } from "../issue/pins";
-import { usePinWrites } from "../issue/usePinWrites";
 import { ThreadCard } from "../margin/ThreadCard";
 import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
@@ -56,6 +57,8 @@ import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
+import { useSendMarkOnce } from "../writes/useSendMarkOnce";
 import { Avatar } from "./Avatar";
 import type { ReplyTarget } from "./composer-model";
 import {
@@ -65,6 +68,7 @@ import {
   type ConversationFilter,
   commentDeliveries,
   focusConversation,
+  handoffFields,
   type MessageConversation,
   matchesFilter,
 } from "./conversation-model";
@@ -78,6 +82,7 @@ import {
 import { MentionComposer } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
+import type { CarriedBlockIds } from "./send-request";
 import { capabilitiesForTarget, TargetedMessageCard } from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
 import { useAgents } from "./useAgents";
@@ -193,13 +198,16 @@ function ConversationReply({
   root: MessageConversation;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
+  const text = useAgentText();
+  const targetName = recipientOf(reply.deliveries, root.root.target);
+  const retry = useKeyedWrite({
+    label: (delivery: MessageDeliveryMode) =>
+      `Delivery to ${text.part(targetName)} again, as ${MODE_LABELS[delivery]}`,
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
+    write: (delivery, bounds) => api.createMessageDelivery(reply.id, delivery, bounds),
   });
   const capabilities = capabilitiesForTarget(root.root.target, agents);
   const lastAttempt = reply.deliveries.at(-1);
-  const targetName = recipientOf(reply.deliveries, root.root.target);
   const answer = root.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
@@ -233,6 +241,7 @@ function ConversationReply({
       onReply={isClosed ? undefined : () => onReply(replyTargetFor(reply, root, issueKey))}
       quote={{
         author: parent?.author,
+        block: reply.reply_block,
         excerpt: parent?.body ?? "",
         to:
           reply.in_reply_to === null
@@ -292,31 +301,14 @@ function Thread({
   );
 }
 
-function TurnPin({
-  disabled,
-  onPin,
-  pinned,
-}: {
-  disabled: boolean;
-  onPin: () => void;
-  pinned: boolean;
-}): ReactNode {
-  return (
-    <PinButton
-      disabled={disabled}
-      label={pinned ? "Unpin" : "Pin"}
-      onClick={onPin}
-      pinned={pinned}
-      quiet
-    />
-  );
+function TurnPin({ onPin, pinned }: { onPin: () => void; pinned: boolean }): ReactNode {
+  return <PinButton label={pinned ? "Unpin" : "Pin"} onClick={onPin} pinned={pinned} quiet />;
 }
 
 function MessageTurn({
   agents,
   current,
   currentReplyId,
-  disabled,
   isClosed,
   issueKey,
   item,
@@ -329,7 +321,6 @@ function MessageTurn({
   agents: readonly Agent[];
   current: boolean;
   currentReplyId: string | undefined;
-  disabled: boolean;
   isClosed: boolean;
   issueKey: string;
   item: Extract<Conversation, { kind: "message" }>;
@@ -365,7 +356,7 @@ function MessageTurn({
               onClick={() => onReply(replyTargetFor(item.root, item, issueKey))}
             />
           )}
-          <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+          <TurnPin onPin={onPin} pinned={pinned} />
         </TurnActions>
       </div>
       <Thread
@@ -377,6 +368,117 @@ function MessageTurn({
         replyDisabled={replyDisabled}
         root={item}
       />
+    </li>
+  );
+}
+
+/** How a handoff shows JSON: an array or object field, or a body that is not a JSON object. */
+const handoffPre = `mt-1 max-h-64 overflow-auto rounded-md p-2 text-xs whitespace-pre-wrap ${surfaceMutedBg} ${textMutedOnSurfaceMuted}`;
+
+/** A handoff's body, fetched when the reader expands its card: each top-level field a labelled
+ *  row, the `proof` list one row per entry. A version never changes once written, so the read
+ *  is kept for the page's life. A body that is not a JSON object is shown as the text it is. */
+function HandoffFields({ handoffId, id }: { handoffId: string; id: string }): ReactNode {
+  const handoff = useQuery({
+    queryKey: ["handoff", handoffId],
+    queryFn: () => api.getHandoff(handoffId),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const fields = useMemo(
+    () => (handoff.data === undefined ? undefined : handoffFields(handoff.data.body)),
+    [handoff.data]
+  );
+  if (handoff.isPending) {
+    return (
+      <p className={`mt-2 text-sm ${textMutedOnSurface}`} id={id}>
+        Loading handoff…
+      </p>
+    );
+  }
+  if (handoff.isError) {
+    return (
+      <p className={`mt-2 text-sm ${dangerText}`} id={id}>
+        Could not load the handoff.
+      </p>
+    );
+  }
+  if (fields === undefined) {
+    return (
+      <pre className={handoffPre} data-handoff-raw id={id}>
+        {handoff.data.body}
+      </pre>
+    );
+  }
+  return (
+    <dl className={`mt-2 flex flex-col gap-2 text-sm ${textPrimaryOnSurface}`} id={id}>
+      {fields.map(({ field, json, label, text }) => (
+        <div data-handoff-field={field} key={`${field}/${label}`}>
+          <dt className={`font-medium ${textMutedOnSurface}`}>{label}</dt>
+          <dd className="min-w-0">
+            {json ? (
+              <pre className={handoffPre}>{text}</pre>
+            ) : (
+              <span className="break-words whitespace-pre-wrap">{text}</span>
+            )}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** One version of a phase handoff: which phase and version, the session that wrote it and when.
+ *  Nobody replies to a handoff, so the card's only control besides its pin is the disclosure
+ *  that reads its body. */
+function HandoffTurn({
+  current,
+  item,
+  onPin,
+  pinned,
+  register,
+}: {
+  current: boolean;
+  item: Extract<Conversation, { kind: "handoff" }>;
+  onPin: () => void;
+  pinned: boolean;
+  register?: DwellRef;
+}): ReactNode {
+  const [expanded, setExpanded] = useState(false);
+  const fieldsId = useId();
+  const { author, phase, version } = item.handoff;
+  return (
+    <li
+      aria-current={current ? "true" : undefined}
+      className={`group mt-2 rounded-lg px-2 py-1 ${surfaceMutedHoverBg}`}
+      data-turn={item.id}
+      ref={register}
+    >
+      <div className="flex gap-3">
+        <Avatar actor={author} />
+        <div className="min-w-0 flex-1">
+          <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
+            <AgentName actor={author} className="font-semibold" inline />
+            <Timestamp at={item.handoff.created_at} />
+            {item.unread ? <UnreadMark /> : null}
+          </p>
+          <p className={`font-medium ${textPrimaryOnSurface}`}>
+            {phase} handoff, version {version}
+          </p>
+          <button
+            aria-controls={expanded ? fieldsId : undefined}
+            aria-expanded={expanded}
+            className={`min-h-8 text-sm font-medium ${linkText}`}
+            onClick={() => setExpanded((open) => !open)}
+            type="button"
+          >
+            {expanded ? "Hide fields" : "Show fields"}
+          </button>
+          {expanded ? <HandoffFields handoffId={item.handoff.id} id={fieldsId} /> : null}
+        </div>
+        <TurnActions>
+          <TurnPin onPin={onPin} pinned={pinned} />
+        </TurnActions>
+      </div>
     </li>
   );
 }
@@ -493,7 +595,6 @@ function CommentTurn({
   composerClassName,
   current,
   currentReplyId,
-  disabled,
   expanded,
   forceExpanded = false,
   hideReplyComposer = false,
@@ -521,7 +622,6 @@ function CommentTurn({
   current: boolean;
   /** The reply a deep link named, marked inside the thread. */
   currentReplyId: string | undefined;
-  disabled: boolean;
   /** Whether the reader has the thread open inline. The tab owns it, so a comment whose thread is
    *  open stays in the list whoever resolves it (`shown`), with its reply and the reply's send. */
   expanded: boolean;
@@ -552,11 +652,12 @@ function CommentTurn({
   const agentText = useAgentText();
   const [editingCommentId, setEditingCommentId] = useState<string>();
   const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
+  /** One attempt of a comment edit's save, under the composer's key (`sendRequest`). */
   const editComment = useCallback(
-    async (id: string, body: string) => {
+    async (id: string, body: string, carried: CarriedBlockIds | undefined, bounds: WriteBounds) => {
       setSavingCommentEditId(id);
       try {
-        const comment = await api.editComment(id, { body });
+        const comment = await api.editComment(id, { body, ...carried }, bounds);
         await queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
         return comment;
       } finally {
@@ -575,11 +676,13 @@ function CommentTurn({
     untilDeadline: true,
   });
   const retryGuard = useSubmitGuard();
-  const retry = useMutation({
-    mutationFn: (delivery: CommentDeliveryAttempt) =>
-      api.createCommentDelivery(delivery.comment_id, delivery.target, delivery.delivery),
+  const retry = useKeyedWrite({
+    label: (delivery: CommentDeliveryAttempt) =>
+      `Delivery of the comment to ${agentText.part(targetPart(delivery.target))} again, as ${MODE_LABELS[delivery.delivery]}`,
     onSettled: () => retryGuard.release(),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] }),
+    write: (delivery, bounds) =>
+      api.createCommentDelivery(delivery.comment_id, delivery.target, delivery.delivery, bounds),
   });
   const thread: CommentThread = {
     anchor: item.root.anchor,
@@ -686,7 +789,7 @@ function CommentTurn({
             }}
           />
         )}
-        <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+        <TurnPin onPin={onPin} pinned={pinned} />
       </div>
     </li>
   );
@@ -714,13 +817,15 @@ function TargetedMessageTurn({
   replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (delivery: MessageDeliveryMode) =>
-      api.createMessageDelivery(item.root.id, delivery),
+  const text = useAgentText();
+  const targetName = recipientOf(item.root.deliveries, item.root.target);
+  const retry = useKeyedWrite({
+    label: (delivery: MessageDeliveryMode) =>
+      `Delivery to ${text.part(targetName)} again, as ${MODE_LABELS[delivery]}`,
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
+    write: (delivery, bounds) => api.createMessageDelivery(item.root.id, delivery, bounds),
   });
   const capabilities = capabilitiesForTarget(item.root.target, agents);
-  const targetName = recipientOf(item.root.deliveries, item.root.target);
   const asker = item.root.author;
 
   return (
@@ -789,9 +894,8 @@ export function ConversationTab({
   const store = useHeldSends();
   // Comments whose card's own reply the store holds, out or refused.
   const heldCardReplies = useHeldSendsUnder(threadRepliesSendKey(sendKey));
-  const pins = usePinWrites(issueKey);
   const viewer = useQuery(whoAmIQuery());
-  // The three reads the list is built from, each the issue's whole set: a conversation is listed
+  // The four reads the list is built from, each the issue's whole set: a conversation is listed
   // however old it is, which no window of the event log could promise.
   // The comments are the read the margin already holds for this issue, under the key it owns
   // (`features/margin/useMarginItems.ts`): the same request, shared rather than fetched and
@@ -811,6 +915,11 @@ export function ConversationTab({
     queryKey: ["issue-messages", issueKey],
     queryFn: () => api.listIssueMessages(issueKey),
   });
+  // Each version of each phase handoff, without its body; a card reads its body when expanded.
+  const handoffs = useQuery({
+    queryKey: ["handoffs", issueKey],
+    queryFn: () => api.listHandoffs(issueKey),
+  });
   const issueState = stateForIssue(state, issueKey);
   const lastReadSeq = issueState.last_read_seq;
   // The watermark as a moment: the first event the reader has not read. One row - the list is
@@ -826,16 +935,16 @@ export function ConversationTab({
   });
   const unreadFrom = unreadBoundary.data?.[0]?.created_at;
   const headSeq = head.data?.[0]?.seq ?? 0;
-  const lastRead = useRef(lastReadSeq);
   const conversations = useMemo(
     () =>
       buildConversations({
         asks: asks.data ?? [],
         comments: comments.data ?? [],
         messages: messages.data ?? [],
+        handoffs: handoffs.data ?? [],
         unreadFrom,
       }),
-    [asks.data, comments.data, messages.data, unreadFrom]
+    [asks.data, comments.data, handoffs.data, messages.data, unreadFrom]
   );
   const [filter, setFilter] = useState<ConversationFilter>("all");
   const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
@@ -858,8 +967,9 @@ export function ConversationTab({
         asks: asks.data ?? [],
         comments: comments.data ?? [],
         messages: messages.data ?? [],
+        handoffs: handoffs.data ?? [],
       }),
-    [asks.data, comments.data, focusItemId, messages.data]
+    [asks.data, comments.data, focusItemId, handoffs.data, messages.data]
   );
   const shown = useMemo(
     () =>
@@ -931,14 +1041,14 @@ export function ConversationTab({
   };
   const phoneReplyTargetsThread =
     phoneThread !== undefined && phone.replyTo?.id === phoneThread.root.id;
-  // The list is on the page only once all three reads answer: `loading` and `failed` both hide it
+  // The list is on the page only once all four reads answer: `loading` and `failed` both hide it
   // (the early returns below) and withhold `latestItemSeq`, so the two cannot drift apart. The
   // number is the newest activity's own millisecond, since the list is ordered by activity.
   // Passed while a read is still pending, the hook's first placement would find no card and
   // scroll to the top, and a read answering last without changing the newest time would leave
   // the reader there (INFRA-303).
-  const loading = asks.isPending || comments.isPending || messages.isPending;
-  const failed = asks.isError || comments.isError || messages.isError;
+  const loading = asks.isPending || comments.isPending || messages.isPending || handoffs.isPending;
+  const failed = asks.isError || comments.isError || messages.isError || handoffs.isError;
   const newestShown = loading || failed ? undefined : shown.at(0);
   const latestItemSeq = newestShown === undefined ? undefined : Date.parse(newestShown.at);
   const follow = useFollowLatest({
@@ -997,39 +1107,42 @@ export function ConversationTab({
     else setThreadOpen(root.root.id, true);
   }, [focus, isPhoneViewport, phone.open, setThreadOpen, shown, visible]);
 
-  useEffect(() => {
-    lastRead.current = lastReadSeq;
-  }, [lastReadSeq]);
-
   // The issue's read mark, and the only writer of it: the newest conversation three-quarters on
   // screen for a second reads the issue through its head. A single watermark cannot say "I read
   // the third conversation only", so a dwell lower down writes nothing, and under-marking never
-  // hides an unread conversation. A write the server refuses re-reads the stored mark and dwells
-  // again while the card stays on screen (`useDwell` re-arms on the rejection this rethrows).
+  // hides an unread conversation. The mark is a quiet write of the one write store
+  // (`useSendMarkOnce`): made as the person reading, tried under its key until Dispatch decides
+  // it, kept across a reload and never shown; one Dispatch refuses is sent again once the stored
+  // mark changes. It names its issue, so an answer that lands after the reader moved on is put
+  // where it belongs.
   const newestId = conversations[0]?.id;
+  const [readThrough, setReadThrough] = useState<{
+    readonly issueKey: string;
+    readonly seq: number;
+  }>();
+  const read = readThrough?.issueKey === issueKey ? readThrough : undefined;
   const registerNewest = useDwell({
     enabled: visible && newestId !== undefined && headSeq > 0,
-    onDwell: async () => {
-      if (headSeq <= lastRead.current) return;
-      lastRead.current = headSeq;
-      try {
-        const next = await api.putIssueState(issueKey, { last_read_seq: headSeq });
-        queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-          ...current,
-          [issueKey]: next,
-        }));
-      } catch (error) {
-        const current = await queryClient.fetchQuery(userStateQuery()).catch(() => undefined);
-        lastRead.current = stateForIssue(current, issueKey).last_read_seq;
-        throw error;
-      }
-    },
+    onDwell: () => setReadThrough({ issueKey, seq: headSeq }),
     resetKey: `${issueKey} ${newestId ?? ""} ${headSeq}`,
-    shouldDwell: () => headSeq > lastRead.current,
+    shouldDwell: () => headSeq > Math.max(lastReadSeq, read?.seq ?? 0),
+  });
+  useSendMarkOnce({
+    mark: read === undefined ? undefined : { key: `${read.issueKey} ${read.seq}`, value: read },
+    onSuccess: (next, mark) =>
+      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+        ...current,
+        [mark.issueKey]: next,
+      })),
+    request: (mark: { issueKey: string; seq: number }) =>
+      issueStateRequest(mark.issueKey, { last_read_seq: mark.seq }),
+    shouldSend: read !== undefined && read.seq > lastReadSeq,
+    target: `read:issue:${issueKey}`,
+    wake: lastReadSeq,
   });
 
   const pinConversation = (id: string) =>
-    pins.updatePins((dismissed) => ({
+    writePin(queryClient, issueKey, (dismissed) => ({
       id,
       op: isPinnedConversation(dismissed, id) ? "unpin" : "pin",
     }));
@@ -1052,7 +1165,6 @@ export function ConversationTab({
       item="data-turn"
       label="Conversation"
     >
-      {pins.banner}
       {/* Mounted, and hidden, while a phone thread covers it: its draft, a send it has out, that
           send's refusal and its reply are all still there on Back. Mounted on a closed issue too,
           where it shows only a send of its own still out or its refusal (`closed`), so an issue
@@ -1153,7 +1265,6 @@ export function ConversationTab({
                 issueKey={issueKey}
                 current={current}
                 currentReplyId={currentReplyId}
-                disabled={pins.blocked}
                 isClosed={isClosed}
                 item={item}
                 key={item.id}
@@ -1162,6 +1273,18 @@ export function ConversationTab({
                 pinned={pinned}
                 register={register}
                 replyDisabled={composerSending}
+              />
+            );
+          }
+          if (item.kind === "handoff") {
+            return (
+              <HandoffTurn
+                current={current}
+                item={item}
+                key={item.id}
+                onPin={() => pinConversation(item.id)}
+                pinned={pinned}
+                register={register}
               />
             );
           }
@@ -1181,7 +1304,6 @@ export function ConversationTab({
                 onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
                 current={current}
                 currentReplyId={currentReplyId}
-                disabled={pins.blocked}
                 expanded={openThreads.has(item.root.id)}
                 onRetryAction={commentActions.retryItem}
                 pendingAction={commentActions.pendingActionIds.has(item.root.id)}
@@ -1230,11 +1352,7 @@ export function ConversationTab({
                   variant="compact"
                 />
               </div>
-              <TurnPin
-                disabled={pins.blocked}
-                onPin={() => pinConversation(item.id)}
-                pinned={pinned}
-              />
+              <TurnPin onPin={() => pinConversation(item.id)} pinned={pinned} />
             </li>
           );
         })}
@@ -1275,7 +1393,6 @@ export function ConversationTab({
                 current={phoneThread.id === focus?.id}
                 currentReplyId={phoneThread.id === focus?.id ? focus?.replyId : undefined}
                 viewerLogin={viewer.data?.login ?? ""}
-                disabled={pins.blocked}
                 expanded={openThreads.has(phoneThread.root.id)}
                 forceExpanded
                 hideReplyComposer={phoneReplyTargetsThread}

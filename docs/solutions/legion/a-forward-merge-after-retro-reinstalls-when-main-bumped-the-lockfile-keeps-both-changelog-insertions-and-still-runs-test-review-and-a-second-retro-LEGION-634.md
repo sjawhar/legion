@@ -33,11 +33,13 @@ a forward merge after retro whose fingerprint is unchanged, and what the round s
   `packages/pi-envoy/extensions/envoy.ts` through the cross-entry test that imports it by relative
   path, and fails there on a symbol the newer `@oh-my-pi/pi-utils` adds. The tester's pod needs the
   same install before its bare gates; say so in the report to the architect.
-- **A changelog entry at the head of `[Unreleased]` → `### Changed` conflicts with every sibling
-  that merges first.** This repository's release commits (`chore: release pi-legion vX.Y.Z`) leave
-  `[Unreleased]` where it is, so each concurrent branch inserts at the same line. Resolve the one
-  conflict by keeping both insertions, this branch's first; it is the conflict a documents-and-tests
-  branch should expect, and the only one here.
+- **Until changelog fragments (INFRA-629), a changelog entry at the head of the unreleased
+  section's `### Changed` conflicted with every sibling that merged first.** The release commits
+  (`chore: release pi-legion vX.Y.Z`) left that heading where it was, so each concurrent branch
+  inserted at the same line. The resolution was to keep both insertions, this branch's first.
+  Now an entry is a fragment file of its own
+  (`packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`), so this
+  conflict is gone.
 - **An unchanged fingerprint is a confirmation for the tester and the reviewer, and still a full
   pass through the daemon's table.** The daemon moves the issue to implementing on the conflict,
   the implementer merges and completes, the tester re-runs the bare gates and completes, the
@@ -47,14 +49,16 @@ a forward merge after retro whose fingerprint is unchanged, and what the round s
   The second retro writes only what the round taught, as a new file, edits none of the first
   retro's, re-reads `mergeable` before committing, and brings the body's `Size` and `Chain` lines
   up to date for its commit.
-- **On a daemon older than LEGION-605's READY refusal, the human merge gate still refuses a head
-  carrying `.legion/<issue>/`.** The repository's own `skills/legion-retro/SKILL.md` makes the
-  removal retro's last commit (`rm -r .legion/<issue>` then
+- **Before sjawhar/legion#2354, the head that merged could not carry `.legion/<issue>/`.** On a
+  daemon older than LEGION-605's READY refusal, the human merge gate refused such a head too. The
+  repository's own `skills/legion-retro/SKILL.md` made the removal retro's last commit
+  (`rm -r .legion/<issue>` then
   `jj split -m "retro: remove .legion/<issue>/ before READY" .legion/<issue>`, after any
-  `docs/solutions/` commit, pushed with CI in full); a worker whose installed plugin predates it is
-  told so by its architect and does it by hand, publishing the final head and
+  `docs/solutions/` commit, pushed with CI in full). A worker whose installed plugin predated it
+  was told so by its architect and did it by hand, publishing the final head and
   `jj diff --from <approved head> --to <final head> --summary` to the reviewer, the merger and the
-  architect, so the reviewer approves at the final head and READY names it.
+  architect, so the reviewer approved at the final head and READY named it. A handoff is a record
+  on the Dispatch issue now, retro deletes nothing, and the approved head is the head READY names.
 
 ## Evidence
 
@@ -75,6 +79,6 @@ a forward merge after retro whose fingerprint is unchanged, and what the round s
   ran: test handoff `89ed15fd8b3e` (bare gates), review handoff `d8889f4605b7` (`verdict:
   approved`, `thermonuclear: Not run this round`), and this second retro.
 - The LEGION-578 architect's direction of 2026-10-09T11:59Z for this retro: the merge gate acting
-  for the repository owner refuses a head still carrying `.legion/<issue>/`; the deployment's daemon
-  predates #1857's READY refusal, so the removal is retro's last commit by hand, as LEGION-629's
-  retro had just done.
+  for the repository owner refused a head still carrying `.legion/<issue>/`; the deployment's
+  daemon predated #1857's READY refusal, so the removal was retro's last commit by hand, as
+  LEGION-629's retro had just done.

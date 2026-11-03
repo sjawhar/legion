@@ -16,6 +16,13 @@ what the human decides, each as a [decision block](skill://dispatch/SKILL.md#ask
 Never post a second "spec" artifact beside it: `dispatch artifact` with the primary document's name
 replaces the human's document.
 
+On your first pass over the spec, cut each requirement carried over from an earlier issue's spec or
+decisions that no source of this issue states: those were decided for that issue. This issue's
+sources are the words a person wrote in it, and its `Filed for` line with what that line cites: the
+answer, Slack message or direct message of a `Filed for <person> at their request:` line, or the
+evidence of a controller's `Filed for Legion from <role> on <issue>:` line
+([The `Filed for` line](skill://legion-controller/references/finding-asks.md#the-filed-for-line)).
+
 ## Which gate runs
 
 The approval step runs only when the `Design gate policy` sentence of your `Legion addressing` line
@@ -43,20 +50,22 @@ When the gate is armed, run this exact sequence before the tree's work starts:
 3. Before every approval request, give two fresh reviewers the current root spec, the code and
    command output it relies on, and the human's words: `task(agent="plan-gap-analyst")` finds its
    gaps, and `task(agent="plan-reviewer")`, told the document is a spec, checks each factual claim
-   against the code, the docs or a read-only command it runs. Resolve every finding in the root
-   spec. Check with a command each claim either reviewer marks unverified: fix it when it is
+   against the code, the docs or a read-only command it runs. Each runs as a job of its own, so
+   `wait` for its result and read what it found before you act on it. Resolve every finding in the
+   root spec. Check with a command each claim either reviewer marks unverified: fix it when it is
    false, or take it out.
 4. Request approval only once the human has agreed to every point in the spec, because the human
    approves what they already agreed to and a point new in the request has no decision block for
    them to answer: give such a point its own decision block first, or take it out of the spec.
 
    ```bash
-   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>.'
+   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>; <what they do not show>.'
    ```
 
    `--summary` says in one to three sentences what the human is approving and nothing else (no
-   commentary and no open question), then one sentence with both reviews' results, for example
-   `Reviews: no open gap, 14 of 14 claims verified.` The primary document is the default; the
+   commentary and no open question), then one sentence with both reviews' results and what they do
+   not show, for example `Reviews: no open gap, 14 of 14 claims verified; neither shows that the
+   design works once built.` The primary document is the default; the
    command prints `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
 5. Register that document version with the daemon:
 
@@ -97,15 +106,15 @@ Facts about the request:
 
 Then end your turn. The registration hands the spec to the human: when nothing else holds the
 slot, the root returns its admission slot and waits on its design gate (`awaiting_person`), as a
-root question handed to the human does ("Every turn" in `skill://legion-architect/SKILL.md`). The
-human's approval or changes request resumes you, and so does a newer spec version once Dispatch
-shows the request back on your turn. While the root waits on a question instead, the human's
-approval or changes request of the spec answers that wait too, and the resume task says how the
-spec stands. Release no wave until a delivered wake shows `design-approved` on the root, or a
-resume task says its design gate is open: the daemon sends a root waiting on a person no
-`design-approved` notice, and "this resume is your design-approved wake" is that wake. On
-`design-changes-requested`: revise the spec as the human's reason asks, run step 3's two reviews on
-the new version, resolve every finding, request approval again and end your turn. A
+root question handed to the human does ("Every turn" in `skill://legion-architect/SKILL.md`). Stay
+live to read the human's comments and replies. Their approval or changes request delivers your next
+task, and so does a newer spec version once Dispatch shows the request back on your turn. While the
+root waits on a question instead, the human's approval or changes request of the spec answers that
+wait too, and the task says how the spec stands. Release no wave until a delivered wake shows
+`design-approved` on the root, or a task says its design gate is open: the daemon sends a root
+waiting on a person no `design-approved` notice, and "this resume is your design-approved wake" is
+that wake. On `design-changes-requested`: revise the spec as the human's reason asks, run step 3's
+two reviews on the new version, resolve every finding, request approval again and end your turn. A
 `design-changes-requested` may name a version below the latest, or arrive after another for the
 same version: it is a request the human made that reached the daemon late, and no approval came
 after it. Each request arrives once. The gate is as the newest review left it; still read the
@@ -115,10 +124,14 @@ reason, and answer it in the spec if the latest version does not already.
 
 Approval is pinned to the spec version: any new version closes the gate again, and no
 `design-approved`-type wake says so; you know from your own edit, or from the `artifact.version`
-event on your issue. The exception is the
-version a human's own answer to a decision block writes when that answer is the whole change since
-the version they approved: Dispatch records an `approved` review in their name at the new version
-and emits `artifact.approved`, and the daemon reopens the gate and sends `design-approved`.
+event on your issue. The exceptions are the version a human's own answer to a decision block
+writes when that answer is the whole change since the version they approved, and a version whose
+text is exactly the text of the version they approved, with no decision block in it decided
+since, such as an accidental edit undone exactly: for either, Dispatch records an `approved`
+review in their name at the new version and emits `artifact.approved`, and the daemon reopens the
+gate and sends `design-approved`. Undo an accidental edit of an approved root spec exactly. When
+the spec then reads Approved at the new version, request nothing; when it does not (a block in
+it was decided since), request approval again with steps 3 to 5.
 
 So edit an approved root spec only when its Summary, its Acceptance, the tree's scope, or a
 decision a human settled in one of its decision blocks changes. Such a change is a point the human
@@ -146,7 +159,7 @@ block names the decision and that evidence. A plan never overturns a settled dec
 
 A design change that leaves the Summary, Acceptance, scope and settled decisions intact (a
 planner's measurement that finds a better way to build the same outcome) goes in the plan (the
-issue's `plan.md` document and `.legion/<issue>/plan.json`), never into the approved spec, even
+issue's `plan.md` document and the planner's `plan` handoff on the issue), never into the approved spec, even
 where the spec's text describes the older design; the reviewer reads the plan beside the spec.
 
 When a planner's `phase-finished` names a departure from the spec's design, compare it with the
@@ -154,8 +167,8 @@ approved spec. If the Summary, the Acceptance, the scope and every settled decis
 the plan is the record and the tree carries on; otherwise change the root spec and request
 approval again.
 
-Later waves, re-scoping open children toward the same Acceptance, and integration-failure children
-need no spec edit and no new approval. A child issue's spec is never gated.
+Later waves and re-scoping open children toward the same Acceptance need no spec edit and no new
+approval. A child issue's spec is never gated.
 
 ## A decision block for a read no pod can make
 

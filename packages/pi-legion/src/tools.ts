@@ -9,6 +9,7 @@ import {
   type LegionDaemonClient,
   retryWhileDaemonRestarts,
 } from "@legion/pi-shared/daemon-client";
+import type { HandoffReport } from "@legion/pi-shared/handoff-record";
 import {
   type ClaimCapability,
   executePhaseOp,
@@ -53,8 +54,9 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
     "rerun_child",
     "read_record",
     "handoff_complete",
+    "ready_for_update",
   ],
-  "phase-worker": ["request_backward_move", "read_record", "handoff_complete"],
+  "phase-worker": ["request_backward_move", "read_record", "handoff_complete", "ready_for_update"],
   controller: ["read_state", "set_status"],
 };
 
@@ -98,6 +100,7 @@ function toolSchema(pi: PiApi): unknown {
     summary: phase.summary,
     verdict: phase.verdict,
     ready: phase.ready,
+    round: phase.round,
     status: z.enum(ISSUE_STATUSES).optional(),
   });
 }
@@ -127,8 +130,8 @@ function assertOperationInput(parameters: Record<string, unknown>, operation: st
  * that writes mints its own grant in-process and posts it with the request; nothing is written
  * to the pane. The phase ops run on the executor every harness shares (`executePhaseOp`):
  * `handoff_complete` belongs to every session but the root architect's (a phase worker, and a
- * sub-architect: an architect whose issue is not its tree), and finds the commit it reports in the
- * pane first (`handoffCommit`); `read_state` and `set_status` belong to the controller. */
+ * sub-architect: an architect whose issue is not its tree), and finds what it reports in the pane
+ * first (`handoffReport`); `read_state` and `set_status` belong to the controller. */
 export function createLegionTool(deps: {
   readonly pi: PiApi;
   readonly daemon: () => LegionDaemonClient;
@@ -137,11 +140,18 @@ export function createLegionTool(deps: {
   readonly controllerGrant: (sessionId: string) => Promise<LegionGrant>;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
-  /** The commit a completion of `phase` by `role` reports: for a file-backed phase the role
-   * works, the pushed commit carrying `.legion/<issue>/<phase>.json`, found with the pane's jj
-   * (`findHandoffCommit`); otherwise the commit the workspace stands on. Throws naming the remedy
-   * when the handoff is uncommitted, missing, not on this branch, another pane's, or unpushed. */
-  readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>;
+  /** Told of each `ready_for_update` that succeeded: the session has answered the daemon's
+   * update task on its pod, and its phase stays open. */
+  readonly onUpdateAnswered: (context: SessionContext) => void;
+  /** What a completion of `phase` by `role` reports beside its summary (`findHandoffReport`): for
+   * a file-backed phase the role works, the newest Dispatch handoff record of the phase, with the
+   * pushed tip of `legion/<issue>@origin` for the implementer; otherwise the commit the workspace
+   * stands on. Throws naming the remedy when the phase has no record, Dispatch does not answer, or
+   * the implementer's work is not pushed. */
+  readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>;
+  /** The head of `legion/<issue>@origin` an update signal reports, read with the pane's jj
+   * (`findPushedBranchHead`), and `""` when the branch is not on the remote. */
+  readonly branchHead: () => Promise<string>;
   /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
    * looked up in Dispatch as a `dispatch` command's `--artifact` is; throws naming the reference
    * when none matches, or when it names two documents. */
@@ -155,7 +165,9 @@ export function createLegionTool(deps: {
     session,
     controllerGrant,
     onPhaseCompleted,
-    handoffCommit,
+    onUpdateAnswered,
+    handoffReport,
+    branchHead,
     resolveDocument,
     restartClock,
   } = deps;
@@ -199,10 +211,20 @@ export function createLegionTool(deps: {
         }
         if (active.kind !== "controller" && isPhaseOp(operation)) {
           const answer = await executePhaseOp(
-            { daemon: daemon(), claim: active, handoffCommit, restart },
+            { daemon: daemon(), claim: active, handoffReport, branchHead, restart },
             parameters
           );
-          if (operation === "handoff_complete") onPhaseCompleted(context);
+          // A call that returned without throwing: a completion, and a backward move, which hands
+          // the issue to another phase. Either way this session's phase is no longer open.
+          // `ready_for_update` ends no phase: it answers the pod's update task, and the worker
+          // then waits for its process to be replaced rather than working, so the turn it ends
+          // after answering earns no reminder (the `update-answered` input of
+          // `@legion/pi-shared/phase-stall`).
+          if (operation === "handoff_complete" || operation === "request_backward_move") {
+            onPhaseCompleted(context);
+          } else if (operation === "ready_for_update") {
+            onUpdateAnswered(context);
+          }
           return jsonSuccess(answer);
         }
         assertOperationInput(parameters, operation);

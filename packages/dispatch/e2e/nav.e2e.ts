@@ -10,7 +10,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("sidebar shows Inbox, Pinned, one row per project with its open-ask badge, and Settings — never an issue row — on desktop and in the phone drawer", async ({
+test("sidebar shows Inbox, Pinned, one row per project with its open-ask badge, and Settings — never an issue row — on desktop and in the phone drawer @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -66,7 +66,13 @@ test("sidebar shows Inbox, Pinned, one row per project with its open-ask badge, 
     await expect(navigation.locator('a[href="/projects/OPS"]')).toContainText("1");
     await expect(navigation.getByRole("link", { name: "Settings" })).toBeVisible();
     await expect(navigation.getByRole("link", { name: /^(CORE|OPS)-\d+/ })).toHaveCount(0);
-    expect(issueRequests).toEqual(["?pinned=true"]);
+    // The Inbox makes no per-issue read of its own either: the list is one `GET /inbox`, and
+    // the reading pane (INFRA-575) draws the selected question from the row it already holds.
+    // Only a question written as a decision block has its issue read, for the one field the
+    // live document is handed - whether the issue is closed (`DecisionBody` in
+    // `ReadingPane.tsx`). These three are ordinary questions, so the pane reads no issue and
+    // the navigation's one read stands alone.
+    await expect.poll(() => issueRequests).toEqual(["?pinned=true"]);
     await page.screenshot({ path: testInfo.outputPath("projects-sidebar.png"), fullPage: true });
   } finally {
     await context.close();
@@ -106,8 +112,11 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
     );
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
 
-    // Activity is the last tab, and it has its own route.
+    // Decisions is the last tab, and Activity before it has its own route.
     await page.keyboard.press("End");
+    await expect(page.getByRole("tab", { name: "Decisions" })).toBeFocused();
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/decisions$`));
+    await page.keyboard.press("ArrowLeft");
     await expect(page.getByRole("tab", { name: "Activity" })).toBeFocused();
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/activity$`));
     await expect(page.getByRole("list", { name: "Issue activity" })).toBeVisible();
@@ -131,7 +140,7 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
 
 // One count, one colour: the Inbox badge means the viewer must act, and a reader who learns it
 // in the drawer must recognise it in the top bar.
-test("the needs-you count is the same badge in the phone top bar and the drawer", async ({
+test("the needs-you count is the same badge in the phone top bar and the drawer @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the compact top bar exists below the xl rail");

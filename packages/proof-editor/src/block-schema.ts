@@ -2,16 +2,21 @@ import { $nodeSchema } from '@milkdown/kit/utils';
 import type { DOMOutputSpec, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import type { MarkdownNode as ParsedMarkdownNode, NodeSchema } from '@milkdown/kit/transformer';
 
+import { parseBlockPointers } from './block-pointers.js';
 import { withBlockIdSpec } from './editor/schema/block-ids.js';
 import { withDomAttributes } from './editor/schema/dom-attributes.js';
+import { maxDirectiveNesting } from './directive-container.js';
+import { markdownSource } from './typed-block-drawing.js';
 
-export type BlockAttributeKind = 'string' | 'bool' | 'enum' | 'string[]' | 'actor' | 'timestamp';
+export type BlockAttributeKind = 'string' | 'bool' | 'enum' | 'string[]' | 'block[]' | 'actor' | 'timestamp';
 
 export interface BlockAttributeSchema {
   kind: BlockAttributeKind;
   choices?: readonly string[];
   default?: string | boolean | readonly string[];
   server?: boolean;
+  /** The block types a `block[]` attribute points at (./block-pointers.ts); none, any block. */
+  targets?: readonly string[];
 }
 
 export interface BlockTypeSchema {
@@ -66,6 +71,9 @@ export function validateBlockSchema(schema: BlockSchema): void {
       if (attribute.kind === 'enum' && (attribute.choices?.length ?? 0) === 0) {
         throw new Error(`typed block ${JSON.stringify(type.name)} attribute ${JSON.stringify(name)} enum has no choices`);
       }
+      if (attribute.targets !== undefined && attribute.kind !== 'block[]') {
+        throw new Error(`typed block ${JSON.stringify(type.name)} attribute ${JSON.stringify(name)} has targets, which only a block[] attribute may carry`);
+      }
     }
   }
 }
@@ -96,6 +104,8 @@ function parseAttribute(typeName: string, name: string, attribute: BlockAttribut
       }
       return values;
     }
+    case 'block[]':
+      return parseBlockPointers(typeName, name, value);
   }
 }
 
@@ -123,7 +133,9 @@ function directiveAttrs(type: BlockTypeSchema, attrs: Record<string, string> | u
 
 /** An attribute value as markdown and HTML carry it, the inverse of `parseAttribute`. */
 function attributeText(attribute: BlockAttributeSchema, value: unknown): string {
-  return attribute.kind === 'bool' ? String(value) : attribute.kind === 'string[]' ? JSON.stringify(value) : String(value);
+  if (attribute.kind === 'string[]') return JSON.stringify(value);
+  if (attribute.kind === 'block[]') return (value as readonly string[]).join(' ');
+  return String(value);
 }
 
 function markdownAttrs(type: BlockTypeSchema, node: ProseMirrorNode): Record<string, string> {
@@ -228,12 +240,23 @@ export function blockSchemaPlugins(schema: BlockSchema, renderBlock?: HostBlockR
   return schema.types.map((type) => $nodeSchema(type.name, () => typedBlockSpec(type, renderBlock)));
 }
 
+/** Why the schema refuses the container directive `node`, as `visit` throws it, or undefined when it is accepted. */
+export function typedBlockRefusal(schema: BlockSchema, node: { name?: string; attributes?: Record<string, string> }): string | undefined {
+  const name = node.name ?? '';
+  const type = schema.types.find((candidate) => candidate.name === name);
+  if (!type) return `unknown typed block ${JSON.stringify(name)} (known types: ${knownNames(schema)})`;
+  try {
+    directiveAttrs(type, node.attributes);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  return undefined;
+}
+
 function visit(node: MarkdownNode, schema: BlockSchema): void {
   if (node.type === 'containerDirective') {
-    const name = node.name ?? '';
-    const type = schema.types.find((candidate) => candidate.name === name);
-    if (!type) throw new Error(`unknown typed block ${JSON.stringify(name)} (known types: ${knownNames(schema)})`);
-    directiveAttrs(type, node.attributes);
+    const refusal = typedBlockRefusal(schema, node);
+    if (refusal !== undefined) throw new Error(refusal);
   }
   for (const child of node.children ?? []) visit(child, schema);
 }
@@ -241,10 +264,16 @@ function visit(node: MarkdownNode, schema: BlockSchema): void {
 /** The document service's reason for refusing a paragraph line that opens with `:`
  *  (pmdoc `unsupportedDirectiveReason`), or undefined when the line is ordinary text. The
  *  parser itself only knows the `:::name{...}` container, so these lines would otherwise
- *  parse here as text the server then refuses on settlement. */
-function unsupportedDirectiveReason(line: string): string | undefined {
+ *  parse here as text the server then refuses on settlement. `directives` is how many container
+ *  directives stand around the line: a `:::name{...}` opener inside `maxDirectiveNesting` of them
+ *  does not open (./directive-container) and is read as text, which the server refuses. */
+function unsupportedDirectiveReason(line: string, directives: number): string | undefined {
   if (line.startsWith(':::')) {
-    if (line === ':::' || /^:::[A-Za-z0-9_-]+\{.*\}$/.test(line)) return undefined;
+    if (line === ':::') return undefined;
+    if (/^:::[A-Za-z0-9_-]+\{.*\}$/.test(line)) {
+      if (directives < maxDirectiveNesting) return undefined;
+      return `a typed block opens inside ${maxDirectiveNesting} typed blocks; a document nests at most ${maxDirectiveNesting} typed blocks`;
+    }
     return 'typed block directives use :::name{...}; Pandoc fenced divs and malformed directives are not supported';
   }
   if (/^::[A-Za-z0-9_-]/.test(line)) return 'leaf directives (::name) are not supported';
@@ -253,26 +282,27 @@ function unsupportedDirectiveReason(line: string): string | undefined {
 }
 
 export function rejectUnsupportedDirectiveSyntax(tree: MarkdownNode, markdown: string): void {
-  const reject = (node: MarkdownNode): void => {
+  const reject = (node: MarkdownNode, directives: number): void => {
     if (node.type === 'paragraph') {
       const start = node.position?.start;
       const end = node.position?.end;
       if (start?.offset !== undefined && end?.offset !== undefined) {
         for (const [index, line] of markdown.slice(start.offset, end.offset).split('\n').entries()) {
-          const reason = unsupportedDirectiveReason(line.trimStart());
+          const reason = unsupportedDirectiveReason(line.trimStart(), directives);
           if (reason !== undefined) throw new Error(`line ${(start.line ?? 1) + index}: ${reason}`);
         }
       }
     }
-    for (const child of node.children ?? []) reject(child);
+    const inner = node.type === 'containerDirective' ? directives + 1 : directives;
+    for (const child of node.children ?? []) reject(child, inner);
   };
-  reject(tree);
+  reject(tree, 0);
 }
 
 export function remarkTypedBlocks(schema: BlockSchema) {
   validateBlockSchema(schema);
   return (tree: MarkdownNode, file: { toString(): string }) => {
-    rejectUnsupportedDirectiveSyntax(tree, file.toString());
+    rejectUnsupportedDirectiveSyntax(tree, markdownSource(file));
     for (const child of tree.children ?? []) visit(child, schema);
   };
 }

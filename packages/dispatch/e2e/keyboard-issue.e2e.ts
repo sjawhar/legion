@@ -14,7 +14,9 @@ const session = {
  *  `/auth/whoami` answers), so a key pressed before the page renders reaches no handler. */
 async function openIssue(page: Page, key: string, title: string): Promise<void> {
   await page.goto(`/issues/${key}`);
-  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(
+    page.getByTestId("issue-header").getByRole("heading", { level: 1, name: title })
+  ).toBeVisible();
   await page.locator("body").focus();
 }
 
@@ -46,7 +48,6 @@ test.beforeEach(async () => {
 test("the issue scope reaches the header controls and the tab chords, and ? lists them under Issue", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Keyboard issue" });
   const context = await asUser(browser, "alice");
@@ -111,7 +112,9 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     await expect(titleInput).toBeFocused();
     await expect(titleInput).toHaveValue(/sp0/);
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("heading", { level: 1, name: "Keyboard issue" })).toBeVisible();
+    await expect(
+      page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Keyboard issue" })
+    ).toBeVisible();
     await expect
       .poll(() => getIssue(issue.key))
       .toMatchObject({
@@ -179,7 +182,6 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
 test("the project List view roves with j/k and opens the focused row with Enter and o", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const seed = async (title: string) => {
     const issue = await createIssue({ project: "CORE", title });
@@ -237,8 +239,7 @@ test("the project List view roves with j/k and opens the focused row with Enter 
 
 test("j and k cross a collapsed band instead of dead-ending in it, and reach its rows once it opens", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const seed = async (title: string, status: "backlog" | "todo" | "in_progress" | "done") => {
     const issue = await createIssue({ project: "CORE", title });
@@ -303,8 +304,7 @@ test("j and k cross a collapsed band instead of dead-ending in it, and reach its
 
 test("a priority the server refuses shows the header's own failure, whether the digit key or the picker sent it", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Refused priority" });
   const context = await asUser(browser, "alice");
@@ -318,10 +318,11 @@ test("a priority the server refuses shows the header's own failure, whether the 
         await route.continue();
         return;
       }
+      // Dispatch's verdict: a 5xx would be tried again under the write's key, not refused.
       await route.fulfill({
-        body: JSON.stringify({ error: { code: "INTERNAL", message: "nope" } }),
+        body: JSON.stringify({ code: "ISSUE_INPUT", error: "Dispatch refused the priority" }),
         contentType: "application/json",
-        status: 500,
+        status: 400,
       });
     });
 
@@ -351,8 +352,7 @@ test("a priority the server refuses shows the header's own failure, whether the 
 
 test("a closed issue greys the shortcuts its header disables, and keeps the ones it does not", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Closed issue" });
   await patchIssue(issue.key, { status: "done" });
@@ -383,8 +383,7 @@ test("a closed issue greys the shortcuts its header disables, and keeps the ones
 
 test("with every band collapsed j and k do nothing and ? greys them, and opening one restores both", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   for (const [title, status] of [
     ["Alpha", "backlog"],
@@ -442,8 +441,7 @@ test("with every band collapsed j and k do nothing and ? greys them, and opening
 
 test("Escape leaves a focused header select, so the next chord is a chord and not type-ahead", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Type-ahead" });
   const context = await asUser(browser, "alice");
@@ -495,8 +493,7 @@ test("Escape leaves a focused header select, so the next chord is a chord and no
 
 test("the Board lists its own roving keys once: the List's are not registered while it shows", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Alpha" });
   await patchIssue(issue.key, { status: "todo" });
@@ -534,8 +531,7 @@ test("the Board lists its own roving keys once: the List's are not registered wh
 test.describe("issue page", () => {
   test("a digit on an ask's option writes no priority, while the same digit on the page does", async ({
     browser,
-  }, testInfo) => {
-    test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", title: "Priority and options" });
     await createAsk(
@@ -549,7 +545,9 @@ test.describe("issue page", () => {
       await page.setViewportSize({ width: 1280, height: 900 });
       await page.goto(`/issues/${issue.key}`);
       await expect(
-        page.getByRole("heading", { level: 1, name: "Priority and options" })
+        page
+          .getByTestId("issue-header")
+          .getByRole("heading", { level: 1, name: "Priority and options" })
       ).toBeVisible();
 
       let patched = 0;
@@ -610,8 +608,7 @@ test.describe("issue page", () => {
   // the rule is that these two keys write only from the page itself, not from a control.
   test("a digit on a page checkbox writes no priority, and neither does Shift+P", async ({
     browser,
-  }, testInfo) => {
-    test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({
       project: "CORE",

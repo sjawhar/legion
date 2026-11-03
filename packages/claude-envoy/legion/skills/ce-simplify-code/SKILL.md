@@ -33,7 +33,7 @@ Do not paraphrase these rubrics from memory — read each file and pass it verba
 
 **Bounded dispatch.** Queue the three reviewers and launch only as many as the harness accepts at once; treat a concurrency/active-agent-limit error as backpressure (leave the reviewer queued and retry after a slot frees), not as reviewer failure. If a dispatch fails for a reason that survives correcting the invocation, run that reviewer's pass inline in the parent context using the same prompt asset, and disclose the substitution in one line.
 
-**Agent.** In Oh My Pi, dispatch each persona as the bundled reviewer, `task(agent="reviewer")`. Which model that agent runs on is the operator's configuration.
+**Agent.** In Oh My Pi, dispatch each persona as the bundled reviewer, `task(agent="reviewer")`. Each runs as a job of its own, so `wait` for its result and read the findings from what it returns. Which model that agent runs on is the operator's configuration.
 
 **Permission mode.** Omit the `mode` parameter on the dispatch call so the user's configured permission settings apply.
 

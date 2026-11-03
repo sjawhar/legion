@@ -8,7 +8,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("an issue shows its spec's task list and its children counted, on its page, in the list and on the board", async ({
+test("an issue shows its spec's task list and its children counted, on its page, in the list and on the board @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -57,7 +57,9 @@ test("an issue shows its spec's task list and its children counted, on its page,
     await shot("issue");
 
     await page.goto(`/issues/${plain.key}`);
-    await expect(page.getByRole("heading", { name: "Plain" })).toBeVisible();
+    await expect(
+      page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Plain" })
+    ).toBeVisible();
     await expect(page.getByTestId("issue-progress-tasks")).toHaveCount(0);
     await expect(page.getByTestId("issue-progress-children")).toHaveCount(0);
 

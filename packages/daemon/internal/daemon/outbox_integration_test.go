@@ -221,7 +221,8 @@ func isolatedOutboxPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(admin.Close)
 	name := "legion_outbox_test_" + outboxSuffix(t)
-	if _, err := admin.Exec(context.Background(), "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -299,8 +300,14 @@ func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval,
 	return dispatch.Approval{}, nil
 }
 func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *blockingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *blockingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *blockingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 func (d *blockingDispatch) count() int {
 	d.mu.Lock()
@@ -456,8 +463,14 @@ func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval,
 	return dispatch.Approval{}, nil
 }
 func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *refusingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *refusingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *refusingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 // boardDispatch is one issue's Dispatch board: it fails the first failures writes, then applies.
@@ -494,9 +507,13 @@ func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, er
 	return dispatch.Approval{}, nil
 }
 func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *boardDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *boardDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
 // pool's connections, and the outbox has to keep draining once they are back. A claim that fails
@@ -763,9 +780,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 	})
 	prompts := len(conn.Prompts())
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the foreign turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 
 	if got := machine.Claim().Pending; got != nil {
 		t.Fatalf("the finished phase's task is still pending as %+v, want it dropped", got)

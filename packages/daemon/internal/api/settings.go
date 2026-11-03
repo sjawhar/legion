@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // Settings is the daemon's resolved legion.yaml as `GET /legion/v1/state` carries it (contract
@@ -67,8 +68,15 @@ type Settings struct {
 	GitHubApps *GitHubAppsSettings `json:"github_apps,omitempty"`
 	// LingerHours and ProductionCheckHours are `linger_hours` and `production_check_hours` as the
 	// file takes them, decimal numbers of hours.
-	LingerHours          float64                 `json:"linger_hours"`
-	ProductionCheckHours float64                 `json:"production_check_hours"`
+	LingerHours          float64 `json:"linger_hours"`
+	ProductionCheckHours float64 `json:"production_check_hours"`
+	// PodUpdateRetaskHours and PodUpdateNoticeHours are `pod_update_retask_hours` and
+	// `pod_update_notice_hours`, decimal numbers of hours as the two above are: how long an open
+	// update round waits before it asks a worker again, and how long after the round opened the
+	// controller is told it is stalled. They are decimals so a live proof and the production
+	// check can drive each bound inside one run.
+	PodUpdateRetaskHours float64                 `json:"pod_update_retask_hours"`
+	PodUpdateNoticeHours float64                 `json:"pod_update_notice_hours"`
 	ReviewRoundCap       int                     `json:"review_round_cap"`
 	MaxFixAttempts       int                     `json:"max_fix_attempts"`
 	Controller           config.ControllerLaunch `json:"controller"`
@@ -76,6 +84,13 @@ type Settings struct {
 	// WorkerBackends is `worker_backends`, the roles that run on a backend other than Oh My Pi by
 	// role, `{}` while the file names none.
 	WorkerBackends map[string]string `json:"worker_backends"`
+	// RoleConfigFiles is `role_config_files`, the Oh My Pi overlays one role names and no other
+	// does, by role, `{}` while the file names none.
+	RoleConfigFiles map[string][]string `json:"role_config_files"`
+	// RepositoryRenames is `repository_renames`, the pairs this deployment treats as one
+	// repository wherever a name is compared, in configured order, `[]` while the file
+	// configures none.
+	RepositoryRenames []RepositoryRenameSettings `json:"repository_renames"`
 }
 
 // RuntimeSettings is `runtime`: its name, the kubernetes block under that runtime alone, and the
@@ -115,7 +130,10 @@ type KubernetesSettings struct {
 	Plugins *PluginsSettings `json:"plugins,omitempty"`
 	// Setup is the argv every role runs before each start of its Oh My Pi, `[]` while the
 	// file sets none: every pod runs it, so every pod knows it, as with `omp_launch_prefix`.
-	Setup           []string                `json:"setup"`
+	Setup []string `json:"setup"`
+	// TestPostgres is whether every issue pod serves its own PostgreSQL for tests, which every
+	// role of such a pod is told as LEGION_TEST_PG_DSN, so every pod may read it.
+	TestPostgres    bool                    `json:"test_postgres"`
 	RepositoryCache RepositoryCacheSettings `json:"repository_cache"`
 }
 
@@ -193,6 +211,13 @@ type DeploySettings struct {
 	Step     string `json:"step"`
 }
 
+// RepositoryRenameSettings is one `repository_renames` entry as the file writes it: the
+// repository as it was and the one it moved to, each `<owner>/<name>`.
+type RepositoryRenameSettings struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
 // MergeSettings is a project's `merge` policy: the by-hand expressions as written, never compiled.
 type MergeSettings struct {
 	ByHand []string `json:"by_hand"`
@@ -262,11 +287,15 @@ func SettingsOf(cfg config.Config) Settings {
 		Gates:                                   GatesSettings{Design: cfg.Gates.Design},
 		LingerHours:                             cfg.Linger.Hours(),
 		ProductionCheckHours:                    cfg.ProductionCheckBound.Hours(),
+		PodUpdateRetaskHours:                    cfg.PodUpdateRetask.Hours(),
+		PodUpdateNoticeHours:                    cfg.PodUpdateNotice.Hours(),
 		ReviewRoundCap:                          cfg.ReviewRoundCap,
 		MaxFixAttempts:                          cfg.MaxFixAttempts,
 		Controller:                              cfg.ControllerLaunch,
 		Capabilities:                            CapabilitiesSettings{Decided: make(map[string]string, len(cfg.Capabilities.Decided))},
 		WorkerBackends:                          make(map[string]string, len(cfg.WorkerBackends)),
+		RoleConfigFiles:                         make(map[string][]string, len(cfg.RoleConfigFiles)),
+		RepositoryRenames:                       repositoryRenamesOf(cfg.RepositoryRenames),
 	}
 	for i, key := range cfg.ProviderKeys {
 		settings.ProviderKeys[i] = key.Env
@@ -297,6 +326,20 @@ func SettingsOf(cfg config.Config) Settings {
 	}
 	for role, backend := range cfg.WorkerBackends {
 		settings.WorkerBackends[string(role)] = string(backend)
+	}
+	for role, files := range cfg.RoleConfigFiles {
+		settings.RoleConfigFiles[string(role)] = stringsOf(files)
+	}
+	return settings
+}
+
+// repositoryRenamesOf is the configured equivalence as the state shows it: one `{from, to}` per
+// pair, in configured order, and `[]` for a deployment that configures none.
+func repositoryRenamesOf(renames ghrepo.Renames) []RepositoryRenameSettings {
+	pairs := renames.Pairs()
+	settings := make([]RepositoryRenameSettings, len(pairs))
+	for i, pair := range pairs {
+		settings[i] = RepositoryRenameSettings{From: pair.From.String(), To: pair.To.String()}
 	}
 	return settings
 }
@@ -331,6 +374,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 		},
 		SessionStore: string(block.SessionStore.Kind),
 		Setup:        stringsOf(block.Setup),
+		TestPostgres: block.TestPostgres,
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,

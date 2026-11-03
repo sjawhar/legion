@@ -41,6 +41,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 const (
@@ -168,6 +169,7 @@ type fakeStore struct {
 	running   map[string]runningClaim
 	homes     map[string]string
 	unretired map[claim.Token]bool
+	claims    []supervise.Claim
 }
 
 // runningClaim is a claim of an issue that runs a process (token:state), in tree.
@@ -184,6 +186,11 @@ func (s *fakeStore) ClaimUnretired(_ context.Context, token claim.Token) (bool, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.unretired[token], nil
+}
+func (s *fakeStore) Claims(context.Context) ([]supervise.Claim, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.claims), nil
 }
 
 // admit records token's claim as stored and unretired, as the supervisor writes it before its
@@ -263,6 +270,31 @@ func rootSpec(t *testing.T) runtime.SpawnSpec {
 
 func workerSpec(t *testing.T) runtime.SpawnSpec {
 	return testSpec(t, workerToken, claim.RoleTester, testTree)
+}
+
+// claudeWorkerSpec is workerSpec on the Claude Code backend: the tester, one of the roles Claude
+// Code runs (runtime.Backends).
+func claudeWorkerSpec(t *testing.T) runtime.SpawnSpec {
+	spec := workerSpec(t)
+	spec.Backend = runtime.BackendClaude
+	return spec
+}
+
+// claudeTranscriptID is the session id of the transcript the Claude specs below resume, and
+// claudeTranscript the path a role's Claude Code recorded it at: its own configuration directory
+// (claudeConfigDir), `projects/<cwd>/<id>.jsonl`.
+const claudeTranscriptID = "9f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
+
+func claudeTranscript(role claim.Role) string {
+	return claudeConfigDir(role) + "/projects/--legion-workspaces-sjawhar-legion-smoke-legion-208--/" + claudeTranscriptID + ".jsonl"
+}
+
+// claudeResumeSpec is claudeWorkerSpec relaunched on the transcript a replaced pod's role
+// recorded, the session a Claude claim records (packages/claude-envoy's legion-claim.ts).
+func claudeResumeSpec(t *testing.T) runtime.SpawnSpec {
+	spec := claudeWorkerSpec(t)
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", claudeTranscript(spec.Role)
+	return spec
 }
 
 func childSpec(t *testing.T) runtime.SpawnSpec {

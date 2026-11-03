@@ -16,9 +16,13 @@ import (
 // state the server could no longer load; thirty-two edits of an ask's options grew one to 28.8 MB;
 // and thirty-two suggestions of 900 KB, which leave the markdown as it was, took one cold
 // websocket load of their document to 296 MiB. So every write a caller makes runs through
-// applyLive, which refuses one outside a transaction (errUnjoined) and weighs every one by what it
-// leaves (refuseGrowth) before it is appended, as SeedText weighs a new document's rendering
-// (weighRendering):
+// applyLive, or for a comment's or suggestion's margin record through applyMargin, which opens and
+// records its operation through the same steps; each refuses one outside a transaction
+// (errUnjoined) and weighs what it leaves before it is appended, as SeedText weighs a new
+// document's rendering (weighRendering). applyLive weighs a write by every measure below
+// (refuseGrowth); a margin record's write leaves the rendering and the anchor marks as they were,
+// so of the growth weigh only its margin bound applies (marginWatch), and the live state is
+// checked as every write's is:
 //
 //   - its rendering, the markdown GET .../text answers and an upload of it would send, measured as
 //     an upload is measured (pmdoc.MeasureDocument): its bytes, and the elements the upload's parse
@@ -36,7 +40,7 @@ import (
 // its ask's block, and settlement writes it back into a block that returns to the document. Where
 // the document has no room for it, each records who answered and when and leaves the answer out of
 // the block (SetBlockAttributes, withholdAnswers), and the ask keeps it. Of the other writes that
-// do not run through applyLive, a rebuild weighs the markdown a caller supplies as SeedText weighs
+// run through neither, a rebuild weighs the markdown a caller supplies as SeedText weighs
 // a new document's, and restores a latest version whatever it weighs, since that is the server's
 // own text (RebuildDocument); the block-id backfill (stampBlockIDs) and the sweep of unrecorded
 // marks (unmarkExpired) add no caller text, and settlement's own repair of a returning answer
@@ -50,9 +54,10 @@ import (
 // gap), and the mark sweep only for a mark a browser race left with no comment, ask or
 // suggestion row to match; neither fires on every settlement the way an answer's return can.
 // What the bound weighs is the document a write leaves, not the history its store keeps - that
-// is now compaction's (LEGION-496), which folds every update into the document's state as a
-// room closes, as the server shuts down, and daily; what grows between those is bounded by how
-// long a room stays open, not by how many versions or replies it has had.
+// is now compaction's (LEGION-496), which folds the document's rows older than compactTail into
+// its state once they are due (the compaction queue, checkCompaction) and at the hourly sweep
+// (RunCompactionSweep); what grows between those is bounded by the rows a document stores while a
+// row waits to fold, about 75 minutes at most, not by how many versions or replies it has had.
 
 // growth is what one write leaves a document, as refuseGrowth weighs it. The live state it leaves
 // is checked apart (refuseUndecodable), once the write has let go of the tree before it.
@@ -73,12 +78,12 @@ type growth struct {
 	serverState func() bool
 }
 
-// refuseGrowth is the refusal of the write g describes, or nil. Its rendering is weighed by
-// weighRendering. A rendering the write left as it was - an anchor mark, a margin record, an
+// refuseGrowth is the refusal of the write g describes, or nil: applyLive's weigh. Its rendering
+// is weighed by weighRendering. A rendering the write left as it was - an anchor mark, an
 // attribute no rendering carries - is not measured again, and one that changed only the server's
 // state of a typed block (serverState) is taken whatever the measures say of it. Every write is
-// then still refused when the live state it leaves could not be decoded (refuseUndecodable, which
-// applyLive runs next).
+// then still refused when the live state it leaves could not be decoded (refuseUndecodable, the
+// first step of the operation's record, recordLiveOperation).
 func refuseGrowth(g growth) error {
 	if err := g.margin.refusal(); err != nil {
 		return err
@@ -155,7 +160,10 @@ const maxMarginBytes = pmdoc.MaxDocumentBytes
 const maxMarginRecordBytes = 256 << 10
 
 // marginWatch is the margin records one write changes on its transaction's fork, each as it was
-// before the write. A comment's projection (ProjectMark) is the only server write of one.
+// before the write. A comment's or suggestion's projection (ProjectMark) is the only server write
+// of one, and its write (applyMargin) shares the steps that open and record an applyLive
+// operation but is weighed by this bound alone: it leaves the rendering and the anchor marks as
+// they were.
 type marginWatch struct {
 	marks *crdt.YMap
 	was   map[string]any

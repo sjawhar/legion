@@ -81,11 +81,15 @@ var settingsEmitted = map[string]string{
 	"Config.GitHubApps":                              "github_apps",
 	"Config.Linger":                                  "linger_hours",
 	"Config.ProductionCheckBound":                    "production_check_hours",
+	"Config.PodUpdateRetask":                         "pod_update_retask_hours",
+	"Config.PodUpdateNotice":                         "pod_update_notice_hours",
 	"Config.ReviewRoundCap":                          "review_round_cap",
 	"Config.MaxFixAttempts":                          "max_fix_attempts",
 	"Config.ControllerLaunch":                        "controller",
 	"Config.Capabilities":                            "capabilities",
 	"Config.WorkerBackends":                          "worker_backends",
+	"Config.RoleConfigFiles":                         "role_config_files",
+	"Config.RepositoryRenames":                       "repository_renames",
 	"Runtime.Name":                                   "runtime.name",
 	"Runtime.Kubernetes":                             "runtime.kubernetes",
 	"Runtime.Tmux":                                   "runtime.tmux",
@@ -102,6 +106,7 @@ var settingsEmitted = map[string]string{
 	"Kubernetes.SessionStore":                        "runtime.kubernetes.session_store (the kind alone: neither the Secret key nor the instance and login behind it is emitted)",
 	"Kubernetes.Plugins":                             "runtime.kubernetes.plugins",
 	"Kubernetes.Setup":                               "runtime.kubernetes.setup",
+	"Kubernetes.TestPostgres":                        "runtime.kubernetes.test_postgres",
 	"Kubernetes.RepositoryCache":                     "runtime.kubernetes.repository_cache",
 	"RepositoryCacheConfig.Volume":                   "runtime.kubernetes.repository_cache.volume",
 	"RepositoryCacheConfig.RefreshMinutes":           "runtime.kubernetes.repository_cache.refresh_minutes",
@@ -267,8 +272,9 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		"tree_stop_timeout_seconds", "slow_command_timeout_seconds", "probe_interval_seconds",
 		"controller_wake_interval_seconds", "worker_boot_registration_deadline_intervals",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit", "envoy_url", "nats_urls",
-		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours", "review_round_cap",
-		"max_fix_attempts", "controller", "capabilities", "worker_backends",
+		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours",
+		"pod_update_retask_hours", "pod_update_notice_hours", "review_round_cap",
+		"max_fix_attempts", "controller", "capabilities", "worker_backends", "role_config_files", "repository_renames",
 	}
 	top := keysOf(t, encoded)
 	assertKeys(t, "settings", top, wantTop)
@@ -279,7 +285,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
 	assertKeys(t, "settings.runtime.kubernetes", kubernetesKeys, []string{
 		"namespace", "image", "storage_class", "issue_volume", "scheduling", "resources", "session_store",
-		"agent_secrets", "plugins", "setup", "repository_cache",
+		"agent_secrets", "plugins", "setup", "test_postgres", "repository_cache",
 	})
 	assertKeys(t, "settings.runtime.kubernetes.repository_cache", keysOf(t, kubernetesKeys["repository_cache"]), []string{
 		"volume", "refresh_minutes", "retain_hours", "resources",
@@ -332,6 +338,9 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if want := map[string]string{"tester": "omp"}; !maps.Equal(settings.WorkerBackends, want) {
 		t.Errorf("worker_backends = %q, want %q", settings.WorkerBackends, want)
+	}
+	if want := []RepositoryRenameSettings{{From: "acme/widgets-legacy", To: "acme/widgets"}}; !slices.Equal(settings.RepositoryRenames, want) {
+		t.Errorf("repository_renames = %+v, want the file's pair %+v", settings.RepositoryRenames, want)
 	}
 	if want := []string{"/bin/sh", "-c", "echo fixture-setup"}; !slices.Equal(settings.Runtime.Kubernetes.Setup, want) {
 		t.Errorf("runtime.kubernetes.setup = %q, want %q", settings.Runtime.Kubernetes.Setup, want)
@@ -432,7 +441,7 @@ func TestSettingsOfAMinimalConfigurationResolvesTheDefaults(t *testing.T) {
 		t.Errorf("github_apps = %+v, want none", settings.GitHubApps)
 	}
 	top := keysOf(t, encoded)
-	for key, want := range map[string]string{"provider_keys": "[]", "omp_launch_prefix": "[]", "nats_urls": "[]", "projects": "{}", "capabilities": `{"decided":{}}`} {
+	for key, want := range map[string]string{"provider_keys": "[]", "omp_launch_prefix": "[]", "nats_urls": "[]", "repository_renames": "[]", "projects": "{}", "capabilities": `{"decided":{}}`} {
 		if got := string(top[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
 		}

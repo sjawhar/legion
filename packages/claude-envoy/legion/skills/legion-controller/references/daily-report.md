@@ -30,9 +30,9 @@ unassigned.
 
 Each time you read it:
 
-- `Status: done` means someone closed it, and Dispatch then refuses an ask or a message there
-  (`409 ISSUE_CLOSED`) and hides its open asks. Reopen it with `set_status` to `icebox` and say so
-  in the day's report.
+- `Status: done` means someone closed it: the close withdrew its open asks (each recorded
+  `withdrawn`; a reopen brings them back), and Dispatch refuses an ask or a message there
+  (`409 ISSUE_CLOSED`). Reopen it with `set_status` to `icebox` and say so in the day's report.
 - `Assignee: unassigned` with a person known: assign it, naming your session (`dispatch whoami`):
   `curl -sS -X PATCH -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" -H 'Content-Type: application/json' -d '{"assignee": "<email>", "actor": {"kind": "session", "id": "<session id>"}}' "$DISPATCH_URL/api/v1/issues/<REPORT KEY>"`.
   An answer that does not print the issue with its new `assignee` left the assignee as it was

@@ -580,6 +580,29 @@ func TestAHeldChildDoesNotStartWhileItsRootWaitsOnAPerson(t *testing.T) {
 	assertOutboxKinds(t, pool, []string{})
 }
 
+// The same holds for a root the waiting line carries: a root handed to Legion that a person
+// answered, and that holds no slot again yet, is a candidate record.Waiting lists, so a judgement
+// that read liveness alone would start its children before the root resumes.
+func TestAHeldChildDoesNotStartWhileItsHandedOverRootWaitsOnAPerson(t *testing.T) {
+	pool := migratedPool(t)
+	root := awaitingRoot(3)
+	answered := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	root.Generation = 4
+	root.Status, root.HandedOver = "todo", true
+	root.Awaiting.AnsweredAt, root.Awaiting.AnsweredBy, root.Awaiting.AnsweredDetail = &answered, record.AnsweredByApproval, "version 3"
+	seedIssue(t, pool, root)
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: new(3)})
+	seedAdmittedChild(t, pool, "LEGION-209")
+	seedMirror(t, pool, "LEGION-209", "todo", "LEGION-300")
+	seedMirror(t, pool, "LEGION-300", "done")
+
+	startUnblockedChildren(t, pool, testEngine(config.DesignGateRootIssues, nil))
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted {
+		t.Fatalf("the child = %s, want it admitted until its root resumes", got)
+	}
+	assertOutboxKinds(t, pool, []string{})
+}
+
 // A root waiting on its design gate when the operator switches gates.design to off is not left
 // suspended: no approval request counts with the gate off, so the next admission pass moves the wait
 // to a question of the tree still with the person, or, with none, answers it, and the architect

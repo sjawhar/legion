@@ -12,6 +12,7 @@ status: active
 module: packages/pi-envoy, packages/envoy/cmd/listener
 related_issues:
   - "INFRA-246"
+  - "INFRA-404"
   - "sjawhar/legion#2164"
 ---
 
@@ -36,12 +37,16 @@ each was wrong in a different direction. Do these instead.
 - **Bound a worst case by tracing the value forward to its sink, not by stopping at the write.**
   "What does this entry eventually make an external API do?" is the question. An audit that stops
   at the write reports a bounded redundancy for a value that, four hops later, is a capability.
-- **A soft claim's named predecessor is a capability, not a hint.** Envoy's listener puts a
-  claimant's named `previous_session_id` into its supersedable set *before* it tests liveness
-  (`packages/envoy/cmd/listener/api.go:818-825`, applied at
-  `packages/envoy/internal/store/kv.go:612-614`). Any session id that reaches `previousSessionID`
-  takes the role from whoever holds it, live or not. A client may name only a session it can show
-  is still its own; a session id it once held is not that, because another process can resume it.
+- **A soft claim's named predecessor is a capability, not a hint.** Envoy's listener once put a
+  claimant's named `previous_session_id` into its supersedable set *before* it tested liveness,
+  so any session id that reached `previousSessionID` took the role from whoever held it, running
+  or gone. A client may name only a session it can show is still its own; a session id it once
+  held is not that, because another process can resume it. INFRA-404 closed the hazard: each
+  client instance mints a client instance id, sends it on every registration, and the listener
+  stores it on the session entry, so a named predecessor gives up the role only when it has no
+  live entry, when its entry carries the claimant's own instance id, or when either side carries
+  no instance id (`roleSetHandler`, `packages/envoy/cmd/listener/api.go:1195-1225`, applied at
+  `SetRoleWithPrevious`, `packages/envoy/internal/store/kv.go:950`).
 - **Write the reviewer's trace as a failing test before choosing a fix.** A case written from the
   reported sequence, red before any design exists, is the only thing that can judge a design it
   was not written for. Keep each round's trace as a case: a condition judged only against the
@@ -52,7 +57,8 @@ each was wrong in a different direction. Do these instead.
 
 ## Evidence
 
-`packages/pi-envoy/extensions/envoy.ts`, `settleEndedHolds`. Four conditions over four rounds:
+`settleEndedHolds`, then in `packages/pi-envoy/extensions/envoy.ts` and now in
+`packages/pi-envoy/src/registration-state.ts`. Four conditions over four rounds:
 restore every failed hand-back; skip the topic this process holds (which that same loop writes
 when it adopts a hold, so "confirmed" and "adopted a moment ago" were indistinguishable); revert
 to the first; and delete the branch that names a predecessor from memory. The third let a hold
@@ -69,11 +75,12 @@ re-keying fixed a collision — two holds of one role under two sessions sharing
 silently dropped, after which the pane records a refusal it can never clear — that none of the
 four conditions had named and no round had looked for.
 
-Still open after that change, and recorded rather than closed: `setEnvoyRole`'s session-moved
-branch (`envoy.ts:1957-1966`, inside `if (!sessionOpen(id))`) writes `claimedRoleSessionID` for a
-session that is by construction not open, and `settleRole` can later name it as a predecessor. A
-discriminator for it — stamp the role holder's `last_seen` when the process leaves a session still
-holding a role, and name that session only while the listener still names it holder and
-`last_seen` is unchanged — is designed in that issue's `plan.md` v4, with a residual one refresh
-interval wide. The extraction that would give this state one tested home is
+Left open by that change and closed since by INFRA-404: the session-moved branch of the plugin's
+role claim still records the hold under a session this process has left
+(`adoptClaimAfterSessionMoved`, `packages/pi-envoy/src/registration-state.ts:380`), and a later
+pass can name that session as a predecessor. What tells such a claim from another process's is
+not the `last_seen` stamp that issue's `plan.md` v4 designed but the client instance id above:
+the claim lands only while the predecessor's entry is still this instance's, or once it has gone.
+The extraction that gave this state one tested home is
+`packages/pi-envoy/src/registration-state.ts`, from
 dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355.

@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // A deploy usually finds someone with a document open, its tab connected to the room with what it
@@ -342,9 +343,7 @@ func TestShutdownLeavesASettlementThatMustWriteIntoItsRoomToResume(t *testing.T)
 		t.Fatalf("wait for the edit to be stored: %v", err)
 	}
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	if err := service.Shutdown(ctx); err != nil {
 		t.Fatalf("shutdown with a settlement that must stamp its room: %v", err)
@@ -375,7 +374,7 @@ func newShutdownTestService(t *testing.T, database *store.Store, appends Version
 	t.Helper()
 	service := New(Deps{
 		Store: database, Persistence: appends, Events: events.NewBroker(),
-		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)},
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)},
 		Settle:   time.Hour,
 	})
 	// A test that already called Shutdown runs this one a second time; it logs its own
@@ -482,11 +481,23 @@ type heldStore struct {
 
 func (s *heldStore) let() { s.once.Do(func() { close(s.release) }) }
 
-func (s *heldStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+// hold holds the held room's next append, once armed, until the test lets it go. Both of the
+// store's appends of a room's own update go through it: the flush its persistence worker runs
+// for a classified update, and the bare append of one no class was recorded for.
+func (s *heldStore) hold(room string) {
 	if room == s.room && s.armed.CompareAndSwap(true, false) {
 		close(s.entered)
 		<-s.release
 	}
+}
+
+func (s *heldStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	s.hold(room)
+	return s.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
+}
+
+func (s *heldStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+	s.hold(room)
 	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
@@ -505,7 +516,7 @@ func (g *appendGate) let() { g.once.Do(func() { close(g.release) }) }
 // Shutdown drains the room, including ones recorded only after its room scan. Once armed, each
 // call consumes the next gate in order; a call past the gates a test supplied is not held. This
 // duplicates heldStore's single-gate shape rather than nesting two heldStores (outer(inner(...))):
-// heldStore.AppendUpdateWithCredit calls through to its wrapped store inside the same call its gate
+// heldStore's append calls through to its wrapped store inside the same call its gate
 // guards, so an outer heldStore's gate would fire a second time on the first append once the inner
 // one releases it and the call reaches the outer wrapper on its way through - a spurious second
 // hold on the first append rather than a hold on the second.
@@ -518,19 +529,30 @@ type burstStore struct {
 	next  int
 }
 
-func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
-	if room == s.room && s.armed.Load() {
-		s.mu.Lock()
-		var gate *appendGate
-		if s.next < len(s.gates) {
-			gate = s.gates[s.next]
-			s.next++
-		}
-		s.mu.Unlock()
-		if gate != nil {
-			close(gate.entered)
-			<-gate.release
-		}
+// hold takes the next gate for a room append, as heldStore.hold does for its one gate.
+func (s *burstStore) hold(room string) {
+	if room != s.room || !s.armed.Load() {
+		return
 	}
+	s.mu.Lock()
+	var gate *appendGate
+	if s.next < len(s.gates) {
+		gate = s.gates[s.next]
+		s.next++
+	}
+	s.mu.Unlock()
+	if gate != nil {
+		close(gate.entered)
+		<-gate.release
+	}
+}
+
+func (s *burstStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	s.hold(room)
+	return s.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
+}
+
+func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+	s.hold(room)
 	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }

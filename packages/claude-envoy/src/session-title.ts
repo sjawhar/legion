@@ -17,7 +17,11 @@ export type SessionTitle = (sessionId: string) => string
 
 /** What `tmux -u -S <socket> display-message -p` prints for `pane` and `format`; undefined when
  *  tmux cannot say. */
-export type TmuxQuery = (socket: string, pane: string, format: string) => string | undefined
+export type TmuxQuery = (
+  socket: string,
+  pane: string,
+  format: string,
+) => Promise<string | undefined>
 
 // `automatic-rename` is the window option, which tmux expands as a format variable (1 or 0). A
 // window left on it is named after the running command, `claude` in every pane, which tells
@@ -38,7 +42,9 @@ const TMUX_PANE_FORMAT = [
   "#{pane_pid}",
 ].join("\t")
 
-/** Bounds the one tmux call the server makes as it starts. */
+/** Bounds the one tmux call the server makes as it starts. A timer bounds it, not a synchronous
+ *  spawn's `timeout`: Bun 1.3.14's `spawnSync` and `execFileSync` can let a child that outlives the
+ *  timeout run to its end, holding the server's start as long as tmux hangs. */
 const TMUX_TIMEOUT_MS = 1_000
 const SHORT_ID_LENGTH = 8
 
@@ -114,23 +120,46 @@ export function isAncestor(candidate: string, pid: number = process.pid): boolea
  * tab-separated, and tmux prints a tab as `_` to a client that has neither `TMUX` nor a UTF-8
  * locale in its environment; the daemon's `utf8Argv` passes it for the same reason.
  */
-export function queryTmux(socket: string, pane: string, format: string): string | undefined {
+export async function queryTmux(
+  socket: string,
+  pane: string,
+  format: string,
+): Promise<string | undefined> {
+  let child: Bun.Subprocess<"ignore", "pipe", "ignore">
   try {
-    const answer = execFileSync(
-      "tmux",
-      ["-u", "-S", socket, "display-message", "-p", "-t", pane, format],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: TMUX_TIMEOUT_MS,
-        // A `tmux` that ignores SIGTERM (a wrapper script) would hold the server's start past the
-        // bound; SIGKILL cannot be ignored.
-        killSignal: "SIGKILL",
-      },
-    )
-    return answer.trim() === "" ? undefined : answer
+    child = Bun.spawn(["tmux", "-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    })
   } catch {
+    // No `tmux` on the PATH.
     return undefined
+  }
+  const reader = child.stdout.getReader()
+  const expired = Promise.withResolvers<undefined>()
+  const timer = setTimeout(() => {
+    // A `tmux` that ignores SIGTERM (a wrapper script) would hold the server's start past the
+    // bound; SIGKILL cannot be ignored. A grandchild it leaves behind (the wrapper's own command)
+    // can still hold the pipe open, so the pipe is not waited for, and the read is cancelled: a
+    // read left pending would keep this process alive until that grandchild ends.
+    child.kill("SIGKILL")
+    reader.cancel().catch(() => undefined)
+    expired.resolve(undefined)
+  }, TMUX_TIMEOUT_MS)
+  const answered = (async () => {
+    const decoder = new TextDecoder()
+    let answer = ""
+    for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+      answer += decoder.decode(chunk.value, { stream: true })
+    }
+    answer += decoder.decode()
+    return (await child.exited) === 0 && answer.trim() !== "" ? answer : undefined
+  })().catch(() => undefined)
+  try {
+    return await Promise.race([answered, expired.promise])
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -141,16 +170,14 @@ export function queryTmux(socket: string, pane: string, format: string): string 
  * first process (the pane is not this session's), and for a session named only by digits (plain
  * `tmux` names its first one `0`) in a window nobody named, since that says nothing on any machine.
  */
-export function tmuxPaneTitle(
+export async function tmuxPaneTitle(
   socket: string,
   serverPid: string,
   pane: string,
   ownPane: (panePid: string) => boolean,
   query: TmuxQuery = queryTmux,
-): string | undefined {
-  const fields = query(socket, pane, TMUX_PANE_FORMAT)
-    ?.replace(/\r?\n$/, "")
-    .split("\t")
+): Promise<string | undefined> {
+  const fields = (await query(socket, pane, TMUX_PANE_FORMAT))?.replace(/\r?\n$/, "").split("\t")
   if (fields === undefined || fields.length < 6) return undefined
   const [name = "", window = "", automaticRename, group = "", pid, panePid = ""] =
     fields.map(oneLine)
@@ -187,15 +214,15 @@ export interface SessionTitleSources {
  * `TMUX_PANE`, asked of the server `TMUX` names, for a pane whose first process `ownPane`
  * accepts, by default one of this process's ancestors) and the project directory's name
  * otherwise. The short id keeps two sessions that share a tmux window or session apart. The tmux
- * name is worked out once, as the server starts: a tmux rename after that shows on the next
- * start. `chosen` is asked on every call instead, so a name the user chose after the server
- * started reaches the listener on the next registration.
+ * name is worked out once, as the server starts, which is the one thing the returned promise waits
+ * for: a tmux rename after that shows on the next start. `chosen` is asked on every call instead,
+ * so a name the user chose after the server started reaches the listener on the next registration.
  */
-export function sessionTitle(
+export async function sessionTitle(
   environment: SessionTitleEnvironment,
   directory: string,
   sources: SessionTitleSources = {},
-): SessionTitle {
+): Promise<SessionTitle> {
   const {
     query = queryTmux,
     ownPane = (panePid: string) => isAncestor(panePid),
@@ -215,7 +242,7 @@ export function sessionTitle(
   const name =
     (socket === "" || serverPid === "" || pane === undefined
       ? undefined
-      : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ??
+      : await tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ??
     (visible(directoryName) ? directoryName : "session")
   return (sessionId) => {
     const own = oneLine(chosen(sessionId) ?? "")

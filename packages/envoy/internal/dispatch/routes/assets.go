@@ -1,99 +1,99 @@
 package routes
 
 import (
+	"container/list"
 	"context"
 	"errors"
-	"fmt"
-	"io"
+	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/aws/smithy-go/logging"
-	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
-	// maxRetainedAssetSize bounds what one request may read from the store, and so the memory one
-	// retained miss holds while it is answered.
-	maxRetainedAssetSize int64 = 8 << 20
-	// retainedAssetFetchTimeout bounds the whole read of a retained asset from the store, object
-	// body included. The browser's download of the bytes read is not bounded by it.
+	// MaxRetainedAssetSize bounds one dashboard asset: what one request may read from the store,
+	// and so the memory one store read holds while it is answered. internal/dispatch/dashboard
+	// refuses to publish a build holding a larger file, so the store holds none.
+	MaxRetainedAssetSize int64 = 8 << 20
+	// retainedAssetFetchTimeout bounds the whole read of an asset from the store. The browser's
+	// download of the bytes read is not bounded by it.
 	retainedAssetFetchTimeout = 3 * time.Second
-	// maxRetainedBytesHeld caps the bytes of retained objects the handler holds at once. A client
-	// that stops reading keeps its object in memory, and the server sets no write timeout.
+	// maxRetainedBytesHeld caps the bytes of store reads the handler holds at once. A client that
+	// stops reading keeps its object in memory, and the server sets no write timeout.
 	maxRetainedBytesHeld int64 = 64 << 20
+	// maxCachedAssetBytes caps the bytes the process keeps of the objects the store answered
+	// (assetCache).
+	maxCachedAssetBytes int64 = 64 << 20
 )
 
-// ErrAssetNotFound distinguishes an absent retained asset from a store failure.
+// ErrAssetNotFound distinguishes an asset the store does not hold from a store failure.
 var ErrAssetNotFound = errors.New("retained asset not found")
 
-// AssetStore holds the hashed assets of earlier dashboard builds, which the static handler serves
-// when the current build does not hold the file a browser asks for.
+// AssetStore holds the hashed assets of every dashboard build a server process has published
+// (internal/dispatch/dashboard), this process's own among them. The static handler asks it only
+// when this process's build does not hold the file a browser asks for: a page another process
+// served, of another build, while a rolling update or a rollback runs two builds at once.
 type AssetStore interface {
-	// GetAsset returns the whole object stored under key, at most maxRetainedAssetSize bytes, or
+	// GetAsset returns the whole object stored under key, at most MaxRetainedAssetSize bytes, or
 	// ErrAssetNotFound when there is none. Any other error is a store failure.
 	GetAsset(ctx context.Context, key string) ([]byte, error)
 }
 
-type s3API interface {
-	GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+// assetCache keeps the objects the store answered, whole and by key, so a burst of one stale
+// tab's chunks, or every tab of another build asking for the same ones, reads each from the store
+// once. A key names content-hashed build output, which never changes under its name, so an entry
+// is never stale. It holds at most limit bytes, evicting the least recently used entry first, and
+// collapses concurrent misses of one key into one store read (reads).
+type assetCache struct {
+	limit int64
+	reads singleflight.Group
+
+	mu    sync.Mutex
+	held  int64
+	order *list.List // of *cachedAsset, the most recently used at the front
+	byKey map[string]*list.Element
 }
 
-type s3AssetStore struct {
-	client s3API
-	bucket string
+type cachedAsset struct {
+	key     string
+	content []byte
 }
 
-// NewS3AssetStore reads retained assets from bucket with the AWS SDK's default credential chain.
-// Loading it reads only the environment and shared config files; credentials are fetched on the
-// first request.
-func NewS3AssetStore(ctx context.Context, bucket string) (AssetStore, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(logging.LoggerFunc(files.LogSDK)))
-	if err != nil {
-		return nil, fmt.Errorf("load AWS configuration for retained assets: %w", err)
-	}
-	return &s3AssetStore{client: s3.NewFromConfig(cfg), bucket: bucket}, nil
+func newAssetCache(limit int64) *assetCache {
+	return &assetCache{limit: limit, order: list.New(), byKey: make(map[string]*list.Element)}
 }
 
-func (s *s3AssetStore) GetAsset(ctx context.Context, key string) ([]byte, error) {
-	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		// S3 answers a missing key with NoSuchKey only to a caller that may also list the bucket;
-		// without s3:ListBucket it is AccessDenied, a store failure.
-		var missing *types.NoSuchKey
-		if errors.As(err, &missing) {
-			return nil, ErrAssetNotFound
-		}
-		return nil, fmt.Errorf("get retained asset %q: %w", key, err)
+// get returns key's object and marks it the most recently used.
+func (c *assetCache) get(key string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	element, ok := c.byKey[key]
+	if !ok {
+		return nil, false
 	}
-	if object.Body == nil {
-		return nil, fmt.Errorf("get retained asset %q: no body", key)
+	c.order.MoveToFront(element)
+	return element.Value.(*cachedAsset).content, true
+}
+
+// put keeps content under key, evicting the least recently used entries until it fits. An object
+// larger than the whole cache is not kept.
+func (c *assetCache) put(key string, content []byte) {
+	size := int64(len(content))
+	if size > c.limit {
+		return
 	}
-	defer object.Body.Close()
-	if object.ContentLength == nil {
-		return nil, fmt.Errorf("get retained asset %q: no content length", key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if element, ok := c.byKey[key]; ok {
+		c.order.MoveToFront(element)
+		return
 	}
-	size := *object.ContentLength
-	if size < 0 || size > maxRetainedAssetSize {
-		return nil, fmt.Errorf("get retained asset %q: %d bytes, limit %d", key, size, maxRetainedAssetSize)
+	for c.held+size > c.limit {
+		oldest := c.order.Back()
+		evicted := c.order.Remove(oldest).(*cachedAsset)
+		delete(c.byKey, evicted.key)
+		c.held -= int64(len(evicted.content))
 	}
-	// One buffer of the declared size, so a request holds the object's bytes and no more.
-	data := make([]byte, size)
-	if _, err := io.ReadFull(object.Body, data); err != nil {
-		return nil, fmt.Errorf("read retained asset %q, %d bytes declared: %w", key, size, err)
-	}
-	var extra [1]byte
-	switch _, err := io.ReadFull(object.Body, extra[:]); {
-	case err == nil:
-		return nil, fmt.Errorf("read retained asset %q: body is longer than the %d bytes declared", key, size)
-	case !errors.Is(err, io.EOF):
-		return nil, fmt.Errorf("read retained asset %q: %w", key, err)
-	}
-	return data, nil
+	c.byKey[key] = c.order.PushFront(&cachedAsset{key: key, content: content})
+	c.held += size
 }

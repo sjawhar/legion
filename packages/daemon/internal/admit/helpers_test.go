@@ -116,6 +116,13 @@ func assertEffects(t *testing.T, pool *pgxpool.Pool, want []effect) {
 	}
 }
 
+// effects is the outbox as these tests compare it: every row in id order, its payload decoded.
+// A supervise start carries an assignment the workflow mints fresh at each start
+// (record.SuperviseRequest.Assignment), so two runs of the same events never write the
+// same one and a comparison of two runs would fail on that id alone. Every such id is replaced
+// here by one sentinel, which drops only the value no run can repeat. It holds nothing about the
+// assignment itself: a start that carries none is left as it is, and what a start carries is
+// pinned by internal/api's completion route tests and by migration 0067's test.
 func effects(t *testing.T, pool *pgxpool.Pool) []effect {
 	t.Helper()
 	rows, err := pool.Query(context.Background(), `select kind, issue, payload from outbox order by id`)
@@ -133,6 +140,10 @@ func effects(t *testing.T, pool *pgxpool.Pool) []effect {
 		if err != nil {
 			t.Fatalf("decode outbox: %v", err)
 		}
+		if start, ok := payload.(record.SuperviseRequest); ok && start.Assignment != "" {
+			start.Assignment = mintedAssignment
+			payload = start
+		}
 		got = append(got, effect{kind: row.Kind, issue: row.Issue, payload: payload})
 	}
 	if err := rows.Err(); err != nil {
@@ -140,6 +151,9 @@ func effects(t *testing.T, pool *pgxpool.Pool) []effect {
 	}
 	return got
 }
+
+// mintedAssignment stands for the assignment a start minted, whatever it was (effects).
+const mintedAssignment = "<minted>"
 
 func assertSlots(t *testing.T, pool *pgxpool.Pool, want []record.Slot) {
 	t.Helper()
@@ -276,7 +290,8 @@ func migratedPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(admin.Close)
 	name := "legion_admit_test_" + randomSuffix(t)
-	if _, err := admin.Exec(context.Background(), "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -332,9 +347,13 @@ func reconcile(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries
 func reconcileWithPosition(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary, target, ackFloorStream int64, idle bool) {
 	t.Helper()
 	position := intake.DispatchConsumerPosition{AckFloorStream: ackFloorStream, Idle: idle}
+	listed := make([]intake.DispatchIssue, len(summaries))
+	for i, summary := range summaries {
+		listed[i] = intake.ListedIssue(summary)
+	}
 	scoped, committed := intake.WithCommitHooks(context.Background())
 	inTx(t, pool, func(tx pgx.Tx) {
-		if err := admission.Reconcile(scoped, tx, summaries, target, position); err != nil {
+		if err := admission.Reconcile(scoped, tx, listed, target, position); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
 	})

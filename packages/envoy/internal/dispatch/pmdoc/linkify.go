@@ -2,205 +2,328 @@ package pmdoc
 
 import (
 	"bytes"
-	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 )
 
-// linkify links bare URLs and email addresses (linkifyGuard), at the priority goldmark's
-// extension.Linkify gives its parser.
+// linkify reads bare web addresses and email addresses as the browser editor's engine reads them
+// (linkifyGuard).
 type linkify struct{}
 
 func (linkify) Extend(m goldmark.Markdown) {
-	m.Parser().AddOptions(parser.WithInlineParsers(util.Prioritized(newLinkifyGuard(), 999)))
+	m.Parser().AddOptions(parser.WithInlineParsers(linkifyParsers()...))
 }
 
-// linkifyGuard reads a www or http(s) URL where the browser editor's parser reads one, and runs
-// goldmark's linkify parser for an email address only where one can match.
-//
-// A URL is read as micromark-extension-gfm-autolink-literal's tokenizer reads it (literalURL),
-// not by goldmark's pattern, which ends a URL elsewhere: it keeps a `"`, `'`, `;`, `]` or `_`
-// ending the URL and a `)` after an earlier trimmed character inside it, and stops at a backslash,
-// an asterisk or a character outside ASCII, where GFM's extended autolink ends a URL only at
-// whitespace or `<` and leaves out the trailing punctuation before it. The guard is asked where
-// goldmark's parser is (after whitespace, `*`, `_`, `~` or `(`, and at the head of a line or of the
-// text after another inline node, when that head is no punctuation), and a URL begins there or after
-// a run of punctuation no inline parser reads (plainPunctuation, such as the `"` of
-// `"https://…"`), where that tokenizer begins one (literalURLFollows). Asked at no other character,
-// goldmark ends no text anywhere else, so the tree and its weight are goldmark's.
-//
-// The editor's parser also links, through mdast-util-gfm-autolink-literal's transform over the
-// decoded text the tokenizer left, a URL the tokenizer refuses before its domain (a host opening
-// with `-` or `.`, or a www URL where the text after another inline node begins) and a URL after
-// any whitespace or punctuation of the decoded text: after a letter and punctuation (`x;https://`),
-// at a head that is punctuation (a line or a table cell opening `"https://`), after an escaped
-// character or a character reference. The markdown does not say what that decoded text is, or
-// goldmark asks no parser there, so there the guard reads as goldmark's parser reads, or reads
-// nothing. A domain the tokenizer refuses (an underscore in one of its last two parts) is refused
-// here too, as the transform refuses it.
-//
-// goldmark's parser, triggered at every space, `*`, `_`, `~` and `(`, scans forward over email
-// local-part characters to the next `@` before it knows there is no email there: on a line of
-// `a_a_a_…` every `_` scans to the line's end, and the line costs time quadratic in its length
-// (LEGION-465). The guard reads each line once, recording for each `@` where its run of local-part
-// characters begins, and answers a trigger with no `@` reachable through local-part characters, or
-// one whose `@` the parser already refused, without calling it. What the parser links is
-// unchanged: it is called exactly where it could link, and whether it links an email ending at an
-// `@` does not depend on which trigger before that `@` asked. A line whose segment carries padding
-// (the columns of a tab its container took part of) goes to the parser as it is, since its bytes
-// are not the source's from the segment's start; that is one trigger, at the line's head.
-type linkifyGuard struct {
-	inner parser.InlineParser
+// linkifyParsers is the readers' parsers of bare addresses: the guard, asked after every other
+// inline parser, and the email reader at `_` (underscoreEmail), asked before emphasis.
+func linkifyParsers() []util.PrioritizedValue {
+	return []util.PrioritizedValue{util.Prioritized(linkifyGuard{}, 999), util.Prioritized(underscoreEmail{}, 450)}
 }
 
-func newLinkifyGuard() *linkifyGuard {
-	return &linkifyGuard{inner: extension.NewLinkifyParser()}
-}
+// linkifyGuard reads a bare web address or email address wherever the browser editor's engine,
+// remark-parse with remark-gfm, reads one, and as it reads it. The engine has two readers of them.
+//
+// micromark-extension-gfm-autolink-literal's tokenizer reads the markdown as it is written, before
+// emphasis, code or links form, so an address it reads claims its bytes, a `*` or `_` among them.
+// At each character it tries an email first, at a character of `[A-Za-z0-9+\-._]` whose previous
+// character is neither one of them nor `/` (literalEmail); then, at an `h` after anything but an
+// ASCII letter, a protocol URL, and at a `w` after a line's start, whitespace, `(`, `*`, `_`, `[`,
+// `]` or `~`, a www URL (literalURL). The previous character is the one written before, the escaped
+// one after a backslash escape and the `;` after a character reference; a line's or a table
+// cell's first character has none before it. Inside a link label not yet closed it reads nothing.
+// The guard reads the same way inside goldmark's inline parse: it is asked at every unescaped ASCII
+// punctuation character and at whitespace and each head, after every other parser declines, and
+// from there reads up to the next character goldmark asks at, where the tokenizer could start an
+// address only after what that stretch holds. An address it starts there is an autolink, the text
+// before it text. At `_`, where the tokenizer tries an email before emphasis, underscoreEmail reads
+// it before goldmark's emphasis parser.
+//
+// mdast-util-gfm-autolink-literal's transform then searches each text node the tokenizer left,
+// outside links, decoded: its URL pattern over every one first, then its email pattern over the
+// text left, each refusal searched again one character later (mdast-util-find-and-replace). That
+// is each block's CloseBlock's (linkTextAddresses), over each run of its text nodes between other
+// nodes; autolink_transform.go holds it, and this file the tokenizer.
+//
+// Asking the guard at a character no other parser is asked at ends the text goldmark is building
+// there: a line asked at a `.` and nowhere else becomes two texts. The guard records the last such
+// cut with where goldmark would have begun the line's last text otherwise, and gives the split text
+// back (linkifyBlock.settle) at the next character goldmark asks at, where the elements counter or
+// the guard is asked first, and at CloseBlock: a markdown holding no address makes goldmark's tree
+// without the guard, and is counted and weighed as it.
+//
+// Each character is read once: the guard's stretch ends at the next character goldmark asks at,
+// an email starts only at the first of a run of its characters, a refused URL's domain and trail
+// are recorded for the next read starting inside them (literalDomains, literalTrail), and the
+// transform keeps the run a refused match read (urlDomain, emailRun).
+type linkifyGuard struct{}
+
+// linkifyTriggers is every ASCII punctuation character and a space, which stands for whitespace
+// and a line's head.
+var linkifyTriggers = func() []byte {
+	triggers := []byte{' '}
+	for c := byte('!'); c <= '~'; c++ {
+		if util.IsPunct(c) {
+			triggers = append(triggers, c)
+		}
+	}
+	return triggers
+}()
+
+func (linkifyGuard) Trigger() []byte { return linkifyTriggers }
 
 var (
-	linkifyLineKey   = parser.NewContextKey()
+	linkifyBlockKey  = parser.NewContextKey()
 	literalDomainKey = parser.NewContextKey()
 )
 
-// linkifyLine is what the guard knows about the line ending at stop in the source, from the first
-// offset a trigger asked about (from) to its end.
-type linkifyLine struct {
-	stop   int
-	from   int
-	ats    []int  // offsets of each `@`, ascending
-	starts []int  // for each `@`, the lowest offset ≥ from from which only local-part characters lead to it
-	failed []bool // for each `@`, whether the parser refused an email ending at it
+// linkifyBlock is what the guard knows of the textblock goldmark is reading.
+type linkifyBlock struct {
+	parent ast.Node
+	// asked is the offset the guard was last asked at, -1 before it is first asked.
+	asked int
+	// head is where goldmark began the text it is building, as it would were the guard asked only
+	// where another parser is: at a head or a character another parser reads.
+	head int
+	// cut is where goldmark last ended a text only because the guard was asked there, until it is
+	// settled, or -1; cutHead is head then.
+	cut, cutHead int
 }
 
-var (
-	// linkifyProtocols are the openings goldmark's parser reads a URL from by its own pattern, which
-	// the guard gives it where the tokenizer refuses the URL before its domain. `ftp:` is not among
-	// them, since the editor links no ftp URL.
-	linkifyProtocols = [][]byte{[]byte("http:"), []byte("https:"), []byte("www.")}
-	// emailLocal marks the bytes goldmark's util.FindEmailIndex reads as an email's local part
-	// (its emailTable); linkify_test.go holds the two to the same set. A line opening with `ftp:`
-	// reaches no `@` through them, so goldmark's parser never reads its URL.
-	emailLocal = func() (table [256]bool) {
-		for _, c := range []byte("!#$%&'*+-./0123456789=?ABCDEFGHIJKLMNOPQRSTUVWXYZ^_`abcdefghijklmnopqrstuvwxyz{|}~") {
-			table[c] = true
-		}
-		return table
-	}()
-)
-
-func (g *linkifyGuard) Trigger() []byte { return g.inner.Trigger() }
-
-func (g *linkifyGuard) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
-	if pc.IsInLinkLabel() {
-		return nil
+// linkifyBlockOf is the guard's record of parent, the textblock goldmark is reading.
+func linkifyBlockOf(pc parser.Context, parent ast.Node) *linkifyBlock {
+	state, _ := pc.Get(linkifyBlockKey).(*linkifyBlock)
+	if state == nil || state.parent != parent {
+		state = &linkifyBlock{parent: parent, asked: -1, cut: -1}
+		pc.Set(linkifyBlockKey, state)
 	}
-	line, segment := block.PeekLine()
-	if segment.Padding != 0 {
-		return g.inner.Parse(parent, block, pc)
-	}
-	if url, handled := literalURLNode(parent, block, pc, line, segment); handled {
-		return url
-	}
-	c := line[0]
-	start := segment.Start
-	rest := line
-	// The parser skips the trigger where it is not a line head, as its Parse does.
-	if c == ' ' || c == '*' || c == '_' || c == '~' || c == '(' {
-		start++
-		rest = rest[1:]
-	}
-	for _, protocol := range linkifyProtocols {
-		if bytes.HasPrefix(rest, protocol) {
-			return g.inner.Parse(parent, block, pc)
-		}
-	}
-	if len(rest) == 0 || util.IsPunct(rest[0]) {
-		return nil
-	}
-	state := g.line(block.Source(), start, segment.Stop, pc)
-	index := sort.SearchInts(state.ats, start)
-	if index == len(state.ats) || state.starts[index] > start || state.failed[index] {
-		return nil
-	}
-	node := g.inner.Parse(parent, block, pc)
-	if node == nil {
-		state.failed[index] = true
-	}
-	return node
-}
-
-// line is the guard's record of the line ending at stop, read from `from` on first sight. Triggers
-// on one line ask in offset order, so a record read from an earlier offset answers every later one.
-func (g *linkifyGuard) line(source []byte, from, stop int, pc parser.Context) *linkifyLine {
-	if state, ok := pc.Get(linkifyLineKey).(*linkifyLine); ok && state.stop == stop && state.from <= from {
-		return state
-	}
-	state := &linkifyLine{stop: stop, from: from}
-	runStart := from
-	for offset := from; offset < stop && offset < len(source); offset++ {
-		c := source[offset]
-		if c == '@' {
-			state.ats = append(state.ats, offset)
-			state.starts = append(state.starts, runStart)
-			state.failed = append(state.failed, false)
-			runStart = offset + 1
-			continue
-		}
-		if !emailLocal[c] {
-			runStart = offset + 1
-		}
-	}
-	pc.Set(linkifyLineKey, state)
 	return state
 }
 
-func (g *linkifyGuard) CloseBlock(parent ast.Node, pc parser.Context) {}
+func (linkifyGuard) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
+	_, segment := block.PeekLine()
+	state := linkifyBlockOf(pc, parent)
+	state.settle()
+	at := segment.Start
+	// goldmark has just ended a text here, rather than reached a head: its last text ends here and
+	// already held where the guard was last asked. A text another parser made ending here began
+	// after that.
+	last, isText := parent.LastChild().(*ast.Text)
+	ended := isText && last.Segment.Stop == at && last.Segment.Start <= state.asked
+	state.asked, state.cut = at, -1
+	if !pc.IsInLinkLabel() {
+		if link := readLiteralAddress(parent, block, pc, segment); link != nil {
+			return link
+		}
+	}
+	asked := byte(' ')
+	if segment.Padding == 0 {
+		asked = block.Source()[at]
+	}
+	if !ended || util.IsSpace(asked) || bytes.IndexByte(inlineTriggers, asked) >= 0 {
+		state.head = at
+		return nil
+	}
+	state.cut, state.cutHead = at, state.head
+	return nil
+}
 
-// literalURLNode reads the URL that begins after the trigger opening line (or at line's start, a
-// head goldmark asks at) and the run of plainPunctuation after it, as an autolink, appending what
-// comes before it as text. It reports handled false where no URL begins there by the tokenizer's
-// rules short of its domain, and nil where the tokenizer refuses the URL's domain.
-func literalURLNode(parent ast.Node, block text.Reader, pc parser.Context, line []byte, segment text.Segment) (url ast.Node, handled bool) {
-	skipped, previous := 0, block.PrecendingCharacter()
-	if c := line[0]; util.IsSpace(c) || isASCIIPunctuation(c) {
-		skipped, previous = 1, rune(c)
+// settle gives the text goldmark split off at the guard's last cut, once it has ended the line
+// there, back to the text before it, or, where goldmark would have begun the line's last text at a
+// later head, moves the split there; a question later on the line takes the text past the cut, so
+// goldmark splits nothing there. A split text is the textblock's last child until the next
+// character goldmark asks at, where the elements counter or the guard is asked first, so each split
+// is settled before anything counts or reads it - but for the empty texts a line holding nothing
+// but a hard break's backslash ends with, which goldmark asks nothing on.
+func (state *linkifyBlock) settle() {
+	if state.cut < 0 {
+		return
 	}
-	for skipped < len(line) && plainPunctuation(line[skipped]) {
-		previous = rune(line[skipped])
-		skipped++
+	after, ok := state.parent.LastChild().(*ast.Text)
+	for ok && after.Segment.IsEmpty() {
+		after, ok = after.PreviousSibling().(*ast.Text)
 	}
-	start, rest := segment.Start+skipped, line[skipped:]
-	if !literalURLPrefix(rest) || !literalURLFollows(previous, rest[3] == '.') {
-		return nil, false
+	if !ok || after.Segment.Start != state.cut {
+		return
 	}
-	length, www, domainRefused := literalURL(rest, literalDomainsOf(pc, start, segment.Stop))
-	if length == 0 {
-		return nil, domainRefused
+	before, ok := after.PreviousSibling().(*ast.Text)
+	if !ok || before.Segment.Stop != state.cut || before.SoftLineBreak() || before.HardLineBreak() {
+		return
 	}
-	if skipped != 0 {
-		ast.MergeOrAppendTextSegment(parent, segment.WithStop(start))
+	state.cut = -1
+	if head := state.cutHead; head > before.Segment.Start {
+		before.Segment = before.Segment.WithStop(head)
+		after.Segment = text.NewSegment(head, after.Segment.Stop)
+		return
 	}
-	block.Advance(skipped + length)
-	link := ast.NewAutoLink(ast.AutoLinkURL, ast.NewTextSegment(text.NewSegment(start, start+length)))
+	before.Segment = before.Segment.WithStop(after.Segment.Stop)
+	before.SetSoftLineBreak(after.SoftLineBreak())
+	before.SetHardLineBreak(after.HardLineBreak())
+	state.parent.RemoveChild(state.parent, after)
+}
+
+// settleCut settles the guard's last cut in parent (linkifyBlock.settle).
+func settleCut(pc parser.Context, parent ast.Node) {
+	if state, _ := pc.Get(linkifyBlockKey).(*linkifyBlock); state != nil && state.parent == parent {
+		state.settle()
+	}
+}
+
+// CloseBlock settles the guard's last cut and links the addresses the transform reads in parent's
+// text (linkTextAddresses), unless the write's markdown has passed its element limit, which leaves
+// the tree unread.
+func (linkifyGuard) CloseBlock(parent ast.Node, block text.Reader, pc parser.Context) {
+	settleCut(pc, parent)
+	pc.Set(linkifyBlockKey, nil)
+	if count := countedElements(pc); count == nil || !count.passed() {
+		linkTextAddresses(parent, block.Source())
+	}
+}
+
+// readLiteralAddress reads the address the tokenizer starts first from where the guard is asked,
+// segment's start, up to the next character goldmark asks at, as an autolink, appending the text
+// before it; or returns nil where the tokenizer starts none or refuses each it starts.
+func readLiteralAddress(parent ast.Node, block text.Reader, pc parser.Context, segment text.Segment) ast.Node {
+	source, stop := block.Source(), segment.Stop
+	// The asked character is the line's padding, whitespace, where the line has some; otherwise the
+	// one at segment's start.
+	asked, previous := segment.Start, ' '
+	if segment.Padding != 0 {
+		asked = -1
+	} else {
+		previous = previousCharacter(parent, block, segment.Start)
+	}
+	for at := segment.Start; at < stop; {
+		c := source[at]
+		if at != asked && (util.IsPunct(c) || util.IsSpace(c)) {
+			return nil
+		}
+		if c == '\\' && at+1 < stop && util.IsPunct(source[at+1]) {
+			previous = rune(source[at+1])
+			at += 2
+			continue
+		}
+		if length, kind, www := literalAddress(source[at:stop], previous, pc, at); length != 0 {
+			if at > segment.Start || segment.Padding != 0 {
+				ast.MergeOrAppendTextSegment(parent, segment.WithStop(at))
+			}
+			block.Advance(segment.Padding + at - segment.Start + length)
+			return bareAutolink(kind, www, at, at+length)
+		}
+		char, width := utf8.DecodeRune(source[at:stop])
+		previous = char
+		at += width
+	}
+	return nil
+}
+
+// bareAutolink is the autolink of a bare address of kind at source offsets [start, end), whose
+// href takes an `http://` before a www URL.
+func bareAutolink(kind ast.AutoLinkType, www bool, start, end int) *ast.AutoLink {
+	link := ast.NewAutoLink(kind, ast.NewTextSegment(text.NewSegment(start, end)))
 	if www {
 		link.Protocol = []byte("http")
 	}
-	return link, true
+	return link
 }
 
-// plainPunctuation reports whether c is ASCII punctuation no inline parser of the readers reads
-// (elementInlineCounter's triggers, `&` and `\`, which open references and escapes, and `|`), which
-// text can hold before a URL.
-func plainPunctuation(c byte) bool {
-	return isASCIIPunctuation(c) && strings.IndexByte("*_~(`[]!<&\\|", c) < 0
+// literalAddress is the length of the address the tokenizer reads from text's start, the source's
+// from offset at to its line's end, after previous, its kind, and whether it is a www URL; or 0
+// where it reads none: an email first (literalEmail), then a protocol or www URL (literalURL).
+func literalAddress(text []byte, previous rune, pc parser.Context, at int) (int, ast.AutoLinkType, bool) {
+	c := text[0]
+	if gfmAtext(c) && previousEmail(previous) {
+		if length := literalEmail(text); length != 0 {
+			return length, ast.AutoLinkEmail, false
+		}
+	}
+	if (c == 'h' || c == 'H') && literalURLFollows(previous, false) || (c == 'w' || c == 'W') && literalURLFollows(previous, true) {
+		if length, www := literalURL(text, literalDomainsOf(pc, at, at+len(text))); length != 0 {
+			return length, ast.AutoLinkURL, www
+		}
+	}
+	return 0, ast.AutoLinkURL, false
+}
+
+// previousCharacter is the character before offset at, where a line's or a table cell's first
+// character has a line feed before it, as the tokenizer has a line ending or nothing there.
+func previousCharacter(parent ast.Node, block text.Reader, at int) rune {
+	if line, _ := block.Position(); line < parent.Lines().Len() && parent.Lines().At(line).Start == at {
+		return '\n'
+	}
+	return block.PrecendingCharacter()
+}
+
+// underscoreEmail reads an email starting at a `_`, where the tokenizer tries one before emphasis.
+type underscoreEmail struct{}
+
+func (underscoreEmail) Trigger() []byte { return []byte{'_'} }
+
+func (underscoreEmail) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
+	_, segment := block.PeekLine()
+	if pc.IsInLinkLabel() || !previousEmail(previousCharacter(parent, block, segment.Start)) {
+		return nil
+	}
+	length := literalEmail(block.Source()[segment.Start:segment.Stop])
+	if length == 0 {
+		return nil
+	}
+	block.Advance(length)
+	return ast.NewAutoLink(ast.AutoLinkEmail, ast.NewTextSegment(segment.WithStop(segment.Start+length)))
+}
+
+// gfmAtext reports whether c is a character of an email's local part to both readers: to the
+// tokenizer, and to the transform's email pattern, `[-.\w+]`.
+func gfmAtext(c byte) bool {
+	return c == '+' || c == '-' || c == '.' || c == '_' || isASCIIAlphaNumeric(c)
+}
+
+// previousEmail reports whether the tokenizer starts an email after previous: neither a character
+// of a local part nor `/`.
+func previousEmail(previous rune) bool {
+	return previous != '/' && (previous >= utf8.RuneSelf || !gfmAtext(byte(previous)))
+}
+
+// literalEmail is the length of the email the tokenizer reads from text's start
+// (tokenizeEmailAutolink), or 0: a run of local-part characters, an `@`, and a domain of letters,
+// digits, `-` and `_` with a dot inside it before a letter or digit, ending in a letter.
+func literalEmail(text []byte) int {
+	at := 0
+	for at < len(text) && gfmAtext(text[at]) {
+		at++
+	}
+	if at == 0 || at == len(text) || text[at] != '@' {
+		return 0
+	}
+	data, dot := false, false
+	var last byte
+	for at++; at < len(text); at++ {
+		c := text[at]
+		if c == '.' && at+1 < len(text) && isASCIIAlphaNumeric(text[at+1]) {
+			dot = true
+		} else if emailDomainCharacter(c) {
+			data = true
+		} else {
+			break
+		}
+		last = c
+	}
+	if !data || !dot || !isASCIILetter(last) {
+		return 0
+	}
+	return at
+}
+
+// emailDomainCharacter reports whether c is a character of an email's domain other than its dots
+// to both readers, `[-\w]`.
+func emailDomainCharacter(c byte) bool {
+	return c == '-' || c == '_' || isASCIIAlphaNumeric(c)
 }
 
 // literalURLFollows reports whether the tokenizer begins a URL after previous, the character before
@@ -224,38 +347,37 @@ func literalURLPrefix(text []byte) bool {
 
 // literalURL is the length in bytes of the www or http(s) autolink literal at the start of text, as
 // micromark-extension-gfm-autolink-literal's tokenizer reads one, and whether it is a www literal,
-// whose href takes an `http://` before it; or 0 where that tokenizer reads none, reporting whether
-// it refused the domain rather than what comes before it. text ends where its line does. A protocol
-// is `http` or `https` in any case followed by `://` and a character neither whitespace, a control
-// character nor punctuation; then come the domain and the path.
-func literalURL(text []byte, domains *literalDomains) (length int, www, domainRefused bool) {
+// whose href takes an `http://` before it; or 0 where that tokenizer reads none. text ends where
+// its line does. A protocol is `http` or `https` in any case followed by `://` and a character
+// neither whitespace, a control character nor punctuation; then come the domain and the path.
+func literalURL(text []byte, domains *literalDomains) (length int, www bool) {
 	if !literalURLPrefix(text) {
-		return 0, false, false
+		return 0, false
 	}
 	www = text[3] == '.'
 	at := 0
 	if !www {
 		at = bytes.IndexByte(text, ':') + 1
 		if !bytes.HasPrefix(text[at:], []byte("//")) {
-			return 0, false, false
+			return 0, false
 		}
 		at += 2
 		if at == len(text) {
-			return 0, false, false
+			return 0, false
 		}
 		if char, _ := utf8.DecodeRune(text[at:]); char < ' ' || char == 0x7f || literalEnd(char) || literalPunctuation(char) {
-			return 0, false, false
+			return 0, false
 		}
 	} else if len(text) == len("www.") {
 		// The paragraph ends after the `www.`; a line ending would be something after it.
-		return 0, false, false
+		return 0, false
 	}
 	trail := literalTrail{text: text}
 	end, ok := domains.read(text, at, &trail)
 	if !ok {
-		return 0, false, true
+		return 0, false
 	}
-	return literalPath(text, end, &trail), www, false
+	return literalPath(text, end, &trail), www
 }
 
 // literalDomains is the record of the last domain read on a line (tokenizeDomain), for every later

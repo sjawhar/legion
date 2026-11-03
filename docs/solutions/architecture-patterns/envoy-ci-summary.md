@@ -17,10 +17,11 @@ every write of the record stamps.
 1. `Record` and `RecordSuite` CAS-update the aggregate. A new record starts at
    generation 0; every later aggregate-hash change and every re-arm advances the
    state version, then clears `SettledEmitted`.
-2. The reconcile loop reads its rebuildable cache and selects every record `due` to settle:
-   unsettled, terminal, quiet for the debounce and, when it has no `schema`, inside the handover
-   grace (see below), whichever commit of the pull request it is for. It checks that before a
-   claim older than twice the debounce interval is reclaimed.
+2. The reconcile loop runs a pass only on a tick at which a record changed or fell due. It takes
+   the records its rebuildable cache marked changed and the queued records whose deadline passed,
+   and selects those `due` to settle: unsettled, terminal, quiet for the debounce and, when it has
+   no `schema`, inside the handover grace (see below), whichever commit of the pull request it is
+   for. It checks that before a claim older than twice the debounce interval is reclaimed.
 3. `ClaimSettlement` re-reads durable state, verifies the expected hash, generation and no live
    claim, applies `due` to the durable record, then CAS-writes the hash-bound claim. A mismatch
    publishes nothing.
@@ -46,10 +47,11 @@ record without `schema` settles only in `[debounce, debounce + 5 min)` after its
 ### The grace
 
 A head that finished just before the old listener was replaced is still owed its settlement, and
-the window must cover the time between the old listener's last tick (it stops ticking at SIGTERM,
-`summaryCancel` in `cmd/listener`'s main) and the new one's first. Only a listener that mounts the
-GitHub webhook route runs the summary loop, and the longest such gap is a compose deploy of one,
-which is stop-then-start, on a slow path whose named terms are a floor:
+the window must cover the time between the old listener's summary loop stopping (at SIGTERM,
+`summaryCancel` in `cmd/listener`'s main) and the new one's first pass, one tick after it starts.
+Only a listener that mounts the GitHub webhook route runs the summary loop, and the longest such
+gap is a compose deploy of one, which is stop-then-start, on a slow path whose named terms are a
+floor:
 
 | Term | Bound |
 | --- | --- |
@@ -98,7 +100,7 @@ debounce plus grace plus that pass's duration.
 
 A record past the band stays `settled_emitted: false` with no `schema` until the TTL expires it;
 that is expected, and it is history, not pending work. The listener's `/metrics` gauge
-`envoy_ci_legacy_records_held` carries how many the last tick held back, and it logs `checks held
+`envoy_ci_legacy_records_held` carries how many the last summary pass held back, and it logs `checks held
 back a head-gated listener's unsettled records, at least` with the count the first time a process
 holds any; that count is a floor, since the loop does not wait for the CI cache to load. An
 observation that changes the record (a new check run, a re-run, a

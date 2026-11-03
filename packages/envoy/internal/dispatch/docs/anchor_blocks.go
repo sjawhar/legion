@@ -2,7 +2,6 @@ package docs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -64,7 +63,7 @@ func (s *Service) backfillAnchorBlocks(ctx context.Context, table string) (int, 
 		if err := rows.Scan(&candidate.id, &encoded); err != nil {
 			return 0, 0, fmt.Errorf("scan %s anchor block: %w", table, err)
 		}
-		if err := json.Unmarshal(encoded, &candidate.anchor); err != nil {
+		if err := model.DecodeAnchor(encoded, &candidate.anchor); err != nil {
 			return 0, 0, fmt.Errorf("decode %s anchor block: %w", table, err)
 		}
 		candidates = append(candidates, candidate)

@@ -26,7 +26,7 @@ func TestAReconcilePassWhoseLeaseIsHeldElsewhereAsksGitHubNothing(t *testing.T) 
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(ctx, leases, deliveryReconcileLease, 0, func(context.Context) {
+		held <- duty.Exclusive(ctx, leases, deliveryReconcileLease, time.Time{}, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -37,7 +37,7 @@ func TestAReconcilePassWhoseLeaseIsHeldElsewhereAsksGitHubNothing(t *testing.T) 
 		t.Fatal("the other caller never took the delivery-reconcile lease")
 	}
 
-	reconcile.leasedPass(ctx, leases)
+	reconcile.leasedPass(ctx, leases, time.Now())
 	if mints := fake.tokenMints.Load(); mints != 0 {
 		t.Fatalf("the pass minted %d installation tokens under a lease held elsewhere; want none", mints)
 	}
@@ -55,7 +55,7 @@ func TestAReconcilePassWhoseLeaseIsHeldElsewhereAsksGitHubNothing(t *testing.T) 
 	}
 
 	// The lease is the pass's, not the process's: the next pass takes it and reconciles.
-	reconcile.leasedPass(ctx, leases)
+	reconcile.leasedPass(ctx, leases, time.Now())
 	settings, err = GetSettings(ctx, pool)
 	if err != nil {
 		t.Fatalf("read the settings after the pass that ran: %v", err)

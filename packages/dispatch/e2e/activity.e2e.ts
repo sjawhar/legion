@@ -157,7 +157,7 @@ test("Activity breaks its rows by day and marks where the reader stopped", async
   }
 });
 
-test("an Activity row pins into the review margin and unpins from it", async ({
+test("an Activity row pins into the review margin and unpins from it @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
