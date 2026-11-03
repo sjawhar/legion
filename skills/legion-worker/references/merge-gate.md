@@ -26,7 +26,9 @@ other change to the head voids it.
   verdict from what those results say. A result that carries no report, or that names another
   place for it, is a failed run, not a verdict: run that agent again, or read its transcript, and
   record nothing from it until you have the findings text in front of you. Answering the rubric
-  yourself from a bare verdict is how an unreviewed head gets an approval. The CI it reads is the head's own checks: no handoff is a
+  yourself from a bare verdict is how an unreviewed head gets an approval, and reading the diff
+  yourself in the agent's place is the same thing wearing more work: you are the caller, not the
+  review, and a round recorded that way has one pair of eyes where the gate asks for three. The CI it reads is the head's own checks: no handoff is a
   commit, so every push to the branch is work whose head gets GitHub's workflow runs of its own.
   With `<o>/<r>`, `<n>`, `<base>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid`, two reads. The required set is the

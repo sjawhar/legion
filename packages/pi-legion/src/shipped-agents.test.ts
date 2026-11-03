@@ -111,6 +111,6 @@ test.each([
   "thermonuclear-code-quality.md",
 ])("%s returns its whole report in the result, never a pointer to one", (file) => {
   expect(definition(file).body.replace(/\s+/g, " ")).toContain(
-    'Return the whole report in the result you hand back: every finding, with its evidence, in the text your caller reads. Write a file as well when you are asked to, and still put the whole report in the result — the file is a copy, never the answer. A result that points at a file, a document or "see markdown" instead of carrying the findings is a review the caller cannot read, and the caller treats it as a failed run.'
+    'Your result is the report. Open it with the verdict line and then every finding with its evidence, and put nothing before them. Name no other place the report also lives — not a file you wrote, not a document, not "see markdown", not even beside the findings: a result that opens by sending the caller somewhere else is how a review with no report behind it gets recorded as a verdict. When the task also asks for the report as a file, write the file and say nothing about it in your result.'
   );
 });

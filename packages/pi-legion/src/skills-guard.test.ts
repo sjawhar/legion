@@ -421,8 +421,12 @@ test("a planner waits on an open decision instead of completing around it", () =
 // R5: a review agent returns its whole report, and the reviewer refuses a result without one
 // (dispatch://INFRA-331). shipped-agents.test.ts pins the two agent definitions.
 test("the reviewer treats a result with no report as a failed run, not a verdict", () => {
-  expect(collapsed(path.join(staged, "legion-worker", "references", "merge-gate.md"))).toContain(
+  const mergeGate = collapsed(path.join(staged, "legion-worker", "references", "merge-gate.md"));
+  expect(mergeGate).toContain(
     "A result that carries no report, or that names another place for it, is a failed run, not a verdict"
+  );
+  expect(mergeGate).toContain(
+    "reading the diff yourself in the agent's place is the same thing wearing more work"
   );
 });
 
