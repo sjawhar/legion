@@ -267,26 +267,36 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
  * issue or document, so the id is all there is.
  */
 const readOwner = documentOwnerValidation(false);
+const READ_OWNER_RULE =
+  "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one.";
+const READ_MESSAGE_RULE =
+  "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.";
+
+/** dispatch_read's refusal: a call with message breaks only the message rule, and a call
+ *  without it only the owner rule. */
+function readProblem(value: unknown): string | undefined {
+  const input = value as {
+    readonly message?: unknown;
+    readonly issue?: unknown;
+    readonly project?: unknown;
+    readonly artifact?: unknown;
+    readonly ref?: unknown;
+  };
+  if (typeof input.message !== "string") {
+    return readOwner.check(value) ? undefined : READ_OWNER_RULE;
+  }
+  const alone =
+    input.issue === undefined &&
+    input.project === undefined &&
+    input.artifact === undefined &&
+    input.ref === undefined;
+  return alone ? undefined : READ_MESSAGE_RULE;
+}
+
 const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    const input = value as {
-      readonly message?: unknown;
-      readonly issue?: unknown;
-      readonly project?: unknown;
-      readonly artifact?: unknown;
-      readonly ref?: unknown;
-    };
-    if (typeof input.message !== "string") return readOwner.check(value);
-    return (
-      input.issue === undefined &&
-      input.project === undefined &&
-      input.artifact === undefined &&
-      input.ref === undefined
-    );
-  },
-  message:
-    "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " +
-    "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.",
+  check: (value) => readProblem(value) === undefined,
+  message: `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
+  refusal: (value) => readProblem(value) ?? `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
 };
 
 /** Component attachment modes an issue write accepts. */

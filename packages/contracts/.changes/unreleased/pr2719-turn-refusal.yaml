@@ -7,4 +7,4 @@ body: |-
     refusal likewise name the owner rule only when the owner is wrong.
 time: 2026-11-03T12:20:00.000000000Z
 custom:
-    Issue: turn-refusal
+    Issue: pr2719

@@ -635,6 +635,10 @@ describe("dispatchToolSpecs", () => {
     const artifactOwner =
       "Exactly one of issue and project is required; with project, artifact names the document.";
     const edit = { artifact: "spec.md", ops: [{ op: "delete", find: "x" }] };
+    const readOwner =
+      "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one.";
+    const readMessage =
+      "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.";
     for (const [tool, args, refusal] of [
       ["dispatch_comment", { issue: "DSP-1", body: "y", turn: "agent" }, turn],
       ["dispatch_comment", { body: "y", turn: "agent" }, `${artifactOwner} ${turn}`],
@@ -644,6 +648,8 @@ describe("dispatchToolSpecs", () => {
       ["dispatch_artifact", { issue: "DSP-1", name: "n" }, source],
       ["dispatch_artifact", { name: "n", content: "c" }, artifactOwner],
       ["dispatch_artifact", { name: "n" }, `${artifactOwner} ${source}`],
+      ["dispatch_read", { issue: "DSP-1", message: "m" }, readMessage],
+      ["dispatch_read", {}, readOwner],
     ] as const) {
       const result = schemaFor(tool).safeParse(args);
       expect(result.success, `${tool} ${JSON.stringify(args)}`).toBe(false);

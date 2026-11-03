@@ -5,4 +5,4 @@ body: |-
     refuses `--turn` without `--reply-to-ask`.
 time: 2026-11-03T12:20:01.000000000Z
 custom:
-    Issue: turn-refusal
+    Issue: pr2719
