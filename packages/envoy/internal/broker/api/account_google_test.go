@@ -16,7 +16,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
-	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -54,7 +53,7 @@ func newGoogleCallerServer(t *testing.T) *googleCallers {
 	}
 	ts := newTestServerWith(t, func(d *api.Deps) {
 		d.GoogleAPIAccounts = map[string]api.Account{listenerGoogleAccount: brokertest.Caller(t, "listener")}
-		d.GoogleAccountTokens = enroll.GoogleVMVerifier{Verifier: verifier}
+		d.GoogleAccountTokens = api.GoogleTokens{Verifier: verifier}
 	})
 	return &googleCallers{testServer: ts, issuer: google, key: key}
 }

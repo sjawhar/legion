@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
-	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
 // ---------------------------------------------------------------------------
@@ -80,7 +79,7 @@ func cmdEnrollHelper(runtimeID, thumbprint, sessionID string, stdout, stderr io.
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
 	}
-	if err := brokerclient.WriteFileAtomic(filepath.Join(dir, enrollmentFile), []byte(resp.EnrollmentID+"\n"), 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, enrollmentFile), []byte(resp.EnrollmentID+"\n"), 0o600); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
 	}

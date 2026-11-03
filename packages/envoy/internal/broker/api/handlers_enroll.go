@@ -177,6 +177,13 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 // and service account the enrollment was made for; a pod enrollment that has never renewed with
 // one still renews with no body, logged here, naming the enrollment, until the token-less path is
 // removed (Renew says when).
+//
+// A machine's own session whose launcher credential has ended (enroll.ErrMachineLoginEnded: the
+// machine login was revoked, lapsed, or its account was dropped from BROKER_VM_SERVICES) is
+// answered ENROLLMENT_NOT_LIVE, which is what the enrollment now is: every renewer treats that
+// code as terminal and enrolls again, which needs a live credential, where a code of its own
+// would read as a retryable failure to a renewer that has not heard of it. The WARN beside it
+// is the only record naming which of the two refusals an operator is looking at.
 func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id string) {
 	urlID, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {
@@ -194,6 +201,10 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 	switch {
 	case errors.Is(err, enroll.ErrNotLive):
 		writeError(w, http.StatusUnauthorized, "ENROLLMENT_NOT_LIVE", "enrollment is not live")
+		return
+	case errors.Is(err, enroll.ErrMachineLoginEnded):
+		slog.Warn("broker: machine session renewal refused: its machine login has ended", "enrollment", id)
+		writeError(w, http.StatusUnauthorized, "ENROLLMENT_NOT_LIVE", err.Error())
 		return
 	case errors.Is(err, enroll.ErrPodTokenExpired):
 		writeError(w, http.StatusForbidden, "POD_TOKEN_EXPIRED", err.Error())

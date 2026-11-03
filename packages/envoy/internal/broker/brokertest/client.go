@@ -57,8 +57,8 @@ type Client struct {
 	UIToken string
 	// DPoP wraps this client's OAuth connections in DPoP proofs signed by a machine's key, which
 	// the device authorization, the device-code exchange and every refresh carry:
-	// helper.NewDPoPTransport in every caller. It is a field a caller sets rather than an import
-	// of internal/broker/helper because that package's own tests import this one, and Go allows
+	// brokerclient.NewDPoPTransport in every caller. It is a field a caller sets rather than an
+	// import of internal/brokerclient because that package's own tests import this one, and Go allows
 	// no package to import one whose tests import it back. A client whose OAuth steps are never
 	// used needs none; one whose are fails with the name of the field to set.
 	DPoP func(key *ecdsa.PrivateKey, base http.RoundTripper) http.RoundTripper
@@ -158,7 +158,7 @@ func NewSigningKey(t *testing.T) *ecdsa.PrivateKey {
 func (c *Client) deviceClient(t *testing.T, key *ecdsa.PrivateKey) (*oauth2.Config, context.Context) {
 	t.Helper()
 	if c.DPoP == nil {
-		t.Fatal("this Client has no DPoP: set it to helper.NewDPoPTransport before driving an OAuth step")
+		t.Fatal("this Client has no DPoP: set it to brokerclient.NewDPoPTransport before driving an OAuth step")
 	}
 	return &oauth2.Config{
 			ClientID: oauthwire.ClientID, Scopes: []string{oauthwire.Scope},

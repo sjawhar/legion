@@ -21,10 +21,10 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
-	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
 // deviceMachine is one machine logging in: its key, the OAuth client it logs in with, and the
@@ -49,7 +49,7 @@ func newDeviceMachine(t *testing.T, rig *brokertest.Rig) *deviceMachine {
 				AuthStyle:     oauth2.AuthStyleInParams,
 			},
 		},
-		ctx: context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: helper.NewDPoPTransport(key, http.DefaultTransport)}),
+		ctx: context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: brokerclient.NewDPoPTransport(key, http.DefaultTransport)}),
 	}
 }
 
@@ -400,7 +400,7 @@ func (m *deviceMachine) refreshAt(t *testing.T, tok *oauth2.Token, target, host 
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := helper.NewDPoPTransport(m.key, rewriteTo{base: base}).RoundTrip(req)
+	resp, err := brokerclient.NewDPoPTransport(m.key, rewriteTo{base: base}).RoundTrip(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +551,7 @@ func TestDeviceLoginsNeedOnlyTheirTransactionsConnection(t *testing.T) {
 	// what ends a call the pool never serves.
 	const bound = 10 * time.Second
 	client := func(m *deviceMachine) context.Context {
-		return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: bound, Transport: helper.NewDPoPTransport(m.key, http.DefaultTransport)})
+		return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: bound, Transport: brokerclient.NewDPoPTransport(m.key, http.DefaultTransport)})
 	}
 	logins := make(chan error, 3)
 	for i := range 3 {

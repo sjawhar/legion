@@ -15,10 +15,12 @@ import (
 
 // fixtureMachineAccount is the Google service account the machine below runs as, and
 // fixtureMachineSubject the subject its credential is keyed by (exchange.MachineSubject for a
-// token minted on a Compute Engine instance). Both are placeholders.
+// token minted on a Compute Engine instance, which names the instance and the machine's own
+// key). Both are placeholders.
 const (
 	fixtureMachineAccount = "example-fleet@example-project.iam.gserviceaccount.com"
-	fixtureMachineSubject = fixtureMachineAccount + "@example-project/example-zone-a/1000000000000000001"
+	fixtureMachineKey     = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	fixtureMachineSubject = fixtureMachineAccount + "@example-project/example-zone-a/1000000000000000001#" + fixtureMachineKey
 )
 
 // newMachineEnrollment inserts a live session enrollment under a launcher credential with no
@@ -79,8 +81,8 @@ func TestAMachinesSessionIsItsFleetsAndNoPersons(t *testing.T) {
 // TestAMachineSubjectReadsBackAsItsAccount guards the one reading the authority above turns on:
 // the credential subject the exchange writes is what names the fleet's account.
 func TestAMachineSubjectReadsBackAsItsAccount(t *testing.T) {
-	account, ok := exchange.MachineAccount(fixtureMachineSubject)
-	if !ok || account != fixtureMachineAccount {
-		t.Fatalf("MachineAccount(%q) = %q, %t; want %q", fixtureMachineSubject, account, ok, fixtureMachineAccount)
+	want := exchange.Subject{Kind: exchange.SubjectMachine, Account: fixtureMachineAccount, Thumbprint: fixtureMachineKey}
+	if got := exchange.ReadSubject(fixtureMachineSubject); got != want {
+		t.Fatalf("ReadSubject(%q) = %+v, want %+v", fixtureMachineSubject, got, want)
 	}
 }

@@ -408,11 +408,9 @@ func TestLoadReadsTheVMServices(t *testing.T) {
 	if want := map[string]string{exampleVMServiceAccount: "example-service"}; !maps.Equal(cfg.VMServicesByAccount, want) {
 		t.Fatalf("VMServicesByAccount = %v, want %v", cfg.VMServicesByAccount, want)
 	}
-	if want := map[string]string{exampleVMServiceAccount: "example-project"}; !maps.Equal(cfg.VMProjects, want) {
-		t.Fatalf("VMProjects = %v, want %v", cfg.VMProjects, want)
-	}
-	if want := map[string]string{exampleVMServiceAccount: "example-vm-*"}; !maps.Equal(cfg.VMInstancePatterns, want) {
-		t.Fatalf("VMInstancePatterns = %v, want %v", cfg.VMInstancePatterns, want)
+	pinned := []exchange.GoogleEntry{{Account: exampleVMServiceAccount, Service: "example-service", CloudProject: "example-project", Instance: "example-vm-*"}}
+	if !slices.Equal(cfg.ExchangeGoogleAccounts, pinned) {
+		t.Fatalf("ExchangeGoogleAccounts = %+v, want %+v: the two pins are read into the entry and nowhere else", cfg.ExchangeGoogleAccounts, pinned)
 	}
 
 	// Two accounts for one service, entries separated by any white space, and an audience with
@@ -433,11 +431,12 @@ func TestLoadReadsTheVMServices(t *testing.T) {
 	if want := map[string]string{exampleVMServiceAccount: "example-service", second: "example-service"}; !maps.Equal(cfg.VMServicesByAccount, want) {
 		t.Fatalf("VMServicesByAccount with two accounts = %v, want %v", cfg.VMServicesByAccount, want)
 	}
-	if want := map[string]string{exampleVMServiceAccount: "example-project", second: "example-other"}; !maps.Equal(cfg.VMProjects, want) {
-		t.Fatalf("VMProjects with two accounts = %v, want %v", cfg.VMProjects, want)
+	bothPinned := []exchange.GoogleEntry{
+		{Account: exampleVMServiceAccount, Service: "example-service", CloudProject: "example-project", Instance: "example-vm-*"},
+		{Account: second, Service: "example-service", CloudProject: "example-other", Instance: "example-vm-[0-9]*"},
 	}
-	if want := map[string]string{exampleVMServiceAccount: "example-vm-*", second: "example-vm-[0-9]*"}; !maps.Equal(cfg.VMInstancePatterns, want) {
-		t.Fatalf("VMInstancePatterns with two accounts = %v, want %v", cfg.VMInstancePatterns, want)
+	if !slices.Equal(cfg.ExchangeGoogleAccounts, bothPinned) {
+		t.Fatalf("ExchangeGoogleAccounts with two accounts = %+v, want %+v", cfg.ExchangeGoogleAccounts, bothPinned)
 	}
 	// A second account pinned in one setting and not the other is half a pin, refused naming
 	// both settings and that account, not only the first's.
@@ -581,7 +580,7 @@ func TestTheVMSettingsLeaveEveryOtherFieldAlone(t *testing.T) {
 	if got.VMServicesByAccount == nil {
 		t.Fatal("the VM settings were not read")
 	}
-	got.GoogleOIDCAudience, got.VMServicesByAccount, got.VMProjects, got.VMInstancePatterns = "", nil, nil, nil
+	got.GoogleOIDCAudience, got.VMServicesByAccount, got.vmProjects, got.vmInstancePatterns = "", nil, nil, nil
 	got.ExchangeGoogleAccounts = nil
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Config with the VM settings, VM fields cleared = %+v, want it equal to the Config without them, %+v", got, want)
@@ -684,9 +683,7 @@ func TestAVMAccountIsPinnedToBothOrToNeither(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load with neither pin = %v, want an unpinned account", err)
 	}
-	if cfg.VMProjects != nil || cfg.VMInstancePatterns != nil {
-		t.Errorf("VMProjects = %v, VMInstancePatterns = %v; want neither with no pin set", cfg.VMProjects, cfg.VMInstancePatterns)
-	}
+	// Neither pin reaches the entry, which is the only place a pin is read.
 	want := []exchange.GoogleEntry{{Account: exampleVMServiceAccount, Service: "example-service"}}
 	if !slices.Equal(cfg.ExchangeGoogleAccounts, want) {
 		t.Errorf("ExchangeGoogleAccounts with neither pin = %+v, want %+v", cfg.ExchangeGoogleAccounts, want)
@@ -739,8 +736,9 @@ func TestAVMAccountIsPinnedToBothOrToNeither(t *testing.T) {
 	for _, glob := range []string{"example-vm-[0-9]*", "example-vm-[^x]?", "*"} {
 		e := validVMEnv()
 		e["BROKER_VM_INSTANCES"] = exampleVMServiceAccount + "=" + glob
-		if cfg, err := Load(env(e)); err != nil || cfg.VMInstancePatterns[exampleVMServiceAccount] != glob {
-			t.Errorf("Load(BROKER_VM_INSTANCES glob %q) = %v, %v; want it accepted", glob, cfg.VMInstancePatterns, err)
+		cfg, err := Load(env(e))
+		if err != nil || len(cfg.ExchangeGoogleAccounts) != 1 || cfg.ExchangeGoogleAccounts[0].Instance != glob {
+			t.Errorf("Load(BROKER_VM_INSTANCES glob %q) = %+v, %v; want it accepted", glob, cfg.ExchangeGoogleAccounts, err)
 		}
 	}
 	for _, setting := range []string{"BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
@@ -807,8 +805,8 @@ func TestWithNoGoogleAudienceEveryVMFieldIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.GoogleOIDCAudience != "" || cfg.VMServicesByAccount != nil || cfg.VMProjects != nil || cfg.VMInstancePatterns != nil {
-		t.Fatalf("VM configuration = audience %q, services %v, projects %v, instances %v; want empty with no Google audience", cfg.GoogleOIDCAudience, cfg.VMServicesByAccount, cfg.VMProjects, cfg.VMInstancePatterns)
+	if cfg.GoogleOIDCAudience != "" || cfg.VMServicesByAccount != nil {
+		t.Fatalf("VM configuration = audience %q, services %v; want empty with no Google audience", cfg.GoogleOIDCAudience, cfg.VMServicesByAccount)
 	}
 	if cfg.ExchangeGoogleAccounts != nil {
 		t.Fatalf("ExchangeGoogleAccounts = %+v, want none with no Google audience: the exchange then registers no Google subject token type", cfg.ExchangeGoogleAccounts)

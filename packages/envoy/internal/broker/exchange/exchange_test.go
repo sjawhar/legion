@@ -857,21 +857,23 @@ func TestReadGoogleIdentityReadsGooglesClaimShapes(t *testing.T) {
 	}
 }
 
-// TestMachineSubjectNamesOneMachineAndReadsItsAccountBack: the subject the broker keys a
-// machine's launcher credential by. A machine minted on a Compute Engine instance is named by
-// that instance, so a new key keeps the one credential; a machine minted anywhere else is named
-// by the key its proof presented, so two machines of one account are two credentials and never
-// one. Both read their account back, and a Kubernetes ServiceAccount reads as no machine at all.
-func TestMachineSubjectNamesOneMachineAndReadsItsAccountBack(t *testing.T) {
+// TestMachineSubjectNamesOneMachineAndTheKeyItHolds: the subject the broker keys a machine's
+// launcher credential by. A machine is named by where it runs and by the key its proof
+// presented, so a copy of its Google identity token presented with another key asks for a
+// subject of its own and moves nothing of the machine's; two machines of one account are two
+// credentials; and two instances of one account presenting one key are two subjects, which the
+// live-key index refuses rather than letting them share a credential. Every one of them reads
+// its account and its key back, and a Kubernetes ServiceAccount reads as no machine at all.
+func TestMachineSubjectNamesOneMachineAndTheKeyItHolds(t *testing.T) {
 	onInstance := exchange.ReadGoogleIdentity(googleToken(pinnedAccount, true, cloudProject, instanceName))
 	onNone := exchange.ReadGoogleIdentity(googleToken(poolAccount, true, "", ""))
 
 	instanceSubject := exchange.MachineSubject(onInstance, "thumbprint-one")
-	if want := pinnedAccount + "@" + cloudProject + "/example-zone-a/1234567890"; instanceSubject != want {
+	if want := pinnedAccount + "@" + cloudProject + "/example-zone-a/1234567890#thumbprint-one"; instanceSubject != want {
 		t.Fatalf("MachineSubject(a Compute Engine machine) = %q, want %q", instanceSubject, want)
 	}
-	if other := exchange.MachineSubject(onInstance, "thumbprint-two"); other != instanceSubject {
-		t.Errorf("MachineSubject of the same instance with another key = %q, want the same subject %q: a new key moves the one credential", other, instanceSubject)
+	if other := exchange.MachineSubject(onInstance, "thumbprint-two"); other == instanceSubject {
+		t.Errorf("another key on the same instance asks for the subject %q the machine's own credential holds; a copied token must move no credential", instanceSubject)
 	}
 	first := exchange.MachineSubject(onNone, "thumbprint-one")
 	if want := poolAccount + "#thumbprint-one"; first != want {
@@ -881,18 +883,18 @@ func TestMachineSubjectNamesOneMachineAndReadsItsAccountBack(t *testing.T) {
 		t.Errorf("two machines of %s with keys of their own share the subject %q; each must hold a credential of its own", poolAccount, first)
 	}
 	for _, c := range []struct {
-		subject, account string
-		machine          bool
+		subject string
+		want    exchange.Subject
 	}{
-		{subject: instanceSubject, account: pinnedAccount, machine: true},
-		{subject: first, account: poolAccount, machine: true},
-		{subject: "system:serviceaccount:legion-system:legion-daemon", machine: false},
-		{subject: pinnedAccount, machine: false},
-		{subject: "", machine: false},
+		{subject: instanceSubject, want: exchange.Subject{Kind: exchange.SubjectMachine, Account: pinnedAccount, Thumbprint: "thumbprint-one"}},
+		{subject: first, want: exchange.Subject{Kind: exchange.SubjectMachine, Account: poolAccount, Thumbprint: "thumbprint-one"}},
+		{subject: "system:serviceaccount:legion-system:legion-daemon"},
+		{subject: pinnedAccount},
+		{subject: "#thumbprint-one"},
+		{subject: ""},
 	} {
-		account, ok := exchange.MachineAccount(c.subject)
-		if ok != c.machine || account != c.account {
-			t.Errorf("MachineAccount(%q) = %q, %t; want %q, %t", c.subject, account, ok, c.account, c.machine)
+		if got := exchange.ReadSubject(c.subject); got != c.want {
+			t.Errorf("ReadSubject(%q) = %+v, want %+v", c.subject, got, c.want)
 		}
 	}
 }
@@ -907,11 +909,13 @@ func TestPersonSubjectNamesOneSignInAndReadsItsMachineBack(t *testing.T) {
 		boxOne = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 		boxTwo = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 	)
-	subjects := map[string]struct{ subject, account string }{
-		"one person on one box":                  {exchange.PersonSubject(person, pinnedAccount, boxOne), pinnedAccount},
-		"the same person on another box":         {exchange.PersonSubject(person, pinnedAccount, boxTwo), pinnedAccount},
-		"the same person on another fleet's box": {exchange.PersonSubject(person, poolAccount, boxOne), poolAccount},
-		"another person on the first box":        {exchange.PersonSubject(stranger, pinnedAccount, boxOne), pinnedAccount},
+	subjects := map[string]struct {
+		subject, account, person, thumbprint string
+	}{
+		"one person on one box":                  {exchange.PersonSubject(person, pinnedAccount, boxOne), pinnedAccount, person, boxOne},
+		"the same person on another box":         {exchange.PersonSubject(person, pinnedAccount, boxTwo), pinnedAccount, person, boxTwo},
+		"the same person on another fleet's box": {exchange.PersonSubject(person, poolAccount, boxOne), poolAccount, person, boxOne},
+		"another person on the first box":        {exchange.PersonSubject(stranger, pinnedAccount, boxOne), pinnedAccount, stranger, boxOne},
 	}
 	seen := map[string]string{}
 	for name, c := range subjects {
@@ -919,12 +923,9 @@ func TestPersonSubjectNamesOneSignInAndReadsItsMachineBack(t *testing.T) {
 			t.Errorf("%s and %s spell one subject, %q: each sign-in holds a credential of its own", name, other, c.subject)
 		}
 		seen[c.subject] = name
-		account, ok := exchange.PersonSubjectAccount(c.subject)
-		if !ok || account != c.account {
-			t.Errorf("PersonSubjectAccount(%q) = %q, %t; want %q: it is what holds the sign-in to a listed fleet", c.subject, account, ok, c.account)
-		}
-		if _, machine := exchange.MachineAccount(c.subject); machine {
-			t.Errorf("MachineAccount(%q) read %s as a machine's subject, which would make its credential a fleet's", c.subject, name)
+		want := exchange.Subject{Kind: exchange.SubjectSignIn, Account: c.account, Person: c.person, Thumbprint: c.thumbprint}
+		if got := exchange.ReadSubject(c.subject); got != want {
+			t.Errorf("ReadSubject(%q) = %+v, want %+v: it is what holds the sign-in to a listed fleet and to its person", c.subject, got, want)
 		}
 	}
 	onInstance := exchange.ReadGoogleIdentity(googleToken(pinnedAccount, true, cloudProject, instanceName))
@@ -933,10 +934,12 @@ func TestPersonSubjectNamesOneSignInAndReadsItsMachineBack(t *testing.T) {
 		exchange.MachineSubject(onInstance, boxOne),
 		exchange.MachineSubject(onNone, boxOne),
 		workerAccount,
+		"signin:" + person,
+		"signin:|" + pinnedAccount + "#" + boxOne,
 		"",
 	} {
-		if account, ok := exchange.PersonSubjectAccount(subject); ok {
-			t.Errorf("PersonSubjectAccount(%q) = %q, true; want no sign-in: it is a subject of another kind", subject, account)
+		if got := exchange.ReadSubject(subject); got.Kind == exchange.SubjectSignIn {
+			t.Errorf("ReadSubject(%q) = %+v; want no sign-in: it is a subject of another kind", subject, got)
 		}
 	}
 }

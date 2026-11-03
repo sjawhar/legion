@@ -159,7 +159,8 @@ type GoogleIdentity struct {
 
 // ReadGoogleIdentity reads a Google identity token's own claims out of the claim map of a token
 // something else has already verified. It is the one reading of those claim shapes: this package
-// decides on them, the broker's own Google token verifier reads the same token (enroll.VerifyGoogle), and
+// decides on them, the broker's own Google token verifier reads the same token
+// (api.GoogleTokens.VerifyGoogle), and
 // a caller authenticated by such a token reads the account off it, so all three read one
 // declaration rather than three spellings of Google's claim names. It refuses nothing: a claim
 // that is absent or of another JSON type reads as empty, and which of those is a refusal is the
@@ -192,46 +193,39 @@ func isVerified(claim any) bool {
 // mints: the row's `subject`, under the live-unique index that makes each machine's credential
 // its own and lets its next exchange move that one credential rather than add another.
 //
-// A machine whose token was minted on a Compute Engine instance is named
-// <account>@<project>/<zone>/<instance id>, the account with the instance the token proves. An
-// instance id is unique only within a project and a zone, so neither the id nor the account
-// alone names one machine; the whole of it does, and it stays the same when the machine makes a
-// new key, so a machine that exchanges again after a reboot moves its one credential.
+// It is <machine>#<thumbprint>: the machine, and the RFC 7638 thumbprint of the key the
+// request's DPoP proof presented. The key is part of the name because the credential is bound
+// to that key and the subject token is a bearer: a copy of a machine's Google identity token
+// presented with a key of the copier's own would otherwise move the machine's one credential
+// onto that key, and whoever holds a machine's credential ends that machine's sessions
+// (enroll.Service.Revoke). Keyed by the key, such a copy mints a credential of its own and
+// moves nothing of the machine's.
 //
-// A machine whose token carries no Compute Engine claim at all — one minted through a workload
-// identity pool, and the one a pod's metadata server on Google Kubernetes Engine answers — is
-// named <account>#<thumbprint>, the account with the RFC 7638 thumbprint of the key its DPoP
-// proof presented. Two such machines of one account present byte-identical tokens, so nothing in
-// the token tells them apart and the key is all there is: naming the account alone would give
-// the two of them one credential, and whichever exchanged last would take the other's. The cost
-// is that a machine making a new key leaves its old credential behind until that credential's
-// own expiry, which is the subject token's.
+// The machine is <account>@<project>/<zone>/<instance id> for a token minted on a Compute
+// Engine instance, and the account alone for a token carrying no Compute Engine claim at all —
+// one minted through a workload identity pool, and the one a pod's metadata server on Google
+// Kubernetes Engine answers. An instance id is unique only within a project and a zone, so
+// neither the id nor the account alone names one machine; the whole of it does. Naming the
+// instance still earns its place now that the key tells two machines apart: two instances of
+// one account presenting one key — a key baked into an image — ask for two subjects with one
+// key, which launcher_credentials_live_key refuses by name, where under one subject they would
+// quietly share a credential and each could end the other's sessions.
+//
+// What the key in the name costs is that a machine making a new key leaves its old credential
+// behind until that credential's own expiry, which is the subject token's, and the sessions
+// enrolled under it stop renewing when it lapses (enroll.Service.Renew). A machine keeps its
+// key across a restart of its helper, and the reboot that loses it ends those sessions anyway.
 func MachineSubject(identity GoogleIdentity, thumbprint string) string {
+	return machineName(identity) + "#" + thumbprint
+}
+
+// machineName is the machine half of a MachineSubject, which is also what ReadSubject reads the
+// account back out of.
+func machineName(identity GoogleIdentity) string {
 	if identity.Compute.Whole() {
 		return identity.Account + "@" + identity.Compute.Project + "/" + identity.Compute.Zone + "/" + identity.Compute.InstanceID
 	}
-	return identity.Account + "#" + thumbprint
-}
-
-// MachineAccount reads the Google account back out of a MachineSubject, which is what says
-// whether the machine's entry still lists it (enroll.Service.AuthenticateLauncher). ok is false
-// for a subject of any other kind, a Kubernetes ServiceAccount's among them: that one is
-// system:serviceaccount:<namespace>:<name>, which carries neither "#" nor an "@" with a path
-// after it.
-func MachineAccount(subject string) (string, bool) {
-	if strings.HasPrefix(subject, signInSubjectPrefix) {
-		// A person's sign-in on a machine is a subject of its own kind, whose credential acts
-		// for that person; reading its account here would make it read as a machine's.
-		return "", false
-	}
-	if account, _, keyed := strings.Cut(subject, "#"); keyed {
-		return account, account != ""
-	}
-	at := strings.LastIndex(subject, "@")
-	if at <= 0 || !strings.Contains(subject[at+1:], "/") {
-		return "", false
-	}
-	return subject[:at], true
+	return identity.Account
 }
 
 // signInSubjectPrefix opens the subject of a person's sign-in on a machine, so that no subject
@@ -247,30 +241,73 @@ const signInSubjectPrefix = "signin:"
 // It is signin:<person>|<machine account>#<box key thumbprint>, and all three parts are needed.
 // The person is there because two people signed in on one box each reach their own secrets and
 // must therefore hold a credential each, which one subject could not. The box key's thumbprint
-// is there because one person signed in on two boxes holds a sign-in on each, told apart by the
-// key `agent-secrets login` made there and by nothing else — the machine account is a fleet's
-// and is the same on every box of it. The machine account is there so that the credential can
-// still be held to a listed fleet on every call (enroll.Service.AuthenticateLauncher): a person
-// signs in from a box the deployment lists, and an account dropped from BROKER_VM_SERVICES ends
-// its boxes' sign-in credentials as it ends their machines'.
+// is there for the reason a machine's is, and because one person signed in on two boxes holds a
+// sign-in on each, told apart by the key `agent-secrets login` made there and by nothing else —
+// the machine account is a fleet's and is the same on every box of it. The machine account is
+// there so that the credential can still be held to a listed fleet on every call
+// (enroll.Service.AuthenticateLauncher): a person signs in from a box the deployment lists, and
+// an account dropped from BROKER_VM_SERVICES ends its boxes' sign-in credentials as it ends
+// their machines'.
 func PersonSubject(person, account, thumbprint string) string {
 	return signInSubjectPrefix + person + "|" + account + "#" + thumbprint
 }
 
-// PersonSubjectAccount reads the machine's Google account back out of a PersonSubject, which is
-// what says whether a sign-in's box is still a listed fleet's. ok is false for a subject of any
-// other kind.
-func PersonSubjectAccount(subject string) (string, bool) {
-	rest, found := strings.CutPrefix(subject, signInSubjectPrefix)
-	if !found {
-		return "", false
+// SubjectKind says which of the identities this package keys a launcher credential by a subject
+// names. The zero value is a subject this package did not write — a Kubernetes ServiceAccount's,
+// system:serviceaccount:<namespace>:<name>, which the broker holds to a setting of its own — so
+// a reader that tests for one kind never reads another's subject as that kind by forgetting the
+// order to test them in.
+type SubjectKind string
+
+const (
+	// SubjectOther is every subject neither MachineSubject nor PersonSubject wrote.
+	SubjectOther SubjectKind = ""
+	// SubjectMachine is a machine's own credential, which acts for no person.
+	SubjectMachine SubjectKind = "machine"
+	// SubjectSignIn is a person's sign-in on a machine, whose credential acts for that person.
+	SubjectSignIn SubjectKind = "signin"
+)
+
+// Subject is a launcher credential's subject read back into the parts a reader acts on.
+type Subject struct {
+	Kind SubjectKind
+	// Account is the machine's Google account, which is what says the credential's fleet is
+	// still listed (enroll.Service.AuthenticateLauncher). A sign-in carries the account of the
+	// box it was made on, so one test holds both to the same listed fleet.
+	Account string
+	// Person is the person a sign-in acts for, and "" for a machine, which acts for none.
+	Person string
+	// Thumbprint is the RFC 7638 thumbprint of the key the subject is keyed by.
+	Thumbprint string
+}
+
+// ReadSubject reads a launcher credential's subject back into its parts. It is the one reading
+// of the grammar MachineSubject and PersonSubject write, so no caller spells that grammar a
+// second time and none has to remember which kind to test for first: a subject it does not
+// recognise, a malformed one included, comes back SubjectOther with nothing filled in.
+func ReadSubject(subject string) Subject {
+	if rest, signIn := strings.CutPrefix(subject, signInSubjectPrefix); signIn {
+		person, box, split := strings.Cut(rest, "|")
+		if !split {
+			return Subject{}
+		}
+		account, thumbprint, keyed := strings.Cut(box, "#")
+		if !keyed || person == "" || account == "" {
+			return Subject{}
+		}
+		return Subject{Kind: SubjectSignIn, Account: account, Person: person, Thumbprint: thumbprint}
 	}
-	_, after, split := strings.Cut(rest, "|")
-	if !split {
-		return "", false
+	machine, thumbprint, keyed := strings.Cut(subject, "#")
+	if !keyed {
+		return Subject{}
 	}
-	account, _, keyed := strings.Cut(after, "#")
-	return account, keyed && account != ""
+	if at := strings.LastIndex(machine, "@"); at > 0 && strings.Contains(machine[at+1:], "/") {
+		return Subject{Kind: SubjectMachine, Account: machine[:at], Thumbprint: thumbprint}
+	}
+	if machine == "" {
+		return Subject{}
+	}
+	return Subject{Kind: SubjectMachine, Account: machine, Thumbprint: thumbprint}
 }
 
 // String names the scope as a refusal or a log line spells it, the zero value included, so a

@@ -1,4 +1,4 @@
-package enroll
+package api_test
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -19,7 +20,7 @@ const (
 	googleTokenID       = "1234567890"
 )
 
-func newGoogleVerifier(t *testing.T) (GoogleVMVerifier, *oidctest.Issuer, *oidctest.Key) {
+func newGoogleVerifier(t *testing.T) (api.GoogleTokens, *oidctest.Issuer, *oidctest.Key) {
 	t.Helper()
 	issuer := oidctest.New(t)
 	key := issuer.PublishKey(t, "google-signing-key")
@@ -27,7 +28,7 @@ func newGoogleVerifier(t *testing.T) (GoogleVMVerifier, *oidctest.Issuer, *oidct
 	if err != nil {
 		t.Fatalf("oidc.New: %v", err)
 	}
-	return GoogleVMVerifier{Verifier: verifier}, issuer, key
+	return api.GoogleTokens{Verifier: verifier}, issuer, key
 }
 
 func googleTokenClaims(issuer *oidctest.Issuer, audience string) map[string]any {

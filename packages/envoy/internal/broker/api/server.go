@@ -341,11 +341,10 @@ func (s *server) sessionCaller(w http.ResponseWriter, r *http.Request, notLiveCo
 }
 
 // GoogleVerifier verifies a caller's own Google identity token and reads the identity claims of
-// the verified token (enroll.GoogleVMVerifier, the broker's one reading of Google's claim
-// shapes). It is an interface here so a test can wire a verifier of its own, as the Kubernetes
-// one is.
+// the verified token (GoogleTokens, the broker's one reading of Google's claim shapes). It is an
+// interface here so a test can wire a verifier of its own, as the Kubernetes one is.
 type GoogleVerifier interface {
-	VerifyGoogle(ctx context.Context, raw string) (enroll.GoogleToken, error)
+	VerifyGoogle(ctx context.Context, raw string) (GoogleToken, error)
 }
 
 // accountCaller authenticates a listed caller's own identity token for authenticate, the

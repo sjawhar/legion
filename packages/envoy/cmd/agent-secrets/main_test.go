@@ -31,7 +31,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
-	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
 // testEnrollmentID is the enrollment id these tests' key dir fixture "issues" (writes into the
@@ -871,18 +870,18 @@ func TestEnrollWaitRidesOutTheLaunchersSetup(t *testing.T) {
 	keyDir := t.TempDir()
 	marker := writePendingMarker(t, keyDir, 0)
 
-	// The launcher writes each file whole (brokerclient.WriteFileAtomic), so a waiting call never
+	// The launcher writes each file whole (writeFileAtomic), so a waiting call never
 	// reads one half-written; the fixture does the same.
 	setupDone := make(chan error, 1)
 	go func() {
 		time.Sleep(time.Second)
 		data, err := os.ReadFile(filepath.Join(fixture, "key.pem"))
 		if err == nil {
-			err = brokerclient.WriteFileAtomic(filepath.Join(keyDir, "key.pem"), data, 0o600)
+			err = writeFileAtomic(filepath.Join(keyDir, "key.pem"), data, 0o600)
 		}
 		time.Sleep(time.Second)
 		if err == nil {
-			err = brokerclient.WriteFileAtomic(filepath.Join(keyDir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600)
+			err = writeFileAtomic(filepath.Join(keyDir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600)
 		}
 		if err == nil {
 			err = os.Remove(marker)

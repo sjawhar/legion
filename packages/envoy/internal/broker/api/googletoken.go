@@ -1,12 +1,14 @@
-// packages/envoy/internal/broker/enroll/googletoken.go
+// packages/envoy/internal/broker/api/googletoken.go
 //
 // The broker's own verification of a Google identity token, against one configured OIDC
 // verifier. The RFC 8693 exchange does not use it: the library resolves a subject token's key
 // itself and checks its signature, issuer and expiry before the exchange's policy reads a claim.
-// What needs this is every other caller that is handed such a token whole — a named caller the
-// broker authenticates by its Google account, and a resource server reading a machine's token
-// back — each of which has rules of its own and so is given the claims rather than a refusal.
-package enroll
+// What needs this is this package's named callers — a caller the broker authenticates by its
+// Google account (accountCaller), which is how the Envoy listener calls from a machine holding
+// no Kubernetes token — which has rules of its own and so is given the claims rather than a
+// refusal.
+
+package api
 
 import (
 	"context"
@@ -28,9 +30,10 @@ type GoogleToken struct {
 	IssuedAt time.Time
 }
 
-// GoogleVMVerifier verifies Google identity tokens against one configured OIDC verifier and reads
-// the email and Compute Engine claims from the verified token.
-type GoogleVMVerifier struct{ Verifier *oidc.Verifier }
+// GoogleTokens verifies Google identity tokens against one configured OIDC verifier and reads
+// the email and Compute Engine claims from the verified token. It is what a deployment wires
+// into Deps.GoogleAccountTokens.
+type GoogleTokens struct{ Verifier *oidc.Verifier }
 
 // VerifyGoogle verifies raw's issuer, audience, signature and expiry and reads the identity
 // claims of the verified token: the account, whether the address is verified, and the Compute
@@ -39,7 +42,7 @@ type GoogleVMVerifier struct{ Verifier *oidc.Verifier }
 // answers, since what each means is its caller's rule — so every error it returns is an OIDC
 // verifier error or a malformed token. The private claims are read without a second verification
 // only after the OIDC verifier has verified this exact token.
-func (v GoogleVMVerifier) VerifyGoogle(ctx context.Context, raw string) (GoogleToken, error) {
+func (v GoogleTokens) VerifyGoogle(ctx context.Context, raw string) (GoogleToken, error) {
 	claims, err := v.Verifier.Verify(ctx, raw)
 	if err != nil {
 		return GoogleToken{}, err

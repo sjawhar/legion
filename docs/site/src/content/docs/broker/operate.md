@@ -212,7 +212,7 @@ refuses to start with only some of them:
 - `BROKER_GOOGLE_OIDC_AUDIENCE`: the audience the machines ask their metadata server for. The
   issuer is Google's, `https://accounts.google.com`, unless `BROKER_GOOGLE_OIDC_ISSUER` names a
   stand-in for a dev stack; the broker reads its keys at startup only when the audience is set,
-  and then logs one `google vm identity` line naming the issuer, the audience and the machine
+  and then logs one `google machine identity` line naming the issuer, the audience and the machine
   services. Unset, the broker reads and logs nothing about Google and takes no such token.
 - `BROKER_VM_SERVICES`: whitespace-separated `<service>=<service account email>` entries. Use a
   dedicated user-managed account for each fleet: the broker refuses a project's default Compute
@@ -279,20 +279,35 @@ nowhere. The issuer of both the person's token and the machine's is `BROKER_GOOG
 `BROKER_GOOGLE_OIDC_AUDIENCE`, whose machines are the boxes a person may sign in on. Unset, the
 broker accepts no person's sign-in and refuses either token type by name.
 
-Each machine holds a launcher credential of its own, keyed by
-`<account>@<project>/<zone>/<instance id>` for a token minted on a Compute Engine instance and by
-`<account>#<key thumbprint>` for one minted anywhere else, so one machine's trade never moves
-another's credential and ending one machine's enrollment leaves the others. The credential expires
-with the token it was minted from, an hour after that token was minted; the enrollment outlives it
-while it renews. Dispatch's machine-login page lists each machine's login, its host and no
+Each machine holds a launcher credential of its own, keyed by the machine and the key its proof
+presented: `<account>@<project>/<zone>/<instance id>#<key thumbprint>` for a token minted on a
+Compute Engine instance, and `<account>#<key thumbprint>` for one minted anywhere else. The key is
+part of the name because the identity token is a bearer: a copy of it presented with a key of the
+copier's asks for a credential of its own and moves nothing of the machine's. So one machine's
+trade never moves another's credential, and ending one machine's enrollment leaves the others.
+A machine that makes a new key — a reboot that empties its key directory — leaves its old
+credential behind until that credential's own expiry, and starts a new one at its next trade.
+
+The credential expires with the token it was minted from, an hour after that token was minted, and
+a machine's session renews only while that credential is live: not revoked, not past its expiry,
+and its account still listed for its service. A machine that stops being able to prove its
+identity therefore stops renewing within the hour, and its sessions lapse one
+`BROKER_LEASE_SECONDS` later; a copy of a session's key and enrollment id taken off the box renews
+nothing once the box's login has ended. The broker answers such a renewal `401
+ENROLLMENT_NOT_LIVE` and logs `broker: machine session renewal refused: its machine login has
+ended`. Only a machine's own session is held this way: a person's session on that box renews until
+they revoke the sign-in, which ends it at once, and a pod's renewal proves the pod's own projected
+token.
+
+Dispatch's machine-login page lists each machine's login, its host and no
 approver, and anyone signed in may revoke it, which ends that machine's enrollment; the machine
 trades again at its next call. A revoke ends the enrollment, not the Google identity token: someone
 who copied that token off the machine trades it again within its hour, under a machine login of
 their own key, and reads what that fleet's service may read. To end a copied token for certain, take
 the machine out of its fleet and wait out the hour, as [a copied machine
 token](#a-copied-machine-token) says. To stop a fleet trading, remove its entries and redeploy the
-broker: each machine's credential stops authenticating at its next call, and its next trade is
-refused.
+broker: each machine's credential stops authenticating at its next call, its next trade is
+refused, and its sessions stop renewing.
 
 Whoever can get an identity token for the fleet's account logs in as its machines. Google Cloud IAM
 is that boundary: who may run a workload as the account (`iam.serviceAccounts.actAs` on it), and
@@ -656,6 +671,7 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `broker: the serving clock could not beat; it retries every interval and logs again once it beats error=… timed_out=…` | At WARN: this process could not record its beat, usually because the database is out of reach. A beat may take at most one `BROKER_SWEEP_SECONDS`; `timed_out=true` says it ran out of that (its deadline, or a lock or statement past it), as when another transaction holds this process's row, while the other brokers go on beating. It retries every `BROKER_SWEEP_SECONDS` and logs `broker: the serving clock beats again` once it does. |
 | `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod enrollment renewed without its token, and no enrollment naming its pod UID has ever renewed with one, so the broker accepted it; for that pod a token copied out of it still keeps an enrollment alive. It is expected from a pod on a worker image whose `agent-secrets renew` predates `--pod-token-file`. A pod on the current image sends its token from its first renewal, so a line naming such a pod means a holder of an enrollment key for it is renewing outside the cluster before the pod's own first token renewal. List pod images below and replace an older-image pod. If its pod UID is absent or every image is current, end the login that made the line's enrollment, which ends every enrollment it made, once its `subject` shows whether it is a Legion daemon's ([the renew token check](#the-renew-token-check) gives the query and both ways to end it); never pick a machine-login row by its machine name. |
 | `broker: pod enrollment renewal refused: projected token required enrollment=…` | At WARN: a pod enrollment renewed without its token after an enrollment naming the same pod UID, this one or another, had renewed with one, and was refused. One cause is someone holding its key, possibly enrolled under another machine login with a token copied out of the pod, renewing outside the cluster. The other is an old-image pod refused because someone else marked its UID first: whoever holds an unexpired copy of an old-image pod's token and a launcher credential that enrolls pods can enroll a key of their own on that UID and renew it with the copy, which marks the UID, and from then on the real old-image pod, whose renewer sends no token, is refused here until its lease lapses. That is weaker than what the copy already allowed, which was to enroll and renew as the pod. The refused enrollment's pod UID names the pod: list pod images (below). If that pod runs an older image, the copy's rows are the marked rows of that pod UID: end each one's login once its `subject` shows whether it is a Legion daemon's ([the renew token check](#the-renew-token-check)), never picking a machine-login row by its machine name, and replace the pod with a current image. Otherwise the copy is the line's own enrollment, as that section says. A current-image renewer that cannot read its token file sends nothing at all, so the broker logs nothing for it; `agent-secrets renew` prints `ERROR: enrollment <id> cannot read its pod token` instead, which the worker shim relays into the pod's log. Its lease and grants end one `BROKER_LEASE_SECONDS` after its last valid renewal. |
+| `broker: machine session renewal refused: its machine login has ended enrollment=…` | At WARN: a machine's own session asked to renew while the launcher credential its Google identity token minted was no longer live — revoked, past the hour's expiry that token gave it, or its account no longer listed for its service in `BROKER_VM_SERVICES`. The renewal is answered `401 ENROLLMENT_NOT_LIVE` and the session lapses within one `BROKER_LEASE_SECONDS`. It is expected after a fleet is taken out of the settings and after a machine stops trading. A line for a machine that is still running and still listed means something holding that session's key is renewing after its box's login has ended, which is what this refusal is for: see [a copied machine token](#a-copied-machine-token). |
 | `broker draining drain=<drain>` | SIGTERM or SIGINT: from here on `GET /healthz` answers `503 SHUTTING_DOWN` while every other route is served and the listener stays open, for `BROKER_DRAIN_SECONDS`. A second signal ends the wait at once, logged as `broker: a second signal ended the drain early`. |
 | `broker shutting down` | The drain is over: the broker stops accepting, and the requests still in flight get 60 seconds to finish. That is the server's own `WriteTimeout` — the 45-second request deadline plus the 15 seconds a handler needs to write its answer — because it is the longest exchange the broker allows a request past its headers: one admitted in the drain's last instant still gets its whole deadline. Shutdown closes idle connections at once, and one that has gone five seconds without sending its headers counts as idle, so the budget covers the requests in flight rather than every connection open. |
 | `broker: listening for the other pods' secret rereads channel=…` | The reread fan-out's receiving half has its `LISTEN` connection. The boot waits up to five seconds for this line before it binds, so on a healthy pod it comes just before `broker listening`; after that it reappears on every redial. |
@@ -900,7 +916,9 @@ order by at;
 ```
 
 A copy's access token is bound to the copier's own key, so it cannot spend the machine's token, and
-its enrollment is its own: ending one ends nothing of the machine's. What it does get is whatever
+its credential and enrollment are its own: a credential is keyed by the key its proof presented,
+so a copy's trade mints a credential beside the machine's rather than moving the machine's onto
+the copier's key, and ending one ends nothing of the machine's. What it does get is whatever
 the fleet's service may read. Revoking the machine's login on Dispatch's machine-login page ends
 every enrollment that login made, but not the copied token: within its hour the copy trades again
 under a login of its own. To end it for certain, take the machine out of the fleet's settings and

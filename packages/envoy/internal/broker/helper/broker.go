@@ -286,7 +286,7 @@ func (b *Broker) tokenContext(ctx context.Context, key *ecdsa.PrivateKey) contex
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: NewDPoPTransport(key, base), Timeout: client.Timeout})
+	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: brokerclient.NewDPoPTransport(key, base), Timeout: client.Timeout})
 }
 
 // oauthBrokerError is err as a BrokerError when the broker answered it with an OAuth error: the
@@ -1047,10 +1047,31 @@ func (b *Broker) settleRefused(ctx context.Context, cred *machineCredential) err
 // renews itself only while a refresh reaches the broker, and from then on no session can enroll
 // until a human approves a new machine login. It ends early, silently, once the helper stops
 // holding cred (a refusal, a refresh, or a newer login).
+//
+// In identity mode there is no warning at all, only the drop. The credential this machine's
+// identity token trades for lives as long as that token, which Google bounds at an hour, so a
+// lead of a day would fire on every trade; and what the warning tells an operator to do — run
+// `agent-secrets machine login` and have a human approve it — is not how such a machine gets a
+// credential at all. The trade loop owns that expiry, trading again well before it
+// (brokerclient.Client.Run) and logging what it cannot trade.
 func (b *Broker) watchExpiry(cred *machineCredential) {
 	if b.testWatchEnded != nil {
 		defer b.testWatchEnded(cred)
 	}
+	if b.Identity == nil && !b.warnBeforeExpiry(cred) {
+		return
+	}
+	select {
+	case <-b.after(cred, time.Until(cred.expiresAt)):
+		b.dropOutsideRefresh(cred, dropExpired, "expires_at", cred.expiresAt.Format(time.RFC3339))
+	case <-cred.gone:
+	}
+}
+
+// warnBeforeExpiry waits until expiryWarning before cred lapses and says so, and reports whether
+// the helper still holds cred then: false is a credential a refusal, a refresh or a newer login
+// replaced while the watch waited, which the watch says nothing more about.
+func (b *Broker) warnBeforeExpiry(cred *machineCredential) bool {
 	lead := b.expiryWarning
 	if lead == 0 {
 		lead = 24 * time.Hour
@@ -1058,18 +1079,14 @@ func (b *Broker) watchExpiry(cred *machineCredential) {
 	select {
 	case <-b.after(cred, time.Until(cred.expiresAt.Add(-lead))):
 	case <-cred.gone:
-		return
+		return false
 	}
 	if b.isGone(cred) {
-		return
+		return false
 	}
 	b.logger().Warn(expiresSoonMsg,
 		"credential_id", cred.id, "expires_at", cred.expiresAt.Format(time.RFC3339), "in", time.Until(cred.expiresAt).Round(time.Second))
-	select {
-	case <-b.after(cred, time.Until(cred.expiresAt)):
-		b.dropOutsideRefresh(cred, dropExpired, "expires_at", cred.expiresAt.Format(time.RFC3339))
-	case <-cred.gone:
-	}
+	return true
 }
 
 // isGone reports whether the helper has stopped holding cred, so a timer that fired as it was

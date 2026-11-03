@@ -17,8 +17,8 @@
 // the next session enrols under and needs no restart.
 //
 // A session of one user never reaches another user's sign-in: the records are one directory per
-// user, 0700, under that user's own key directory (signinstore.go), and the only store read
-// here is the one the reading process's own key directory names.
+// user, 0700, under that user's own state directory (SignIns, signinstore.go), and the only
+// store read here is the one the reading process's own environment names.
 
 package brokerclient
 
@@ -33,15 +33,34 @@ import (
 	"sync"
 )
 
-// SignInsDir is the directory under a key directory that holds one record per person, so
-// `agent-secrets login`, which writes them, and every reader of them name one directory in one
-// place.
+// SignInsDir is the directory that holds one record per person, so `agent-secrets login`, which
+// writes them, and every reader of them name one directory in one place.
 const SignInsDir = "signins"
 
-// SignInsIn is the sign-in store of a key directory: a box, a pod and a person's own machine
-// each keep their sign-ins where everything else of that session's identity lives.
-func SignInsIn(keyDir string) SignInStore {
-	return SignInStore{Dir: filepath.Join(keyDir, SignInsDir)}
+// SignInDirVar names the directory a machine keeps its sign-ins in, for a deployment that
+// places it itself; unset, SignIns answers the XDG state directory below.
+const SignInDirVar = "AGENT_SECRETS_SIGNIN_DIR"
+
+// SignIns is the sign-in store of the process reading getenv: SignInDirVar where it names one,
+// and otherwise $XDG_STATE_HOME/agent-secrets/signins, which is $HOME/.local/state/… where
+// XDG_STATE_HOME is unset, as the XDG base directory specification defines it.
+//
+// It is the state directory and not the key directory, where a session's own key and enrollment
+// live, because the two have opposite lifetimes. A key directory is $XDG_RUNTIME_DIR, which a
+// reboot and the user's last logout both empty, and that is right for a session's key: the
+// session ends with the box. A sign-in must outlive both. Signing in is a person at a keyboard
+// completing a device grant, and the broker goes on listing the sign-in until that person
+// revokes it (store.PersonSignIns), so a box that loses its record at every reboot asks for
+// that ceremony again and leaves a row behind whose box key no longer exists anywhere.
+func SignIns(getenv func(string) string) SignInStore {
+	if dir := getenv(SignInDirVar); dir != "" {
+		return SignInStore{Dir: dir}
+	}
+	state := getenv("XDG_STATE_HOME")
+	if state == "" {
+		state = filepath.Join(getenv("HOME"), ".local", "state")
+	}
+	return SignInStore{Dir: filepath.Join(state, "agent-secrets", SignInsDir)}
 }
 
 // Authority is a launcher credential as the process holding its key sees it: the credential the
@@ -67,7 +86,7 @@ type Authority struct {
 // a process that enrols sessions under it. The zero value answers nothing: Store, Machine, Flow
 // and BrokerURL are all required.
 type SignInAuthority struct {
-	// Store is where this machine's sign-ins live: SignInsIn of this process's key directory,
+	// Store is where this machine's sign-ins live: SignIns of this process's own environment,
 	// and never another user's.
 	Store SignInStore
 	// Person is what PersonVar says in this process's own environment, which picks one of

@@ -175,6 +175,9 @@ environment:
                              on this machine with agent-secrets login; with one sign-in it is
                              that person, and with more and this unset every form that needs a
                              session identity refuses and names them
+  AGENT_SECRETS_SIGNIN_DIR   where agent-secrets login keeps this machine's sign-ins
+                             (default $XDG_STATE_HOME/agent-secrets/signins, which a reboot
+                             keeps; the key dir above is runtime state and does not)
   AGENT_SECRETS_SIGNIN_CLIENT_ID
                              the device-flow client agent-secrets login signs a person in as
   AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE
@@ -636,13 +639,13 @@ func writeMachineSession(dir string, key *ecdsa.PrivateKey, enrollmentID string)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("make the key dir %s: %w", dir, err)
 	}
-	if err := brokerclient.WriteFileAtomic(filepath.Join(dir, keyFile), pemBytes, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, keyFile), pemBytes, 0o600); err != nil {
 		return err
 	}
-	if err := brokerclient.WriteFileAtomic(filepath.Join(dir, machineSessionMarker), nil, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, machineSessionMarker), nil, 0o600); err != nil {
 		return err
 	}
-	return brokerclient.WriteFileAtomic(filepath.Join(dir, enrollmentFile), []byte(enrollmentID+"\n"), 0o600)
+	return writeFileAtomic(filepath.Join(dir, enrollmentFile), []byte(enrollmentID+"\n"), 0o600)
 }
 
 // signInSigner is the signer of the person this session acts for, or nil where nobody has
@@ -758,7 +761,7 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets keygen: %v\n", err)
 		return 1
 	}
-	if err := brokerclient.WriteFileAtomic(filepath.Join(*out, keyFile), pemBytes, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(*out, keyFile), pemBytes, 0o600); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets keygen: %v\n", err)
 		return 1
 	}
@@ -807,51 +810,40 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	token := boxRenewal
 	if *podTokenFile != "" {
-		token = renewToken{field: "pod_token", what: "pod token", until: "the file becomes readable", read: func() (string, error) { return readPodToken(*podTokenFile) }}
 		// A pod given a token file that cannot be read now never starts: a bodyless renewal of
 		// such an enrollment is refused anyway, and would hide the fault.
-		if _, err := token.read(); err != nil {
-			fmt.Fprintf(stderr, "agent-secrets renew: %s\n", tokenUnreadable(enrollmentID, token, err))
+		if _, err := readPodToken(*podTokenFile); err != nil {
+			fmt.Fprintf(stderr, "agent-secrets renew: %s\n", tokenUnreadable(enrollmentID, err))
 			return exitUsageError
 		}
 	}
-	return renewLoop(ctx, newClient(base), signer, enrollmentID, token, stderr, time.After)
+	return renewLoop(ctx, newClient(base), signer, enrollmentID, *podTokenFile, stderr, time.After)
 }
-
-// renewToken is the token each renewal carries: the body field the broker reads it as, what an
-// ERROR line calls it when it cannot be read and what has to change before it can be, and how to
-// read it afresh — a pod re-reads its projected file.
-// boxRenewal reads nothing and sends no body at all.
-type renewToken struct {
-	field, what, until string
-	read               func() (string, error)
-}
-
-// boxRenewal is an agent box's renewal: no token, no body.
-var boxRenewal = renewToken{}
 
 // tokenUnreadable is the ERROR a pod's renewer prints when it cannot read its token: it sends
-// nothing (a bodyless renewal of an enrollment whose kind must carry a token is refused, and
-// would hide the fault), so the broker never hears of it, and this line, which the worker shim
-// relays into its log, is the only record naming the enrollment whose lease is lapsing.
-func tokenUnreadable(enrollmentID string, carry renewToken, err error) string {
-	return fmt.Sprintf("ERROR: enrollment %s cannot read its %s (%v); nothing was sent, so its lease lapses unless %s", enrollmentID, carry.what, err, carry.until)
+// nothing (a bodyless renewal of a pod enrollment is refused, and would hide the fault), so the
+// broker never hears of it, and this line, which the worker shim relays into its log, is the
+// only record naming the enrollment whose lease is lapsing.
+func tokenUnreadable(enrollmentID string, err error) string {
+	return fmt.Sprintf("ERROR: enrollment %s cannot read its pod token (%v); nothing was sent, so its lease lapses unless the file becomes readable", enrollmentID, err)
 }
 
-func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, carry renewToken, stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
+// renewLoop renews enrollmentID until ctx ends or the broker refuses it for good. podTokenFile
+// is a pod's projected token file, read again before every renewal because the kubelet rotates
+// it in place, and "" is every other session's renewal, which carries no body.
+func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID, podTokenFile string, stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
 	backoff := 2 * time.Second
 	for {
 		var token string
 		var tokenErr error
-		if carry.read != nil {
-			token, tokenErr = carry.read()
+		if podTokenFile != "" {
+			token, tokenErr = readPodToken(podTokenFile)
 		}
 		var expires time.Time
 		err := tokenErr
 		if err == nil {
-			expires, err = c.RenewEnrollment(ctx, signer, enrollmentID, carry.field, token)
+			expires, err = c.RenewEnrollment(ctx, signer, enrollmentID, token)
 		}
 		if err != nil {
 			if ctx.Err() != nil {
@@ -867,7 +859,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				return exitRenewRefused
 			}
 			if tokenErr != nil {
-				fmt.Fprintf(stderr, "agent-secrets renew: %s; retrying in %s\n", tokenUnreadable(enrollmentID, carry, tokenErr), backoff)
+				fmt.Fprintf(stderr, "agent-secrets renew: %s; retrying in %s\n", tokenUnreadable(enrollmentID, tokenErr), backoff)
 			} else {
 				fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)
 			}

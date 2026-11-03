@@ -7,12 +7,17 @@
 // this package's rig needs — while that package's run anywhere.
 package main
 
-import "github.com/sjawhar/envoy/internal/brokerclient"
+import (
+	"os"
 
-// signInStore is where this machine keeps them: under the key dir, so a box, a pod and a
-// person's machine each keep their own where everything else of that session's identity is.
-// The directory inside it is brokerclient's own (SignInsIn), the one place that names it, since
-// agent-secrets-helper reads the same records to decide whose authority a session enrols under.
+	"github.com/sjawhar/envoy/internal/brokerclient"
+)
+
+// signInStore is where this machine keeps them: the state directory, which outlives the reboot
+// a key directory does not, since signing in is a human ceremony and the broker lists the
+// sign-in until its person revokes it. The directory is brokerclient's own (SignIns), the one
+// place that names it, since agent-secrets-helper reads the same records to decide whose
+// authority a session enrols under.
 func signInStore() brokerclient.SignInStore {
-	return brokerclient.SignInsIn(keyDir())
+	return brokerclient.SignIns(os.Getenv)
 }

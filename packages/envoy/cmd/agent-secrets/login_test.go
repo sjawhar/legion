@@ -171,6 +171,7 @@ func TestLoginTradesUnderThePersonsOwnSessionName(t *testing.T) {
 			issuer := loginIssuer(t, person)
 			keyDir := t.TempDir()
 			t.Setenv("AGENT_SECRETS_KEY_DIR", keyDir)
+			t.Setenv(brokerclient.SignInDirVar, filepath.Join(t.TempDir(), "signins"))
 			t.Setenv(brokerclient.BrokerURLVar, broker.server.URL)
 			t.Setenv(brokerclient.SessionVar, machineSession)
 			t.Setenv(brokerclient.IdentityVar, brokerclient.IdentityKubernetes)
@@ -181,7 +182,7 @@ func TestLoginTradesUnderThePersonsOwnSessionName(t *testing.T) {
 				t.Fatalf("login: %v", err)
 			}
 
-			records, err := brokerclient.SignInsIn(keyDir).List()
+			records, err := signInStore().List()
 			if err != nil || len(records) != 1 {
 				t.Fatalf("the sign-ins login kept = %+v, %v; want the one it just made", records, err)
 			}
@@ -209,6 +210,7 @@ func TestASignInWhoseLeaseLapsedRegistersItselfAgain(t *testing.T) {
 	issuer := loginIssuer(t, person)
 	keyDir := t.TempDir()
 	t.Setenv("AGENT_SECRETS_KEY_DIR", keyDir)
+	t.Setenv(brokerclient.SignInDirVar, filepath.Join(t.TempDir(), "signins"))
 	t.Setenv(brokerclient.BrokerURLVar, broker.server.URL)
 	t.Setenv(brokerclient.SessionVar, "")
 	t.Setenv(brokerclient.IdentityVar, brokerclient.IdentityKubernetes)
@@ -218,7 +220,7 @@ func TestASignInWhoseLeaseLapsedRegistersItselfAgain(t *testing.T) {
 	if err := login(context.Background(), io.Discard, &approvingWriter{t: t, issuer: issuer}); err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	store := brokerclient.SignInsIn(keyDir)
+	store := signInStore()
 	first, err := store.Choose("")
 	if err != nil {
 		t.Fatalf("the sign-in login kept: %v", err)

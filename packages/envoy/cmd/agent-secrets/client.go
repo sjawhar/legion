@@ -492,16 +492,16 @@ func (c *client) Self(ctx context.Context, signer Signer) (SelfResult, []byte, e
 
 // RenewEnrollment is the one Signer-taking method that still needs enrollmentID explicitly: the
 // broker route is /v1/enrollments/{id}/renew, so the id is in the URL path, not just the signed
-// payload. A pod's renewal carries its current projected token as pod_token; an empty field or
-// token sends no body at all, a box's renewal.
-func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, tokenField, token string) (time.Time, error) {
+// payload. A pod's renewal carries its current projected token as pod_token; an empty podToken
+// sends no body at all, which is every other session's renewal.
+func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, podToken string) (time.Time, error) {
 	if err := pathID("an enrollment id", enrollmentID); err != nil {
 		return time.Time{}, err
 	}
 	var body []byte
-	if tokenField != "" && token != "" {
+	if podToken != "" {
 		var err error
-		if body, err = json.Marshal(map[string]string{tokenField: token}); err != nil {
+		if body, err = json.Marshal(map[string]string{"pod_token": podToken}); err != nil {
 			return time.Time{}, err
 		}
 	}

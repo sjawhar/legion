@@ -21,7 +21,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
-	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
@@ -33,6 +32,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -204,7 +204,7 @@ func (r *rig) machineLogin(t *testing.T, key *ecdsa.PrivateKey, person, host str
 		ClientID: oauthwire.ClientID, Scopes: []string{oauthwire.Scope},
 		Endpoint: oauth2.Endpoint{DeviceAuthURL: r.url + "/v1/oauth/device_authorization", TokenURL: r.url + "/v1/oauth/token", AuthStyle: oauth2.AuthStyleInParams},
 	}
-	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: helper.NewDPoPTransport(key, r.srv.Client().Transport)})
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: brokerclient.NewDPoPTransport(key, r.srv.Client().Transport)})
 	da, err := cfg.DeviceAuth(ctx, oauth2.SetAuthURLParam("request", request), oauth2.SetAuthURLParam("dpop_jkt", jkt))
 	if err != nil {
 		t.Fatalf("device authorization for %s: %v", person, err)

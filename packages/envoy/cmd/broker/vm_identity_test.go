@@ -141,8 +141,8 @@ func TestAGoogleAudienceDiscoversGooglesIssuer(t *testing.T) {
 	if found.GoogleKeys == nil || found.GoogleKeys != d.keys[config.DefaultGoogleOIDCIssuer] {
 		t.Fatalf("the exchange's Google key source = %p, want Google's own, %p", found.GoogleKeys, d.keys[config.DefaultGoogleOIDCIssuer])
 	}
-	lines := strings.Count(logged.String(), "google vm identity")
-	wantLine := `msg="google vm identity" issuer=https://accounts.google.com audience=example-vm-audience services=example-fleet fleets=1`
+	lines := strings.Count(logged.String(), "google machine identity")
+	wantLine := `msg="google machine identity" issuer=https://accounts.google.com audience=example-vm-audience services=example-fleet fleets=1`
 	if lines != 1 || !strings.Contains(logged.String(), wantLine) {
 		t.Fatalf("log = %q, want one line holding %q", logged, wantLine)
 	}
@@ -235,7 +235,7 @@ func TestWithNoGoogleAudienceTheBootLogHoldsNoGoogleLine(t *testing.T) {
 		"BROKER_K8S_OIDC_ISSUER=" + issuer.URL(),
 		"BROKER_K8S_OIDC_AUDIENCE=example-broker-pod",
 	}})
-	for _, never := range []string{config.DefaultGoogleOIDCIssuer, "google vm identity"} {
+	for _, never := range []string{config.DefaultGoogleOIDCIssuer, "google machine identity"} {
 		if strings.Contains(broker.Boot, never) {
 			t.Fatalf("boot log with no Google audience holds %q:\n%s", never, broker.Boot)
 		}

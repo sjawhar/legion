@@ -48,7 +48,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
-	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/policy"
@@ -59,6 +58,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -372,7 +372,7 @@ func (s *e2eServer) deviceClient(key *ecdsa.PrivateKey) (*oauth2.Config, context
 				AuthStyle:     oauth2.AuthStyleInParams,
 			},
 		},
-		context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: helper.NewDPoPTransport(key, http.DefaultTransport)})
+		context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: brokerclient.NewDPoPTransport(key, http.DefaultTransport)})
 }
 
 // deviceLogin asks for a device code for a machine of person on host, signed by key, as the

@@ -33,6 +33,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/sjawhar/envoy/internal/brokertoken"
 )
 
@@ -287,12 +289,17 @@ const deviceGrantTTL = 5 * time.Second
 // that fails falls back to it however old it is, since a page that vanishes because one read
 // timed out is worse than one that lingers past a change.
 type deviceGrant struct {
-	// mu is held across the read, so a wave of page loads makes one request rather than one
-	// each, and the answer they all take is the same one.
+	// mu guards the remembered answer and nothing else. It is never held across the read: a
+	// lock held there would queue the Nth caller of a hung broker behind N of the call's own
+	// five seconds, and this is read on every load of the credentials page.
 	mu     sync.Mutex
 	read   bool
 	served bool
 	until  time.Time
+	// flight is the one metadata read in progress, which every caller that finds nothing fresh
+	// enough joins rather than opening a second one, as brokertoken.GoogleAccount's own reader
+	// does. So a hung broker costs every caller waiting on it one window, not one each.
+	flight singleflight.Group
 }
 
 // ServesDeviceGrant answers whether this broker still serves RFC 8628's device grant — whether,
@@ -303,23 +310,57 @@ type deviceGrant struct {
 // the two ways to be wrong, hiding a page that works costs a person their machine login while
 // showing one that does not costs them a clear refusal from the broker when they use it. A
 // broker read before is answered with what it said then.
+//
+// The read runs on ctx with its cancellation dropped, bounded by the call's own window
+// (defaultTimeout): the answer is every caller's, so one browser going away must not cancel the
+// read the others are waiting on and leave them each to start another.
 func (c *Client) ServesDeviceGrant(ctx context.Context) bool {
-	c.deviceGrant.mu.Lock()
-	defer c.deviceGrant.mu.Unlock()
-	if c.deviceGrant.read && time.Now().Before(c.deviceGrant.until) {
-		return c.deviceGrant.served
+	if served, fresh := c.deviceGrant.fresh(); fresh {
+		return served
 	}
-	served, err := c.readDeviceGrant(ctx)
+	answer, err, _ := c.deviceGrant.flight.Do(metadataPath, func() (any, error) {
+		// The flight's own look at what is remembered: a caller that waited out this flight's
+		// predecessor would otherwise read the broker again for an answer just read.
+		if served, fresh := c.deviceGrant.fresh(); fresh {
+			return served, nil
+		}
+		served, err := c.readDeviceGrant(context.WithoutCancel(ctx))
+		if err != nil {
+			return false, err
+		}
+		c.deviceGrant.keep(served)
+		return served, nil
+	})
 	if err != nil {
-		if c.deviceGrant.read {
-			return c.deviceGrant.served
+		if served, read := c.deviceGrant.last(); read {
+			return served
 		}
 		slog.Warn("dispatch: the secrets broker's authorization server metadata could not be read", "error", err)
 		return true
 	}
-	c.deviceGrant.read, c.deviceGrant.served = true, served
-	c.deviceGrant.until = time.Now().Add(deviceGrantTTL)
-	return served
+	return answer.(bool)
+}
+
+// fresh is the remembered answer while it is younger than deviceGrantTTL, and false once it is
+// not or where there is none.
+func (d *deviceGrant) fresh() (served, fresh bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.served, d.read && time.Now().Before(d.until)
+}
+
+// last is the remembered answer however old it is, and read reports whether there is one.
+func (d *deviceGrant) last() (served, read bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.served, d.read
+}
+
+// keep remembers what a read that succeeded said, for deviceGrantTTL.
+func (d *deviceGrant) keep(served bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.read, d.served, d.until = true, served, time.Now().Add(deviceGrantTTL)
 }
 
 // readDeviceGrant reads the broker's metadata and answers whether grant_types_supported names the

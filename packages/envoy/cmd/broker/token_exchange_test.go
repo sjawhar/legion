@@ -23,10 +23,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
@@ -472,7 +472,7 @@ func TestTheBinaryExchangesAMachinesGoogleIdentityToken(t *testing.T) {
 		requireHealthy(t, broker.Addr)
 		for _, want := range []string{
 			"token exchange state=on kubernetes=true github=true accounts=2 workflows=0 machines=2",
-			"google vm identity issuer=" + google.URL() + " audience=" + machineAudience +
+			"google machine identity issuer=" + google.URL() + " audience=" + machineAudience +
 				" services=" + pinnedFleetService + "," + poolFleetService + " fleets=2",
 		} {
 			if !strings.Contains(boot, want) {
@@ -946,7 +946,7 @@ func newPlainBroker(addr string) *liveBroker {
 // exchange judges a credential-less caller on.
 func newLiveBroker(addr string, key *ecdsa.PrivateKey) *liveBroker {
 	live := newPlainBroker(addr)
-	live.dpop = &http.Client{Transport: helper.NewDPoPTransport(key, http.DefaultTransport)}
+	live.dpop = &http.Client{Transport: brokerclient.NewDPoPTransport(key, http.DefaultTransport)}
 	return live
 }
 

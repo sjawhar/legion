@@ -217,7 +217,7 @@ type enrollmentRow struct {
 // withheld from it (RevokeByApprover's withhold). Its service is its launcher credential's only
 // when the account the enrollment recorded still proves it: `BROKER_SERVICES` for a pod's
 // verified service account, `BROKER_VM_SERVICES` for the Google account a machine's credential
-// subject names (exchange.MachineAccount). A machine login's service name is the machine's own
+// subject names (exchange.ReadSubject). A machine login's service name is the machine's own
 // claim, which anyone signed in to Dispatch may approve, so the account is what proves the
 // service. Any other session has none.
 // It is read on every request, decision and release, so an account dropped from the
@@ -242,8 +242,8 @@ func (m *Machine) requester(ctx context.Context, q querier, e enrollmentRow) (po
 				service = *e.Service
 			}
 		case "session":
-			if account, machine := exchange.MachineAccount(*e.Subject); machine {
-				if bound, ok := m.VMServicesByAccount[account]; ok && bound == *e.Service {
+			if read := exchange.ReadSubject(*e.Subject); read.Kind == exchange.SubjectMachine {
+				if bound, ok := m.VMServicesByAccount[read.Account]; ok && bound == *e.Service {
 					service = *e.Service
 				}
 			}

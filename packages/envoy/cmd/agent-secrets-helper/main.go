@@ -43,11 +43,15 @@ type config struct {
 	OperatorFile string
 	MachineFile  string
 	StatePath    string
-	// KeyDir is where this user's session identity lives (AGENT_SECRETS_KEY_DIR), the
-	// directory `agent-secrets login` keeps this user's sign-ins under. The helper reads that
-	// one and no other user's: it runs as its own user, and the records are that user's own,
-	// 0600 in a 0700 directory.
+	// KeyDir is where this user's session identity lives (AGENT_SECRETS_KEY_DIR): the key and
+	// enrollment of a session on this box, which end with the box.
 	KeyDir string
+	// SignIns is where `agent-secrets login` keeps this user's sign-ins
+	// (brokerclient.SignIns: AGENT_SECRETS_SIGNIN_DIR, else the XDG state directory, which a
+	// reboot keeps and a key directory does not). The helper reads that one store and no other
+	// user's: it runs as its own user, and the records are that user's own, 0600 in a 0700
+	// directory.
+	SignIns brokerclient.SignInStore
 	// Identity is this machine's own identity at the broker's token exchange
 	// (AGENT_SECRETS_MACHINE_IDENTITY and the variables it needs), or nil where this machine
 	// proves none and is logged in by a person as before. With one, the helper's launcher
@@ -77,6 +81,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		Person:       strings.TrimSpace(getenv(brokerclient.PersonVar)),
 		Session:      strings.TrimSpace(getenv(brokerclient.SessionVar)),
 	}
+	cfg.SignIns = brokerclient.SignIns(getenv)
 	identity, err := brokerclient.MachineIdentity(getenv)
 	if err != nil {
 		return config{}, err
@@ -136,11 +141,13 @@ environment:
                                With it the helper's launcher credential is the one that exchange
                                mints, traded again before it lapses, and no person approves this
                                machine; unset, a person logs it in as before
-  AGENT_SECRETS_KEY_DIR        where this user's session identity lives; the helper reads the
-                               sign-ins agent-secrets login keeps there (<key dir>/signins) to
-                               decide whose authority each session enrols under, and reads no
-                               other user's; install writes it into the unit when set
-                               (default $XDG_RUNTIME_DIR/agent-secrets)
+  AGENT_SECRETS_KEY_DIR        where this user's session identity lives; install writes it into
+                               the unit when set (default $XDG_RUNTIME_DIR/agent-secrets)
+  AGENT_SECRETS_SIGNIN_DIR     where agent-secrets login keeps this user's sign-ins, which the
+                               helper reads to decide whose authority each session enrols under,
+                               and reads no other user's; install writes it into the unit when
+                               set (default $XDG_STATE_HOME/agent-secrets/signins, which a
+                               reboot keeps, where the key dir above does not)
   AGENT_SECRETS_SIGNIN_CLIENT_ID, AGENT_SECRETS_SIGNIN_CLIENT_SECRET_FILE, AGENT_SECRETS_SIGNIN_ISSUER
                                the device-flow client a person signed in with, which mints their
                                next identity token; without it a sign-in on this box cannot be
@@ -300,7 +307,7 @@ func signInAuthority(cfg config, log *slog.Logger) helper.SignIns {
 		return nil
 	}
 	return &brokerclient.SignInAuthority{
-		Store: brokerclient.SignInsIn(cfg.KeyDir), Person: cfg.Person,
+		Store: cfg.SignIns, Person: cfg.Person,
 		Machine: cfg.Identity, Flow: cfg.SignIn,
 		BrokerURL: cfg.URL, HTTP: brokerclient.HTTPClient(), Log: log,
 	}

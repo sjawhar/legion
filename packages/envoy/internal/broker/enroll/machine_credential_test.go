@@ -47,10 +47,10 @@ func issueMachineCredential(t *testing.T, svc *Service, subject, thumbprint stri
 }
 
 // TestAMachinesCredentialAuthenticatesWhileItsAccountIsListed: the credential the exchange mints
-// is keyed by the machine (exchange.MachineSubject) and authenticates on the account alone —
-// where the machine runs was the exchange entry's decision, taken before the credential existed.
-// Dropping the account from BROKER_VM_SERVICES, and listing it for another service, each end the
-// credential at its next call.
+// is keyed by the machine and the key it holds (exchange.MachineSubject) and authenticates on
+// the account alone — where the machine runs was the exchange entry's decision, taken before
+// the credential existed. Dropping the account from BROKER_VM_SERVICES, and listing it for
+// another service, each end the credential at its next call.
 func TestAMachinesCredentialAuthenticatesWhileItsAccountIsListed(t *testing.T) {
 	ctx := context.Background()
 	svc := newService(t)
@@ -58,7 +58,7 @@ func TestAMachinesCredentialAuthenticatesWhileItsAccountIsListed(t *testing.T) {
 	onInstance := exchange.MachineSubject(exchange.GoogleIdentity{
 		Account: machineAccountEmail,
 		Compute: exchange.ComputeEngine{Project: "example-project", Zone: "example-zone-a", Instance: "example-machine-1", InstanceID: "1"},
-	}, "tp-ignored")
+	}, "tp-on-instance")
 	keyed := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-pool-machine")
 
 	for _, subject := range []string{onInstance, keyed} {
@@ -189,5 +189,97 @@ func TestOnlyAMachinesOwnCredentialEnrolsItsSession(t *testing.T) {
 	}
 	if err := svc.Revoke(ctx, credOne, enrolled.ID.String(), "launcher:one"); err != nil {
 		t.Fatalf("the machine's own revoke of its session: %v", err)
+	}
+}
+
+// TestAMachineSessionRenewsOnlyWhileItsMachineLoginIsLive is the safeguard the vm enrollment
+// kind used to carry: a machine session's renewal proves only that its renewer holds the
+// session key, and the key and the enrollment id are two files on the box, so a copy of them
+// taken off it would renew for ever. Renewal is therefore held to the launcher credential the
+// machine's exchange minted, and the two endings a revoke is not — the account dropped from
+// BROKER_VM_SERVICES, and the credential past the expiry its Google identity token gave it —
+// each refuse the next renewal. Listing the account again lets it renew, so this is the
+// configuration as it is now and not a mark on the row.
+func TestAMachineSessionRenewsOnlyWhileItsMachineLoginIsLive(t *testing.T) {
+	ctx := context.Background()
+	svc := newService(t)
+	svc.VMServicesByAccount = map[string]string{machineAccountEmail: machineFleet}
+	subject := exchange.MachineSubject(exchange.GoogleIdentity{Account: machineAccountEmail}, "tp-machine")
+	cred, err := svc.Credential(ctx, issueMachineCredential(t, svc, subject, "tp-machine"))
+	if err != nil {
+		t.Fatalf("Credential: %v", err)
+	}
+	enrolled, err := svc.Create(ctx, cred, Enrollment{Kind: "session", RuntimeID: "machine-1", Thumbprint: "tp-session"})
+	if err != nil {
+		t.Fatalf("a machine's session enrollment: %v", err)
+	}
+	id := enrolled.ID.String()
+	if _, err := svc.Renew(ctx, id, ""); err != nil {
+		t.Fatalf("the first renewal of a live machine's session: %v; want it renewed", err)
+	}
+
+	svc.VMServicesByAccount = map[string]string{}
+	if _, err := svc.Renew(ctx, id, ""); !errors.Is(err, ErrMachineLoginEnded) {
+		t.Fatalf("the renewal of a delisted machine's session = %v, want ErrMachineLoginEnded", err)
+	}
+	svc.VMServicesByAccount = map[string]string{machineAccountEmail: machineFleet}
+	if _, err := svc.Renew(ctx, id, ""); err != nil {
+		t.Fatalf("the renewal after the account was listed again: %v; want it renewed", err)
+	}
+
+	// RetireCredential is the one operation that ends a credential by its expiry and leaves
+	// the enrollments it made alone, which is exactly the state a machine that has stopped
+	// trading reaches when its last Google identity token runs out.
+	if err := svc.RetireCredential(ctx, cred.ID.String(), "broker"); err != nil {
+		t.Fatalf("RetireCredential: %v", err)
+	}
+	if _, err := svc.Renew(ctx, id, ""); !errors.Is(err, ErrMachineLoginEnded) {
+		t.Fatalf("the renewal of a session whose machine login has lapsed = %v, want ErrMachineLoginEnded", err)
+	}
+}
+
+// TestAPersonsSessionOnAMachineRenewsPastItsCredentialsExpiry holds the asymmetry the rule
+// above is written around. A person's sign-in on a box mints a credential of the same shape and
+// of the same hour's life, and their sessions must outlive it: a person signs in once per box
+// and their sessions are theirs until they revoke that sign-in, which ends them at once
+// (RevokePersonSignIn). Only a machine's own session, which no person ever enrolled, is held to
+// its credential.
+func TestAPersonsSessionOnAMachineRenewsPastItsCredentialsExpiry(t *testing.T) {
+	ctx := context.Background()
+	const person = "ada@example.com"
+	svc := newService(t)
+	svc.VMServicesByAccount = map[string]string{machineAccountEmail: machineFleet}
+
+	tx, err := svc.Store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	credID, err := svc.IssueTokenLoginTx(ctx, tx, TokenLogin{
+		Subject: exchange.PersonSubject(person, machineAccountEmail, "tp-box"), Service: machineFleet,
+		Operator: person, Host: "example-project/example-zone-a/example-machine-1",
+		TokenExpires: time.Now().Add(time.Hour), Thumbprint: "tp-box",
+		JWK: json.RawMessage(`{"kty":"EC"}`), Expires: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("IssueTokenLoginTx(a person's sign-in): %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cred, err := svc.Credential(ctx, credID.String())
+	if err != nil {
+		t.Fatalf("Credential: %v", err)
+	}
+	operator := person
+	enrolled, err := svc.Create(ctx, cred, Enrollment{Kind: "session", RuntimeID: "box-1", Operator: &operator, Thumbprint: "tp-person-session"})
+	if err != nil {
+		t.Fatalf("a person's session enrollment on a machine: %v", err)
+	}
+	if err := svc.RetireCredential(ctx, credID.String(), "broker"); err != nil {
+		t.Fatalf("RetireCredential: %v", err)
+	}
+	if _, err := svc.Renew(ctx, enrolled.ID.String(), ""); err != nil {
+		t.Fatalf("the renewal of a person's session past its sign-in credential's expiry: %v; want it renewed", err)
 	}
 }

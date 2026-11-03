@@ -56,9 +56,9 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
-	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
@@ -145,7 +145,7 @@ func newBrokerClient(t *testing.T, publicURL, addr, uiToken string) *brokertest.
 	t.Helper()
 	client := brokertest.NewClient(t, publicURL, addr)
 	client.UIToken = uiToken
-	client.DPoP = helper.NewDPoPTransport
+	client.DPoP = brokerclient.NewDPoPTransport
 	return client
 }
 

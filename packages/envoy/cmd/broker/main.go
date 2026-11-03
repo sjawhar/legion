@@ -558,7 +558,7 @@ func main() {
 	// every Google caller would fault instead of being refused ACCOUNT_TOKENS_OFF.
 	var googleCallers api.GoogleVerifier
 	if discovered.GoogleIdentities != nil {
-		googleCallers = enroll.GoogleVMVerifier{Verifier: discovered.GoogleIdentities}
+		googleCallers = api.GoogleTokens{Verifier: discovered.GoogleIdentities}
 	}
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, RereadOverallLimit: rereadOverall,
 		APIAccounts: cfg.APIAccounts, AccountTokens: pod,
@@ -862,7 +862,7 @@ func discoverVerifiers(ctx context.Context, cfg config.Config, keysFor keysFunc)
 		return verifiers{}, err
 	}
 	services := slices.Sorted(maps.Values(cfg.VMServicesByAccount))
-	slog.Info("google vm identity", "issuer", cfg.GoogleOIDCIssuer, "audience", cfg.GoogleOIDCAudience,
+	slog.Info("google machine identity", "issuer", cfg.GoogleOIDCIssuer, "audience", cfg.GoogleOIDCAudience,
 		"services", strings.Join(slices.Compact(services), ","), "fleets", len(cfg.ExchangeGoogleAccounts))
 	found.GoogleKeys = googleKeys
 	// One verifier on that key set, for a listed caller that holds a Google identity rather

@@ -39,6 +39,7 @@ var unitVariables = []struct {
 	{name: "AGENT_SECRETS_OPERATOR_FILE", path: true},
 	{name: "AGENT_SECRETS_MACHINE_FILE", path: true},
 	{name: "AGENT_SECRETS_KEY_DIR", path: true},
+	{name: brokerclient.SignInDirVar, path: true},
 	{name: brokerclient.IdentityVar},
 	{name: brokerclient.MachineTokenFileVar, path: true},
 	{name: brokerclient.MachineAudienceVar},
