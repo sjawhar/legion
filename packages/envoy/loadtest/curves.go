@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,9 +17,52 @@ import (
 	"strings"
 )
 
-// gridFactors are the load factors of the cluster grid; a knee-series step at another
-// factor is a refinement step.
-var gridFactors = []float64{1, 2, 3, 5, 7, 10}
+// curveSeries is the rule one run of loadgen curves judges a set of steps by: the load factors of
+// its grid, how near a knee's bracket must be before it needs no refinement step, which of
+// passCriteria it judges, and whether it voids a step whose generator was starved. Two load-test
+// series read by two rules, so the rule is the command's -series flag and not a package constant:
+// the cluster series of INFRA-598, whose curves must keep reading as they do, and the Verified
+// Linux spec loop's.
+type curveSeries struct {
+	name string
+	// grid are the series' grid factors; a knee-series step at another factor is a refinement
+	// step.
+	grid []float64
+	// bracket is how near the last passing factor and the first failing one must be before the
+	// knee between them is narrow enough to need no refinement step (refineFactors).
+	bracket float64
+	// crits are the criteria of passCriteria this series judges, in the order its Pass table and
+	// curves.csv carry them.
+	crits []int
+	// void is set for a series that voids a step whose own generator was starved (markVoid).
+	void bool
+}
+
+// clusterSeries is INFRA-598's cluster series: the grid 1, 2, 3, 5, 7, 10, a knee refined until
+// its bracket is 1.0 wide, and the six criteria (a) to (f). It is -series' default, so a reading
+// of that series says what it has always said.
+var clusterSeries = &curveSeries{
+	name: "cluster", grid: []float64{1, 2, 3, 5, 7, 10}, bracket: 1.0,
+	crits: []int{critCommits, critRequests, critDelivery, critCPULimit, critPool, critFailed},
+}
+
+// loopSeries is the Verified Linux spec loop's series: the grid 1, 2, 3, 4, 6, 8, 12, 16, 20, a
+// knee refined until its bracket is 0.5 wide, the six criteria and the two the loop adds (no
+// notification lost, and the Cloud SQL instance's CPU), and the void rule, since the loop's load
+// comes from a generator VM that can starve before Dispatch does.
+var loopSeries = &curveSeries{
+	name: "loop", grid: []float64{1, 2, 3, 4, 6, 8, 12, 16, 20}, bracket: 0.5,
+	crits: []int{critCommits, critRequests, critDelivery, critCPULimit, critPool, critFailed, critLost, critCloudSQLCPU},
+	void:  true,
+}
+
+// curveSeriesByName are the series -series takes.
+var curveSeriesByName = map[string]*curveSeries{clusterSeries.name: clusterSeries, loopSeries.name: loopSeries}
+
+// curveSeriesNames are those series' names, for the flag's words and a refusal's.
+func curveSeriesNames() string {
+	return strings.Join(slices.Sorted(maps.Keys(curveSeriesByName)), " or ")
+}
 
 // curveKind is where a step sits in the curves: the knee series (the grid and refinement steps),
 // the reads-only control, the hour, or the 4 vCPU database. Rows go in that order.
@@ -40,7 +84,9 @@ const (
 	verdictNA   verdict = "n/a"
 )
 
-// The pass criteria, as indices into passCriteria and curveStep.verdicts.
+// The pass criteria, as indices into passCriteria and curveStep.verdicts. A series judges the
+// criteria of its crits, which is every one of them for the spec loop and (a) to (f) for the
+// cluster series.
 const (
 	critCommits = iota
 	critRequests
@@ -48,6 +94,8 @@ const (
 	critCPULimit
 	critPool
 	critFailed
+	critLost
+	critCloudSQLCPU
 )
 
 // passCriteria are the pass rule, one per column of the Pass table: a step passes when none
@@ -59,7 +107,18 @@ var passCriteria = []struct{ id, csv, text, when string }{
 	{"d", "pass_d_cpu_limit", "no container's cores mean ≥ 0.9 × its CPU limit, from cgroup.json", "n/a without cgroup.json, which fails (f)"},
 	{"e", "pass_e_pool", "Dispatch's pool acquire waiters p50 = 0", "FAIL when the sampler measured none"},
 	{"f", "pass_f_no_failure", "no failed row: no step-failed.json, and cgroup.json present and not failed", ""},
+	{"g", "pass_g_lost", "no notification a loop session was owed is lost: every class of events.by_class lost 0", "n/a for a step with no loop session class; a write on the boundary of a session's life is no loss"},
+	{"h", "pass_h_cloudsql_cpu", "the Cloud SQL instance's cores mean < 0.9 × its vCPUs, from cloudsql-cpu.json", "n/a without cloudsql-cpu.json, which a step on a database that is not Cloud SQL has none of"},
 }
+
+// cpuLimitShare is the share of a CPU limit that a cores mean at or above it fails: criterion (d)
+// for a container's cgroup limit, and criterion (h) for the Cloud SQL instance's vCPUs, which
+// cloudsql-cpu.json reports as limit_cores so that one rule reads both (cloudsqlcpu.go:44-70).
+const cpuLimitShare = 0.9
+
+// generatorStarved is the share of its own processors the generator VM's cores mean reaches when
+// the step measures the generator and not Dispatch (markVoid).
+const generatorStarved = 0.7
 
 // The failure kinds that loadgen curves adds to step-failed.json's: a step directory without
 // summary.json, and a cgroup.json marked failed with no sampler_gap reason in step-failed.json.
@@ -80,12 +139,26 @@ type curveStep struct {
 	verdicts  []verdict
 	// overLimit are the roles whose cores_mean reached 0.9 × limit_cores (criterion d).
 	overLimit []string
+	// lostClasses are the events.by_class classes that lost a notification (criterion g), sorted.
+	lostClasses []string
+	// cloudsql is the step directory's cloudsql-cpu.json, nil for a step that holds none.
+	cloudsql *cloudsqlCPUFile
+	// se is the series rule that judges the step: which criteria count, which factors are grid
+	// steps, and whether a starved generator voids it.
+	se *curveSeries
+	// void is set when the step's own generator was starved (markVoid): voidRole is that
+	// generator's cgroup.json role, voidShare its cores mean as a share of voidLimit, the
+	// machine's processors.
+	void                 bool
+	voidRole             string
+	voidShare, voidLimit float64
 }
 
-// readCurveStep reads the step directory dir. A directory without summary.json is a failed row
-// whose factor its name gives ("<f>x…"); any other unreadable input is an error.
-func readCurveStep(dir string) (*curveStep, error) {
-	cs := &curveStep{dir: dir}
+// readCurveStep reads the step directory dir and judges it by the series rule se. A directory
+// without summary.json is a failed row whose factor its name gives ("<f>x…"); any other
+// unreadable input is an error.
+func readCurveStep(se *curveSeries, dir string) (*curveStep, error) {
+	cs := &curveStep{dir: dir, se: se}
 	_, err := os.Stat(filepath.Join(dir, "summary.json"))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -110,17 +183,53 @@ func readCurveStep(dir string) (*curveStep, error) {
 		}
 		cs.factor = configFactor(cs.sum.Config)
 	}
+	if cs.cloudsql, err = readCloudSQLCPUFile(dir); err != nil {
+		return nil, err
+	}
 	if cs.cgroup != nil && cs.cgroup.Failed && !slices.Contains(cs.failedKinds, stepFailedKindSamplerGap) {
 		cs.failedKinds, cs.failed = append(cs.failedKinds, failedKindCgroup), true
 	}
 	cs.kind = cs.classify()
 	cs.judge()
+	if err := cs.markVoid(); err != nil {
+		return nil, err
+	}
 	return cs, nil
 }
 
-// configFactor is a step's load factor from its configuration: requests/s ÷ 60, or events/s ÷ 4
-// for a step with no requests.
+// readCloudSQLCPUFile is the step directory's cloudsql-cpu.json (loadgen cloudsql-cpu), nil when
+// the directory holds none: the database of a step that does not run on Cloud SQL has no such
+// file, and criterion (h) is n/a for it. A file that is there and cannot be read is an error and
+// never a silent n/a, so a broken read is not taken for an instance with no CPU. A file whose
+// limit_cores is not a positive number gives (h) nothing to judge, so it is such a read.
+func readCloudSQLCPUFile(dir string) (*cloudsqlCPUFile, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "cloudsql-cpu.json"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("step %s: %w", dir, err)
+	}
+	var f cloudsqlCPUFile
+	if err := json.Unmarshal(b, &f); err != nil {
+		return nil, fmt.Errorf("step %s: cloudsql-cpu.json: %w", dir, err)
+	}
+	if !finite(f.LimitCores) || f.LimitCores <= 0 || !finite(f.CoresMean) {
+		return nil, fmt.Errorf("step %s: cloudsql-cpu.json: cores_mean %v of limit_cores %v: no CPU to judge criterion (h) by", dir, f.CoresMean, f.LimitCores)
+	}
+	return &f, nil
+}
+
+// configFactor is a step's load factor from its configuration: the -loop-factor its run was given
+// (config.loop_factor), else requests/s ÷ 60, or events/s ÷ 4 for a step with no requests. Those
+// rates are divided by the cluster series' own baseline, its 1x step, which is no baseline at all
+// for a series whose steps each offer their own rates: every step of the spec loop would read as
+// factor 1. A step that carries a loop factor therefore reads at the factor its run was told it
+// stood for.
 func configFactor(c summaryConfig) float64 {
+	if c.LoopFactor > 0 {
+		return c.LoopFactor
+	}
 	if c.RequestsPerS > 0 {
 		return c.RequestsPerS / 60
 	}
@@ -184,14 +293,15 @@ func (s *curveStep) kindName() string {
 	case kindDB4:
 		return "db4"
 	}
-	if slices.Contains(gridFactors, s.factor) {
+	if slices.Contains(s.se.grid, s.factor) {
 		return "grid"
 	}
 	return "refinement"
 }
 
-// judge sets the step's verdicts on passCriteria. A failed row is judged by (f) alone: the curves
-// take no number from it, so its other criteria are n/a.
+// judge sets the step's verdicts on every criterion of passCriteria; which of them count towards
+// the step's result is its series' (passes, tripped). A failed row is judged by (f) alone: the
+// curves take no number from it, so its other criteria are n/a.
 func (s *curveStep) judge() {
 	v := make([]verdict, len(passCriteria))
 	for i := range v {
@@ -222,26 +332,88 @@ func (s *curveStep) judge() {
 	if s.cgroup != nil {
 		for _, name := range slices.Sorted(maps.Keys(s.cgroup.Roles)) {
 			r := s.cgroup.Roles[name]
-			if r.CoresMean != nil && r.LimitCores != nil && *r.CoresMean >= 0.9**r.LimitCores {
+			if r.CoresMean != nil && r.LimitCores != nil && *r.CoresMean >= cpuLimitShare**r.LimitCores {
 				s.overLimit = append(s.overLimit, name)
 			}
 		}
 		v[critCPULimit] = check(len(s.overLimit) == 0)
+	}
+	if len(e.ByClass) > 0 {
+		for _, name := range slices.Sorted(maps.Keys(e.ByClass)) {
+			if e.ByClass[name].Lost > 0 {
+				s.lostClasses = append(s.lostClasses, name)
+			}
+		}
+		v[critLost] = check(len(s.lostClasses) == 0)
+	}
+	if s.cloudsql != nil {
+		v[critCloudSQLCPU] = check(s.cloudsql.CoresMean < cpuLimitShare*s.cloudsql.LimitCores)
 	}
 	r := s.sum.Resources
 	v[critPool] = check(r != nil && r.PoolAcquireGoroutines.N > 0 && r.PoolAcquireGoroutines.P50 == 0)
 	v[critFailed] = check(s.cgroup != nil)
 }
 
-// passes is true when no criterion is FAIL.
-func (s *curveStep) passes() bool { return !slices.Contains(s.verdicts, verdictFail) }
+// markVoid marks the step void when its own generator was starved. A step whose load generator
+// ran at generatorStarved of the generator VM's processors offered what that machine could send
+// and not what the step asked for, so it measures the generator and not Dispatch: it is neither a
+// pass nor a failure (findKnees), and the deployment re-runs it with a larger generator.
+//
+// The generator's role is summary.json's config.generator_role, which loadgen run records from
+// -generator-role, and never a vm- role of cgroup.json read by its name: the application VMs
+// report a vm- role of their own (vmsample.go:61-64), so only the run that sent the load knows
+// which machine sent it, and a series whose steps ran on different generators still reads right.
+// A step naming a role its cgroup.json holds no series for is an error, not a step that silently
+// can never be void.
+func (s *curveStep) markVoid() error {
+	name := s.sum.Config.GeneratorRole
+	if !s.se.void || s.failed || name == "" || s.cgroup == nil {
+		return nil
+	}
+	r := s.role(name)
+	if r == nil {
+		return fmt.Errorf("step %s: config.generator_role is %q, which cgroup.json holds no role for; its roles are %s",
+			s.dir, name, strings.Join(slices.Sorted(maps.Keys(s.cgroup.Roles)), ", "))
+	}
+	share, ok := limitShare(r)
+	if !ok || share < generatorStarved {
+		return nil
+	}
+	s.void, s.voidRole, s.voidShare, s.voidLimit = true, name, share, *r.LimitCores
+	return nil
+}
 
-// tripped are the indices of the criteria the step fails.
+// voidReason says what voided the step, as the Pass table, KNEES.md and curves.csv name it: the
+// generator's role, and its cores mean as a share of the machine's processors. It is empty for a
+// step that is not void.
+func (s *curveStep) voidReason() string {
+	if !s.void {
+		return ""
+	}
+	return fmt.Sprintf("%s at %s of its %s processors", s.voidRole, num(s.voidShare, 2), num(s.voidLimit, 2))
+}
+
+// passes is true when no criterion the step's series judges is FAIL. A void step is no pass: its
+// generator was starved, so it measured nothing to pass by (markVoid), and every renderer says
+// void of it rather than yes or no (passWord).
+func (s *curveStep) passes() bool {
+	if s.void {
+		return false
+	}
+	for _, c := range s.se.crits {
+		if s.verdicts[c] == verdictFail {
+			return false
+		}
+	}
+	return true
+}
+
+// tripped are the criteria of the step's series that it fails, in the series' order.
 func (s *curveStep) tripped() []int {
 	var out []int
-	for i, v := range s.verdicts {
-		if v == verdictFail {
-			out = append(out, i)
+	for _, c := range s.se.crits {
+		if s.verdicts[c] == verdictFail {
+			out = append(out, c)
 		}
 	}
 	return out
@@ -618,14 +790,15 @@ type knee struct {
 }
 
 // findKnees are the knees of series, the knee-series steps in factor order. The walk takes the
-// steps that are not failed: a failed row gives no number, so it is judged by (f) alone (judge),
-// and is neither a knee nor the end of a bracket. A knee is a step that fails after the previous
-// judged step passed, or the first judged step when it fails.
+// steps that are neither failed nor void: a failed row gives no number, so it is judged by (f)
+// alone (judge), and a void step measured its own generator (markVoid), so neither is a knee or
+// the end of a bracket. A knee is a step that fails after the previous judged step passed, or
+// the first judged step when it fails.
 func findKnees(series []*curveStep) []knee {
 	var out []knee
 	var prev *curveStep
 	for _, s := range series {
-		if s.failed {
+		if s.failed || s.void {
 			continue
 		}
 		if !s.passes() {
@@ -641,13 +814,14 @@ func findKnees(series []*curveStep) []knee {
 	return out
 }
 
-// refineFactors is one factor per knee whose bracket is wider than 1.0 and whose grid interval
-// (the grid factors at or around the bracket) holds fewer than two refinement steps: the bracket's
-// midpoint rounded to 0.5, moved by 0.5 steps inside the bracket when a step already has that
-// factor. A knee at the series' first judged step has no bracket to narrow. A failed step ends no
-// bracket (findKnees), but its factor is taken: the cluster script refuses to run a step whose
-// directory exists, so a refinement never names it again.
-func refineFactors(knees []knee, steps []*curveStep) []float64 {
+// refineFactors is one factor per knee whose bracket is wider than the series' (1.0 for the
+// cluster series, 0.5 for the spec loop's) and whose grid interval (the grid factors at or
+// around the bracket) holds fewer than two refinement steps: the bracket's midpoint rounded to
+// 0.5, moved by 0.5 steps inside the bracket when a step already has that factor. A knee at the
+// series' first judged step has no bracket to narrow. A failed or void step ends no bracket
+// (findKnees), but its factor is taken: the cluster script refuses to run a step whose directory
+// exists, so a refinement never names it again.
+func refineFactors(se *curveSeries, knees []knee, steps []*curveStep) []float64 {
 	var out []float64
 	taken := func(f float64) bool {
 		return slices.Contains(out, f) || slices.ContainsFunc(steps, func(s *curveStep) bool { return s.factor == f })
@@ -657,11 +831,11 @@ func refineFactors(knees []knee, steps []*curveStep) []float64 {
 			continue
 		}
 		lo, hi := k.pass.factor, k.fail.factor
-		if hi-lo <= 1.0 {
+		if hi-lo <= se.bracket {
 			continue
 		}
 		gLo, gHi := lo, hi
-		for _, g := range gridFactors {
+		for _, g := range se.grid {
 			if g <= lo {
 				gLo = g
 			}
@@ -704,8 +878,9 @@ func fmtFloat(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
 func runCurves(args []string) error {
 	fs := flag.NewFlagSet("curves", flag.ExitOnError)
 	out := fs.String("out", "", "the directory that receives CURVES.md, curves.csv, KNEES.md, refine.txt and, with an hour step, TREND.md (required)")
+	seriesName := fs.String("series", clusterSeries.name, "the series rule these steps are judged by, "+curveSeriesNames()+": its grid, how narrow a knee's bracket is refined to, the criteria of its Pass table, and whether a starved generator voids a step")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: loadgen curves -out <dir> <step dir>...")
+		fmt.Fprintln(fs.Output(), "usage: loadgen curves -out <dir> [-series "+strings.ReplaceAll(curveSeriesNames(), " or ", "|")+"] <step dir>...")
 		fs.PrintDefaults()
 	}
 	_ = fs.Parse(args)
@@ -713,9 +888,13 @@ func runCurves(args []string) error {
 		fs.Usage()
 		return fmt.Errorf("name -out and at least one step directory")
 	}
+	se := curveSeriesByName[*seriesName]
+	if se == nil {
+		return fmt.Errorf("-series must be %s, not %q", curveSeriesNames(), *seriesName)
+	}
 	var steps []*curveStep
 	for _, dir := range fs.Args() {
-		s, err := readCurveStep(dir)
+		s, err := readCurveStep(se, dir)
 		if err != nil {
 			return err
 		}
@@ -729,17 +908,17 @@ func runCurves(args []string) error {
 		}
 	}
 	knees := findKnees(series)
-	refine := refineFactors(knees, steps)
+	refine := refineFactors(se, knees, steps)
 
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		return err
 	}
 	files := map[string]string{
-		"CURVES.md":  renderCurves(steps),
+		"CURVES.md":  renderCurves(se, steps),
 		"KNEES.md":   renderKnees(series, knees),
 		"refine.txt": renderRefine(refine),
 	}
-	csvText, err := renderCurvesCSV(steps)
+	csvText, err := renderCurvesCSV(se, steps)
 	if err != nil {
 		return err
 	}
@@ -768,9 +947,10 @@ func renderRefine(factors []float64) string {
 }
 
 // renderCurvesCSV is curves.csv: one row per step, every number of the CURVES.md tables (a
-// column shared by two tables once), then the verdicts; an empty cell is a number not measured or
-// a failed row's.
-func renderCurvesCSV(steps []*curveStep) (string, error) {
+// column shared by two tables once), then the verdicts of the series' criteria; an empty cell is
+// a number not measured or a failed row's. A series with the void rule carries a void column
+// too, which says what voided the step (voidReason) and is empty for every step that stands.
+func renderCurvesCSV(se *curveSeries, steps []*curveStep) (string, error) {
 	var cols []curveCol
 	for _, t := range curveTables {
 		for _, c := range t.cols {
@@ -780,11 +960,14 @@ func renderCurvesCSV(steps []*curveStep) (string, error) {
 		}
 	}
 	header := []string{"step", "factor", "kind", "failed"}
+	if se.void {
+		header = append(header, "void")
+	}
 	for _, c := range cols {
 		header = append(header, c.csv)
 	}
-	for _, p := range passCriteria {
-		header = append(header, p.csv)
+	for _, i := range se.crits {
+		header = append(header, passCriteria[i].csv)
 	}
 	var b strings.Builder
 	w := csv.NewWriter(&b)
@@ -793,13 +976,20 @@ func renderCurvesCSV(steps []*curveStep) (string, error) {
 	}
 	for _, s := range steps {
 		row := []string{s.name, fmtFloat(s.factor), s.kindName(), strings.Join(s.failedKinds, ";")}
+		if se.void {
+			row = append(row, s.voidReason())
+		}
 		for _, c := range cols {
 			row = append(row, c.csvCell(s))
 		}
-		for _, v := range s.verdicts {
-			row = append(row, string(v))
+		for _, i := range se.crits {
+			row = append(row, string(s.verdicts[i]))
 		}
-		if err := w.Write(append(row, strconv.FormatBool(s.passes()))); err != nil {
+		result := strconv.FormatBool(s.passes())
+		if s.void {
+			result = voidWord
+		}
+		if err := w.Write(append(row, result)); err != nil {
 			return "", err
 		}
 	}
@@ -808,10 +998,13 @@ func renderCurvesCSV(steps []*curveStep) (string, error) {
 }
 
 // renderCurves is CURVES.md.
-func renderCurves(steps []*curveStep) string {
+func renderCurves(se *curveSeries, steps []*curveStep) string {
 	var md markdown
 	md.line("# Scaling curves\n")
 	md.line("One row per step: the knee series (the grid and refinement steps) in factor order, then the reads-only control, the hour and the 4 vCPU database. A step's factor is its requests/s target ÷ 60 (events/s ÷ 4 without requests). `-` is a number the step did not measure or that could not be read, never 0.")
+	if slices.ContainsFunc(steps, func(s *curveStep) bool { return s.sum.Config.LoopFactor > 0 }) {
+		md.line("\nA step whose summary.json carries `config.loop_factor` reads at that factor instead (`loadgen run -loop-factor`): the steps of a series whose every step has its own baseline rates would all read as factor 1 otherwise.")
+	}
 	if slices.ContainsFunc(steps, func(s *curveStep) bool { return s.failed }) {
 		md.line("\n(failed: <kinds>), in every table: the step failed, so its row shows no number. The kinds are step-failed.json's `reasons[].kind` ("+failedKindsText+"; `sampler_gap`: a role went over %s without a good cgroup sample in the window), `%s` (cgroup.json is marked failed) and `%s` (the step directory holds none).",
 			seconds(cgroupMaxGap), failedKindCgroup, failedKindNoSummary)
@@ -819,7 +1012,7 @@ func renderCurves(steps []*curveStep) string {
 	for _, t := range curveTables {
 		curveTableMD(&md, t, steps)
 	}
-	passTableMD(&md, steps)
+	passTableMD(&md, se, steps)
 	controlMD(&md, steps)
 	return md.String()
 }
@@ -874,30 +1067,68 @@ func curveTableMD(md *markdown, t curveTable, steps []*curveStep) {
 	}
 }
 
-// passTableMD writes the Pass table and its criteria.
-func passTableMD(md *markdown, steps []*curveStep) {
+// passTableMD writes the Pass table and the criteria of the series the steps were judged by.
+func passTableMD(md *markdown, se *curveSeries, steps []*curveStep) {
 	md.line("\n## Pass\n")
 	md.line("The pass rule, each criterion per step. A step passes when no criterion is FAIL. A failed row is judged by (f) alone: the curves take no number from it, so its other criteria are n/a.\n")
 	header := []string{"step", "factor"}
-	for _, p := range passCriteria {
-		header = append(header, "("+p.id+")")
+	for _, i := range se.crits {
+		header = append(header, "("+passCriteria[i].id+")")
 	}
 	md.header(append(header, "passes")...)
 	for _, s := range steps {
 		cells := []string{s.label(), fmtFloat(s.factor)}
-		for _, v := range s.verdicts {
-			cells = append(cells, string(v))
+		for _, i := range se.crits {
+			cells = append(cells, string(s.verdicts[i]))
 		}
-		md.row(append(cells, yesNo(s.passes()))...)
+		md.row(append(cells, passWord(s))...)
 	}
 	md.line("")
-	for _, p := range passCriteria {
+	for _, i := range se.crits {
+		p := passCriteria[i]
 		if p.when == "" {
 			md.line("- (%s) %s", p.id, p.text)
 		} else {
 			md.line("- (%s) %s (%s)", p.id, p.text, p.when)
 		}
 	}
+	voidNoteMD(md, steps)
+}
+
+// voidNoteMD says what a void step is, and names each of them, under the Pass table of a series
+// that holds one.
+func voidNoteMD(md *markdown, steps []*curveStep) {
+	voids := voidSteps(steps)
+	if len(voids) == 0 {
+		return
+	}
+	md.line("\n`%s`: the step's own generator was starved — the machine that ran loadgen held a cores mean of %s or more of its processors — so the step measures the generator and not Dispatch. A void step is neither a pass nor a failure: it ends no knee bracket, and the deployment re-runs it with a larger generator.", voidWord, num(generatorStarved, 2))
+	for _, s := range voids {
+		md.line("- %s: %s.", s.label(), s.voidReason())
+	}
+}
+
+// voidSteps are the void steps of steps, in their row order.
+func voidSteps(steps []*curveStep) []*curveStep {
+	var out []*curveStep
+	for _, s := range steps {
+		if s.void {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// voidWord is what a void step reads as where another step reads yes or no: the Pass table's
+// cell, and curves.csv's passes column.
+const voidWord = "void"
+
+// passWord is the Pass column of s: void for a step whose generator was starved, else yes or no.
+func passWord(s *curveStep) string {
+	if s.void {
+		return voidWord
+	}
+	return yesNo(s.passes())
 }
 
 func yesNo(b bool) string {
@@ -967,12 +1198,12 @@ func pairTableMD(md *markdown, p [2]*curveStep, cols []curveCol) {
 		for _, c := range cols {
 			cells = append(cells, c.cell(s))
 		}
-		md.row(append(cells, yesNo(s.passes()))...)
+		md.row(append(cells, passWord(s))...)
 	}
 }
 
-// renderKnees is KNEES.md: the series' failed rows, which no knee can be, then each knee's
-// tripped criteria, bracket, measured limit and evidence.
+// renderKnees is KNEES.md: the series' failed and void rows, which no knee can be, then each
+// knee's tripped criteria, bracket, measured limit and evidence.
 func renderKnees(series []*curveStep, knees []knee) string {
 	var md markdown
 	md.line("# Knees\n")
@@ -989,6 +1220,13 @@ func renderKnees(series []*curveStep, knees []knee) string {
 		md.line("")
 		for _, s := range failed {
 			md.line("- %sx (step %s): not judged %s.", fmtFloat(s.factor), s.name, failedMark(s.failedKinds))
+		}
+	}
+	if voids := voidSteps(series); len(voids) > 0 {
+		md.line("")
+		for _, s := range voids {
+			md.line("- %sx (step %s): %s (%s): its own generator was starved, so the step measures the generator and not Dispatch. It is neither a pass nor a failure and ends no bracket; re-run it from a larger generator.",
+				fmtFloat(s.factor), s.name, voidWord, s.voidReason())
 		}
 	}
 	if len(knees) == 0 {
@@ -1052,6 +1290,17 @@ func kneeLimit(k knee, c int) string {
 		return fmt.Sprintf("cores mean at %s: %s.", f.name, strings.Join(roles, "; "))
 	case critPool:
 		return "requests/s sent: " + both(colSent, "") + "; pool acquire waiters p50 at " + f.name + ": " + colPoolP50.cell(f) + "."
+	case critLost:
+		var classes []string
+		for _, name := range f.lostClasses {
+			d := f.sum.Events.ByClass[name]
+			classes = append(classes, fmt.Sprintf("%s lost %s of the %s receipts it was owed, %s of them on the boundary of a session's life",
+				name, num(float64(d.Lost), 0), num(float64(d.Expected), 0), num(float64(d.Boundary), 0)))
+		}
+		return fmt.Sprintf("notifications lost at %s: %s.", f.name, strings.Join(classes, "; "))
+	case critCloudSQLCPU:
+		return fmt.Sprintf("the Cloud SQL instance's cores mean at %s: %s of its %s vCPUs.", f.name,
+			num(f.cloudsql.CoresMean, 2), num(f.cloudsql.LimitCores, 2))
 	}
 	// (f) at a knee is a step that is not failed and holds no cgroup.json: a failed step is no
 	// knee (findKnees).

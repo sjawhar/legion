@@ -420,6 +420,30 @@ func TestLoopSummaryConfigNamesItsSeed(t *testing.T) {
 	}
 }
 
+// TestLoopSummaryConfigRecordsItsFactorAndItsGenerator: a step given -loop-factor and
+// -generator-role records both, so loadgen curves draws the step at the factor of its grid it
+// stood at and can tell whether its own generator was starved; a step given neither carries
+// neither key, and the curves read it by its rates as they always have.
+func TestLoopSummaryConfigRecordsItsFactorAndItsGenerator(t *testing.T) {
+	b, err := json.Marshal(summaryConfig{LoopFactor: 6, GeneratorRole: "vm-gen1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"loop_factor":6`) || !strings.Contains(string(b), `"generator_role":"vm-gen1"`) {
+		t.Fatalf("summary.json's config does not say which factor the step stood at, or which machine sent its load:\n%s", b)
+	}
+	plain, err := json.Marshal(summaryConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "loop_factor") || strings.Contains(string(plain), "generator_role") {
+		t.Fatalf("a step given neither flag records one:\n%s", plain)
+	}
+	if got := configFactor(summaryConfig{LoopFactor: 6, RequestsPerS: 60}); got != 6 {
+		t.Fatalf("the curves read the recorded step at factor %v, want 6", got)
+	}
+}
+
 // TestMetaRecordsTheLoopListenersWithoutCredentials: -loop-listeners is a list of listener URLs,
 // and meta.json records every element of it without its userinfo, as it records the endpoint
 // flags (TestAForeignRunsMetaHoldsNoTokenOrPassword).

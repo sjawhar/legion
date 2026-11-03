@@ -56,16 +56,22 @@ type runConfig struct {
 	loopListeners   []string
 	driverTopics    int
 	receiptDeadline time.Duration
-	sessions        int
-	events          float64
-	requests        float64
-	warmup          time.Duration
-	duration        time.Duration
-	grace           time.Duration
-	mix             eventMix
-	routes          routeMix
-	human           float64
-	live            int
+	// loopFactor is -loop-factor, the load factor of its series' grid that the step stands at,
+	// and generatorRole -generator-role, the cgroup.json role of the machine this generator runs
+	// on. Both are recorded in summary.json for loadgen curves to judge the step by
+	// (configFactor, markVoid); loopFactor is 0 and generatorRole empty without the flags.
+	loopFactor    float64
+	generatorRole string
+	sessions      int
+	events        float64
+	requests      float64
+	warmup        time.Duration
+	duration      time.Duration
+	grace         time.Duration
+	mix           eventMix
+	routes        routeMix
+	human         float64
+	live          int
 	// dashboard is the dashboard stream the build under test serves, probed once before the
 	// window (probeDashboard): dashboardLive or dashboardSSE.
 	dashboard string
@@ -130,6 +136,8 @@ func runLoad(args []string) error {
 	loopListeners := fs.String("loop-listeners", "", "the listener endpoints the loop's sessions register on, comma separated: the unit sessions round-robin over all but the last, and the driver session takes the last")
 	driverTopics := fs.Int("driver-topics", 614, "issue topics the driver session follows: every proposal the loop's driver is live on first, then the others by the size of their part documents")
 	receiptDeadline := fs.Duration("receipt-deadline", time.Second, "the deadline a receipt is expected by, from the write's commit: a session whose unsubscribe was acknowledged inside it is counted on the boundary, not lost (the pass rule judges delivery p99 from arrival at 1,000 ms)")
+	loopFactor := fs.Float64("loop-factor", 0, "the load factor of its series' grid that this step stands at, recorded in summary.json as config.loop_factor: loadgen curves draws the step's curve at it (0 leaves the factor to the step's own rates, requests/s ÷ 60 or events/s ÷ 4, which is the cluster series' baseline)")
+	generatorRole := fs.String("generator-role", "", "the cgroup.json role of the machine that runs this generator (vm-<host>, as loadgen vm-sample names a VM's own series), recorded in summary.json as config.generator_role: loadgen curves voids a step whose generator was starved, and the application VMs report a vm- role too, so no name can be guessed")
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
@@ -181,6 +189,8 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-loop-seed applies only to -source %s: a replay sends the bundle's own writes", sourceRequests)
 	case *loopSeedPath != "" && *seedPath != "":
 		return fmt.Errorf("-seed applies only without -loop-seed: a loop step's issues are the loop seed's proposals, and seed.json is not read")
+	case *loopFactor < 0 || !finite(*loopFactor):
+		return fmt.Errorf("-loop-factor must be 0 or more")
 	case !replay && *sessions < 1:
 		return fmt.Errorf("-sessions is required and must be at least 1")
 	case *human < 0 || *human > 1 || !finite(*human):
@@ -271,6 +281,7 @@ func runLoad(args []string) error {
 		loopSeedPath: *loopSeedPath, loop: loop,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
+		loopFactor: *loopFactor, generatorRole: *generatorRole,
 		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, sessionDelivery: *delivery,
 		unitStarts: *unitStarts, unitLife: *unitLife, loopListeners: loopEndpoints,
 		driverTopics: *driverTopics, receiptDeadline: *receiptDeadline,
@@ -369,14 +380,21 @@ type summaryConfig struct {
 	// LoopSeed is the -loop-seed file the step's proposals and their records came from, and
 	// LoopPlanID the plan those records were written from (loopPlanID): a step's summary says
 	// which seed it ran against. Both are absent without the flag.
-	LoopSeed   string  `json:"loop_seed,omitempty"`
-	LoopPlanID string  `json:"loop_plan_id,omitempty"`
-	Human      float64 `json:"human"`
-	WarmupS    float64 `json:"warmup_s"`
-	DurationS  float64 `json:"duration_s"`
-	GraceS     float64 `json:"grace_s"`
-	RNGSeed    uint64  `json:"rng_seed"`
-	NATSConns  int     `json:"nats_conns"`
+	LoopSeed   string `json:"loop_seed,omitempty"`
+	LoopPlanID string `json:"loop_plan_id,omitempty"`
+	// LoopFactor is -loop-factor, the load factor of its series' grid this step stands at: the
+	// curves draw the step at it rather than at its rates over the cluster series' baseline
+	// (configFactor). GeneratorRole is -generator-role, the cgroup.json role of the machine that
+	// ran this generator, which the curves void a starved step by (markVoid). Both are absent
+	// without their flag, where the curves read the step as they always have.
+	LoopFactor    float64 `json:"loop_factor,omitempty"`
+	GeneratorRole string  `json:"generator_role,omitempty"`
+	Human         float64 `json:"human"`
+	WarmupS       float64 `json:"warmup_s"`
+	DurationS     float64 `json:"duration_s"`
+	GraceS        float64 `json:"grace_s"`
+	RNGSeed       uint64  `json:"rng_seed"`
+	NATSConns     int     `json:"nats_conns"`
 	// SessionDelivery is the delivery the sessions asked for (-session-delivery): core or
 	// consumer. sessions.delivery says how many got consumer delivery.
 	SessionDelivery string `json:"session_delivery"`
@@ -895,6 +913,7 @@ func (st *step) buildSummary(ns *natsSessions, lp *loopSessions, reg *registrar,
 			Dashboard: cfg.dashboard,
 			EventMix:  cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			LoopSeed: cfg.loopSeedPath, LoopPlanID: cfg.loopPlanID(),
+			LoopFactor: cfg.loopFactor, GeneratorRole: cfg.generatorRole,
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
 			SessionDelivery: cfg.sessionDelivery, MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
 		},
