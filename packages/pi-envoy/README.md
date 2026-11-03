@@ -621,11 +621,10 @@ by its own model. An earlier release did not review such a session at all (outco
 **When a write posts unreviewed.** Each of these lets the write out, records an `advisor-gate`
 entry with its outcome, and hands the agent a note that says the write went out unreviewed and
 why. The note reaches a headless session too. For `timeout`, `error`, `no-verdict` and `halted`,
-the session is also told once per cause, until it changes, apart from the call's result: a
-displayed message that starts no turn, an aside while a run goes on and a follow-up on an idle
-host (a UI notice on a host without either), and one line in the host's plain log. A run that
-settles between AskGate's read of the host's state and the host's delivery of the aside can start
-a turn for it:
+the session is also told once per cause, until it changes, apart from the call's result: one line
+in the host's plain log, a UI notice in a session with a UI, and, on an idle host (a background
+eval cell's call that ends after its run), a displayed follow-up message that starts no turn. A
+busy host gets no message, since an aside that the host takes as its run ends starts a turn:
 
 | Outcome | What happened |
 | --- | --- |

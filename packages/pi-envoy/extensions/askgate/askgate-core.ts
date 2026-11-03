@@ -160,7 +160,8 @@
 //     chain erroring, no parsable answer) stop the gate for the session. The halt, the count, the
 //     breaker and the rebuttals reset on session_switch and session_branch. A write that goes out
 //     with no verdict tells the agent so on its own result, and the session is told once per
-//     cause besides, as a displayed message and a line in the host's log (`tellSession`).
+//     cause besides: a line in the host's log, a UI notice, and on an idle host a displayed
+//     follow-up message (`tellSession`).
 //   - breaker: two refusals of one thing on one target (the device plus its issue/ask/artifact/
 //     project values) send the third attempt at it unasked, and say so; the second refusal
 //     already warns that it will. A thing is each new ask a call opens, or the call as a whole
@@ -647,7 +648,7 @@ export interface Pi {
   /** The host's message into the session; a host without it gets a UI notice instead. */
   sendMessage?(
     message: { customType: string; content: string; display: boolean },
-    options: { deliverAs: "aside" | "followUp"; triggerTurn: boolean }
+    options: { deliverAs: "followUp"; triggerTurn: boolean }
   ): void;
 }
 export type ToolCallEvent = { toolName: string; toolCallId: string; input: Input };
@@ -2780,14 +2781,13 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
      * Tells the session, once per cause until the session changes, that a write of it went out
      * with no review: the call's own result says so too, but an agent reads a result for what the
      * call did, and a person watching the session reads no result at all. Called only for a write
-     * that runs. The notice is a displayed message that starts no turn (`sendMessage`), or a UI
-     * notice on a host without it, and one line in the host's plain log (`runtimeLogger`), which a
-     * headless session's reader has. While a run goes on it is an aside, which the host folds in at
-     * the run's next step; on an idle host (a background eval cell's call that ends after its run)
-     * it is a follow-up, which the host appends with no turn, since an idle host starts a turn for
-     * an aside whatever `triggerTurn` says. Limit: a run that settles between the read of
-     * `isIdle` and the host's delivery of the aside can start a turn for it. Best effort: a notice
-     * that fails changes no decision.
+     * that runs. The notice is one line in the host's plain log (`runtimeLogger`), which a
+     * headless session's reader has, and a UI notice where the session has a UI. On an idle host
+     * (a background eval cell's call that ends after its run) it is also a displayed follow-up
+     * message (`sendMessage`), which the host appends with no turn. A busy host gets no message:
+     * an aside it is handed while a run goes on starts a turn when the run ends before the host
+     * delivers it, whatever `triggerTurn` says, and the agent of a running turn reads the call's
+     * own result. Best effort: a notice that fails changes no decision.
      */
     const tellSession = (ctx: GateCtx, outcome: GateEntry["outcome"]) => {
       const cause = UNREVIEWED_CAUSE[outcome];
@@ -2799,12 +2799,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           : `AskGate did not review a write of this session: ${cause}, and the write went out unreviewed. AskGate reviews each later write again; one that also goes out unreviewed for this cause says so on its own result.`;
       try {
         deps.runtimeLogger.warn(notice);
-        if (pi.sendMessage !== undefined)
+        if (ctx.hasUI) ctx.ui.notify(notice, "warning");
+        if (pi.sendMessage !== undefined && ctx.isIdle?.() === true)
           pi.sendMessage(
             { customType: ASKGATE_NOTICE_TYPE, content: notice, display: true },
-            { deliverAs: ctx.isIdle?.() === true ? "followUp" : "aside", triggerTurn: false }
+            { deliverAs: "followUp", triggerTurn: false }
           );
-        else if (ctx.hasUI) ctx.ui.notify(notice, "warning");
       } catch {
         // The log line or the call's own note is the record.
       }

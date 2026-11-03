@@ -1311,10 +1311,9 @@ describe("a write that passes unreviewed is recorded and said", () => {
     expect(context).toContain("AskGate is paused for this session");
     expect(context).toContain("The call ran unreviewed.");
   });
-  test("the session is told once per cause besides each result: a displayed aside and a log line", async () => {
+  test("the session is told once per cause besides each result: a log line and a UI notice, and no message to a busy host", async () => {
     const answers = [untilAborted, untilAborted, async () => ({ text: "", error: "500" })];
     const g = bind({
-      hasUI: false,
       sendMessage: true,
       idle: false,
       env: { OMP_ASKGATE_TIMEOUT_MS: "20" },
@@ -1326,27 +1325,28 @@ describe("a write that passes unreviewed is recorded and said", () => {
     }
     expect(g.entries.map((e) => e.outcome)).toEqual(["timeout", "timeout", "error", "halted"]);
     // Three causes: the second timeout says so on its own result alone, and the halt the third
-    // failure reached is told with the first write it lets out.
-    expect(g.sent.map((s) => s.options)).toEqual(
-      Array(3).fill({ deliverAs: "aside", triggerTurn: false })
-    );
-    expect(g.sent.map((s) => [s.message.customType, s.message.display])).toEqual(
-      Array(3).fill([ASKGATE_NOTICE_TYPE, true])
-    );
-    expect(g.sent[0].message.content).toContain("the review did not answer within its deadline");
-    expect(g.sent[1].message.content).toContain("the review failed");
-    expect(g.sent[2].message.content).toContain("AskGate is paused for this session");
-    expect(g.runtimeWarnings).toEqual(g.sent.map((s) => s.message.content));
-    expect(g.notices).toEqual([]);
+    // failure reached is told with the first write it lets out. A busy host is sent no message,
+    // since an aside it took as its run ended would start a turn.
+    expect(g.notices).toHaveLength(3);
+    expect(g.notices[0]).toContain("the review did not answer within its deadline");
+    expect(g.notices[1]).toContain("the review failed");
+    expect(g.notices[2]).toContain("AskGate is paused for this session");
+    expect(g.runtimeWarnings).toEqual(g.notices);
+    expect(g.sent).toEqual([]);
   });
-  test("on an idle host the notice is a follow-up, which starts no turn where an aside would", async () => {
+  test("on an idle host the notice is also a displayed follow-up, which starts no turn", async () => {
     const g = bind({
+      hasUI: false,
       sendMessage: true,
       idle: true,
       complete: async () => ({ text: "", error: "500" }),
     });
     await g.device("a", "dispatch_comment", COMMENT);
-    expect(g.sent.map((s) => s.options)).toEqual([{ deliverAs: "followUp", triggerTurn: false }]);
+    expect(g.sent.map((s) => [s.message.customType, s.message.display, s.options])).toEqual([
+      [ASKGATE_NOTICE_TYPE, true, { deliverAs: "followUp", triggerTurn: false }],
+    ]);
+    expect(g.sent[0].message.content).toContain("the review failed");
+    expect(g.runtimeWarnings).toEqual([g.sent[0].message.content]);
   });
   test("a halt reached by a refused call is told only with the first write it lets out", async () => {
     const g = bind({
@@ -1357,12 +1357,13 @@ describe("a write that passes unreviewed is recorded and said", () => {
     });
     for (const id of ["a", "b", "c"])
       expect((await g.device(id, "dispatch_comment", COMMENT))?.block).toBe(true);
-    expect(g.sent).toEqual([]);
+    expect(g.notices).toEqual([]);
   });
   test("a session switch tells the cause again; a reviewed, refused or rebutted write tells nothing", async () => {
     const answers = [untilAborted, async () => ({ text: REVISE }), async () => ({ text: ALLOW })];
     const g = bind({
       sendMessage: true,
+      idle: true,
       env: { OMP_ASKGATE_TIMEOUT_MS: "20", OMP_ASKGATE: "block" },
       complete: (req) => (answers.shift() ?? untilAborted)(req),
     });
