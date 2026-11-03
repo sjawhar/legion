@@ -9,11 +9,12 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
-// A stored log whose later row does not decode is refused naming the decoder's reason once, as every
-// other decode of stored state refuses it (decodeStoredState): the fold a room's load, a cold read
-// and a compaction make of a document's rows reports such a row as an invalid update. The
-// compaction and the load log that refusal (recordUnfoldable, "serving them merged"), so the error
-// must be the line an operator can act on.
+// A stored log whose later row does not decode is refused naming the decoder's refusal once, as
+// every other decode of stored state refuses it (decodeStoredState): the fold a room's load, a cold
+// read and a compaction make of a document's rows reports such a row as an invalid update carrying
+// ygo's own refusal of it, whatever reason ygo gives, stated once. The compaction and the load log
+// that refusal (recordUnfoldable, "serving them merged"), so the error must be the line an
+// operator can act on.
 func TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce(t *testing.T) {
 	writer := newProofHistory(t, 101)
 	first := writer.write("A first paragraph.\n")
@@ -23,7 +24,8 @@ func TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(doc, first, nil); err != nil {
 		t.Fatalf("apply the first row: %v", err)
 	}
-	if err := crdt.ApplyUpdateV1(doc, cut, nil); err == nil {
+	refused := crdt.ApplyUpdateV1(doc, cut, nil)
+	if refused == nil {
 		t.Fatal("the cut second row decoded, so nothing here is tested")
 	}
 
@@ -34,8 +36,8 @@ func TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce(t *testing.T) {
 	if misread == nil {
 		t.Fatal("the fold of a log whose second row does not decode reported no misread")
 	}
-	const reason = "crdt: invalid update"
-	if !strings.HasSuffix(misread.Error(), ": "+reason) || !errors.Is(misread, crdt.ErrInvalidUpdate) {
-		t.Fatalf("the fold's refusal = %q, want an invalid update ending %q", misread, reason)
+	want := errUnfoldable.Error() + ": " + refused.Error()
+	if misread.Error() != want || strings.Count(misread.Error(), crdt.ErrInvalidUpdate.Error()) != 1 || !errors.Is(misread, crdt.ErrInvalidUpdate) {
+		t.Fatalf("the fold's refusal = %q, want %q, an invalid update stated once", misread, want)
 	}
 }
