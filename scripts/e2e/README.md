@@ -3072,7 +3072,7 @@ Each item below names a check, then what it holds.
 
 - `agent-token-refused`
 
-  `POST /api/v1/agents/<id>/messages` with the body `/model <the other model>` and the session's Dispatch bearer gets 403 `HUMAN_ONLY`.
+  `POST /api/v1/agents/<id>/messages` with the body `/model <the other model>` and the session's Dispatch bearer gets 403 `OAUTH_SCOPE_REQUIRED`: that bearer holds no `person` scope.
   Dispatch stores nothing new, and the session is unchanged
 
 - `other-session-unchanged`

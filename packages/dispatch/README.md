@@ -9,7 +9,7 @@ suggestions, artifacts, and durable event history. The Go server in
 
 `AuthGate` requests `GET /auth/whoami` and sends unauthenticated visitors to the
 Google sign-in flow. All application requests are same-origin. React Router serves
-the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
+the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the
 repository-to-project settings page at `/settings`; TanStack Query and the live socket's events
 feed keep the issue, Inbox, documents, and sidebar current.
 
@@ -243,11 +243,11 @@ failure prints `FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
     `PASS: R12 component: this server has no architecture source, so it holds no component node`;
     a source present is a `FAIL` naming `COMPONENT_SOURCE=existing`.
 - `DEV_SIGNIN_LOGIN`, optional, a login the server's dev sign-in route (`/auth/_dev/signin`) signs
-  in: `bun run dispatch:local` has the route, a deployed server does not. Editing a comment is a
-  person's write, by its author alone, so the A13 and A15 comment sections sign that person in with a
+  in: `bun run dispatch:local` has the route, a deployed server does not. Editing a comment needs
+  the `person` scope, and is its author's alone, so the A13 and A15 comment sections sign that person in with a
   cookie jar, write the comments that person edits, and send each edit with the dashboard's origin.
   Unset, each of those two sections prints one
-  `SKIP: … PATCH /api/v1/comments/{id} is human-only and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; …`
+  `SKIP: … PATCH /api/v1/comments/{id} needs the person scope, which this bearer does not hold, and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; …`
   line, and every other section runs.
 
 It writes two issues in `PROJECT`: the first holds the spec, comments, messages and the documents

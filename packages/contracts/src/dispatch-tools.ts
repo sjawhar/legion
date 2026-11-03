@@ -863,7 +863,8 @@ export const dispatchToolSpecs = [
     description:
       "Resolve a review comment thread once it has been addressed - typically your own comment " +
       "after the document was fixed. Any session or human may resolve any open comment on an " +
-      "open issue or project document; reopening a resolved comment is human-only (the dashboard). " +
+      "open issue or project document. To reopen a resolved comment, the credential must hold " +
+      "the person scope: a browser sign-in, or a personal token that holds it. " +
       "Not for asks: use dispatch resolve-ask.",
     arguments: (z) => ({
       comment: z

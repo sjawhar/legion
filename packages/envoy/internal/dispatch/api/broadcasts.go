@@ -37,7 +37,7 @@ import (
 // the same capability list, and the response covers the race where a session's capabilities
 // or liveness changed in between. What persists is who was actually sent to.
 //
-// Broadcasting is human-only, like the one-session route it is built from.
+// Broadcasting needs the person scope (routeScopes), like the one-session route it is built from.
 
 // broadcastDeliveryWorkers is how many recipients are delivered to at once, once the create
 // request has already answered. Each worker takes a tracking context of its own

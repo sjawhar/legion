@@ -95,7 +95,7 @@ type Actor struct {
 // compares a stored actor with the caller's using == — a comment's author against the caller
 // editing it, a room's connected writers against the one that edited — and a stored actor was
 // decoded from JSON, which carries no credential, so an actor a handler records or compares
-// must carry none either. actorFrom and requireHuman, the two helpers that hand a handler its
+// must carry none either. actorFrom and requireScope, the two helpers that hand a handler its
 // actor, are where the request's credential stops.
 func (a Actor) Recorded() Actor {
 	a.Credential = nil
