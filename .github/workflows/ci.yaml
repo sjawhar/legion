@@ -1783,8 +1783,9 @@ jobs:
       # launcher that wires it, whose accept loop, copy pairs, pair tracking and bounded drain share
       # state across goroutines. The detector needs cgo, which the runners have gcc for. The lane
       # tests hold a fake clock, so they are deterministic under it.
+      # main's internal/daemon took 340-461 s here under -race (Nov 2026), too near go test's 10 m default.
       - name: Test the concurrent packages under the race detector
-        run: go test -count=1 -race ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
+        run: go test -count=1 -race -timeout 20m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
 
       - name: Stage 1 live proof

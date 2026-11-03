@@ -27,10 +27,8 @@ import (
 // (https://github.com/sjawhar/legion/pull/2163#issuecomment-6542200410), which the oracle now
 // accepts once and only after such a failed write (keptRun.tell, afterFailedWrite). They run at
 // 300 steps because that is where each reaches it; 262 and 41 reach it only on some schedules of
-// their rows. Three of the eleven, 96, 414 and 432, are not listed here: they run at the same 300
-// steps and checks in TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild, and a
-// second identical run of each would only add to the package's time.
-var keptLongRegressionSeeds = []int64{11, 41, 48, 69, 73, 125, 262, 311, 363, 365, 366, 367, 388, 427, 459, 475, 479, 701}
+// their rows.
+var keptLongRegressionSeeds = []int64{11, 41, 48, 69, 73, 96, 125, 262, 311, 363, 365, 366, 367, 388, 414, 427, 432, 459, 475, 479, 701}
 
 // keptShortRegressionSeeds are the seeds whose runs at the default length found faults earlier in
 // this work — a decision told twice, one told to an architect owed nothing, one left kept at

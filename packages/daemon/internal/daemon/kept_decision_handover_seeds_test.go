@@ -9,14 +9,16 @@ import (
 // unsent when the old root's linger hands the child over, belongs to the child's new tree: the
 // hand-over must give it to the child's architect, not leave it in the old architect's task, which
 // is sent to the old tree's next run after the child has left. These seeds of the kept-decision
-// property model, at 300 steps, each reach that state: the hand-over moves only what is still
-// kept, the old root's held start task (row 5, 10, ...) is prompted to the old tree's architect
-// after the hand-over, and the child's architect is told the decision 0 times.
+// property model, at 300 steps, each reach a hand-over between a held task's queue and the
+// confirmation that tells what it holds (keptCounts.handedBeforeConfirm), on every schedule seen:
+// 13, 20 and 24 reached it once each in three runs of three. Seeds 96, 414 and 432, which found
+// the fault this test was written for, never reach it at this code; they run in
+// keptLongRegressionSeeds.
 func TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild(t *testing.T) {
 	t.Parallel()
 	// Each seed's run has a database, runtime and state directory of its own (newKeptRun), so the
 	// seeds run in parallel, with each other and with the other kept-decision seed tests.
-	for _, seed := range []int64{96, 414, 432} {
+	for _, seed := range []int64{13, 20, 24} {
 		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
 			t.Parallel()
 			run := newKeptRun(t, seed, 300)
