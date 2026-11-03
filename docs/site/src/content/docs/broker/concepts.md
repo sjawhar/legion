@@ -105,15 +105,19 @@ broker was serving. A renewal with another pod's or service account's token is s
 `POD_IDENTITY_MISMATCH`. A gap of three sweeps is given back to nobody, so a lease has to
 outlive one and then the retries its renewer takes to renew once a broker serves again. The
 broker refuses to start on a `BROKER_LEASE_SECONDS` too short for its `BROKER_SWEEP_SECONDS`,
-and names the shortest lease that is long enough: 91 seconds at a sweep of 1 or 5 seconds, 97
-at a sweep of 10, 203 at 30 and 351 at 60.
+and names the shortest lease that is long enough: 91 seconds at a sweep of 1 or 5 seconds, 105
+at a sweep of 10, 225 at 30 and 360 at 60.
 It walks both renewers' own retry schedules
-(`packages/envoy/internal/broker/leasetime`), counting a renewal the outage holds to its
-30-second client timeout rather than refusing at once, which is what makes one renewal near the
-end of the gap the costly one.
+(`packages/envoy/internal/broker/leasetime`), counting each renewal the outage refuses as
+failing at whatever instant costs the renewer most: anywhere from at once, when the connection
+is refused, to the 30-second client timeout, when nothing behind a front door ever answers,
+with a proxy that gives up or a terminating pod that resets ending one between the two.
+Each renewer waits from the instant its failure comes back, so that instant is what decides
+where its next renewal falls.
 Which renewer sets the floor changes with the sweep: `agent-secrets-helper` waits at least 30
 seconds after any failed renewal, which costs it at short sweeps, while `agent-secrets renew`
-retries every 2 to 10 seconds, which puts one of its renewals nearer the end of a long gap.
+retries every 2 to 10 seconds, which lets it spend more of a long gap and still have a renewal
+left to lose at the end of it.
 The default lease
 of 900 seconds passes at every sweep the broker takes.
 A deployment whose `BROKER_LEASE_SECONDS` is below its sweep's floor has to raise it before it

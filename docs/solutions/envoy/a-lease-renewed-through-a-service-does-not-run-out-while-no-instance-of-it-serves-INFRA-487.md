@@ -63,6 +63,7 @@ related_issues:
   9*BROKER_SWEEP_SECONDS` counted the gap and not the retries a renewer takes after it.
   `config.Load` now walks each renewer's own retry schedule
   (`packages/envoy/internal/broker/leasetime`) and refuses a lease that cannot outlive the gap
-  plus those retries, counting one renewal the outage holds to its 30-second client timeout, and
-  naming the shortest lease that survives both renewers at that sweep: 91 s at a 1 s or a 5 s
-  sweep, 97 s at 10, 203 s at 30 and 351 s at 60.
+  plus those retries, counting each renewal the outage refuses as failing at whatever instant
+  costs the renewer most, up to the 30-second client timeout, and naming the shortest lease
+  that survives both renewers at that sweep: 91 s at a 1 s or a 5 s sweep, 105 s at 10, 225 s
+  at 30 and 360 s at 60.

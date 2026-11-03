@@ -712,10 +712,10 @@ four.
 **Before you roll a broker, read the lease refusal.** A broker whose `BROKER_LEASE_SECONDS` is
 too short for its `BROKER_SWEEP_SECONDS` exits at boot instead of serving, and that rule is
 stricter than it was: it walks each renewer's own retry schedule rather than counting two thirds
-of the lease, so the shortest lease it accepts is 91 s at a sweep of 1 or 5 seconds, 97 s at 10,
-203 s at 30 and 351 s at 60.
+of the lease, so the shortest lease it accepts is 91 s at a sweep of 1 or 5 seconds, 105 s at
+10, 225 s at 30 and 360 s at 60.
 A pair below that boots a broker of an earlier release and does not boot this one — a 60-second
-lease at the default sweep, or anything from 271 s to 350 s at a sixty-second sweep — so raise
+lease at the default sweep, or anything from 271 s to 359 s at a sixty-second sweep — so raise
 `BROKER_LEASE_SECONDS` to at least the figure for your sweep and roll that first.
 The refusal prints the figure itself
 ([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)).
