@@ -29,6 +29,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -651,6 +652,27 @@ func (r *Runtime) storedPod(name string) *corev1.Pod {
 		return nil
 	}
 	return obj.(*corev1.Pod)
+}
+
+// PodAt is the uid of the project's pod whose address is addr, as the synced store holds it, and
+// false for an address no running pod of the project holds: the operator's machine, the daemon
+// itself. A pod's traffic to the daemon's Service keeps the pod's own address, so this is the pod
+// a request from addr came from (api's Options.CallerPod). A pod that has run to its end is passed
+// over, since the address it last held may already be a new pod's.
+func (r *Runtime) PodAt(addr netip.Addr) (string, bool) {
+	for _, obj := range r.pods.GetStore().List() {
+		pod, ok := obj.(*corev1.Pod)
+		if !ok || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		held := append([]corev1.PodIP{{IP: pod.Status.PodIP}}, pod.Status.PodIPs...)
+		for _, ip := range held {
+			if parsed, err := netip.ParseAddr(ip.IP); err == nil && parsed.Unmap() == addr.Unmap() {
+				return string(pod.UID), true
+			}
+		}
+	}
+	return "", false
 }
 
 // ownedBy reports whether p is controller-owned by the Sandbox with uid: the one relationship
