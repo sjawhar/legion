@@ -73,8 +73,12 @@ missing proof goes back as step 1 says. The Dispatch message (step 6) is for a f
    `[actions skip]`), which start no workflow: a base that requires a check will not merge a head
    whose checks never ran.
 6. **Post one Dispatch message on the issue**, the record of the retro that the architect reads.
-   No `gh issue` write: Legion issues live on Dispatch. The body is at most 32,000 characters,
-   Dispatch's message limit, and ends with your attribution footer:
+   No `gh issue` write: Legion issues live on Dispatch.
+   The body is at most 32,000 characters, Dispatch's message limit,
+   and carries no `<!-- legion: … -->` footer:
+   Dispatch records the session that sent the message,
+   and the footer is for a pull-request comment or review, which the daemon reads it from
+   (`skill://legion-worker`).
 
    ```bash
    dispatch message --issue '<KEY>' --body-file - <<'EOF'
@@ -90,8 +94,6 @@ missing proof goes back as step 1 says. The Dispatch message (step 6) is for a f
    **Production check:** <the command or user action that will show the change working in production>
    **Carried by:** <the deploy or restart that carries the merge there>
    **Run by:** <the agent or role your system prompt's deployment instructions name; when none, the person to ask>
-
-   <!-- legion: {"session":"<session-id>","phase":"retro"} -->
    EOF
    ```
 

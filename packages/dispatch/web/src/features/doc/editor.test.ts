@@ -83,3 +83,31 @@ test("bindRemoteMarks keeps an accepted suggestion's text when its projection ar
     root.remove();
   }
 });
+
+// A document is not a body: INFRA-341's raw-HTML policy is a parse option its body renderers
+// pass and the document path does not, so an HTML comment in a document is a node of it and is
+// written back exactly as its author typed it. A document that lost one on every save would lose
+// what it holds for a reader who never sees it.
+test("a document keeps an inline HTML comment byte for byte when another block is edited", async () => {
+  const root = document.body.appendChild(document.createElement("div"));
+  const blockSchema = await blockSchemaCache.load(() => Promise.reject(new Error("no schema")));
+  const handle = await createEditor(root, {
+    awareness: null,
+    blockSchema,
+    user: { color: "#f59e0b", name: "alice" },
+    ydoc: new Y.Doc(),
+  });
+  try {
+    handle.setMarkdown("Held <!-- legion: keep me --> here.\n\nThe second block.\n");
+    const { state } = handle.view;
+    // The edit is elsewhere: the last word of the other block.
+    handle.view.dispatch(state.tr.insertText(" today", state.doc.content.size - 2));
+
+    expect(handle.getMarkdown()).toBe(
+      "Held <!-- legion: keep me --> here.\n\nThe second block today.\n"
+    );
+  } finally {
+    handle.destroy();
+    root.remove();
+  }
+});

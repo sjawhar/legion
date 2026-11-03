@@ -247,6 +247,25 @@ test("a headline writes a reference as its short form, keeps one in code as writ
   }
 });
 
+// A title or tooltip made from a body is that body projected to one line, so it reads the raw
+// HTML in one as the body does (INFRA-341 R5): the `<!-- legion: … -->` footer an agent appends
+// draws as nothing, where the whole headline used to read as the body's own source.
+test("a headline of a body holding the Legion footer reads its words with no comment in them", async () => {
+  const footer = '<!-- legion: {"session":"01HQ8F3K2M4N5P6Q7R8S9T0V","phase":"retro"} -->';
+  const view = render(<Headline markdown={`**Retro** complete.\n\n${footer}`} max={60} />);
+  try {
+    const headline = await waitFor(() => {
+      const output = view.container.querySelector("output");
+      expect(output).not.toBeNull();
+      return output as HTMLElement;
+    });
+    expect(headline.textContent).toBe("Retro complete.");
+    expect(headline.getAttribute("data-cut")).toBe("false");
+  } finally {
+    view.unmount();
+  }
+});
+
 test("an ask's unfurl card shows its question once, even when the question ends in an ellipsis", async () => {
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead("Should we wait for **CORE-2**…"));
   const view = render(

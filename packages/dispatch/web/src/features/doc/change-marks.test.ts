@@ -169,3 +169,20 @@ test("a baseline the engine refuses marks nothing", () => {
     widgets: [],
   });
 });
+
+// INFRA-341's raw-HTML policy is a parse option the body renderers pass; the version column
+// passes none, so a document's own baseline is parsed as it always was, with an HTML comment a
+// node of it, as it is a node of the document the editor holds. An unchanged version holding one
+// is therefore drawn with no marks at all.
+test("an unchanged version holding an inline HTML comment keeps it in the baseline and marks nothing", () => {
+  const markdown = "# Plan\n\nHeld <!-- legion: keep me --> here.\n";
+  const baseline = render(markdown);
+  const comments: string[] = [];
+  baseline.descendants((node) => {
+    if (node.type.name === "html") comments.push(String(node.attrs.value ?? ""));
+    return true;
+  });
+
+  expect(comments).toEqual(["<!-- legion: keep me -->"]);
+  expect(changeMarksAgainst(markdown, baseline)).toEqual({ text: [], widgets: [] });
+});

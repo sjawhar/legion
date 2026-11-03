@@ -1,4 +1,4 @@
-import type { HeadlessProofEditor, SoftBreaks } from "@legion/proof-editor/headless";
+import type { HeadlessProofEditor, RawHtml, SoftBreaks } from "@legion/proof-editor/headless";
 import { DOMSerializer, type Node as ProseMirrorNode, type Schema } from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
@@ -17,10 +17,18 @@ import {
 } from "./routes";
 import { rememberUpTo, type WorkerJob, WorkerQueue } from "./worker-queue";
 
-/** What a single newline inside a paragraph becomes, chosen per parse: `"space"` (the document
- *  default, hard-wrapped Markdown is one paragraph) or `"line"` (text whose author meant its
- *  lines as lines, a model's streamed turn in the live view). The engine's own type. */
-export type { SoftBreaks };
+/**
+ * The two parse policies, each chosen per parse and each the engine's own type.
+ *
+ * `SoftBreaks` is what a single newline inside a paragraph becomes: `"space"` (the document
+ * default, hard-wrapped Markdown is one paragraph) or `"line"` (text whose author meant its
+ * lines as lines, a model's streamed turn in the live view).
+ *
+ * `RawHtml` is what raw HTML in a source becomes: `"refuse"` (the document default, a line of it
+ * throws and the source is kept as its author wrote it) or `"text"` (a comment, message or reply
+ * body: an HTML comment draws as nothing and any other raw HTML as its literal text).
+ */
+export type { RawHtml, SoftBreaks };
 
 /**
  * The one headless Proof engine every Markdown-bearing surface parses with - `MarkdownBody` for a
@@ -46,10 +54,14 @@ export interface MarkdownEngine {
    * holding a heading), is drawn as its literal fence lines around its formatted content rather
    * than refused or silently dropped, a Pandoc `::: warning` fence or a `::leaf` / `:text{` line
    * reads as paragraph text, and so does a `:::` opener inside 32 open container directives, the
-   * deepest the parser nests them (`directive-container.ts`), so none of them throws. Proof's
-   * schema has no node for CommonMark's raw-HTML spans (a bare tag-shaped substring outside a
-   * code span or fence, e.g. `<img src=x>`) or a mark span of a kind this schema does not carry,
-   * so the parser still throws for them. HTML-like text inside a code span or fence parses
+   * deepest the parser nests them (`directive-container.ts`), so none of them throws. A mark
+   * span of a kind this schema does not carry still throws, and so does a line of raw HTML -
+   * which a bare tag-shaped line such as `<img src=x>` is - under `rawHtml: "refuse"`, the
+   * default a document takes. Under `"text"`, which every body renderer passes, that line draws
+   * as the literal text its author typed, never as HTML, and an HTML comment draws as nothing,
+   * as GitHub draws it. A tag-shaped span among a paragraph's own text throws under neither
+   * policy: it is an inline node of the schema, drawn as the characters it is made of.
+   * HTML-like text inside a code span or fence parses
    * safely as literal text, so nothing is escaped beforehand: escaping the whole source
    * regardless of context would print literal backslashes around any
    * code span or fence containing something tag-shaped. Reference-style links and images
@@ -66,7 +78,7 @@ export interface MarkdownEngine {
    * default: outside a document no server wrote it, so a body's `:::ask{state="answered" …}`
    * reads as the open decision its author wrote, never as an answer nobody recorded.
    */
-  parse(markdown: string, softBreaks?: SoftBreaks): ProseMirrorNode | undefined;
+  parse(markdown: string, softBreaks?: SoftBreaks, rawHtml?: RawHtml): ProseMirrorNode | undefined;
 }
 
 type HeadlessModule = typeof import("@legion/proof-editor/headless");
@@ -74,7 +86,7 @@ type HeadlessModule = typeof import("@legion/proof-editor/headless");
 let headlessModule: Promise<HeadlessModule> | undefined;
 const engines = new Map<number, Promise<MarkdownEngine>>();
 /** The engine the newest resolved load produced: what a body renders with synchronously. The
- *  engine serves every soft-break policy (the policy is a parse argument), and a parse that
+ *  engine serves every pair of parse policies (each is a parse argument), and a parse that
  *  throws no longer evicts it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
 
@@ -127,9 +139,9 @@ function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema): Mark
     blockSchema,
     schema: proof.schema,
     serializer: pictureSerializer(proof.schema),
-    parse(markdown, softBreaks = "space") {
+    parse(markdown, softBreaks = "space", rawHtml = "refuse") {
       try {
-        return proof.parseMarkdown(markdown, softBreaks);
+        return proof.parseMarkdown(markdown, softBreaks, rawHtml);
       } catch {
         return undefined;
       }
@@ -222,9 +234,10 @@ interface SentBody extends WorkerJob {
   /** The engine its answer becomes a document of, and that parses it here if the worker cannot. */
   readonly engine: MarkdownEngine;
   /** Its entry in the answer cache, and its place in the queue: the schema version, the
-   *  soft-break policy and the source. */
+   *  soft-break policy, the raw-HTML policy and the source. */
   readonly key: string;
   readonly markdown: string;
+  readonly rawHtml: RawHtml;
   readonly softBreaks: SoftBreaks;
 }
 
@@ -257,7 +270,7 @@ function documentFromJSON(schema: Schema, json: DocumentJSON): ProseMirrorNode {
 function parseOnThePage(body: SentBody): ParsedAnswer {
   const answer: ParsedAnswer = {
     openMermaidFence: undefined,
-    parsed: body.engine.parse(body.markdown, body.softBreaks),
+    parsed: body.engine.parse(body.markdown, body.softBreaks, body.rawHtml),
   };
   rememberUpTo(answers, ANSWER_LIMIT, body.key, answer);
   return answer;
@@ -334,6 +347,7 @@ const parseQueue = new WorkerQueue<SentBody, ParsedBody, ParsedAnswer>({
     worker.postMessage({
       id,
       markdown: body.markdown,
+      rawHtml: body.rawHtml,
       softBreaks: body.softBreaks,
     } satisfies ParseRequest);
   },
@@ -384,6 +398,7 @@ function renderLoaded(
   engine: MarkdownEngine,
   markdown: string,
   softBreaks: SoftBreaks,
+  rawHtml: RawHtml,
   render: (rendering: MarkdownRendering) => void,
   { keepAPostedParse = false }: RenderWithEngineOptions
 ): () => void {
@@ -391,15 +406,16 @@ function renderLoaded(
     render({
       engine,
       openMermaidFence: undefined,
-      parsed: engine.parse(markdown, softBreaks),
+      parsed: engine.parse(markdown, softBreaks, rawHtml),
       pending: false,
     });
     return () => undefined;
   }
-  // The schema version, the soft-break policy and the source are all a parse reads, so one
-  // answer serves every later render of the same three: a new decision card, paint or decorate
-  // pass repaints the body it already has rather than asking for it again.
-  const key = `${engine.blockSchema.version}\u0000${softBreaks}\u0000${markdown}`;
+  // The schema version, the two parse policies and the source are all a parse reads, so one
+  // answer serves every later render of the same four: a new decision card, paint or decorate
+  // pass repaints the body it already has rather than asking for it again. A policy left out of
+  // the key would serve a body parsed under one of them to a caller that asked for the other.
+  const key = `${engine.blockSchema.version}\u0000${softBreaks}\u0000${rawHtml}\u0000${markdown}`;
   const cached = answers.get(key);
   if (cached !== undefined) {
     // Reading an answer keeps it: what the cache drops is the body read longest ago, never one
@@ -418,7 +434,7 @@ function renderLoaded(
   render({ engine, openMermaidFence: undefined, parsed: undefined, pending: true });
   return parseQueue.wait(
     key,
-    () => ({ engine, key, markdown, softBreaks }),
+    () => ({ engine, key, markdown, rawHtml, softBreaks }),
     ({ openMermaidFence, parsed }) => {
       render({ engine, openMermaidFence, parsed, pending: false });
     },
@@ -437,7 +453,8 @@ export function loadedEngine(): MarkdownEngine | undefined {
 }
 
 /**
- * Renders `markdown` under the soft-break policy `softBreaks`, through the shared engine.
+ * Renders `markdown` under the soft-break policy `softBreaks` and the raw-HTML policy `rawHtml`,
+ * through the shared engine.
  *
  * A body of at most `markdownWorkerThreshold` characters is parsed on the page's own thread and
  * rendered synchronously, where a load has already resolved, so it renders in the layout phase of
@@ -465,11 +482,12 @@ export function loadedEngine(): MarkdownEngine | undefined {
 export function renderWithEngine(
   markdown: string,
   softBreaks: SoftBreaks,
+  rawHtml: RawHtml,
   render: (rendering: MarkdownRendering) => void,
   options: RenderWithEngineOptions = {}
 ): () => void {
   if (readyEngine !== undefined) {
-    return renderLoaded(readyEngine, markdown, softBreaks, render, options);
+    return renderLoaded(readyEngine, markdown, softBreaks, rawHtml, render, options);
   }
   let cancelled = false;
   let cancelAnswer: (() => void) | undefined;
@@ -492,7 +510,7 @@ export function renderWithEngine(
       render({ engine: undefined, openMermaidFence: undefined, parsed: undefined, pending: false });
       return;
     }
-    cancelAnswer = renderLoaded(engine, markdown, softBreaks, render, options);
+    cancelAnswer = renderLoaded(engine, markdown, softBreaks, rawHtml, render, options);
   })();
   return () => {
     cancelled = true;
@@ -522,8 +540,8 @@ function shortenReferences(text: string): string {
 }
 
 /** The words a parsed document renders, on one line: text as it reads (references shortened),
- *  raw inline HTML as the literal characters a body shows for it, and every block boundary,
- *  hard break or other leaf a space. */
+ *  raw HTML as the literal characters a body shows for it, and every block boundary, hard break
+ *  or other leaf a space. */
 function plainWords(doc: ProseMirrorNode): string {
   const parts: string[] = [];
   doc.descendants((node, _position, parent) => {
@@ -552,6 +570,9 @@ export interface MarkdownHeadline {
  * reads `Blocking: the deploy`, a code span keeps its words, a `dispatch://` reference reads as
  * its short form, and the cut happens on the projected text, so it never splits a mark (nor a
  * character outside the Basic Multilingual Plane). Blocks and hard breaks become single spaces.
+ * The source is a body, so it is parsed as a body (`rawHtml: "text"`): a title made from one
+ * holding the `<!-- legion: … -->` footer reads the words before it and nothing of the comment,
+ * and other raw HTML reads as the characters the body itself shows.
  * `cut` says whether the text was cut, which an ellipsis the author typed cannot fake.
  * `undefined` until the engine has answered (one pre-paint commit once it is loaded, and for a
  * body the parse worker parses, until its answer lands) and for an `undefined` source; the
@@ -567,7 +588,7 @@ export function useMarkdownHeadline(
       setHeadline(undefined);
       return;
     }
-    return renderWithEngine(markdown, "space", ({ parsed, pending }) => {
+    return renderWithEngine(markdown, "space", "text", ({ parsed, pending }) => {
       if (pending) {
         // A long body's headline waits for the worker rather than reading as its own source,
         // and the source before it goes with it: `undefined` is what this hook documents for a

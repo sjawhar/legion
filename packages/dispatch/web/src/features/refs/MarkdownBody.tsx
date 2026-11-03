@@ -290,8 +290,12 @@ function* paintBlockInSlices(
  * parsed off the page's own thread, so it holds its own text, marked `data-markdown-pending`,
  * until the parse worker answers (`markdown-engine.ts`), and the `block` variant then fills the
  * element a piece at a time (`paintBlockInSlices`), so the 16,000 elements of an 8,000-item list
- * never reach the page in one task. A preview that must clamp its rendered line is
- * `MarkdownPreview`, which parses with the same engine.
+ * never reach the page in one task. A body is not a document, so raw HTML in one is read as the
+ * text it shows (`rawHtml: "text"`): an HTML comment - the `<!-- legion: … -->` footer an agent
+ * appends, say - draws as nothing, as GitHub draws it, and any other raw HTML draws as its own
+ * literal characters, never as HTML, with the Markdown around it formatted as ever. A preview
+ * that must clamp its rendered line is `MarkdownPreview`, which parses with the same engine and
+ * the same policy.
  */
 export function MarkdownBody({
   markdown,
@@ -319,6 +323,7 @@ export function MarkdownBody({
       pictures: variant,
       onRendered,
       paintInSlices: inline ? undefined : paintBlockInSlices,
+      rawHtml: "text",
       softBreaks,
     }
   );

@@ -12,7 +12,12 @@ import { createPortal } from "react-dom";
 import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
-import { parsesInTheWorker, renderWithEngine, type SoftBreaks } from "./markdown-engine";
+import {
+  parsesInTheWorker,
+  type RawHtml,
+  renderWithEngine,
+  type SoftBreaks,
+} from "./markdown-engine";
 import { drawMermaidDiagrams } from "./mermaid-diagrams";
 import {
   collectReferenceAnchors,
@@ -196,8 +201,12 @@ export interface RenderedMarkdownOptions {
   decorate?: DecorateMarkdown;
   /** Called after each render lands; none by default. */
   onRendered?: () => void;
-  /** The parse policy (`SoftBreaks`): `space`, the default, or `line`. */
+  /** The soft-break parse policy (`SoftBreaks`): `space`, the default, or `line`. */
   softBreaks?: SoftBreaks;
+  /** The raw-HTML parse policy (`RawHtml`): `refuse`, the default, which leaves a body holding
+   *  raw HTML to the literal-text fallback, or `text`, which every body renderer passes - an
+   *  HTML comment draws as nothing and any other raw HTML as its literal characters. */
+  rawHtml?: RawHtml;
   /** `paint`, a piece at a time (`PaintMarkdownInSlices`), for a body the parse worker parsed;
    *  without one such a body is painted in one go, as every other body is. */
   paintInSlices?: PaintMarkdownInSlices;
@@ -397,6 +406,7 @@ export function useRenderedMarkdown(
     decorate,
     onRendered,
     paintInSlices,
+    rawHtml = "refuse",
     softBreaks = "space",
   }: RenderedMarkdownOptions = {}
 ): RenderedMarkdown {
@@ -455,6 +465,7 @@ export function useRenderedMarkdown(
     const cancelRender = renderWithEngine(
       markdown,
       softBreaks,
+      rawHtml,
       ({ engine, openMermaidFence, parsed, pending }) => {
         // Nothing of an answer reaches an element that has gone, or one a newer frame has
         // already painted: those are the two ways a kept answer stops being worth having.
@@ -522,7 +533,7 @@ export function useRenderedMarkdown(
               element,
               parsed,
               markdown,
-              (source) => engine.parse(source, softBreaks),
+              (source) => engine.parse(source, softBreaks, rawHtml),
               openMermaidFence
             );
           }
@@ -603,7 +614,7 @@ export function useRenderedMarkdown(
       { keepAPostedParse: true }
     );
     return cancelRender;
-  }, [Card, decorate, markdown, paint, paintInSlices, root, softBreaks]);
+  }, [Card, decorate, markdown, paint, paintInSlices, rawHtml, root, softBreaks]);
 
   return {
     isFallback,

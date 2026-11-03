@@ -280,11 +280,10 @@ test("a long body is parsed whole in the worker, so formatting past any visible 
   }
 });
 
-test("a body the engine cannot parse shows its literal text, led and highlighted, and never as HTML", async () => {
-  // Proof's schema has no node for raw HTML, so the parse throws. A comment holding
-  // `<script>alert(1)</script> astrolabe <mark>x</mark>`, found by q=astrolabe, comes back escaped
-  // with one server mark, which `snippetSegments` decodes into exactly this source and one hit.
-  const source = "<script>alert(1)</script> astrolabe <mark>x</mark>";
+test("a body the parser refuses shows its literal text, led and highlighted, and never as HTML", async () => {
+  // A mark span of a kind this schema does not carry: the parse throws, which is what the
+  // literal-text fallback is left for. Raw HTML is no longer one of those (the row below).
+  const source = '<span data-dispatch="bogus">alert(1)</span> astrolabe';
   const { preview, rerender, view } = renderPreview({
     highlight: ["astrolabe"],
     lead: "Replying to Planner — ",
@@ -294,8 +293,8 @@ test("a body the engine cannot parse shows its literal text, led and highlighted
   try {
     await waitFor(() => expect(preview().getAttribute("data-markdown-fallback")).toBe("true"));
     expect(preview().textContent).toBe(`Replying to Planner — ${source}`);
-    expect(preview().querySelector("script")).toBeNull();
-    // The author's own `<mark>` is text; only the server's hit is a mark.
+    expect(preview().querySelector("[data-dispatch]")).toBeNull();
+    // The author's own span is text; only the server's hit is a mark.
     expect(marks(preview())).toEqual(["astrolabe"]);
 
     // Edited into a body that parses, it renders formatted and stops being the fallback.
@@ -303,6 +302,30 @@ test("a body the engine cannot parse shows its literal text, led and highlighted
     await waitFor(() => expect(preview().querySelector("strong")?.textContent).toBe("fixed"));
     expect(preview().getAttribute("data-markdown-fallback")).toBeNull();
     expect(preview().textContent).toBe("fixed astrolabe");
+    expect(marks(preview())).toEqual(["astrolabe"]);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a body holding raw HTML shows its characters, highlighted, and never as HTML (INFRA-341)", async () => {
+  // A comment holding `<script>alert(1)</script> astrolabe <mark>x</mark>`, found by
+  // q=astrolabe, comes back escaped with one server mark, which `snippetSegments` decodes into
+  // exactly this source and one hit. The preview reads it as a body: the raw HTML is the
+  // characters its author typed, and the body is not the fallback.
+  const source = "<script>alert(1)</script> astrolabe <mark>x</mark>";
+  const { preview, view } = renderPreview({
+    highlight: ["astrolabe"],
+    lead: "Replying to Planner — ",
+    lines: 2,
+    markdown: source,
+  });
+  try {
+    await waitFor(() => expect(preview().textContent).toBe(`Replying to Planner — ${source}`));
+    expect(preview().getAttribute("data-markdown-fallback")).toBeNull();
+    expect(preview().querySelector("script")).toBeNull();
+    expect(preview().querySelector("mark:not([class])")).toBeNull();
+    // The author's own `<mark>` is text; only the server's hit is a mark.
     expect(marks(preview())).toEqual(["astrolabe"]);
   } finally {
     view.unmount();

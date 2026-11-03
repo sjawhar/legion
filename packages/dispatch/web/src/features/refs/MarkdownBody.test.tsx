@@ -766,15 +766,52 @@ test("a code span containing tag-shaped text renders the literal characters with
   }
 });
 
-test("raw unsupported HTML renders as literal text with no element created", async () => {
-  const view = render(<MarkdownBody markdown="<img src=x onerror=alert(1)>" />);
+// INFRA-341 R5. A body is not a document: its author writes what they like, and the parser
+// refusing the raw HTML in one used to send the whole body to the literal-text fallback, every
+// `**` showing. Of 1,481 comments measured on 2026-10-25, 14 read that way, and every one of
+// them held Legion's `<!-- legion: … -->` footer. A body now renders its Markdown: an HTML
+// comment draws as nothing, as GitHub draws it, and any other raw HTML as its own characters.
+const LEGION_FOOTER = '<!-- legion: {"session":"01HQ8F3K2M4N5P6Q7R8S9T0V","phase":"retro"} -->';
+
+for (const [what, markdown] of [
+  ["a block HTML comment", `**Retro** complete.\n\n${LEGION_FOOTER}`],
+  [
+    "a block of other raw HTML",
+    "**Retro** complete.\n\n<details>\n<summary>Logs</summary>\n</details>",
+  ],
+  ["an inline HTML comment", `**Retro** complete <!-- legion: done --> today.`],
+] as const) {
+  test(`a body holding ${what} renders its Markdown, with no comment text and no fallback`, async () => {
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      expect(
+        await within(view.container).findByText("Retro", { selector: "strong" })
+      ).toBeDefined();
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(view.container.textContent).not.toContain("<!--");
+      expect(view.container.textContent).not.toContain("legion");
+      expect(view.container.textContent).not.toContain("**");
+    } finally {
+      view.unmount();
+    }
+  });
+}
+
+test("a body of raw HTML shows its text literally, creates no element, and still formats", async () => {
+  const view = render(
+    <MarkdownBody markdown={"Before **it**:\n\n<img src=x onerror=alert(1)>\n\nAfter **it**."} />
+  );
 
   try {
     expect(await within(view.container).findByText("<img src=x onerror=alert(1)>")).not.toBeNull();
     expect(view.container.querySelector("img")).toBeNull();
-    await waitFor(() =>
-      expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true")
-    );
+    expect(view.container.querySelector("script")).toBeNull();
+    // The rest of the body around it is formatted, and no part of it fell back to its source.
+    expect(
+      Array.from(view.container.querySelectorAll("strong"), (strong) => strong.textContent)
+    ).toEqual(["it", "it"]);
+    await waitFor(() => expect(fallbackMark(view.container)).toBeNull());
   } finally {
     view.unmount();
   }
@@ -1304,6 +1341,27 @@ describe("A long body parsed in the worker", () => {
       await waitFor(() => expect(pendingMark(view.container)).toBeNull());
       expect(fallbackMark(view.container)).toBeNull();
       expect(view.container.textContent).not.toContain("- x");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The worker parses every body past the threshold, so the raw-HTML policy has to reach it as
+  // the soft-break policy does: a retro's comment is longer than 2,000 characters far more often
+  // than it is shorter, and it is the body the footer is on.
+  test("renders the Markdown of a long body holding the Legion footer, with no comment in it", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = `${longBody("A retro the worker is parsing")}\n${LEGION_FOOTER}\n`;
+    expect(markdown.length).toBeGreaterThan(markdownWorkerThreshold);
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      await waitFor(() => expect(pendingMark(view.container)).toBeNull());
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(view.container.textContent).not.toContain("legion");
+      expect(view.container.textContent).not.toContain("<!--");
     } finally {
       view.unmount();
     }
