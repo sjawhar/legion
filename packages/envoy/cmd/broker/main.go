@@ -49,7 +49,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/wake"
 	"github.com/sjawhar/envoy/internal/oidc"
-	"github.com/sjawhar/envoy/internal/ratelimit"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -425,12 +424,15 @@ func main() {
 	go runClientChecks(ctx, cfg.SignIn, st)
 
 	mux := http.NewServeMux()
-	// Under the GCP store a reread spends Secret Manager's shared metadata quota, so its overall
-	// cap is the GCP one.
-	var rereadOverall *ratelimit.Limit
+	// Under the GCP store a reread spends Secret Manager's shared metadata quota, so the fleet
+	// budget this process divides is the GCP one. api.RereadRate divides it among the pods the
+	// serving clock counts below, and moves this process's reread buckets whenever that count
+	// changes.
+	rereadBudget := api.DefaultRereadFleetBudget
 	if cfg.SecretsStore == secrets.StoreGCP {
-		rereadOverall = &api.GCPRereadOverallLimit
+		rereadBudget = api.GCPRereadFleetBudget
 	}
+	rereadRate := api.NewRereadRate(rereadBudget, slog.Default())
 	// draining is set once, by the signal handler below, and read by every handler goroutine
 	// GET /healthz runs on, which is why it is atomic rather than a plain bool.
 	var draining atomic.Bool
@@ -441,7 +443,7 @@ func main() {
 	// their own next five-minute reload (policyRefresh) anyway. Neither the caller's 200 nor the
 	// process is worth failing over a notification Postgres would not take.
 	notify := reread.Notifier(st.Pool, senderID)
-	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, RereadOverallLimit: rereadOverall,
+	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, RereadRate: rereadRate,
 		APIAccounts: cfg.APIAccounts, AccountTokens: pod,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
@@ -475,7 +477,8 @@ func main() {
 	// leases that run out swept. It beats on serving, not ctx: this pod still answers renewals
 	// through its drain, so it is still a broker serving, and a gap in the beats there would read
 	// as an outage.
-	clock := &enroll.ServingClock{Enrollments: enr, Interval: sweep, NotServingAfter: config.NotServingSweeps * sweep}
+	clock := &enroll.ServingClock{Enrollments: enr, Interval: sweep, NotServingAfter: config.NotServingSweeps * sweep,
+		OnReplicas: rereadRate.SetReplicas}
 	go clock.Run(serving)
 	go func() {
 		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {

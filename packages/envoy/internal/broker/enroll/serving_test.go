@@ -415,6 +415,45 @@ func sortedCopy(s []string) []string {
 	return s
 }
 
+// A beat counts the brokers beating at its own instant and hands that count to OnReplicas: its
+// own row and every other row whose gap since its last beat is within that row's own threshold.
+// A row that stopped beating is not one of them, however recently it is still in the table, so a
+// fleet that loses a pod stops counting it a threshold later rather than at the next prune, an
+// hour on.
+func TestABeatCountsTheBrokersStillBeating(t *testing.T) {
+	r := newServingRig(t)
+	var counted []int
+	r.clock.OnReplicas = func(replicas int) { counted = append(counted, replicas) }
+	r.exec(t, `insert into broker_serving (process, last_serving_at, not_serving_after) values
+		('peer-1', now(), interval '15 seconds'),
+		('peer-2', now(), interval '15 seconds'),
+		('peer-3', now(), interval '15 seconds'),
+		('peer-4', now(), interval '15 seconds')`)
+	r.beat(t)
+	if want := []int{5}; !slices.Equal(counted, want) {
+		t.Fatalf("a beat beside four beating peers counted %v, want %v: the four and this process's own row", counted, want)
+	}
+	r.exec(t, `update broker_serving set last_serving_at = now() - interval '1 minute' where process like 'peer-%'`)
+	r.beat(t)
+	if want := []int{5, 1}; !slices.Equal(counted, want) {
+		t.Fatalf("a beat beside four peers a minute past their own %s threshold counted %v, want %v", notServingAfter, counted, want)
+	}
+}
+
+// A broker beating alone counts one, itself, and says so: holding a lone pod to the rate two
+// pods get is api.MinReplicas's work and not the count's, so the count a process hands over is
+// the fleet it really sees.
+func TestALoneBrokersBeatCountsItself(t *testing.T) {
+	r := newServingRig(t)
+	var counted []int
+	r.clock.OnReplicas = func(replicas int) { counted = append(counted, replicas) }
+	r.beat(t)
+	r.beat(t)
+	if want := []int{1, 1}; !slices.Equal(counted, want) {
+		t.Fatalf("a lone broker's two beats counted %v, want %v", counted, want)
+	}
+}
+
 // A beat held up on its own row (another transaction holds it) fails within about its bound and
 // Run logs that it timed out, while another broker beats on: that broker keeps the latest row
 // current across more than the threshold, so the guard stays off and a lease that runs out in the

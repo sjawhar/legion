@@ -27,11 +27,17 @@ import (
 // that is merely late is not an outage, and well short of the part of its lease a renewing session
 // always holds, so no live session's lease runs out inside a gap the clock tolerates.
 //
+// OnReplicas, when it is set, is called after each beat commits with the number of broker
+// processes beating at that beat's instant, this one included; the broker derives its reread
+// rates from that count (api.RereadRate.SetReplicas). A beat that fails calls nothing, so the
+// last count stands until a beat commits again.
+//
 // Each ServingClock is one process in broker_serving: it draws a random id on its first beat and
 // beats on that row alone.
 type ServingClock struct {
 	Enrollments               *Service
 	Interval, NotServingAfter time.Duration
+	OnReplicas                func(replicas int)
 
 	processOnce sync.Once
 	process     string
@@ -109,6 +115,11 @@ func (c *ServingClock) processID() string {
 // moves to now, never backward, with this process's NotServingAfter, and rows more than
 // servingPrune behind the latest are deleted, skipping any another transaction holds.
 // enrollment_lease_live reads the rows without a lock, so no read of a lease ever waits on a beat.
+//
+// Last, in the same transaction and after this process's row is written, the beat counts the
+// rows still beating - those whose gap since their own last beat is within their own threshold -
+// and hands that count to OnReplicas once the transaction commits. This process's row is one of
+// them, so the count is never zero, and a beat that fails hands over nothing.
 func (c *ServingClock) Beat(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, c.Interval)
 	defer cancel()
@@ -178,12 +189,19 @@ func (c *ServingClock) Beat(ctx context.Context) error {
 			for update skip locked)`, servingPrune); err != nil {
 		return err
 	}
+	var replicas int
+	if err := tx.QueryRow(ctx, `select count(*) from broker_serving where clock_timestamp() - last_serving_at <= not_serving_after`).Scan(&replicas); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	if gaveBack {
 		slog.Info("broker: gave back the time no broker was serving to every lease still running when the last broker served",
 			"gap", gap, "last_serving_at", last, "enrollments", restored)
+	}
+	if c.OnReplicas != nil {
+		c.OnReplicas(replicas)
 	}
 	return nil
 }

@@ -78,6 +78,15 @@ type Deps struct {
 	// RereadOverallLimit bounds that route across every caller at once; nil means
 	// DefaultRereadOverallLimit.
 	RereadOverallLimit *ratelimit.Limit
+	// RereadRate derives both reread limits above from the replica count this process counts,
+	// and moves the live buckets whenever that count changes; nil is every rate fixed at
+	// registration, which is what every test that pins RereadLimit or RereadOverallLimit, and
+	// every broker that counts no pods, gets. Only cmd/broker sets it, from the fleet budget of
+	// the store it mounts, and only its serving clock changes the count.
+	//
+	// A limit pinned above still wins the bucket this process starts at, so a row can mount a
+	// bucket of its own and watch what a change of the count does to it.
+	RereadRate *RereadRate
 	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
 	TokenLimit *ratelimit.Limit
 	// AccountLimit bounds every route accountAuth authenticates per source address, in one bucket
@@ -145,6 +154,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 		limits = *deps.LauncherLimits
 	}
 	rereadOverall := DefaultRereadOverallLimit
+	if deps.RereadRate != nil {
+		rereadOverall = deps.RereadRate.Overall()
+	}
 	if deps.RereadOverallLimit != nil {
 		rereadOverall = *deps.RereadOverallLimit
 	}
@@ -171,6 +183,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 		rereadOverall:   ratelimit.NewBucket(rereadOverall),
 		tokenLimiter:    ratelimit.NewKeyed(token),
 		accountLimiter:  ratelimit.NewKeyed(account),
+	}
+	if deps.RereadRate != nil {
+		deps.RereadRate.Mount(s.rereadLimiter, s.rereadOverall)
 	}
 	for _, route := range routes() {
 		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
