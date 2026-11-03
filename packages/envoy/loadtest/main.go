@@ -24,6 +24,9 @@ commands:
   refs-fetch       write a TSV of every seeded issue's references answer (status, ETag, sha256, bytes)
   run              one load step against the stack in stack.json; writes summary.json and profiles
   loop-seed-plan   plan the Verified Linux spec loop's own seed, without a stack; writes loopseed.plan.json
+  loop-seed-write  write that plan to a Dispatch through its API, resumably (loadtest.loop_ids maps
+                   each planned object to the one it created); writes loopseed.meta.json
+  loop-seed-check  compare a written loop seed with its plan over Postgres; exit 1 on a failed line
   plan-docs        print, without a stack, the documents a step's in-window edits and uploads write
                    the most versions to (the run's own plan of the same flags, seed.json)
   tables           render TABLES.md and pprof tops from step directories
@@ -76,6 +79,10 @@ func main() {
 		err = runLoad(os.Args[2:])
 	case "loop-seed-plan":
 		err = runLoopSeedPlan(os.Args[2:])
+	case "loop-seed-write":
+		err = runLoopSeedWrite(os.Args[2:])
+	case "loop-seed-check":
+		err = runLoopSeedCheck(os.Args[2:])
 	case "plan-docs":
 		err = runPlanDocs(os.Args[2:])
 	case "tables":
