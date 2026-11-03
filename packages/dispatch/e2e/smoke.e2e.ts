@@ -7,7 +7,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("an authenticated user sees their empty inbox", async ({ browser }, testInfo) => {
+test("an authenticated user sees their empty inbox @phone", async ({ browser }, testInfo) => {
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 

@@ -109,9 +109,8 @@ func superviseRequests(t *testing.T, pool *pgxpool.Pool, issue string) []record.
 	return got
 }
 
-// A root whose architect handed a question to a person, and whose tree is otherwise idle, moves to
-// awaiting_person: its architect is suspended with its session kept, the controller is told, and
-// the slot it gave back goes to the root waiting behind it.
+// awaiting_person: its architect stays live while the root waits, the controller is told, and the
+// slot it gave back goes to the root waiting behind it.
 func TestARootWaitingOnAPersonReturnsItsSlot(t *testing.T) {
 	pool := migratedPool(t)
 	admission := awaitingRig(t, pool)
@@ -125,9 +124,16 @@ func TestARootWaitingOnAPersonReturnsItsSlot(t *testing.T) {
 		t.Fatalf("awaiting = %+v, want it unanswered", root.Awaiting)
 	}
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-300", Index: 0, AdmittedAt: fixedNow}})
+	var architectState string
+	if err := pool.QueryRow(context.Background(), `select state from claims where token = $1`, string(awaitingArchitect(t, "LEGION-208"))).Scan(&architectState); err != nil {
+		t.Fatalf("read the awaiting architect claim: %v", err)
+	}
+	if architectState != "working" {
+		t.Fatalf("architect state = %q, want it live while the root waits", architectState)
+	}
 	requests := superviseRequests(t, pool, "LEGION-208")
-	if len(requests) != 1 || requests[0].Op != "suspend" || requests[0].Role != claim.RoleArchitect {
-		t.Fatalf("supervise requests = %+v, want one architect suspend", requests)
+	if len(requests) != 0 {
+		t.Fatalf("supervise requests = %+v, want no architect suspend", requests)
 	}
 	var notices int
 	for _, e := range effects(t, pool) {
@@ -144,9 +150,9 @@ func TestARootWaitingOnAPersonReturnsItsSlot(t *testing.T) {
 }
 
 // A person's answer puts the waiting root at the front of the line, ahead of every root that never
-// ran, and the next free slot resumes its architect in its own session, told what answered it. The
-// resume is a handout: what it handed back before is cleared, so only its next hand-back starts
-// the next wait.
+// ran, and the next free slot hands its architect the task in its live session, told what answered
+// it. The resume is a handout: what it handed back before is cleared, so only its next hand-back
+// starts the next wait.
 func TestAnAnsweredRootTakesTheNextSlotAndResumesItsArchitect(t *testing.T) {
 	pool := migratedPool(t)
 	admission := awaitingRig(t, pool)
@@ -174,11 +180,21 @@ func TestAnAnsweredRootTakesTheNextSlotAndResumesItsArchitect(t *testing.T) {
 	}
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-208", Index: 0, AdmittedAt: fixedNow}})
 	requests := superviseRequests(t, pool, "LEGION-208")
-	if len(requests) != 2 || requests[1].Op != "start" || requests[1].Role != claim.RoleArchitect {
-		t.Fatalf("supervise requests = %+v, want the suspend then the architect's resume", requests)
+	if len(requests) != 1 || requests[0].Op != "start" || requests[0].Role != claim.RoleArchitect {
+		t.Fatalf("supervise requests = %+v, want the live architect's resume task", requests)
 	}
-	if !strings.Contains(requests[1].Task, "ask-q") {
-		t.Fatalf("resume task %q, want it to name the ask that was answered", requests[1].Task)
+	if !strings.Contains(requests[0].Task, "ask-q") {
+		t.Fatalf("resume task %q, want it to name the ask that was answered", requests[0].Task)
+	}
+	if !runQueuedArchitectStarts(t, pool, "LEGION-208") {
+		t.Fatal("the live architect's resume task was not queued")
+	}
+	var delivered string
+	if err := pool.QueryRow(context.Background(), `select task from pending_task_deliveries where claim_token = $1`, string(awaitingArchitect(t, "LEGION-208"))).Scan(&delivered); err != nil {
+		t.Fatalf("read the live architect's delivered task: %v", err)
+	}
+	if !strings.Contains(delivered, "ask-q") {
+		t.Fatalf("delivered task %q, want it to name the ask that was answered", delivered)
 	}
 	// The resume writes no Dispatch status: the root kept the one it ran with.
 	for _, e := range effects(t, pool) {
@@ -281,7 +297,7 @@ func TestAHandBackNoLongerWithThePersonIsTakenIn(t *testing.T) {
 		t.Fatalf("root = %+v (awaiting %+v), want it admitted, waiting on nothing", root, root.Awaiting)
 	}
 	if requests := superviseRequests(t, pool, "LEGION-208"); len(requests) != 0 {
-		t.Fatalf("supervise requests = %+v, want the architect neither suspended nor resumed", requests)
+		t.Fatalf("supervise requests = %+v, want no new task for a hand-back the architect already took in", requests)
 	}
 }
 
@@ -290,7 +306,7 @@ func TestAHandBackNoLongerWithThePersonIsTakenIn(t *testing.T) {
 func TestAHeldRootIsNotDecidedBeforeTheConsumerCatchesUp(t *testing.T) {
 	pool := migratedPool(t)
 	admission := awaitingRig(t, pool)
-	admission.pending = map[string]dispatch.IssueSummary{"LEGION-208": {Key: "LEGION-208", Status: "todo", LastSeq: 20}}
+	admission.pending = map[string]intake.DispatchIssue{"LEGION-208": {Key: "LEGION-208", Status: "todo", Seq: 20}}
 	admission.target = 100
 	tick(t, pool, admission, "tick-held")
 	if got := issue(t, pool, "LEGION-208").Phase; got != phase.Admitted {
@@ -306,9 +322,8 @@ func TestAHeldRootIsNotDecidedBeforeTheConsumerCatchesUp(t *testing.T) {
 	}
 }
 
-// A root whose architect has not taken the work it was given keeps its slot: suspending it then
-// would cancel that work. The confirmation of the task is itself a fact, so the wait starts there
-// rather than at the next tick.
+// A root whose architect has not taken the work it was given keeps its slot. The confirmation of
+// the task is itself a fact, so the wait starts there rather than at the next tick.
 func TestAWaitHeldByUntakenWorkStartsAtTheTaskConfirmation(t *testing.T) {
 	pool := migratedPool(t)
 	seedSlotted(t, pool, "LEGION-208", "U")

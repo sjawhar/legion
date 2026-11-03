@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/rescue/rescuetest"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -1031,6 +1032,61 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 	}
 }
 
+// `rescue-unpushed` is answered by the shim itself, as its role and in its role's environment: it
+// checks every workspace on the disk its LEGION_WORKSPACE is on, pushes what the remote lacks to a
+// rescue branch, and answers one entry per workspace; OMP never sees the frame. A shim with no
+// LEGION_WORKSPACE has no disk to check and refuses.
+func TestRescueUnpushedChecksTheDiskAndAnswersTheDaemon(t *testing.T) {
+	d := rescuetest.New(t, "WIDGETS-42")
+	d.Write(d.Workspace, "feature.txt", "work jj alone holds\n")
+	d.JJ("commit", "-m", "work jj alone holds")
+	commit := d.JJ("log", "--no-graph", "-r", "@-", "-T", "commit_id")
+	for _, tc := range []struct {
+		name        string
+		noWorkspace bool
+	}{{name: "a shim on the issue's workspace"}, {name: "a shim with no LEGION_WORKSPACE", noWorkspace: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := socketPath(t)
+			daemon := listen(t, path)
+			child := newOMP(t)
+			cfg := config(t, path, child)
+			cfg.Env = append(slices.Clone(d.Env), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker, "FAKE_OMP_LOG="+child.log)
+			if !tc.noWorkspace {
+				cfg.Env = append(cfg.Env, "LEGION_WORKSPACE="+d.Workspace)
+			}
+			run(t, cfg, newClock())
+			p := daemon.accept(t)
+			p.open(t)
+
+			request := shimwire.RescueUnpushed{ID: "r1", Branch: "legion/WIDGETS-42-rescue-9d3f0c7a", WorkspaceTimeoutMs: 60_000, TimeoutMs: 120_000}
+			p.send(t, request)
+			got, ok := p.next(t).(shimwire.RescueUnpushedResult)
+			if !ok || got.ID != request.ID {
+				t.Fatalf("the shim answered %#v, want a result for %s", got, request.ID)
+			}
+			if tc.noWorkspace {
+				if got.OK || !strings.Contains(got.Error, "LEGION_WORKSPACE is not set") {
+					t.Fatalf("the shim answered %#v, want a refusal naming LEGION_WORKSPACE", got)
+				}
+			} else {
+				want := []shimwire.RescueWorkspace{{Dir: d.Workspace, Status: "rescued", Branches: []shimwire.RescueBranch{{Name: request.Branch + "-1", Commit: commit}}}}
+				if !got.OK || !reflect.DeepEqual(got.Workspaces, want) {
+					t.Fatalf("the shim answered %#v, want %+v", got, want)
+				}
+				if held := d.RemoteBranch(request.Branch + "-1"); held != commit {
+					t.Fatalf("the remote holds %s-1 at %q, want %s", request.Branch, held, commit)
+				}
+			}
+
+			p.send(t, shimwire.GetState{ID: "after"})
+			p.next(t)
+			if got := frameTypes(child.received(t)); !reflect.DeepEqual(got, []string{shimwire.TypeGetState}) {
+				t.Fatalf("OMP read %v; rescue-unpushed is the shim's own", got)
+			}
+		})
+	}
+}
+
 // No runtime tells a pane or a pod LEGION_JJ_PATH (internal/api/version.go, the LEGION-631 entry;
 // docs/kubernetes.md, "No container is told …"): a pane's jj is its PATH's, the one every role's
 // plain `jj git push` runs, and the shim's adoption runs that same jj. A PATH without one refuses
@@ -1132,6 +1188,10 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 			jjAs := func(user string, args ...string) string {
 				t.Helper()
 				command := exec.Command(jj, append(args, "-R", workspace)...)
+				// -R names the repository, not a working directory: the helper runs in the
+				// workspace it reads, since jj searches upward from the directory it runs in for
+				// the closest .jj, and the test process stands in a real workspace in a pod.
+				command.Dir = workspace
 				command.Env = append(os.Environ(), "JJ_USER="+user, "JJ_EMAIL="+user+"@example.test")
 				output, err := command.CombinedOutput()
 				if err != nil {
@@ -1140,6 +1200,9 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 				return strings.TrimSpace(string(output))
 			}
 			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
+			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
+			// the test process's directory to the closest .jj and write that repository.
+			initialize.Dir = workspace
 			initialize.Env = append(os.Environ(), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
 			if output, err := initialize.CombinedOutput(); err != nil {
 				t.Fatalf("jj git init: %v\n%s", err, output)
@@ -1222,6 +1285,9 @@ func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			workspace := t.TempDir()
 			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
+			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
+			// the test process's directory to the closest .jj and write that repository.
+			initialize.Dir = workspace
 			initialize.Env = append(os.Environ(), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
 			if output, err := initialize.CombinedOutput(); err != nil {
 				t.Fatalf("jj git init: %v\n%s", err, output)

@@ -29,14 +29,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
-// Image is the NATS server image the daemon's existing NATS tests use.
-const Image = "mirror.gcr.io/library/nats:2.10"
+// Image is the NATS server image the daemon's existing NATS tests use:
+// ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml).
+const Image = "ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f"
 
 // readinessTimeout bounds the wait for the JetStream API once the container runs. The container
 // start is not bounded by it: how long Docker takes to create a container is the daemon's load.
@@ -310,11 +312,18 @@ func retryStreamStoreFailure(create func() error) error {
 	}
 }
 
+// limits caps a NATS test container at one CPU and 512 MiB, as every container the repository's
+// tests and proofs start is capped on a shared host: a test server holds a few small streams.
+var limits = testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
+	hostConfig.NanoCPUs = 1_000_000_000
+	hostConfig.Memory = 512 << 20
+})
+
 // start runs a NATS container, with its monitoring endpoint on 8222. A container Docker created and never saw ready (a readiness wait
 // that timed out under load) comes back beside the error, and is removed before start returns:
 // no test's end would remove a container the package shares.
 func start(image string, options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
-	options = append([]testcontainers.ContainerCustomizer{tcnats.WithArgument("http_port", "8222")}, options...)
+	options = append([]testcontainers.ContainerCustomizer{tcnats.WithArgument("http_port", "8222"), limits}, options...)
 	started, err := tcnats.Run(context.Background(), image, options...)
 	if err != nil {
 		return started, errors.Join(err, testcontainers.TerminateContainer(started))

@@ -9,7 +9,7 @@ tags:
   - review
   - long-lived-pr
 date: 2026-09-13
-status: active
+status: superseded in part by sjawhar/legion#2423 — a branch no longer carries a rebuilt `dist/` commit and `check-dist` forces no rebuild in a pull request, since main's Rebuild Claude Envoy plugin workflow commits the bundle after each merge; the one-fileset fingerprint, its verification by a pair and the rules for what a rebase may change stand
 module: skills/legion-worker
 related_issues:
   - "LEGION-59"
@@ -100,13 +100,14 @@ it without anyone editing a line of the branch:
   interdiff is a confirmation scoped to the listed hunks; an unexplained one is a round.
 - **Changed through release-managed files only (LEGION-25 #1110, rebase 2, `74871c03 → 386f3562`,
   `2d54b573… → 8dd84c1f…`).** A branch that bumps the daemon API contract *must* touch three files
-  `main`'s release commits rewrite on every release: `packages/pi-envoy/package.json` (the
+  that `main` changes again and again: `packages/pi-envoy/package.json` (the
   `legion.daemonApiVersion` field sits beside the `version` the release bumps),
-  `packages/pi-envoy/CHANGELOG.md` (the contract line under Unreleased, which the release
-  re-heads), and `packages/claude-envoy-bridge/dist/*.js` (today
-  `packages/claude-envoy/dist/*.js`; the committed bundle embeds `@legion/contracts`, so
-  `check-dist` forces a rebuild). Every `chore: release …` on `main` is therefore a `CONFLICTING`
-  for that branch — #1110 was flagged three times in one PR life, twice by release commits alone.
+  `packages/pi-envoy/CHANGELOG.md` (the contract line under `[Unreleased]`, which no release
+  re-heads and under which every concurrent branch inserts its own line), and
+  `packages/claude-envoy-bridge/dist/*.js` (today `packages/claude-envoy/dist/*.js`; the committed
+  bundle embeds `@legion/contracts`, so `check-dist` forces a rebuild). Every `chore: release …`
+  on `main` is therefore a `CONFLICTING` for that branch — #1110 was flagged three times in one PR
+  life, twice by release commits alone.
   Resolve by taking `main`'s version and re-adding the field and line; rebuild the bundle on the
   pinned Bun (1.3.14) inside its own commit; the fingerprint changes through those files and
   nothing else. Keeping the three in one one-concern commit
@@ -154,9 +155,10 @@ match.
 1. Before merging: `jj git fetch`, then hash the current tip with the one-fileset command and
    keep the number.
 2. `jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"`
-   — a forward merge from the bookmark, not `@` (a handoff split leaves `@` empty and
-   undescribed, and `jj git push` refuses a commit with no description); the tester's and
-   reviewer's handoff commits stay exactly where they are.
+   — a forward merge from the bookmark, not `@`, which can be empty and undescribed (`jj git
+   push` refuses a commit with no description; until sjawhar/legion#2354 a handoff split was the
+   usual way `@` ended up that way); every commit already on the branch stays exactly where it
+   is.
 3. Resolve the conflict directly in that one merge commit (edit the markers; there is nothing to
    squash, since the merge is the only new commit). Never `jj op restore` in a shared workspace.
 4. `jj new`, run the package's tests, lint, and typecheck at the resolved tip, re-run every
@@ -176,7 +178,8 @@ match.
 - `committed-plugin-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md`
   — a generated-output directory that must be excluded from the fileset, and the CI-forced
   rebase that is not a conflict but is still necessary.
-- `handoff-file-conflicts-during-rebases.md` — the bottom-up edit-and-squash procedure for
-  `.legion/` files.
+- `handoff-file-conflicts-during-rebases.md` — superseded by
+  `handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md`:
+  its bottom-up edit-and-squash procedure was for `.legion/` files, and no branch carries one.
 - `../github/conflicting-pr-gets-no-pull-request-ci.md` — why a `CONFLICTING` PR gets no CI
   and no wake announces it.

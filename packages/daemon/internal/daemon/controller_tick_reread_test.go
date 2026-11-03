@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -265,13 +266,20 @@ func (d *tickDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 func (d *tickDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *tickDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *tickDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
 func (d *tickDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *tickDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *tickDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *tickDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // tickRecords is the record store the boot gives the runtime (openWorkflow): this project's
 // issues alone, with no outbox wake, since no outbox runs in a tick test.

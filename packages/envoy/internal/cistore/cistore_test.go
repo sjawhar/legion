@@ -35,6 +35,7 @@ func openStore(t testing.TB, conn *natsgo.Conn) *Store {
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
 	}
+	t.Cleanup(func() { forgetTestSummarizer(st) })
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := st.WaitForCacheReady(ctx); err != nil {
@@ -63,7 +64,7 @@ func recordCheck(s *Store, owner, repo, number, sha, checkName, checkRunID, url,
 		return err
 	}
 	return within(func() error {
-		return s.Record(contracts.CIObservation{
+		return s.Record(context.Background(), contracts.CIObservation{
 			Owner:      owner,
 			Repo:       repo,
 			Number:     number,
@@ -112,7 +113,7 @@ func maxCheckRunID(runs []CheckRunRef) uint64 {
 
 func recordSuite(s *Store, owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
 	return within(func() error {
-		return s.RecordSuite(contracts.CIObservation{
+		return s.RecordSuite(context.Background(), contracts.CIObservation{
 			Owner:      owner,
 			Repo:       repo,
 			Number:     number,

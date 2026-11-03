@@ -116,6 +116,15 @@ func TestListenerEnvCheck(t *testing.T) {
 			mutate: func(e *rendering.ListenerEnv) { e.NatsReplicas = 0 },
 			input:  "natsReplicas", err: "natsReplicas 0 is below 1",
 		},
+		{
+			name:   "more NATS replicas than NATS keeps",
+			mutate: func(e *rendering.ListenerEnv) { e.NatsReplicas = 6 },
+			input:  "natsReplicas", err: "natsReplicas 6 is above 5, the most copies NATS keeps",
+		},
+		{
+			name:   "five NATS replicas",
+			mutate: func(e *rendering.ListenerEnv) { e.NatsReplicas = 5 },
+		},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			e := listenerEnv()

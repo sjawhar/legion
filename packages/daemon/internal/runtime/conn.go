@@ -32,6 +32,43 @@ func RefusalReason(err error) string {
 // an unknown command. Asking the same shim again changes neither.
 var ErrTokenRefused = errors.New("runtime: the shim did not read its projected token")
 
+// ErrRescueUnsupported is a shim that does not know `rescue-unpushed`: one built before the push
+// check, which forwards the frame to its agent, and the agent refuses it as a command it does not
+// know. Nothing was checked and nothing was pushed. Every other failure of the check is not this.
+var ErrRescueUnsupported = errors.New("runtime: the pod's shim predates the push check")
+
+// RescueRequest is one push check of a pod's disk: the prefix of every rescue branch, which the
+// shim numbers from 1, the bound of one workspace's check and push, and the bound of the whole.
+type RescueRequest struct {
+	Branch           string
+	WorkspaceTimeout time.Duration
+	Timeout          time.Duration
+}
+
+// WorkspaceRescue is one workspace's push check, as the shim that ran it reports it.
+type WorkspaceRescue struct {
+	// Dir is the workspace's directory on the pod's disk.
+	Dir string
+	// Status is RescueClean, RescueRescued or RescueFailed.
+	Status string
+	// Branches is each rescue branch pushed for it, with the commit it holds.
+	Branches []RescuedBranch
+	// Error is why a failed check failed.
+	Error string
+}
+
+// RescuedBranch is one rescue branch a push check pushed, and the commit it holds.
+type RescuedBranch struct {
+	Name, Commit string
+}
+
+// The statuses of a workspace's push check.
+const (
+	RescueClean   = "clean"
+	RescueRescued = "rescued"
+	RescueFailed  = "error"
+)
+
 // Conn is one agent's live connection, as everything above the transport sees it: a way to ask
 // the agent to do something, and nothing more. The facts that come back — the acknowledgement,
 // the turn starting, the turn ending, the connection closing — are events on the stream, never
@@ -51,15 +88,15 @@ type Conn interface {
 	// a turn is in flight, which is how a restart tells a delivery already in progress from one
 	// that never arrived.
 	GetState(ctx context.Context) (ConnState, error)
-	// Abort asks the agent to end the turn it is running, keeping its process and session, and
-	// returns on the agent's answer. The turn's end is the agent_end the stream observes, which can
-	// arrive after the answer; an agent between turns answers and nothing ends.
-	Abort(ctx context.Context) error
 	// Shutdown asks the agent to end its own process — the graceful half of a stop.
 	Shutdown(ctx context.Context) error
 	// AdoptWorkingCopy makes the agent's side set the author of its working copy, for a
 	// workspace the daemon cannot reach itself.
 	AdoptWorkingCopy(ctx context.Context, id GitIdentity, timeout time.Duration) error
+	// RescueUnpushed asks the agent's shim to check every workspace on its pod's disk for work the
+	// remote lacks and to push that work to rescue branches, as the agent's role. A shim that does
+	// not know the request is ErrRescueUnsupported; every other error is transport or a refusal.
+	RescueUnpushed(ctx context.Context, request RescueRequest) ([]WorkspaceRescue, error)
 	// AgentSecretsEnrollment hands the agent's shim the secrets broker's enrollment id for its
 	// process, which the shim keeps beside the key it generated.
 	AgentSecretsEnrollment(ctx context.Context, enrollmentID string) error

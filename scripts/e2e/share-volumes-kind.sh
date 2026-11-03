@@ -97,7 +97,7 @@ trap cleanup EXIT
 on_kind() {
   local name=$1
   shift
-  docker run --rm --name "$cluster-$name" --network kind --user "$(id -u):$(id -g)" \
+  docker run --rm --name "$cluster-$name" --cpus 2 --memory 2g --network kind --user "$(id -u):$(id -g)" \
     -v "$work:$work" -e HOME=/tmp "$@"
 }
 

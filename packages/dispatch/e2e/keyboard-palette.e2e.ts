@@ -11,6 +11,7 @@ import {
   syncArchitectureSource,
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
+import { selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -18,7 +19,9 @@ import { asUser } from "./users";
 // `/auth/whoami` answers), so a key pressed before the page renders reaches no handler.
 async function openIssue(page: Page, issueKey: string, title: string): Promise<void> {
   await page.goto(`/issues/${issueKey}`);
-  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(
+    page.getByTestId("issue-header").getByRole("heading", { level: 1, name: title })
+  ).toBeVisible();
   await page.locator("body").focus();
 }
 
@@ -28,8 +31,7 @@ test.beforeEach(async () => {
 
 test("the palette lists the issue page's actions, guarded like their buttons, and runs one", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Palette actions" });
   const context = await asUser(browser, "alice");
@@ -134,8 +136,7 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
   }
 });
 
-test("stop-word searches show empty results without Retry", async ({ browser }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+test("stop-word searches show empty results without Retry", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Stop word search" });
   const context = await asUser(browser, "alice");
@@ -160,8 +161,7 @@ test("stop-word searches show empty results without Retry", async ({ browser }, 
   }
 });
 
-test("a failed palette search keeps its Retry action", async ({ browser }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+test("a failed palette search keeps its Retry action", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Failed palette search" });
   const context = await asUser(browser, "alice");
@@ -200,8 +200,7 @@ test("a failed palette search keeps its Retry action", async ({ browser }, testI
 
 test("/ searches only, and a query that is no action's start lists the hits above the actions", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Astrolabe issue calibration" });
   const context = await asUser(browser, "alice");
@@ -259,7 +258,9 @@ test("/ searches only, and a query that is no action's start lists the hits abov
     await input.press("Enter");
     await expect(dialog).toHaveCount(0);
     await expect(
-      page.getByRole("heading", { level: 1, name: "Astrolabe issue calibration" })
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Astrolabe issue calibration" })
     ).toBeVisible();
     await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
     expect(statusWrites).toEqual([]);
@@ -271,8 +272,7 @@ test("/ searches only, and a query that is no action's start lists the hits abov
 
 test("g d opens the route's project Documents, from an issue key or a project path, and g p picks a project", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   await createProject({ key: "OPS", name: "Operations" });
   const issue = await createIssue({ project: "CORE", title: "Documents from an issue" });
@@ -312,8 +312,7 @@ test("g d opens the route's project Documents, from an issue key or a project pa
 
 test("Shift+S and Shift+M toggle the sidebar and the margin, and the choice survives a reload", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "the rails are a desktop layout");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Panel toggles" });
   const context = await asUser(browser, "alice");
@@ -346,8 +345,7 @@ test("Shift+S and Shift+M toggle the sidebar and the margin, and the choice surv
 
 test("the rail's Search control shows the same actions as the keyboard palette", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "the rail Search control is a desktop layout");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Rail search" });
   const context = await asUser(browser, "alice");
@@ -368,11 +366,10 @@ test("the rail's Search control shows the same actions as the keyboard palette",
 
 test("a focus-dependent row is offered, survives filtering, and runs on the row that opened the palette", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Inbox palette" });
-  await createAsk(
+  const ask = await createAsk(
     issue.key,
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: { id: "e2e-palette", kind: "session" }, as: "agent" }
@@ -384,10 +381,11 @@ test("a focus-dependent row is offered, survives filtering, and runs on the row 
     await page.goto("/");
     await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
     await page.locator("body").focus();
-    // Every other inbox binding is gated on a focused row, so `j` first: with one focused, the
-    // movement rows are still absent while the row's own action is offered.
+    // Every other inbox binding is gated on the row in hand, so `j` first: with the reading
+    // column on (INFRA-575) that hand is the selection the column is showing, not the focus,
+    // and the movement rows are still absent while the row's own action is offered.
     await page.keyboard.press("j");
-    await expect(page.locator("[data-inbox-row]").first()).toBeFocused();
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", ask.id);
     await page.keyboard.press("Control+k");
 
     const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
@@ -415,10 +413,7 @@ test("a focus-dependent row is offered, survives filtering, and runs on the row 
   }
 });
 
-test("a board card's row runs on the card that opened the palette", async ({
-  browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+test("a board card's row runs on the card that opened the palette", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Board palette" });
   const context = await asUser(browser, "alice");
@@ -457,10 +452,7 @@ test("a board card's row runs on the card that opened the palette", async ({
   }
 });
 
-test("a query that holds a card move further in moves no card on Enter", async ({
-  browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+test("a query that holds a card move further in moves no card on Enter", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   // Two cards in one column, so `Move card down` from the first one has somewhere to go.
   const first = await createIssue({ project: "CORE", title: "Board query one" });
@@ -551,8 +543,7 @@ test("a query that holds a card move further in moves no card on Enter", async (
 
 test("a fresh open starts on an empty query, so it lists the new page's actions", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Astrolabe calibration" });
   const context = await asUser(browser, "alice");
@@ -579,7 +570,9 @@ test("a fresh open starts on an empty query, so it lists the new page's actions"
       .first()
       .click();
     await expect(
-      page.getByRole("heading", { level: 1, name: "Astrolabe calibration" })
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Astrolabe calibration" })
     ).toBeVisible();
     await page.locator("body").focus();
     await page.keyboard.press("Control+k");
@@ -592,8 +585,7 @@ test("a fresh open starts on an empty query, so it lists the new page's actions"
 
 test("a header write in flight withdraws the rows whose buttons it disables", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "In-flight guard" });
   const context = await asUser(browser, "alice");
@@ -631,8 +623,7 @@ test("a header write in flight withdraws the rows whose buttons it disables", as
 
 test("a Set priority row the server refuses is reported by the header, in the digit key's one failure", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Refused palette priority" });
   const context = await asUser(browser, "alice");
@@ -647,10 +638,11 @@ test("a Set priority row the server refuses is reported by the header, in the di
         return;
       }
       patches += 1;
+      // Dispatch's verdict: a 5xx would be tried again under the write's key, not refused.
       await route.fulfill({
-        body: JSON.stringify({ error: { code: "INTERNAL", message: "nope" } }),
+        body: JSON.stringify({ code: "ISSUE_INPUT", error: "Dispatch refused the priority" }),
         contentType: "application/json",
-        status: 500,
+        status: 400,
       });
     });
 
@@ -688,8 +680,7 @@ test("a Set priority row the server refuses is reported by the header, in the di
 
 test("a List row's own row runs on the row that opened the palette, and its movement keys are no rows", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "List palette" });
   const context = await asUser(browser, "alice");
@@ -722,11 +713,10 @@ test("a List row's own row runs on the row that opened the palette, and its move
 
 test("the Inbox offers the selection's snooze but not the keys that mark and clear it", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Inbox selection palette" });
-  await createAsk(
+  const ask = await createAsk(
     issue.key,
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: { id: "e2e-palette", kind: "session" }, as: "agent" }
@@ -739,8 +729,12 @@ test("the Inbox offers the selection's snooze but not the keys that mark and cle
     const row = page.locator("[data-inbox-row]");
     await expect(row).toHaveCount(1);
     await page.locator("body").focus();
+    // `j` puts the row in hand: with the reading column on (INFRA-575) that is the selection
+    // the column is showing. The reader's own place is the row it selected, which is where the
+    // palette hands the focus back.
     await page.keyboard.press("j");
-    await expect(row).toBeFocused();
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", ask.id);
+    await row.focus();
     await page.keyboard.press("x");
     const bar = page.getByRole("group", { name: "Selected asks" });
     await expect(bar).toContainText("1 selected");
@@ -753,7 +747,7 @@ test("the Inbox offers the selection's snooze but not the keys that mark and cle
     await page.keyboard.press("Control+k");
     await expect(snooze).toHaveCount(1);
     await expect
-      .soft(actions.getByRole("option", { name: "Select or deselect the focused ask" }))
+      .soft(actions.getByRole("option", { name: "Select or deselect the selected ask" }))
       .toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
@@ -780,8 +774,7 @@ test("the Inbox offers the selection's snooze but not the keys that mark and cle
 
 test("the Agents page offers a row's picker, which then commits a keyboard pick on Enter", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await seedAgents();
   const context = await asUser(browser, "alice");
 
@@ -832,8 +825,7 @@ test("the Agents page offers a row's picker, which then commits a keyboard pick 
 
 test("hits that arrive after the reader has arrowed keep the highlight on the row they chose", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Go held search" });
   const context = await asUser(browser, "alice");
@@ -883,8 +875,7 @@ test("hits that arrive after the reader has arrowed keep the highlight on the ro
 
 test("an arrow pressed before the search answers reaches no action the query finds mid-label", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Arrow before the issue search" });
   await patchIssue(issue.key, { status: "in_progress" });
@@ -945,8 +936,7 @@ test("an arrow pressed before the search answers reaches no action the query fin
 
 test("a stale answer refreshing for the same query keeps the arrows off the actions it finds mid-label", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Stale answer for an issue search" });
   await patchIssue(issue.key, { status: "in_progress" });
@@ -1009,10 +999,7 @@ test("a stale answer refreshing for the same query keeps the arrows off the acti
   }
 });
 
-test("a row whose control has gone since the palette opened does nothing", async ({
-  browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+test("a row whose control has gone since the palette opened does nothing", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Stale row" });
   await patchIssue(issue.key, { status: "done" });
@@ -1055,8 +1042,7 @@ test("a row whose control has gone since the palette opened does nothing", async
 
 test("below xl the margin is the route's own sheet, so Shift+M and its row change nothing", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Compact margin" });
   const context = await asUser(browser, "alice");
@@ -1090,8 +1076,7 @@ test("below xl the margin is the route's own sheet, so Shift+M and its row chang
 
 test("the Architecture tab offers its focused component's Open row, and not its movement keys", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   await seedFakeGithub({
     "legion/arch": {
@@ -1134,8 +1119,7 @@ test("the Architecture tab offers its focused component's Open row, and not its 
 
 test("Go to project… and Keyboard shortcuts are rows, and each opens its own dialog", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   await createProject({ key: "OPS", name: "Operations" });
   const issue = await createIssue({ project: "CORE", title: "Openers" });
@@ -1170,8 +1154,7 @@ test("Go to project… and Keyboard shortcuts are rows, and each opens its own d
 
 test("the arrows keep the highlighted row in view when the list is longer than the palette", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Long list" });
   const context = await asUser(browser, "alice");
@@ -1205,8 +1188,7 @@ test("the arrows keep the highlighted row in view when the list is longer than t
 
 test("a nested Architecture level offers Up one level, and not the keys that move into children", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   await seedFakeGithub({
     "legion/arch": {
@@ -1251,8 +1233,7 @@ test("a nested Architecture level offers Up one level, and not the keys that mov
 
 test("on a short window the palette fits the screen and each highlighted row shows whole", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Short window" });
   const context = await asUser(browser, "alice");
@@ -1292,8 +1273,7 @@ test("on a short window the palette fits the screen and each highlighted row sho
 
 test("a window that shrinks under an open palette keeps the highlighted row in view", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Shrinking window" });
   const context = await asUser(browser, "alice");

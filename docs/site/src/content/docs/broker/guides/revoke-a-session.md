@@ -40,7 +40,9 @@ $ curl -s -X POST -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_
 
 (That is the call Dispatch's server makes as its own ServiceAccount, the caller the broker lists
 in `BROKER_API_ACCOUNTS`; on the [local stack](/legion/broker/guides/run-locally/) you can make it
-yourself with the token in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.)
+yourself with the token in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`. The broker takes the revoking
+person the body names on its caller's word, as it does for a machine login's decision: a revoke
+only takes power away, so unlike approving a secret request it needs no sign-in to the broker.)
 
 ## Revoke a grant from your shell
 
@@ -61,12 +63,12 @@ $ agent-secrets grant list
 GRANT_ID                              SECRETS          GRANTED    APPROVER         SESSION                                       OPERATOR         EXPIRES
 f26b6b78-2819-4b1d-abbd-d6990ca1a776  DEMO_API_KEY     approval   ada@example.com  session/example-host-laptop:1989345:35362384  ada@example.com  2026-10-10T15:56:07Z
 cc63d479-ddae-4052-b93b-b4b5df37adf0  DEMO_READ_TOKEN  automatic  -                session/example-host-devbox:1989344:35362384  ada@example.com  session-end
-Every row is a grant from the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1).
+Every row is a grant from the broker AGENT_SECRETS_URL names (AWS Secrets Manager).
 $ agent-secrets grant revoke f26b6b78-2819-4b1d-abbd-d6990ca1a776
-revoked f26b6b78-2819-4b1d-abbd-d6990ca1a776 at the broker at secrets.internal.example
+revoked f26b6b78-2819-4b1d-abbd-d6990ca1a776 at the broker AGENT_SECRETS_URL names
 ```
 
-The line after the table goes to standard error, naming the broker and store every row is from, so
+The line after the table goes to standard error, naming the broker and kind of store every row is from, so
 the table stays one row per grant for a script.
 
 `GRANTED` is `automatic` or `approval`, and `APPROVER` is `-` for an automatic grant. `EXPIRES` is
@@ -81,13 +83,13 @@ ending its own grant withholds nothing: its next request is decided as before.
 
 ```console
 $ agent-secrets revoke b51e58bc-3b7b-4144-a2ed-5821f232d612
-revoked at the broker at secrets.internal.example
+revoked at the broker AGENT_SECRETS_URL names
 $ agent-secrets self
 enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
-source: the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 ```
 
 ## End every session's access to a secret
@@ -117,10 +119,10 @@ approver's list. It names the request by the request id `agent-secrets` printed 
 
 ```console
 $ agent-secrets cancel 715ea84a-6f5c-4230-83c9-1cf258acd88b
-cancelled at the broker at secrets.internal.example
+cancelled at the broker AGENT_SECRETS_URL names
 $ agent-secrets status 715ea84a-6f5c-4230-83c9-1cf258acd88b
 state: cancelled
-source: the broker at secrets.internal.example (AWS Secrets Manager account 111122223333 in us-east-1)
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 decided_by: session:2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 ```
 
@@ -138,7 +140,10 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
   `ENROLLMENT_NOT_LIVE` on its next renewal from the moment its lease lapses,
   `BROKER_LEASE_SECONDS` after its last renewal. Other session calls are refused `PROOF_INVALID`.
   The broker's sweep ends it on its next run, within `BROKER_SWEEP_SECONDS`, and logs
-  `broker sweeper: ended an enrollment whose lease lapsed`. The
+  `broker sweeper: ended an enrollment whose lease lapsed`. A lease that ran out while no broker
+  was serving (every broker process down, or the database out of reach) is not ended: the broker
+  gives the session back that time once it serves again
+  ([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)). The
   [configuration reference](/legion/broker/reference/config/) gives both settings' defaults.
 - **Its machine login is revoked.** Whoever may revoke the machine login that enrolled it — the
   person who approved a person's machine login, or anyone signed in for a service's — revokes that
@@ -189,11 +194,11 @@ $ agent-secrets machine list
 CREDENTIAL_ID                         HOST                 APPROVED_BY      ISSUED                EXPIRES               STATE
 d4187389-953c-4156-90c1-1dd937e9bf0b  example-host-devbox  ada@example.com  2026-10-10T14:56:01Z  2026-10-17T14:56:01Z  ok
 a2df6d16-adc1-434e-b479-496defb3a5c8  example-host-laptop  ada@example.com  2026-10-10T14:55:53Z  2026-10-17T14:55:53Z  ok
-Every row is a login to the broker at secrets.internal.example.
+Every row is a login to the broker AGENT_SECRETS_URL names.
 $ agent-secrets machine revoke 8f4c8ae4-b73e-4a60-a591-725667480f1a
-agent-secrets machine revoke: no such machine login (NOT_FOUND); asked the broker at secrets.internal.example
+agent-secrets machine revoke: no such machine login (NOT_FOUND); asked the broker AGENT_SECRETS_URL names
 $ agent-secrets machine revoke a2df6d16-adc1-434e-b479-496defb3a5c8
-revoked a2df6d16-adc1-434e-b479-496defb3a5c8 at the broker at secrets.internal.example
+revoked a2df6d16-adc1-434e-b479-496defb3a5c8 at the broker AGENT_SECRETS_URL names
 ```
 
 The machine-login page lists the services' logins, the Legion daemon's, beside them, and revokes
@@ -252,3 +257,12 @@ machine login ends both, and its row stays on the machine-login page while eithe
 `expired, sessions still running` once the login has expired. Without Dispatch, end each box with
 `agent-secrets unenroll --helper --enrollment <id>`, run against a helper logged in as the box's
 operator, or stop its `agent-secrets renew`, after which it lapses within `BROKER_LEASE_SECONDS`.
+
+## End a person's sign-in to the broker
+
+The sessions above are agents'. A person's own sign-in to the broker's approval page is separate:
+it lasts a day at most, is never extended, and ends when they sign out. Nobody ends someone
+else's from a page; an operator ends every browser session one login holds by running the
+broker's own subcommand in a broker pod, `envoy-broker end-sessions <login>`
+([Ending a person's sessions](/legion/broker/operate/#ending-a-persons-sessions)). Revoking a
+grant or a machine login does not need a broker sign-in and never ends one.

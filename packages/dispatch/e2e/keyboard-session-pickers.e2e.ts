@@ -132,7 +132,9 @@ async function expectPicked(page: Page, model: string, level: string): Promise<v
   await expect(shownThinking).toHaveText(level);
 }
 
-/** The stored id of the switch whose body is `body`, once Dispatch has stored it, with its author. */
+/** The stored id of the switch whose body is `body`, once Dispatch has stored it and opened its
+ *  first delivery, with its author. A session only ever answers a delivery it received, and
+ *  Dispatch opens the delivery after the message commits, so a listed message can have none yet. */
 async function storedSwitch(
   sessionID: string,
   body: string
@@ -141,7 +143,7 @@ async function storedSwitch(
   await expect
     .poll(async () => {
       const read = (await listAgentMessages(sessionID)).find((row) => row.message.body === body);
-      found = read === undefined ? undefined : read.message;
+      found = read === undefined || read.message.deliveries.length === 0 ? undefined : read.message;
       return found !== undefined;
     })
     .toBe(true);
@@ -190,7 +192,7 @@ test.beforeEach(async () => {
 // choose and Enter commits, so a keyboard reader can pass the next model to reach the one after
 // it. An engine that commits a closed select's arrow step would switch the session to every model
 // it passes on the way.
-test("the arrows move a header picker's choice without switching the session, and Enter switches it once", async ({
+test("the arrows move a header picker's choice without switching the session, and Enter switches it once @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(11);
@@ -249,7 +251,7 @@ for (const [row, way, leave] of [
     (page: Page) => page.getByTestId("agent-thread-empty").click(),
   ],
 ] as const) {
-  test(`a header picker's step left by ${way} sends nothing and puts the picker back on the reported model`, async ({
+  test(`a header picker's step left by ${way} sends nothing and puts the picker back on the reported model @phone`, async ({
     browser,
   }, testInfo) => {
     const session = liveSession(row);
@@ -296,7 +298,7 @@ for (const [row, way, leave] of [
 // Decision 6a: type-ahead is a step as the arrows are. A letter moves the choice to the next
 // option it starts, here `o` to openai/model-c past both anthropic models, and sends nothing;
 // Enter switches to it.
-test("type-ahead on a header picker moves its choice without switching the session, and Enter switches it once", async ({
+test("type-ahead on a header picker moves its choice without switching the session, and Enter switches it once @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(14);
@@ -336,7 +338,7 @@ test("type-ahead on a header picker moves its choice without switching the sessi
 // so a held picker keeps focus and its keys still step its choice, but Enter sends nothing. The
 // step survives the switch's end, since the session reported no new thinking level meanwhile, so
 // Enter afterwards switches to it.
-test("a held header picker keeps focus and steps its choice but Enter sends nothing until the switch ends, and Enter then switches to that step", async ({
+test("a held header picker keeps focus and steps its choice but Enter sends nothing until the switch ends, and Enter then switches to that step @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(15);

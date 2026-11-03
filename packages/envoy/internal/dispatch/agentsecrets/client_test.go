@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/brokertoken"
 )
 
 // capturedRequest snapshots what the client actually put on the wire, so a subtest can assert
@@ -71,21 +73,6 @@ func TestPendingSendsBearerAndApproverQuery(t *testing.T) {
 	}
 	if string(body) != `{"requests":[]}` {
 		t.Fatalf("body = %s, want the broker's response relayed verbatim", body)
-	}
-}
-
-func TestRecordSendsBearerAndPath(t *testing.T) {
-	server, captured := serveCapturing(t, http.StatusOK, `{"id":"req-1"}`)
-	defer server.Close()
-
-	if _, err := New(server.URL, tokenFile(t, "account-token")).Record(context.Background(), "req-1"); err != nil {
-		t.Fatalf("Record: %v", err)
-	}
-	if captured.Method != http.MethodGet || captured.Path != "/v1/credential-requests/req-1" {
-		t.Fatalf("request = %s %s, want GET /v1/credential-requests/req-1", captured.Method, captured.Path)
-	}
-	if captured.Auth != "Bearer account-token" {
-		t.Fatalf("Authorization = %q, want Bearer account-token", captured.Auth)
 	}
 }
 
@@ -262,10 +249,10 @@ func TestARewrittenTokenFileReachesTheBrokerOnceTheCacheLapses(t *testing.T) {
 		t.Fatalf("the call inside the cache window: %v", err)
 	}
 	if captured.Auth != "Bearer first-token" {
-		t.Fatalf("Authorization = %q within %v of the read, want the cached Bearer first-token", captured.Auth, tokenCacheTTL)
+		t.Fatalf("Authorization = %q within %v of the read, want the cached Bearer first-token", captured.Auth, brokertoken.AccountTokenCacheTTL)
 	}
 
-	client.tokenTTL = 0
+	client.Account.TTL = 0
 	if _, err := client.Pending(context.Background(), "sjawhar"); err != nil {
 		t.Fatalf("the call after the cache lapsed: %v", err)
 	}

@@ -14,6 +14,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import type { ComposerKind } from "../conversation/composer-model";
+import type { SaveCommentEdit } from "../conversation/send-request";
 import {
   COMPACT_VIEWPORT_QUERY,
   PHONE_VIEWPORT_QUERY,
@@ -26,6 +27,7 @@ import { PinnedTab } from "./PinnedTab";
 import { ThreadCard } from "./ThreadCard";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import type {
+  DecisionMarginItem,
   MarginItemAction,
   MarginOwner,
   MarginTab,
@@ -41,7 +43,7 @@ export interface MarginSheetModel {
     closeComposer: (composer: MarginComposer) => void;
     onAction: (id: string, action: MarginItemAction) => void;
     onComposerKindChange: (kind: ComposerKind) => string | undefined;
-    onEdit: (id: string, body: string) => Promise<unknown>;
+    onEdit: SaveCommentEdit;
     onRetryAction: () => void;
     onUnpin: (eventId: number) => void;
     onUnpinConversation: (id: string) => void;
@@ -60,6 +62,9 @@ export interface MarginSheetModel {
     asksPending: boolean;
     commentsError: boolean;
     commentsPending: boolean;
+    /** The decisions beside the spec's blocks, in the spec's order; none beside any other
+     *  document. */
+    decisions: readonly DecisionMarginItem[];
     historicalAsks: Ask[];
     marginRef: RefObject<HTMLElement | null>;
     isClosed: boolean;
@@ -74,8 +79,8 @@ export interface MarginSheetModel {
     pinnedConversations: PinnedConversationCard[];
     pinnedIds: string[];
     resolvedThreads: Thread[];
-    /** Retracted asks hidden behind the same toggle as resolved threads. */
-    retractedAskCount: number;
+    /** Retracted and withdrawn asks hidden behind the same toggle as resolved threads. */
+    foldedAskCount: number;
     threads: Thread[];
     viewerLogin: string;
     visibleArtifact: Artifact | undefined;
@@ -136,6 +141,7 @@ export function MarginSheet({
       asksPending,
       commentsError,
       commentsPending,
+      decisions,
       historicalAsks,
       marginRef,
       isClosed,
@@ -150,7 +156,7 @@ export function MarginSheet({
       needsYou,
       onSelectCard,
       resolvedThreads,
-      retractedAskCount,
+      foldedAskCount,
       threads,
       viewerLogin,
       visibleArtifact,
@@ -351,6 +357,7 @@ export function MarginSheet({
               asksPending={asksPending}
               commentsError={commentsError}
               commentsPending={commentsPending}
+              decisions={decisions}
               expandedThreadKey={selection.expandedThreadKey}
               editingCommentId={selection.editingCommentId}
               savingCommentEditId={selection.savingCommentEditId}
@@ -373,7 +380,7 @@ export function MarginSheet({
               onToggleThread={actions.onToggleThread}
               pendingActionIds={pendingActionIds}
               resolvedThreads={resolvedThreads}
-              retractedAskCount={retractedAskCount}
+              foldedAskCount={foldedAskCount}
               selectedItemId={selection.selectedItemId}
               showResolved={selection.showResolved}
               threads={threads}

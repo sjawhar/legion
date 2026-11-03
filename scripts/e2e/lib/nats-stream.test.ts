@@ -36,9 +36,12 @@ async function startNats(): Promise<void> {
     container,
     "--cpus",
     "0.5",
+    "--memory",
+    "512m",
     "-p",
     "127.0.0.1::4222",
-    "mirror.gcr.io/library/nats:2.10",
+    // ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+    "ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f",
     "-js"
   );
   const endpoint = docker("port", container, "4222/tcp").trim();

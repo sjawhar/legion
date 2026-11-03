@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The live proof that the daemon keeps a tree's order: an acceptance is refused while any issue
-# beneath the signing one is in the workflow, and a merged root's close waits for the rest of its
-# tree instead of lingering it mid-turn. The whole daemon is booted by the function `legion start`
+# The live proof that the daemon keeps a tree's order at the close: a root is accepted while a child
+# beneath it is still in the workflow, and its merged close waits for the rest of its tree instead
+# of lingering it mid-turn. The whole daemon is booted by the function `legion start`
 # calls, over a real PostgreSQL and a real nats-server, and driven only through the GitHub and
 # Dispatch envelopes of the ENVOY_NOTIFICATIONS stream and its own HTTP routes; every step is read
 # back from GET /legion/v1/state and from what the daemon posted to the Dispatch and Envoy

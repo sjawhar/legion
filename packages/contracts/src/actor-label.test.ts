@@ -33,6 +33,11 @@ test("a bare session id is labelled by the title given, else its short id", () =
   expect(sessionLabel("0123456789abcdef", undefined)).toBe("session:01234567…");
 });
 
+test("the Legion daemon's write identity reads whole, not as a short session id", () => {
+  expect(actorLabel({ id: "legion-daemon:INFRA", kind: "session" })).toBe("legion-daemon:INFRA");
+  expect(actorLabel({ id: "legion-daemonic-session", kind: "session" })).toBe("session:legion-d…");
+});
+
 test("an actor's name never carries the owner or service attribution", () => {
   expect(
     actorName(

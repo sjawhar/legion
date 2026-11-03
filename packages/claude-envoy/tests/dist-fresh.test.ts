@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { afterAll, beforeAll, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
 import { cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -7,7 +7,18 @@ import ts from "typescript"
 import { assertPinnedBun, BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
 
 const packageRoot = resolve(import.meta.dir, "..")
-const distDirectory = join(packageRoot, "dist")
+// A pull request never commits dist/ (main's rebuild workflow does), so every test here reads one
+// fresh build of this tree rather than whatever dist/ the checkout holds.
+let distDirectory = ""
+
+beforeAll(async () => {
+  distDirectory = await mkdtemp(join(tmpdir(), "claude-envoy-fresh-dist-"))
+  await buildBundles(distDirectory)
+}, 60_000)
+
+afterAll(async () => {
+  await rm(distDirectory, { recursive: true, force: true })
+})
 
 async function findExternalDependencySpecifiers(source: string): Promise<string[]> {
   const resolverRoot = await mkdtemp(join(tmpdir(), "claude-envoy-module-resolution-"))
@@ -72,7 +83,7 @@ async function findExternalDependencySpecifiers(source: string): Promise<string[
   }
 }
 
-test("the committed bundle starts without node_modules and, with no envoy.json, says Envoy is off and exits 0 once stdin ends", async () => {
+test("the fresh bundle starts without node_modules and, with no envoy.json, says Envoy is off and exits 0 once stdin ends", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-dist-"))
   try {
     await cp(distDirectory, join(scratch, "dist"), { recursive: true })
@@ -279,7 +290,7 @@ test("the dependency guard rejects nonbuiltin literal module specifiers", async 
   for (const { path } of specifiers) expect(matches).toContain(path)
 })
 
-test("the committed bundles contain only runtime builtin module specifiers", async () => {
+test("the fresh bundles contain only runtime builtin module specifiers", async () => {
   for (const name of Object.keys(BUNDLE_ENTRYPOINTS)) {
     const bundle = await readFile(join(distDirectory, `${name}.js`), "utf8")
     expect(await findExternalDependencySpecifiers(bundle)).toEqual([])
@@ -287,8 +298,8 @@ test("the committed bundles contain only runtime builtin module specifiers", asy
 })
 
 // Claude Code puts the plugin's bin/ on the Bash tool's PATH, and its plugin cache holds the git
-// tree with no node_modules, so bin/dispatch has to run the committed bundle as it stands.
-test("bin/dispatch is executable and runs the committed dist/dispatch.js without node_modules", async () => {
+// tree with no node_modules, so bin/dispatch has to run the built bundle as it stands.
+test("bin/dispatch is executable and runs a fresh dist/dispatch.js without node_modules", async () => {
   expect(BUNDLE_ENTRYPOINTS).toHaveProperty("dispatch", "../envoy-client/bin/dispatch.ts")
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-bin-"))
   try {
@@ -316,35 +327,47 @@ test("bin/dispatch is executable and runs the committed dist/dispatch.js without
 })
 
 /** Where two bundles part ways, with 80 characters of each side around it. */
-function describeMismatch(file: string, fresh: Buffer, current: Buffer): string {
-  const shorter = Math.min(fresh.length, current.length)
+function describeMismatch(file: string, first: Buffer, second: Buffer): string {
+  const shorter = Math.min(first.length, second.length)
   let offset = 0
-  while (offset < shorter && fresh[offset] === current[offset]) offset += 1
+  while (offset < shorter && first[offset] === second[offset]) offset += 1
   const context = (bytes: Buffer): string =>
     JSON.stringify(bytes.subarray(Math.max(0, offset - 80), offset + 80).toString("utf8"))
   return [
-    `${file}: fresh build differs from committed dist/`,
-    `fresh ${fresh.length} bytes, committed ${current.length} bytes, first difference at byte ${offset}`,
-    `fresh:     ${context(fresh)}`,
-    `committed: ${context(current)}`,
+    `${file}: the second build differs from the first`,
+    `first ${first.length} bytes, second ${second.length} bytes, first difference at byte ${offset}`,
+    `first:  ${context(first)}`,
+    `second: ${context(second)}`,
   ].join("\n")
 }
 
-test("rebuilding reproduces the committed bundle byte for byte", async () => {
+// Main's rebuild workflow commits nothing when a merge changed no bundled source, and that holds
+// only while one tree always builds to the same bytes. The second build is the script's own
+// `--out`, in a process of its own as each rebuild on main is, started from the filesystem root:
+// the build runs from the package root whatever the caller's directory, so that changes no byte
+// either. (A second Bun.build in a test process that has already run other test files fails
+// reading its sources with EISDIR on Bun 1.3.14.)
+test("two builds of one tree are byte for byte the same", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-rebuild-"))
   try {
-    await buildBundles(scratch)
-    const committed = (await readdir(distDirectory)).sort()
-    expect((await readdir(scratch)).sort()).toEqual(committed)
-    for (const file of committed) {
-      const fresh = await readFile(join(scratch, file))
-      const current = await readFile(join(distDirectory, file))
-      if (!fresh.equals(current)) throw new Error(describeMismatch(file, fresh, current))
+    const run = Bun.spawn(
+      [process.execPath, join(packageRoot, "scripts", "build.ts"), "--out", scratch],
+      { cwd: "/", stdout: "pipe", stderr: "pipe" },
+    )
+    const [exitCode, stderr] = await Promise.all([run.exited, new Response(run.stderr).text()])
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" })
+    const secondDirectory = join(scratch, "dist")
+    const files = (await readdir(distDirectory)).sort()
+    expect((await readdir(secondDirectory)).sort()).toEqual(files)
+    for (const file of files) {
+      const first = await readFile(join(distDirectory, file))
+      const second = await readFile(join(secondDirectory, file))
+      if (!first.equals(second)) throw new Error(describeMismatch(file, first, second))
     }
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
-}, 30_000)
+}, 60_000)
 
 // `bun run build`/`bun run check-dist` spawn a new "bun" to run scripts/build.ts, and that spawn
 // resolves "bun" from PATH rather than reusing whichever binary the caller invoked `bun run` with
@@ -353,11 +376,11 @@ test("rebuilding reproduces the committed bundle byte for byte", async () => {
 // exact Bun build. buildBundles refuses before it ever calls Bun.build(); these check the pure
 // comparison a real mismatch would hit, without needing a second real Bun installed to prove it.
 test("buildBundles refuses a Bun other than .bun-version pins", () => {
-  expect(() => assertPinnedBun("1.4.2", "1.3.14")).toThrow(
-    /refusing to build under Bun 1\.4\.2.*\.bun-version pins 1\.3\.14/s,
+  expect(() => assertPinnedBun("1.4.2", "1.4.4")).toThrow(
+    /refusing to build under Bun 1\.4\.2.*\.bun-version pins 1\.4\.4/s,
   )
 })
 
 test("a Bun matching .bun-version proceeds", () => {
-  expect(() => assertPinnedBun("1.3.14", "1.3.14")).not.toThrow()
+  expect(() => assertPinnedBun("1.4.4", "1.4.4")).not.toThrow()
 })

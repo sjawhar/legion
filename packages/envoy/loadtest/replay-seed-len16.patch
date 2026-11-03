@@ -1,0 +1,127 @@
+replay-seed-len16.patch: applied by stack.sh (build_dispatch_at) to Dispatch at 35efd326 for the
+LINUX replay seed (git apply -p1 at the root of a `git archive` of packages/envoy). len16 counts
+UTF-16 units without allocating; len16_seed_test.go holds it equal to len(utf16.Encode([]rune(s))).
+
+diff --git a/packages/envoy/internal/dispatch/pmdoc/len16_seed_test.go b/packages/envoy/internal/dispatch/pmdoc/len16_seed_test.go
+new file mode 100644
+index 0000000..1058e1b
+--- /dev/null
++++ b/packages/envoy/internal/dispatch/pmdoc/len16_seed_test.go
+@@ -0,0 +1,92 @@
++package pmdoc
++
++// The load test's replay seed (packages/envoy/loadtest/replay-seed-len16.patch) builds Dispatch at
++// 35efd326 with an allocation-free len16. These tests hold that it counts what the original
++// len(utf16.Encode([]rune(s))) counts, on edge cases and, when LOADTEST_LEN16_CORPUS names a
++// directory, on every *.md under it, whole and line by line. A mismatch names only the file, the
++// line number and both lengths, never the text.
++
++import (
++	"io/fs"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"unicode/utf16"
++)
++
++func len16Reference(value string) int { return len(utf16.Encode([]rune(value))) }
++
++func TestLen16SeedEquivalence(t *testing.T) {
++	cases := map[string]string{
++		"empty":          "",
++		"ascii":          "hello, world",
++		"two-byte":       "caf\u00e9 \u00fc\u00df",
++		"three-byte":     "\u65e5\u672c\u8a9e \u20ac",
++		"four-byte":      "\U0001F600\U0001F680",
++		"astral":         "\U00010000\U0010FFFF",
++		"replacement":    "\uFFFD",
++		"invalid":        "a\xffb\xfe\xc3",
++		"lone-surrogate": "x\xed\xa0\x80y",
++		"truncated":      "\xf0\x9f\x98",
++		"mixed":          "a\u00e9\u65e5\U0001F600\xff\uFFFD\xed\xb0\x80z",
++		"bmp-edge":       "\uFFFF\uE000\uD7FF",
++	}
++	for name, value := range cases {
++		if got, want := len16(value), len16Reference(value); got != want {
++			t.Errorf("case %s: len16 = %d, utf16.Encode = %d", name, got, want)
++		}
++	}
++	dir := os.Getenv("LOADTEST_LEN16_CORPUS")
++	if dir == "" {
++		return
++	}
++	files, lines := 0, 0
++	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
++		if err != nil {
++			return err
++		}
++		if entry.IsDir() || !strings.HasSuffix(path, ".md") {
++			return nil
++		}
++		data, err := os.ReadFile(path)
++		if err != nil {
++			return err
++		}
++		files++
++		text := string(data)
++		if got, want := len16(text), len16Reference(text); got != want {
++			t.Errorf("%s (whole file): len16 = %d, utf16.Encode = %d", path, got, want)
++		}
++		for number, line := range strings.Split(text, "\n") {
++			lines++
++			if got, want := len16(line), len16Reference(line); got != want {
++				t.Errorf("%s:%d: len16 = %d, utf16.Encode = %d", path, number+1, got, want)
++			}
++		}
++		return nil
++	})
++	if err != nil {
++		t.Fatalf("walking LOADTEST_LEN16_CORPUS %s: %v", dir, err)
++	}
++	if files == 0 {
++		t.Fatalf("LOADTEST_LEN16_CORPUS %s holds no *.md file", dir)
++	}
++	t.Logf("len16 corpus: %d files, %d lines compared", files, lines)
++}
++
++func TestLen16SeedAllocatesNothing(t *testing.T) {
++	value := strings.Repeat("a\u00e9\u65e5\U0001F600\xff", 64)
++	if allocs := testing.AllocsPerRun(100, func() { _ = len16(value) }); allocs != 0 {
++		t.Fatalf("len16 allocates %v times a call, want 0", allocs)
++	}
++}
++
++func BenchmarkLen16(b *testing.B) {
++	value := strings.Repeat("a\u00e9\u65e5\U0001F600 plain ascii text ", 256)
++	b.ReportAllocs()
++	b.SetBytes(int64(len(value)))
++	for b.Loop() {
++		_ = len16(value)
++	}
++}
+diff --git a/packages/envoy/internal/dispatch/pmdoc/position.go b/packages/envoy/internal/dispatch/pmdoc/position.go
+index 2d56287..de7b3fb 100644
+--- a/packages/envoy/internal/dispatch/pmdoc/position.go
++++ b/packages/envoy/internal/dispatch/pmdoc/position.go
+@@ -5,8 +5,19 @@ import (
+ 	"unicode/utf16"
+ )
+ 
++// len16 is how many UTF-16 units value takes, as len(utf16.Encode([]rune(value))) counts them,
++// without building either slice: a character above U+FFFF is two units, any other one one (each
++// invalid byte reads as U+FFFD, one unit).
+ func len16(value string) int {
+-	return len(utf16.Encode([]rune(value)))
++	units := 0
++	for _, char := range value {
++		if char > 0xFFFF {
++			units += 2
++		} else {
++			units++
++		}
++	}
++	return units
+ }
+ 
+ // units16 is how many UTF-16 units runes take, counted as ygo counts a text's length: a character

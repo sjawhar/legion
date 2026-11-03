@@ -19,6 +19,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // Server answers the helper socket. PeerOf is a field so tests can present a chosen pid.
@@ -339,8 +340,8 @@ func (s *Server) signLauncher(peer *Peer, pid int, method, url string) Response 
 	}
 	if !operatorRoute(s.Broker.URL, method, url) {
 		peer.Close()
-		b := s.Broker.URL
-		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("sign-launcher signs only GET %[1]s/v1/operator/machines, POST %[1]s/v1/operator/machines/{id}/revoke, GET %[1]s/v1/operator/grants and POST %[1]s/v1/operator/grants/{id}/revoke; not %[2]s %[3]s", b, method, url)}
+		b := redact.URL(s.Broker.URL)
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("sign-launcher signs only GET %[1]s/v1/operator/machines, POST %[1]s/v1/operator/machines/{id}/revoke, GET %[1]s/v1/operator/grants and POST %[1]s/v1/operator/grants/{id}/revoke; not %[2]s %[3]s", b, method, redact.URL(url))}
 	}
 	sess, unknown := s.Registry.RootOrUnknown(pid)
 	if sess != nil {

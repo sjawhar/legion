@@ -32,16 +32,25 @@ var browserSpreadAttr = []byte("pmdoc-browser-spread")
 //   - in a quote and a footnote definition, as footnotedQuoteListSpread reads;
 //   - and blank lines after an item that ends in a quote or a list are that block's.
 //
+// The blank lines indented code keeps past where goldmark ends it are that code's, and space
+// nothing (heldCodeLines, markBlocksAfterHeldCode).
+//
 // The lines alone do not decide a typed block holding a blank line in a list item, a blank line at
 // the end of a quote after a list, at or after a list in a typed block in a footnote definition, or
-// in a quote at or after a list that quotes and typed blocks nest around more than once. A
+// in a quote at or after a list that quotes and typed blocks nest around more than once, and this
+// parser does not read the blank lines after a list item in a quote ending in a footnote definition
+// whose typed block holds a fenced code block no fence closed (quotedDefinitionFenceBlank). A
 // document holding such a shape is also refused where goldmark reads its blocks
 // otherwise: an empty list item before a blank line and a block its outer item holds, where
 // goldmark ends the outer item (emptyItemEndsOuterItem).
 func browserListSpacing(root ast.Node, source []byte) error {
+	lines := newSourceLines(source)
+	_, lines.keptLast = root.Attribute(lastLineKeptAttr)
+	lines.held = heldCodeLines(root, lines)
+	markBlocksAfterHeldCode(root, lines)
 	shape := browserOnlyShape(root)
 	if shape == "" {
-		if reason := readExactListSpacing(root, newSourceLines(source)); reason != "" {
+		if reason := readExactListSpacing(root, lines); reason != "" {
 			return fmt.Errorf("%w: %s", ErrSchema, reason)
 		}
 		return nil
@@ -49,7 +58,6 @@ func browserListSpacing(root ast.Node, source []byte) error {
 	refuse := func(reason string) error {
 		return fmt.Errorf("%w: %s, in a document holding %s, which is read as the browser editor reads it", ErrSchema, reason, shape)
 	}
-	lines := newSourceLines(source)
 	return ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
@@ -239,13 +247,21 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		// typed block once around the list that count is quotedListSpread's; where quotes and typed
 		// blocks alternate around it more than once, a blank line in its quote at or after it, outside
 		// the code it holds, is refused.
-		if quoteTypedAlternations(list) > 1 && len(lines.blankLinesOutsideCode(list, nextBlock(list), quoteBlankLine)) > 0 {
+		if before := lines.asHeldBefore(); quoteTypedAlternations(list) > 1 && len(before.blanksOutsideCode(list, before.blankLines(list, nextBlock(list), quoteBlankLine))) > 0 {
 			return nestedQuotedListBlank
 		}
 		// The browser editor spaces a list in a typed block inside its quote by one blank line.
 		spread, reason := quotedListSpread(list, quote, directive, typed && isAncestor(quote, directive), lines)
 		if reason != "" {
 			return reason
+		}
+		// The blank lines after an item ending in a footnote definition whose typed block ends in a
+		// fenced code block no fence closed are that code's to the browser editor's parser, where
+		// definitionEndSpreadsItem counts them as the definition's.
+		for item := list.FirstChild(); item != nil; item = item.NextSibling() {
+			if definitionEndSpreadsItem(item, list, quote, lines) && typedFenceKeepsBlankLinesAfter(item.LastChild()) {
+				return quotedDefinitionFenceBlank
+			}
 		}
 		definitionHolds := definitionBlanksInQuote(list, lines)
 		setSpread(list, spread, func(item ast.Node) bool {
@@ -353,6 +369,11 @@ const typedFootnoteListBlank = "a blank line at or after a list in a typed block
 // code it holds, that quotes and typed blocks alternate around more than once
 // (quoteTypedAlternations).
 const nestedQuotedListBlank = "a blank line in a quote at or after a list that quotes and typed blocks nest around more than once, which the browser editor reads as spacing the list by where each typed block's content ends"
+
+// quotedDefinitionFenceBlank is the refusal of blank lines after a list item in a quote that ends in
+// a footnote definition whose typed block ends in a fenced code block no fence closed
+// (typedFenceKeepsBlankLinesAfter), where they would spread the item (definitionEndSpreadsItem).
+const quotedDefinitionFenceBlank = "blank lines after a list item in a quote ending in a footnote definition whose typed block holds a fenced code block no fence closed, which the browser editor reads as that code's lines and not as spacing the item"
 
 // quoteTypedAlternations is how many times the quotes and typed blocks around node change from one
 // to the other, outward: a list in a quote in a typed block has one, and one in a quote in a typed
@@ -495,9 +516,15 @@ func fenceEnding(typed *typedDirective) (*typedDirective, bool) {
 // line before the next item. Blank lines between the list and what the nearer of the two goes on
 // with space the last item, one before a quote or a list, and two before anything else when the
 // quote stands inside the definition; with the definition inside the quote, two before anything
-// else space the list. Blank lines after a last item that ends in a list are that list's.
+// else space the list. Blank lines after a last item that ends in a list are that list's, and
+// those after one ending in a typed block that ends in a fenced code block no fence closed are
+// that code's (keepsBlankLinesAfter).
 func footnotedQuoteListSpread(list *ast.List, quote, definition ast.Node, lines sourceLines) (spread, lastSpread bool, reason string) {
-	if endsWithList(list.LastChild()) {
+	last := list.LastChild()
+	if endsWithList(last) {
+		return false, false, ""
+	}
+	if typedFenceKeepsBlankLinesAfter(last) {
 		return false, false, ""
 	}
 	quoteInside := isAncestor(definition, quote)
@@ -620,10 +647,12 @@ func blankBetweenBlocksBut(item ast.Node, listHolds, definitionHolds func(ast.No
 }
 
 // blankAfterAttr marks a block goldmark made from a paragraph that followed a blank line, which
-// its HasBlankPreviousLines does not carry over (lazyTableRows.transform).
+// its HasBlankPreviousLines does not carry over (lazyTableRows.transform), and the block right
+// after indented code's held lines, which follows no blank line (markBlocksAfterHeldCode).
 var blankAfterAttr = []byte("pmdoc-blank-after")
 
-// blankBefore reports whether a blank line comes right before block.
+// blankBefore reports whether a blank line comes right before block. A line indented code holds
+// past where goldmark ends it is the code's, so the block right after one follows none.
 func blankBefore(block ast.Node) bool {
 	if blank, ok := block.Attribute(blankAfterAttr); ok {
 		return blank.(bool)
@@ -632,6 +661,56 @@ func blankBefore(block ast.Node) bool {
 		return false
 	}
 	return block.HasBlankPreviousLines()
+}
+
+// heldCodeLines is the lines each indented code block holds past where goldmark ends it
+// (codeHeldAttr): the code's text, which spaces nothing, so no counter of blank lines counts them
+// (sourceLines.held).
+func heldCodeLines(root ast.Node, lines sourceLines) map[int]bool {
+	var held map[int]bool
+	eachHeldCode(root, func(code *ast.CodeBlock, from int) {
+		if held == nil {
+			held = map[int]bool{}
+		}
+		segments := code.Lines()
+		for index := from; index < segments.Len(); index++ {
+			held[lines.lineOf(segments.At(index).Start)] = true
+		}
+	})
+	return held
+}
+
+// markBlocksAfterHeldCode records on the block on the line right after an indented code block's
+// last held line that it follows no blank line (blankAfterAttr), whatever goldmark records on it,
+// even where that line holds only its quotes' markers (blankBefore). It runs after the parse, so it
+// decides over what lazyTableRows.transform records there.
+func markBlocksAfterHeldCode(root ast.Node, lines sourceLines) {
+	eachHeldCode(root, func(code *ast.CodeBlock, _ int) {
+		segments := code.Lines()
+		last := lines.lineOf(segments.At(segments.Len() - 1).Start)
+		if next := nextBlock(code); next != nil && lines.lineOf(startOf(next)) == last+1 {
+			next.SetAttribute(blankAfterAttr, false)
+		}
+	})
+}
+
+// eachHeldCode calls visit with each indented code block that holds lines past where goldmark
+// ends it, and the index of the first of them (codeHeldAttr).
+func eachHeldCode(root ast.Node, visit func(code *ast.CodeBlock, from int)) {
+	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch node := node.(type) {
+		case *ast.Paragraph, *ast.TextBlock, *ast.Heading:
+			return ast.WalkSkipChildren, nil
+		case *ast.CodeBlock:
+			if from, ok := node.Attribute(codeHeldAttr); ok {
+				visit(node, from.(int))
+			}
+		}
+		return ast.WalkContinue, nil
+	})
 }
 
 // keepsBlankLinesAfter reports whether node ends in a fenced code block no fence closed that takes
@@ -652,14 +731,34 @@ func keepsBlankLinesAfter(node ast.Node) bool {
 	return true
 }
 
-// endsInOpenFence reports whether node ends in a fenced code block no fence closed.
+// typedFenceKeepsBlankLinesAfter reports whether node ends in a fenced code block no fence closed,
+// inside a typed block node holds, that takes the blank lines after node as its own lines
+// (keepsBlankLinesAfter).
+func typedFenceKeepsBlankLinesAfter(node ast.Node) bool {
+	if !keepsBlankLinesAfter(node) {
+		return false
+	}
+	typed, ok := ancestor[*typedDirective](lastFencedCode(node))
+	return ok && isAncestor(node, typed)
+}
+
+// endsInOpenFence reports whether node ends in a fenced code block no fence closed, and that runs
+// to node's end: a typed block between them, node included, that its own fence closes ends the code
+// there, so the lines after it are not the code's.
 func endsInOpenFence(node ast.Node) bool {
 	code := lastFencedCode(node)
 	if code == nil {
 		return false
 	}
-	_, closed := code.Attribute(fenceClosedAttr)
-	return !closed
+	if _, closed := code.Attribute(fenceClosedAttr); closed {
+		return false
+	}
+	for container := code.Parent(); container != node.Parent(); container = container.Parent() {
+		if typed, ok := container.(*typedDirective); ok && typed.Closed {
+			return false
+		}
+	}
+	return true
 }
 
 // lastFencedCode is the fenced code block node ends in, through the last block of each container

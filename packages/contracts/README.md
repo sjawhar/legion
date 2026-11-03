@@ -11,6 +11,10 @@ Current scope:
 - Go generation: `scripts/gen-go.ts`
 - generated Go output: `packages/envoy/internal/contracts/generated.go`
 
+This package has no release of its own: `.github/workflows/changelog-fold.yaml` folds its
+changelog fragments (`.changes/unreleased/`) into `CHANGELOG.md` under `main@<commit>` at the
+first fold run after they merge.
+
 ## GitHub Topic Hierarchy
 
 The GitHub receiver publishes per-resource topics. Consumers subscribe at the

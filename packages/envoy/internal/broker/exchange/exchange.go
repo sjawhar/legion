@@ -22,7 +22,9 @@
 // The principal is the caller's standing identity, never the instance asking: the listed account
 // for a pod, the listed workflow for a run, the person for a dev box. A session name belongs to
 // one principal, so a pod's replacement and a workflow's next run keep writing under the name
-// their predecessor held, and a caller of any other principal is refused it.
+// their predecessor held, and a caller of any other principal is refused it. Instance is the
+// second rule beside it, and the only thing that separates two callers of one principal: the pod
+// uid a registration has to name for a pod of a free-session entry to write under a session name.
 package exchange
 
 import (
@@ -38,8 +40,9 @@ import (
 // Why a subject token is refused. Each stands for one answer an operator can act on: list the
 // identity (ErrNoEntry), mint the token in a pod rather than by hand (ErrNoPodBinding), ask under
 // the session the entry fixes (ErrSessionMismatch), name a session (ErrSessionRequired), name a
-// usable one (ErrSessionInvalid), or present a token that carries the claims its kind must
-// (ErrClaimMissing).
+// usable one (ErrSessionInvalid), present a token that carries the claims its kind must
+// (ErrClaimMissing), or, of a registration, leave an entry that fixes a session alone
+// (ErrSessionFixed).
 var (
 	ErrNoEntry         = errors.New("exchange: no entry lists this identity")
 	ErrNoPodBinding    = errors.New("exchange: the subject token is bound to no pod")
@@ -47,6 +50,7 @@ var (
 	ErrSessionRequired = errors.New("exchange: the request names no session and the entry fixes none")
 	ErrSessionInvalid  = errors.New("exchange: the request names an unusable session")
 	ErrClaimMissing    = errors.New("exchange: the subject token carries no such claim")
+	ErrSessionFixed    = errors.New("exchange: the entry fixes the session name it writes under")
 )
 
 // MaxSessionBytes is the longest session name a request may carry. A session name is written into
@@ -117,6 +121,13 @@ type Claims struct {
 	// two kinds never compare equal. Every pod of one account, every run of one workflow and every
 	// machine of one person is therefore one holder.
 	Principal string
+	// Instance is which caller of that principal is asking, and is not a claim of the minted
+	// token either: it is the pod uid a registration has to name for this exchange to be made
+	// (oauthstore.Store.PodSessionRegistered), and is empty for every caller no registration
+	// separates from the others of its principal — a pod whose entry fixes the session, a
+	// workflow run, and a dev box session, each of which writes under a name its configuration or
+	// its person already decides.
+	Instance string
 }
 
 // Reservation is a session name an entry fixes and the principal it belongs to. The broker holds
@@ -286,25 +297,69 @@ func checkGrant(where, project, person, session string) error {
 //
 // The principal is the account, not the pod: every pod of one account is one holder, so the
 // replacement pod of a rolling update, or a Legion session resumed in a relaunched pod, keeps
-// writing under the name the pod before it held. Pods of one account are not kept apart from one
-// another by their session names; an entry lists an account because its pods are one service.
+// writing under the name the pod before it held. What keeps the pods of one account apart from
+// one another is therefore not the claim on the name but Instance, the pod uid, which this
+// answers for an entry that fixes no session: the exchange mints nothing under that name unless a
+// registration its deployment made says that pod uid may use it, and a relaunch is a second pod
+// uid registered for the same name rather than a refusal. An entry that fixes a session answers
+// no Instance and needs no registration, because the name it writes under is the configuration's
+// and every pod of the account writes under it.
 func (s *Set) Pod(token map[string]any, session string) (Claims, error) {
 	account, err := claimString(token, "sub")
 	if err != nil {
 		return Claims{}, err
 	}
-	if podUID(token) == "" {
-		return Claims{}, fmt.Errorf("%w: %s presented a token bound to no pod, which proves only that the account exists", ErrNoPodBinding, account)
-	}
-	entry, listed := s.accounts[account]
-	if !listed {
-		return Claims{}, fmt.Errorf("%w: no entry lists the service account %s", ErrNoEntry, account)
+	uid := podUID(token)
+	entry, err := s.podEntry(account, uid)
+	if err != nil {
+		return Claims{}, err
 	}
 	name, err := resolveSession(entry.Session, session, account)
 	if err != nil {
 		return Claims{}, err
 	}
-	return Claims{Session: name, Person: entry.Person, Scope: ProjectScopeNamed, Project: entry.Project, Principal: accountPrincipal(account)}, nil
+	claims := Claims{Session: name, Person: entry.Person, Scope: ProjectScopeNamed, Project: entry.Project, Principal: accountPrincipal(account)}
+	if entry.Session == "" {
+		claims.Instance = uid
+	}
+	return claims, nil
+}
+
+// podEntry is the reading of a pod's identity that Pod and Registration both begin with: the
+// pod uid the token must carry, refused first because a token bound to no pod proves only that
+// the account exists, and then the entry that lists the account. Both refuse in this order, in
+// these words, because they are this one helper: a registrar and the exchange that reads its
+// row refuse the same pods for the same reasons, which Registration's doc promises.
+func (s *Set) podEntry(account, uid string) (AccountEntry, error) {
+	if uid == "" {
+		return AccountEntry{}, fmt.Errorf("%w: %s presented a token bound to no pod, which proves only that the account exists", ErrNoPodBinding, account)
+	}
+	entry, listed := s.accounts[account]
+	if !listed {
+		return AccountEntry{}, fmt.Errorf("%w: no entry lists the service account %s", ErrNoEntry, account)
+	}
+	return entry, nil
+}
+
+// Registration refuses what a pod-session registration must refuse before it is written: a token
+// bound to no pod, an account no entry lists, and an entry that fixes a session, which needs no
+// registration because its name is the configuration's. The first two refusals are podEntry,
+// the one reading of a pod's identity Pod makes too, so a registrar and the exchange that reads
+// its row refuse the same pods for the same reasons; what it does not decide is whether the
+// name belongs to the account, which only the claim on the name answers
+// (oauthstore.Store.BindSession).
+func (s *Set) Registration(account, podUID, session string) error {
+	entry, err := s.podEntry(account, podUID)
+	if err != nil {
+		return err
+	}
+	if entry.Session != "" {
+		return fmt.Errorf("%w: %s writes as %s, which every pod of it may do, so its pods are registered for no name", ErrSessionFixed, account, entry.Session)
+	}
+	if !validSession(session) {
+		return fmt.Errorf("%w: the registration of %s names a session of %d bytes; %s", ErrSessionInvalid, account, len(session), sessionRule)
+	}
+	return nil
 }
 
 // Workflow answers the claims for a continuous-integration workflow run's GitHub token, from the

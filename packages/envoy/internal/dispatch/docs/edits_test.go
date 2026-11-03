@@ -144,7 +144,7 @@ func TestVerifyTableAnchorSnapshotsRejectsMarkAddedAfterPrevalidation(t *testing
 	if !markText(tree) {
 		t.Fatal("delete cell text missing")
 	}
-	err = verifyTableAnchorSnapshots(tree, []model.EditOp{op}, []tableAnchorSnapshot{snapshot})
+	err = verifyTableAnchorSnapshots(tree, []model.EditOp{op}, []tableAnchorSnapshot{snapshot}, "")
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "index" || !strings.Contains(invalid.Reason, "changed during validation") {
 		t.Fatalf("table snapshot validation error = %v", err)
@@ -755,7 +755,11 @@ func TestApplyOperationsExplainsBlockCascadeWithinBatch(t *testing.T) {
 	}
 	parentID, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
 	childID, _ := tree.Children[0].Children[0].Attrs[pmdoc.BlockIDAttr].(string)
-	removed, err := pmdoc.BlockDescendantIDs(tree, parentID)
+	valid, err := pmdoc.ValidateDocument(tree, "BlockDescendantIDs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, err := valid.BlockDescendantIDs(parentID)
 	if err != nil {
 		t.Fatalf("find delete cascade: %v", err)
 	}
@@ -1532,6 +1536,117 @@ func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.
 	}
 }
 
+// A replace's `with` is read as a paragraph's text, where `\|` in code is the code's own text, and a
+// delete can cut code down to a backslash before a `|`; in a table cell no markdown writes such code
+// (pmdoc.TableCodePipes), so the write is refused, naming the operation's field, the table, the
+// cell's row and column, the header above it, and what to write instead. Code holding a `|` with no
+// backslash or two before it, and text holding a backslash before a `|`, are stored as written. A
+// table a browser edit already left such code in still takes writes, the one that rewrites that
+// code among them, but not one that adds such code beside it, the same code included.
+func TestApplyOperationRefusesCodeWithAPipeAfterABackslashInATableCell(t *testing.T) {
+	const table = "| Cmd | Note |\n| --- | --- |\n| run | x |\n"
+	replace := func(find, with string) model.EditOp { return model.EditOp{Op: "replace", Find: find, With: with} }
+	for _, test := range []struct {
+		name, document string
+		// browser puts code holding `a\|b` in the body row's first cell first, as a browser edit can.
+		browser bool
+		op      model.EditOp
+		// field is the field a refusal names, "" when the write is stored; says is what the refusal
+		// says after naming the table, and stored a line of the markdown stored.
+		field, says, stored string
+	}{
+		{name: "code holding a backslash before a pipe replaced into a body cell", document: table, op: replace("x", "`git log \\| wc -l`"),
+			field: "with", says: `holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "git log \| wc -l"`},
+		{name: "code holding a backslash before a pipe replaced into a header cell", document: table, op: replace("Note", "`a\\|b`"),
+			field: "with", says: `holds code in row 0, column 1 (the header row)`},
+		{name: "a delete that leaves code holding a backslash before a pipe", document: "| Cmd |\n| --- |\n| `a\\\\\\|b` |\n", op: model.EditOp{Op: "delete", Find: "a\\"},
+			field: "find", says: `holds code in row 1, column 0 (under the header "Cmd") whose text has a | right after a backslash, "\|b"`},
+		{name: "code holding a pipe", document: table, op: replace("x", "`a|b`"), stored: "| run | `a\\|b` |"},
+		{name: "code holding a pipe after two backslashes", document: table, op: replace("x", "`a\\\\|b`"), stored: "| run | `a\\\\\\|b` |"},
+		{name: "text holding a backslash before a pipe", document: table, op: replace("x", "a\\\\\\|b"), stored: "| run | a\\\\\\|b |"},
+		{name: "a replace beside code a browser edit left", document: table, browser: true, op: replace("x", "y"), stored: "| `a\\`\\|`b` | y |"},
+		{name: "the rewrite of code a browser edit left", document: table, browser: true, op: replace("a\\|b", "`a|b`"), stored: "| `a\\|b` | x |"},
+		{name: "a code pipe replaced in beside code a browser edit left", document: table, browser: true, op: replace("x", "`a\\|b`"),
+			field: "with", says: `holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "a\|b"`},
+		{name: "a delete that leaves a code pipe beside code a browser edit left", document: "| Cmd | Note |\n| --- | --- |\n| run | `c\\\\\\|d` |\n", browser: true,
+			op: model.EditOp{Op: "delete", Find: "c\\"}, field: "find", says: `holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "\|d"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.browser {
+				tree.Children[0].Children[1].Children[0].Children[0].Children = []*pmdoc.Node{{Type: "text", Text: "a\\|b", Marks: []pmdoc.Mark{{Type: "inlineCode"}}}}
+			}
+			out, err := applyAlone(tree, test.op)
+			if test.field == "" {
+				if err != nil {
+					t.Fatalf("%s = %v, want it stored", test.op.Op, err)
+				}
+				markdown, err := renderTree(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(markdown, test.stored+"\n") {
+					t.Fatalf("%s stored %q, want the line %q", test.op.Op, markdown, test.stored)
+				}
+				return
+			}
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != test.field {
+				t.Fatalf("%s = %v, want an invalid op on %s", test.op.Op, err, test.field)
+			}
+			for _, says := range []string{fmt.Sprintf("table %q %s", blockID(tree.Children[0]), test.says), "drop the backslash before the |, or end the code before the | and write the | as text"} {
+				if !strings.Contains(invalid.Reason, says) {
+					t.Errorf("%s refused with %q, want it to say %q", test.op.Op, invalid.Reason, says)
+				}
+			}
+		})
+	}
+}
+
+// A browser edit can leave code holding a `|` after a backslash in a table cell, which no markdown of
+// a cell writes and a caller's write is refused for
+// (TestApplyOperationRefusesCodeWithAPipeAfterABackslashInATableCell). Settlement versions a browser
+// edit as its rendering, as it does every tree whose markdown reads back otherwise, so the `|` is
+// written as text after the code: the version reads back as the table it was, each row as wide and
+// every character in its cell, never as the `\\|` that ends the cell between the backslash and the
+// `|`.
+func TestSettlementVersionsCodeWithAPipeAfterABackslashInATableCellWithThePipeAfterTheCode(t *testing.T) {
+	for _, test := range []struct{ name, code, row string }{
+		{"one backslash", "a\\|b", "| run | `a\\`\\|`b` |"},
+		{"a grep alternation's code", "grep -n 'one\\|two' notes.txt", "| run | `grep -n 'one\\`\\|`two' notes.txt` |"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "| Cmd | Count |\n| --- | --- |\n| run | n |\n")
+			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+				tree.Children[0].Children[1].Children[1].Children[0].Children = []*pmdoc.Node{{Type: "text", Text: test.code, Marks: []pmdoc.Mark{{Type: "inlineCode"}}}}
+				return tree
+			})
+			settleCurrentGeneration(t, service, artifactID)
+			markdown, _ := latestVersionOf(t, service.store, artifactID)
+			if want := "| Cmd | Count |\n| --- | --- |\n" + test.row + "\n"; markdown != want {
+				t.Fatalf("the settled version is %q, want %q", markdown, want)
+			}
+			back, err := pmdoc.Parse(markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index, row := range back.Children[0].Children {
+				if len(row.Children) != 2 {
+					t.Fatalf("the version reads back with row %d holding %d cells, want 2", index, len(row.Children))
+				}
+			}
+			if got := pmdoc.TextContent(back.Children[0].Children[1].Children[1]); got != test.code {
+				t.Fatalf("the version's cell reads back holding %q, want %q", got, test.code)
+			}
+		})
+	}
+}
+
 // Whitespace at the edges of a replacement continues the text around it; at the start or the end
 // of the textblock it lands in there is no text to continue, and whitespace kept there would be
 // stripped on the next read - or, after a footnote's marker, open indented code.
@@ -2147,6 +2262,358 @@ func TestApplyOperationInsertWithACrossBlockQuoteAnchorNamesTheQuote(t *testing.
 	}
 }
 
+// A quote that runs across table cells - a row as markdown writes it, with " | " between the
+// cells - matches no text, because " | " is the boundary between two cells and neither cell holds
+// it. The miss says so and names the row's cells to quote, for a replace, a delete, an insert and a
+// move anchor alike, rather than ranking blocks against a quote that opens with a pipe. The same
+// row quoted with the pipes left out reaches from one cell into the next, and that refusal names
+// both cells too.
+func TestApplyOperationQuoteAcrossTableCellsNamesTheCellsToQuote(t *testing.T) {
+	tree, err := parseInput("Intro.\n\n| Item | Owner |\n| --- | --- |\n| Cut freezes run as build-pool pods | MACH; worker PoolFreeze |\n| Literal | x \\| y |\n| same | same |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intro, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+	const cells = `"Cut freezes run as build-pool pods", "MACH; worker PoolFreeze"`
+	const findAdvice = "one operation per cell in the same batch"
+	const anchorAdvice = "anchor on one cell's own text"
+	for name, test := range map[string]struct {
+		op          model.EditOp
+		cells, says string
+	}{
+		"a replace": {
+			op:    model.EditOp{Op: "replace", Find: "Cut freezes run as build-pool pods | MACH; worker PoolFreeze", With: "x | y"},
+			cells: cells, says: findAdvice,
+		},
+		"a replace with the row's own pipes": {
+			op:    model.EditOp{Op: "replace", Find: "| Cut freezes run as build-pool pods | MACH; worker PoolFreeze |", With: "x"},
+			cells: cells, says: findAdvice,
+		},
+		"a delete of part of each cell": {
+			op:    model.EditOp{Op: "delete", Find: "build-pool pods | MACH; worker"},
+			cells: cells, says: findAdvice,
+		},
+		"a row whose cells hold the same text": {
+			op:    model.EditOp{Op: "replace", Find: "same | same", With: "x"},
+			cells: `"same", "same"`, says: findAdvice,
+		},
+		"an insert anchor": {
+			op:    model.EditOp{Op: "insert", Markdown: "x", After: "Cut freezes run as build-pool pods | MACH; worker PoolFreeze"},
+			cells: cells, says: anchorAdvice,
+		},
+		"a move anchor": {
+			op:    model.EditOp{Op: "move", Block: intro, Before: "Item | Owner"},
+			cells: `"Item", "Owner"`, says: anchorAdvice,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := applyAlone(tree, test.op)
+			var missing *ErrQuoteNotFound
+			if !errors.As(err, &missing) {
+				t.Fatalf("cross-cell quote = %v, want *ErrQuoteNotFound", err)
+			}
+			message := missing.Error()
+			for _, want := range []string{"one table cell", `" | " is the boundary`, test.cells, test.says} {
+				if !strings.Contains(message, want) {
+					t.Fatalf("cross-cell quote = %q, want it to contain %q", message, want)
+				}
+			}
+		})
+	}
+
+	for name, test := range map[string]struct {
+		op   model.EditOp
+		says string
+	}{
+		"a replace":      {op: model.EditOp{Op: "replace", Find: "Item Owner", With: "x"}, says: findAdvice},
+		"an insert":      {op: model.EditOp{Op: "insert", Markdown: "x", After: "Item Owner"}, says: anchorAdvice},
+		"a move":         {op: model.EditOp{Op: "move", Block: intro, After: "Item Owner"}, says: anchorAdvice},
+		"a move, before": {op: model.EditOp{Op: "move", Block: intro, Before: "Item Owner"}, says: anchorAdvice},
+	} {
+		t.Run(name+" reaching from one cell into the next", func(t *testing.T) {
+			_, err := applyAlone(tree, test.op)
+			var spans *ErrQuoteSpansBlocks
+			if !errors.As(err, &spans) {
+				t.Fatalf("quote reaching across two cells = %v, want *ErrQuoteSpansBlocks", err)
+			}
+			message := spans.Error()
+			for _, want := range []string{"one table cell", `"Item", "Owner"`, test.says} {
+				if !strings.Contains(message, want) {
+					t.Fatalf("quote reaching across two cells = %q, want it to contain %q", message, want)
+				}
+			}
+		})
+	}
+
+	// A quote reaching from a paragraph into a cell names no cells: only one end is in a table.
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Intro. Item", With: "x"})
+	var spans *ErrQuoteSpansBlocks
+	if !errors.As(err, &spans) || strings.Contains(spans.Error(), "table cell") {
+		t.Fatalf("quote from a paragraph into a cell = %v, want the ordinary cross-block refusal", err)
+	}
+	// A cell that holds " | " itself is quoted with it, as before.
+	if _, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "x | y", With: "x or y"}); err != nil {
+		t.Fatalf("quote of a cell holding a pipe = %v, want it to match", err)
+	}
+	// A quote holding a pipe whose parts no run of one row's cells holds is an ordinary miss: one
+	// part a cell holds is not a row.
+	for _, find := range []string{"Intro | Outro", "Item | typo", "Item | Cut freezes run as build-pool pods"} {
+		_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: find, With: "x"})
+		var missing *ErrQuoteNotFound
+		if !errors.As(err, &missing) || strings.Contains(missing.Error(), "table cell") || !strings.Contains(missing.Error(), "nearest blocks") {
+			t.Fatalf("pipe quote %q with no row = %v, want the ordinary miss with its nearest blocks", find, err)
+		}
+	}
+	// An unclosed inline mark is refused as one before the quote is read as a row.
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "**Item | Owner", With: "x"})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || !strings.Contains(invalid.Error(), "must be balanced") {
+		t.Fatalf("unbalanced row quote = %v, want the unbalanced-mark refusal", err)
+	}
+}
+
+// A quote that opens with a list item's marker (`5. `, `- `) selects the item whose text starts
+// with the rest, as a quote's `# ` selects a heading: the marker is no text the item holds, so the
+// quote matched nothing unless it also carried inline markup. Its number is not matched, a `with`
+// carrying the same kind of marker replaces the item's text, and a miss says what the marker means
+// and what to quote instead.
+func TestApplyOperationQuoteOpeningWithAListMarkerSelectsTheItem(t *testing.T) {
+	tree, err := parseInput("Plan:\n\n1. First point.\n2. Second point.\n3. A fresh reviewer checks points 1 to 4.\n\nThen:\n\n- bullet one\n- bullet two\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, test := range map[string]struct {
+		op   model.EditOp
+		want string
+	}{
+		"a replace by the item's own marker": {
+			op:   model.EditOp{Op: "replace", Find: "3. A fresh reviewer checks points 1 to 4.", With: "3. A fresh reviewer checks points 1 to 5."},
+			want: "3. A fresh reviewer checks points 1 to 5.\n",
+		},
+		"a replace under another number": {
+			op:   model.EditOp{Op: "replace", Find: "5. A fresh reviewer", With: "One reviewer"},
+			want: "3. One reviewer checks points 1 to 4.\n",
+		},
+		"a replace of a bullet item": {
+			op:   model.EditOp{Op: "replace", Find: "- bullet two", With: "- bullet 2"},
+			want: "- bullet 2\n",
+		},
+		"an insert anchor": {
+			op:   model.EditOp{Op: "insert", Markdown: "Done.", After: "3. A fresh reviewer checks points 1 to 4."},
+			want: "\n\nDone.\n",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := applyAlone(tree, test.op)
+			if err != nil {
+				t.Fatalf("list-marker quote = %v, want it to select the item", err)
+			}
+			markdown, err := pmdoc.Render(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(markdown, test.want) {
+				t.Fatalf("list-marker quote wrote %q, want it to hold %q", markdown, test.want)
+			}
+		})
+	}
+	out, err := applyAlone(tree, model.EditOp{Op: "delete", Find: "- bullet one"})
+	if err != nil {
+		t.Fatalf("list-marker delete = %v, want it to select the item", err)
+	}
+	if markdown, _ := pmdoc.Render(out); strings.Contains(markdown, "bullet one") || !strings.Contains(markdown, "- bullet two") {
+		t.Fatalf("list-marker delete wrote %q, want the item gone and its sibling kept", markdown)
+	}
+
+	// The marker selects an item of its own kind whose text starts with the rest: a bullet does not
+	// select an ordered item, and text inside an item is not where its marker stands.
+	for find, kind := range map[string]string{"- A fresh reviewer": "an item of a bullet list", "2. point.": "an item of an ordered list"} {
+		_, err := applyAlone(tree, model.EditOp{Op: "replace", Find: find, With: "x"})
+		var missing *ErrQuoteNotFound
+		if !errors.As(err, &missing) {
+			t.Fatalf("list-marker quote %q = %v, want *ErrQuoteNotFound", find, err)
+		}
+		for _, want := range []string{"a leading list marker is no text the item holds", kind, "without the marker"} {
+			if !strings.Contains(missing.Error(), want) {
+				t.Fatalf("list-marker miss = %q, want it to contain %q", missing.Error(), want)
+			}
+		}
+	}
+}
+
+// A task box after a list marker selects only a task item in that state, and a with carrying the
+// marker and the other box ticks the item it selected.
+func TestApplyOperationListMarkerQuoteMatchesTheTaskBox(t *testing.T) {
+	tree, err := parseInput("- [ ] deploy\n- [x] ship\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "- [ ] deploy", With: "- [x] deploy"})
+	if err != nil {
+		t.Fatalf("task-box quote = %v, want it to select the unchecked item", err)
+	}
+	if markdown, _ := pmdoc.Render(out); !strings.Contains(markdown, "- [x] deploy") {
+		t.Fatalf("task-box replace wrote %q, want the item ticked", markdown)
+	}
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "- [x] deploy", With: "x"})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || !strings.Contains(missing.Error(), "a checked task item") || !strings.Contains(missing.Error(), `without the marker ("deploy")`) {
+		t.Fatalf("checked box on an unchecked item = %v, want a miss naming the box and the text to quote", err)
+	}
+}
+
+// A list marker selects an item only for a document edit's find or anchor: a comment's or an ask's
+// quote, and an upload re-anchoring one, read the marker as the text it was, so a cached quote
+// `5. deploy` never lands on an item `1. deploy`.
+func TestAListMarkerSelectsAnItemForADocumentEditAlone(t *testing.T) {
+	tree, err := parseInput("1. deploy\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pmdoc.FindQuote(tree, "5. deploy", nil, nil); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("anchor quote with a list marker = %v, want no match", err)
+	}
+	if _, err := pmdoc.NewQuoteFinder(tree).NearestFirst("5. deploy", 0); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("re-anchoring a quote with a list marker = %v, want no match", err)
+	}
+	if _, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "5. deploy", With: "ship"}); err != nil {
+		t.Fatalf("document edit with a list marker = %v, want it to select the item", err)
+	}
+}
+
+// The selection reads each step of the matcher on its own, item text that opens with punctuation
+// is no marker text, and a find that matched as markup elsewhere selected nothing by its marker.
+func TestAListMarkerSelectionEdgeCases(t *testing.T) {
+	render := func(t *testing.T, out *pmdoc.Node) string {
+		t.Helper()
+		markdown, err := pmdoc.Render(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return markdown
+	}
+	// An exact match in a paragraph does not hide an item the text matches with its whitespace
+	// normalized.
+	tree, err := parseInput("ship now\n\n- ship  now\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "- ship now", With: "- shipped"})
+	if err != nil || !strings.Contains(render(t, out), "- shipped") || !strings.Contains(render(t, out), "ship now\n") {
+		t.Fatalf("list-marker find beside an exact paragraph match = %v, want the item replaced", err)
+	}
+	// Item text that opens with punctuation like a marker's is the item's text.
+	for find, with := range map[string]string{"- -2 degrees": "- -3 degrees", "1. 1.2 release": "1. 1.3 release"} {
+		tree, err := parseInput("- -2 degrees\n\n1. 1.2 release\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := applyAlone(tree, model.EditOp{Op: "replace", Find: find, With: with})
+		if err != nil || !strings.Contains(render(t, out), with) {
+			t.Fatalf("replace %q with %q = %v, want the item's text replaced", find, with, err)
+		}
+	}
+	// A find whose markup matched an unchecked item's text selected nothing by its checked box,
+	// so a with carrying a marker is refused as it always was.
+	tree, err = parseInput("- [ ] **deploy**\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "- [x] **deploy**", With: "- [ ] shipped"}); err == nil {
+		t.Fatal("a checked box matched by markup on an unchecked item = applied, want it refused")
+	}
+}
+
+// A with that is only the selected item's marker, and its box, would empty the item with no word
+// of it, so it is refused; an empty with deletes the text on purpose.
+func TestAMarkerOnlyWithForASelectedItemIsRefused(t *testing.T) {
+	for doc, op := range map[string]model.EditOp{
+		"- deploy\n":     {Op: "replace", Find: "- deploy", With: "- "},
+		"1. deploy\n":    {Op: "replace", Find: "1. deploy", With: "1. "},
+		"- [ ] deploy\n": {Op: "replace", Find: "- [ ] deploy", With: "- [x] "},
+	} {
+		tree, err := parseInput(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = applyAlone(tree, op)
+		var invalid *ErrInvalidOp
+		if !errors.As(err, &invalid) || !strings.Contains(invalid.Error(), "marker with no text after it") {
+			t.Fatalf("marker-only with %q on %q = %v, want it refused", op.With, doc, err)
+		}
+	}
+	// On a plain item a box is text, so a with of the marker and a box gives the item that text.
+	for doc, op := range map[string]model.EditOp{
+		"- deploy\n":  {Op: "replace", Find: "- deploy", With: "- [x] "},
+		"1. deploy\n": {Op: "replace", Find: "1. deploy", With: "1. [ ] "},
+	} {
+		tree, err := parseInput(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := applyAlone(tree, op); err != nil {
+			t.Fatalf("with %q on the plain item %q = %v, want the box written as text", op.With, doc, err)
+		}
+	}
+}
+
+// A row quote takes off only the escape of a pipe a cell holds, leaving every other backslash to
+// the cell's inline parse, as the table parser does: a cell shown as `x\|z` is quoted `x\\\|z`.
+func TestARowQuoteDecodesACellsEscapedPipeOnce(t *testing.T) {
+	tree, err := parseInput("| A | B |\n| --- | --- |\n| x\\\\\\|z | y |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: `x\\\|z | y`, With: "w"})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || !strings.Contains(missing.Error(), `the cells are "x\\|z", "y"`) {
+		t.Fatalf("row quote of a cell holding a backslash and a pipe = %v, want both cells named", err)
+	}
+}
+
+// A row quote keeps an empty cell between two pipes, one part alone is no row, and a part written
+// with inline markdown matches the text its cell shows.
+func TestARowQuoteReadsEmptyAndFormattedCells(t *testing.T) {
+	tree, err := parseInput("| A | Gap | B |\n| --- | --- | --- |\n| A |  | B |\n| Item | Owner | x |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for find, cells := range map[string]string{
+		"A | | B":                          `the cells are "A", "", "B"`,
+		"*Item* | [Owner](https://x.test)": `the cells are "Item", "Owner"`,
+	} {
+		_, err := applyAlone(tree, model.EditOp{Op: "replace", Find: find, With: "x"})
+		var missing *ErrQuoteNotFound
+		if !errors.As(err, &missing) || !strings.Contains(missing.Error(), cells) {
+			t.Fatalf("row quote %q = %v, want it to name %s", find, err, cells)
+		}
+	}
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "| Gap |", With: "x"})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || strings.Contains(missing.Error(), "table cell") {
+		t.Fatalf("one cell between pipes = %v, want the ordinary miss", err)
+	}
+}
+
+// A row quote is split as a markdown row is split: a pipe after an odd run of backslashes is the
+// pipe a cell holds, and one after an even run ends a cell.
+func TestApplyOperationRowQuoteSplitsAtPipesAsARowDoes(t *testing.T) {
+	tree, err := parseInput("| Item | Owner |\n| --- | --- |\n| a\\\\ | b |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: `Item \| Owner`, With: "x"})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || strings.Contains(missing.Error(), "table cell") {
+		t.Fatalf("quote with an escaped pipe = %v, want the ordinary miss", err)
+	}
+	// `a\\|` is a cell holding `a\` and the boundary after it.
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: `a\\| b`, With: "x"})
+	if !errors.As(err, &missing) || !strings.Contains(missing.Error(), `the cells are "a\\", "b"`) {
+		t.Fatalf("quote with a pipe after two backslashes = %v, want it read as the row's two cells", err)
+	}
+}
+
 // An out-of-range occurrence is a miss like any other: it names the quote, how many places it
 // did match, and the nearest blocks — not a bare "target not found" (Rev1326).
 func TestApplyOperationOutOfRangeOccurrenceNamesTheQuoteAndMatchCount(t *testing.T) {
@@ -2556,7 +3023,7 @@ func TestApplyOperationReplaceEscapesBlockSyntaxBesideAnEmptiedParagraph(t *test
 			if !strings.Contains(markdown, test.escaped) {
 				t.Fatalf("replace with %q beside an emptied paragraph stored %q, want it to hold %q", test.with, markdown, test.escaped)
 			}
-			if err := pmdoc.BlockShapeError(next.Children[1]); err != nil {
+			if err := pmdoc.ReadBackBlock(next.Children[1]).Shape; err != nil {
 				t.Fatalf("replace with %q beside an emptied paragraph stored %q, which reads back as another block: %v", test.with, markdown, err)
 			}
 			back, err := parseInput(markdown)
@@ -2747,7 +3214,15 @@ func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			block, broke, err := replacementBroke(before, after, match, test.check)
+			valid, err := pmdoc.ValidateDocument(before, "BlockIndexes")
+			if err != nil {
+				t.Fatal(err)
+			}
+			found, err := matchedBlocks(valid, match)
+			if err != nil {
+				t.Fatal(err)
+			}
+			block, broke, err := replacementBroke(before, after, found, test.check)
 			if block != -1 || broke != nil || !errors.Is(err, pmdoc.ErrPanic) {
 				t.Fatalf("replacementBroke = (%d, %v, %v), want an ErrPanic error and no verdict", block, broke, err)
 			}
@@ -2757,5 +3232,5 @@ func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
 
 // applyAlone applies op to tree as a write of its own, on a budget of its own.
 func applyAlone(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
-	return applyOperation(tree, op, pmdoc.NewWriteBudget())
+	return applyOperation(newBatchTree(tree), op, pmdoc.NewWriteBudget())
 }

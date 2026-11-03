@@ -1,0 +1,1 @@
+{"Services":{"svc:envoy-hub":{"TCP":{"4222":{"TCPForward":"envoy-nats.envoy.svc.cluster.local:4222"},"9020":{"TCPForward":"127.0.0.1:9020"}}}}}

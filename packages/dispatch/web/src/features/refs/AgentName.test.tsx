@@ -8,7 +8,7 @@ import { api } from "../../api/client";
 import type { Actor, Agent } from "../../api/types";
 import { liveDotBg, offlineDotBorder, unknownDotBorder } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
-import { AgentName, AskResolutionLine, useAgentText } from "./AgentName";
+import { AgentName, AskResolutionLine, askResolutionParts, useAgentText } from "./AgentName";
 import { AGENT_REGISTRY_POLL_MS, AgentRegistryPoller } from "./agent-registry";
 
 /** One live session, as `GET /api/v1/agents` lists it. */
@@ -403,6 +403,64 @@ test("a resolution names its actor through the component", async () => {
     view.unmount();
     agents.mockRestore();
   }
+});
+
+test("a withdrawal names the closer once, the Legion daemon by its whole id", async () => {
+  const agents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const withdrawn = (actor: Actor) =>
+    ({
+      actor,
+      at: "2026-10-25T00:00:00Z",
+      kind: "withdrawn",
+      reason: "Withdrawn by the close of CORE-1.",
+    }) as const;
+  const { view } = renderWith(
+    <>
+      <p data-testid="user">
+        <AskResolutionLine resolution={withdrawn({ id: "alice", kind: "user" })} />
+      </p>
+      <p data-testid="daemon">
+        <AskResolutionLine resolution={withdrawn({ id: "legion-daemon:CORE", kind: "session" })} />
+      </p>
+    </>
+  );
+  try {
+    expect(screen.getByTestId("user").textContent).toBe("Withdrawn when alice closed the issue");
+    await waitFor(() =>
+      expect(agentNode(view.container, "legion-daemon:CORE").getAttribute("data-agent-state")).toBe(
+        "not-running"
+      )
+    );
+    expect(screen.getByTestId("daemon").textContent).toBe(
+      "Withdrawn when legion-daemon:CORE closed the issue"
+    );
+  } finally {
+    view.unmount();
+    agents.mockRestore();
+  }
+});
+
+test("a resolution's description parts carry its reason, except a withdrawal's", () => {
+  const actor: Actor = { id: LISTED_ID, kind: "session" };
+  const at = "2026-10-25T00:00:00Z";
+  expect(
+    askResolutionParts({
+      actor,
+      at,
+      kind: "withdrawn",
+      reason: "Withdrawn by the close of CORE-1.",
+    })
+  ).toEqual(["Withdrawn when ", { actor }, " closed the issue"]);
+  expect(askResolutionParts({ actor, at, kind: "retracted", reason: "Duplicate." })).toEqual([
+    "Retracted by ",
+    { actor },
+    " - Duplicate.",
+  ]);
+  expect(askResolutionParts({ actor, at, kind: "resolved", reason: "Done." })).toEqual([
+    "Resolved by ",
+    { actor },
+    " - Done.",
+  ]);
 });
 
 test("the text API names agents by the cached registry titles and fetches nothing", async () => {

@@ -126,7 +126,8 @@
                 }
               ]
             },
-            "pluginContract": 0
+            "pluginContract": 0,
+            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11"
           },
           "rounds": 2
         },
@@ -146,9 +147,14 @@
                 "generation": 2
               }
             },
-            "pluginContract": 0
+            "pluginContract": 0,
+            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+            "updateHead": "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128"
           },
-          "handoffCommit": "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+          "handoffRecord": {
+            "id": "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
+            "version": 1
+          },
           "rounds": 0
         }
       },
@@ -314,6 +320,11 @@
       "detail": "checked by the daemon's probe of the worker image, which passed"
     },
     {
+      "name": "claude-code",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
       "name": "resource-limits",
       "status": "open",
       "detail": "no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod",
@@ -378,6 +389,12 @@
       {
         "repo": "acme/gadgets",
         "reason": "the review App is not installed on acme/gadgets"
+      }
+    ],
+    "withoutWebhookApp": [
+      {
+        "repo": "zeta/tools",
+        "reason": "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"
       }
     ],
     "caches": [
@@ -455,6 +472,7 @@
           "-c",
           "echo fixture-setup"
         ],
+        "test_postgres": false,
         "repository_cache": {
           "volume": "40Gi",
           "refresh_minutes": 15,
@@ -545,6 +563,8 @@
     },
     "linger_hours": 1.5,
     "production_check_hours": 240,
+    "pod_update_retask_hours": 1,
+    "pod_update_notice_hours": 4,
     "review_round_cap": 4,
     "max_fix_attempts": 5,
     "controller": "daemon",
@@ -555,6 +575,40 @@
     },
     "worker_backends": {
       "tester": "omp"
+    },
+    "role_config_files": {},
+    "repository_renames": [
+      {
+        "from": "acme/widgets-legacy",
+        "to": "acme/widgets"
+      }
+    ]
+  },
+  "consumers": [
+    {
+      "name": "legion-go-LEGION-dispatch",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": "2026-09-22T09:17:50Z",
+      "stalled": false
+    },
+    {
+      "name": "legion-go-LEGION-dispatch-server",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": null,
+      "stalled": false,
+      "unavailable": "read the consumer's info: context deadline exceeded"
+    },
+    {
+      "name": "legion-go-LEGION-github",
+      "waiting": 412,
+      "oldestAt": "2026-09-22T09:05:34Z",
+      "oldestAgeSeconds": 754,
+      "lastHandledAt": "2026-09-22T09:16:41Z",
+      "stalled": true
     }
-  }
+  ]
 }

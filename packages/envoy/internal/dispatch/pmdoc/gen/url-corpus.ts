@@ -43,8 +43,29 @@ const befores = [
   "\\",
   ",",
   ".",
+  ";",
+  "#",
+  "&amp;",
+  "x;",
+  "\\*",
+  "\\(",
+  "é",
+  "—",
+  "]",
+  "|",
+  "!",
 ];
-const schemes = ["https://", "http://", "www.", "HTTPS://", "Www.", "ftp://", "https:/"];
+const schemes = [
+  "https://",
+  "http://",
+  "www.",
+  "HTTPS://",
+  "Www.",
+  "ftp://",
+  "https:/",
+  "http\\://",
+  "www\\.",
+];
 const hosts = [
   "a.example",
   "api.github.com",
@@ -56,6 +77,9 @@ const hosts = [
   "a.example:8080",
   "x@y.com",
   "a.b.c_d",
+  "a'b@c.test",
+  "a!b@c.test",
+  "a@b.test1",
 ];
 const paths = [
   "",
@@ -120,7 +144,7 @@ const linkAfters = [...afters, "é", "\\b", "|x", ".x"];
 const explicit = lines.length + Math.floor(count / 4);
 for (let attempt = 0; lines.length < explicit && attempt < count * 10; attempt++) {
   const url = pick(schemes) + pick(hosts) + pick(paths);
-  const href = /^www\./i.test(url) ? `http://${url}` : url;
+  const href = /^www\\?\./i.test(url) ? `http://${url}` : url;
   const text = `${pick(befores)}[${url}](<${href}>)${pick(linkAfters)}`;
   const markdown = `${pick(forms).replace("{}", text)}\n`;
   if (seen.has(markdown)) continue;

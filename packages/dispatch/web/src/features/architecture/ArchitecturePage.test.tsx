@@ -10,6 +10,8 @@ import {
 } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type {
   ArchitectureTree,
@@ -18,6 +20,7 @@ import type {
   ArchitectureTreeSource,
 } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { writesOf } from "../writes/write-store";
 import { ArchitecturePage } from "./ArchitecturePage";
 
 function component(
@@ -145,7 +148,7 @@ function LocationProbe() {
 function renderPane(tree: ArchitectureTree, search = "") {
   const getArchitecture = spyOn(api, "getArchitecture").mockResolvedValue(tree);
   const syncArchitectureSource = spyOn(api, "syncArchitectureSource");
-  const patchIssue = spyOn(api, "patchIssue");
+  const patchIssue = answerIssuePatches();
   const getIssue = spyOn(api, "getIssue");
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
@@ -406,9 +409,15 @@ test("never synced: the source line says so and an empty model shows the Refresh
     });
     fireEvent.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
     await waitFor(() =>
-      expect(pane.syncArchitectureSource).toHaveBeenCalledWith("CORE", "legion/legion")
+      expect(pane.syncArchitectureSource).toHaveBeenCalledWith(
+        "CORE",
+        "legion/legion",
+        keyedAttempt
+      )
     );
-    const refreshing = await screen.findByRole("button", { name: "Refreshing legion/legion…" });
+    const refreshing = await screen.findByRole("button", {
+      name: "Refreshing legion/legion…",
+    });
     expect(refreshing.textContent).toBe("Refreshing…");
     expect(refreshing.hasAttribute("disabled")).toBe(true);
     settle?.();
@@ -418,26 +427,28 @@ test("never synced: the source line says so and an empty model shows the Refresh
   }
 });
 
-test("a Refresh whose request itself fails says so beside the button until the next attempt", async () => {
+// A Refresh Dispatch refuses is the shell's to say, with every other control's write
+// (`PendingWritesIndicator`): the pending-writes queue holds it with Dispatch's reason, the button
+// is ready for the next attempt, and nothing beside it repeats the refusal.
+test("a refused Refresh goes to the shell's pending writes, and the button is ready again", async () => {
   const pane = renderPane(fixture());
   try {
     const source = await screen.findByTestId("architecture-source");
     pane.syncArchitectureSource.mockRejectedValueOnce(
-      new ApiError(500, { error: "GitHub is unreachable" })
+      new ApiError(409, { code: "SOURCE_ACCESS", error: "GitHub is unreachable" })
     );
     fireEvent.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
-    expect(await within(source).findByRole("alert")).toHaveProperty(
-      "textContent",
-      "GitHub is unreachable"
+    await waitFor(() => {
+      const [refused] = writesOf(pane.queryClient).rows();
+      expect(refused?.status === "refused" ? refused.refusal.message : undefined).toBe(
+        "GitHub is unreachable"
+      );
+    });
+    expect(writesOf(pane.queryClient).rows()[0]?.label).toBe(
+      "Refresh of CORE's architecture source legion/legion"
     );
-    // The next attempt clears it.
-    const { promise, resolve } = Promise.withResolvers<never>();
-    pane.syncArchitectureSource.mockImplementationOnce(() => promise);
-    fireEvent.click(screen.getByRole("button", { name: "Refresh legion/legion" }));
-    await screen.findByRole("button", { name: "Refreshing legion/legion…" });
-    expect(within(source).queryByRole("alert")).toBeNull();
-    resolve(undefined as never);
     await screen.findByRole("button", { name: "Refresh legion/legion" });
+    expect(within(source).queryByRole("alert")).toBeNull();
   } finally {
     pane.restore();
   }
@@ -536,7 +547,7 @@ test("the header has one line per source, each with its own commit, check time a
     pane.syncArchitectureSource.mockImplementation(() => Promise.withResolvers<never>().promise);
     fireEvent.click(screen.getByRole("button", { name: "Refresh acme/infra" }));
     await waitFor(() =>
-      expect(pane.syncArchitectureSource).toHaveBeenCalledWith("CORE", "acme/infra")
+      expect(pane.syncArchitectureSource).toHaveBeenCalledWith("CORE", "acme/infra", keyedAttempt)
     );
     expect(pane.syncArchitectureSource).toHaveBeenCalledTimes(1);
     // Only the source being refreshed says so.
@@ -602,9 +613,11 @@ test("Unassigned: the picker PATCHes an explicit set, the row leaves the list at
       key: "Escape",
     });
     await waitFor(() =>
-      expect(pane.patchIssue).toHaveBeenCalledWith("CORE-7", {
-        components: { ids: ["web"], mode: "explicit" },
-      })
+      expect(pane.patchIssue).toHaveBeenCalledWith(
+        "CORE-7",
+        { components: { ids: ["web"], mode: "explicit" } },
+        keyedAttempt
+      )
     );
     expect(await within(list).findByRole("alert")).toHaveProperty(
       "textContent",
@@ -715,7 +728,11 @@ test("Not architectural lists each reason, names the ancestor of an inherited ro
       })
     );
     await waitFor(() =>
-      expect(pane.patchIssue).toHaveBeenCalledWith("CORE-8", { components: { mode: "inherit" } })
+      expect(pane.patchIssue).toHaveBeenCalledWith(
+        "CORE-8",
+        { components: { mode: "inherit" } },
+        keyedAttempt
+      )
     );
   } finally {
     pane.restore();
@@ -733,9 +750,11 @@ test("the Not architectural… form on an Unassigned row PATCHes none with the r
     });
     fireEvent.click(within(list).getByRole("button", { name: "Save reason" }));
     await waitFor(() =>
-      expect(pane.patchIssue).toHaveBeenCalledWith("CORE-7", {
-        components: { mode: "none", reason: "a hiring task" },
-      })
+      expect(pane.patchIssue).toHaveBeenCalledWith(
+        "CORE-7",
+        { components: { mode: "none", reason: "a hiring task" } },
+        keyedAttempt
+      )
     );
   } finally {
     pane.restore();
@@ -767,9 +786,11 @@ test("Retired: the re-attach picker starts from the issue's surviving live compo
       key: "Escape",
     });
     await waitFor(() =>
-      expect(pane.patchIssue).toHaveBeenCalledWith("CORE-2", {
-        components: { ids: ["web", "server"], mode: "explicit" },
-      })
+      expect(pane.patchIssue).toHaveBeenCalledWith(
+        "CORE-2",
+        { components: { ids: ["web", "server"], mode: "explicit" } },
+        keyedAttempt
+      )
     );
   } finally {
     pane.restore();

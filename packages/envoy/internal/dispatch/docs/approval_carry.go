@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // A human's answer to a decision block carries his approval forward. He approved the document at
@@ -57,9 +58,27 @@ import (
 // block id twice carries nothing either: its read-back (storedVersionTree) repairs the repeat,
 // keeping the id on the first block and minting one for the next, so A shows a block N never had,
 // and a block of A that no longer stands in N refuses the carry.
+//
+// A version whose text is the approved text carries that approval too. The document's newest
+// review approves version A; a later version, N, is stored with A's markdown byte for byte - an
+// accidental edit undone exactly, or a version a route wrote over a document that changed nothing -
+// and each decision block of N is as its row has it (rowBackedBlocks), so no block in it shows
+// other than what was decided: a block A showed open that someone answered since comes back in A's
+// bytes while its row holds that answer, and carries nothing. Such an N holds nothing its reviewer
+// has not agreed to, so Dispatch records his approval of N in his name, in the transaction that
+// writes N, rather than asking him to approve A's text again. Only the newest review carries this
+// way: when it requests changes no approval stands, and an older approval was superseded by it.
+// A's markdown is compared as it was stored, so a renderer change between A and N leaves N a
+// change, as N's diff against A shows. A version whose decision blocks differ from A's does not
+// hold A's text, so the answer carry alone decides it, as before this rule.
 
 // carryReason is the reason a carried review records, naming the approval it follows.
 const carryReason = "Carried forward from the approval of version %d: the answer to a decision block was the whole change since it."
+
+// restoreReason is the reason a review carried to a version restoring the approved text records,
+// naming the approval it follows. It opens as carryReason does, which is how the Legion daemon
+// tells a carry from a person's own approval (intake.CarriedApprovalReasonPrefix).
+const restoreReason = "Carried forward from the approval of version %d: this version's text is that version's, unchanged."
 
 // carryInput is what the rule is decided on once H, the version he approved, A, and when he
 // approved it are known: the blocks of N by block id, each its row (rowBackedBlocks); the block
@@ -82,21 +101,118 @@ type approvedVersion struct {
 	cut   string
 }
 
-// carryApproval carries a human's approval to version, just written from rendered, when the
-// answer he gave a decision block is the whole change since the version he approved (the rule
-// above). It returns the events it appended - the open approval request's ask.answered, when one
-// is open, then artifact.approved - and nothing when the version carries no approval. It reads
-// rendered.tree and never changes it: the tree is the live document's.
+// carryApproval carries a human's approval to version, just written from rendered, when his answer
+// to a decision block is the whole change since the version he approved, or when version's text is
+// the text of the version the document's newest review approved (the rules above). It returns the
+// events it appended - the open approval request's ask.answered, when one is open, then
+// artifact.approved - and nothing when the version carries no approval. It reads rendered.tree and
+// never changes it: the tree is the live document's.
 func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID string, version model.Version, rendered renderedTree) ([]model.Event, error) {
+	// Every version write runs this: anything past the newest review is read only once a carry is
+	// possible at all, which needs an approval still standing. A newer request for changes than
+	// every approval leaves none: the answer carry's candidates each fail on it, and the restore
+	// reads the newest review alone.
+	newest, err := NewestReview(ctx, tx, artifactID)
+	if err != nil || newest == nil || newest.State != "approved" {
+		return nil, err
+	}
+	review, err := s.answerCarriedReview(ctx, tx, artifactID, version.Number, rendered)
+	if err != nil {
+		return nil, err
+	}
+	if review == nil {
+		return restoreApproval(ctx, tx, s.events, artifactID, version.Number, rendered.markdown, rendered.tree, *newest, s.serverURL)
+	}
+	return writeCarriedReview(ctx, tx, s.events, artifactID, version.Number, *review, fmt.Sprintf(carryReason, review.Version), s.serverURL)
+}
+
+// CarryRestoredApproval is the restore alone, for the route that writes a document version itself
+// rather than through writeVersionTx - an upload that replaces a document (the api package's
+// storeArtifact) - once that version, number, is written with markdown and the open approval
+// request has moved to it (MoveApprovalAsk). tree is markdown's read-back, which the caller holds
+// when its write left one, and nil otherwise, when markdown is parsed here if the bytes match.
+// The answer carry has nothing to read there: an upload's markdown writes no answer, since the
+// server takes a block's server-owned attributes off an upload. It returns the events it
+// appended, as carryApproval does.
+func CarryRestoredApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, tree *pmdoc.Node, serverURL string) ([]model.Event, error) {
+	newest, err := NewestReview(ctx, tx, artifactID)
+	if err != nil || newest == nil || newest.State != "approved" {
+		return nil, err
+	}
+	return restoreApproval(ctx, tx, broker, artifactID, number, markdown, tree, *newest, serverURL)
+}
+
+// restoreApproval carries newest, the document's newest review and an approval, to version number
+// of artifactID when that version's markdown is the text newest approved (restoresApprovedText)
+// and every decision block it holds is as its row has it, and appends nothing otherwise. The text
+// alone is not the approved document: a block the approved version showed open, answered by
+// someone since, comes back in the same bytes while its row holds a decision nobody approved,
+// which settlement then writes into the next version. So the blocks are read as the answer carry
+// reads N's (askNodes, rowBackedBlocks), from tree, the version's own, or from markdown parsed
+// when tree is nil; that read is made only once the bytes match.
+func restoreApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, tree *pmdoc.Node, newest model.ArtifactReview, serverURL string) ([]model.Event, error) {
+	restored, err := restoresApprovedText(ctx, tx, artifactID, newest.Version, markdown)
+	if err != nil || !restored {
+		return nil, err
+	}
+	if tree == nil {
+		if tree, err = pmdoc.ParseRendering(markdown); err != nil {
+			return nil, skipUnreadableVersion(artifactID, number, err)
+		}
+	}
+	nodes, readable := askNodes(tree)
+	if !readable {
+		return nil, nil
+	}
+	if len(nodes) > 0 {
+		rows, err := loadAskBlocks(ctx, tx, artifactID)
+		if err != nil {
+			return nil, err
+		}
+		if _, backed := rowBackedBlocks(nodes, rows); !backed {
+			return nil, nil
+		}
+	}
+	return writeCarriedReview(ctx, tx, broker, artifactID, number, newest, fmt.Sprintf(restoreReason, newest.Version), serverURL)
+}
+
+// writeCarriedReview writes the carry of review to version number of artifactID with reason: the
+// open approval request's answer, Approve in the approver's name, when one is open, then the
+// approved review and its artifact.approved. It returns those events in that order.
+func writeCarriedReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, review model.ArtifactReview, reason, serverURL string) ([]model.Event, error) {
+	var appended []model.Event
+	var askID *string
+	open, err := OpenApprovalAsk(ctx, tx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	if open != nil {
+		answered, err := answerApprovalAsk(ctx, tx, broker, open, review.Actor, reason, serverURL)
+		if err != nil {
+			return nil, err
+		}
+		appended = append(appended, answered)
+		askID = &open.ID
+	}
+	artifact, err := reviewedArtifact(ctx, tx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	_, event, err := WriteReview(ctx, tx, broker, artifact, number, "approved", review.Actor, &reason, askID)
+	if err != nil {
+		return nil, err
+	}
+	return append(appended, event), nil
+}
+
+// answerCarriedReview is the review the answer carry carries to version number of artifactID,
+// just written from rendered, or nil: a version holding no ask block carries nothing by it and
+// reads nothing more, and one whose blocks a row of this document does not each back as
+// settlement leaves it (rowBackedBlocks) leaves its decisions unknown.
+func (s *Service) answerCarriedReview(ctx context.Context, tx pgx.Tx, artifactID string, number int, rendered renderedTree) (*model.ArtifactReview, error) {
 	nodes, readable := askNodes(rendered.tree)
 	if len(nodes) == 0 || !readable {
 		return nil, nil
-	}
-	// Every version write runs this, and a document keeps its ask blocks for the rest of its life:
-	// the rows are read only once a carry is possible at all, which needs an approval of the
-	// document by someone.
-	if approvedByAnyone, err := LatestApprovedReview(ctx, tx, artifactID); err != nil || approvedByAnyone == nil {
-		return nil, err
 	}
 	rows, err := loadAskBlocks(ctx, tx, artifactID)
 	if err != nil {
@@ -106,35 +222,26 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	if !backed {
 		return nil, nil
 	}
-	review, err := s.carriedReview(ctx, tx, artifactID, version.Number, rendered.markdown, blocks)
-	if err != nil || review == nil {
-		return nil, err
-	}
+	return s.carriedReview(ctx, tx, artifactID, number, rendered.markdown, blocks)
+}
 
-	reason := fmt.Sprintf(carryReason, review.Version)
-	var events []model.Event
-	var askID *string
-	open, err := OpenApprovalAsk(ctx, tx, artifactID)
+// restoresApprovedText reports whether markdown, the text a version of artifactID was just
+// written with, is byte for byte the stored text of version approved. Only a stored text of the
+// same size is read, so the write of any other text reads no document; octet_length reads a
+// stored text's size without decompressing it.
+func restoresApprovedText(ctx context.Context, tx pgx.Tx, artifactID string, approved int, markdown string) (bool, error) {
+	var stored string
+	err := tx.QueryRow(ctx, `
+		select markdown from artifact_versions
+		where artifact_id = $1 and number = $2 and octet_length(markdown) = $3
+	`, artifactID, approved, len(markdown)).Scan(&stored)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
-		return nil, err
+		return false, fmt.Errorf("read approved document version %d: %w", approved, err)
 	}
-	if open != nil {
-		answered, err := answerApprovalAsk(ctx, tx, s.events, open, review.Actor, reason)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, answered)
-		askID = &open.ID
-	}
-	artifact, err := reviewedArtifact(ctx, tx, artifactID)
-	if err != nil {
-		return nil, err
-	}
-	_, event, err := WriteReview(ctx, tx, s.events, artifact, version.Number, "approved", review.Actor, &reason, askID)
-	if err != nil {
-		return nil, err
-	}
-	return append(events, event), nil
+	return stored == markdown, nil
 }
 
 // carriedReview is the review version number of artifactID, whose markdown is markdown and whose
@@ -413,9 +520,16 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 // answerApprovalAsk answers the open approval request ask with Approve in actor's name, giving
 // reason as the answer's text, as a human's answer through the answer route is written, and
 // appends its ask.answered event on the ask's owner. The write names the open state it answers
-// from: a request that is no longer open is an error, not a second answer.
-func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ask *model.Ask, actor model.Actor, reason string) (model.Event, error) {
-	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: time.Now().UTC()}
+// from: a request that is no longer open is an error, not a second answer. The answer's time is
+// the transaction's now(), as the answer route's is: each process's host keeps its own clock, and
+// this one is the created_at of the ask.answered event appended here and of the review the carry
+// writes beside it, and the time the answer's part is written at (IndexAskPartsCounted below).
+func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ask *model.Ask, actor model.Actor, reason, serverURL string) (model.Event, error) {
+	var answeredAt time.Time
+	if err := tx.QueryRow(ctx, `select now()`).Scan(&answeredAt); err != nil {
+		return model.Event{}, fmt.Errorf("read the approval answer's time: %w", err)
+	}
+	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: answeredAt.UTC()}
 	encoded, err := json.Marshal(answer)
 	if err != nil {
 		return model.Event{}, fmt.Errorf("encode approval answer: %w", err)
@@ -429,13 +543,28 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, as
 	}
 	ask.State = "answered"
 	ask.Answer = &answer
+	// The answer is a part of the request, so its text reaches the graph with it, and the
+	// ask.answered below names what it moved.
+	changes, err := refs.IndexAskPartsCounted(ctx, tx, *ask, serverURL, answer.At, model.ReferenceChanges{})
+	if err != nil {
+		return model.Event{}, fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
+	}
+	payload, err := events.AskEventPayload(ctx, tx, *ask, changes)
+	if err != nil {
+		return model.Event{}, err
+	}
 	event, err := broker.Append(ctx, tx, model.Event{
 		IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
 		Type: "ask.answered", Actor: actor,
-		Payload: model.AskAnsweredEventPayload{AskEventPayload: model.NewAskEventPayload(*ask, model.ReferenceChanges{})},
+		Payload: model.AskAnsweredEventPayload{AskEventPayload: payload},
 	})
 	if err != nil {
 		return model.Event{}, fmt.Errorf("append approval ask answer: %w", err)
+	}
+	// The answer's part edges are new rows of this transaction, so they take the event's id and
+	// a ?since= read lists them.
+	if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
+		return model.Event{}, fmt.Errorf("stamp approval ask answer references: %w", err)
 	}
 	return event, nil
 }

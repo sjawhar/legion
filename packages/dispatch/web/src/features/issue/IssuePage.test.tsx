@@ -5,6 +5,8 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type {
   Agent,
@@ -153,6 +155,7 @@ function stubIssuePage(
   const originalListIssueAskThreads = api.listIssueAskThreads;
   const originalListComments = api.listComments;
   const originalListIssueMessages = api.listIssueMessages;
+  const originalListHandoffs = api.listHandoffs;
   const originalGetInbox = api.getInbox;
   const originalGetMyState = api.getMyState;
   const originalListAgents = api.listAgents;
@@ -161,12 +164,13 @@ function stubIssuePage(
   api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": state });
   api.getIssueEvents = async () => [];
-  // The Conversation builds its list from the issue's own asks, comments and messages; it asks
-  // the ask list for each thread, where the margin reads the same route without one.
+  // The Conversation builds its list from the issue's own asks, comments, messages and handoffs;
+  // it asks the ask list for each thread, where the margin reads the same route without one.
   api.listIssueAsks = async () => [];
   api.listIssueAskThreads = async () => [];
   api.listComments = async () => [];
   api.listIssueMessages = async () => [];
+  api.listHandoffs = async () => [];
   api.listAgents = async () => agents;
   api.getIssueSubscribers = async () => subscribers;
   return () => {
@@ -178,6 +182,7 @@ function stubIssuePage(
     api.listIssueAskThreads = originalListIssueAskThreads;
     api.listComments = originalListComments;
     api.listIssueMessages = originalListIssueMessages;
+    api.listHandoffs = originalListHandoffs;
     api.listAgents = originalListAgents;
     api.getIssueSubscribers = originalGetIssueSubscribers;
   };
@@ -506,7 +511,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     { ...labeledIssue, open_asks: 0 },
     { ...issue, key: "CORE-2", labels: ["frontend"], open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...labeledIssue,
     labels: ["bug", "urgent"],
   });
@@ -524,7 +529,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
 
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] }, keyedAttempt)
     );
     expect(patchIssue).toHaveBeenCalledTimes(1);
   } finally {
@@ -541,7 +546,7 @@ test("IssuePage does not save after a label is toggled off and back on", async (
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -573,7 +578,7 @@ test("IssuePage returns focus to the label trigger when Escape closes an unchang
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -900,7 +905,16 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
       ...openIssueAsk,
       priority: issue.priority,
       snoozed_until: null,
-      thread: { answers: [], edits: [], followers: [], replies: [] },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+      },
     },
   ]);
   const view = renderIssuePage("/issues/CORE-1");
@@ -932,6 +946,30 @@ test("IssuePage opens the Activity tab with the t v chord", async () => {
     expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1/activity");
   } finally {
     view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage opens the Decisions tab with the t d chord", async () => {
+  const restore = stubIssuePage(issue);
+  const decisions = spyOn(api, "getIssueDecisions").mockResolvedValue({
+    decisions: [],
+    document: null,
+    open_questions: [],
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    fireEvent.keyDown(document.body, { key: "t" });
+    fireEvent.keyDown(document.body, { key: "d" });
+
+    await screen.findByRole("tab", { name: "Decisions", selected: true });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1/decisions");
+    await waitFor(() => expect(decisions).toHaveBeenCalledWith("CORE-1"));
+  } finally {
+    view.unmount();
+    decisions.mockRestore();
     restore();
   }
 });
@@ -1718,6 +1756,37 @@ test("IssuePage fills and marks the issue pin when it is pinned", async () => {
     restore();
   }
 });
+
+test("IssuePage's pin refreshes the sidebar's pinned list once the pin is saved", async () => {
+  const restore = stubIssuePage(issue);
+  const saved = { dismissed: [], last_read_seq: 0, pinned: true, seq: 1 };
+  const putIssueState = spyOn(api, "putIssueState").mockResolvedValue(saved);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  // The sidebar's read of the pinned issues, as it is cached beside the page.
+  queryClient.setQueryData(["issues", "pinned"], []);
+  const view = renderIssuePage("/issues/CORE-1/conversation", undefined, undefined, queryClient);
+
+  try {
+    await within(view.container).findByRole("heading", { level: 1, name: issue.title });
+    expect(queryClient.getQueryState(["issues", "pinned"])?.isInvalidated).toBe(false);
+    fireEvent.click(within(view.container).getByRole("button", { name: "Pin issue" }));
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["issues", "pinned"])?.isInvalidated).toBe(true)
+    );
+    // The pin is a keyed write of the page's store, so its bounds name the key it goes under.
+    expect(putIssueState).toHaveBeenCalledWith(
+      "CORE-1",
+      { pinned: true },
+      expect.objectContaining({ key: expect.any(String) })
+    );
+  } finally {
+    view.unmount();
+    putIssueState.mockRestore();
+    restore();
+  }
+});
 test("IssuePage keeps an unrequested draft approval passive", async () => {
   const restore = stubIssuePage({
     ...issue,
@@ -1781,7 +1850,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
   });
   const closeSave = Promise.withResolvers<IssueDetails>();
   const reopenSave = Promise.withResolvers<IssueDetails>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async (_key, input) => {
+  const patchIssue = answerIssuePatches().mockImplementation(async (_key, input) => {
     if (input.status === "done") return closeSave.promise;
     if (input.status === "backlog") return reopenSave.promise;
     throw new Error(`Unexpected issue update: ${JSON.stringify(input)}`);
@@ -1793,7 +1862,9 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
     expect([...openStatus.options].map((option) => option.value)).not.toContain("done");
 
     fireEvent.click(screen.getByRole("button", { name: "Close issue" }));
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }, keyedAttempt)
+    );
     // While the write is in flight the control is disabled: no second close can be queued.
     expect(
       (screen.getByRole("button", { name: "Close issue" }) as HTMLButtonElement).disabled
@@ -1810,7 +1881,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reopen issue" }));
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt)
     );
     expect(
       (screen.getByRole("button", { name: "Reopen issue" }) as HTMLButtonElement).disabled
@@ -1833,7 +1904,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
 test("IssuePage lets a human move a Todo issue to In progress", async () => {
   const restore = stubIssuePage(issue);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...issue,
     status: "in_progress",
   });
@@ -1857,7 +1928,7 @@ test("IssuePage lets a human move a Todo issue to In progress", async () => {
 
     fireEvent.change(status, { target: { value: "in_progress" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" }, keyedAttempt)
     );
   } finally {
     view.unmount();

@@ -18,9 +18,9 @@ import { hasErrnoCode, messageFor } from "./errors";
 import { jsonErrorPosition } from "./json-position";
 import { sendable } from "./secret-file";
 
-/** Where a caller runs: one of the three plugins (and the `dispatch` command, which takes its host
+/** Where a caller runs: one of the two plugins (and the `dispatch` command, which takes its host
  * plugin's rule), or a script outside any of them (`command`). */
-export type EnvoyHarness = "omp" | "claude" | "opencode" | "command";
+export type EnvoyHarness = "omp" | "claude" | "command";
 
 /** The variables a read consults, by name, over whatever else the environment holds. */
 export type EnvoyConfigEnvironment = {
@@ -31,7 +31,6 @@ export type EnvoyConfigEnvironment = {
   readonly PI_CODING_AGENT_DIR?: string | undefined;
   readonly CLAUDE_CONFIG_DIR?: string | undefined;
   readonly CLAUDE_CODE_CHILD_SESSION?: string | undefined;
-  readonly OPENCODE_CONFIG_DIR?: string | undefined;
   readonly DISPATCH_URL?: string | undefined;
 } & Readonly<Record<string, string | undefined>>;
 
@@ -72,7 +71,6 @@ function neutralConfig(env: EnvoyConfigEnvironment): { path: string } | { error:
 const HARNESS_DIRECTORY_VARIABLE = {
   omp: "PI_CODING_AGENT_DIR",
   claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR",
 } as const;
 
 type PluginHarness = keyof typeof HARNESS_DIRECTORY_VARIABLE;
@@ -80,8 +78,7 @@ type PluginHarness = keyof typeof HARNESS_DIRECTORY_VARIABLE;
 const PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE) as readonly PluginHarness[];
 
 /** The directory a plugin's harness names, as written: Oh My Pi's `PI_CODING_AGENT_DIR` when
- * `OMP_PROFILE` names a profile other than `default`, Claude Code's `CLAUDE_CONFIG_DIR`,
- * OpenCode's `OPENCODE_CONFIG_DIR`. */
+ * `OMP_PROFILE` names a profile other than `default`, Claude Code's `CLAUDE_CONFIG_DIR`. */
 function namedDirectory(harness: PluginHarness, env: EnvoyConfigEnvironment): string | undefined {
   if (harness === "omp") {
     const profile = nonEmpty(env.OMP_PROFILE);
@@ -91,8 +88,8 @@ function namedDirectory(harness: PluginHarness, env: EnvoyConfigEnvironment): st
 }
 
 /** The directory `harness` reads its envoy.json from, refused when relative: a plugin's own
- * (`namedDirectory`), or for a command the first one named of Oh My Pi's, Claude Code's and
- * OpenCode's, in that order, Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`. */
+ * (`namedDirectory`), or for a command the first one named of Oh My Pi's and Claude Code's, in
+ * that order, Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`. */
 function harnessDirectory(harness: EnvoyHarness, env: EnvoyConfigEnvironment): string | undefined {
   for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
     // A shell outside Claude Code can export CLAUDE_CONFIG_DIR too; only Claude Code sets
@@ -115,13 +112,12 @@ export function handedConfigPath(env: EnvoyConfigEnvironment): string | undefine
 
 /**
  * The envoy.json a caller reads. A plugin reads its own harness's directory (omp: a named
- * profile's `PI_CODING_AGENT_DIR`; Claude Code: `CLAUDE_CONFIG_DIR`; OpenCode:
- * `OPENCODE_CONFIG_DIR`) and no other harness's, else the file `ENVOY_CONFIG_FILE` names, else
- * `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script (`command`) reads
- * `ENVOY_CONFIG_FILE` first, then the omp, Claude Code and OpenCode directories in that order
- * (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`), then that same neutral file. Throws
- * when the path it would use is relative: `ENVOY_CONFIG_FILE`, the harness directory, or
- * `XDG_CONFIG_HOME` for the neutral file.
+ * profile's `PI_CODING_AGENT_DIR`; Claude Code: `CLAUDE_CONFIG_DIR`) and no other harness's, else
+ * the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`.
+ * A script (`command`) reads `ENVOY_CONFIG_FILE` first, then the omp and Claude Code directories
+ * in that order (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`), then that same neutral
+ * file. Throws when the path it would use is relative: `ENVOY_CONFIG_FILE`, the harness
+ * directory, or `XDG_CONFIG_HOME` for the neutral file.
  */
 export function envoyConfigPath(harness: EnvoyHarness, env: EnvoyConfigEnvironment): string {
   const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;
@@ -168,6 +164,13 @@ const CheckoutFileSchema = z.looseObject({
   dispatch: DispatchSectionSchema.optional(),
 });
 
+// The session's switch for AskGate, read apart from the rest of the file (`askgateSetting`), so a
+// section that does not parse never fails the Dispatch or Envoy read.
+const AskgateSectionSchema = z.strictObject({ enabled: z.boolean().optional() });
+
+/** AskGate on or off for a session, and why a section that could not be read leaves it on. */
+export type AskgateSetting = { readonly enabled: boolean; readonly error: string | null };
+
 type EnvoyFile = z.infer<typeof EnvoyFileSchema>;
 
 /** A `dispatch` section as written. */
@@ -186,6 +189,8 @@ export type CheckoutEnvoyConfig =
       readonly dispatch: DispatchFileSettings;
       /** Set when the file holds an `envoy` section, which a checkout cannot write. */
       readonly envoyError: string | null;
+      /** Set when the file holds an `askgate` section, which only the session's file sets. */
+      readonly askgateError: string | null;
     }
   | { readonly kind: "invalid"; readonly path: string; readonly error: string };
 
@@ -403,6 +408,11 @@ function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): 
   }
 }
 
+/** Whether reading a `!` value may run its command: `run`, as every read does by default, or
+ * `kept`, which only takes the outcome a run already kept in this process and never runs one, for a
+ * caller on a deadline that a 10 s command would blow (the per-request feed of people's answers). */
+export type CommandMode = "run" | "kept";
+
 /**
  * A value from the chosen file: as written, or, for one starting with `!`, its command's trimmed
  * stdout. The command runs under `/bin/sh -c` with `env`, in the directory of the file that names
@@ -416,12 +426,16 @@ function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): 
  * timeout or empty output throws naming the field and the file. A value with whitespace or a
  * control character inside it, as written or as printed, throws too, since it cannot be sent as one
  * bearer. No error carries the value or either stream.
+ *
+ * With `commands: "kept"` the command never runs: the kept outcome answers, a kept failure throws
+ * as above however old it is, and a command with no kept outcome throws saying it has not run.
  */
 export function fileValue(
   value: string,
   field: string,
   filePath: string,
-  env: EnvoyConfigEnvironment
+  env: EnvoyConfigEnvironment,
+  commands: CommandMode = "run"
 ): string {
   if (!value.startsWith("!")) {
     if (!sendable(value)) {
@@ -433,7 +447,13 @@ export function fileValue(
   const cwd = path.dirname(path.resolve(filePath));
   const key = JSON.stringify([command, filePath, cwd]);
   let outcome = commandOutcomes.get(key);
-  if (
+  if (commands === "kept") {
+    if (outcome === undefined) {
+      throw new Error(
+        `${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`
+      );
+    }
+  } else if (
     outcome === undefined ||
     ("failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS)
   ) {
@@ -574,6 +594,9 @@ export function readEnvoyConfig(
       envoyError: Object.hasOwn(checkoutFile.settings, "envoy")
         ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}`
         : null,
+      askgateError: Object.hasOwn(checkoutFile.settings, "askgate")
+        ? `askgate in ${checkoutPath} is not read; set it in ${filePath}`
+        : null,
     };
   }
   const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
@@ -605,4 +628,51 @@ export function readEnvoyConfig(
         : null,
     warnings,
   };
+}
+
+/**
+ * AskGate's switch in the session's envoy.json at `filePath`, read now. No file, no `askgate`
+ * section, or `enabled: true` leaves it on; `enabled: false` turns it off. A section that does
+ * not parse, or a file that cannot be read or is not JSON, leaves it on with an `error` that names
+ * the file and `askgate.enabled`.
+ */
+export function askgateSetting(filePath: string): AskgateSetting {
+  const stayOn = (reason: string): AskgateSetting => ({
+    enabled: true,
+    error: `${reason}; AskGate stays on`,
+  });
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf-8");
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
+      return { enabled: true, error: null };
+    }
+    return stayOn(
+      `${filePath}: could not be read (${messageFor(error)}); askgate.enabled is not read`
+    );
+  }
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    const position = jsonErrorPosition(raw);
+    const at = position === undefined ? "" : ` at ${position}`;
+    return stayOn(`${filePath}: invalid JSON${at}; askgate.enabled is not read`);
+  }
+  if (typeof parsedJson !== "object" || parsedJson === null || !("askgate" in parsedJson)) {
+    return { enabled: true, error: null };
+  }
+  const parsed = z.object({ askgate: AskgateSectionSchema }).safeParse(parsedJson);
+  if (!parsed.success) {
+    // An unknown key is named as the other sections name one, and then the one key the section
+    // takes; any other issue is the switch's type.
+    const unknownKey = parsed.error.issues[0]?.code === "unrecognized_keys";
+    return stayOn(
+      unknownKey
+        ? `${describeSchemaIssue(filePath, parsed.error)}; the one askgate key is askgate.enabled, true or false`
+        : `${filePath}: askgate.enabled must be true or false`
+    );
+  }
+  return { enabled: parsed.data.askgate.enabled ?? true, error: null };
 }

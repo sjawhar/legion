@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { type DispatchConfigResolution, dispatchSettings } from "../dispatch-config";
 import type * as EnvoyConfigModule from "../envoy-config";
 import {
+  askgateSetting,
   type EnvoyConfig,
   type EnvoyHarness,
   envoyConfigPath,
@@ -80,22 +81,19 @@ describe("envoyConfigPath", () => {
     ).toBe("/handed/envoy.json");
   });
 
-  test("claude reads CLAUDE_CONFIG_DIR and opencode reads OPENCODE_CONFIG_DIR, each ignoring the others", () => {
+  test("claude reads CLAUDE_CONFIG_DIR, ignoring the other harnesses'", () => {
     const all = {
       HOME: home,
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: "/profiles/work/agent",
       CLAUDE_CONFIG_DIR: "/claude",
-      OPENCODE_CONFIG_DIR: "/opencode",
     };
     expect(envoyConfigPath("claude", all)).toBe("/claude/envoy.json");
-    expect(envoyConfigPath("opencode", all)).toBe("/opencode/envoy.json");
     expect(envoyConfigPath("claude", { ...all, CLAUDE_CONFIG_DIR: undefined })).toBe(neutral);
-    expect(envoyConfigPath("opencode", { ...all, OPENCODE_CONFIG_DIR: undefined })).toBe(neutral);
   });
 
   test("a plugin whose harness names no directory reads ENVOY_CONFIG_FILE, else the neutral file", () => {
-    for (const harness of ["omp", "claude", "opencode"] as const) {
+    for (const harness of ["omp", "claude"] as const) {
       expect(
         envoyConfigPath(harness, { HOME: home, ENVOY_CONFIG_FILE: "/handed/envoy.json" })
       ).toBe("/handed/envoy.json");
@@ -115,7 +113,7 @@ describe("envoyConfigPath", () => {
   });
 
   test("a relative XDG_CONFIG_HOME is refused naming it; an empty one reads as unset", () => {
-    for (const harness of ["omp", "claude", "opencode", "command"] as const) {
+    for (const harness of ["omp", "claude", "command"] as const) {
       expect(() =>
         envoyConfigPath(harness, { HOME: home, XDG_CONFIG_HOME: "relative/config" })
       ).toThrow("XDG_CONFIG_HOME is relative/config, which is not an absolute path");
@@ -143,7 +141,6 @@ describe("envoyConfigPath", () => {
         "PI_CODING_AGENT_DIR is agent",
       ],
       ["claude", { CLAUDE_CONFIG_DIR: "~/.claude" }, "CLAUDE_CONFIG_DIR is ~/.claude"],
-      ["opencode", { OPENCODE_CONFIG_DIR: "config" }, "OPENCODE_CONFIG_DIR is config"],
       [
         "command",
         { CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CONFIG_DIR: "claude" },
@@ -167,14 +164,13 @@ describe("envoyConfigPath", () => {
     expect(envoyConfigPath("command", { HOME: home, CLAUDE_CONFIG_DIR: "relative" })).toBe(neutral);
   });
 
-  test("a command reads ENVOY_CONFIG_FILE, else the omp, Claude Code and OpenCode rules in turn, else the neutral file", () => {
+  test("a command reads ENVOY_CONFIG_FILE, else the omp and Claude Code rules in turn, else the neutral file", () => {
     const harnesses = {
       HOME: home,
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: "/profiles/work/agent",
       CLAUDE_CODE_CHILD_SESSION: "1",
       CLAUDE_CONFIG_DIR: "/claude",
-      OPENCODE_CONFIG_DIR: "/opencode",
     };
     expect(
       envoyConfigPath("command", { ...harnesses, ENVOY_CONFIG_FILE: "/handed/envoy.json" })
@@ -191,9 +187,6 @@ describe("envoyConfigPath", () => {
         CLAUDE_CONFIG_DIR: "/claude",
       })
     ).toBe("/claude/envoy.json");
-    expect(envoyConfigPath("command", { HOME: home, OPENCODE_CONFIG_DIR: "/opencode" })).toBe(
-      "/opencode/envoy.json"
-    );
     expect(envoyConfigPath("command", { HOME: home })).toBe(neutral);
   });
 
@@ -212,10 +205,6 @@ describe("envoyConfigPath", () => {
         neutral
       );
     }
-    // Passed over, Claude Code's step leaves OpenCode's next.
-    expect(envoyConfigPath("command", { ...shell, OPENCODE_CONFIG_DIR: "/opencode" })).toBe(
-      "/opencode/envoy.json"
-    );
     // The Claude Code plugin's own rule reads CLAUDE_CONFIG_DIR with no marker.
     expect(envoyConfigPath("claude", shell)).toBe("/claude/envoy.json");
   });
@@ -342,7 +331,6 @@ describe("readEnvoyConfig", () => {
     const profiles = [
       ["omp", { OMP_PROFILE: "work", PI_CODING_AGENT_DIR: path.join(home, "omp") }],
       ["claude", { CLAUDE_CONFIG_DIR: path.join(home, "claude") }],
-      ["opencode", { OPENCODE_CONFIG_DIR: path.join(home, "opencode") }],
     ] as const;
 
     for (const [harness, profile] of profiles) {
@@ -473,7 +461,6 @@ describe("readEnvoyConfig", () => {
     const profiles = [
       ["omp", { OMP_PROFILE: "work", PI_CODING_AGENT_DIR: directory }],
       ["claude", { CLAUDE_CONFIG_DIR: directory }],
-      ["opencode", { OPENCODE_CONFIG_DIR: directory }],
     ] as const;
 
     // The file's path decides, so a relocated XDG_CONFIG_HOME does not change it.
@@ -587,7 +574,13 @@ describe("readEnvoyConfig", () => {
       path: file,
       dispatch: own.dispatch,
       envoy: own.envoy,
-      checkout: { kind: "valid", path: checkout, dispatch: { enabled: false }, envoyError: null },
+      checkout: {
+        kind: "valid",
+        path: checkout,
+        dispatch: { enabled: false },
+        envoyError: null,
+        askgateError: null,
+      },
       missing: null,
       warnings: [],
     });
@@ -604,6 +597,21 @@ describe("readEnvoyConfig", () => {
         path: checkout,
         dispatch: { enabled: false },
         envoyError: `${checkout}: envoy is not read from a checkout's envoy.json; put it in ${file}`,
+      },
+    });
+  });
+
+  test("a checkout's askgate section is named as not read", () => {
+    const cwd = tempDir();
+    const file = writeFile(path.join(tempDir(), "envoy.json"), {});
+    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), {
+      askgate: { enabled: false },
+    });
+    expect(readEnvoyConfig(file, { HOME: tempDir() }, { cwd })).toMatchObject({
+      checkout: {
+        kind: "valid",
+        envoyError: null,
+        askgateError: `askgate in ${checkout} is not read; set it in ${file}`,
       },
     });
   });
@@ -1039,6 +1047,54 @@ describe("a ! command in envoy.json", () => {
       expect(copy.fileValue(token, "dispatch.token", second, env)).toBe("shared-secret");
     }
     expect(readFileSync(runs, "utf-8")).toBe("run\nrun\n");
+  });
+
+  // The per-request feed of people's answers resolves Dispatch on a deadline a 10 s command would
+  // blow, so it takes only an outcome another call already kept.
+  test("read with commands: kept, never runs: it fails saying so until a run keeps a value, then takes it", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const runs = path.join(home, "runs");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; echo kept-secret` },
+    });
+    const resolve = (commands?: "kept") =>
+      dispatchSettings(env, readEnvoyConfig(file, env, { cwd: tempDir() }), { commands });
+
+    expect(resolve("kept")).toEqual({
+      enabled: false,
+      notice: null,
+      error: `${file}: dispatch.token's command has not run in this process yet, and this read does not run it`,
+    });
+    expect(existsSync(runs)).toBe(false);
+    expect(resolve()).toMatchObject({ enabled: true, token: "kept-secret" });
+    expect(resolve("kept")).toMatchObject({ enabled: true, token: "kept-secret" });
+    expect(readFileSync(runs, "utf-8")).toBe("run\n");
+  });
+
+  test("read with commands: kept, takes a kept failure however old, and never runs it again", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const runs = path.join(home, "runs");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; exit 3` },
+    });
+    const resolve = (commands?: "kept") =>
+      dispatchSettings(env, readEnvoyConfig(file, env, { cwd: tempDir() }), { commands });
+    const failed: DispatchConfigResolution = {
+      enabled: false,
+      notice: null,
+      error: `${file}: dispatch.token's command exited with status 3`,
+    };
+    const start = Date.now();
+    try {
+      expect(resolve()).toEqual(failed);
+      setSystemTime(new Date(start + 61_000));
+      expect(resolve("kept")).toEqual(failed);
+      expect(readFileSync(runs, "utf-8")).toBe("run\n");
+    } finally {
+      setSystemTime();
+    }
   });
 
   // A failing natsSeed command turns off only inbound messages: the seed is for NATS alone.
@@ -1501,5 +1557,71 @@ describe("a checkout's .envoy/envoy.json", () => {
       url: "http://localhost:8766",
       token: "environment-token",
     });
+  });
+});
+
+describe("askgateSetting", () => {
+  test("is on with no file, no section, or enabled: true, and off with enabled: false", () => {
+    const dir = tempDir();
+    expect(askgateSetting(path.join(dir, "none.json"))).toEqual({ enabled: true, error: null });
+    const file = path.join(dir, "envoy.json");
+    writeFile(file, { dispatch: { enabled: true } });
+    expect(askgateSetting(file)).toEqual({ enabled: true, error: null });
+    writeFile(file, { askgate: { enabled: true } });
+    expect(askgateSetting(file)).toEqual({ enabled: true, error: null });
+    writeFile(file, { askgate: { enabled: false } });
+    expect(askgateSetting(file)).toEqual({ enabled: false, error: null });
+  });
+
+  test("a section that does not parse leaves it on and names the file and the key", () => {
+    const file = path.join(tempDir(), "envoy.json");
+    writeFile(file, { askgate: { enabled: "no" } });
+    expect(askgateSetting(file)).toEqual({
+      enabled: true,
+      error: `${file}: askgate.enabled must be true or false; AskGate stays on`,
+    });
+    writeFile(file, { askgate: { on: false } });
+    expect(askgateSetting(file)).toEqual({
+      enabled: true,
+      error: `${file}: unrecognized askgate key(s): askgate.on; the one askgate key is askgate.enabled, true or false; AskGate stays on`,
+    });
+    for (const section of [false, null]) {
+      writeFile(file, { askgate: section });
+      expect(askgateSetting(file)).toEqual({
+        enabled: true,
+        error: `${file}: askgate.enabled must be true or false; AskGate stays on`,
+      });
+    }
+  });
+
+  test("a file that cannot be read or is not JSON leaves it on", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), "{");
+    expect(askgateSetting(file)).toEqual({
+      enabled: true,
+      error: `${file}: invalid JSON at line 1, column 2; askgate.enabled is not read; AskGate stays on`,
+    });
+    const dir = tempDir();
+    const unreadable = askgateSetting(dir);
+    expect(unreadable.enabled).toBe(true);
+    expect(unreadable.error).toStartWith(`${dir}: could not be read (`);
+    expect(unreadable.error).toEndWith("askgate.enabled is not read; AskGate stays on");
+  });
+
+  test("the section never changes Dispatch's settings", () => {
+    const env = { HOME: tempDir() };
+    const cwd = tempDir();
+    const dispatch = { enabled: true, serverUrl: "https://dispatch.example", token: "t" };
+    const read = (askgate?: unknown) => {
+      const file = writeFile(
+        path.join(tempDir(), "envoy.json"),
+        askgate === undefined ? { dispatch } : { dispatch, askgate }
+      );
+      return dispatchSettings(env, readEnvoyConfig(file, env, { cwd }));
+    };
+    const plain = read();
+    expect(plain.enabled).toBe(true);
+    for (const askgate of [{ enabled: false }, { enabled: "no" }, { on: false }]) {
+      expect(read(askgate)).toEqual(plain);
+    }
   });
 });

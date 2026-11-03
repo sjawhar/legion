@@ -56,6 +56,33 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 		{"agent_start", `{"type":"agent_start"}`, AgentStart{}},
 		{"replayed agent_start", `{"type":"agent_start","deliveryId":"d1"}`, AgentStart{DeliveryID: "d1"}},
 		{"agent_end", `{"type":"agent_end"}`, AgentEnd{}},
+		{
+			// Oh My Pi's own, measured against the pinned binary: it follows the agent_end of the
+			// turn the prompt ran. Its line carries `status` and `sessionSettled` besides, which
+			// the daemon reads nothing of and the decode drops
+			// (TestAPromptResultDecodesTheBinarysOwnLineWhole).
+			"prompt_result",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":true}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: true},
+		},
+		{
+			// The error of a turn whose provider request failed with Oh My Pi's own retries
+			// exhausted: an object of the binary's PromptError, never a string.
+			"prompt_result of a turn that ended in a provider error",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":true,` +
+				`"error":{"message":"429 Too Many Requests","provider":"anthropic","model":"claude-opus-4-5","httpStatus":429,"retryable":true}}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: true, Error: &PromptError{
+				Message: "429 Too Many Requests", Provider: "anthropic", Model: "claude-opus-4-5",
+				HTTPStatus: 429, Retryable: true,
+			}},
+		},
+		{
+			// A prompt Oh My Pi failed outright, which it writes with the two members its fail()
+			// fills and no provider at all.
+			"prompt_result of a prompt that ran no turn",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":false,"error":{"message":"no model","retryable":false}}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: false, Error: &PromptError{Message: "no model"}},
+		},
 		{"shutdown", `{"type":"shutdown"}`, Shutdown{}},
 		{
 			"adopt-working-copy",
@@ -71,6 +98,19 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 			"failed adopt-working-copy-result",
 			`{"type":"adopt-working-copy-result","id":"r4","ok":false,"error":"no workspace"}`,
 			AdoptWorkingCopyResult{ID: "r4", OK: false, Error: "no workspace"},
+		},
+		{
+			"rescue-unpushed",
+			`{"type":"rescue-unpushed","id":"r5","branch":"legion/LEGION-484-rescue-9d3f0c7a","workspaceTimeoutMs":120000,"timeoutMs":300000}`,
+			RescueUnpushed{ID: "r5", Branch: "legion/LEGION-484-rescue-9d3f0c7a", WorkspaceTimeoutMs: 120_000, TimeoutMs: 300_000},
+		},
+		{
+			"rescue-unpushed-result",
+			`{"type":"rescue-unpushed-result","id":"r5","ok":true,"workspaces":[{"dir":"/legion/workspaces/acme/widgets/legion-484","status":"rescued","branches":[{"name":"legion/LEGION-484-rescue-9d3f0c7a-1","commit":"c0ffee"}]},{"dir":"/legion/workspaces/acme/widgets/legion-485","status":"error","error":"push refused"}]}`,
+			RescueUnpushedResult{ID: "r5", OK: true, Workspaces: []RescueWorkspace{
+				{Dir: "/legion/workspaces/acme/widgets/legion-484", Status: "rescued", Branches: []RescueBranch{{Name: "legion/LEGION-484-rescue-9d3f0c7a-1", Commit: "c0ffee"}}},
+				{Dir: "/legion/workspaces/acme/widgets/legion-485", Status: "error", Error: "push refused"},
+			}},
 		},
 		{
 			"rpc_chunk",
@@ -141,6 +181,72 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 	}
 }
 
+// The prompt_result lines the pinned Oh My Pi actually writes, members and order as its own
+// schema declares them (`PromptResultEvent { type, id?, agentInvoked, status, error?:
+// PromptError, sessionSettled }`, `PromptError { message, provider?, model?, httpStatus?,
+// retryable }`, read out of /opt/omp/bin/omp). The daemon reads three of those members, so the
+// decode must take the rest without being handed them and without refusing them: a frame it
+// refuses is a prompt whose end the daemon never learns, and a claim that waits for that end
+// forever.
+func TestAPromptResultDecodesTheBinarysOwnLineWhole(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want PromptResult
+	}{
+		{
+			"a turn that completed",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":true,"status":"completed","sessionSettled":false}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: true},
+		},
+		{
+			// What a turn whose provider request ran out of retries ends with: the last assistant
+			// message stopped with "error", and Oh My Pi reports its detail as an object.
+			"a turn that ended in a provider error",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":true,"status":"error",` +
+				`"error":{"message":"429 Too Many Requests","provider":"anthropic","model":"claude-opus-4-5","httpStatus":429,"retryable":true},` +
+				`"sessionSettled":true}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: true, Error: &PromptError{
+				Message: "429 Too Many Requests", Provider: "anthropic", Model: "claude-opus-4-5",
+				HTTPStatus: 429, Retryable: true,
+			}},
+		},
+		{
+			// Oh My Pi's fail(): the prompt never reached a turn, and the error carries only the
+			// two members that path fills.
+			"a prompt that failed before any turn",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":false,"status":"error",` +
+				`"error":{"message":"no model","retryable":false},"sessionSettled":true}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: false, Error: &PromptError{Message: "no model"}},
+		},
+		{
+			// `id` is optional in the schema, and a result that names no request names no
+			// delivery either; it still decodes, and the daemon drops it downstream.
+			"a result of no request of the daemon's",
+			`{"type":"prompt_result","agentInvoked":true,"status":"aborted","sessionSettled":true}`,
+			PromptResult{AgentInvoked: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decoded, err := Decode([]byte(tc.line))
+			if err != nil {
+				t.Fatalf("Decode(%s): %v", tc.line, err)
+			}
+			if !reflect.DeepEqual(decoded, tc.want) {
+				t.Fatalf("Decode(%s) = %#v, want %#v", tc.line, decoded, tc.want)
+			}
+			result := decoded.(PromptResult)
+			reason := ""
+			if result.Error != nil {
+				reason = result.Error.Message
+			}
+			if result.Reason() != reason {
+				t.Fatalf("Reason() = %q, want %q", result.Reason(), reason)
+			}
+		})
+	}
+}
+
 // The shim is a bridge: OMP emits frames this package models nothing of (tool_execution_start,
 // error, and whatever a later OMP adds), and they must cross it unchanged rather than fail a
 // decode (worker-shim.ts:141-142 leaves them unsummarized and :290 forwards them anyway).
@@ -208,6 +314,24 @@ func TestTheFramesTheShippedCodeValidatesRefuseTheirMalformedForms(t *testing.T)
 		{"no jjEmail", AdoptWorkingCopy{ID: "r4", JJUser: "legion", TimeoutMs: 1}},
 		{"no timeout", AdoptWorkingCopy{ID: "r4", JJUser: "legion", JJEmail: "l@example.com"}},
 		{"negative timeout", AdoptWorkingCopy{ID: "r4", JJUser: "legion", JJEmail: "l@example.com", TimeoutMs: -1}},
+	} {
+		if err := tc.frame.Validate(); !errors.Is(err, ErrMalformedFrame) {
+			t.Fatalf("%s: Validate = %v, want ErrMalformedFrame", tc.name, err)
+		}
+	}
+	rescue := RescueUnpushed{ID: "r5", Branch: "legion/LEGION-484-rescue-9d3f0c7a", WorkspaceTimeoutMs: 1, TimeoutMs: 2}
+	if err := rescue.Validate(); err != nil {
+		t.Fatalf("RescueUnpushed.Validate: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		frame RescueUnpushed
+	}{
+		{"no id", RescueUnpushed{Branch: rescue.Branch, WorkspaceTimeoutMs: 1, TimeoutMs: 2}},
+		{"a branch outside legion/", RescueUnpushed{ID: "r5", Branch: "main", WorkspaceTimeoutMs: 1, TimeoutMs: 2}},
+		{"a branch a refspec misreads", RescueUnpushed{ID: "r5", Branch: "legion/x:refs/heads/main", WorkspaceTimeoutMs: 1, TimeoutMs: 2}},
+		{"no workspace bound", RescueUnpushed{ID: "r5", Branch: rescue.Branch, TimeoutMs: 2}},
+		{"a workspace bound above the whole", RescueUnpushed{ID: "r5", Branch: rescue.Branch, WorkspaceTimeoutMs: 3, TimeoutMs: 2}},
 	} {
 		if err := tc.frame.Validate(); !errors.Is(err, ErrMalformedFrame) {
 			t.Fatalf("%s: Validate = %v, want ErrMalformedFrame", tc.name, err)

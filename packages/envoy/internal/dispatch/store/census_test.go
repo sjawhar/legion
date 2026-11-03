@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
@@ -478,8 +479,13 @@ func TestCensusRefusesALockHolderWhoseAgeItCannotSee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
-	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], pid) || !strings.Contains(got[0], "pg_read_all_stats") {
-		t.Errorf("refusals = %v, want one naming %s and pg_read_all_stats", got, pid)
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], pid) || !strings.Contains(got[0], "which is not the session's role") || !strings.Contains(got[0], "granting the census's role pg_read_all_stats lets the census read the age") {
+		t.Errorf("refusals = %v, want one naming %s, that it runs as another role, and pg_read_all_stats", got, pid)
+	}
+	// The diagnosis rides on the refusal, and shows what Postgres hides from the census's role as
+	// not visible; the holder's lock, from pg_locks, every role may read.
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "diagnosis of "+pid+", read when refused: state not visible, xact_start not visible, backend_xid none, wait_event not visible") || !strings.Contains(got[0], "relation things AccessShareLock granted") {
+		t.Errorf("refusals = %v, want the holder's diagnosis with its hidden fields and its lock on things", got)
 	}
 	if !slices.ContainsFunc(report.LongTransactions, isHolder) {
 		t.Errorf("long transactions = %v, want the holder whose age the census cannot see:\n%s", report.LongTransactions, reportText(report))
@@ -499,6 +505,60 @@ func TestCensusRefusesALockHolderWhoseAgeItCannotSee(t *testing.T) {
 	}
 }
 
+// A WAL sender holding a lock on a touched table in a transaction older than the bound refuses,
+// though it is of the census's own role and its state is visible: Postgres never records a WAL
+// sender's transaction start, to any role, and a replication=database connection runs SQL, so
+// the census cannot rule out the long transaction it exists to catch. It is listed with the long
+// transactions, and nothing names it as in no transaction. A replication=database connection
+// needs a role with REPLICATION and a server with max_wal_senders above 0 (the default is 10),
+// not wal_level=logical, which only logical decoding needs.
+func TestCensusRefusesAWALSenderHoldingALockInATransaction(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	config := store.Pool.Config().ConnConfig.Config.Copy()
+	if config.RuntimeParams == nil {
+		config.RuntimeParams = map[string]string{}
+	}
+	config.RuntimeParams["replication"] = "database"
+	sender, err := pgconn.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a replication=database connection: %v", err)
+	}
+	t.Cleanup(func() { sender.Close(context.Background()) })
+	// A WAL sender takes only the simple query protocol.
+	if _, err := sender.Exec(ctx, "begin; lock table things in access share mode").ReadAll(); err != nil {
+		t.Fatal(err)
+	}
+	senderPID := sender.PID()
+	var backendType, state string
+	var noStart bool
+	if err := store.Pool.QueryRow(ctx, "select backend_type, state, xact_start is null from pg_stat_activity where pid = $1", senderPID).Scan(&backendType, &state, &noStart); err != nil {
+		t.Fatal(err)
+	}
+	if backendType != "walsender" || state != "idle in transaction" || !noStart {
+		t.Fatalf("the holder reads as backend_type %q, state %q, xact_start null %v; want a walsender idle in transaction with no xact_start", backendType, state, noStart)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	report, err := census(ctx, url, withCheck("select 0"), pgmigrate.CensusOptions{LongTransaction: time.Second})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	pid := "pid " + strconv.FormatUint(uint64(senderPID), 10)
+	got := refusals(report)
+	if len(got) != 1 || !strings.Contains(got[0], pid) || !strings.Contains(got[0], "Postgres records no transaction start for it though its state is idle in transaction (it records none for a WAL sender, to any role), so the census cannot rule out a transaction older than 1s") {
+		t.Errorf("refusals = %v, want one naming %s as a holder whose transaction start Postgres records none of:\n%s", got, pid, reportText(report))
+	}
+	if len(got) == 1 && !strings.Contains(got[0], "diagnosis of "+pid+", read when refused: state idle in transaction, xact_start none") {
+		t.Errorf("refusal lacks the WAL sender's diagnosis:\n%s", got[0])
+	}
+	if !slices.ContainsFunc(report.LongTransactions, func(s pgmigrate.Session) bool { return s.PID == senderPID }) {
+		t.Errorf("long transactions = %v, want the WAL sender whose age the census cannot see:\n%s", report.LongTransactions, reportText(report))
+	}
+	if out := reportText(report); strings.Contains(out, "idle in transaction, in no transaction when read") {
+		t.Errorf("the report names the WAL sender as in no transaction:\n%s", out)
+	}
+}
+
 // A touched table above the limit refuses on its size and is not counted; the limit is injected so
 // the test needs no gigabyte.
 func TestCensusRefusesATouchedTableAboveTheLimit(t *testing.T) {
@@ -512,6 +572,190 @@ func TestCensusRefusesATouchedTableAboveTheLimit(t *testing.T) {
 	}
 	if out := reportText(report); !strings.Contains(out, ", above the 1 bytes limit, so its rows were not counted;") {
 		t.Errorf("report:\n%s", out)
+	}
+}
+
+// A migration whose every statement only changes the catalog is exempt from the table limit, and
+// its table's size is still reported: the shipped 0122 (a function and a trigger on
+// artifact_versions) passes over a database at 0121 with the limit at one byte, and the report
+// prints artifact_versions above that limit with why the migration is exempt.
+func TestCensusExemptsAMigrationOfOnlyCatalogStatementsFromTheTableLimit(t *testing.T) {
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 121)
+	report, err := census(context.Background(), store.Pool.Config().ConnString(), migrationsThrough(t, 122), pgmigrate.CensusOptions{TableLimit: 1})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if report.Refused() {
+		t.Errorf("0122 refused: %v", refusals(report))
+	}
+	if len(report.Pending) != 1 || report.Pending[0].TableSizeExemption != "create function and create trigger" {
+		t.Errorf("pending = %+v, want 0122 alone, exempt as a function and a trigger", report.Pending)
+	}
+	if out := reportText(report); !strings.Contains(out, "touches artifact_versions: ") ||
+		!strings.Contains(out, ", above the 1 bytes limit, from which the migration is exempt because its statements are only create function and create trigger, which change the catalog and read no row, so its rows were not counted;") {
+		t.Errorf("report:\n%s", out)
+	}
+}
+
+// An enabled event trigger on create trigger runs code of its own when the migration runs, so a
+// migration of only a trigger is not exempt while one exists, and the size refusal names it. A
+// disabled one changes nothing.
+func TestCensusDoesNotExemptACatalogMigrationAnEventTriggerRunsOn(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	for _, statement := range []string{
+		"create function noop_event() returns event_trigger language plpgsql as $$ begin end $$",
+		"create function owe() returns trigger language plpgsql as $$ begin return null; end $$",
+		"create event trigger on_create_trigger on ddl_command_end when tag in ('CREATE TRIGGER') execute function noop_event()",
+	} {
+		if _, err := store.Pool.Exec(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set := fstest.MapFS{
+		"migrations/0001_things.up.sql": censusBase["migrations/0001_things.up.sql"],
+		"migrations/0002_owed.up.sql":   {Data: []byte("create trigger things_owed after insert on things for each row execute function owe()")},
+	}
+	report, err := census(ctx, url, set, pgmigrate.CensusOptions{TableLimit: 1})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "above the 1 bytes a table a migration touches may be; its statements are only create trigger, which would exempt it from the limit, but the enabled event triggers on_create_trigger run code of their own on them") {
+		t.Errorf("refusals = %v, want things refused on its size, naming the event trigger", got)
+	}
+	if _, err := store.Pool.Exec(ctx, "alter event trigger on_create_trigger disable"); err != nil {
+		t.Fatal(err)
+	}
+	report, err = census(ctx, url, set, pgmigrate.CensusOptions{TableLimit: 1})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if report.Refused() {
+		t.Errorf("a disabled event trigger kept the exemption off: %v", refusals(report))
+	}
+}
+
+// A migration holding any statement outside the catalog-only kinds still refuses a table above
+// the limit: an index, a column with a default, a default set on a column, and a trigger beside an
+// index. A trigger only a comment or a string literal names exempts nothing.
+func TestCensusStillRefusesAnIndexOrAColumnDefaultOnATableAboveTheLimit(t *testing.T) {
+	for name, migration := range map[string]string{
+		"an index":                    "create index things_kind on things (kind)",
+		"a column with a default":     "alter table things add column note text default 'x'",
+		"a default set on a column":   "alter table things alter column kind set default 'x'",
+		"a trigger beside an index":   "create function owe() returns trigger language plpgsql as $$ begin return null; end $$; create trigger things_owed after insert on things for each row execute function owe(); create index things_kind on things (kind);",
+		"a trigger only in a comment": "-- create trigger things_owed after insert on things for each row execute function owe();\ncreate index things_kind on things (kind)",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, url := migratedToOne(t)
+			set := fstest.MapFS{
+				"migrations/0001_things.up.sql": censusBase["migrations/0001_things.up.sql"],
+				"migrations/0002_change.up.sql": {Data: []byte(migration)},
+			}
+			report, err := census(context.Background(), url, set, pgmigrate.CensusOptions{TableLimit: 1})
+			if err != nil {
+				t.Fatalf("census: %v", err)
+			}
+			if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "things is ") || !strings.Contains(got[0], "above the 1 bytes a table a migration touches may be") {
+				t.Errorf("refusals = %v, want things refused on its size", got)
+			}
+		})
+	}
+}
+
+// A holder of the census's own role whose transaction began after the census first read
+// pg_stat_activity is read with its age, so a young one neither refuses nor is named as an age
+// Postgres hides. Postgres keeps a transaction's first read of pg_stat_activity for the rest of
+// that transaction, and the census is one transaction over every pending migration: here 0002
+// touches others, which reads pg_stat_activity while the holder is idle, and 0002's census then
+// waits on a lock the test holds on blocker, during which the holder begins a transaction on
+// things; the test then lets the census go on to 0003, which touches things. Read through the
+// census's first copy, the holder showed "idle" with no transaction start and refused as hidden
+// from the census's role, naming pg_read_all_stats, which changes nothing for its own role.
+func TestCensusReadsTheAgeOfAHolderOfItsOwnRoleWhoseTransactionBeganDuringTheCensus(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	if _, err := store.Pool.Exec(ctx, "create table others (id integer); create table blocker (id integer)"); err != nil {
+		t.Fatal(err)
+	}
+	set := fstest.MapFS{
+		"migrations/0001_things.up.sql":     censusBase["migrations/0001_things.up.sql"],
+		"migrations/0002_others.up.sql":     {Data: []byte("alter table others add column note text")},
+		"migrations/0002_others.census.sql": {Data: []byte("select count(*) from blocker")},
+		"migrations/0003_things.up.sql":     {Data: []byte("alter table things add column note text")},
+	}
+	holder, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { holder.Close(context.Background()) })
+	blocking, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { blocking.Close(context.Background()) })
+	blocked, err := blocking.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocked.Exec(ctx, "lock table blocker in access exclusive mode"); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		report *pgmigrate.Report
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		report, err := census(ctx, url, set, pgmigrate.CensusOptions{})
+		done <- result{report, err}
+	}()
+	// Wait until the census is queued on blocker, which it reaches only after reading others' holders.
+	deadline := time.Now().Add(pgmigrate.LockTimeout - time.Second)
+	for {
+		var waiting bool
+		if err := store.Pool.QueryRow(ctx, "select exists (select from pg_locks where relation = 'blocker'::regclass and not granted)").Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the census never queued on blocker")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	held, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { held.Rollback(context.Background()) })
+	if _, err := held.Exec(ctx, "lock table things in access share mode"); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocked.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("census: %v", got.err)
+	}
+	if got.report.Refused() {
+		t.Errorf("a young holder of the census's own role refused: %v", refusals(got.report))
+	}
+	if out := reportText(got.report); strings.Contains(out, "pg_read_all_stats") {
+		t.Errorf("the report names pg_read_all_stats for a holder of the census's own role:\n%s", out)
+	}
+	pid := holder.PgConn().PID()
+	for _, entry := range got.report.Pending {
+		for _, table := range entry.Tables {
+			for _, session := range table.Holders {
+				if table.Name == "things" && session.PID == pid && (session.XactAge == nil || session.State != "idle in transaction") {
+					t.Errorf("holder of things read as %s, want it idle in transaction with its age", session)
+				}
+			}
+		}
 	}
 }
 
@@ -755,6 +999,52 @@ func TestCensusRefusesALockHeldOnATouchedTableByAnOldTransaction(t *testing.T) {
 	}
 	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "pid "+strconv.FormatUint(uint64(pid), 10)) || !strings.Contains(got[0], "has held a lock on things for") {
 		t.Errorf("refusals = %v, want one naming pid %d", got, pid)
+	}
+}
+
+// A holder's refusal carries its diagnosis, read when the census refused: its state, transaction
+// start, xid, wait and query from pg_stat_activity, and every lock it holds from pg_locks. The
+// query is printed with its literals taken out, so a value it carries never reaches the report.
+func TestCensusRefusesALockHolderWithItsDiagnosis(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	holder, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { holder.Close(context.Background()) })
+	held, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { held.Rollback(context.Background()) })
+	const sentinel = "ghp_SENTINEL_IN_A_HOLDERS_QUERY_5d1c"
+	if _, err := held.Exec(ctx, "select count(*) from things where kind = '"+sentinel+"'"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	report, err := census(ctx, url, withCheck("select 0"), pgmigrate.CensusOptions{LongTransaction: time.Second})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	pid := "pid " + strconv.FormatUint(uint64(holder.PgConn().PID()), 10)
+	got := refusals(report)
+	if len(got) != 1 {
+		t.Fatalf("refusals = %v, want the one old holder", got)
+	}
+	for _, want := range []string{
+		"has held a lock on things for ",
+		"; diagnosis of " + pid + ", read when refused: state idle in transaction, xact_start 20",
+		", backend_xid none, wait_event Client/ClientRead, query \"select count(*) from things where kind = ?\"; its locks: ",
+		"relation things AccessShareLock granted",
+		"virtualxid ExclusiveLock granted",
+	} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("refusal lacks %q:\n%s", want, got[0])
+		}
+	}
+	if out := reportText(report); strings.Contains(out, sentinel) {
+		t.Errorf("the report prints a literal of the holder's query:\n%s", out)
 	}
 }
 

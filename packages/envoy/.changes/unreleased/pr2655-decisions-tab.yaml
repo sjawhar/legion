@@ -1,0 +1,2 @@
+kind: Added
+body: "The dashboard's Decisions tab (`/issues/<key>/decisions`, chord `t d`) lists an issue's open questions, the agent decisions waiting for a person's review with Keep and Change, the person's own decisions and the replaced ones, each linking the spec blocks it shaped; the server's reference reader reads its page as the issue's `decisions.md`."

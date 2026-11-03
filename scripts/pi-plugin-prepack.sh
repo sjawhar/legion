@@ -35,7 +35,9 @@ plugin() {
   case "$1" in
   @sjawhar/pi-envoy)
     entry=envoy
-    skills=(asd-ste100 dispatch dispatch-first dispatch-writing-specs envoy)
+    skills=(
+      asd-ste100 dispatch dispatch-first dispatch-writing-specs envoy outside-message plain-words
+    )
     ;;
   @sjawhar/pi-legion)
     entry=legion
@@ -88,7 +90,7 @@ fi
 metafiles=$(mktemp -d)
 trap 'rm -rf "$metafiles"' EXIT
 if [ "$name" = "@sjawhar/pi-envoy" ]; then
-  bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils --metafile="$metafiles/envoy.json"
+  bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-ai --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils --metafile="$metafiles/envoy.json"
   "$root/packages/envoy-client/scripts/build-dispatch-cli.sh" dist "$metafiles/dispatch.json"
   bun "$root/scripts/third-party-notices.ts" "$metafiles/envoy.json" "$metafiles/dispatch.json" dist/THIRD_PARTY_NOTICES
 else

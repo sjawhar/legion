@@ -116,14 +116,16 @@ func PutSettings(ctx context.Context, pool *store.Pool, settings DeliverySetting
 	))
 }
 
-// RecordEventAt advances delivery_settings.last_event_at to t: called after intake processes a
-// GitHub envelope. Never moves it backward, so an out-of-order redelivery cannot make the
-// freshness row look staler than it is.
-func RecordEventAt(ctx context.Context, pool *store.Pool, t time.Time) error {
+// RecordEventAt advances delivery_settings.last_event_at to the database's now(): called after
+// intake processes a GitHub envelope. The database's clock, not the calling process's, so server
+// processes whose clocks disagree still stamp one clock. Never moves it backward: now() is the
+// statement's transaction start, so an update that started earlier and commits later cannot make
+// the freshness row look staler than it is.
+func RecordEventAt(ctx context.Context, pool *store.Pool) error {
 	_, err := pool.Exec(ctx, `
-		update delivery_settings set last_event_at = greatest(coalesce(last_event_at, $1), $1)
+		update delivery_settings set last_event_at = greatest(last_event_at, now())
 		where singleton
-	`, t)
+	`)
 	return err
 }
 

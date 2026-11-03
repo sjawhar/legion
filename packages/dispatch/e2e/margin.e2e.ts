@@ -48,7 +48,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the selection bar comments, suggests, and asks on marks that both users see", async ({
+test("the selection bar comments, suggests, and asks on marks that both users see @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -174,8 +174,7 @@ test("the selection bar comments, suggests, and asks on marks that both users se
 // On a phone the sheet opens for it, which `phone.e2e.ts` checks.
 test("a bar Comment focuses its composer from the margin's rail and from its Pinned tab", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec: initialMarkdown, title: "Focus" });
   const alice = await asUser(browser, "alice");
@@ -255,7 +254,7 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
   }
 });
 
-test("highlights follow edits in the other browser and preserve their anchor state", async ({
+test("highlights follow edits in the other browser and preserve their anchor state @phone", async ({
   browser,
 }) => {
   await createProject({ key: "FOLLOW", name: "Following highlights" });
@@ -336,7 +335,7 @@ test("highlights follow edits in the other browser and preserve their anchor sta
   }
 });
 
-test("accepting a suggestion changes the text in both browsers and names a version; rejecting leaves the text", async ({
+test("accepting a suggestion changes the text in both browsers and names a version; rejecting leaves the text @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SUG", name: "Suggestions" });
@@ -520,7 +519,7 @@ test("anchored and unanchored comments reach Conversation for both viewers", asy
   }
 });
 
-test("a document mark opens its thread in the margin and stays on the document", async ({
+test("a document mark opens its thread in the margin and stays on the document @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "FOCUS", name: "Focus marks" });
@@ -582,7 +581,7 @@ test("a document mark opens its thread in the margin and stays on the document",
   }
 });
 
-test("a Conversation reply to an agent's anchored comment carries no anchor and stays in one thread", async ({
+test("a Conversation reply to an agent's anchored comment carries no anchor and stays in one thread @phone", async ({
   browser,
 }) => {
   await createProject({ key: "REPLY", name: "Anchored replies" });
@@ -691,7 +690,7 @@ test("margin ask composer sends option choices that the inbox records as a selec
   }
 });
 
-test("a viewer who opens the issue after an anchored ask is answered sees it in the margin", async ({
+test("a viewer who opens the issue after an anchored ask is answered sees it in the margin @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SEES", name: "Sees answered asks" });
@@ -751,7 +750,7 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
   }
 });
 
-test("long option labels and descriptions wrap inside the margin ask card", async ({
+test("long option labels and descriptions wrap inside the margin ask card @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -840,7 +839,7 @@ test("long option labels and descriptions wrap inside the margin ask card", asyn
   }
 });
 
-test("a comment a verified service token wrote names its service account in the margin", async ({
+test("a comment a verified service token wrote names its service account in the margin @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SVC", name: "Service" });

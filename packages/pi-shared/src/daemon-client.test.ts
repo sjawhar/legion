@@ -166,6 +166,26 @@ test("reads the daemon's state strictly, refusing the TypeScript daemon's shape"
   ).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
+test("a state read hands fetch its caller's signal, and an abort ends a read the daemon never answers", async () => {
+  const handed: (AbortSignal | null | undefined)[] = [];
+  const hung = (async (_input, init) => {
+    handed.push(init?.signal);
+    const { promise, reject } = Promise.withResolvers<Response>();
+    init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    return promise;
+  }) as typeof fetch;
+  const controller = new AbortController();
+  const late = new Error("the reader stopped waiting");
+
+  const read = createLegionDaemonClient("http://daemon.test", hung).state({
+    signal: controller.signal,
+  });
+  controller.abort(late);
+
+  await expect(read).rejects.toBe(late);
+  expect(handed).toEqual([controller.signal]);
+});
+
 test("posts every Stage 3 workflow request through its matching route", async () => {
   type WorkflowClient = {
     readonly grant: (body: object) => Promise<unknown>;
@@ -186,12 +206,21 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-209" },
       "grant.json",
     ],
-    // The completion names the pushed commit carrying the handoff, which the legion tool found
-    // in the pane; the daemon answers the note READY leaves for a pull request already merged.
+    // An implementing round's completion names the Dispatch handoff record and the pushed tip,
+    // which the legion tool found in the pane; the daemon answers the note READY leaves for a pull
+    // request already merged.
     [
       "handoffComplete",
       "/legion/v1/handoff/complete",
-      { grantId: "grant-208", summary: "done", verdict: "", ready: false, commit: "abc123" },
+      {
+        grantId: "grant-208",
+        summary: "done",
+        verdict: "",
+        ready: false,
+        commit: "abc123",
+        handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
+        handoffVersion: 2,
+      },
       "handoff-complete.json",
     ],
     [

@@ -395,9 +395,30 @@ func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod
 // agent's own argv is itself wrapped in the start script (startArgv): the shim's child is then
 // `/bin/sh -c '<script>' legion-start <n> <setup…> <agent argv…>`, which installs the pair, runs
 // the setup command, and execs the agent, so the shim's own preparation (--pod-safety) has
-// already run and no new shim flag is needed; after the script's `exec` the child is Oh My Pi
+// already run and no new shim flag is needed; after the script's `exec` the child is the harness
 // itself, so the shim's pid is unchanged. The setup command runs at every start of the role,
-// a Spawn's, a Resume's and a replaced pod's alike.
+// a Spawn's, a Resume's and a replaced pod's alike. A Claude Code launch is wrapped whatever else
+// it carries, for the `mkdir -p` of its configuration directory (claudeConfigDir) and the install
+// of the pinned Claude Code its agent command names (claudeCodeBlock: the image carries the pin
+// and never the binary), and adds one file to the generation's credentials: the MCP document its
+// agent command reads
+// (claudeMCPFile), which the launcher writes 0600 into the 0700 private directory it makes for
+// the generation and removes with the rest when the generation ends (internal/launcher). It
+// travels in Files and never in spec.Secrets, which would be two wrongs: every secret name also
+// gets a `<NAME>_FILE` pointer in the worker's environment (mainEnvironment), and
+// ValidateSpawnSpec refuses a credential-shaped name outright.
+//
+// The agent-secrets flags are the one part of the command built from the pod the role will run in
+// rather than from the configuration as it now reads (launch.enrolls): the shim stats the key
+// directory and the token file those flags name and exits 1 when either is absent
+// (shim.ReadAgentSecretsFlags), and a live pod a launch keeps may have been built before the
+// runtime enrolled, so it carries neither. Such a role is started without them and runs without
+// the broker until the update round replaces its pod (INFRA-484, keptPod) — which it can only do
+// once every worker of the pod has pushed its work and answered, and a process that refused to
+// start would never answer at all. The environment that start carries says the same thing: the
+// AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR an agent reads to decide it holds a broker are set
+// from this one decision too (mainEnvironment, enrollsIn), so such a role reports a resource it
+// cannot reach rather than a secrets problem it does not have.
 func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 	dir := generationDir(l.spec.Generation)
 	shim := []string{r.tools.Legion, "worker-shim", connectFlag, r.streamURL, "--boot-token-file", dir + "/" + bootTokenKey, "--pod-safety", "--stop-grace", r.terminationGrace.String()}
@@ -412,7 +433,7 @@ func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 	if r.mountsProviders() {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}
-	if r.agentSecrets != nil {
+	if l.enrolls(r) {
 		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir, "--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile, "--agent-secrets-bin", r.tools.AgentSecrets)
 	}
 	_, values := r.launchEnvironment(l)
@@ -422,7 +443,12 @@ func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 		files = map[string]string{}
 	}
 	files[bootTokenKey] = l.spec.BootToken
-	agentArgv := startArgv(roleStateHome(l.spec.Role), l.spec.Generation, l.spec.Plugins, r.setup, l.agentArgv(r.agent),
+	claudeDir := ""
+	if l.runsClaude() {
+		claudeDir = claudeConfigDir(l.spec.Role)
+		files[claudeMCPFile] = l.claude.mcp
+	}
+	agentArgv := startArgv(roleStateHome(l.spec.Role), l.spec.Generation, l.spec.Plugins, claudeDir, r.setup, l.agentArgv(r.agent),
 		installLockWait(r.bootTimeout, r.registrationIntervals))
 	return shimwire.LauncherStart{
 		ID: "start-" + fmt.Sprint(l.spec.Generation), Generation: l.spec.Generation,

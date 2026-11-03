@@ -15,19 +15,29 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/redact"
 )
+
+// GoogleOIDCIssuer is the issuer of every Google identity token, the one a VM's metadata server
+// has Google sign. Google has one, so no variable names it: BROKER_GOOGLE_OIDC_AUDIENCE configures
+// only the audience.
+const GoogleOIDCIssuer = "https://accounts.google.com"
 
 type Config struct {
 	// BROKER_LISTEN_ADDR: the host:port the broker listens on.
@@ -67,12 +77,30 @@ type Config struct {
 	// projected token, for BROKER_K8S_OIDC_AUDIENCE, on those routes, verified against
 	// BROKER_K8S_OIDC_ISSUER as every other ServiceAccount token the broker takes is, so this
 	// needs that pair. A token that lives longer than an hour from its issue is refused, as a
-	// service's login token is. The caller's name
-	// (lowercase letters, digits and hyphens, at most 64) is what the broker's log names it when
-	// it acts; nothing else reads it. A namespace's default account is refused, as is an account
-	// given twice, since each account names one caller. Keyed by account, each answering its
-	// caller. Unset, no caller reaches those routes.
-	APIAccounts map[string]string
+	// service's login token is. The caller's name decides what the account may do, and the broker
+	// knows two: dispatch reaches every one of those routes, the ten Dispatch's server relays a
+	// person's decisions and reads through as well as introspection, and listener reaches
+	// introspection alone, since the Envoy listener reads a token back and relays no decision. A
+	// name the broker does not know refuses the boot naming it and the names it knows, so a typo
+	// never quietly produces a caller that reaches nothing, and a new caller is a deliberate
+	// edit to the broker's own table (api.AccountFor). A listed caller reaching a route its name
+	// does not carry is 403 ACCOUNT_LACKS_POWER, which is a different fact from an account that
+	// is not listed at all (403 ACCOUNT_NOT_LISTED). A namespace's default account is refused, as
+	// is an account given twice, since each account names one caller. Keyed by account, each
+	// answering its caller and that caller's powers. Unset, no caller reaches those routes.
+	APIAccounts map[string]api.Account
+	// BROKER_SIGNIN_ISSUER, BROKER_SIGNIN_CLIENT_ID, BROKER_SIGNIN_CLIENT_SECRET_FILE,
+	// BROKER_SIGNIN_DOMAIN, BROKER_SIGNIN_SESSION_SECONDS: the broker's own OpenID Connect client,
+	// through which a person signs in to the broker's approval page to approve a secret request:
+	// the provider's issuer (an absolute https URL, or http only to a loopback host, for a run on
+	// one machine), the client's id, a file holding the client's secret (read at startup and
+	// trimmed; no variable carries the secret itself, so BROKER_SIGNIN_CLIENT_SECRET is refused),
+	// the Google Workspace domain a person's ID token must name in its hd claim, and how many
+	// seconds a sign-in lasts (an absolute expiry nothing extends, at most 86400, 24 hours, the
+	// default). The first four are required: a broker missing any of them refuses to start,
+	// naming the ones missing, since nobody could approve a secret request on a page nobody can
+	// sign in to.
+	SignIn approval.SignIn
 	// BROKER_SECRETS_STORE: which secret store the agent secrets live in: aws-secrets-manager (the
 	// default when unset, AWS Secrets Manager with the agent-secrets key in AWS KMS) or
 	// gcp-secret-manager (Google Cloud Secret Manager with the agent-secrets key in Cloud KMS, read
@@ -115,7 +143,10 @@ type Config struct {
 	// as owner-tag-malformed.
 	ServicesByAccount map[string]string
 	// BROKER_SERVICE_LOGINS: the ServiceAccounts that log in as a service with their own projected
-	// token (POST /v1/launcher-credentials/token), whitespace-separated <service>=<service account>
+	// token (POST /v1/launcher-credentials/token), and that authenticate the routes a service
+	// calls as itself (serviceAuth, today POST /v1/oauth/exchange/pod-sessions, where a
+	// deployment's daemon registers a pod it starts under a session name),
+	// whitespace-separated <service>=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion-system:legion-daemon-legion. Each
 	// account (system:serviceaccount:<namespace>:<name>, named exactly: there is no wildcard) logs in
 	// as the one service its entry names and is given once; one service may have several accounts,
@@ -131,6 +162,36 @@ type Config struct {
 	K8sOIDCIssuer string
 	// BROKER_K8S_OIDC_AUDIENCE: the audience a pod's projected service-account token must carry.
 	K8sOIDCAudience string
+	// BROKER_GOOGLE_OIDC_AUDIENCE: the audience a Google VM identity token must carry. Its issuer
+	// is always https://accounts.google.com, so no variable names it. Needs BROKER_VM_SERVICES, since
+	// an audience no VM service is listed for could accept no token. Unset, the broker accepts no VM
+	// identity token, and BROKER_VM_SERVICES, BROKER_VM_PROJECTS and BROKER_VM_INSTANCES are refused.
+	GoogleOIDCAudience string
+	// BROKER_VM_SERVICES: the VM services, whitespace-separated name=<service account email>
+	// entries, such as example-service=example-fleet@example-project.iam.gserviceaccount.com. A name
+	// is lowercase letters, digits and hyphens, at most 64, not shared; the account is a user-managed
+	// Google service account (<account id>@<project id>.iam.gserviceaccount.com, in lowercase, as a
+	// token carries it) that the service's VMs run as, so every VM of that account is one identity. A
+	// service may be named for several accounts, one entry each, but each account is given once and
+	// proves exactly one service. A project's default service accounts (Compute Engine's and App
+	// Engine's) and Google-managed service agents are refused: a project's workloads run as the first
+	// by default and Google's own services as the second, so neither proves which VMs are the
+	// service's. Every account needs an entry in BROKER_VM_PROJECTS and in BROKER_VM_INSTANCES. Keyed
+	// by account, each answering its service. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, no VM service
+	// is listed.
+	VMServicesByAccount map[string]string
+	// BROKER_VM_PROJECTS: the Google project each VM service's VMs run in, whitespace-separated
+	// <service account email>=<project id> entries, one per account BROKER_VM_SERVICES lists and none
+	// for any other account. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty,
+	// so any account BROKER_VM_SERVICES lists is refused for having no project.
+	VMProjects map[string]string
+	// BROKER_VM_INSTANCES: the names each VM service's VMs may have, whitespace-separated
+	// <service account email>=<instance-name glob> entries, one per account BROKER_VM_SERVICES lists
+	// and none for any other account. The glob is Go's path.Match syntax (*, ?, and [...] classes,
+	// negated with ^) over the characters of an instance name, such as example-vm-*. Keyed by
+	// account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty, so any account
+	// BROKER_VM_SERVICES lists is refused for having no instance-name glob.
+	VMInstancePatterns map[string]string
 	// BROKER_EXCHANGE_K8S_AUDIENCE: the audience a pod's projected service-account token must
 	// carry to be exchanged (RFC 8693) for a Dispatch access token. Its issuer is the one cluster
 	// the broker is told about, BROKER_K8S_OIDC_ISSUER, which this needs; the audience is its own
@@ -175,7 +236,9 @@ type Config struct {
 	// BROKER_ENVOY_URL is set.
 	EnvoyToken string
 	// BROKER_LEASE_SECONDS: an enrollment's lease. A session renews it while it runs; one whose
-	// lease runs out is no longer enrolled and its calls are refused.
+	// lease runs out is no longer enrolled and its calls are refused. Time while no broker was
+	// serving is not counted against it: a lease that ran out then stays live until a broker serves
+	// again, which gives it that time back. More than four and a half times BROKER_SWEEP_SECONDS.
 	LeaseSeconds int
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
@@ -190,7 +253,10 @@ type Config struct {
 	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
-	// the pending requests and machine logins nobody decided in time.
+	// the pending requests and machine logins nobody decided in time. It is also how often a serving
+	// broker records that it serves: a gap of more than three sweeps between two such records is
+	// time no broker was serving, which the broker gives back to every lease still running when the
+	// gap began.
 	SweepSeconds int
 	// BROKER_DRAIN_SECONDS: how long the broker goes on serving after SIGTERM while answering
 	// GET /healthz with 503, so Kubernetes has stopped sending it new requests before it stops
@@ -212,6 +278,23 @@ type Config struct {
 	// otherwise a caller can forge the header and pick its own rate-limit bucket.
 	TrustedProxyHeader string
 }
+
+// The four settings the broker's sign-in needs, each read by its own name: the provider's issuer,
+// the client's id, the file holding the client's secret, and the Workspace domain.
+const (
+	signInIssuerSetting       = "BROKER_SIGNIN_ISSUER"
+	signInClientIDSetting     = "BROKER_SIGNIN_CLIENT_ID"
+	signInClientSecretSetting = "BROKER_SIGNIN_CLIENT_SECRET_FILE"
+	signInDomainSetting       = "BROKER_SIGNIN_DOMAIN"
+)
+
+// SignInSettings are those four settings, every one of them required. Every message that names
+// them names them in this order.
+var SignInSettings = []string{signInIssuerSetting, signInClientIDSetting, signInClientSecretSetting, signInDomainSetting}
+
+// NotServingSweeps is how many sweeps a gap between two serving records may last and still count
+// as a broker serving; a longer gap is time no broker was serving.
+const NotServingSweeps = 3
 
 // noUIToken is why BROKER_UI_TOKEN and its file are gone: the routes it authenticated take the
 // caller's own Kubernetes ServiceAccount token now.
@@ -245,7 +328,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_DISPATCH_TOKEN_FILE", noDispatchCredential},
 	{"BROKER_DISPATCH_PROJECT", noDispatchCredential},
 	{"BROKER_ASK_POLL_SECONDS", noDispatchCredential},
-	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin"},
+	{"BROKER_UI_ORIGIN", "a person approves on the broker's own page, signed in to the broker (BROKER_SIGNIN_*), so the broker checks no WebAuthn origin"},
 	{"BROKER_UI_TOKEN", noUIToken},
 	{"BROKER_UI_TOKEN_FILE", noUIToken},
 	{"BROKER_DATABASE_PASSWORD", noDatabasePassword},
@@ -254,6 +337,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
 	{"BROKER_MAX_GRANT_SECONDS", noGrantCap},
 	{"BROKER_MINT_TARGETS", noMintTargets},
+	{"BROKER_SIGNIN_CLIENT_SECRET", "the broker reads its sign-in client's secret only from the file BROKER_SIGNIN_CLIENT_SECRET_FILE names, so the secret is never in its environment"},
 }
 
 // serviceAccountPattern is a Kubernetes service account's subject, the one a pod's projected token
@@ -288,13 +372,9 @@ func parseServiceAccounts(setting, value string) ([]serviceAccountEntry, error) 
 		if isDefaultServiceAccount(subject) {
 			return nil, fmt.Errorf("%s names a namespace's default service account, got %q: every pod in that namespace whose spec names no account runs as it and can get a token for the broker's audience, so it proves nothing; name a dedicated account", setting, text)
 		}
-		if other, twice := seen[subject]; twice {
-			if other == service {
-				return nil, fmt.Errorf("%s names the service account %s twice for %q; each account proves one service, so name it once", setting, subject, service)
-			}
-			return nil, fmt.Errorf("%s names the service account %s for both %q and %q; each account proves one service, so name it once", setting, subject, other, service)
+		if err := bindOnce(seen, setting, subject, service); err != nil {
+			return nil, err
 		}
-		seen[subject] = service
 		entries = append(entries, serviceAccountEntry{service: service, subject: subject, text: text})
 	}
 	return entries, nil
@@ -306,6 +386,151 @@ func parseServiceAccounts(setting, value string) ([]serviceAccountEntry, error) 
 func isDefaultServiceAccount(subject string) bool {
 	_, account, _ := strings.Cut(strings.TrimPrefix(subject, "system:serviceaccount:"), ":")
 	return account == defaultServiceAccount
+}
+
+// bindOnce records in seen that account proves service, refusing an account seen already, since
+// each account proves one service: named for two services, the refusal names both; named twice for
+// the same service, it names the account and that service. parseServiceAccounts and
+// parseVMServiceAccounts share it.
+func bindOnce(seen map[string]string, setting, account, service string) error {
+	if other, twice := seen[account]; twice {
+		if other == service {
+			return fmt.Errorf("%s names the service account %s twice for %q; each account proves one service, so name it once", setting, account, service)
+		}
+		return fmt.Errorf("%s names the service account %s for both %q and %q; each account proves one service, so name it once", setting, account, other, service)
+	}
+	seen[account] = service
+	return nil
+}
+
+// googleIDPart is the form Google gives both a service account's ID and a project's ID: a
+// lowercase letter, then 4 to 28 lowercase letters, digits or hyphens, then a lowercase letter or
+// digit, so 6 to 30 characters that never end in a hyphen.
+const googleIDPart = `[a-z][a-z0-9-]{4,28}[a-z0-9]`
+
+// googleProjectIDPattern is a Google project ID.
+var googleProjectIDPattern = regexp.MustCompile(`^` + googleIDPart + `$`)
+
+// vmServiceAccountPattern is a user-managed Google service account's email,
+// <account id>@<project id>.iam.gserviceaccount.com, the only form a VM service may name.
+var vmServiceAccountPattern = regexp.MustCompile(`^` + googleIDPart + `@` + googleIDPart + `\.iam\.gserviceaccount\.com$`)
+
+// defaultGoogleServiceAccountPattern is a project's Compute Engine default account
+// (<project number>-compute@developer.gserviceaccount.com) or its App Engine default account
+// (<project id>@appspot.gserviceaccount.com). Google makes them for the project and its workloads
+// run as them by default, so a token from one proves nothing about which VMs are a service's.
+var defaultGoogleServiceAccountPattern = regexp.MustCompile(`^([0-9]+-compute@developer|` + googleIDPart + `@appspot)\.gserviceaccount\.com$`)
+
+// googleServiceAgentPattern is a Google-managed service agent: an account named
+// service-<number>, service-org-<number> or service-folder-<number>, or any account of a gcp-sa-
+// domain. Google's own services run as these accounts, never a VM.
+var googleServiceAgentPattern = regexp.MustCompile(`^service-(org-|folder-)?[0-9]+@|@gcp-sa-`)
+
+// instancePatternChars are the characters an instance-name glob may hold: an instance name's own
+// (lowercase letters, digits and hyphens) and path.Match's *, ?, [, ] and ^ (validInstancePattern
+// takes ^ only where it negates a class). Any other character could never match an instance name,
+// and a ! would read as negation to someone who knows shell globs, where path.Match takes it
+// literally.
+var instancePatternChars = regexp.MustCompile(`^[a-z0-9*?\[\]^-]+$`)
+
+// vmAccountRefusal refuses, naming setting and the entry text, an account no VM service may name:
+// a user-managed account's address written with capital letters (a Google identity token carries
+// it in lowercase), a project's default account, a Google-managed service agent, and any address
+// that is not a user-managed service account's. It answers nil for an account a VM service may
+// name.
+func vmAccountRefusal(setting, text, account string) error {
+	switch {
+	case account != strings.ToLower(account) && vmServiceAccountPattern.MatchString(strings.ToLower(account)):
+		return fmt.Errorf("%s names a service account with capital letters, got %q: a Google identity token carries the address in lowercase, so write it in lowercase", setting, text)
+	case defaultGoogleServiceAccountPattern.MatchString(account):
+		return fmt.Errorf("%s names a project's default service account, got %q: the project's workloads run as it by default, so it proves nothing about which VMs are a service's; name a dedicated account", setting, text)
+	case googleServiceAgentPattern.MatchString(account):
+		return fmt.Errorf("%s names a Google-managed service agent, got %q: Google's own services run as it, never a VM; name a dedicated account", setting, text)
+	case !vmServiceAccountPattern.MatchString(account):
+		return fmt.Errorf("%s must name user-managed service accounts, <account id>@<project id>.iam.gserviceaccount.com, got %q", setting, text)
+	}
+	return nil
+}
+
+// vmServiceAccountEntry is one <service>=<service account email> entry of BROKER_VM_SERVICES,
+// with its text as the setting gave it.
+type vmServiceAccountEntry struct{ service, account, text string }
+
+// parseVMServiceAccounts reads setting's whitespace-separated <service>=<service account email>
+// entries, in order. It refuses, naming the entry: one not of that form or naming the service
+// policy.OwnerShared, as parseServiceAccounts does; an account vmAccountRefusal refuses; and an
+// account given twice, through bindOnce, which parseServiceAccounts shares. A service named for
+// several accounts is allowed.
+func parseVMServiceAccounts(setting, value string) ([]vmServiceAccountEntry, error) {
+	var entries []vmServiceAccountEntry
+	seen := map[string]string{}
+	for _, text := range strings.Fields(value) {
+		service, account, ok := strings.Cut(text, "=")
+		if !ok || !record.ValidService(service) || service == policy.OwnerShared {
+			return nil, fmt.Errorf("%s must be <service>=<service account email> entries, each service lowercase letters, digits and hyphens, at most 64, not %s, got %q", setting, policy.OwnerShared, text)
+		}
+		if err := vmAccountRefusal(setting, text, account); err != nil {
+			return nil, err
+		}
+		if err := bindOnce(seen, setting, account, service); err != nil {
+			return nil, err
+		}
+		entries = append(entries, vmServiceAccountEntry{service: service, account: account, text: text})
+	}
+	return entries, nil
+}
+
+// vmAccountValue is one <service account email>=<value> entry of BROKER_VM_PROJECTS or
+// BROKER_VM_INSTANCES, with its text as the setting gave it.
+type vmAccountValue struct{ account, value, text string }
+
+// parseVMAccountValues reads setting's whitespace-separated <service account email>=<kind>
+// entries, in order. It refuses, naming the entry: one not of that form or whose value valid
+// refuses; an account vmAccountRefusal refuses; and an account given twice, since a VM identity
+// must have one value of each kind.
+func parseVMAccountValues(setting, value, kind string, valid func(string) bool) ([]vmAccountValue, error) {
+	var entries []vmAccountValue
+	seen := map[string]bool{}
+	for _, text := range strings.Fields(value) {
+		account, attribute, ok := strings.Cut(text, "=")
+		if !ok || !valid(attribute) {
+			return nil, fmt.Errorf("%s must be <service account email>=<%s> entries, got %q", setting, kind, text)
+		}
+		if err := vmAccountRefusal(setting, text, account); err != nil {
+			return nil, err
+		}
+		if seen[account] {
+			return nil, fmt.Errorf("%s names the service account %s twice; each account has one %s, so name it once", setting, account, kind)
+		}
+		seen[account] = true
+		entries = append(entries, vmAccountValue{account: account, value: attribute, text: text})
+	}
+	return entries, nil
+}
+
+// validInstancePattern reports whether pattern is an instance-name glob: path.Match's syntax,
+// holding only instancePatternChars, with ^ only as a class's negation ("[^"), the one place
+// path.Match does not take it as a literal no instance name holds.
+func validInstancePattern(pattern string) bool {
+	_, err := path.Match(pattern, "")
+	return instancePatternChars.MatchString(pattern) && strings.Count(pattern, "^") == strings.Count(pattern, "[^") && err == nil
+}
+
+// vmAccountMap keys entries by account, refusing, naming setting and the entry, one whose account
+// services does not bind: a project or an instance pattern for an account no VM service lists
+// would configure nothing. No entries answer nil, as an unset setting does.
+func vmAccountMap(setting string, entries []vmAccountValue, services map[string]string) (map[string]string, error) {
+	var values map[string]string
+	for _, entry := range entries {
+		if _, listed := services[entry.account]; !listed {
+			return nil, fmt.Errorf("%s names %s, got %q, but BROKER_VM_SERVICES does not list it; a project or instance entry must name a listed VM account", setting, entry.account, entry.text)
+		}
+		if values == nil {
+			values = map[string]string{}
+		}
+		values[entry.account] = entry.value
+	}
+	return values, nil
 }
 
 // exchangeFields splits one entry of an exchange setting into want fields on "=", the last field
@@ -489,6 +714,7 @@ func Load(getenv func(string) string) (Config, error) {
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
 		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
+		GoogleOIDCAudience: strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_AUDIENCE")),
 		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
 		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
 	}
@@ -519,10 +745,10 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
-		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", cfg.PublicURL)
+		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", redact.URL(cfg.PublicURL))
 	}
 	if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", cfg.MachineLoginURL)
+		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", redact.URL(cfg.MachineLoginURL))
 	}
 	switch cfg.SecretsStore {
 	case secrets.StoreAWS:
@@ -563,6 +789,48 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.ServiceLogins[entry.subject] = entry.service
 	}
+	if cfg.GoogleOIDCAudience == "" {
+		for _, setting := range []string{"BROKER_VM_SERVICES", "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
+			if strings.TrimSpace(getenv(setting)) != "" {
+				return Config{}, fmt.Errorf("%s needs BROKER_GOOGLE_OIDC_AUDIENCE, whose VM identity tokens it configures", setting)
+			}
+		}
+	}
+	vmServices, err := parseVMServiceAccounts("BROKER_VM_SERVICES", getenv("BROKER_VM_SERVICES"))
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.GoogleOIDCAudience != "" && len(vmServices) == 0 {
+		return Config{}, fmt.Errorf("BROKER_GOOGLE_OIDC_AUDIENCE needs BROKER_VM_SERVICES: with no VM service listed, no VM identity token for that audience could ever be accepted")
+	}
+	for _, entry := range vmServices {
+		if cfg.VMServicesByAccount == nil {
+			cfg.VMServicesByAccount = map[string]string{}
+		}
+		cfg.VMServicesByAccount[entry.account] = entry.service
+	}
+	projects, err := parseVMAccountValues("BROKER_VM_PROJECTS", getenv("BROKER_VM_PROJECTS"), "project id", googleProjectIDPattern.MatchString)
+	if err != nil {
+		return Config{}, err
+	}
+	instances, err := parseVMAccountValues("BROKER_VM_INSTANCES", getenv("BROKER_VM_INSTANCES"), "instance-name glob", validInstancePattern)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.VMProjects, err = vmAccountMap("BROKER_VM_PROJECTS", projects, cfg.VMServicesByAccount); err != nil {
+		return Config{}, err
+	}
+	if cfg.VMInstancePatterns, err = vmAccountMap("BROKER_VM_INSTANCES", instances, cfg.VMServicesByAccount); err != nil {
+		return Config{}, err
+	}
+	for _, entry := range vmServices {
+		if _, found := cfg.VMProjects[entry.account]; !found {
+			return Config{}, fmt.Errorf("BROKER_VM_SERVICES names %s, got %q, but BROKER_VM_PROJECTS does not: every VM service needs one project", entry.account, entry.text)
+		}
+		if _, found := cfg.VMInstancePatterns[entry.account]; !found {
+			return Config{}, fmt.Errorf("BROKER_VM_SERVICES names %s, got %q, but BROKER_VM_INSTANCES does not: every VM service needs one instance-name pattern", entry.account, entry.text)
+		}
+	}
 	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
 	if err != nil {
 		return Config{}, err
@@ -576,10 +844,17 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	for _, entry := range callers {
-		if cfg.APIAccounts == nil {
-			cfg.APIAccounts = map[string]string{}
+		// A caller's name is an authority and not a label — it decides which of the broker's
+		// named-caller routes that account reaches — so a name the broker's own table does not
+		// know is refused here, rather than listed as a caller that reaches nothing.
+		account, known := api.AccountFor(entry.service)
+		if !known {
+			return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS names the caller %q, which this broker does not know, got %q: its callers are %s", entry.service, entry.text, strings.Join(api.KnownCallers(), ", "))
 		}
-		cfg.APIAccounts[entry.subject] = entry.service
+		if cfg.APIAccounts == nil {
+			cfg.APIAccounts = map[string]api.Account{}
+		}
+		cfg.APIAccounts[entry.subject] = account
 	}
 	if len(cfg.APIAccounts) > 0 && cfg.K8sOIDCIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its callers present")
@@ -610,6 +885,7 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, err
 		}
 	}
+	var sessionSeconds int
 	ints := []struct {
 		name     string
 		dst      *int
@@ -622,6 +898,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 		{"BROKER_DRAIN_SECONDS", &cfg.DrainSeconds, 5, 0, 120},
+		{"BROKER_SIGNIN_SESSION_SECONDS", &sessionSeconds, 86400, 1, 86400},
 	}
 	for _, i := range ints {
 		raw := getenv(i.name)
@@ -635,24 +912,91 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		*i.dst = n
 	}
+	if cfg.SignIn, err = parseSignIn(getenv, time.Duration(sessionSeconds)*time.Second); err != nil {
+		return Config{}, err
+	}
+	// A live session renews with at least two thirds of its lease left, and a gap of up to
+	// NotServingSweeps sweeps reads as a broker still serving, so a lease that ran out inside such a
+	// gap would be ended rather than given back. That gap must fall short of two thirds of a lease.
+	if 2*cfg.LeaseSeconds <= 3*NotServingSweeps*cfg.SweepSeconds {
+		return Config{}, fmt.Errorf("BROKER_LEASE_SECONDS (%d) must be more than four and a half times BROKER_SWEEP_SECONDS (%d): a live session holds at least two thirds of its lease, and the gap the broker tolerates before giving back the time no broker was serving is three sweeps",
+			cfg.LeaseSeconds, cfg.SweepSeconds)
+	}
 	return cfg, nil
+}
+
+// parseSignIn reads the broker's sign-in client, its session lasting sessionLifetime, the
+// BROKER_SIGNIN_SESSION_SECONDS Load read. All four of the client's settings are required, since
+// a broker nobody can sign in to is a broker on which no secret request is ever approved. It
+// refuses: any of them missing, naming each one; an issuer that is not an absolute https URL, or
+// http to a loopback host; and an unreadable or blank secret file. No refusal carries the secret.
+func parseSignIn(getenv func(string) string, sessionLifetime time.Duration) (approval.SignIn, error) {
+	signIn := approval.SignIn{SessionLifetime: sessionLifetime}
+	// One destination per SignInSettings entry, read in that order, so the missing ones are named
+	// in the order every message naming them uses. The secret's path is held aside rather than
+	// kept in the SignIn, whose field carries the secret itself.
+	var secretPath string
+	into := []*string{&signIn.Issuer, &signIn.ClientID, &secretPath, &signIn.Domain}
+	var missing []string
+	for i, setting := range SignInSettings {
+		*into[i] = strings.TrimSpace(getenv(setting))
+		if *into[i] == "" {
+			missing = append(missing, setting)
+		}
+	}
+	if len(missing) > 0 {
+		return approval.SignIn{}, fmt.Errorf("the broker's approval page needs %s; missing %s", strings.Join(SignInSettings, ", "), strings.Join(missing, ", "))
+	}
+	if !signInIssuerOK(signIn.Issuer) {
+		return approval.SignIn{}, fmt.Errorf("%s must be an absolute https URL, or http to a loopback host, got %q", signInIssuerSetting, signIn.Issuer)
+	}
+	var err error
+	if signIn.ClientSecret, err = secretFile(signInClientSecretSetting, secretPath); err != nil {
+		return approval.SignIn{}, err
+	}
+	return signIn, nil
+}
+
+// signInIssuerOK reports whether issuer is an absolute https URL, or an http one whose host is
+// localhost or a loopback address: a sign-in's code exchange sends the client secret to it, which
+// only a local run may send in plain text, to its own machine.
+func signInIssuerOK(issuer string) bool {
+	parsed, err := url.Parse(issuer)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	switch parsed.Scheme {
+	case "https":
+		return true
+	case "http":
+		host := parsed.Hostname()
+		ip := net.ParseIP(host)
+		return host == "localhost" || ip != nil && ip.IsLoopback()
+	}
+	return false
 }
 
 // secretValue reads NAME_FILE (trimmed contents) ahead of NAME; a set-but-unreadable or blank
 // file is an error naming both, never a fallback.
 func secretValue(getenv func(string) string, name string) (string, error) {
 	if path := getenv(name + "_FILE"); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("%s_FILE names %s, which could not be read: %w", name, path, err)
-		}
-		value := strings.TrimSpace(string(data))
-		if value == "" {
-			return "", fmt.Errorf("%s_FILE names %s, which is empty", name, path)
-		}
-		return value, nil
+		return secretFile(name+"_FILE", path)
 	}
 	return getenv(name), nil
+}
+
+// secretFile reads the trimmed contents of path, the file the variable setting names; an
+// unreadable or blank file is an error naming setting and path, never what the file holds.
+func secretFile(setting, path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s names %s, which could not be read: %w", setting, path, err)
+	}
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return "", fmt.Errorf("%s names %s, which is empty", setting, path)
+	}
+	return value, nil
 }
 
 func orDefault(v, d string) string {

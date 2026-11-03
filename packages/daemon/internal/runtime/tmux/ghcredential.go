@@ -2,7 +2,10 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,7 +50,10 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // minting authority. It rewrites only the owners whose hosts.yml differs (ghconfig.WriteBundle),
 // recreating a root that is gone. An owner that cannot be read, a render that fails, or a render
 // for a write owner whose default is another owner is logged and the pane keeps its last tokens
-// until the next tick. A runtime with no credential function (Options.GitHubCredential nil: a
+// until the next tick. A controller whose project has no GitHub owner to mint for
+// (runtime.ErrNoGitHubOwner) launched with gh acting as nobody, its gh directory empty, and has
+// nothing to refresh: it is passed over without a word, as the sandbox runtime passes over such a
+// controller's pod. A runtime with no credential function (Options.GitHubCredential nil: a
 // daemon with no GitHub Apps) wrote no pane any gh files, so it has nothing to refresh.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	if r.gitHubCredential == nil {
@@ -72,6 +78,9 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 			owner = strings.ToLower(recorded)
 		}
 		bundle, err := r.gitHubCredential(ctx, role, owner)
+		if role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner) {
+			continue
+		}
 		if err != nil {
 			failed(err)
 			continue
@@ -92,4 +101,26 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 				"expiresAt", written.ExpiresAt, "owners", changed)
 		}
 	}
+}
+
+// emptyGitHubBundle makes root an empty 0700 directory, removing whatever an earlier launch wrote
+// there: the gh directory of a controller whose gh acts as nobody (runtime.ErrNoGitHubOwner), which
+// GH_CONFIG_DIR still names so no gh configuration elsewhere is read in its place.
+func emptyGitHubBundle(root string) error {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }

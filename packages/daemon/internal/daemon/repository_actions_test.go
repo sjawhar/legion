@@ -99,7 +99,7 @@ func TestEachIssuesActionsActOnTheRepositoryItsRecordNames(t *testing.T) {
 			provisioned = append(provisioned, request.Issue+" "+request.Repo.String()+"@"+request.DefaultBranch)
 			return workspace.Workspace{Dir: t.TempDir()}, nil
 		},
-		remove: func(_ context.Context, working workspace.Workspace) error {
+		remove: func(_ context.Context, working workspace.Workspace, _ sync.Locker) error {
 			removed = append(removed, working.Dir)
 			return nil
 		},
@@ -165,7 +165,7 @@ func TestARowQueuedBeforeTheFillActsOnTheFilledRepository(t *testing.T) {
 	named := newRepositoryGitHubFor(t, "Zeta/Tools", "release/v7.1")
 	client := &listingDispatch{summaries: []dispatch.IssueSummary{{Key: "LEGION-7", ResolvedRepo: "zeta/tools"}}}
 	if err := backfillRepositories(context.Background(), pool, records, client, "LEGION", t.TempDir(),
-		newDefaultBranches(roleTokens{}, named, defaultBranchTTL, time.Now), quietLogger()); err != nil {
+		newDefaultBranches(roleTokens{}, nil, named, defaultBranchTTL, time.Now), ghrepo.Renames{}, quietLogger()); err != nil {
 		t.Fatalf("backfill: %v", err)
 	}
 

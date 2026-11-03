@@ -9,6 +9,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -87,34 +88,61 @@ func (e *Engine) personAnswered(ctx context.Context, tx pgx.Tx, root record.Issu
 
 // itemLeft applies an act that is nobody's answer and takes an item of root's wait away from the
 // person: a close by anyone who is not a person, Dispatch's settlement restoring an earlier
-// answer, or a session's reply handing a question back to the agent's turn. before and after are
+// answer, or a session's reply handing the item back to the agent's turn. An item is a question of
+// the root's tree, or an approval request of its closed, armed design gate's document. before and after are
 // that ask's mirror row around the act. Nobody will answer what is no longer with the person, so
-// the wait moves to what still is (withHuman), keeping where it began, and is answered — by what
-// took the item away, which the resume task names — only once nothing is. An act on an ask the
-// root could not wait on, and one that leaves the ask with the person, change no wait.
+// the wait moves to what still is (withHuman: the gate when its request is, else the oldest
+// question), keeping where it began, and is answered — by what took the item away, which the
+// resume task names — only once nothing is. A gate wait whose request left with nothing else still
+// with the person is answered on that request, so the resume names the ask it was. An act on an ask
+// the root could not wait on, and one that leaves the ask with the person, change no wait.
 func (e *Engine) itemLeft(ctx context.Context, tx pgx.Tx, root record.Issue, before, after record.RootAsk, by record.Answer, detail string) error {
-	if !root.AwaitingPerson() || root.Awaiting.AnsweredAt != nil {
+	if !root.AwaitingPerson() || root.Awaiting.AnsweredAt != nil || !before.WithHuman() || after.WithHuman() {
 		return nil
 	}
-	if !before.ByTree || !before.Question() || !before.WithHuman() || after.WithHuman() {
+	gate, err := e.store.Gate(ctx, tx, root.Key)
+	if err != nil {
+		return err
+	}
+	isRequest := after.GateRequestOf(gateRequestArtifact(gate, e.armed()))
+	if !isRequest && (!before.ByTree || !before.Question()) {
 		return nil
 	}
 	asks, err := e.store.RootAsks(ctx, tx, []string{root.Key})
 	if err != nil {
 		return err
 	}
-	if questions := withHuman(asks[root.Key]); len(questions) > 0 {
-		if root.Awaiting.Ask != before.Ask {
+	onSubject := root.Awaiting.Ask == before.Ask || isRequest && root.Awaiting.GateVersion != 0
+	if next, ok := waitSubject(asks[root.Key], gate, e.armed(), root.Awaiting.Since); ok {
+		if !onSubject {
 			return nil
 		}
-		e.logOnCommit(ctx, "workflow: the question a root waits on left the person, and its wait moves to what is still with them",
-			"issue", root.Key, "ask", before.Ask, "next_ask", questions[0].Ask, "left_by", by)
-		root.Awaiting.Ask = questions[0].Ask
+		e.logOnCommit(ctx, "workflow: the item a root waits on left the person, and its wait moves to what is still with them",
+			"issue", root.Key, "ask", before.Ask, "next_ask", next.Ask, "next_version", next.GateVersion, "left_by", by)
+		root.Awaiting.Ask, root.Awaiting.GateVersion, root.Awaiting.Artifact = next.Ask, next.GateVersion, next.Artifact
 		return e.store.PutIssue(ctx, tx, root)
 	}
 	e.logOnCommit(ctx, "workflow: an item of a root's wait left the person, and nothing else is with them", "issue", root.Key,
 		"ask", before.Ask, "left_by", by, "detail", detail)
+	if root.Awaiting.GateVersion != 0 {
+		root.Awaiting = &record.Awaiting{Ask: before.Ask, Since: root.Awaiting.Since}
+	}
 	return e.answerWait(ctx, tx, root, by, detail)
+}
+
+// catchUpApplied records that the boot catch-up applied root's Dispatch event log through
+// fact.Through (record.Store.SetCaughtUp), so the next boot reads only the events after it. It
+// changes nothing else: admission, which held the root out of its decision while that window was
+// applied, decides it on this fact.
+func (e *Engine) catchUpApplied(ctx context.Context, tx pgx.Tx, fact intake.CatchUpApplied) (intake.Result, error) {
+	if fact.Through <= 0 {
+		return intake.Result{}, nil
+	}
+	issue, err := e.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || issue == nil {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.store.SetCaughtUp(ctx, tx, issue.Key, fact.Through)
 }
 
 // answerWait records that by answered root's wait now, with detail, which puts the root at the

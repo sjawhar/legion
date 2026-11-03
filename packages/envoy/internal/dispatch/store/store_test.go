@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
+	"github.com/sjawhar/envoy/migrationid"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -57,7 +58,8 @@ func openEmptyTestStore(t *testing.T) *Store {
 	t.Cleanup(admin.Close)
 
 	databaseName := "dispatch_test_" + randomDatabaseSuffix(t)
-	if _, err := admin.Exec(ctx, "create database "+databaseName); err != nil {
+	// A copy of template1's files, as storetest makes every database (its package comment says why).
+	if _, err := admin.Exec(ctx, "create database "+databaseName+" strategy file_copy"); err != nil {
 		t.Fatalf("create isolated database: %v", err)
 	}
 	t.Cleanup(func() {
@@ -146,6 +148,40 @@ func TestOpenRefusesAConnectionStringThatSetsThePoolSize(t *testing.T) {
 	t.Cleanup(store.Pool.Close)
 }
 
+// Dispatch's timestamps are UTC whatever zone the host runs in, because a time.Time marshals
+// JSON in the zone it carries and every reader that compares a timestamp as a string reads that
+// zone: a Pacific host answered "2026-10-01T17:00:01.12-07:00" where a UTC one answered
+// "2026-10-02T00:00:01.12Z" for the same instant. pgx otherwise hands back a timestamptz in
+// time.Local, which is never time.UTC - not even under TZ=UTC, where it is a location of its own
+// named "UTC" - so this holds the connection to the zone rather than to the host's.
+func TestScannedTimestampsCarryUTCWhateverTheHostZone(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	// Both wire formats: the pool's own (binary, the statement cache's) and the text one a
+	// simple-protocol query answers, each with a scan plan of its own in pgx.
+	for name, args := range map[string][]any{
+		"binary": nil,
+		"text":   {pgx.QueryExecModeSimpleProtocol},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var scanned, stored time.Time
+			if err := store.Pool.QueryRow(ctx,
+				`select now(), '2026-10-02T00:00:01.12Z'::timestamptz`, args...,
+			).Scan(&scanned, &stored); err != nil {
+				t.Fatalf("read a timestamptz: %v", err)
+			}
+			if scanned.Location() != time.UTC || stored.Location() != time.UTC {
+				t.Fatalf("scanned in %s and %s, want both in %s",
+					scanned.Location(), stored.Location(), time.UTC)
+			}
+			// What the server writes into JSON, which is what a client compares.
+			if written := stored.Format(time.RFC3339Nano); written != "2026-10-02T00:00:01.12Z" {
+				t.Fatalf("the stored instant reads back as %q, want 2026-10-02T00:00:01.12Z", written)
+			}
+		})
+	}
+}
+
 func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -173,8 +209,23 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_deliveries",
 		"refs",
 		"events",
+		"event_horizon",
 		"user_issue_state",
 		"user_agent_state",
+		"document_blocks",
+		"block_refs",
+		"document_block_versions",
+		"document_block_texts",
+		"document_indexed_versions",
+		"block_grammar_owed",
+		"comment_blocks",
+		"message_blocks",
+		"comment_block_texts",
+		"comment_block_state",
+		"message_block_state",
+		"comment_block_refs",
+		"message_block_refs",
+		"handoffs",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
@@ -189,7 +240,9 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_ask_id",
 		"refs_to",
 		"refs_excerpt_drift",
-		"events_unpublished",
+		"events_outbox_fresh",
+		"events_outbox_retry",
+		"events_outbox_owner",
 		"asks_open_artifact",
 		"issues_search",
 		"comments_search",
@@ -199,10 +252,31 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"issues_parent_key",
 		"artifacts_issue_key",
 		"asks_anchor_artifact",
+		"asks_anchor_artifact_id",
 		"comments_anchor_artifact",
 		"ask_followers_ask_id_text",
 		"events_ask_answered_by_user",
 		"comments_ask_replies_by_user",
+		"document_blocks_node_id",
+		"block_refs_to",
+		"block_refs_from_node",
+		"document_block_versions_owed",
+		"block_grammar_owed_enqueued",
+		"comment_blocks_node_id",
+		"comment_blocks_comment_id_text",
+		"message_blocks_node_id",
+		"message_blocks_message_id_text",
+		"comment_block_state_owed",
+		"message_block_state_owed",
+		"comment_block_refs_to",
+		"comment_block_refs_from_node",
+		"message_block_refs_to",
+		"message_block_refs_from_node",
+		"comments_replies_to_block",
+		"messages_replies_to_block",
+		"events_person_words",
+		"comment_deliveries_session",
+		"message_deliveries_session_created",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
@@ -288,6 +362,11 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"user_issue_state_pkey",
 		"user_issue_state_issue_key_fkey",
 		"user_agent_state_pkey",
+		"handoffs_pkey",
+		"handoffs_issue_key_fkey",
+		"handoffs_phase_check",
+		"handoffs_version_check",
+		"handoffs_issue_key_phase_version_key",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select conname
@@ -303,9 +382,21 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	assertRecordsEveryVersion(t, ctx, store)
 }
 
-// Dispatch's set is numbered 1 to N with none missing; pgmigratetest.CheckNumberedOneToN says why.
-func TestMigrationSetIsNumberedOneToN(t *testing.T) {
-	if err := pgmigratetest.CheckNumberedOneToN(migrationFiles, "migrations"); err != nil {
+// Dispatch's set hands its identifiers out the way the repository requires: its numbered
+// migrations are 1 to the file its series closed at (migrationid's closings), each
+// taken once and none above it, and every migration added since is named for the UTC moment its
+// author created it, so two pull requests open at once cannot both claim one version;
+// migrationid.Check says why.
+func TestMigrationSetTakesNumbersThenTimestamps(t *testing.T) {
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := make(map[int]string, len(migrations))
+	for _, migration := range migrations {
+		versions[migration.Version] = migration.Name
+	}
+	if err := migrationid.Check(versions); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -321,7 +412,8 @@ func TestEveryMigrationFileIsEmbedded(t *testing.T) {
 // censusRequiredFrom is the first migration number that must declare a census (LEGION-459): one
 // more than the highest migration on main when the census landed, so no migration written before
 // the rule is caught by it. Every migration below it that declares one is a worked example. Read
-// from origin/main on 2026-10-01, where the set ended at 0055.
+// from origin/main on 2026-10-01, where the set ended at 0055. Every timestamped migration is
+// above it, so every migration added from now on declares a census.
 const censusRequiredFrom = 56
 
 // Every migration from censusRequiredFrom on declares a census: the count a deployment reads before
@@ -558,9 +650,11 @@ func assertDatabaseObjectsAbsent(t *testing.T, ctx context.Context, pool *Pool, 
 func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	t.Helper()
 	ctx := context.Background()
+	// The runner's own DDL (createVersionTable), bigint included: a test that created the table
+	// as an integer would make the runner widen it, which is not what these tests are about.
 	if _, err := store.Pool.Exec(ctx, `
 		create table if not exists schema_migrations (
-			version integer primary key,
+			version bigint primary key,
 			applied_at timestamptz not null default now()
 		)
 	`); err != nil {

@@ -53,7 +53,7 @@ type censusToken struct {
 	quoted bool
 }
 
-// censusTokens reads a census as Postgres 16's lexer reads it with standard_conforming_strings on,
+// censusTokens reads a census as Postgres 18's lexer reads it with standard_conforming_strings on,
 // which Census sets (scanSQL), and returns its code: everything outside its comments and string
 // literals, dollar-quoted ones included. A Unicode escape, U&'…' or U&"…", is refused outright: its
 // escapes can spell any name, and no census needs one.

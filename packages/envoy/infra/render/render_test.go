@@ -426,7 +426,7 @@ func TestMetricFiltersAreTheFiltersEachComponentRegisters(t *testing.T) {
 			},
 		},
 		{
-			component: "webhook-listener", prefix: "example-hooks", namespace: "example/EnvoyListener", count: 8,
+			component: "webhook-listener", prefix: "example-hooks", namespace: "example/EnvoyListener", count: 9,
 			construct: func(ctx *pulumi.Context, opts pulumi.ResourceOption) error {
 				in := listenerArgs()
 				in.MetricNamespace = "example/EnvoyListener"
@@ -641,6 +641,11 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			name: "--nats-replicas 0",
 			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "0"),
 			want: "refused: --nats-replicas: natsReplicas 0 is below 1",
+		},
+		{
+			name: "--nats-replicas 6",
+			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "6"),
+			want: "refused: --nats-replicas: natsReplicas 6 is above 5, the most copies NATS keeps",
 		},
 		{
 			name: "a line break in --listen-host, refused by core.ListenerConfig.Check",

@@ -7,7 +7,6 @@ import (
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
-	"github.com/yuin/goldmark/util"
 )
 
 // refuseBlocks refuses a document holding a block that cannot be stored as it reads (blockRefusal),
@@ -51,7 +50,7 @@ func blockRefusal(node ast.Node, source []byte, firstLine int) error {
 		// The browser editor's parser decodes backslash escapes and character references in the
 		// info string's first word, the language, where goldmark keeps them as written.
 		language := current.Language(source)
-		if !bytes.Equal(util.ResolveEntityNames(util.ResolveNumericReferences(util.UnescapePunctuations(language))), language) {
+		if decodeMarkdownText(language) != string(language) {
 			return refuse("a code block whose language holds a backslash escape or a character reference, which the browser editor's parser decodes and goldmark keeps as written")
 		}
 	case *ast.CodeBlock:
@@ -64,13 +63,11 @@ func blockRefusal(node ast.Node, source []byte, firstLine int) error {
 		if current.Lines().Len() <= 1 {
 			return nil
 		}
-		switch current.PreviousSibling().(type) {
+		switch heldOpenBy(current).(type) {
 		case *ast.List:
 			return refuse("an indented code block right after a list, which the browser editor's parser splits after its first line")
 		case *ast.Blockquote:
-			if !current.HasBlankPreviousLines() {
-				return refuse("an indented code block right after a quote, which the browser editor's parser splits after its first line")
-			}
+			return refuse("an indented code block right after a quote, which the browser editor's parser splits after its first line")
 		}
 	case *ast.HTMLBlock:
 		// Proof's doc accepts blocks only, while html is an inline atom.
@@ -79,11 +76,24 @@ func blockRefusal(node ast.Node, source []byte, firstLine int) error {
 		if _, nested := ancestor[*extensionast.Footnote](current); nested {
 			return refuse("a footnote definition inside another footnote definition, where the browser editor reads a line of = or - continuing the inner one's paragraph as a heading's underline")
 		}
-		if _, typed := ancestor[*typedDirective](current); typed {
-			return refuse("a footnote definition inside a typed block, which the browser editor refers to only from inside a typed block or after it")
-		}
 		if bytes.ContainsAny(current.Ref, " \t") {
 			return refuse("a footnote definition whose label holds whitespace, which the browser editor's parser reads as a paragraph")
+		}
+		// The browser editor's parser reads a typed block as a container, so a definition inside
+		// one reads as one inside a quote does, but only one holding paragraphs alone is read alike
+		// by both parsers: where a list item stands around it, inside the typed block or outside
+		// it, or where it holds any other block (a list, a quote, code), that parser counts the
+		// definition's lines and the blank lines among them otherwise when it decides whether a
+		// list item is spread.
+		if _, typed := ancestor[*typedDirective](current); typed {
+			if _, item := ancestor[*ast.ListItem](current); item {
+				return refuse("a footnote definition inside a typed block with a list item around it, whose spacing the browser editor reads otherwise")
+			}
+			for child := current.FirstChild(); child != nil; child = child.NextSibling() {
+				if _, paragraph := child.(*ast.Paragraph); !paragraph {
+					return refuse("a footnote definition inside a typed block holding a block other than a paragraph, whose spacing the browser editor reads otherwise")
+				}
+			}
 		}
 	case *typedDirective:
 		return typedDirectiveRefusal(current)

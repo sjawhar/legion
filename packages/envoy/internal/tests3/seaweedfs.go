@@ -13,15 +13,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Image is the SeaweedFS image every S3-compatible test container runs. The envoy-go CI job
-// reads this declaration and pulls the image before its first test step, so no test reaches the
-// registry mid-run; keep it a single-line string constant.
-const Image = "mirror.gcr.io/chrislusf/seaweedfs:3.97"
+// Image is the SeaweedFS image every S3-compatible test container runs: ghcr.io/sjawhar/legion/ci,
+// the copy of seaweedfs:3.97 (.github/ci-images.yaml). The envoy-go CI job reads this declaration
+// and pulls the image before its first test step, so no test reaches the registry mid-run; keep it
+// a single-line string constant.
+const Image = "ghcr.io/sjawhar/legion/ci@sha256:bb05d66d2963b1cc48073190781c3dd29e2c4c88a2ae2986bf58e38c86d89c6e"
 
 // Start runs an S3-compatible server holding the empty bucket, removed when t ends, points this
 // process's AWS SDK at it for the rest of t (filestest.PointSDKAt), so files.NewS3(ctx, bucket)
@@ -34,6 +36,12 @@ func Start(t testing.TB, bucket string) string {
 		testcontainers.WithCmd("server", "-s3", "-dir=/data", "-ip=0.0.0.0", "-s3.port=8333"),
 		testcontainers.WithExposedPorts("8333/tcp"),
 		testcontainers.WithWaitStrategy(wait.ForHTTP("/").WithPort("8333/tcp").WithStartupTimeout(90*time.Second)),
+		// One CPU and 1 GiB, as every container the repository's tests start is capped on a shared
+		// host: one process runs the master, volume, filer and S3 servers for a few small objects.
+		testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
+			hostConfig.NanoCPUs = 1_000_000_000
+			hostConfig.Memory = 1 << 30
+		}),
 	)
 	testcontainers.CleanupContainer(t, container)
 	if err != nil {

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   brokenRelativeLinks,
@@ -13,6 +14,15 @@ import {
   stageSkills,
 } from "@legion/pi-shared/test/skills-guard";
 
+// The Claude Code plugin is generated from this repository's skills/ and this package's agents/,
+// and only main's Rebuild Claude Envoy plugin workflow commits packages/claude-envoy/legion/, so
+// a check of what a Claude Code role loads builds a fresh one, as
+// packages/claude-envoy/tests/legion-plugin-fresh.test.ts does. The build runs as its own command,
+// the way stageSkills runs the prepack script: imported, that package's sources would be
+// typechecked under this package's `tsc`, whose `lib` is older than the one they are written
+// against.
+const PLUGIN_BUILDER = path.join(REPO_ROOT, "packages/claude-envoy/scripts/build.ts");
+
 // The rules (`@legion/pi-shared/test/skills-guard`) over the skills this package stages into
 // dist/skills: the partition scripts/pi-plugin-prepack.sh gives @sjawhar/pi-legion, staged here as
 // its prepack stages it. Everything a Legion agent reads that can link into a skill is a linking
@@ -22,6 +32,7 @@ import {
 // partition is valid because the Envoy plugin, installed beside this one, ships it.
 const repoSkillsRoot = path.join(REPO_ROOT, "skills");
 const promptsRoot = path.join(REPO_ROOT, "packages/daemon/internal/prompts");
+const agentsRoot = path.join(REPO_ROOT, "packages/pi-legion/agents");
 let staged: string;
 
 beforeAll(() => {
@@ -163,28 +174,6 @@ test("the controller skill reads pull requests as the review App, and nothing sa
   expect(offending).toEqual([]);
 });
 
-// GitHub honours the `skip-checks: true` trailer only as the last line after two empty lines; the
-// recipe's first live run wrote one and GitHub started every workflow (LEGION-631). The worker
-// skill's trailer reference and the daemon's worker part carry the recipe with two, and no skill
-// or prompt carries one with fewer: a `$'\n…skip-checks: true'` form is the recipe, so it ends
-// with exactly three `\n`.
-test("the skip-checks recipe writes two empty lines before the trailer, everywhere it is written", () => {
-  const recipe = "$'\\n\\n\\nskip-checks: true'";
-  expect(
-    readFileSync(path.join(staged, "legion-worker/references/skip-checks-trailer.md"), "utf8")
-  ).toContain(recipe);
-  expect(readFileSync(path.join(promptsRoot, "go/worker-common.md"), "utf8")).toContain(recipe);
-  const short = [staged, promptsRoot]
-    .flatMap(files)
-    .filter((file) => {
-      if (!file.endsWith(".md")) return false;
-      const forms = readFileSync(file, "utf8").match(/\$'(\\n)*skip-checks: true'/g) ?? [];
-      return forms.some((form) => form !== recipe);
-    })
-    .map((file) => path.relative(REPO_ROOT, file));
-  expect(short).toEqual([]);
-});
-
 // INFRA-83 took the `CI:` line out of the pull request body, and the forward merge of main put the
 // paragraph that defined it back into skills/legion-worker/references/pr-body.md with no conflict
 // for anyone to read: a merge keeps both sides by design, so a deletion is undone in silence. The
@@ -249,37 +238,82 @@ test("no staged skill or daemon prompt says what a pull request body `CI` line h
   expect(instructing).toEqual([]);
 });
 
-// Whether retro's push carries that trailer was once stated three ways that disagreed: a rule keyed
-// to the paths a push touched, an exception list that named retro's removal commit, and a reason
-// that held only while retro also wrote a learning (INFRA-149). A retro with nothing to write took
-// the path rule, so the commit that merges arrived with no check runs, which a base branch that
-// requires a check blocks while Legion carries the earlier code head's verdict and reads the head as
-// green. One sentence now replaces all three, and an edit that un-states it in any of the five texts
-// must fail a lane here rather than pass with every required check green. Counted per file and never
-// against a composed prompt: the composed implementer prompt carries the sentence twice, from
-// `roles/implementer.md` and from `go/worker-common.md`. The whole sentence is counted literally, so
-// a reworded half cannot satisfy it. The `packages/claude-envoy/legion/` mirror needs no pin of its
-// own; `packages/claude-envoy/tests/legion-plugin-fresh.test.ts` fails when it drifts from these.
+// Background work is on for every role: Legion writes no Oh My Pi settings
+// overlay, so a long bash call becomes a background job and a `task` subagent runs as one, and a
+// role reads a result with the `wait` tool, which a message to its session also returns from. No
+// task agent declares `blocking`, and nothing interrupts a turn: a CI red that ends a
+// phase starts the implementer at once and tells the role whose phase ended by one message, which
+// stops nothing of its. So no skill, no shipped agent and no file of the plugin a Claude Code role
+// loads may say that a takeover cancels a turn or tell a role to keep its work in
+// the foreground, and each that dispatches a task subagent names the tool that reads its result.
 //
-// INFRA-83 adds the fifth text. It moved the trailer's contract out of `legion-worker/SKILL.md`
-// into `legion-worker/references/skip-checks-trailer.md`, which is now the file a worker reads
-// before it writes the line, so a copy of the sentence that lived there unpinned would be the
-// drift this test exists to stop. The four INFRA-149 pinned are pinned unchanged.
-test("one sentence states that retro's push never carries the trailer, in each text that states it", () => {
-  const rule =
-    "Retro's push never carries the line, whatever paths it touches, because it is the last " +
-    "push before the merge and a base that requires a check will not merge a head whose checks " +
-    "never ran.";
-  const texts = [
-    path.join(staged, "legion-worker/SKILL.md"),
-    path.join(staged, "legion-worker/references/skip-checks-trailer.md"),
-    path.join(staged, "legion-retro/SKILL.md"),
-    path.join(promptsRoot, "go/worker-common.md"),
-    path.join(promptsRoot, "roles/implementer.md"),
+// Three of the four trees that carry this text are read here — the repository's skills/, the
+// plugin's agents/, and a
+// fresh `buildLegionPlugin` output, which is generated from those two and so is the only copy of
+// `packages/claude-envoy/legion/` a pull request can check (that tree is committed by main's
+// Rebuild Claude Envoy plugin workflow alone). The daemon's prompts are the fourth, read by
+// packages/daemon/internal/prompts/roles_test.go, which walks both of its embed trees and so
+// reaches go/claude-mechanics.md, a part `Compose` never joins.
+//
+// Both halves are exact: the retired sentences as literals, and the dispatch as the boot gate's
+// own `task(agent="` against `` `wait` `` as a backticked token, since the English word "wait" is
+// in many of these files and one of them forbids waiting (packages/daemon/internal/prompts/go/
+// implementer.md, "never wait for CI"). The files that dispatch are listed rather than counted, so
+// one that stopped dispatching fails as loudly as one that started, and a reader that found
+// nothing cannot pass while checking nothing.
+test("no skill, agent or plugin file keeps work in the foreground, and each that dispatches a task names `wait`", () => {
+  const retired = [
+    "interrupts your turn",
+    "tool calls are cancelled",
+    "interrupted its turn",
+    "run none in the background",
+    "one foreground command",
+    "blocking: true",
   ];
-  const counts = texts.map((file) => ({
-    file: path.relative(REPO_ROOT, file),
-    found: readFileSync(file, "utf8").split(rule).length - 1,
-  }));
-  expect(counts).toEqual(texts.map((file) => ({ file: path.relative(REPO_ROOT, file), found: 1 })));
-});
+  const out = path.join(mkdtempSync(path.join(os.tmpdir(), "legion-plugin-")), "build");
+  try {
+    const built = Bun.spawnSync([process.execPath, PLUGIN_BUILDER, "--out", out]);
+    if (built.exitCode !== 0) {
+      throw new Error(
+        `${PLUGIN_BUILDER} --out ${out} exited ${built.exitCode}:\n${built.stderr.toString()}`
+      );
+    }
+    const plugin = path.join(out, "legion");
+    const saidAnyway: string[] = [];
+    const dispatching: string[] = [];
+    const silent: string[] = [];
+    for (const file of [repoSkillsRoot, agentsRoot, plugin].flatMap(files)) {
+      const name = file.startsWith(plugin)
+        ? `the fresh Claude plugin's ${path.relative(plugin, file)}`
+        : path.relative(REPO_ROOT, file);
+      const text = readFileSync(file, "utf8");
+      for (const phrase of retired) {
+        if (text.includes(phrase)) saidAnyway.push(`${name}: ${phrase}`);
+      }
+      if (text.includes('task(agent="')) {
+        dispatching.push(name);
+        if (!text.includes("`wait`")) silent.push(name);
+      }
+    }
+    expect(saidAnyway).toEqual([]);
+    expect(silent).toEqual([]);
+    expect(dispatching.sort()).toEqual([
+      "skills/AGENTS.md",
+      "skills/ce-simplify-code/SKILL.md",
+      "skills/dispatch-writing-specs/SKILL.md",
+      "skills/legion-architect/references/decomposition.md",
+      "skills/legion-architect/references/design-gate.md",
+      "skills/legion-oracle/SKILL.md",
+      "skills/legion-retro/SKILL.md",
+      "skills/legion-worker/references/merge-gate.md",
+      "the fresh Claude plugin's skills/ce-simplify-code/SKILL.md",
+      "the fresh Claude plugin's skills/legion-architect/references/decomposition.md",
+      "the fresh Claude plugin's skills/legion-architect/references/design-gate.md",
+      "the fresh Claude plugin's skills/legion-oracle/SKILL.md",
+      "the fresh Claude plugin's skills/legion-retro/SKILL.md",
+      "the fresh Claude plugin's skills/legion-worker/references/merge-gate.md",
+    ]);
+  } finally {
+    rmSync(path.dirname(out), { recursive: true, force: true });
+  }
+}, 60_000);

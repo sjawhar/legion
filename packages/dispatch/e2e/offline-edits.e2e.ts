@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { createIssue, createProject, getArtifactText, patchIssue } from "./api";
-import { connectedDot, documentTransport, typeAtEnd } from "./editor";
+import { connectedDot, documentEditor, documentTransport, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -188,6 +188,63 @@ test("read-only admission preserves edits until a later read-write reload", asyn
     await expect
       .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
       .toContain(paragraph);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a reopened issue's page names no unsent edit before typing, and an edit typed after its reconnect survives a reload", async ({
+  browser,
+}) => {
+  // The spec opens with a heading: the read-only page's editor stamps the heading's id as it loads,
+  // an update of this page's own client that the read-only server refuses. The reconnect after the
+  // reopen sends it in its SyncStep2, and what the person types later continues that client's
+  // clock, so its rows apply on a reload only because the server holds the stamp.
+  const issue = await makeIssue();
+  await patchIssue(issue.key, { status: "done" });
+  const alice = await asUser(browser, "alice");
+  const paragraph = "typed after the reopened reconnect";
+  const unsentNotice = /saved in this browser/u;
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(connectedDot(page)).toHaveText("connected");
+    const editor = documentEditor(page);
+    await expect(editor).toHaveAttribute("contenteditable", "false");
+    await expect(page.getByRole("status", { name: unsentNotice })).toHaveCount(0);
+    expect(await pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
+
+    // The issue reopens while the page is open. The reopen drops the document's socket; the
+    // reconnect syncs and is then admitted writable, as the server orders it. The document socket's
+    // first reconnect is a uniform draw from [0, 2 s) (#2323), so a row must wait for the state the
+    // page settles in and never depend on which side of the draw a run lands.
+    await patchIssue(issue.key, { status: "backlog" });
+    await expect(page.getByText("This issue is closed. Its document is read-only.")).toBeHidden();
+    await expect(editor).toHaveAttribute("contenteditable", "true");
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
+
+    // The connection is severed and its reconnect held. A page that is not connected names every
+    // row this browser holds, so a row the reconnect left would show here.
+    transport.hold();
+    await transport.sever();
+    await expect(connectedDot(page)).toHaveCount(0);
+    await expect(page.getByRole("status", { name: unsentNotice })).toHaveCount(0);
+    expect(await pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
+
+    // The typing waits in this browser while the reconnect is held.
+    await typeAtEnd(page, paragraph);
+    await waitForPersistedTyping(page, issue.primary_artifact_id, paragraph);
+    await page.reload();
+    await expect(
+      page.getByRole("status", { name: /edit(?:s)? saved in this browser, not sent yet/u })
+    ).toBeVisible();
+    await transport.release();
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toContain(paragraph);
+    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
   } finally {
     await alice.close();
   }

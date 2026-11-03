@@ -166,11 +166,12 @@ type seenRequest struct {
 // api.NewServer over real claim machines and a fake runtime, on a loopback port, with every
 // request that reached it recorded.
 type operatorDaemon struct {
-	t         *testing.T
-	runtime   *fake.Runtime
-	url       string
-	port      int
-	tokenFile string
+	t               *testing.T
+	runtime         *fake.Runtime
+	claimSupervisor *memoryClaims
+	url             string
+	port            int
+	tokenFile       string
 
 	mu   sync.Mutex
 	seen []seenRequest
@@ -196,7 +197,7 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, OperatorToken: claimsOperatorToken, Log: quiet,
 	}).Handler
 
-	d := &operatorDaemon{t: t, runtime: rt, tokenFile: writeFile(t, "operator-token", claimsOperatorToken+"\n")}
+	d := &operatorDaemon{t: t, runtime: rt, claimSupervisor: claims, tokenFile: writeFile(t, "operator-token", claimsOperatorToken+"\n")}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -400,7 +401,7 @@ func TestClaimsSpawnPostsTheClaimWithTheOperatorBearer(t *testing.T) {
 	if spawns := d.runtime.CallsOf("Spawn"); len(spawns) != 1 || spawns[0].Spec.Claim != architectClaim {
 		t.Fatalf("spawns = %+v, want one launch of %s", spawns, architectClaim)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0 - -\n"; out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
 }
@@ -453,7 +454,7 @@ func TestClaimsDeliverPostsTheTask(t *testing.T) {
 	if answered.Pending == nil || answered.Pending.Task != "Review the plan." {
 		t.Fatalf("the daemon answered pending %+v, want the task queued", answered.Pending)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0 - -\n"; out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
 }
@@ -473,9 +474,9 @@ func TestClaimsSuspendResumeAndStopDriveTheClaim(t *testing.T) {
 		action, method, want string
 		claim                legionclaim.Token
 	}{
-		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1 " + thisBinarysContract + "\n", architectClaim},
-		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2 " + thisBinarysContract + "\n", architectClaim},
-		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1 0\n", workerClaim},
+		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1 " + thisBinarysContract + " - -\n", architectClaim},
+		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2 " + thisBinarysContract + " - -\n", architectClaim},
+		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1 0 - -\n", workerClaim},
 	} {
 		out := d.succeed(append(append([]string{step.action}, d.reach()...), "--claim", string(step.claim))...)
 
@@ -527,7 +528,7 @@ func TestClaimsRetryPostsToTheClaimsRetryRoute(t *testing.T) {
 	if len(seen.body) != 0 {
 		t.Fatalf("retry sent a body %q, want none", seen.body)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0 - -\n"; out != want {
 		t.Fatalf("retry stdout = %q, want %q", out, want)
 	}
 	if spawns := d.runtime.CallsOf("Spawn"); len(spawns) != 4 {
@@ -541,8 +542,84 @@ func TestClaimsRetryPostsToTheClaimsRetryRoute(t *testing.T) {
 	}
 }
 
-// list prints one line per claim — token, role, issue, state, generation, plugin contract — in the
-// daemon's token order, and --json prints the daemon's answer byte for byte.
+// forget-session posts the exact session the operator is abandoning and prints the failed claim as
+// the daemon left it.
+func TestClaimsForgetSessionPostsToTheClaimRoute(t *testing.T) {
+	d := newOperatorDaemon(t)
+	d.succeed(d.spawnArgs()...)
+	d.ready(architectClaim)
+	refused := fake.SpawnResult{Err: errors.New("the session table holds no such session")}
+	d.runtime.ScriptResume(refused, refused)
+	machine, _ := d.claimSupervisor.Machine(architectClaim)
+	if err := machine.Handle(context.Background(), supervise.RuntimeObservation{Observation: runtime.Observation{
+		Locator: *machine.Claim().Locator, Kind: runtime.Gone,
+	}}); err == nil {
+		t.Fatal("the missing-session relaunches answered no error")
+	}
+
+	session := machine.Claim().Session
+	out := d.succeed(append(append([]string{"forget-session"}, d.reach()...), "--claim", string(architectClaim), "--session", session)...)
+
+	seen := d.lastOperatorRequest()
+	wantOperatorRequest(t, seen, http.MethodPost, "/legion/v1/operator/claims/"+string(architectClaim)+"/forget-session")
+	var sent api.ForgetSessionRequest
+	decodeStrict(t, seen.body, &sent)
+	if sent.Session != session {
+		t.Fatalf("forget-session sent %+v, want %s", sent, session)
+	}
+	if want := "legion-legion-legion-208-architect architect LEGION-208 failed 3 " + thisBinarysContract + " - -\n"; out != want {
+		t.Fatalf("forget-session stdout = %q, want %q", out, want)
+	}
+}
+
+// retry --failed lists the claims and retries every one the daemon holds failed, in its token
+// order, printing each retried claim as --claim prints it, and asks nothing of a claim that has not
+// failed; with none failed it retries nothing and exits 0. --claim and --failed name what to retry,
+// so the command takes exactly one of them.
+func TestClaimsRetryFailedRetriesEveryFailedClaim(t *testing.T) {
+	d := newOperatorDaemon(t)
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
+	d.runtime.ScriptSpawn(refused, refused, refused)
+	if code, _, _ := d.claims(d.spawnArgs()...); code != 1 {
+		t.Fatalf("spawn whose every launch the runtime refused exited %d, want 1", code)
+	}
+	worker := append(append([]string{"spawn"}, d.reach()...), "--tree", "LEGION-208", "--issue", "LEGION-209",
+		"--role", "implementer", "--prompt-file", writeFile(t, "implementer.md", "Implement."))
+	d.succeed(worker...)
+	before := len(d.operatorRequests())
+
+	out := d.succeed(append(append([]string{"retry"}, d.reach()...), "--failed")...)
+
+	var asked []string
+	for _, seen := range d.operatorRequests()[before:] {
+		asked = append(asked, seen.method+" "+seen.path)
+	}
+	if want := []string{"GET /legion/v1/operator/claims", "POST /legion/v1/operator/claims/" + string(architectClaim) + "/retry"}; !slices.Equal(asked, want) {
+		t.Fatalf("retry --failed asked %q, want %q", asked, want)
+	}
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0 - -\n"; out != want {
+		t.Fatalf("retry --failed stdout = %q, want %q", out, want)
+	}
+
+	before = len(d.operatorRequests())
+	if out := d.succeed(append(append([]string{"retry"}, d.reach()...), "--failed")...); out != "" {
+		t.Fatalf("retry --failed with nothing failed printed %q, want nothing", out)
+	}
+	if asked := d.operatorRequests()[before:]; len(asked) != 1 || asked[0].method != http.MethodGet {
+		t.Fatalf("retry --failed with nothing failed asked %v, want the list alone", asked)
+	}
+
+	for _, args := range [][]string{{"--failed", "--claim", string(architectClaim)}, {}} {
+		code, out, errb := d.claims(append(append([]string{"retry"}, d.reach()...), args...)...)
+		if code != 2 || out != "" || !strings.Contains(errb, "--claim") {
+			t.Errorf("retry %q: exit %d, stdout %q, stderr %q; want 2 naming --claim", args, code, out, errb)
+		}
+	}
+}
+
+// list prints one line per claim — token, role, issue, state, generation, plugin contract, the
+// update round the claim is in and the head its worker reported when it answered, each `-` when
+// there is none — in the daemon's token order, and --json prints the daemon's answer byte for byte.
 func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	d := newOperatorDaemon(t)
 	d.succeed(d.spawnArgs()...)
@@ -554,8 +631,8 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	out := d.succeed(append([]string{"list"}, d.reach()...)...)
 
 	wantOperatorRequest(t, d.lastOperatorRequest(), http.MethodGet, "/legion/v1/operator/claims")
-	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1 " + thisBinarysContract + "\n" +
-		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1 0\n"
+	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1 " + thisBinarysContract + " - -\n" +
+		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1 0 - -\n"
 	if out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
@@ -563,6 +640,38 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	out = d.succeed(append([]string{"list", "--json"}, d.reach()...)...)
 	if answer := d.lastOperatorRequest().answer; out != string(answer) {
 		t.Fatalf("list --json printed %q, want the daemon's answer %q verbatim", out, answer)
+	}
+}
+
+// The head a worker reports when it answers an update round is an agent's own string, which
+// nothing verifies (api.OperatorClaim.UpdateHead), and two listings print it: one row per claim in
+// `legion claims list`, and the open-rounds line of `legion state`. A newline in it would forge a
+// row of either — a claim that is not there, a round nobody opened — so each prints it quoted.
+func TestAWorkerReportedHeadIsPrintedQuoted(t *testing.T) {
+	const forged = "c0ffee\nlegion-legion-legion-299-tester tester LEGION-299 ready 1 0 - -"
+	const round = "pod:0f3c8d21-5b47-4e90-9a16-2c7d5e8b40af"
+
+	var line bytes.Buffer
+	writeClaimLine(&line, api.OperatorClaim{
+		Token: architectClaim, Tree: "LEGION-208", Issue: "LEGION-208", Role: "architect",
+		Generation: 1, State: "ready", UpdateRound: round, UpdateHead: forged,
+	})
+	if rows := strings.Count(line.String(), "\n"); rows != 1 {
+		t.Errorf("one claim printed %d rows: %q", rows, line.String())
+	}
+	if !strings.Contains(line.String(), strconv.Quote(forged)) {
+		t.Errorf("the claim line is %q, want the head quoted as %s", line.String(), strconv.Quote(forged))
+	}
+
+	summary := roundsSummary(map[string]api.Issue{"LEGION-208": {
+		Key:       "LEGION-208",
+		Architect: &api.ClaimView{State: "ready", UpdateRound: round, UpdateHead: forged},
+	}})
+	if strings.Contains(summary, "\n") {
+		t.Errorf("the open-rounds line is %q, want one line", summary)
+	}
+	if !strings.Contains(summary, strconv.Quote(forged)) {
+		t.Errorf("the open-rounds line is %q, want the head quoted as %s", summary, strconv.Quote(forged))
 	}
 }
 
@@ -837,6 +946,17 @@ func TestClaimsRefusesAPositionalArgument(t *testing.T) {
 
 	if code != 2 || !strings.Contains(errb, `legion claims stop: unexpected argument "`+string(architectClaim)+`"`) {
 		t.Fatalf("exit %d, stderr %q; want 2 naming the argument", code, errb)
+	}
+	d.wantNothingReached()
+}
+
+func TestClaimsForgetSessionRequiresTheRecordedSession(t *testing.T) {
+	d := newOperatorDaemon(t)
+
+	code, out, errb := d.claims(append(append([]string{"forget-session"}, d.reach()...), "--claim", string(architectClaim))...)
+
+	if code != 2 || out != "" || !strings.Contains(errb, "legion claims forget-session: --session is required") {
+		t.Fatalf("forget-session without --session: exit %d, stdout %q, stderr %q; want usage failure naming --session", code, out, errb)
 	}
 	d.wantNothingReached()
 }

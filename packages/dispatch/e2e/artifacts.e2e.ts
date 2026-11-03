@@ -10,6 +10,7 @@ import {
   createIssueArtifact,
   createProject,
   dashboardOrigin,
+  editArtifact,
   getArtifactText,
 } from "./api";
 import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } from "./editor";
@@ -55,7 +56,9 @@ function postAsPage(page: Page, path: string, data?: object) {
   return page.request.post(path, { data, headers: { Origin: dashboardOrigin } });
 }
 
-test("artifacts upload, version, references, and phone layout", async ({ page }, testInfo) => {
+test("artifacts upload, version, references, and phone layout @phone", async ({
+  page,
+}, testInfo) => {
   const sockets = countDocumentSockets(page);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
@@ -189,7 +192,52 @@ test("artifacts upload, version, references, and phone layout", async ({ page },
   }
 });
 
-test("the artifacts tab filter narrows rows by name and kind", async ({ page }, testInfo) => {
+// The From/To compare of a document shows what changed as the change view, word by word. It is
+// seeded on a document that is not the issue's primary one, because `ArtifactRoutePanel` mounts
+// `ArtifactDetails` - the version history and this compare - only off the primary document's own
+// route (`isPrimaryDocumentArtifactRoute`, `features/refs/routes.ts`).
+test("the version history compares two versions of a document with the change view", async ({
+  page,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "# Lease handover\n\nThe spec itself is the primary document.\n",
+    title: "Version compare",
+  });
+  const notes = await createIssueArtifact(issue.key, {
+    content: "# Review notes\n\nThe ledger keeps three leases.\n",
+    name: "notes.md",
+  });
+  await editArtifact(
+    notes.artifact.id,
+    {
+      ops: [
+        {
+          find: "The ledger keeps three leases.",
+          op: "replace",
+          with: "The ledger keeps seven leases.",
+        },
+      ],
+      summary: "Seven leases",
+    },
+    { as: "agent" }
+  );
+
+  await page.goto(`/issues/${issue.key}/artifacts/notes-md`);
+  const compare = page.getByRole("region", { name: "Compare versions for notes.md" });
+  await compare.getByRole("button", { name: "Show comparison" }).click();
+  await compare.getByLabel("Compare notes.md from").selectOption("1");
+  await compare.getByLabel("Compare notes.md to").selectOption("2");
+  const changed = compare.getByTestId("change-view").locator('[data-change="changed"]');
+  await expect(changed).toHaveCount(1);
+  await expect(changed.locator("del")).toHaveText(["three"]);
+  await expect(changed.locator("ins")).toHaveText(["seven"]);
+});
+
+test("the artifacts tab filter narrows rows by name and kind @phone", async ({
+  page,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Artifact filtering" });
   await page.goto(`/issues/${issue.key}`);
@@ -217,7 +265,7 @@ test("the artifacts tab filter narrows rows by name and kind", async ({ page }, 
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
 });
 
-test("an uploaded document is linked from the Activity tab and counted on its own tab", async ({
+test("an uploaded document is linked from the Activity tab and counted on its own tab @phone", async ({
   page,
 }, testInfo) => {
   await createProject({ key: "OPS", name: "Ops" });
@@ -232,11 +280,11 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
     name,
   });
 
-  // The live event stream refreshes the issue and its tabs: no reload.
+  // The live event feed refreshes the issue and its tabs: no reload.
   await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   const tablist = page.getByRole("tablist", { name: "Issue detail" });
   const tabs = tablist.getByRole("tab");
-  await expect(tabs).toHaveCount(5);
+  await expect(tabs).toHaveCount(6);
   const insideTablist = async (tab: Locator) => {
     const [listBox, box] = await Promise.all([tablist.boundingBox(), tab.boundingBox()]);
     expect(listBox).not.toBeNull();
@@ -247,16 +295,29 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
       (listBox?.x ?? 0) + (listBox?.width ?? 0) + 0.5
     );
   };
-  // Five tabs, one of them counted, no longer fit a 390 px viewport: the tablist scrolls
+  // Six tabs, one of them counted, no longer fit a 390 px viewport: the tablist scrolls
   // sideways there (as it already did at 360 px). No label is shortened to buy the room, every
   // tab is reachable from the keyboard, each is scrolled fully into view as it takes focus, and
   // each keeps its 44 px touch target.
   const viewport = page.viewportSize();
   await page.setViewportSize({ height: viewport?.height ?? 800, width: 390 });
-  await expect(tabs).toHaveText(["Spec", "Conversation", "Children", "Artifacts2", "Activity"]);
+  await expect(tabs).toHaveText([
+    "Spec",
+    "Conversation",
+    "Children",
+    "Artifacts2",
+    "Activity",
+    "Decisions",
+  ]);
   expect(await tablist.evaluate((node) => node.scrollWidth > node.clientWidth + 0.5)).toBe(true);
   await page.getByRole("tab", { name: "Spec" }).focus();
-  for (const label of ["Conversation", "Children", "Artifacts (2)", "Activity"] as const) {
+  for (const label of [
+    "Conversation",
+    "Children",
+    "Artifacts (2)",
+    "Activity",
+    "Decisions",
+  ] as const) {
     await page.keyboard.press("ArrowRight");
     const tab = page.getByRole("tab", { exact: true, name: label });
     await expect(tab).toBeFocused();
@@ -298,7 +359,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
   await expect(page.getByTestId("artifact-header")).toContainText(name);
 });
 
-test("the Artifacts badge counts the rows the tab lists, and a row's details are not truncated", async ({
+test("the Artifacts badge counts the rows the tab lists, and a row's details are not truncated @phone", async ({
   page,
 }) => {
   await createProject({ key: "OPS", name: "Ops" });
@@ -358,7 +419,7 @@ test("an out-of-schema document names its repair and uploads replacement markdow
 // the text it read on the first visit. The second admission reads the text afresh and shows the
 // repair; connecting on the cached text would open a socket into a tree outside the schema. The
 // count is this document's sockets alone: the issue's own spec holds a socket of its own.
-test("an out-of-schema document does not reconnect from cached text", async ({
+test("an out-of-schema document does not reconnect from cached text @phone", async ({
   page,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -469,9 +530,14 @@ test("an edit typed while the socket was down survives a text refetch the server
       status: 503,
     });
   });
-  // A tab that becomes visible reopens the event stream, which refreshes every query the page
-  // holds, the document's text among them; the app retries a 5xx twice before it fails the read.
-  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  // A comment anchored in the document names it, so its event refreshes the document's reads, its
+  // text among them; the app retries a 5xx twice before it fails the read. A drop of the page's
+  // live socket would not: Dispatch replays every event the page missed (`replay_complete`), so a
+  // gap that replay covers refreshes nothing.
+  await createComment(issue.key, {
+    anchor: { artifact: upload.artifact.slug, quote: "before" },
+    body: "On the text.",
+  });
   await expect.poll(() => refused).toBeGreaterThanOrEqual(3);
   // The third answer fails the read; nothing on a page that keeps its editor marks that moment, so
   // the page is given a moment to render the failure before what it shows is read.

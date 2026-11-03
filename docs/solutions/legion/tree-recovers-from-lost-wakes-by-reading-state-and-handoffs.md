@@ -10,7 +10,7 @@ tags:
   - handoff
   - envoy
 date: 2026-09-13
-status: active
+status: superseded by sjawhar/legion#2354 — a phase's handoff is a record on its Dispatch issue, and no phase commits or pushes one; see docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md
 module: daemon, skills/legion-architect, skills/legion-worker
 related_issues:
   - "LEGION-11"
@@ -60,6 +60,7 @@ worker reporting a later round loads the current file, adds a keyed object (`reb
 `schemaVersion` — the CLI rejects them), and writes the whole thing back. The reviewer then
 found the rebase rationale, the diff-identity result, and each nit's disposition without
 asking anyone. The tester did the same: round 1 at the top level, then `round2`…`round4`.
+No handoff carries a `completed` field since dispatch://INFRA-336: a handoff's time is the committer date of the commit that carries it.
 
 **A 202 needs no action from the worker; a 409 needs one message.** After
 `no architect was live`, the daemon holds the completion and replays it on the architect's next

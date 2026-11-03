@@ -624,6 +624,34 @@ func TestWaveReleaseRecordsATodoChildUnderAWrittenChildOfTheWaveInItsTree(t *tes
 	}
 }
 
+// A wave that names a written child twice still records that child before the labelled todo child
+// under it: named once, it has its own depth in releaseOrder, not that depth counted once per
+// naming, which put it after its child and had admission record the child as a root of its own.
+func TestWaveReleaseNamingAChildTwiceKeepsItAheadOfItsChild(t *testing.T) {
+	h, statuses := releaseHarnessWithAdmission(t)
+	top, middle, bottom := "LEGION-209", "LEGION-210", "LEGION-211"
+	statuses.issues[top] = todoChild(top)
+	written := backlogChild(middle)
+	written.Parent = &top
+	statuses.issues[middle] = written
+	statuses.issues[bottom] = labelledChild(bottom, middle, "todo")
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	response, _ := releaseWave(t, h, architect, top, bottom, middle, middle)
+
+	for _, key := range []string{top, middle, bottom} {
+		if recorded := recordedChild(t, h, key); recorded == nil || recorded.Tree != releaseRoot {
+			t.Errorf("the record of %s = %#v, want it in %s's tree, not a root of its own", key, recorded, releaseRoot)
+		}
+	}
+	if want := []string{top, bottom, middle}; !reflect.DeepEqual(response.Released, want) {
+		t.Errorf("release answered released %v, want %v", response.Released, want)
+	}
+	if want := []statusWrite{{middle, "todo"}}; !reflect.DeepEqual(statuses.writes, want) {
+		t.Errorf("Dispatch writes = %#v, want %s written once", statuses.writes, middle)
+	}
+}
+
 // A child the release writes todo is not recorded from that write when the daemon has already
 // applied a later event of the child that recorded nothing — a person moved it back to backlog
 // right after the release, and that event beat the release to the fact lock. The write's answer is

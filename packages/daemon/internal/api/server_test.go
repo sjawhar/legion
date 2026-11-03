@@ -5,14 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/sjawhar/legion/daemon/internal/intake"
 )
 
 type fakeSource struct {
@@ -138,11 +142,67 @@ func TestStateRouteUsesARepeatableReadOnlyTransaction(t *testing.T) {
 	}
 }
 
+// The consumers' lag is read from NATS once the state's snapshot has committed, so no NATS read
+// holds it open, and served beside the state, each consumer's oldest waiting message and its age
+// null when nothing waits or it could not be read, and its last handled null before the first; a
+// read NATS did not answer is the consumer's `unavailable`, and the state is still served. A daemon
+// with no consumers serves an empty list.
+func TestStateRouteServesTheConsumersLagReadAfterTheCommit(t *testing.T) {
+	tx := &fakeTx{}
+	handled := time.Date(2026, 10, 28, 9, 14, 2, 0, time.UTC)
+	oldest := time.Date(2026, 10, 28, 9, 2, 26, 0, time.UTC)
+	committedAtRead := false
+	server := NewServer("127.0.0.1", 8437, Options{
+		State: fakeSource{}, StateTransactions: &fakeStateTransactions{tx: tx},
+		ConsumerLag: func(context.Context) []intake.ConsumerLag {
+			committedAtRead = tx.committed
+			return []intake.ConsumerLag{
+				{Name: "legion-go-LEGION-dispatch", LastHandledAt: handled},
+				{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+				{Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: oldest, OldestAge: 754*time.Second + 600*time.Millisecond, Stalled: true, LastHandledAt: handled},
+				{Name: "legion-go-LEGION-other", Waiting: 3, Unavailable: "read the oldest waiting message: nats: permissions violation"},
+			}
+		},
+	})
+	recorder := httptest.NewRecorder()
+	server.Handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/legion/v1/state", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if !committedAtRead {
+		t.Fatal("the consumers' lag was read before the state's transaction committed")
+	}
+	var body struct {
+		Consumers json.RawMessage `json:"consumers"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %s: %v", recorder.Body, err)
+	}
+	want := `[{"name":"legion-go-LEGION-dispatch","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":"2026-10-28T09:14:02Z","stalled":false},` +
+		`{"name":"legion-go-LEGION-dispatch-server","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":null,"stalled":false,"unavailable":"read the consumer's info: context deadline exceeded"},` +
+		`{"name":"legion-go-LEGION-github","waiting":412,"oldestAt":"2026-10-28T09:02:26Z","oldestAgeSeconds":754,"lastHandledAt":"2026-10-28T09:14:02Z","stalled":true},` +
+		`{"name":"legion-go-LEGION-other","waiting":3,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":null,"stalled":false,"unavailable":"read the oldest waiting message: nats: permissions violation"}]`
+	if string(body.Consumers) != want {
+		t.Fatalf("consumers = %s\nwant %s", body.Consumers, want)
+	}
+
+	if none := serve(t, fakeSource{}, http.MethodGet, "/legion/v1/state").Body.String(); !strings.Contains(none, `"consumers":[]`) {
+		t.Fatalf("state with no consumers = %s, want an empty consumers list", none)
+	}
+}
+
 func TestStateRouteReportsASourceFailure(t *testing.T) {
 	// The handler logs the failure through the default logger; keep it out of the test output.
-	previous := slog.Default()
+	// slog.SetDefault also points the log package's output at the handler and clears its flags,
+	// and setting the previous default back undoes neither, so both are put back too.
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		log.SetOutput(output)
+		log.SetFlags(flags)
+	})
 
 	recorder := serve(t, fakeSource{err: errors.New("dial db.internal: refused")}, http.MethodGet, "/legion/v1/state")
 

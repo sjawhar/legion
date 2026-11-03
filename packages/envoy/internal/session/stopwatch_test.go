@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -63,9 +64,7 @@ func TestStopWatchIsFinal(t *testing.T) {
 
 	var logs bytes.Buffer
 	var logsMu sync.Mutex
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(lockedWriter{&logs, &logsMu}, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(lockedWriter{&logs, &logsMu}, nil))
 
 	registry.StopWatch()
 	if err := registry.Rewatch(conn); err != nil {

@@ -938,12 +938,15 @@ func TestTheReaperSparesEveryManagersGenerationAndReapsTheRest(t *testing.T) {
 	}
 	tester, reviewer := start("exit 7"), start("exit 9")
 	orphan := start("exit 0")
+	// The launcher's own child, the test database's script, which its own wait reads (pidGuard).
+	guarded := start("exit 5")
 	managers := []*manager{
 		{role: "tester", namespaced: true, log: &roleLog{}, child: &child{pid: tester.Process.Pid}},
 		{role: "reviewer", namespaced: true, log: &roleLog{}, child: &child{pid: reviewer.Process.Pid}},
 	}
+	guard := &pidGuard{pids: map[int]bool{guarded.Process.Pid: true}}
 	// Every one has exited and waits as a zombie for whoever reaps it.
-	for _, cmd := range []*exec.Cmd{tester, reviewer, orphan} {
+	for _, cmd := range []*exec.Cmd{tester, reviewer, orphan, guarded} {
 		deadline := time.Now().Add(5 * time.Second)
 		for !zombie(cmd.Process.Pid) {
 			if time.Now().After(deadline) {
@@ -955,7 +958,7 @@ func TestTheReaperSparesEveryManagersGenerationAndReapsTheRest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	signals := make(chan os.Signal, 1)
 	done := make(chan struct{})
-	go func() { reapOrphans(ctx, signals, managers); close(done) }()
+	go func() { reapOrphans(ctx, signals, managers, guard); close(done) }()
 	signals <- syscall.SIGCHLD
 	// A reaped process is gone from the process table; a zombie still takes signal 0.
 	deadline := time.Now().Add(5 * time.Second)
@@ -967,7 +970,7 @@ func TestTheReaperSparesEveryManagersGenerationAndReapsTheRest(t *testing.T) {
 	}
 	cancel()
 	<-done
-	for cmd, want := range map[*exec.Cmd]int{tester: 7, reviewer: 9} {
+	for cmd, want := range map[*exec.Cmd]int{tester: 7, reviewer: 9, guarded: 5} {
 		if err := cmd.Wait(); cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != want {
 			t.Errorf("a manager's generation reads %v (%v), want its own exit %d: the reaper took it", cmd.ProcessState, err, want)
 		}
@@ -985,23 +988,41 @@ var testDatabase = ompsessions.Database{Instance: testInstance, Name: "legion_se
 // which the test owns, and check is the credential work the connector does before each of them, so
 // a test can refuse one dial and allow the next. While stalling (stallAt), every dial reaches a
 // silent upstream instead and stalls in a real TLS handshake, which, like the connector's own, ends
-// only when the dial's context does.
+// only when the dial's context does. Every dial records when it began and its context's deadline,
+// and a stalled one when it ended (bounds), so a test reads the bound a dial was given from the
+// dial itself, and times only what the launcher did after it.
 type sessionDialer struct {
 	addr  string
 	check func() error
 
 	mu     sync.Mutex
-	dials  []string
+	bounds []dialBound
 	silent string
 }
 
-func (d *sessionDialer) Dial(ctx context.Context, instance string) (net.Conn, error) {
+// dialBound is what one Dial was given: the time it was entered and its context's deadline, if
+// any, and for a stalled dial the time it returned.
+type dialBound struct {
+	entered     time.Time
+	deadline    time.Time
+	hasDeadline bool
+	ended       time.Time
+}
+
+func (d *sessionDialer) Dial(ctx context.Context, _ string) (net.Conn, error) {
+	bound := dialBound{entered: time.Now()}
+	bound.deadline, bound.hasDeadline = ctx.Deadline()
 	d.mu.Lock()
-	d.dials = append(d.dials, instance)
+	index := len(d.bounds)
+	d.bounds = append(d.bounds, bound)
 	silent := d.silent
 	d.mu.Unlock()
 	if silent != "" {
-		return stalledDial(ctx, silent)
+		conn, err := stalledDial(ctx, silent)
+		d.mu.Lock()
+		d.bounds[index].ended = time.Now()
+		d.mu.Unlock()
+		return conn, err
 	}
 	if d.check != nil {
 		if err := d.check(); err != nil {
@@ -1169,24 +1190,47 @@ func TestAGenerationWhoseSessionDatabaseRefusesIsNotStarted(t *testing.T) {
 // generation left on disk or bound. The command loop is free again: the Stop the daemon sends after
 // a start it gave up on, already queued behind that start, is read and obeyed, and the next
 // generation, once the instance answers, starts and is served.
+//
+// The bound has two halves, as proofTimeout splits the grace. The proof dial's half is read from
+// the stalled dial itself, its context's deadline against the time it was entered, never from a
+// clock around the whole start. The other half is the rest of the start, the launcher's own work
+// before the dial (the generation directory, the credential, the proxy's listen) and after it (the
+// cleanup and the reply): the time from the start's send to the dial's entry plus the time from
+// the dial's return to the reply's arrival. A start that reached the daemon after it had stopped
+// waiting fails here however correct the dial's deadline was, whichever side of the dial it lost
+// its time on.
 func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits(t *testing.T) {
 	dialer := &sessionDialer{addr: idleUpstream(t)}
 	dialer.stallAt(silentUpstream(t))
-	const grace = 400 * time.Millisecond
+	// Generation 1's bound is read from its dial's deadline, so the grace sets no race there; it is
+	// generation 2's real proof dial to a local listener that has half of it, which a host starved of
+	// CPU (six busy loops on two cores, under -race) once took more than 200ms to make.
+	const grace = 2 * time.Second
 	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
 	marker := filepath.Join(t.TempDir(), "marker")
 
-	began := time.Now()
+	sent := time.Now()
 	g.send(g.childStart(1, marker, nil))
 	stop := shimwire.LauncherStop{ID: "stop-1", Generation: 1, GraceMs: 1000}
 	g.send(stop)
 	got, ok := g.reply().(shimwire.LauncherStartResult)
-	if waited := time.Since(began); waited >= grace {
-		t.Fatalf("the start was answered %s after it was sent, past the %s stop grace", waited, grace)
+	answered := time.Now()
+	dialer.mu.Lock()
+	bounds := append([]dialBound(nil), dialer.bounds...)
+	dialer.mu.Unlock()
+	if len(bounds) != 1 {
+		t.Fatalf("generation 1 made %d dials, want its one proof dial", len(bounds))
+	}
+	if proof := bounds[0]; !proof.hasDeadline {
+		t.Fatal("generation 1's proof dial had no deadline")
+	} else if limit := proof.deadline.Sub(proof.entered); limit > grace/2 {
+		t.Fatalf("generation 1's proof dial was given %s, past half the %s stop grace", limit, grace)
+	} else if before, after := proof.entered.Sub(sent), answered.Sub(proof.ended); proof.ended.IsZero() || before+after > grace/2 {
+		t.Fatalf("generation 1's start took %s outside its proof dial (%s before it, %s after it), past the other half of the %s stop grace", before+after, before, after, grace)
 	}
 	if !ok || got.OK || !strings.Contains(got.Error, "generation 1") || !strings.Contains(got.Error, testInstance) ||
-		!strings.Contains(got.Error, "no answer within 200ms") {
-		t.Fatalf("start result = %#v, want a refusal naming generation 1, %s and its 200ms bound", got, testInstance)
+		!strings.Contains(got.Error, "no answer within "+(grace/2).String()) {
+		t.Fatalf("start result = %#v, want a refusal naming generation 1, %s and its %s bound", got, testInstance, grace/2)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("a generation whose session database never answered started its child")
@@ -1291,7 +1335,7 @@ func TestOnTheContainersShutdownASessionDatabaseEndsOnceItsWedgedChildIsKilled(t
 	upstreamDials := func() int {
 		dialer.mu.Lock()
 		defer dialer.mu.Unlock()
-		return len(dialer.dials)
+		return len(dialer.bounds)
 	}
 	before := upstreamDials()
 

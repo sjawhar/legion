@@ -170,12 +170,21 @@ func (d *postingDispatch) PostMessage(_ context.Context, key, body string) error
 func (d *postingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *postingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
 func (d *postingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *postingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *postingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *postingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 // postsTo is how many messages were posted on issue.
@@ -221,13 +230,20 @@ func (d *laneBoard) PostMessage(context.Context, string, string) error { return 
 func (d *laneBoard) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *laneBoard) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
 func (d *laneBoard) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *laneBoard) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *laneBoard) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *laneBoard) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // statuses is each status that landed, in order.
 func (d *laneBoard) statuses() []string {
@@ -371,7 +387,7 @@ func startLaneTree(t *testing.T, log *slog.Logger) *laneTree {
 			tree.provisions.Add(1)
 			return workspace.Workspace{}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 	tree.records = wakingRecords(tree.runner)
 	runLanes(t, tree.runner, tree.clock, tree.spawn.gate.open)

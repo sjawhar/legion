@@ -137,7 +137,11 @@ says **not running**, and the issue counts as unclaimed.
 ## Creating an issue
 
 Press `c` anywhere. Pick the project, type a title of up to 1,000 characters, and optionally the
-first line of the spec. If the title closely matches an existing issue in the project, Dispatch
+first line of the spec. A short moment after you stop typing the title, Dispatch lists the items
+it already holds on the same subject — issues, asks, comments, messages and documents — each a
+link that opens in a new tab, so your draft stays as you left it. When it searched and found
+nothing it says so, and when it could not search at all it says that instead, with the words to
+search for yourself. If the title closely matches an existing issue in the project, Dispatch
 shows that issue and offers **Create anyway**. A new issue opens as soon as it is created.
 
 ## The issue page
@@ -167,6 +171,62 @@ still clamps a title shows the whole of it on hover.
 - **Components** appears when the project has an architecture source. It shows which parts of the
   architecture the issue belongs to, and lets you change them, picking from the components of
   every source of the project.
+
+### Changes Dispatch has not confirmed
+
+Every change you make — a status, a priority, an assignee, labels, a pin, an answer to an ask, a
+comment, a comment resolved, an upload — is sent under a name of its own, and Dispatch makes it
+once under that name however many times the page asks. So a change tried again after a lost
+answer, a timeout or an outage lands exactly once, and the page keeps asking while your connection
+is down, and again at once when Dispatch is reachable again; while Dispatch keeps answering the
+change with an error, or the change keeps failing on its way while the rest of Dispatch answers,
+the tries spread out, up to 30 seconds apart; when Dispatch answers that it is too busy and says
+how long to leave it, the page waits exactly that, for a change and for what the page reads alike.
+A change Dispatch is slow to finish is waited
+for and made once, and an upload still going up is never cut off, however long a slow link takes.
+
+A corner of the screen accounts for the ones still out: **Saving 2 changes…**, and once one has
+gone 30 seconds unconfirmed, **Dispatch has not confirmed 2 changes — still trying**, with **Stop
+trying** beside each. An upload still going up reads **Uploading… 40%** instead, and never still
+trying unless a try has failed. A change waiting behind an earlier one that has not gone out yet
+reads **Waiting to send**, with **Discard**. A change Dispatch refuses shows its reason where you
+made it, with **Retry**, when that place is a form or a field you are in front of: a comment, an
+answer, the title, the priority, the assignee, the repository, the components, a new issue. A
+quick control such as **Status**, **Labels** or a pin shows your choice while it is out, puts
+itself back as it was if it is refused, and the corner lists the change as **Not saved: …** with
+why, **Retry** and **Discard**. Changes to one issue go out in the order you made them, a card
+moved on the board among them. While any change is unconfirmed the browser asks you to confirm
+before you leave or reload the page, and a change a reload interrupted, an upload's file included,
+is picked up again when the page comes back, in the order you made them, for the person who made
+it and for nobody else: a change pending when someone else signs in at that browser, in this tab
+or another, is dropped unsent. If your sign-in lapses, your changes wait, and go out once you sign
+in again: the sign-in page lists them under **Kept until you sign in again as …**, a refused one
+with **Discard**, and its sign-in link leaves the page without asking. Signing out asks you first,
+listing each change it would discard, in this tab and in your other Dispatch tabs (when a tab does
+not answer at once, it says it would also discard **any unsent changes in your other Dispatch
+tabs**), and discards nothing until Dispatch has signed you out: meanwhile none of your changes
+goes out in any tab (another tab's read **Waiting for a sign-out in another tab**), and if the
+sign-out fails you stay signed in with every change, told **The sign-out did not go through.**
+If that tab closes before it can say how the sign-out ended, the others ask Dispatch who is
+signed in: signed out, your changes go there too, as the sign-out said they would; still signed
+in, they go out again within seconds.
+One interrupted more
+than five minutes ago is not sent on its own: the corner lists it as **Not saved: …** with
+**Retry** and **Discard**. A Retry of a stopped or interrupted change asks again under its first
+name, so it is saved at most once if you retry within 24 hours of the first try; after that
+Dispatch no longer knows the name, and the change may be made twice. The corner says so.
+
+A closed issue takes no upload: the Artifacts tab's **Upload** says **This issue is closed. Reopen
+it to upload.** and picks no file, no key opens a file picker there, and a file dropped on it is
+ignored.
+
+Now and then Dispatch makes a change but its answer is lost on the way back. The change is made;
+the page says so (for example **The issue “…” was made, but Dispatch lost its answer, so it may
+take a moment to appear.**) and clears the form, so pressing again makes nothing twice. A new agent
+token made that way has lost its value with the answer. The page looks for the tokens of that
+label made since you pressed **New token** and offers to revoke it and mint another in its place;
+if it finds more than one, you pick which, and every revoke asks you to confirm first, since
+agents using it stop working at once.
 
 ### The tabs
 

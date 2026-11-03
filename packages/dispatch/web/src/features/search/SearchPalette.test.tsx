@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { Window as HappyDOMWindow } from "happy-dom";
 import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
@@ -9,6 +10,7 @@ import { api } from "../../api/client";
 import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
+import { ANSWER_PREVIEW_CHARS } from "./AskHitStatus";
 import { SearchButton } from "./SearchButton";
 import { type PaletteMode, SearchPalette } from "./SearchPalette";
 import { optionId } from "./search-model";
@@ -172,6 +174,159 @@ test("renders document-owned results under the document and opens their discussi
   }
 });
 
+test("an ask hit says where it stands and shows its latest answer", async () => {
+  const answer = {
+    at: "2026-10-01T00:00:00Z",
+    selected: ["Brass", "Steel"],
+    text: "Keep **both** frames.",
+    user: "alice",
+  };
+  const resolution = {
+    actor: { id: "bob", kind: "user" as const },
+    at: "2026-10-02T00:00:00Z",
+    kind: "resolved" as const,
+    reason: "Settled in the spec.",
+  };
+  const askHit = (id: string, ask: SearchResult["ask"]): SearchResult => ({
+    ask,
+    href: `/issues/LEGION-5/asks/${id}`,
+    id,
+    kind: "ask",
+    owner: { key: "LEGION-5", kind: "issue", status: "todo", title: "Orrery" },
+    rank: 1,
+    snippet: `Which <mark>orrery</mark> frame, ${id}?`,
+  });
+  const search = spyOn(api, "search").mockResolvedValue(
+    searchAnswer([
+      askHit("open", { state: "open" }),
+      askHit("answered", { answer: { ...answer, selected: [], text: null }, state: "answered" }),
+      askHit("closed", { resolution, state: "resolved" }),
+      askHit("closed-answered", { answer, resolution, state: "resolved" }),
+    ])
+  );
+  const view = renderPalette();
+
+  try {
+    await searchFor("orrery");
+    const option = (id: string) =>
+      screen.getAllByRole("option").find((row) => row.textContent?.includes(`frame, ${id}?`));
+    await waitFor(() => expect(option("closed-answered")?.textContent).toContain("both"));
+
+    expect(option("open")?.textContent).toContain("Open");
+    expect(option("answered")?.textContent).toContain("Answered");
+    expect(option("answered")?.textContent).toContain("alice · ");
+    expect(option("answered")?.textContent).toContain("No option chosen");
+    expect(option("closed")?.textContent).toContain("Closed, no answer");
+    expect(option("closed")?.textContent).toContain("Resolved by bob · ");
+    expect(option("closed")?.textContent).not.toContain("alice");
+    expect(option("closed-answered")?.textContent).toContain("Closed after an answer");
+    expect(option("closed-answered")?.textContent).toContain("Resolved by bob · ");
+    expect(option("closed-answered")?.textContent).toContain("Chose Brass, Steel");
+    expect(screen.getAllByRole("option", { name: /^ask / })).toHaveLength(4);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+// The answer's three-line clamp is CSS only: whatever text reaches the option is its accessible
+// name, so a long answer is cut to its start before it renders.
+test("an ask hit shows only the start of a long answer, cut at a word with an ellipsis", async () => {
+  const text = `Keep **both** frames. ${"The meridian ring stays level. ".repeat(80)}zenithward`;
+  const search = spyOn(api, "search").mockResolvedValue(
+    searchAnswer([
+      {
+        ask: {
+          answer: { at: "2026-10-01T00:00:00Z", selected: [], text, user: "alice" },
+          state: "answered",
+        },
+        href: "/issues/LEGION-5/asks/long",
+        id: "long",
+        kind: "ask",
+        owner: { key: "LEGION-5", kind: "issue", status: "todo", title: "Orrery" },
+        rank: 1,
+        snippet: "Which <mark>orrery</mark> frame?",
+      },
+    ])
+  );
+  const view = renderPalette();
+
+  try {
+    await searchFor("orrery");
+    const option = screen.getByRole("option");
+    await waitFor(() => expect(option.querySelector("strong")?.textContent).toBe("both"));
+
+    // 280 characters (ANSWER_PREVIEW_CHARS) end inside the ninth sentence's second word, so the
+    // cut falls after its first, with an ellipsis, and the shown answer stays within the bound.
+    const shown = option.textContent ?? "";
+    const shownAnswer = shown.slice(shown.indexOf("Keep both frames."));
+    expect(ANSWER_PREVIEW_CHARS).toBe(280);
+    expect(text.length).toBeGreaterThan(2000);
+    expect(shown).not.toContain("zenithward");
+    expect(shownAnswer).toBe(
+      `Keep both frames. ${"The meridian ring stays level. ".repeat(8)}The…`
+    );
+    expect(shownAnswer.length).toBeLessThanOrEqual(ANSWER_PREVIEW_CHARS + 1);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+// A hit's href is the server's, so a hit in a document whose name is past the bound text is held
+// to (2683 characters, which a new upload's reference key still holds) is a hover-card trigger
+// for that document all the same, an issue's and a project's alike. The hrefs are read against
+// the page's origin, which happy-dom's `about:blank` does not have.
+test("a hit in a long-named document previews that document", async () => {
+  const slug = "a".repeat(2683);
+  const search = spyOn(api, "search").mockResolvedValue(
+    searchAnswer([
+      {
+        artifact: { name: "Long notes", slug },
+        href: `/issues/LEGION-2/artifacts/${slug}`,
+        id: "document-2",
+        kind: "document",
+        owner: { key: "LEGION-2", kind: "issue", status: "todo", title: "Navigation instruments" },
+        rank: 2,
+        snippet: "The <mark>astrolabe</mark> measures altitude.",
+      },
+      {
+        artifact: { name: "Long handbook", slug },
+        href: `/projects/CORE/documents/${slug}`,
+        id: "document-3",
+        kind: "document",
+        owner: {
+          artifact_id: "document-3",
+          kind: "document",
+          name: "Long handbook",
+          project: "CORE",
+          slug,
+        },
+        rank: 1,
+        snippet: "Keep the <mark>astrolabe</mark> dry.",
+      },
+    ])
+  );
+  const testWindow = window as unknown as HappyDOMWindow;
+  const pageBefore = window.location.href;
+  testWindow.happyDOM.setURL("https://dispatch.test/issues/LEGION-2");
+  const view = renderPalette();
+
+  try {
+    await searchFor("astrolabe");
+    expect(
+      screen.getAllByRole("option").map((option) => option.getAttribute("data-dispatch-ref"))
+    ).toEqual([`dispatch://LEGION-2/artifact/${slug}`, `dispatch://CORE/artifact/${slug}`]);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+    testWindow.happyDOM.setURL(pageBefore);
+  }
+});
+
 test("does not query below two characters", () => {
   const search = spyOn(api, "search").mockResolvedValue(searchAnswer([]));
   const view = renderPalette();
@@ -262,7 +417,8 @@ test("a refetch that re-ranks the hits leaves the highlight on the hit the reade
     const shown = input.getAttribute("aria-activedescendant");
     expect(shown).toBe(screen.getAllByRole("option")[0]?.id ?? "");
 
-    // A focus refetch, or the event stream's reconnect, answers the same query re-ranked.
+    // A focus refetch, or the refresh after a gap in the live socket, answers the same query
+    // re-ranked.
     search.mockResolvedValue(searchAnswer([second, first]));
     await view.queryClient.refetchQueries();
     await waitFor(() => expect(screen.getAllByRole("option")[0]?.id).not.toBe(shown));

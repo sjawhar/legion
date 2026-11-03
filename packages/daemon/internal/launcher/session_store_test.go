@@ -183,20 +183,26 @@ func TestAResumeUnderSQLStorageWaitsOutAnUnreachableSessionDatabase(t *testing.T
 	unreachable := "postgres://legion:unused@127.0.0.1:1/none?sslmode=disable&connect_timeout=1"
 	writeURL(unreachable)
 	env := []string{ompsessions.StorageVariable + "=" + ompsessions.SQLStorage, ompsessions.DSNFileVariable + "=" + dsnFile}
+	sessions, err := newSessionDial(env, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	back := make(chan struct{})
 	go func() {
 		defer close(back)
 		time.Sleep(300 * time.Millisecond)
 		writeURL(dsn)
 	}()
-	if _, err := sessionWritten(context.Background(), env, sessionFile, ""); err != nil {
+	_, found, err := sessionWritten(context.Background(), sessions, sessionFile)
+	if err != nil {
 		t.Fatalf("a lookup whose database came back during the backoff = %v, want the session found", err)
 	}
+	closeSessions(found)
 	<-back
 
 	writeURL(unreachable)
 	started := time.Now()
-	_, err = sessionWritten(context.Background(), env, sessionFile, "")
+	_, _, err = sessionWritten(context.Background(), sessions, sessionFile)
 	if err == nil || !strings.Contains(err.Error(), "resume session "+sessionFile) || !strings.Contains(err.Error(), "attempts in "+resumeLookupTimeout.String()) {
 		t.Fatalf("a lookup whose database never came back = %v, want the refusal naming the session and the attempts", err)
 	}
@@ -324,7 +330,12 @@ func TestAnAgentKeepsWritingPastItsCredentialsExpiry(t *testing.T) {
 	ask := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, _, err := lookupWritten(ctx, endpoint.ClientURL(), "sessions/one.jsonl")
+		conn, err := ompsessions.ConnectURL(ctx, endpoint.ClientURL())
+		if err != nil {
+			return err
+		}
+		defer closeSessions(conn)
+		_, _, err = ompsessions.Written(ctx, conn, "sessions/one.jsonl")
 		return err
 	}
 

@@ -4,14 +4,12 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -27,7 +25,9 @@ const CheckLookBound = 2 * time.Hour
 // The causes a look is woken by: what the check's record names as its last wake, and what the
 // check task tells the implementer woke it. A deploy run is a configured deploy workflow's job
 // whose named step succeeded after the merge (deployRunCompleted, then the check_compare row's
-// GitHub read).
+// GitHub read). A Dispatch start is Dispatch's server.started, which announces the build every
+// Dispatch server process serves (intake.ServerStarted); the cause is named `dispatch start`
+// because check records and the daemon's state API carry that name.
 const (
 	wakeMerge         = "merge"
 	wakeDeployed      = "issue.deployed"
@@ -62,7 +62,7 @@ func (e *Engine) openCheck(ctx context.Context, tx pgx.Tx, issue record.Issue, p
 	if err != nil {
 		return err
 	}
-	if existing != nil && existing.Repo == pr.Repo && existing.Number == pr.Number && (existing.MergeSHA == "" || pr.MergeSHA == "" || existing.MergeSHA == pr.MergeSHA) {
+	if existing != nil && e.sameRepository(existing.Repo, pr.Repo) && existing.Number == pr.Number && (existing.MergeSHA == "" || pr.MergeSHA == "" || existing.MergeSHA == pr.MergeSHA) {
 		state := "open"
 		if !existing.Open() {
 			state = "closed as " + string(existing.Outcome)
@@ -159,7 +159,7 @@ func wokenBy(cause, detail string) string {
 	case wakeDaemonBoot:
 		return "the Legion daemon's boot on build " + detail
 	case wakeDispatchStart:
-		return "Dispatch's start on build " + detail
+		return "Dispatch serving build " + detail + " on every server process"
 	case wakeDispatchBuild:
 		return "Dispatch's build " + detail
 	case wakeDeployRun:
@@ -348,7 +348,7 @@ func (e *Engine) checkIssue(ctx context.Context, tx pgx.Tx, check record.Product
 // or a check of another pull request.
 func (e *Engine) issueDeployed(ctx context.Context, tx pgx.Tx, fact intake.IssueDeployed) (intake.Result, error) {
 	check, err := e.store.ProductionCheck(ctx, tx, fact.Issue)
-	if err != nil || check == nil || !check.Open() || check.Repo != fact.Repo || check.Number != fact.Number {
+	if err != nil || check == nil || !check.Open() || !e.sameRepository(check.Repo, fact.Repo) || check.Number != fact.Number {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.wake(ctx, tx, check, wakeDeployed, fmt.Sprintf("run %d completed %s", fact.RunID, fact.CompletedAt.UTC().Format(time.RFC3339)))
@@ -423,28 +423,30 @@ func (e *Engine) checkWake(ctx context.Context, tx pgx.Tx, fact intake.CheckWake
 	return intake.Result{}, e.wake(ctx, tx, check, fact.Cause, fact.Detail)
 }
 
-// serverStarted is Dispatch's start on a build (intake.ServerStarted): the build is compared
-// against the open checks of the repository the daemon is built from (compareBuilds), as the
-// daemon's own build is at boot.
+// serverStarted is Dispatch's announcement that every live server process serves a build
+// (intake.ServerStarted): the build is compared against the open checks of the repository the
+// daemon is built from (compareBuilds), as the daemon's own build is at boot.
 func (e *Engine) serverStarted(ctx context.Context, tx pgx.Tx, fact intake.ServerStarted) (intake.Result, error) {
 	return intake.Result{}, e.compareBuilds(ctx, tx, wakeDispatchStart, fact.Commit)
 }
 
 // buildShape is what a build's commit must look like to be compared: a git SHA, abbreviated or
-// whole. The daemon's own revision and Dispatch's /healthz commit are release stamps of that
-// shape; Dispatch's server.started is published on the bus by any client the listener takes a
-// `source: dispatch` publish from, so its commit is held to the shape here, where every build
-// meets the compare path (the implement App's GitHub compare URL) and the wake detail written
-// into the implementer's task text, and nothing else reaches either.
+// whole. The daemon's own revision and the build Dispatch's /healthz reports are release stamps of
+// that shape; Dispatch's server.started, the announcement of the build its whole server fleet
+// serves, is published on the bus by any client the listener takes a `source: dispatch` publish
+// from, so its commit is held to the shape here, where every build meets the compare path (the
+// implement App's GitHub compare URL) and the wake detail written into the implementer's task
+// text, and nothing else reaches either.
 var buildShape = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 // compareBuilds queues one check_compare row, carrying cause, the build's commit and the check
 // it is of, for every open check of this project in the repository the daemon is built from
-// (Config.BuiltFrom): the row's executor reads GitHub for whether the build carries the check's
-// merge and applies intake.CheckWake when it does. A check whose last look has started gets none,
-// since no look follows; no build, or no repository the daemon is built from, compares nothing,
-// and a build that is not a git SHA (buildShape) is refused, logged with its cause and length
-// and never its text.
+// (Config.BuiltFrom, compared as sameRepository compares two names, so a check recorded on the
+// repository as it was is still the build's): the row's executor reads GitHub for whether the
+// build carries the check's merge and applies intake.CheckWake when it does. A check whose last
+// look has started gets none, since no look follows; no build, or no repository the daemon is
+// built from, compares nothing, and a build that is not a git SHA (buildShape) is refused, logged
+// with its cause and length and never its text.
 func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build string) error {
 	if build == "" || e.cfg.BuiltFrom == "" {
 		return nil
@@ -459,7 +461,7 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 	}
 	compared := 0
 	for _, check := range open {
-		if check.Project != e.cfg.Project || check.Repo != e.cfg.BuiltFrom || check.Last {
+		if check.Project != e.cfg.Project || !e.sameRepository(check.Repo, e.cfg.BuiltFrom) || check.Last {
 			continue
 		}
 		if err := e.enqueue(ctx, tx, check.Issue, record.CheckCompare{Look: check.Looks, Cause: cause, Build: build, OpenedAt: check.OpenedAt}); err != nil {
@@ -475,29 +477,26 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 
 // deployRunCompleted is a completed run of a workflow (intake.WorkflowRunCompleted): for the
 // project's deploy (Config.Deploys, which names a repository and workflow file at most once) whose
-// repository (case-insensitively, as GitHub matches names) and workflow file are the run's, it
-// queues one check_compare row carrying the run and the deploy's step for every open check of this
-// project in that repository whose issue's recorded default branch is the run's branch. The row's
-// executor reads the run attempt and its jobs from GitHub, holds them to the row, and applies
-// intake.CheckWake for each job whose step succeeded after the pull request merged; the envelope is
-// trusted for nothing more than choosing what to read. A check whose last look has started gets
-// none, since no look follows, and a run of no deploy, or of another branch, queues nothing and
-// costs no GitHub read.
+// repository and workflow file are the run's (intake.DeployOf, the rule the decoder already dropped
+// every other run by, read here again for the deploy's step), it queues one check_compare row
+// carrying the run and the deploy's step for every open check of this project in that repository
+// whose issue's recorded default branch is the run's branch. The row's executor reads the run
+// attempt and its jobs from GitHub, holds them to the row, and applies intake.CheckWake for each
+// job whose step succeeded after the pull request merged; the envelope is trusted for nothing more
+// than choosing what to read. A check whose last look has started gets none, since no look follows,
+// and a run of no deploy, or of another branch, queues nothing and costs no GitHub read.
 func (e *Engine) deployRunCompleted(ctx context.Context, tx pgx.Tx, fact intake.WorkflowRunCompleted) (intake.Result, error) {
-	index := slices.IndexFunc(e.cfg.Deploys, func(deploy config.Deploy) bool {
-		return strings.EqualFold(deploy.Repo.String(), fact.Repo) && deploy.Workflow == fact.Path
-	})
-	if index < 0 {
+	deploy, ok := intake.DeployOf(e.cfg.Deploys, e.cfg.RepositoryRenames, fact.Repo, fact.Path)
+	if !ok {
 		return intake.Result{}, nil
 	}
-	deploy := e.cfg.Deploys[index]
 	open, err := e.store.OpenProductionChecks(ctx, tx)
 	if err != nil {
 		return intake.Result{}, err
 	}
 	compared := 0
 	for _, check := range open {
-		if check.Project != e.cfg.Project || !strings.EqualFold(check.Repo, fact.Repo) || check.Last {
+		if check.Project != e.cfg.Project || !e.sameRepository(check.Repo, fact.Repo) || check.Last {
 			continue
 		}
 		issue, err := e.store.Issue(ctx, tx, check.Issue)

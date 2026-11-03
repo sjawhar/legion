@@ -25,7 +25,8 @@ type projectionStore struct {
 	checks       []record.ProductionCheck
 	held         []record.HeldRow
 	// mirror is what Dispatch says each issue of the project waits on, as the store lists it: by
-	// key, which is the order the state's `blocked` is judged from.
+	// key, which is the order the state's `blocked` is judged from. DispatchIssuesOf serves the rows
+	// of the keys asked for and of what they wait on, as the real store does.
 	mirror []record.DispatchIssueRow
 }
 
@@ -51,8 +52,25 @@ func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate
 func (s projectionStore) OpenProductionChecks(context.Context, pgx.Tx) ([]record.ProductionCheck, error) {
 	return s.checks, nil
 }
-func (s projectionStore) DispatchIssues(context.Context, pgx.Tx, string) ([]record.DispatchIssueRow, error) {
-	return s.mirror, nil
+func (s projectionStore) DispatchIssuesOf(_ context.Context, _ pgx.Tx, _ string, keys []string) ([]record.DispatchIssueRow, error) {
+	wanted := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		wanted[key] = true
+	}
+	for _, row := range s.mirror {
+		if wanted[row.Key] {
+			for _, blocker := range row.Blockers {
+				wanted[blocker] = true
+			}
+		}
+	}
+	var rows []record.DispatchIssueRow
+	for _, row := range s.mirror {
+		if wanted[row.Key] {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
 }
 
 // projectedAt is the fixed instant every test here projects at.
@@ -207,6 +225,40 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	}
 	if view.State != string(supervise.StateLaunchUncertain) || view.Locator != nil {
 		t.Fatalf("launch_uncertain architect = %#v, want its state with no locator", view)
+	}
+}
+
+// A worker's view shows the handoff of its current phase as its completion left it: the Dispatch
+// handoff record a file-backed phase's completion named, with its version, and the commit a
+// completion reported; a worker whose phase has not completed shows neither.
+func TestProjectShowsTheHandoffRecordAWorkerNamed(t *testing.T) {
+	const record1 = "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b"
+	tester, implementer, reviewer := claim.Token("legion-208-tester"), claim.Token("legion-208-implementer"), claim.Token("legion-208-reviewer")
+	store := projectionStore{
+		issues: []record.Issue{{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing}},
+		phases: map[string][]record.PhaseRow{"LEGION-208": {
+			{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: implementer, HandoffCommit: "head", HandoffRecord: "implement-record", HandoffVersion: 2, Rounds: 1},
+			{Issue: "LEGION-208", Role: claim.RoleTester, Claim: tester, HandoffRecord: record1, HandoffVersion: 3},
+			{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: reviewer, LastHandoff: "review-record"},
+		}},
+	}
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{
+		{Token: implementer, Issue: "LEGION-208", Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "ses_implementer"},
+		{Token: tester, Issue: "LEGION-208", Role: claim.RoleTester, State: supervise.StateIdle, Session: "ses_tester"},
+		{Token: reviewer, Issue: "LEGION-208", Role: claim.RoleReviewer, State: supervise.StateIdle, Session: "ses_reviewer"},
+	}, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	workers := got.Issues["LEGION-208"].Workers
+	if got, want := workers[claim.RoleTester].HandoffRecord, (&api.HandoffRecordView{ID: record1, Version: 3}); !reflect.DeepEqual(got, want) || workers[claim.RoleTester].HandoffCommit != "" {
+		t.Fatalf("the tester's handoff = record %+v, commit %q; want %+v and no commit", got, workers[claim.RoleTester].HandoffCommit, want)
+	}
+	if got, want := workers[claim.RoleImplementer].HandoffRecord, (&api.HandoffRecordView{ID: "implement-record", Version: 2}); !reflect.DeepEqual(got, want) || workers[claim.RoleImplementer].HandoffCommit != "head" {
+		t.Fatalf("the implementer's handoff = record %+v, commit %q; want %+v at head", got, workers[claim.RoleImplementer].HandoffCommit, want)
+	}
+	if got := workers[claim.RoleReviewer]; got.HandoffRecord != nil || got.HandoffCommit != "" {
+		t.Fatalf("the reviewer mid-round shows handoff %+v, commit %q; want none: the record it named last round is not this round's", got.HandoffRecord, got.HandoffCommit)
 	}
 }
 

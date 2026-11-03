@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { balanceCutMarkdown, searchSnippetMarkdown } from "./markdown-fragment";
+import { balanceCutMarkdown, markdownHead, searchSnippetMarkdown } from "./markdown-fragment";
 
 // The shapes come from `ts_headline` with search.go's own options (`MaxWords=24, MinWords=12,
 // MaxFragments=1`) run on a real Postgres.
@@ -78,4 +78,26 @@ test("a search snippet is balanced only when the headline window cut it: exactly
   const window = `${"word ".repeat(21)}anchor** after the`;
   expect(window.split(" ").length).toBe(24);
   expect(searchSnippetMarkdown(window)).toBe(window.replace("**", ""));
+});
+
+test("a body's head is the body when it fits, else cut at a word and closed with an ellipsis", () => {
+  expect(markdownHead("Keep **both** frames.", 21)).toBe("Keep **both** frames.");
+  expect(markdownHead("Keep **both** frames.", 20)).toBe("Keep **both**…");
+  // A whitespace exactly at the limit keeps the whole limit.
+  expect(markdownHead("abc def ghi", 7)).toBe("abc def…");
+  // A line break is a word boundary too, and the cut drops the whitespace before it.
+  expect(markdownHead("first line  \nsecond line", 14)).toBe("first line…");
+});
+
+test("a cut inside a mark drops the delimiter it left open", () => {
+  expect(markdownHead("Keep **both frames** level", 15)).toBe("Keep both…");
+  expect(markdownHead("Run `make deploy-all` now", 16)).toBe("Run make…");
+});
+
+test("a head with no whitespace in the limit's second half is cut at the limit", () => {
+  expect(markdownHead("see https://example.com/a/very/long/path", 20)).toBe(
+    "see https://example.…"
+  );
+  // Never inside a surrogate pair: the astral character goes whole.
+  expect(markdownHead(`${"a".repeat(9)}😀b`, 10)).toBe(`${"a".repeat(9)}…`);
 });

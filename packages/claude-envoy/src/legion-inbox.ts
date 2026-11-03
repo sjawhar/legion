@@ -25,7 +25,7 @@ export const INBOX_CAPABILITIES = [
   "steer",
 ] as const satisfies readonly DeliveryCapability[]
 
-/** `InboxAnswer`: the bridge's line back for one delivery, once it has queued it. */
+/** `InboxAnswer`: the bridge's line back for one delivery, once Claude Code took it or cannot. */
 interface InboxAnswer {
   readonly id: string
   readonly ok?: boolean
@@ -35,10 +35,12 @@ interface InboxAnswer {
 /**
  * A notifier that writes each delivery to the bridge's inbox at `socketPath`, one JSON line
  * `{id, content}` (the envelope's `event_id`, else a fresh id; the rendered content), and resolves
- * once the bridge answers `{id, ok: true}`: the delivery is queued as a user turn, which is what a
- * forwarded lane's receipt then says. An answer with an error, a closed socket or an answer for
- * another id rejects. The bridge answers one connection's lines in order, so one connection, opened
- * on first use and again after it closes, carries every delivery.
+ * once the bridge answers `{id, ok: true}`. The bridge answers `ok` only when Claude Code re-emits
+ * that user message (`--replay-user-messages`), that is once it took the delivery into a step, and
+ * an error when Claude Code never takes it: a relayed frame is answered `done` on the one and `nak`
+ * on the other. An answer with an error, a closed socket or an answer for another id rejects. The
+ * bridge answers one connection's lines in order, so one connection, opened on first use and again
+ * after it closes, carries every delivery.
  */
 export function createInboxNotifier(socketPath: string): ChannelNotifier {
   let socket: Socket | undefined

@@ -13,6 +13,7 @@ import {
   getIssue,
 } from "./api";
 import { documentEditor } from "./editor";
+import { askCard, inboxList } from "./inbox-pane";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { signIn } from "./users";
@@ -73,21 +74,33 @@ test("an issue and its ask show a cross-project message and structural backlinks
   ).resolves.toBe(true);
 
   await page.goto("/");
-  const askCard = page.getByTestId(`ask-${decision.id}`);
-  await askCard.getByRole("button", { name: /^Referenced by \(1\)$/ }).click();
-  const askReferences = askCard.getByRole("region", { name: "Referenced by" });
-  await expect(askReferences).toContainText(`Message · ${source.key}`);
+  const phoneCard = page.getByTestId(`ask-${decision.id}`);
+  await phoneCard.getByRole("button", { name: /^Referenced by \(1\)$/ }).click();
+  await expect(phoneCard.getByRole("region", { name: "Referenced by" })).toContainText(
+    `Message · ${source.key}`
+  );
 
   const phoneAsk = testInfo.outputPath("referenced-by-ask-card-390.png");
-  await askCard.screenshot({ path: phoneAsk });
+  await phoneCard.screenshot({ path: phoneAsk });
   await testInfo.attach("Referenced by ask card (390px)", {
     contentType: "image/png",
     path: phoneAsk,
   });
 
+  // The card is drawn where its width draws it: in the row below 1280 px, and in the Inbox's
+  // reading column from there (INFRA-575). So the resize unmounts the node resolved at 390 px
+  // and draws a fresh card in the column, with its own collapsed backlink panel: resolve the
+  // card again, and open that panel again, before the shot.
   await page.setViewportSize({ height: 900, width: 1440 });
+  const desktopCard = await askCard(page, decision.id);
+  await expect(desktopCard).toBeVisible();
+  await desktopCard.getByRole("button", { name: /^Referenced by \(1\)$/ }).click();
+  await expect(desktopCard.getByRole("region", { name: "Referenced by" })).toContainText(
+    `Message · ${source.key}`
+  );
+
   const desktopAsk = testInfo.outputPath("referenced-by-ask-card-1440.png");
-  await askCard.screenshot({ path: desktopAsk });
+  await desktopCard.screenshot({ path: desktopAsk });
   await testInfo.attach("Referenced by ask card (1440px)", {
     contentType: "image/png",
     path: desktopAsk,
@@ -107,7 +120,7 @@ test("an open backlink panel follows a mention added, replied to, and removed", 
   const references = page.getByTestId("issue-header").getByRole("region", {
     name: "Referenced by",
   });
-  // Each step waits on a server write, the event stream, and the panel's refetch, so these are
+  // Each step waits on a server write, the live event feed, and the panel's refetch, so these are
   // deliberately generous on a loaded box.
   const live = { timeout: 30_000 };
   await expect(references).toContainText("Attached document", live);
@@ -142,11 +155,20 @@ test("Inbox cards gain and move their backlink control as writes elsewhere cite 
   });
 
   await page.goto("/");
-  const uncitedCard = page.getByTestId(`ask-${uncited.id}`);
-  const citedCard = page.getByTestId(`ask-${cited.id}`);
+  // The backlink control is the card's. From 1280 px the Inbox draws the card of the row the
+  // reader has selected (INFRA-575), so each question is read on its own card, in turn.
+  const openCard = async (askId: string) => {
+    const card = await askCard(page, askId);
+    await expect(card).toBeVisible();
+    return card;
+  };
   const live = { timeout: 30_000 };
-  await expect(citedCard.getByRole("button", { name: /^Referenced by \(1\)$/ })).toBeVisible(live);
-  await expect(uncitedCard.getByRole("button", { name: /^Referenced by/ })).toHaveCount(0);
+  await expect(
+    (await openCard(cited.id)).getByRole("button", { name: /^Referenced by \(1\)$/ })
+  ).toBeVisible(live);
+  await expect(
+    (await openCard(uncited.id)).getByRole("button", { name: /^Referenced by/ })
+  ).toHaveCount(0);
 
   await createMessage(source.key, {
     body: `Now also waiting on dispatch://${target.key}/ask/${uncited.id}.`,
@@ -154,19 +176,25 @@ test("Inbox cards gain and move their backlink control as writes elsewhere cite 
   await createMessage(source.key, {
     body: `Second cite of dispatch://${target.key}/ask/${cited.id}.`,
   });
-  await expect(uncitedCard.getByRole("button", { name: /^Referenced by \(1\)$/ })).toBeVisible(
-    live
-  );
-  await expect(citedCard.getByRole("button", { name: /^Referenced by \(2\)$/ })).toBeVisible(live);
+  await expect(
+    (await openCard(uncited.id)).getByRole("button", { name: /^Referenced by \(1\)$/ })
+  ).toBeVisible(live);
+  await expect(
+    (await openCard(cited.id)).getByRole("button", { name: /^Referenced by \(2\)$/ })
+  ).toBeVisible(live);
 
   // A comment that replies to no ask is the other half of #1248's subtraction.
   const note = await createComment(source.key, {
     body: `Third citation of dispatch://${target.key}/ask/${cited.id}.`,
   });
-  await expect(citedCard.getByRole("button", { name: /^Referenced by \(3\)$/ })).toBeVisible(live);
+  await expect(
+    (await openCard(cited.id)).getByRole("button", { name: /^Referenced by \(3\)$/ })
+  ).toBeVisible(live);
 
   await editComment(note.id, { body: "Withdrawn; nothing to wait on." });
-  await expect(citedCard.getByRole("button", { name: /^Referenced by \(2\)$/ })).toBeVisible(live);
+  await expect(
+    (await openCard(cited.id)).getByRole("button", { name: /^Referenced by \(2\)$/ })
+  ).toBeVisible(live);
 });
 
 // Answering an ask moves no backlink count, and a citation written afterwards does. Both are the
@@ -372,16 +400,19 @@ test("an Inbox of twenty asks reads no backlinks until a card is opened", async 
   });
 
   await page.goto("/");
-  await expect(page.getByTestId(/^ask-/)).toHaveCount(20);
-  await expect(page.getByText("Decision 20?")).toBeVisible();
+  // Twenty questions, twenty rows. From 1280 px one of them is also the card the reading pane
+  // draws (INFRA-575): that card is part of the Inbox's first paint and still reads no
+  // backlinks - it shows its count, which the Inbox response carried, behind a closed control.
+  await expect(inboxList(page).locator("[data-inbox-row]")).toHaveCount(20);
+  await expect(inboxList(page).getByText("Decision 20?")).toBeVisible();
+  const citedCard = await askCard(page, cited.id);
+  const panelControl = citedCard.getByRole("button", { name: /^Referenced by \(1\)$/ });
+  await expect(panelControl).toBeVisible();
   expect(referenceReads).toBe(0);
 
-  await page
-    .getByTestId(`ask-${cited.id}`)
-    .getByRole("button", { name: /^Referenced by \(1\)$/ })
-    .click();
-  await expect(
-    page.getByTestId(`ask-${cited.id}`).getByRole("region", { name: "Referenced by" })
-  ).toContainText(`Message · ${source.key}`);
+  await panelControl.click();
+  await expect(citedCard.getByRole("region", { name: "Referenced by" })).toContainText(
+    `Message · ${source.key}`
+  );
   expect(referenceReads).toBe(1);
 });

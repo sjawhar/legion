@@ -36,6 +36,12 @@ Extends docs/solutions/testing/an-embedded-postgres-from-the-zonky-jar-runs-the-
   Boot the daemon the way the script does — a `legion.yaml` with `project`, `port`, `postgres_dsn`,
   `state_dir`, `operator_token_file`, a port under 16000 — and cite CI's `Stage 1 live proof` step
   for the script itself.
+  *Note, 2026-10-26 (INFRA-253):* `scripts/e2e/lib/free-port.sh` is gone, and with it the port-range
+  refusal and the `ss` need. Stage 1 now holds its daemon's port with
+  `scripts/e2e/lib/held-port.py` (`python3`), and `legion start` serves on the inherited socket
+  (`LEGION_LISTEN_FD`). The script runs in a pod given a Postgres (`LEGION_E2E_PG_DSN`) and a real
+  `tmux` on `PATH`: tmux 3.5a unpacked from Debian's `.deb` with its `libevent` and `jemalloc`,
+  and its rpath pointed at them (`patchelf --set-rpath`), passed it there.
 - A daemon booted with no `dispatch_url` serves the API and runs no workflow, so no outbox lanes
   run: an outbox row seeded by SQL is never claimed. That is what makes a seeded foreign lease a
   usable fixture for `legion state`'s `heldOutboxRows`, and what the proof can claim: the

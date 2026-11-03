@@ -53,7 +53,8 @@ func emptyStore(t *testing.T) *store.Store {
 	t.Cleanup(admin.Close)
 
 	name := "legion_record_test_" + randomSuffix(t)
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -188,6 +189,56 @@ func TestPutIssueRefusesAMissingOrChangedRepository(t *testing.T) {
 	})
 }
 
+// QueuedRootsUnder lists, by key, exactly the labelled todo roots whose Ancestry holds the key,
+// whatever their parent: not a root whose chain holds another key, an unlabelled one, one in
+// another status, nor a child in a tree. A root's Ancestry reads back as it was written.
+func TestQueuedRootsUnderListsTheLabelledTodoRootsWhoseChainHoldsTheKey(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := func(key, tree, status string, handed bool, ancestry ...string) Issue {
+		issue := issueFixture(key)
+		issue.Tree, issue.Status, issue.HandedOver, issue.ReadyPendingVersion, issue.Ancestry = tree, status, handed, nil, ancestry
+		if len(ancestry) != 0 {
+			issue.Parent = ParentOf(ancestry[0])
+		}
+		return issue
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, recorded := range []Issue{
+			issue("LEGION-300", "LEGION-300", "in_progress", true),
+			issue("LEGION-302", "LEGION-302", "todo", true, "LEGION-401", "LEGION-400", "LEGION-300"),
+			issue("LEGION-301", "LEGION-301", "todo", true, "LEGION-400", "LEGION-300"),
+			issue("LEGION-303", "LEGION-303", "todo", true, "LEGION-300"),
+			issue("LEGION-304", "LEGION-304", "todo", false, "LEGION-400"),
+			issue("LEGION-305", "LEGION-305", "backlog", true, "LEGION-400"),
+			issue("LEGION-306", "LEGION-300", "todo", true, "LEGION-400"),
+			issue("LEGION-307", "LEGION-307", "todo", true),
+		} {
+			must(t, records.PutIssue(ctx, tx, recorded))
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		roots, err := records.QueuedRootsUnder(ctx, tx, "LEGION-400")
+		must(t, err)
+		var keys []string
+		for _, root := range roots {
+			keys = append(keys, root.Key)
+		}
+		if !reflect.DeepEqual(keys, []string{"LEGION-301", "LEGION-302"}) {
+			t.Fatalf("QueuedRootsUnder(LEGION-400) = %v, want LEGION-301 and LEGION-302", keys)
+		}
+		if !reflect.DeepEqual(roots[1].Ancestry, []string{"LEGION-401", "LEGION-400", "LEGION-300"}) || roots[1].Status != "todo" {
+			t.Fatalf("QueuedRootsUnder(LEGION-400)[1] = %#v, want the whole record of LEGION-302", roots[1])
+		}
+		none, err := records.Issue(ctx, tx, "LEGION-307")
+		must(t, err)
+		if none.Ancestry != nil {
+			t.Fatalf("LEGION-307 reads back with Ancestry %#v, want nil as written", none.Ancestry)
+		}
+	})
+}
+
 // A record written before the schema carried the issue's repository has none, and the boot fills
 // it (daemon's backfillRepositories): UnfilledIssues lists one project's unfilled records, and
 // FillIssueRepository fills one, once, with GitHub's spelling beside the record's own.
@@ -311,8 +362,8 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	updatedAt := time.Date(2026, 9, 22, 14, 12, 13, 456000000, time.UTC)
 	approved := 7
 	pushes := []ClassifiedPush{
-		{SHA: "b1c2d3", Before: "a0b1c2", HandoffOnly: true, Unknown: "paths_truncated", ByReviewApp: true},
-		{SHA: "c2d3e4", Before: "b1c2d3", Forced: true},
+		{SHA: "b1c2d3", Before: "a0b1c2", ByReviewApp: true},
+		{SHA: "c2d3e4", Before: "b1c2d3"},
 	}
 	pr := PullRequest{
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208",
@@ -320,12 +371,24 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", HeadCountedBefore: "a0b1c2", PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
+		Snapshot: "snapshot-4", Pushes: pushes, Moves: []Move{{Before: "9f8e7d", SHA: "a0b1c2"},
+			{Before: "a0b1c2", SHA: "b1c2d3", Pushed: true, Repeats: []ClassifiedPush{{SHA: "b1c2d3", Before: "a0b1c2", ByReviewApp: true}, {SHA: "b1c2d3", Before: "a0b1c2", Sender: "legion-implement[bot]"}}}},
+		HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
+		// A run's anchor keeps a set never read apart from an empty one, and so do its steps.
+		Run: &HeadRun{
+			Anchor: Judgement{HeadSHA: "a0b1c2", FixAttempts: 1, HeadCounted: "a0b1c2", CheckedHead: "a0b1c2", Failing: []string{"unit"},
+				CheckRuns: []AttemptRun{{Name: "unit", ID: 90}}, Generation: 3, Snapshot: "snapshot-3", Workflows: []RequiredWorkflow{}},
+			Pushes: pushes[:1],
+			Steps: []RunStep{{Head: "b1c2d3", Before: "a0b1c2", At: time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)}, {Settlement: &Settlement{Head: "b1c2d3", CheckRuns: []AttemptRun{{Name: "unit", ID: 91}}, Generation: 4,
+				Snapshot: "snapshot-4", Failing: []string{"unit"}, Cancelled: []string{"e2e"}}},
+				{Required: &RequiredRead{Names: []string{}, Workflows: []RequiredWorkflow{}}}, {WorkflowsCleared: true}, {Reopened: true}},
+			Decided: "b1c2d3",
+		},
 		// A base that requires no check reads back as such, never as a set that was not read.
 		Required:  []string{},
 		Workflows: []RequiredWorkflow{{Path: ".github/workflows/review.yml", Result: "failure"}}, WorkflowsHead: "b1c2d3",
 	}
-	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass",
+	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", HandoffRecord: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", HandoffVersion: 3, Rounds: 2, Verdict: "pass",
 		MergeNote: "MANUAL_MERGE_REQUIRED: pull request #1243 matches a by_hand merge rule; do not auto-arm it"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
 	slot := Slot{Issue: issue.Key, Index: 0, AdmittedAt: updatedAt}
@@ -374,6 +437,18 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		if len(slots) != 1 || slots[0].Issue != slot.Issue || slots[0].Index != slot.Index || !slots[0].AdmittedAt.Equal(slot.AdmittedAt) {
 			t.Fatalf("slots = %#v, want %#v", slots, slot)
 		}
+		// The slotted read admission makes on every fact returns the whole issue record, every
+		// column the issue read returns, so a column added to the issue is never left out of it.
+		slotted, err := records.SlottedIssues(ctx, tx, issue.Project)
+		must(t, err)
+		if !reflect.DeepEqual(slotted, []Issue{issue}) {
+			t.Fatalf("slotted issues = %#v, want %#v", slotted, []Issue{issue})
+		}
+		other, err := records.SlottedIssues(ctx, tx, "OTHER")
+		must(t, err)
+		if len(other) != 0 {
+			t.Fatalf("slotted issues of another project = %#v, want none", other)
+		}
 	})
 
 	inTx(t, st, func(tx pgx.Tx) {
@@ -382,6 +457,37 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		must(t, err)
 		if len(slots) != 0 {
 			t.Fatalf("slots after release = %#v, want no rows", slots)
+		}
+	})
+}
+
+// A row the release before this one wrote holds its moves as their two heads alone, in head_moves
+// and in its head run's anchor, and its head steps with no before. It reads back as moves not
+// pushed, with no repeats, and steps that name no move, so the next push of each move's two heads
+// is taken as its own and no arrival takes a repeat (classify.arrivalPushes), as before.
+func TestARowFromBeforeRepeatsReadsAsMovesNotPushed(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-208")
+	pr := PullRequest{Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208", HeadSHA: "b1", State: PullRequestOpen,
+		Failing: []string{}, Cancelled: []string{}, Run: &HeadRun{Anchor: Judgement{HeadSHA: "a0"}, Steps: []RunStep{{Head: "b1"}}}}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+		_, err := tx.Exec(ctx, `update pull_requests set head_moves = '[{"before":"9f","sha":"a0"},{"before":"a0","sha":"b1"}]'::jsonb,
+			head_run = '{"anchor":{"headSha":"a0","failing":[],"cancelled":[],"checkRuns":null,"required":null,"workflows":null,"moves":[{"before":"9f","sha":"a0"}]},"pushes":[],"steps":[{"head":"b1"}]}'::jsonb
+			where issue = $1`, issue.Key)
+		must(t, err)
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.PullRequest(ctx, tx, issue.Key)
+		must(t, err)
+		if want := []Move{{Before: "9f", SHA: "a0"}, {Before: "a0", SHA: "b1"}}; !reflect.DeepEqual(got.Moves, want) {
+			t.Fatalf("moves = %#v, want %#v", got.Moves, want)
+		}
+		if got.Run == nil || !reflect.DeepEqual(got.Run.Anchor.Moves, []Move{{Before: "9f", SHA: "a0"}}) || !reflect.DeepEqual(got.Run.Steps, []RunStep{{Head: "b1"}}) {
+			t.Fatalf("head run = %#v, want its anchor's one move not pushed and one head step naming no move", got.Run)
 		}
 	})
 }
@@ -420,6 +526,31 @@ func TestStoreRoundTripsATreeTakenBack(t *testing.T) {
 		must(t, err)
 		if !reflect.DeepEqual(got, &cleared) {
 			t.Fatalf("issue after a write that carries no mark = %#v, want %#v", got, cleared)
+		}
+	})
+}
+
+// The tree a root left is what keeps it its own tree on every later pass of the admission sweep
+// and every release of children (workflow's RanAsRoot), so PutIssue stores it and every read
+// behind issueColumns gives it back.
+func TestStoreRoundTripsTheTreeARootLeft(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	left := issueFixture("LEGION-216")
+	left.Phase, left.Status, left.HandedOverFrom = phase.Admitted, "todo", "LEGION-200"
+
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, left))
+		got, err := records.Issue(ctx, tx, left.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &left) {
+			t.Fatalf("handed-over root = %#v, want %#v", got, left)
+		}
+		issues, err := records.TreeIssues(ctx, tx, left.Key)
+		must(t, err)
+		if !reflect.DeepEqual(issues, []Issue{left}) {
+			t.Fatalf("tree issues = %#v, want %#v", issues, []Issue{left})
 		}
 	})
 }
@@ -590,7 +721,8 @@ func samePullRequest(got, want PullRequest) bool {
 		got.FixAttempts == want.FixAttempts &&
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot &&
-		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted && got.HeadCountedBefore == want.HeadCountedBefore &&
+		reflect.DeepEqual(got.Pushes, want.Pushes) && reflect.DeepEqual(got.Moves, want.Moves) && got.HeadCounted == want.HeadCounted &&
+		reflect.DeepEqual(got.Run, want.Run) &&
 		got.PlannedRed == want.PlannedRed && reflect.DeepEqual(got.Required, want.Required) &&
 		reflect.DeepEqual(got.Workflows, want.Workflows) && got.WorkflowsHead == want.WorkflowsHead && got.MergeSHA == want.MergeSHA
 }
@@ -699,7 +831,8 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
 		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
 		CheckedHead: "red-tests", Failing: []string{"test"}, CheckRuns: []AttemptRun{},
-		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", HeadCountedBefore: "fix", PlannedRed: true, State: PullRequestOpen,
+		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", Run: &HeadRun{Anchor: Judgement{HeadSHA: "fix"}, Steps: []RunStep{{Head: "red-tests"}}},
+		PlannedRed: true, State: PullRequestOpen,
 	}
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, issue))
@@ -712,9 +845,38 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		if got == nil {
 			t.Fatal("the open pull request is gone, want it kept")
 		}
-		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.HeadCountedBefore != "" || got.PlannedRed {
-			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q plannedRed=%v, want 0, 0, \"\", \"\" and false",
-				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore, got.PlannedRed)
+		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.Run != nil || got.PlannedRed {
+			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q run=%+v plannedRed=%v, want 0, 0, \"\", nil and false",
+				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.Run, got.PlannedRed)
+		}
+	})
+}
+
+// A new generation clears each role's handoff of its current phase — the commit it reported and the
+// Dispatch handoff record it named — so no role of the new generation reads as having completed,
+// and keeps the record each role last named, which a completion naming it again is refused against.
+func TestClearGenerationClearsTheHandoffRecordAndKeepsTheLastNamed(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-286")
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPhase(ctx, tx, PhaseRow{Issue: issue.Key, Role: claim.RoleTester, Claim: "tester", HandoffRecord: "test-record", HandoffVersion: 2, LastHandoff: "test-record", Verdict: "pass"}))
+		must(t, records.PutPhase(ctx, tx, PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "head", HandoffRecord: "implement-record", HandoffVersion: 1, LastHandoff: "implement-record", Rounds: 1}))
+		must(t, records.ClearGeneration(ctx, tx, issue.Key))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := records.Phases(ctx, tx, issue.Key)
+		must(t, err)
+		want := map[claim.Role]string{claim.RoleImplementer: "implement-record", claim.RoleTester: "test-record"}
+		if len(rows) != len(want) {
+			t.Fatalf("phases after ClearGeneration = %#v, want both rows kept", rows)
+		}
+		for _, row := range rows {
+			if row.Completed() || row.HandoffVersion != 0 || row.LastHandoff != want[row.Role] {
+				t.Fatalf("the %s row after ClearGeneration = %#v, want no commit, record or version, and %q kept as the record it last named", row.Role, row, want[row.Role])
+			}
 		}
 	})
 }
@@ -1101,8 +1263,8 @@ func TestHeldRowsListsLifecycleRowsBehindTheirIssuesRunningOne(t *testing.T) {
 }
 
 // UnfinishedLanes names each lane with a row left, once, by issue then lane, for the project alone:
-// an issue with a status write and a start has both lanes, one with two board rows has the board
-// lane once, and a project with no rows has none.
+// an issue with a status write, a start and a phase-ended message has all three lanes, one with two
+// board rows has the board lane once, and a project with no rows has none.
 func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -1113,6 +1275,7 @@ func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
 			{Kind: OutboxKindDispatchStatus, Issue: "LEGION-208", Payload: json.RawMessage(`{"status":"testing"}`)},
 			{Kind: OutboxKindSupervise, Issue: "LEGION-208", Payload: json.RawMessage(`{"op":"start"}`)},
 			{Kind: OutboxKindNotice, Issue: "LEGION-209", Payload: json.RawMessage(`{"kind":"phase-finished"}`)},
+			{Kind: OutboxKindPhaseEnded, Issue: "LEGION-208", Payload: json.RawMessage(`{"role":"tester","from":"testing","to":"implementing","reason":"CI is red"}`)},
 			{Kind: OutboxKindDispatchMessage, Issue: "LEGION-209", Payload: json.RawMessage(`{"body":"Done."}`)},
 			{Kind: OutboxKindSupervise, Issue: "OTHER-7", Payload: json.RawMessage(`{"op":"start"}`)},
 		} {
@@ -1123,7 +1286,8 @@ func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
 	inTx(t, st, func(tx pgx.Tx) {
 		lanes, err := records.UnfinishedLanes(ctx, tx, "LEGION")
 		must(t, err)
-		want := []LaneKey{{Issue: "LEGION-208", Lane: LaneBoard}, {Issue: "LEGION-208", Lane: LaneLifecycle}, {Issue: "LEGION-209", Lane: LaneBoard}}
+		want := []LaneKey{{Issue: "LEGION-208", Lane: LaneBoard}, {Issue: "LEGION-208", Lane: LaneLifecycle}, {Issue: "LEGION-208", Lane: LaneRoleMessage},
+			{Issue: "LEGION-209", Lane: LaneBoard}}
 		if !reflect.DeepEqual(lanes, want) {
 			t.Errorf("LEGION's unfinished lanes = %v, want %v", lanes, want)
 		}
@@ -1715,9 +1879,10 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 		"issues": {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "taken_back",
 			"linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch",
 			"github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by",
-			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at"},
-		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
-		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
+			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at", "caught_up_seq",
+			"ancestry", "handed_over_from"},
+		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note", "assignment", "handoff_record", "handoff_version"},
+		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_moves", "head_counted", "head_run", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
 		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},
 		"root_asks":         {"issue", "ask", "kind", "artifact", "open", "seq", "waiting_on", "waiting_on_seq", "closed_by", "closed_seq", "by_tree", "person_seq", "person_answer_seq"},
@@ -1962,6 +2127,57 @@ func TestRoleRunsSkipsAnotherRolesUndecodableRow(t *testing.T) {
 		}
 		if _, err := records.RoleRuns(ctx, tx, []RoleRunKey{tester}); err == nil {
 			t.Fatal("the tester's run read its own undecodable row without an error")
+		}
+	})
+}
+
+// The three reads keyed by a pull request's repository find the row whatever the case the name is
+// spelled in: the row carries the spelling of the fact that opened the pull request, while a
+// later fact — an event under GitHub's own spelling of the other name of a configured rename,
+// say — names the same repository in another case. A name that is another repository still finds
+// nothing.
+func TestThePullRequestReadsFindTheRowInAnySpelling(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-303")
+	issue.Repo, issue.GitHubRepo = "sjawhar/legion", "sjawhar/legion"
+	pr := PullRequest{Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-303",
+		HeadSHA: "b1c2d3", HeadUpdatedAt: time.Date(2026, 9, 22, 14, 12, 13, 0, time.UTC),
+		Generation: int64(issue.Generation), State: PullRequestOpen}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+	})
+	for _, name := range []string{"sjawhar/legion", "SJAWHAR/Legion", "sjawhar/LEGION"} {
+		inTx(t, st, func(tx pgx.Tx) {
+			byNumber, err := records.PullRequestByNumber(ctx, tx, name, pr.Number)
+			must(t, err)
+			if byNumber == nil || byNumber.Issue != pr.Issue {
+				t.Fatalf("PullRequestByNumber(%q, %d) = %#v, want the row of %s", name, pr.Number, byNumber, pr.Issue)
+			}
+			byBranch, err := records.PullRequestByBranch(ctx, tx, name, pr.Branch)
+			must(t, err)
+			if byBranch == nil || byBranch.Issue != pr.Issue {
+				t.Fatalf("PullRequestByBranch(%q, %q) = %#v, want the row of %s", name, pr.Branch, byBranch, pr.Issue)
+			}
+			recorded, err := PullRequestRecorded(ctx, tx, name, pr.Number)
+			must(t, err)
+			if !recorded {
+				t.Fatalf("PullRequestRecorded(%q, %d) = false, want the row of %s", name, pr.Number, pr.Issue)
+			}
+		})
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		other := "cybermonklabs/legion"
+		byNumber, err := records.PullRequestByNumber(ctx, tx, other, pr.Number)
+		must(t, err)
+		byBranch, err := records.PullRequestByBranch(ctx, tx, other, pr.Branch)
+		must(t, err)
+		recorded, err := PullRequestRecorded(ctx, tx, other, pr.Number)
+		must(t, err)
+		if byNumber != nil || byBranch != nil || recorded {
+			t.Fatalf("the reads of %s = %#v, %#v, %v; want nothing: it is another repository", other, byNumber, byBranch, recorded)
 		}
 	})
 }

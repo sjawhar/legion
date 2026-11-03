@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/rescue"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -209,18 +210,6 @@ func (c *Conn) GetState(ctx context.Context) (runtime.ConnState, error) {
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
 }
 
-// Abort asks OMP to end its running turn and returns on OMP's answer, which it gives once the
-// agent is idle. The turn's agent_end can still follow the answer on the wire, so the TurnEnd event
-// is what says the turn is over. A refusal is a *RefusedError; every other failure is transport.
-func (c *Conn) Abort(ctx context.Context) error {
-	if err := c.Negotiate(ctx); err != nil {
-		return err
-	}
-	id := rand.Text()
-	_, err := c.call(ctx, shimwire.Abort{ID: id}, id, "")
-	return err
-}
-
 // Shutdown asks the shim to end OMP: SIGTERM, then SIGKILL once the shim's grace runs out. The
 // shim acts on the frame itself and answers nothing (internal/shim); whether the process ended is
 // the runtime's to observe.
@@ -264,6 +253,36 @@ func (c *Conn) AdoptWorkingCopy(ctx context.Context, identity runtime.GitIdentit
 		}
 	}
 	return fmt.Errorf("worker-stream: %s %s answered by a %s frame", c.claim, shimwire.TypeAdoptWorkingCopy, answer.FrameType())
+}
+
+// RescueUnpushed asks the shim to check every workspace on its pod's disk for work the remote
+// lacks and push it to rescue branches (internal/rescue). The shim runs the check within
+// request.Timeout; the answer is awaited for that plus the RPC timeout. A shim built before the
+// frame forwards it to its agent, and the agent's refusal is runtime.ErrRescueUnsupported: such a
+// pod cannot be checked. A shim that answers the frame and could not run the check is a refusal.
+func (c *Conn) RescueUnpushed(ctx context.Context, request runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	id := rand.Text()
+	frame := shimwire.RescueUnpushed{ID: id, Branch: request.Branch,
+		WorkspaceTimeoutMs: int(request.WorkspaceTimeout.Milliseconds()), TimeoutMs: int(request.Timeout.Milliseconds())}
+	if err := frame.Validate(); err != nil {
+		return nil, fmt.Errorf("worker-stream: %s: %w", c.claim, err)
+	}
+	answer, err := c.request(ctx, frame, id, "", request.Timeout+c.rpcTimeout)
+	if err != nil {
+		return nil, err
+	}
+	switch answer := answer.(type) {
+	case shimwire.RescueUnpushedResult:
+		if !answer.OK {
+			return nil, &RefusedError{Claim: c.claim, Command: shimwire.TypeRescueUnpushed, Reason: answer.Error}
+		}
+		return rescue.Report(answer.Workspaces), nil
+	case shimwire.Response:
+		if !answer.Success {
+			return nil, fmt.Errorf("worker-stream: %s: %w (its agent answered: %s)", c.claim, runtime.ErrRescueUnsupported, answer.Error)
+		}
+	}
+	return nil, fmt.Errorf("worker-stream: %s %s answered by a %s frame", c.claim, shimwire.TypeRescueUnpushed, answer.FrameType())
 }
 
 // AgentSecretsEnrollment hands the shim the broker's enrollment id for its pod; the shim writes it
@@ -438,6 +457,9 @@ func (c *Conn) logNotAFrame(line []byte, err error) {
 // are not facts the daemon supervises on, and are dropped here, except an extension's failure,
 // which leaves the agent running without what the extension gives it (the Legion plugin's tool,
 // when its session_start fails) and is on no other record the daemon reads, so it is logged.
+//
+// A prompt_result whose request id names no delivery is dropped: every prompt this daemon sends
+// carries one (Prompt), so such a frame answers a `prompt` command something else wrote.
 func (c *Conn) dispatch(frame shimwire.Frame) {
 	switch frame := frame.(type) {
 	case shimwire.AgentStart:
@@ -447,6 +469,12 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 		c.acked = nil
 		c.mu.Unlock()
 		c.events.push(TurnEnd{Claim: c.claim})
+	case shimwire.PromptResult:
+		if delivery := promptDelivery(frame.ID); delivery != "" {
+			c.events.push(PromptResult{
+				Claim: c.claim, DeliveryID: delivery, AgentInvoked: frame.AgentInvoked, Error: frame.Reason(),
+			})
+		}
 	case shimwire.Response:
 		c.answer(frame)
 	case shimwire.Raw:
@@ -461,6 +489,8 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 				"extension", event.ExtensionPath, "event", event.Event, "error", event.Error)
 		}
 	case shimwire.AdoptWorkingCopyResult:
+		c.answerShim(frame.ID, frame)
+	case shimwire.RescueUnpushedResult:
 		c.answerShim(frame.ID, frame)
 	case shimwire.AgentSecretsEnrollmentResult:
 		c.answerShim(frame.ID, frame)

@@ -28,12 +28,14 @@ questions, approve the spec, and review the pull request. Everything happens in
 ## Hand an issue to Legion
 
 1. Open the issue in Dispatch and add the label **`legion`** from the issue header.
-2. Set its status to **`todo`**.
+2. For a new issue (status `triage`), that is the whole handover: your label is queued by the
+   daemon, and the issue moves to `todo` itself. For a parked issue (`backlog` or `icebox`), set
+   its status to **`todo`**, or approve its spec: your approval queues it the same way.
 
-That is the whole handover. When a slot is free the daemon admits the issue and the status changes
-to `in_progress`; when every slot is taken, the issue waits in `todo` and takes the next free slot
-in the board's order. A labelled issue in `triage` goes to the controller first, which admits it,
-parks it, or leaves it for you.
+When a slot is free the daemon admits the issue and the status changes to `in_progress`; when
+every slot is taken, the issue waits in `todo` and takes the next free slot in the board's order. A
+label an agent session set on an issue in `triage` goes to the controller instead: the controller
+decides whether to admit it, park it, or leave it for you.
 
 The controller never takes an issue on its own, whatever slots are free: Legion works what a person
 hands it, and the clear defects its own agents report. You can also ask the controller to hand an
@@ -112,9 +114,8 @@ repository, submitted on GitHub while the issue is in `needs_review`, counts the
 **Request changes** sends the work back to the implementer with your comments, and an approval of
 the head can end the round. A review from an account without write access decides nothing, since
 any GitHub account can review a public repository's pull request, and a plain comment moves
-nothing. The approved head also carries the tree's handoff files under `.legion/<issue>/`. Retro's
-last commit removes them, so the head that merges carries none and the merge brings no handoff onto
-the default branch; the pull request's file list shows them only until that commit.
+nothing. Legion's handoffs are records on the Dispatch issue, never commits, so the pull request's
+file list shows only the change and the merge brings no handoff onto the default branch.
 
 ## Merge
 
@@ -136,8 +137,8 @@ The merge closes the issue: it moves to `done` the moment GitHub reports the pul
 A root with work still running beneath it is the exception: its merge is recorded and the issue
 waits until the last other issue of its tree is done or parked, so no child's finished work is cut
 off, and then it closes. The architect accepted the change before that, when the reviewer approved
-it, with a comment on the issue summarizing the evidence; Legion refuses that acceptance while any
-issue beneath it is still running, so a parent is accepted after its children. After the close the
+it, with a comment on the issue summarizing the evidence; work still running beneath an issue does
+not hold that acceptance, since the root's close waits for it. After the close the
 implementer checks the change in production, once your deploy carries it, and records what it saw
 on the pull request's `Production:` line; a closed issue takes no further write, so look there.
 The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
@@ -150,8 +151,9 @@ resumes.
   agents stop, each once the turn it is in ends, however long that takes, so a turn already under
   way finishes what it was doing. To keep Legion off it for good, also take the `legion` label off;
   taking the label off alone does not stop a tree that has started.
-- **To run it again**, set it back to `todo` with the label on. The tree starts over as a new
-  generation, from its architect.
+- **To run it again**, set it back to `todo` with the label on, or approve its spec: a person's
+  approval of a parked labelled issue's spec is queued by the daemon, and the issue moves to `todo`
+  itself. The tree starts over as a new generation, from its architect.
 - **To close it without a change**, tell the architect at the design gate that no change is needed;
   it closes the issue with that reason. You can also close the issue yourself from the dashboard.
 
@@ -163,7 +165,7 @@ architect is told who wrote it; only a person's move in the dashboard, the contr
 
 | Status | Set by | What it means for a Legion issue |
 | --- | --- | --- |
-| `triage` | whoever files the issue | New. With the `legion` label, the controller decides whether to admit it now, park it, or leave it to you. |
+| `triage` | whoever files the issue | New. A person's `legion` label is queued by the daemon: the issue moves to `todo` itself. A label a session set goes to the controller, which decides whether to admit it now, park it, or leave it to you. |
 | `icebox` | a person or the controller | Parked for the long term. Legion does not run it. |
 | `backlog` | a person or the controller | Should not run now: it waits on a decision or a deploy. Legion does not run it. |
 | `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child in `todo` runs under its tree. |

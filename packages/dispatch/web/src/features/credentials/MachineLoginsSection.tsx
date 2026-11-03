@@ -80,7 +80,7 @@ export function MachineLoginsSection(): ReactNode {
         void queryClient.invalidateQueries({ queryKey: credentialGrantsQuery().queryKey });
       }}
       query={logins}
-      revoke={(login) => api.revokeMachineLogin(login.credential_id)}
+      revoke={(login, bounds) => api.revokeMachineLogin(login.credential_id, bounds)}
       revokeError="Could not revoke this machine login."
       rowKey={(login) => login.credential_id}
     />

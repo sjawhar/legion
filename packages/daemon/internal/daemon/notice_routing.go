@@ -137,8 +137,9 @@ func (r *outbox) readNoticeRoute(ctx context.Context, tx pgx.Tx, key string, rou
 // claim. A child's close or status change starts at its parent: the child's own sub-architect is
 // suspended with it (workflow's leave), and the architect above it decides what the rest of the
 // tree does. The walk stays inside the issue's tree: admission records a Dispatch re-parent as it
-// comes and leaves the issue's tree as it was (admit's recordObservation), so a parent that is not
-// an issue of tree — not recorded, or recorded in another tree — ends the walk at the tree root.
+// comes and leaves the issue's tree as it was (admit's recordObservation), except a root that
+// never ran, which joins its parent's live tree (workflow/adopt.go), so a parent that is not an
+// issue of tree — not recorded, or recorded in another tree — ends the walk at the tree root.
 func owningArchitect(project string, tree map[string]record.Issue, issue record.Issue, kind record.NoticeKind, runs func(claim.Token) bool) (claim.Token, error) {
 	root := func() (claim.Token, error) { return claim.NewToken(project, issue.Tree, claim.RoleArchitect) }
 	current := issue

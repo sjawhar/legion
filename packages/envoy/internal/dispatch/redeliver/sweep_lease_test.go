@@ -1,20 +1,26 @@
 package redeliver_test
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // webhookRedeliveryLease is the name the running sweep takes its lease under, written here as the
@@ -63,9 +69,7 @@ func redeliverTestLeases(t *testing.T) duty.Leases {
 func captureDefaultLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
 	buffer := &lockedBuffer{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buffer, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(buffer, nil))
 	return buffer
 }
 
@@ -102,7 +106,7 @@ func TestARunningSweepWhoseLeaseIsHeldElsewhereListsNothing(t *testing.T) {
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(context.Background(), leases, webhookRedeliveryLease, 0, func(context.Context) {
+		held <- duty.Exclusive(context.Background(), leases, webhookRedeliveryLease, time.Time{}, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -137,5 +141,141 @@ func TestARunningSweepWhoseLeaseIsHeldElsewhereListsNothing(t *testing.T) {
 	}
 	if calls := github.calls.Load(); calls != 0 {
 		t.Fatalf("the sweep made %d GitHub calls under a lease held elsewhere; want none", calls)
+	}
+}
+
+// sweepEvents records, in order and with the time of each, what a running sweep does: each listing
+// it asks GitHub for ("list"), each sweep's summary line, the last thing a sweep does ("end"), and
+// each wait it arms after a sweep ("wait <duration>"). Run's one goroutine makes all three, so the
+// order recorded is the order they happened in.
+type sweepEvents struct {
+	mu     sync.Mutex
+	events []sweepEvent
+}
+
+type sweepEvent struct {
+	name string
+	at   time.Time
+}
+
+func (e *sweepEvents) add(name string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.events = append(e.events, sweepEvent{name: name, at: time.Now()})
+}
+
+// Write takes the sweep's log and records its summary line.
+func (e *sweepEvents) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(`msg="webhook redelivery sweep"`)) {
+		e.add("end")
+	}
+	return len(p), nil
+}
+
+func (e *sweepEvents) list() []sweepEvent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.events)
+}
+
+func sweepEventNames(events []sweepEvent) []string {
+	names := make([]string, len(events))
+	for index, event := range events {
+		names[index] = event.name
+	}
+	return names
+}
+
+// recordingGitHub is a GitHub with no failed delivery that records each listing.
+type recordingGitHub struct{ events *sweepEvents }
+
+func (g recordingGitHub) Deliveries(context.Context, time.Time, func() error) ([]githubapp.Delivery, error) {
+	g.events.add("list")
+	return nil, nil
+}
+
+func (recordingGitHub) Redeliver(context.Context, int64) error { return nil }
+
+// The running sweep sweeps at start and then waits the interval plus up to a tenth of it again
+// after every sweep (duty.Jittered), drawn afresh each period, so two processes started together
+// drift apart rather than reaching the lease in step for the life of both. With the draw fixed at
+// its smallest and at its largest, the loop lists before it arms any wait, and after each sweep
+// ends it arms one wait of exactly the interval plus the draw: armed once the sweep has returned,
+// so the next sweep lists no sooner than that wait after the sweep before it ended, where a plain
+// ticker's wait would be the interval less the sweep's own time. Each wait of at least one interval
+// reaches the next period, so a sweep follows every wait and none is skipped as served. The test
+// holds the time between a sweep's end and the next listing to at least the wait armed between
+// them, on the monotonic clock, and to nothing more: a loaded machine that runs the lease's
+// statements slowly only lengthens that time, so it changes nothing the test checks.
+func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(t *testing.T) {
+	const (
+		interval = time.Second
+		sweeps   = 4
+		// hangGuard only ends a loop that stopped sweeping: forty intervals, against the three
+		// and a bit the sweeps' waits add up to, so a starved machine still reaches its sweeps.
+		// The comparison of the sequence it waited for, not the bound, reports such a loop.
+		hangGuard = sweeps * 10 * interval
+	)
+	for _, tc := range []struct {
+		name string
+		draw func(n time.Duration) time.Duration
+		wait time.Duration
+	}{
+		{name: "smallest draw", draw: func(time.Duration) time.Duration { return 0 }, wait: interval},
+		{name: "largest draw", draw: func(n time.Duration) time.Duration { return n - 1 }, wait: interval + interval/10 - 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each row opens the pool afresh, which clears the period the row before recorded.
+			leases := redeliverTestLeases(t)
+			events := &sweepEvents{}
+			redeliver.FixJitter(t, func(n time.Duration) time.Duration {
+				drawn := tc.draw(n)
+				// FixJitter draws from a tenth of the duration Run hands jittered, so the wait Run
+				// arms is ten times n plus the draw.
+				events.add(fmt.Sprint("wait ", 10*n+drawn))
+				return drawn
+			})
+			h := newHarness(t)
+			sweeper := &redeliver.Sweeper{
+				GitHub: recordingGitHub{events: events},
+				Open:   func() (bus.KeyValue, error) { return h.state, nil },
+				Logger: slog.New(slog.NewTextHandler(events, nil)),
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				sweeper.Run(ctx, interval, leases)
+			}()
+			var want []string
+			for sweep := 1; sweep <= sweeps; sweep++ {
+				want = append(want, "list", "end")
+				if sweep < sweeps {
+					want = append(want, fmt.Sprint("wait ", tc.wait))
+				}
+			}
+			for deadline := time.Now().Add(hangGuard); len(events.list()) < len(want) && time.Now().Before(deadline); {
+				time.Sleep(10 * time.Millisecond)
+			}
+			cancel()
+			<-done
+
+			got := events.list()
+			names := sweepEventNames(got)
+			if len(names) < len(want) || !slices.Equal(names[:len(want)], want) {
+				t.Fatalf("the running sweep did %q, want %q first, within the %v it was given", names, want, hangGuard)
+			}
+			var ended time.Time
+			for _, event := range got[:len(want)] {
+				switch {
+				case event.name == "end":
+					ended = event.at
+				case event.name == "list" && !ended.IsZero():
+					if gap := event.at.Sub(ended); gap < tc.wait {
+						t.Errorf("a sweep listed %v after the sweep before it ended, before the %v wait armed between them ran out", gap, tc.wait)
+					}
+				}
+			}
+		})
 	}
 }

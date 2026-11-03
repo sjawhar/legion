@@ -56,16 +56,15 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // belongs to one, else the document itself. askID is the approval ask the review answers, nil
 // when it was given from the document header with no request open. The review row keeps the
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
-// events. Every caller already holds the owner's row (and, when it appends `ask.answered` first,
-// the commit-order lock) before it calls this; inside WriteReview the row is inserted before the
-// event is appended and its sequence written after. The update that writes the sequence runs the
-// foreign-key checks again, since Postgres re-checks a row its own transaction inserted, and so asks
-// for the same FOR KEY SHARE locks the insert took: the transaction already holds them, so the
-// request never waits. Migration 0120's trigger, which gives the release
-// before this one's reviews their sequence, would give this row its sequence too, but only at the
-// commit, the first moment the event exists for every release; so WriteReview writes it itself,
-// and the row is right for any read the caller makes before it commits. The trigger then finds the
-// row sequenced and leaves it. The caller owns the transaction and publishes the event.
+// events. Every caller already holds the owner's row before it calls this; inside WriteReview the
+// row is inserted before the event is appended and its sequence written after. The update that
+// writes the sequence runs the foreign-key checks again, since Postgres re-checks a row its own
+// transaction inserted, and so asks for the same FOR KEY SHARE locks the insert took: the
+// transaction already holds them, so the request never waits. Migration 0120's trigger, which gives
+// the release before this one's reviews their sequence, would give this row its sequence too, but
+// only at the commit, the first moment the event exists for every release; so WriteReview writes it
+// itself, and the row is right for any read the caller makes before it commits. The trigger then
+// finds the row sequenced and leaves it. The caller owns the transaction and publishes the event.
 func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {
@@ -125,10 +124,31 @@ const latestReviewByQuery = `
 	limit 1
 `
 
+// newestReviewQuery selects the newest review of the document $1 names, in any state. Like the
+// two above it reads one row from artifact_reviews_by_artifact_event_seq (migration 0120), the
+// index in ReviewOrder's own order, rather than sorting every review of the document.
+const newestReviewQuery = `
+	select ` + ReviewColumns + `
+	from artifact_reviews
+	where artifact_id = $1
+	order by ` + ReviewOrder + `
+	limit 1
+`
+
 // LatestApprovedReview is the newest approval of artifactID, whoever gave it, or nil when nobody
 // has approved the document at any version.
 func LatestApprovedReview(ctx context.Context, q Queryer, artifactID string) (*model.ArtifactReview, error) {
 	return newestReview(ctx, q, "latest approved review", latestApprovedReviewQuery, artifactID)
+}
+
+// NewestReview is the newest review of artifactID in any state, whoever gave it, or nil when
+// nobody has reviewed the document. It orders as every newest-review read does, by the order the
+// reviews' events committed (ReviewOrder): artifact_reviews.created_at is its transaction's start
+// and its id is random, so a review that committed later can carry the earlier pair - an approval
+// a version write carries forward (carryApproval) against an approval committed while that write
+// was open, among others.
+func NewestReview(ctx context.Context, q Queryer, artifactID string) (*model.ArtifactReview, error) {
+	return newestReview(ctx, q, "newest review", newestReviewQuery, artifactID)
 }
 
 // latestReviewBy is the newest review of artifactID a person gave, in any state, by his canonical

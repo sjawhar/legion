@@ -165,8 +165,35 @@ func seedRemote(t *testing.T, root, defaultBranch string) string {
 	return remote
 }
 
-// runSetup runs a fixture command, never under a GIT_CONFIG_PARAMETERS a test planted for
-// provisioning's processes alone.
+// fixtureEnvironment is os.Environ() without the git configuration and identity of whatever
+// process runs the tests: a Legion issue pod hands every one of them a GIT_CONFIG_* block, a
+// role's GitHub credential helper and core.hooksPath=/dev/null among it, and GIT_AUTHOR_*/
+// GIT_COMMITTER_* of its own, none of which a fixture may read — a fixture is the repository the
+// test wrote, not the pod's. GIT_DIR, GIT_WORK_TREE and GIT_ALTERNATE_OBJECT_DIRECTORIES go for
+// the same reason, and the three provisioning variables so that no fixture reaches the pod's
+// token or its repository cache (cmd/legion's runtimeOptionalEnv drops those three for
+// `provision`). The block itself goes through withoutGitConfigPairs, which owns which entries
+// make it up, so a pair a caller appends (fromOrigin's) is the whole block git then reads.
+// JJ_CONFIG stays: TestMain sets it deliberately, and newLocalRunnerOnBranch sets it again.
+func fixtureEnvironment() []string {
+	return slices.DeleteFunc(withoutGitConfigPairs(os.Environ()), func(entry string) bool {
+		key := environmentKey(entry)
+		for _, prefix := range []string{"GIT_AUTHOR_", "GIT_COMMITTER_"} {
+			if strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+		return slices.Contains([]string{
+			"GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_WORK_TREE",
+			"GIT_ALTERNATE_OBJECT_DIRECTORIES", "LEGION_PROVISION_TOKEN_FILE",
+			"LEGION_REPOSITORY_CACHE_URL", "LEGION_REPOSITORY_CACHE_TOKEN_FILE",
+		}, key)
+	})
+}
+
+// runSetup runs a fixture command under fixtureEnvironment, so it reads neither a
+// GIT_CONFIG_PARAMETERS a test planted for provisioning's processes alone nor the git
+// configuration of the process that runs the tests.
 func runSetup(t *testing.T, dir string, argv ...string) string {
 	t.Helper()
 	return runSetupWith(t, dir, nil, argv...)
@@ -177,12 +204,7 @@ func runSetupWith(t *testing.T, dir string, env []string, argv ...string) string
 	t.Helper()
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Dir = dir
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "GIT_CONFIG_PARAMETERS=") {
-			command.Env = append(command.Env, entry)
-		}
-	}
-	command.Env = append(command.Env, "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+	command.Env = append(fixtureEnvironment(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
 	command.Env = append(command.Env, env...)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -231,7 +253,7 @@ func provisionRequest(t *testing.T) Request {
 		Issue:            "WIDGETS-42",
 		DefaultBranch:    "main",
 		CredentialHelper: GitHubCredentialHelper,
-		Source:           FromGitHub("test-installation-token", state),
+		Source:           FromGitHub(staticToken("test-installation-token"), state),
 		Log:              func(line string) { t.Logf("provisioning logged: %s", line) },
 	}
 }
@@ -297,7 +319,7 @@ func TestProvisionStartsAtADefaultBranchWhoseNameJJWouldParse(t *testing.T) {
 					t.Helper()
 					req := provisionRequest(t)
 					req.StateDir = filepath.Join(filepath.Dir(run.remote), "legion state")
-					req.Source = FromGitHub("test-installation-token", req.StateDir)
+					req.Source = FromGitHub(staticToken("test-installation-token"), req.StateDir)
 					req.DefaultBranch = tc.branch
 					if source == "feed" {
 						req = feedRequest(t, run, req)
@@ -346,7 +368,8 @@ func TestProvisionRefusesARequestWithNoOneWayToTheRepository(t *testing.T) {
 		edit func(*Request)
 		want string
 	}{
-		{"a token and no credential directory", func(r *Request) { r.Source = FromGitHub("test-installation-token", "") }, "workspace credential directory is required"},
+		{"a token and no credential directory", func(r *Request) { r.Source = FromGitHub(staticToken("test-installation-token"), "") }, "workspace credential directory is required"},
+		{"no token", func(r *Request) { r.Source = FromGitHub(nil, r.StateDir) }, "workspace provisioning token is required"},
 		{"no way to the repository", func(r *Request) { r.Source = nil }, "workspace request names no way to the repository: FromFeed or FromGitHub"},
 		{"no log", func(r *Request) { r.Log = nil }, "workspace request names no log"},
 	} {
@@ -914,7 +937,7 @@ func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	}
 	push := exec.Command("jj", "git", "push", "--named", "legion/WIDGETS-99=@", "--allow-empty-description")
 	push.Dir = working.Dir
-	push.Env = append(os.Environ(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
+	push.Env = append(fixtureEnvironment(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
 	if output, err := push.CombinedOutput(); err != nil {
 		t.Fatalf("a tree agent's push: %v\n%s", err, output)
 	}
@@ -1026,7 +1049,7 @@ func TestRemoveForgetsTheWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if _, err := os.Stat(workspace.Dir); !errors.Is(err, os.ErrNotExist) {
@@ -1079,7 +1102,7 @@ func TestProvisioningAndRemovalTouchOnlyTheirOwnGitWorktree(t *testing.T) {
 	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
 		t.Errorf("git in the re-added workspace answers %q, want %q", got, workspace.Dir)
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locked, registered := gitWorktreeLocks(t, workspace.Clone)[workspace.Dir]; registered {
@@ -1143,7 +1166,7 @@ func TestProvisionRecordsWhenItCreatedTheWorkspace(t *testing.T) {
 		t.Errorf("Created after provisioning the existing workspace = %v, %v; want %v unchanged", again, err, created)
 	}
 
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if _, ok, err := Created(workspace.Dir); ok || err != nil {
@@ -1290,7 +1313,7 @@ func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
 	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != physical {
 		t.Errorf("git in the re-added workspace answers %q, want %q", got, physical)
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locks := gitWorktreeLocks(t, workspace.Clone); len(locks) != 0 {
@@ -1618,7 +1641,7 @@ func TestRemoveDeletesTheEntryACrashAfterTheForgetLeft(t *testing.T) {
 	if _, registered := gitWorktreeLocks(t, workspace.Clone)[workspace.Dir]; !registered {
 		t.Fatal("the forget already removed the git worktree entry; the crash shape is not reproduced")
 	}
-	if err := Remove(context.Background(), run, workspace); err != nil {
+	if err := Remove(context.Background(), run, workspace, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if locks := gitWorktreeLocks(t, workspace.Clone); len(locks) != 0 {
@@ -1750,7 +1773,7 @@ func TestAnIssueWithADotSegmentIsRefused(t *testing.T) {
 		filepath.Join(state, "workspaces", "acme"),
 		filepath.Join(state, "workspaces", "acme", "other", "widgets-7"),
 	} {
-		err := Remove(context.Background(), run, Workspace{Dir: dir, Bookmark: "legion/WIDGETS-42", Clone: clone})
+		err := Remove(context.Background(), run, Workspace{Dir: dir, Bookmark: "legion/WIDGETS-42", Clone: clone}, nil)
 		if err == nil || !strings.Contains(err.Error(), "is not a workspace Location names") {
 			t.Errorf("Remove(%s) = %v, want it refused as no workspace Location names", dir, err)
 		}

@@ -476,7 +476,6 @@ func (r *noRequiredChecksLive) publishPush(issue noRequiredChecksIssue, from, to
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
 		"kind": "push", "repo": liveRepo, "ref": "refs/heads/" + issue.branch(), "before": from, "after": to,
-		"changed_paths": "src/widget.go", "changed_paths_truncated": "false", "forced": "false",
 		"pusher": "legion-implement[bot]", "commit_count": "1", "head_subject": "fix the widget",
 	})
 	if err != nil {
@@ -505,7 +504,7 @@ func (r *noRequiredChecksLive) publishSynchronize(issue noRequiredChecksIssue, h
 
 // noRequiredChecksGitHub is GitHub's REST API for acme/widgets as this proof's daemon reads it,
 // answering every read of the required-checks pass (readRequiredChecks) with a 2xx: each pull
-// request with its base, head and `mergeable: true` (pullRequestMergeability), its reviews as none
+// request with its base, head and `mergeable: true` (readPullRequest), its reviews as none
 // (readReviews), each base branch's rulesets as the driver last set them (requiredchecks.Required's
 // /rules/branches/<base>) and the branch itself as unprotected (its /branches/<base>, which a 404
 // would make an error that keeps the set last read). It also answers what a launch and a disarm

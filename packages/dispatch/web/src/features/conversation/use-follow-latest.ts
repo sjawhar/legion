@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { onMarkdownLatePaint } from "../refs/useRenderedMarkdown";
+
 const FOLLOW_POSITION_TOLERANCE_PX = 1;
 /** Every card and reply carries `data-turn`; the first in the document is the newest card. */
 const NEWEST_TURN_SELECTOR = "[data-turn]";
@@ -77,7 +79,7 @@ export function useFollowLatest({
   }, [followsLatest]);
 
   // The mutation's `onSuccess` bumps `ownSendCount` and invalidates the events query in the same
-  // tick, but the SSE stream (features/api/sse.ts) can independently invalidate the same query
+  // tick, but the event feed (api/event-feed.ts) can independently invalidate the same query
   // from the server push — sometimes *before* the mutation's own callback runs. `ownSendCount` and
   // `latestItemSeq` therefore change in either order across renders, not always together, so this
   // single effect reacts to a change in either: an own send always follows regardless of scroll
@@ -112,6 +114,24 @@ export function useFollowLatest({
       onFirstPlacementRef.current?.();
     }
   }, [enabled, followsLatest, jumpToLatest, latestItemSeq, ownSendCount]);
+
+  // A body longer than the parse worker's threshold formats a frame or more after the commit
+  // that drew it (`refs/markdown-engine.ts`), which is after the placement above: where the turn
+  // that just formatted is the newest one and the reader is still at it, it is placed again,
+  // once per late paint. A reader who has scrolled away keeps their place: `followsLatest` is
+  // what says so, as it does for an arrival.
+  useEffect(
+    () =>
+      onMarkdownLatePaint((element) => {
+        if (!enabled || !followsLatest()) {
+          return;
+        }
+        if (document.querySelector(NEWEST_TURN_SELECTOR)?.contains(element) === true) {
+          jumpToLatest();
+        }
+      }),
+    [enabled, followsLatest, jumpToLatest]
+  );
 
   return {
     atTop,

@@ -10,16 +10,20 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -33,6 +37,16 @@ const (
 	// the store accepts and serves back.
 	maxArtifactBlobSize      = files.MaxObjectSize
 	maxDocumentMarkdownBytes = pmdoc.MaxDocumentBytes // A Markdown document, and what a write may grow one to (docs' refuseGrowth); maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+	// maxNewArtifactKeyBytes bounds, in bytes, a new artifact's name and the reference key
+	// `<owner>/<slug>` that name gives it (newArtifactNameRefusal, newArtifactKeyRefusal).
+	// artifacts_ref_key_key is a B-tree index on ref_key, and a Postgres B-tree entry holds at
+	// most 2704 bytes: an 8-byte tuple header, then the value's 4-byte length word and its bytes,
+	// so incompressible text of 2692 bytes fits and one byte more fails the insert (SQLSTATE
+	// 54000). No index holds the name, but it is held to the same bytes: its slug is the part of
+	// the key a caller writes, so one number names what a new artifact may be called. An artifact
+	// already stored past it, under a key Postgres compressed into the index, keeps its name and
+	// key: an upload naming it stores a version as before.
+	maxNewArtifactKeyBytes = 2692
 )
 
 // artifactColumns is the canonical artifact column list scanArtifact reads.
@@ -94,6 +108,68 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	s.uploadArtifactFor(w, r, artifactTarget{IssueKey: &issueKey})
 }
 
+// issueUploadRoute is the upload to an issue, which refuseUploadToAClosedIssue guards.
+const issueUploadRoute = http.MethodPost + " /api/v1/issues/{key}/artifacts"
+
+// refuseUploadToAClosedIssue answers an upload to an issue that is closed, or missing, with the
+// refusal its handler would make (requireOpenOwnerStatus) before anything spools or parses the
+// upload's body: the keyed layer spools a keyed body whole to disk before its handler runs
+// (readKeyedBody), and the multipart parser spools an unkeyed one whole before the handler reaches
+// the issue, so an upload to a closed issue would otherwise be written out in full only to be
+// refused. The body is still read off the connection, and discarded, before the refusal is written
+// (drainBeforeAnswer), so a client that sends it whole before it reads the answer gets the
+// answer. register mounts it ahead of the keyed layer, so the refusal claims no key. The handler's
+// locked check still decides an issue that closes meanwhile; this one only spares the spool. A
+// caller that resolves to nobody is left to the route's own 401, and a malformed Idempotency-Key
+// to the keyed layer's 400, which spools no body either and refuses the request's form before
+// anything is looked up.
+//
+// The refusal stands in for the handler, so it answers only a request whose handler would run. A
+// repeat under a key the keyed layer answers itself (requestKeyAnswersItself) - its first upload's
+// stored answer, a first upload still running, one that committed and lost its answer - goes on to
+// that layer whatever the issue's state now: an upload that landed before the issue closed is
+// replayed its 201, and one still running is told KEY_IN_FLIGHT, unspooled, until the first
+// answers.
+func (s *server) refuseUploadToAClosedIssue(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestKey, keyed, err := requestKeyHeader(r)
+		if keyed && err != nil {
+			handler(w, r)
+			return
+		}
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			handler(w, r)
+			return
+		}
+		// The caller is resolved once a request: the key layer and the handler read this.
+		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
+		refusal := s.refuseClosedOwnerBeforeResolving(r.Context(), issueOwner(r.PathValue("key")))
+		if refusal == nil {
+			handler(w, r)
+			return
+		}
+		// Only the issue's own refusal (closed, missing) stands aside for the key: a check that
+		// failed is answered as it always was.
+		var ownerRefusal *apiError
+		if keyed && errors.As(refusal, &ownerRefusal) && ownerRefusal.status < http.StatusInternalServerError {
+			answers, err := s.requestKeyAnswersItself(r.Context(), requestKeyLogin(actor, human), requestKey)
+			if err != nil {
+				// As the keyed layer answers its own failed lookup: under the key, which nothing has
+				// claimed, so the client asks again under it.
+				w.Header().Set(contracts.IdempotencyKeyHeader, requestKey)
+				s.writeHandlerError(w, err)
+				return
+			}
+			if answers {
+				handler(w, r)
+				return
+			}
+		}
+		s.writeHandlerError(w, refusal)
+	}
+}
+
 func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, target artifactTarget) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxArtifactBlobSize+(1<<20))
 	requestType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -129,7 +205,7 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		return
 	}
 	if len(input.content) > maxArtifactBlobSize {
-		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		s.writeHandlerError(w, errUploadTooLarge)
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(input.contentType)
@@ -172,7 +248,7 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 	if err := decoder.Decode(&body); err != nil {
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
-			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+			s.writeHandlerError(w, errUploadTooLarge)
 		} else {
 			writeError(w, "INVALID_JSON", http.StatusBadRequest, "invalid JSON body")
 		}
@@ -216,7 +292,7 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		var spool *fs.PathError
 		switch {
 		case errors.As(err, &tooLarge):
-			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+			s.writeHandlerError(w, errUploadTooLarge)
 		case errors.Is(err, multipart.ErrMessageTooLarge):
 			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "the upload's form fields are too large to read")
 		case errors.As(err, &spool):
@@ -226,6 +302,17 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		}
 		return artifactUploadInput{}, false
 	}
+	// The parser spools a file part past a megabyte to a temporary file. net/http removes the
+	// files of the request it handed its handler, but this is a copy (the access log and the
+	// transaction tracking each wrap it with WithContext), so the server never sees them; left
+	// alone, every such upload kept its file on the pod's disk until the pod's ephemeral storage
+	// ran out. The content is read into memory below, so the files go when this returns, stored
+	// or refused.
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			slog.Error("dispatch: remove a multipart upload's spooled files", "error", err)
+		}
+	}()
 	if refusal := unstorableForm(r.MultipartForm.Value); refusal != nil {
 		s.writeHandlerError(w, refusal)
 		return artifactUploadInput{}, false
@@ -307,6 +394,17 @@ func writeDocumentVersion(ctx context.Context, tx pgx.Tx, artifactID string, num
 	return version, nil
 }
 
+// recordDocumentTaskProgress records the task count of the document a write just stored.
+// readBack is the rendering that write stored, read back by its own parse (docs'
+// Ledger.ReadBackOf): the count reads that tree rather than parsing the same markdown again, and
+// parses markdown itself when the write left none.
+func recordDocumentTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, readBack *pmdoc.Node, markdown string) error {
+	if readBack != nil {
+		return docs.RecordTaskProgress(ctx, tx, artifactID, readBack)
+	}
+	return docs.RecordTaskProgressMarkdown(ctx, tx, artifactID, markdown)
+}
+
 func (s *server) storeArtifact(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -317,8 +415,9 @@ func (s *server) storeArtifact(
 ) {
 	checksum := sha256.Sum256(input.content)
 	sha := hex.EncodeToString(checksum[:])
-	// A file's object is written before the transaction opens (putUploadedFile, artifact_files.go).
-	if !s.putUploadedFile(w, r, kind, sha, input) {
+	// A file's object is written before the transaction opens, once the refusals the transaction
+	// would make have been made (putUploadedFile, artifact_files.go).
+	if !s.putUploadedFile(w, r, kind, sha, input, target) {
 		return
 	}
 	tx, err := s.begin(r.Context())
@@ -353,15 +452,27 @@ func (s *server) storeArtifact(
 			return
 		}
 		project = &loaded.Key
+		if err := lockProjectArtifacts(r.Context(), tx, loaded.Key); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	var artifact model.Artifact
 	var created bool
-	artifact, err = s.findArtifactByName(r.Context(), tx, target, input.name)
+	artifact, err = s.findArtifactByNameOrSlug(r.Context(), tx, target, input.name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
+		if refusal := newArtifactNameRefusal(input.name); refusal != nil {
+			s.writeHandlerError(w, refusal)
+			return
+		}
 		slug, err := s.nextArtifactSlug(r.Context(), tx, target, input.name)
 		if err != nil {
 			s.writeHandlerError(w, err)
+			return
+		}
+		if refusal := newArtifactKeyRefusal(target, slug); refusal != nil {
+			s.writeHandlerError(w, refusal)
 			return
 		}
 		actorJSON, err := encodeJSON(actor)
@@ -382,7 +493,7 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	} else if artifact.Kind != kind {
-		writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
+		s.writeHandlerError(w, artifactKindMismatch(input.name, artifact, kind))
 		return
 	}
 	// A project document's owner row is the artifact itself, and until here this transaction
@@ -413,6 +524,10 @@ func (s *server) storeArtifact(
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
 	var documentMarkdown string
+	// documentReadBack is the rendering this write stored, read back by its own parse (docs'
+	// Ledger.ReadBackOf), which the task count and the advice's blocks read in place of parsing
+	// the same markdown again (recordDocumentTaskProgress, documentBlocksFor).
+	var documentReadBack *pmdoc.Node
 	var documentChanges model.ReferenceChanges
 	var movedEvents []model.Event
 	if kind == "doc" {
@@ -433,8 +548,10 @@ func (s *server) storeArtifact(
 		// The version credits the uploader alone, and holds the upload's write to the document,
 		// which clears the credit of every edit that write read when it changed the document.
 		ledger.WroteVersion(artifact.ID, version)
+		documentReadBack = ledger.ReadBackOf(artifact.ID, documentMarkdown)
 		// The version row exists now, so the count names it (LEGION-542).
-		if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifact.ID, documentMarkdown); err != nil {
+		err = recordDocumentTaskProgress(r.Context(), tx, artifact.ID, documentReadBack, documentMarkdown)
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -482,6 +599,17 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
+		// It carries the document's newest approval when its text is the approved text again and
+		// its decision blocks are as their rows have them, as every version the document service
+		// writes does (docs.carryApproval): an exact undo uploaded is the approved document.
+		carried, err := docs.CarryRestoredApproval(
+			r.Context(), tx, s.deps.Events, artifact.ID, version.Number, documentMarkdown, documentReadBack, s.deps.ServerURL,
+		)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		movedEvents = append(movedEvents, carried...)
 		diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -512,6 +640,16 @@ func (s *server) storeArtifact(
 		}
 		published = append(published, event)
 	}
+	// The approval this upload's own version superseded, read in its transaction as the edit
+	// route reads it: an upload to an existing document always writes a version, so a
+	// replacement of an approved spec closes its design gate as an edit does, unless the restore
+	// above carried the approval to it. A new document has no review of its own to supersede.
+	var superseded *supersededApproval
+	if kind == "doc" && !created {
+		superseded = s.supersededApprovalAdvice(
+			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", artifactIssueKey(artifact), artifact.ID, version.Number,
+		)
+	}
 	var advice *writeAdvice
 	if target.IssueKey != nil && issueStatus != nil {
 		advice = s.writeAdvice(
@@ -531,16 +669,19 @@ func (s *server) storeArtifact(
 	s.publish(published...)
 	var blocks *documentBlocks
 	if kind == "doc" {
-		blocks = readDocumentBlocks(documentMarkdown)
+		blocks = documentBlocksFor(documentReadBack, documentMarkdown)
 	}
 	if advice != nil {
 		advice.documentBlocks = blocks
+		advice.SupersededApproval = superseded
 	}
 	responsePayload := map[string]any{"artifact": artifact, "version": version}
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
-	} else if blocks != nil {
-		WriteJSON(w, http.StatusCreated, withRawAdvice(responsePayload, blocks))
+	} else if blocks != nil || superseded != nil {
+		WriteJSON(w, http.StatusCreated, withRawAdvice(responsePayload, documentWriteAdvice{
+			documentBlocks: blocks, SupersededApproval: superseded,
+		}))
 	} else {
 		WriteJSON(w, http.StatusCreated, responsePayload)
 	}
@@ -859,12 +1000,17 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
+	// release ends the conditional edit gate once: right after the commit, which is all a later
+	// conditional edit of this document waits on, so the checks of this edit's new decision blocks
+	// never hold it; on every earlier return, here.
+	release := func() {}
 	if input.Precondition != nil {
-		release, err := s.deps.Docs.AcquireConditionalEdit(r.Context(), artifact.ID)
+		acquired, err := s.deps.Docs.AcquireConditionalEdit(r.Context(), artifact.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		release = sync.OnceFunc(acquired)
 		defer release()
 	}
 	tx, err := s.begin(r.Context())
@@ -926,6 +1072,15 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			published = append(published, event)
 		}
 	}
+	// The approval this edit's own version superseded, read in the edit's transaction after that
+	// version and any carry it made: a person's approval of a spec is Legion's design gate, and
+	// the writer is the only one who learns in time that this write closed it.
+	var superseded *supersededApproval
+	if written != nil {
+		superseded = s.supersededApprovalAdvice(
+			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", artifactIssueKey(artifact), artifact.ID, written.Version.Number,
+		)
+	}
 	var advice *writeAdvice
 	if artifact.IssueKey != nil && status != nil {
 		advice = s.writeAdvice(
@@ -936,6 +1091,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	release()
 	var version *model.Version
 	if written != nil {
 		version = &written.Version
@@ -964,13 +1120,28 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	// The ask blocks the edit added, read from the documents the batch was applied to: whether an
 	// operation's markdown makes a block depends on where it lands and on the parser's reading of
 	// code and containers, which a caller's own reading of that markdown would only approximate.
-	blocks := &editBlocks{DecisionBlocksAdded: edit.AskBlocksAdded}
+	blocks := &editBlocks{
+		DecisionBlocksAdded: len(edit.AddedAskBlocks),
+		DecisionBlockChecks: s.decisionBlockChecks(r.Context(), artifact, edit.AddedAskBlocks, actor),
+	}
 	if artifact.IssueKey == nil || advice == nil {
-		WriteJSON(w, http.StatusOK, withRawAdvice(responsePayload, blocks))
+		WriteJSON(w, http.StatusOK, withRawAdvice(responsePayload, documentWriteAdvice{
+			editBlocks: blocks, SupersededApproval: superseded,
+		}))
 		return
 	}
 	advice.editBlocks = blocks
+	advice.SupersededApproval = superseded
 	WriteJSON(w, http.StatusOK, withAdvice(responsePayload, advice))
+}
+
+// artifactIssueKey is the issue a document belongs to, or the empty string for a project
+// document, for a log line that names where a write ran.
+func artifactIssueKey(artifact model.Artifact) string {
+	if artifact.IssueKey == nil {
+		return ""
+	}
+	return *artifact.IssueKey
 }
 
 // lostOps is the edit response's lost_ops: the operations the live document did not hold after
@@ -1060,13 +1231,33 @@ const documentHintLimit = 8
 // loadArtifactByDocumentReference reads an issue's or a project's artifact at slug reference, or
 // the one document whose filename it is.
 func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer, target artifactTarget, reference string) (model.Artifact, error) {
-	artifact, err := s.loadArtifactByRefKey(ctx, q, target.refPrefix()+"/"+reference)
+	return resolveDocumentReference(ctx, s, q, target, reference,
+		func(refKey string) (model.Artifact, error) { return s.loadArtifactByRefKey(ctx, q, refKey) },
+		func(id string) (model.Artifact, error) { return s.loadArtifact(ctx, q, id) },
+	)
+}
+
+// resolveDocumentReference is the one resolution of an issue's or a project's document reference,
+// shared by the full read and the summary: the artifact at slug reference (byRefKey, given the
+// ref_key), else the one document whose filename it is (byID, given its id). Each reader answers
+// ARTIFACT_NOT_FOUND for no row, and reads only the shape its route serves.
+func resolveDocumentReference[T any](
+	ctx context.Context,
+	s *server,
+	q queryer,
+	target artifactTarget,
+	reference string,
+	byRefKey func(refKey string) (T, error),
+	byID func(id string) (T, error),
+) (T, error) {
+	found, err := byRefKey(target.refPrefix() + "/" + reference)
 	if err == nil || !isArtifactNotFound(err) {
-		return artifact, err
+		return found, err
 	}
+	var none T
 	documents, listErr := s.loadDocumentReferences(ctx, q, target)
 	if listErr != nil {
-		return model.Artifact{}, listErr
+		return none, listErr
 	}
 	matches := make([]model.Artifact, 0, 1)
 	for index := range documents {
@@ -1076,11 +1267,11 @@ func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer,
 	}
 	switch len(matches) {
 	case 0:
-		return model.Artifact{}, documentReferenceError(target, reference, documents)
+		return none, documentReferenceError(target, reference, documents)
 	case 1:
-		return s.loadArtifact(ctx, q, matches[0].ID)
+		return byID(matches[0].ID)
 	default:
-		return model.Artifact{}, ambiguousDocumentReferenceError(target, reference, matches)
+		return none, ambiguousDocumentReferenceError(target, reference, matches)
 	}
 }
 
@@ -1114,19 +1305,142 @@ func (s *server) loadDocumentReferences(ctx context.Context, q queryer, target a
 	return documents, nil
 }
 
+// documentReferenceError refuses a reference that names none of the owner's documents. An owner
+// with more documents than the hint lists (documentHintLimit) is named with its count, the
+// documents nearest the reference first (documentsNearest), and the route that lists them all.
 func documentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {
 	scope := "this project's"
+	everyDocument := "/api/v1/projects/" + target.Project + "/artifacts?unlinked=true"
 	if target.IssueKey != nil {
 		scope = "this issue's"
+		everyDocument = "/api/v1/issues/" + *target.IssueKey + "/artifacts"
+	}
+	if len(documents) <= documentHintLimit {
+		return errorf(
+			http.StatusNotFound,
+			"ARTIFACT_NOT_FOUND",
+			`document %q not found by slug; %s documents: %s`,
+			reference,
+			scope,
+			documentReferenceLabels(documents),
+		)
 	}
 	return errorf(
 		http.StatusNotFound,
 		"ARTIFACT_NOT_FOUND",
-		`document %q not found by slug; %s documents: %s`,
+		`document %q not found by slug; %s %d documents include: %s; GET %s lists them all`,
 		reference,
 		scope,
-		documentReferenceLabels(documents),
+		len(documents),
+		documentReferenceLabels(documentsNearest(reference, documents)),
+		everyDocument,
 	)
+}
+
+// documentsNearest orders documents, given oldest first, for a hint about reference: those whose
+// slug or filename is close to it (documentCloseness) first, nearest first, then every other one,
+// each group newest first. envoy-client's documentsNearest orders an issue's documents by the
+// same rule for the hint the dispatch command gives.
+func documentsNearest(reference string, documents []model.Artifact) []model.Artifact {
+	type ranked struct {
+		document model.Artifact
+		index    int
+		distance int
+		near     bool
+	}
+	rankedDocuments := make([]ranked, len(documents))
+	for index, document := range documents {
+		distance, near := documentCloseness(reference, document.Slug, document.Name)
+		rankedDocuments[index] = ranked{document: document, index: index, distance: distance, near: near}
+	}
+	slices.SortStableFunc(rankedDocuments, func(a, b ranked) int {
+		if a.near != b.near {
+			if a.near {
+				return -1
+			}
+			return 1
+		}
+		if a.near && a.distance != b.distance {
+			return a.distance - b.distance
+		}
+		return b.index - a.index
+	})
+	ordered := make([]model.Artifact, len(rankedDocuments))
+	for index, document := range rankedDocuments {
+		ordered[index] = document.document
+	}
+	return ordered
+}
+
+// documentCloseness compares a reference with a document's slug and filename, ASCII letter case
+// ignored: the smaller edit distance of the two, and whether the document is close to it - within
+// a third of the reference's length (at least 2 edits), or one holding the other where the one held
+// is at least 4 characters long, whose distance is then exactly their difference in length. A
+// spelling more than limit edits away gives no distance (boundedEditDistance knows only that it is
+// past limit), so it never ties a document that is close through its other spelling. Only ASCII
+// letters are folded because Go and JavaScript lowercase other letters differently, and
+// envoy-client's documentCloseness must rank alike.
+func documentCloseness(reference, slug, name string) (int, bool) {
+	wanted := []rune(asciiLower(reference))
+	limit := max(2, len(wanted)/3)
+	distance := -1
+	for _, candidate := range []string{slug, name} {
+		label := []rune(asciiLower(candidate))
+		edits := boundedEditDistance(wanted, label, limit)
+		if (len(wanted) >= 4 && strings.Contains(string(label), string(wanted))) ||
+			(len(label) >= 4 && strings.Contains(string(wanted), string(label))) {
+			edits = max(len(label)-len(wanted), len(wanted)-len(label))
+		} else if edits > limit {
+			continue
+		}
+		if distance < 0 || edits < distance {
+			distance = edits
+		}
+	}
+	if distance < 0 {
+		return limit + 1, false
+	}
+	return distance, true
+}
+
+// asciiLower lowercases the ASCII letters of text and leaves every other character as it is.
+func asciiLower(text string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, text)
+}
+
+// boundedEditDistance is the Levenshtein distance between a and b in characters, or limit+1 once
+// it is known to be more than limit.
+func boundedEditDistance(a, b []rune, limit int) int {
+	if len(a)-len(b) > limit || len(b)-len(a) > limit {
+		return limit + 1
+	}
+	previous := make([]int, len(b)+1)
+	current := make([]int, len(b)+1)
+	for j := range previous {
+		previous[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		current[0] = i
+		smallest := current[0]
+		for j := 1; j <= len(b); j++ {
+			substitution := previous[j-1]
+			if a[i-1] != b[j-1] {
+				substitution++
+			}
+			current[j] = min(previous[j]+1, current[j-1]+1, substitution)
+			smallest = min(smallest, current[j])
+		}
+		if smallest > limit {
+			return limit + 1
+		}
+		previous, current = current, previous
+	}
+	return min(previous[len(b)], limit+1)
 }
 
 func ambiguousDocumentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {
@@ -1217,21 +1531,25 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 // artifactOwnerKey is the owner part of ref_key (artifactTarget.refPrefix), which the 0071
 // trigger fills ref_key from, so a lookup by owner compares what ref_key was built from. Its
 // session arm, 'agent/' || session_id, has a second reader: an agent's conversation's lookups
-// (agentArtifactByNameSQL, agentArtifactSlugTakenSQL in agent_artifacts.go) compare session_id
+// (agentArtifactByNameOrSlugSQL, agentArtifactSlugTakenSQL in agent_artifacts.go) compare session_id
 // itself, so a change to ref_key's owner part changes both.
 const artifactOwnerKey = `coalesce(issue_key, project_key, 'agent/' || session_id)`
 
-// artifactByNameSQL and artifactSlugTakenSQL are an upload's two lookups by owner, $1 the owner
-// key and $2 the name or the slug; an agent's conversation runs its own pair
-// (artifactTarget.ownerLookup).
+// artifactByNameOrSlugSQL and artifactSlugTakenSQL are an upload's two lookups by owner, $1 the
+// owner key and $2 the name or the slug; an agent's conversation runs its own pair
+// (artifactTarget.ownerLookup). An upload's name finds the artifact whose name or slug it is, so a
+// name that is one artifact's slug is that artifact's next version rather than a second artifact
+// the same reference would also name. An owner that already holds two such artifacts (one whose
+// slug and another whose name it is, which uploads stored before this lookup read slugs) gets the
+// one whose slug it is, the one a read by that reference resolves to (resolveDocumentReference).
 const (
-	artifactByNameSQL    = `select ` + artifactColumns + ` from artifacts where ` + artifactOwnerKey + ` = $1 and name = $2`
+	artifactByNameOrSlugSQL = `select ` + artifactColumns + ` from artifacts where ` + artifactOwnerKey +
+		` = $1 and $2 in (name, slug) order by slug = $2 desc limit 1`
 	artifactSlugTakenSQL = `select exists(select 1 from artifacts where ` + artifactOwnerKey + ` = $1 and slug = $2)`
 )
 
-func (s *server) findArtifactByName(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
-	query, owner := target.ownerLookup(artifactByNameSQL, agentArtifactByNameSQL)
-	artifact, err := scanArtifact(q.QueryRow(ctx, query, owner, name))
+func (s *server) findArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
+	artifact, err := lookupArtifactByNameOrSlug(ctx, q, target, name)
 	if err != nil {
 		return model.Artifact{}, err
 	}
@@ -1241,6 +1559,12 @@ func (s *server) findArtifactByName(ctx context.Context, q queryer, target artif
 	}
 	artifact.Versions = versions
 	return artifact, nil
+}
+
+// lookupArtifactByNameOrSlug reads the artifact name finds under target's owner, without its versions.
+func lookupArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactTarget, name string) (model.Artifact, error) {
+	query, owner := target.ownerLookup(artifactByNameOrSlugSQL, agentArtifactByNameOrSlugSQL)
+	return scanArtifact(q.QueryRow(ctx, query, owner, name))
 }
 
 // versionColumns is the column list a version read selects over artifact_versions aliased v, in
@@ -1337,6 +1661,51 @@ func artifactSlug(name string) string {
 	return result
 }
 
+// artifactKindMismatch is the 400 refusing an upload under name, of kind, as the next version of
+// artifact, the one the name or slug finds, whose kind is another.
+func artifactKindMismatch(name string, artifact model.Artifact, kind string) error {
+	return errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH",
+		"%q names artifact %s (%s), whose kind is %s; this upload's kind is %s, so it cannot be its next version: give it another name",
+		name, artifact.Slug, artifact.Name, artifact.Kind, kind)
+}
+
+// newArtifactNameRefusal is the 400 refusing a new artifact's name past maxNewArtifactKeyBytes,
+// or nil. An upload naming an artifact that already exists is never held to it.
+func newArtifactNameRefusal(name string) error {
+	if len(name) <= maxNewArtifactKeyBytes {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
+		"artifact name is %d bytes, past the %d bytes a new artifact's name may hold; give it a shorter name",
+		len(name), maxNewArtifactKeyBytes)
+}
+
+// newArtifactKeyRefusal is the 400 refusing a new artifact whose reference key, the target's
+// owner, `/` and slug (the one nextArtifactSlug took, suffix and all), is past
+// maxNewArtifactKeyBytes, or nil.
+func newArtifactKeyRefusal(target artifactTarget, slug string) error {
+	key := len(target.refPrefix()) + 1 + len(slug)
+	if key <= maxNewArtifactKeyBytes {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
+		"the reference key `%s/<slug>` this name gives a new artifact is %d bytes, past the %d bytes a new artifact's reference key may hold; give it a shorter name",
+		target.refPrefix(), key, maxNewArtifactKeyBytes)
+}
+
+// lockProjectArtifacts serialises one project's own uploads (its documents, not its issues') for
+// the rest of tx, as lockAgentArtifacts does a conversation's. A project's upload otherwise locks
+// no row before it looks its artifact up by name or slug and takes a new slug, so two uploads at
+// once - `plan.md` and `plan-md` - could each miss the other and leave two documents that one
+// reference names. Only these uploads take the lock, and they take it before any row or room, so
+// it joins no lock cycle.
+func lockProjectArtifacts(ctx context.Context, tx pgx.Tx, project string) error {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('project-artifacts:' || $1))`, project); err != nil {
+		return fmt.Errorf("lock the project's documents: %w", err)
+	}
+	return nil
+}
+
 func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifactTarget, name string) (string, error) {
 	base := artifactSlug(name)
 	query, owner := target.ownerLookup(artifactSlugTakenSQL, agentArtifactSlugTakenSQL)
@@ -1355,17 +1724,15 @@ func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifac
 	}
 }
 
-// quiesceDocuments closes every live document, flushing each through the store, and waits for
-// the settlements in flight. Test-only: mounted by routes() only when Deps.TestHooksEnabled is
-// set, so a browser-test harness can truncate its database between scenarios with no document
-// the previous scenario had open still writing to it.
+// quiesceDocuments closes every live document on every process, flushing each through the store,
+// and waits for the settlements in flight. Test-only: mounted by routes() only when
+// Deps.TestHooksEnabled is set, so a browser-test harness can truncate its database between
+// scenarios with no document the previous scenario had open still writing to it. It answers only
+// once every process has closed its documents (runTestHookEverywhere): a room still open on
+// another process would write to the tables the harness truncates next.
 func (s *server) quiesceDocuments(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	if err := s.deps.Docs.Quiesce(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	s.runTestHookEverywhere(w, r, testHookCall{Hook: hookQuiesceDocuments})
 }

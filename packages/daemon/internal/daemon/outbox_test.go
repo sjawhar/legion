@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,6 +53,48 @@ func TestOutboxDropsSupersededStatusWrite(t *testing.T) {
 	}
 	if len(client.statuses) != 0 {
 		t.Fatalf("status writes = %#v, want superseded row dropped", client.statuses)
+	}
+}
+
+// A person's handover row (StatusWrite.PersonHandover) answers a person's legion label on a triage
+// root, or a person's approval of a parked labelled root's spec. Its delivery writes todo only
+// while the issue still shows the status the row answered and still carries the label: a person
+// who parked the root since is let stand silently, as any superseded status write is, and one who
+// took the label off withdrew the handover, which is dropped with one log line (R4 of
+// dispatch://LEGION-755 and the plan's D2). A hand-over row of the workflow (HandOver) is not held
+// to the label: TestAHandOverWritesTheStatusAndTheLabelTogether's unlabelled cases PATCH it on.
+func TestOutboxWritesAPersonsHandoverOnlyWhileItsLabelAndStatusStand(t *testing.T) {
+	const dropped = "outbox: a person's handover is not written; the label is gone"
+	for _, tc := range []struct {
+		name     string
+		shown    dispatch.Issue
+		statuses []string
+		logged   int
+	}{
+		{name: "parked since", shown: dispatch.Issue{Key: "LEGION-208", Status: "backlog", Labels: []string{"legion"}, HandedOver: true}},
+		{name: "label gone", shown: dispatch.Issue{Key: "LEGION-208", Status: "triage"}, logged: 1},
+		{name: "label and status stand", shown: dispatch.Issue{Key: "LEGION-208", Status: "triage", Labels: []string{"legion"}, HandedOver: true}, statuses: []string{"todo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true}, time.Now())
+			client := &outboxDispatch{issue: tc.shown}
+			var logs bytes.Buffer
+			runner := &outbox{log: slog.New(slog.NewJSONHandler(&logs, nil)), dispatch: client}
+
+			if err := runner.execute(context.Background(), row); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if !slices.Equal(client.statuses, tc.statuses) {
+				t.Fatalf("status writes = %v, want %v", client.statuses, tc.statuses)
+			}
+			lines := loggedLines(t, logs.String(), dropped)
+			if len(lines) != tc.logged {
+				t.Fatalf("logged %q %d times, want %d: %s", dropped, len(lines), tc.logged, logs.String())
+			}
+			if tc.logged == 1 && lines[0]["issue"] != "LEGION-208" {
+				t.Fatalf("the drop line names issue %v, want LEGION-208", lines[0]["issue"])
+			}
+		})
 	}
 }
 
@@ -112,8 +157,14 @@ func (d *outboxDispatch) PostMessage(_ context.Context, _ string, body string) e
 func (d *outboxDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return d.bodies, d.messageReadErr
 }
+func (d *outboxDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *outboxDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return d.approval, d.approvalErr
+}
+func (d *outboxDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
 }
 func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
 	d.buildAsked++
@@ -122,6 +173,7 @@ func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
 func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *outboxDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())
@@ -706,6 +758,54 @@ func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
 	}
 }
 
+// A merge queue holder that does not advertise the packet's delivery mode (403 capability)
+// refuses every attempt until another session holds the role, and the listener's own NATS grant
+// denies every forward (403 with no reason) until an operator changes it, as a role with no holder
+// does: the issue is told the role refused the packet and which holder did, or that the listener
+// was denied the forward and why, and the row is done. A holder that did not confirm the packet in
+// time (504 receipt_timeout or delivery_failed) is retried.
+func TestOutboxMergeQueueAnswersOfTheConfirmedPublishRoute(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	row.ID = 59
+	publisher := &outboxPublisher{err: fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"reason":"capability","holder":"ses_mq"}: %w`,
+		notify.ErrRefusedByHolder{Holder: "ses_mq"})}
+	client := &outboxDispatch{}
+	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute merge queue publish its holder refused: %v", err)
+	}
+	if got := client.messages; len(got) != 1 ||
+		!strings.HasPrefix(got[0], "merge queue role merge-queue refused the packet: its holder ses_mq does not advertise the delivery mode, at 2026-09-25T03:04:05Z") ||
+		!strings.HasSuffix(got[0], "<!-- legion-outbox:59 -->") {
+		t.Fatalf("Dispatch messages = %q, want one naming the role and the holder that refused the packet", got)
+	}
+
+	denied := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	denied.ID = 60
+	const denial = `envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to "notifications.agent.ses_mq"`
+	publisher.err = fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"error":%q}: %w`, denial, notify.ErrPublishDenied{Message: denial})
+	if err := runner.execute(context.Background(), denied); err != nil {
+		t.Fatalf("execute merge queue publish the listener was denied: %v", err)
+	}
+	if got := client.messages; len(got) != 2 ||
+		!strings.HasPrefix(got[1], "merge queue role merge-queue: the listener's NATS grant denied the forward ("+denial+"), at 2026-09-25T03:04:05Z") ||
+		!strings.HasSuffix(got[1], "<!-- legion-outbox:60 -->") {
+		t.Fatalf("Dispatch messages = %q, want a second naming the role and the listener's denial", got)
+	}
+
+	for _, reason := range []string{notify.ReasonReceiptTimeout, notify.ReasonDeliveryFailed} {
+		publisher.err = fmt.Errorf("publish notice to notifications.role.merge-queue: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_mq"})
+		var notDelivered notify.ErrNotDelivered
+		if err := runner.execute(context.Background(), row); !errors.As(err, &notDelivered) || notDelivered.Reason != reason {
+			t.Fatalf("merge queue publish answered %s = %v, want the answer as a failure, retried", reason, err)
+		}
+	}
+	if got := client.messages; len(got) != 2 {
+		t.Fatalf("Dispatch messages = %q, want no message for a packet that is retried", got)
+	}
+}
+
 func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -876,12 +976,24 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	row := mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Linger: issue.Generation}, time.Now())
 	var removed workspace.Workspace
-	runner := &outbox{
+	var runner *outbox
+	runner = &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, project: "legion", log: quietLogger(),
 		stateDir: t.TempDir(),
-		remove: func(_ context.Context, got workspace.Workspace) error {
+		remove: func(_ context.Context, got workspace.Workspace, store sync.Locker) error {
 			removed = got
+			// The removal is handed its repository's store lock, the one its provisions are, not
+			// held: workspace.Remove takes it, and lets it go before it deletes the workspace's files.
+			shared, release := runner.provisions.stores.take(got.Clone)
+			defer release()
+			if store != sync.Locker(shared) {
+				t.Errorf("the removal was handed store lock %p, want its repository's %p", store, shared)
+			} else if !shared.TryLock() {
+				t.Error("the removal was handed its repository's store lock held, want it free for workspace.Remove to take")
+			} else {
+				shared.Unlock()
+			}
 			return nil
 		},
 	}
@@ -893,7 +1005,7 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 		t.Fatalf("removed workspace = %#v, want %#v", removed, want)
 	}
 
-	runner.remove = func(context.Context, workspace.Workspace) error { return errors.New("remove failed") }
+	runner.remove = func(context.Context, workspace.Workspace, sync.Locker) error { return errors.New("remove failed") }
 	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "remove failed") {
 		t.Fatalf("workspace removal failure = %v, want remove failure", err)
 	}
@@ -1265,7 +1377,7 @@ func TestALingerExpiryRowAfterReadmissionActsOnNothing(t *testing.T) {
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
 		Task: "Carry on testing.", ResumeTask: true}, time.Now())); err != nil {
@@ -1316,7 +1428,7 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 	}
 	removals := 0
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 	closeOf := func(linger uint64) record.OutboxRow {
 		return mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Linger: linger}, time.Now())
@@ -1340,6 +1452,40 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 	}
 	if got := machine.Claim().State; got != supervise.StateRetired || removals != 1 {
 		t.Fatalf("after the second linger's rows: tester %s, %d removals; want retired and the workspace removed", got, removals)
+	}
+}
+
+// A queued root that never ran joins the live tree it is made a child of. A workspace removal its
+// own former tree's linger queued, still backing off, names that tree, and finishes without acting
+// even when its new tree lingers at the same root generation: the adopted work goes on in its
+// workspace. A removal its new tree's linger queued removes it.
+func TestAWorkspaceRemovalOfATreeTheIssueLeftActsOnNothing(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	until := time.Now().Add(2 * time.Hour)
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 4, Status: "done", Rank: "U", LingerUntil: &until}
+	putOutboxIssue(t, pool, records, root)
+	parent := root.Key
+	adopted := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "adopted", Phase: phase.Planning, Generation: 5, Status: "in_progress", Rank: "V"}
+	putOutboxIssue(t, pool, records, adopted)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	removals := 0
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
+	}
+
+	if err := runner.execute(ctx, mustOutboxRow(t, adopted.Key, record.WorkspaceRemove{Linger: root.Generation, Tree: adopted.Key}, time.Now())); err != nil {
+		t.Fatalf("the former tree's removal = %v, want it finished without acting", err)
+	}
+	if removals != 0 {
+		t.Fatalf("workspace removals after the former tree's row = %d, want none", removals)
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, adopted.Key, record.WorkspaceRemove{Linger: root.Generation, Tree: root.Key}, time.Now())); err != nil {
+		t.Fatalf("the new tree's removal: %v", err)
+	}
+	if removals != 1 {
+		t.Fatalf("workspace removals after the new tree's row = %d, want the workspace removed", removals)
 	}
 }
 
@@ -1375,7 +1521,7 @@ func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	removals := 0
 	trees := outboxTreeStore(t, pool, root.Key)
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: trees, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 	closeRow := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Linger: 3}, time.Now())
 	removal := mustOutboxRow(t, child.Key, record.WorkspaceRemove{Linger: 3}, time.Now())
@@ -1483,13 +1629,11 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token}); err != nil {
 		t.Fatalf("start the turn: %v", err)
 	}
-	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:LEGION-208:implementer:implementing", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: token, Commit: "952c3514"}, engine)
+	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:LEGION-208:implementer:implementing", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: token, Commit: "952c3514", HandoffRecord: "implement-1", HandoffVersion: 1}, engine)
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("complete implementing = %+v, %v", result.Refusal, err)
 	}
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 	implementerLaunches := func() int {
 		n := 0
 		for _, call := range rt.Calls() {
@@ -1604,7 +1748,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Author: reviewApp, Body: "scripted changes requested, round 2"})
 			// A review ends when its reviewer completes it: its handoff is part of the phase.
 			apply("handoff:reviewer:reviewing:1", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
-				Claim: "reviewer", Commit: "review-round-1"})
+				Claim: "reviewer", HandoffRecord: "review-round-1", HandoffVersion: 1})
 			due("the round-2 start")
 			machine, found := sup.Machine(implementer)
 			if !found {
@@ -1641,24 +1785,22 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 
 			// Inside that turn the implementer finishes round 2, and its turn ends after the issue
 			// moved to testing: the round-2 task still pending is the finished phase's, and is dropped.
-			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
+			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2", HandoffRecord: "implement-round-2", HandoffVersion: 2})
 			due("the move to testing")
-			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
-				t.Fatalf("end the steer's turn: %v", err)
-			}
+			endTurn(ctx, t, machine, implementer)
 			if got := machine.Claim(); got.State != supervise.StateIdle || got.Pending != nil || len(rt.CallsOf("Suspend")) != 0 {
 				t.Fatalf("after round 2's turn the implementer is %s holding %+v with %d suspensions, want idle, holding nothing, never stopped",
 					got.State, got.Pending, len(rt.CallsOf("Suspend")))
 			}
 
 			// The tester passes, and the reviewer decides.
-			apply("handoff:tester:testing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleTester, Claim: tester, Commit: "test-round-2", Verdict: "pass"})
+			apply("handoff:tester:testing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleTester, Claim: tester, HandoffRecord: "test-round-2", HandoffVersion: 1, Verdict: "pass"})
 			due("the move to reviewing")
 			review := tc.review
 			review.Repo, review.Number, review.CommitID, review.HeadSHA, review.Author = "acme/widgets", 118, head, head, reviewApp
 			apply("review:after-round-2", review)
 			apply("handoff:reviewer:reviewing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
-				Claim: "reviewer", Commit: "review-round-2"})
+				Claim: "reviewer", HandoffRecord: "review-round-2", HandoffVersion: 2})
 			if tc.accept {
 				apply("signoff", intake.SignOff{Issue: issue.Key})
 			}
@@ -1863,48 +2005,53 @@ func TestTheControllersTerminalStatesNeverReachTheWorkflow(t *testing.T) {
 }
 
 // The answer supervise asks for before it sends a queued task: is the issue still in the phase
-// the task was queued for. The role is not what is compared — one role runs several phases — and
-// a task of no phase never reaches this answer at all, which is supervise's own rule.
+// and run the task was queued for. The role is not what is compared — one role runs several
+// phases — and a task of no phase never reaches this answer at all, which is supervise's own rule.
 func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	putOutboxIssue(t, pool, records, record.Issue{
 		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
-		Phase: phase.Implementing, Status: "in_progress", Rank: "00000",
+		Phase: phase.Implementing, Generation: 2, Status: "in_progress", Rank: "00000",
 	})
 	holds := (&workflowRuntime{pool: pool, records: records}).phaseHolds
 
 	for _, tc := range []struct {
-		name      string
-		issue     string
-		queuedFor phase.Phase
-		want      bool
+		name       string
+		issue      string
+		queuedFor  phase.Phase
+		generation uint64
+		want       bool
 	}{
-		{name: "the issue's own phase", issue: "LEGION-208", queuedFor: phase.Implementing, want: true},
-		{name: "a phase the issue has not reached", issue: "LEGION-208", queuedFor: phase.Testing, want: false},
+		{name: "the issue's own phase and run", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 2, want: true},
+		{name: "a phase the issue has not reached", issue: "LEGION-208", queuedFor: phase.Testing, generation: 2, want: false},
 		// The implementer works implementing, retro and the production check: a task written for
 		// one of them is not the work of another, which the role alone cannot tell.
-		{name: "another phase of the same role", issue: "LEGION-208", queuedFor: phase.Retro, want: false},
+		{name: "another phase of the same role", issue: "LEGION-208", queuedFor: phase.Retro, generation: 2, want: false},
+		// A re-admission restarts the issue in the phase it stood in: the run that is over's task
+		// of that phase is not the new run's work.
+		{name: "the issue's phase of a run that is over", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 1, want: false},
+		{name: "a task of no run in the issue's phase", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 0, want: true},
 		// The workflow never deletes an issue, so no record means the claim is not the workflow's:
 		// an operator spawn, whose task the workflow has no standing to drop.
-		{name: "an issue the workflow never recorded", issue: "LEGION-999", queuedFor: phase.Implementing, want: true},
+		{name: "an issue the workflow never recorded", issue: "LEGION-999", queuedFor: phase.Implementing, generation: 1, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := holds(context.Background(), tc.issue, tc.queuedFor)
+			got, err := holds(context.Background(), tc.issue, tc.queuedFor, tc.generation)
 			if err != nil {
 				t.Fatalf("phaseHolds: %v", err)
 			}
 			if got != tc.want {
-				t.Fatalf("phaseHolds(%s, %s) = %v, want %v", tc.issue, tc.queuedFor, got, tc.want)
+				t.Fatalf("phaseHolds(%s, %s, %d) = %v, want %v", tc.issue, tc.queuedFor, tc.generation, got, tc.want)
 			}
 		})
 	}
 
 	putOutboxIssue(t, pool, records, record.Issue{
 		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
-		Phase: phase.Testing, Status: "testing", Rank: "00000",
+		Phase: phase.Testing, Generation: 2, Status: "testing", Rank: "00000",
 	})
-	implementing, err := holds(context.Background(), "LEGION-208", phase.Implementing)
+	implementing, err := holds(context.Background(), "LEGION-208", phase.Implementing, 2)
 	if err != nil {
 		t.Fatalf("phaseHolds after the phase moved: %v", err)
 	}
@@ -2122,7 +2269,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 			provisioned++
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { removed++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removed++; return nil },
 	}
 
 	// The tree's architect ran on a session before the tree closed.
@@ -2198,7 +2345,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error {
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error {
 			removals++
 			if busy {
 				return errors.New("jj workspace forget: the repository is locked")
@@ -2262,7 +2409,7 @@ func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testin
 			provisions++
 			return workspace.Workspace{}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { removals++; return nil },
 	}
 
 	start := record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}

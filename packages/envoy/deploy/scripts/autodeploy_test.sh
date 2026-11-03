@@ -22,8 +22,11 @@ ENVOY_IMAGE_TAG=old-image
 DATABASE_URL=${1:-postgres://dispatch:s%40cret-canary@db.test:5432/dispatch?sslmode=require}
 DISPATCH_SERVER_URL=http://browser.test:8766
 EOF
-  printf '112\n' >"$schema"
-  rm -f "$schema.up" "$schema.running"
+  # The versions schema_migrations holds, one per line, as the deployer reads them: a set, not a
+  # level. A migration applied below the highest one changes the set and leaves max(version) where
+  # it was.
+  seq 1 112 >"$schema"
+  rm -f "$schema.up" "$schema.running" "$schema.candidate" "$schema.held"
   touch "$schema.running"
   : >"$log"
   : >"$argv"
@@ -44,9 +47,11 @@ EOF
 cat >"$bin/docker" <<'EOF'
 #!/usr/bin/env bash
 held_migration_commits() {
-  # A migration the candidate held open commits once Compose stops or replaces the candidate.
-  if [[ -n "${AUTODEPLOY_TEST_MIGRATE_ON_STOP:-}" && -e "$AUTODEPLOY_TEST_SCHEMA.up" ]]; then
-    printf '%s\n' "$AUTODEPLOY_TEST_MIGRATE_ON_STOP" >"$AUTODEPLOY_TEST_SCHEMA"
+  # A migration the candidate held open commits once Compose stops or replaces the candidate, and
+  # commits once however often Compose runs.
+  if [[ -n "${AUTODEPLOY_TEST_MIGRATE_ON_STOP:-}" && -e "$AUTODEPLOY_TEST_SCHEMA.up" && ! -e "$AUTODEPLOY_TEST_SCHEMA.held" ]]; then
+    printf '%s\n' "$AUTODEPLOY_TEST_MIGRATE_ON_STOP" >>"$AUTODEPLOY_TEST_SCHEMA"
+    touch "$AUTODEPLOY_TEST_SCHEMA.held"
   fi
 }
 case "$1" in
@@ -85,12 +90,13 @@ case "$1" in
         ;;
       *" up "*)
         if [[ "${ENVOY_IMAGE_TAG:-}" == new-image ]]; then
-          touch "$AUTODEPLOY_TEST_SCHEMA.up"
+          touch "$AUTODEPLOY_TEST_SCHEMA.up" "$AUTODEPLOY_TEST_SCHEMA.candidate"
           if [[ -n "${AUTODEPLOY_TEST_MIGRATE_TO:-}" ]]; then
-            printf '%s\n' "$AUTODEPLOY_TEST_MIGRATE_TO" >"$AUTODEPLOY_TEST_SCHEMA"
+            printf '%s\n' "$AUTODEPLOY_TEST_MIGRATE_TO" >>"$AUTODEPLOY_TEST_SCHEMA"
           fi
         else
           held_migration_commits
+          rm -f "$AUTODEPLOY_TEST_SCHEMA.candidate"
         fi
         touch "$AUTODEPLOY_TEST_SCHEMA.running"
         ;;
@@ -116,13 +122,26 @@ case "$1" in
     ;;
 esac
 EOF
+# curl answers /healthz 200 with NATS connected, but for new-image with
+# AUTODEPLOY_TEST_CANDIDATE_NATS set, which it reports as `nats`.
 cat >"$bin/curl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
+  *"/healthz"*)
+    nats=true
+    if [[ -e "$AUTODEPLOY_TEST_SCHEMA.candidate" ]]; then
+      nats="${AUTODEPLOY_TEST_CANDIDATE_NATS:-true}"
+    fi
+    printf '{"ok":true,"db":true,"nats":%s}' "$nats"
+    ;;
   *"/auth/start"*)
     printf 'https://github.com/login/oauth/authorize?redirect_uri=http%%3A%%2F%%2Fwrong.test%%3A8766%%2Fauth%%2Fcallback'
     ;;
 esac
+EOF
+# The health check's three-second waits pass at once, so a check that never passes fails in no time.
+cat >"$bin/sleep" <<'EOF'
+#!/usr/bin/env bash
 EOF
 # The fake libpq, which splits a URL as libpq does rather than as the deployer does: the
 # credentials run to the first @ before the first /, a raw ? included, and a query key or value is
@@ -180,7 +199,8 @@ fi
 case "$*" in
   *'pg_advisory_lock(8150001)'*'from schema_migrations'*) printf '\n' ;;
 esac
-cat "$AUTODEPLOY_TEST_SCHEMA"
+# The versions as `order by version` returns them.
+sort -n "$AUTODEPLOY_TEST_SCHEMA"
 EOF
 cat >"$tools/pg_dump" <<'EOF'
 #!/usr/bin/env bash
@@ -189,7 +209,7 @@ source "$AUTODEPLOY_TEST_TOOLS/libpq.sh"
 connection_password pg_dump "$@" || exit 1
 printf 'backup'
 EOF
-chmod +x "$bin/jj" "$bin/docker" "$bin/curl" "$tools/psql" "$tools/pg_dump"
+chmod +x "$bin/jj" "$bin/docker" "$bin/curl" "$bin/sleep" "$tools/psql" "$tools/pg_dump"
 
 deploy_once() {
   PATH="$bin:$PATH" AUTODEPLOY_TEST_LOG="$log" AUTODEPLOY_TEST_ARGV="$argv" AUTODEPLOY_TEST_SCHEMA="$schema" \
@@ -208,6 +228,14 @@ no_secret() {
     grep -q -e 'cret-canary' -e 'review-secret' "$argv"; then
     fail "$1: a password or psql's stderr reached the output or a process's arguments"
   fi
+}
+# The value the deployer records for the version set in $schema: <max>-<count>-<sha256 of the
+# versions, ascending, one per line>.
+schema_value() {
+  local versions
+  versions=$(sort -n "$schema")
+  printf '%s-%s-%s\n' "$(printf '%s\n' "$versions" | tail -n1)" "$(printf '%s\n' "$versions" | wc -l)" \
+    "$(printf '%s\n' "$versions" | sha256sum | cut -d' ' -f1)"
 }
 
 # A deploy that fails its origin check with the schema where it was stops the candidate, confirms
@@ -230,8 +258,8 @@ fi
 if [[ "$output" != *"rolling back to old-image"* ]]; then
   fail 'deployer did not report the redirect-uri rollback'
 fi
-if [[ $(<"$compose/.env") != *"ENVOY_IMAGE_SCHEMA=old-image:112"* ]]; then
-  fail 'deployer did not record the schema version old-image runs against'
+if [[ $(<"$compose/.env") != *"ENVOY_IMAGE_SCHEMA=old-image:$(schema_value)"* ]]; then
+  fail 'deployer did not record the set of migrations old-image runs against'
 fi
 if [[ $(grep -c "^pg_dump -Fc $url_without_password\$" "$argv") -ne 1 ]] ||
   [[ $(grep -c "^psql .*pg_advisory_lock(8150001).*from schema_migrations.* $url_without_password\$" "$argv") -ne 2 ]]; then
@@ -242,6 +270,25 @@ if [[ $(grep -c '^docker run ' "$argv") -ne 3 || $(grep -c '^docker run --init '
   fail 'deployer ran a database client container without --init, which a timeout could not stop'
 fi
 
+# A new image that serves with its NATS connection failing (`nats` false) fails the health check
+# and is rolled back, as when Dispatch exited at boot without NATS; one with NATS turned off
+# (`nats` null) passes it and goes on to the origin check.
+fresh_env
+if output=$(AUTODEPLOY_TEST_CANDIDATE_NATS=false deploy_once); then
+  fail 'deployer kept an image whose NATS connection failed'
+fi
+if [[ "$output" != *"did not answer 200 with NATS connected"*"rolling back to old-image"* ]] ||
+  [[ "$output" == *"OAuth redirect_uri"* ]] || [[ $(<"$compose/.env") != *"ENVOY_IMAGE_TAG=old-image"* ]]; then
+  fail 'deployer did not roll back an image whose /healthz reported nats false'
+fi
+fresh_env
+if output=$(AUTODEPLOY_TEST_CANDIDATE_NATS=null deploy_once); then
+  fail 'deployer did not fail after the origin check rejected the deployment with NATS turned off'
+fi
+if [[ "$output" != *"OAuth redirect_uri"*"rolling back to old-image"* ]] || [[ "$output" == *"NATS connected"* ]]; then
+  fail 'deployer did not pass the health check of an image with NATS turned off (nats null)'
+fi
+
 # A deploy whose image moved the schema before it failed refuses to start the previous image
 # against that schema: it stops the new one, names both versions, and fails.
 fresh_env
@@ -249,7 +296,7 @@ if output=$(AUTODEPLOY_TEST_MIGRATE_TO=113 deploy_once); then
   fail 'deployer did not fail after a deploy that moved the schema failed its origin check'
 fi
 no_secret 'the refusal'
-if [[ "$output" != *"refusing to roll back to old-image"*"schema 112"*"113"*"forward recovery is required"* ]]; then
+if [[ "$output" != *"refusing to roll back to old-image"*"schema 112 (112 applied)"*"113 (113 applied)"*"forward recovery is required"* ]]; then
   fail 'deployer did not refuse the rollback naming both schema versions'
 fi
 if [[ $(grep -c ' up ' "$log") -ne 1 || $(grep -c ' stop dispatch' "$log") -ne 1 ]]; then
@@ -266,7 +313,7 @@ if output=$(deploy_once); then
   fail 'deployer did not fail on the retry of an image whose rollback it refused'
 fi
 no_secret 'the retry'
-if [[ "$output" != *"refusing to roll back to old-image"*"schema 112"*"113"* ]] || [[ $(grep -c ' up ' "$log") -ne 1 ]]; then
+if [[ "$output" != *"refusing to roll back to old-image"*"schema 112 (112 applied)"*"113 (113 applied)"* ]] || [[ $(grep -c ' up ' "$log") -ne 1 ]]; then
   fail 'deployer rolled back to old-image against schema 113 on the retry'
 fi
 
@@ -277,9 +324,50 @@ if output=$(AUTODEPLOY_TEST_MIGRATE_ON_STOP=113 deploy_once); then
   fail 'deployer did not fail when the failed image migrated as it stopped'
 fi
 no_secret 'the migration committing as the image stops'
-if [[ "$output" != *"refusing to roll back to old-image"*"schema 112"*"113"* ]] || [[ $(grep -c ' up ' "$log") -ne 1 ]] ||
-  [[ $(<"$schema") != 113 ]]; then
+if [[ "$output" != *"refusing to roll back to old-image"*"schema 112 (112 applied)"*"113 (113 applied)"* ]] || [[ $(grep -c ' up ' "$log") -ne 1 ]] ||
+  [[ $(schema_value) != 113-113-* ]]; then
   fail 'deployer rolled back to old-image while the failed image held a migration open'
+fi
+
+# An out-of-order migration: the failed image applied a version below the highest one already
+# applied, a numbered migration under a timestamped one, so max(version) is where it was and only
+# the set changed. The deployer compares the set, so it refuses this rollback too.
+fresh_env
+printf '%s\n' 20260115123000 >>"$schema"
+if output=$(AUTODEPLOY_TEST_MIGRATE_TO=113 deploy_once); then
+  fail 'deployer did not fail after a deploy that applied an out-of-order migration failed its origin check'
+fi
+no_secret 'the out-of-order refusal'
+if [[ "$output" != *"refusing to roll back to old-image"*"schema 20260115123000 (113 applied)"*"20260115123000 (114 applied)"*"forward recovery is required"* ]]; then
+  fail 'deployer did not refuse the rollback after a migration applied below the highest one left max(version) where it was'
+fi
+if [[ $(grep -c ' up ' "$log") -ne 1 || $(<"$compose/.env") != *"ENVOY_IMAGE_TAG=old-image"* ]]; then
+  fail 'deployer started old-image against a schema holding a migration old-image never ran'
+fi
+
+# A compose/.env the deployer before this one wrote records <tag>:<max(version)>, with no set
+# behind it. While that tag is still deployed it is compared the old way, so a retry in flight
+# across the upgrade keeps the safety it started with: a schema whose max has moved refuses, and
+# the record is left as it is.
+fresh_env
+printf 'ENVOY_IMAGE_SCHEMA=old-image:112\n' >>"$compose/.env"
+if output=$(AUTODEPLOY_TEST_MIGRATE_TO=113 deploy_once); then
+  fail 'deployer did not fail on an old-form record after a deploy that moved the schema failed'
+fi
+no_secret 'the old-form record'
+if [[ "$output" != *"refusing to roll back to old-image"*"schema 112"*"113 (113 applied)"*"forward recovery is required"* ]] ||
+  [[ $(<"$compose/.env") != *"ENVOY_IMAGE_SCHEMA=old-image:112"* ]]; then
+  fail 'deployer did not refuse the rollback against an old-form ENVOY_IMAGE_SCHEMA record, or rewrote it'
+fi
+# The same record with the schema where old-image left it rolls back.
+fresh_env
+printf 'ENVOY_IMAGE_SCHEMA=old-image:112\n' >>"$compose/.env"
+if output=$(deploy_once); then
+  fail 'deployer did not fail after the origin check rejected the deployment on an old-form record'
+fi
+no_secret 'the old-form record with the schema unmoved'
+if [[ "$output" != *"rolling back to old-image"* ]] || [[ $(<"$compose/.env") != *"ENVOY_IMAGE_TAG=old-image"* ]]; then
+  fail 'deployer did not roll back on an old-form record with the schema where old-image left it'
 fi
 
 # A stop that fails, or that leaves the candidate running, proves nothing about the schema.
@@ -414,4 +502,4 @@ fi
 if [[ $(<"$compose/.env") != *"ENVOY_IMAGE_TAG=old-image"* ]]; then
   fail 'deployer persisted the failed image tag after a pull failure'
 fi
-printf '%s\n' 'autodeploy --once rollback, schema-advance refusal, stop-first, credential and pull-retry cases: PASS'
+printf '%s\n' 'autodeploy --once rollback, schema-set refusal (out-of-order migration and old-form record included), stop-first, credential and pull-retry cases: PASS'

@@ -1,9 +1,11 @@
 package tmux
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -17,6 +19,12 @@ type Launcher interface {
 	// Marker is what the command line of a pane's process holds while the pane runs this harness:
 	// the last tier of verifyPane (runsAgent).
 	Marker() string
+	// SessionsDir is the directory under which the harness, started for spec's claim in a pane
+	// whose environment is env (the pane's: the daemon's allow-listed variables, the XDG base
+	// directories under the state directory, and the operator's pane variables) in workDir, keeps
+	// its sessions, one folder per working directory: where a resume looks for a recorded session
+	// that was carried onto this host from elsewhere (sessionFileOf).
+	SessionsDir(spec runtime.SpawnSpec, host Host, env map[string]string, workDir string) (string, error)
 }
 
 // Host is what a launch's command names of the daemon's host: its state directory and the `legion`
@@ -43,6 +51,30 @@ func (l ompLauncher) Launch(spec runtime.SpawnSpec, _ Host) (string, []string, e
 
 // Marker is "omp", which the invocation in an Oh My Pi pane's command line names.
 func (ompLauncher) Marker() string { return "omp" }
+
+// SessionsDir is where Oh My Pi, started under env in workDir, keeps its sessions (getSessionsDir,
+// @oh-my-pi/pi-utils src/dirs.ts): `sessions` under the agent directory, `<config root>/agent`,
+// except where an XDG data root holds the profile (ompdirs.ProfileRoot), which flattens the
+// `agent/` prefix to `$XDG_DATA_HOME/omp[/profiles/<name>]/sessions`. A pane's environment never
+// holds PI_CODING_AGENT_DIR, which would move the agent directory itself: the daemon's allow-list
+// does not carry it and runtime.PaneVariableRefusal refuses it as a pane variable. A launch prefix
+// that sets a profile is not read here, as ompdirs says of its own reads.
+func (ompLauncher) SessionsDir(_ runtime.SpawnSpec, _ Host, env map[string]string, workDir string) (string, error) {
+	root, profile, err := ompdirs.ProfileRoot(env, workDir)
+	if err != nil {
+		return "", err
+	}
+	if data := env["XDG_DATA_HOME"]; data != "" {
+		xdg := filepath.Join(data, "omp")
+		if profile != "" {
+			xdg = filepath.Join(xdg, "profiles", profile)
+		}
+		if root == xdg {
+			return filepath.Join(root, "sessions"), nil
+		}
+	}
+	return filepath.Join(root, "agent", "sessions"), nil
+}
 
 // agentMarkers are the markers of launchers, sorted, and the harnesses they run as one phrase, in
 // the order their names sort: what verifyPane accepts and what it says a pane is not running.

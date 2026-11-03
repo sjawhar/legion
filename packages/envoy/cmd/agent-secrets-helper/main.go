@@ -32,6 +32,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/buildversion"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 type config struct {
@@ -191,8 +192,9 @@ func serve(cfg config) error {
 	}()
 	srv.Recover(ctx)
 	// The version says which release a restart came up on. The credential's state is logged where
-	// it changes (the Broker's resume, machine-login, refresh, expiry-warning and drop lines).
-	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", cfg.URL, "version", buildversion.String())
+	// it changes (the Broker's resume, machine-login, refresh, expiry-warning and drop lines). The
+	// broker's URL is logged without a credential it may carry.
+	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", redact.URL(cfg.URL), "version", buildversion.String())
 	return srv.Serve(ctx, ln)
 }
 

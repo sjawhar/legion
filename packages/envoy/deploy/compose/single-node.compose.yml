@@ -51,9 +51,8 @@ services:
       ENVOY_MACHINE_ID: ${ENVOY_MACHINE_ID:?set ENVOY_MACHINE_ID (this machine's name)}
       # This machine's own NATS, above, so the listener needs no ENVOY_ALLOW_REMOTE_NATS.
       NATS_URLS: nats://127.0.0.1:${NATS_PORT:-4222}
-      # A session that registers a port (OpenCode's serve port) is reached on this machine's
-      # loopback; unset, the listener would dial host.docker.internal, which host networking does
-      # not resolve.
+      # A session that registers a port is reached on this machine's loopback; unset, the listener
+      # would dial host.docker.internal, which host networking does not resolve.
       ENVOY_HOST_BRIDGE: 127.0.0.1
       # The NATS above has no users, so nothing refuses a subscription to every notification
       # topic: a session that registered a port also receives a topic the stream does not store,

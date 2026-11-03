@@ -1108,7 +1108,10 @@ func TestAnIssuePodTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 	if tags := git(t, report.Feed, "--git-dir="+report.Feed, "tag", "--list"); tags != "" {
 		t.Errorf("the feed holds tags %q", tags)
 	}
-	if err := exec.Command("git", "--git-dir="+report.Feed, "cat-file", "-e", tagged).Run(); err == nil {
+	// This probe expects git to fail, so it runs outside the fixture helper above, which fatals.
+	held := exec.Command("git", "--git-dir="+report.Feed, "cat-file", "-e", tagged)
+	held.Dir = report.Feed
+	if err := held.Run(); err == nil {
 		t.Errorf("the feed holds acme/gadgets's commit %s", tagged)
 	}
 }

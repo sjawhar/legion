@@ -1,7 +1,5 @@
 package gcp
 
-import "strconv"
-
 // CloudConfig is the hub VM's cloud-config document, for the tests outside the package.
 type CloudConfig = cloudConfig
 
@@ -21,6 +19,91 @@ func CloudConfigOf(args *NatsHubArgs) (CloudConfig, string, error) {
 	return s.vm.document(), s.userData, nil
 }
 
+// NatsHubAuthConf is the authorization args render for the hub's NATS server, for the test that
+// holds gcp:ClusteredNatsHub's to the same rendering.
+func NatsHubAuthConf(args *NatsHubArgs) (string, error) {
+	s, err := newSettings(args)
+	if err != nil {
+		return "", err
+	}
+	return s.vm.natsConf, nil
+}
+
+// ClusteredNatsHubSettings is the resolved gcp:ClusteredNatsHub configuration the external tests
+// assert. Tailnet is nil without tailnet.
+type ClusteredNatsHubSettings struct {
+	Name, Namespace, ServiceName, ServiceURL string
+	NatsImage, ReloaderImage, ExporterImage  string
+	NatsReplicas, StreamMaxBytes             int
+	DiskSizeGb, MaxFileStoreGb               int
+	NatsCPU, NatsMemory                      string
+	StorageClassName, PriorityClassName      string
+	ClientNamespaces                         []string
+	MonitorNamespaces                        []string
+	MetricsNamespaces                        []string
+	AuthConf                                 string
+	PodSelector                              map[string]string
+	Tailnet                                  *ClusteredHubTailnetSettings
+}
+
+// ClusteredHubTailnetSettings is the resolved tailnet entry, its listener's environment included.
+type ClusteredHubTailnetSettings struct {
+	ServiceName, TailnetDNSName     string
+	Tags                            []string
+	Replicas                        int
+	TailscaleImage                  string
+	ListenerImage, MachineID        string
+	SeedSecretName, SeedSecretKey   string
+	ListenerCPU, ListenerMemory     string
+	ListenerEnv                     []string
+	TailnetNatsURL, TailnetEnvoyURL string
+}
+
+// ResolveClusteredNatsHub resolves gcp:ClusteredNatsHub's plain inputs for the external refusal
+// and default tests, which need no engine.
+func ResolveClusteredNatsHub(args *ClusteredNatsHubArgs) (ClusteredNatsHubSettings, error) {
+	s, err := newClusteredHubSettings(args)
+	if err != nil {
+		return ClusteredNatsHubSettings{}, err
+	}
+	settings := ClusteredNatsHubSettings{
+		Name: s.name, Namespace: s.namespace, ServiceName: s.serviceName, ServiceURL: s.serviceURL,
+		NatsImage: s.images.nats, ReloaderImage: s.images.reloader, ExporterImage: s.images.exporter,
+		NatsReplicas: s.natsReplicas, StreamMaxBytes: s.streamMaxBytes,
+		DiskSizeGb: s.size.diskSizeGb, MaxFileStoreGb: s.size.maxFileStoreGb,
+		NatsCPU: s.size.natsCPU, NatsMemory: s.size.natsMemory,
+		StorageClassName: s.storageClassName, PriorityClassName: s.priorityClassName,
+		ClientNamespaces: s.clientNamespaces, MonitorNamespaces: s.monitorNamespaces, MetricsNamespaces: s.metricsNamespaces,
+		AuthConf:    s.authConf,
+		PodSelector: clusteredHubSelector(s.name),
+	}
+	if t := s.tailnet; t != nil {
+		l := t.listener
+		settings.Tailnet = &ClusteredHubTailnetSettings{
+			ServiceName: t.serviceName, TailnetDNSName: t.tailnetDNSName, Tags: t.tags, Replicas: t.replicas,
+			TailscaleImage: t.tailscaleImage, ListenerImage: l.image, MachineID: l.machineID,
+			SeedSecretName: l.seedSecretName, SeedSecretKey: l.seedSecretKey, ListenerCPU: l.cpu, ListenerMemory: l.memory,
+			ListenerEnv: l.env, TailnetNatsURL: t.natsURL, TailnetEnvoyURL: t.envoyURL,
+		}
+	}
+	return settings, nil
+}
+
+// RefuseClusteredHubSecret is gcp:ClusteredNatsHub's check of a secret Input once it resolves.
+var RefuseClusteredHubSecret = refuseClusteredHubSecret
+
+// ProtectClusteredHubStatefulSet is gcp:ClusteredNatsHub's chart transform, for the test that
+// calls it directly: chart children are not registered under the mocks.
+var ProtectClusteredHubStatefulSet = protectClusteredHubStatefulSet
+
+// The two shutdown budgets of a gcp:ClusteredNatsHub tailnet host pod, for the test that holds
+// each within the pod's grace period: the tailscale container's preStop hook and containerboot's
+// shutdown, and the session listener's own shutdown on its SIGTERM, after its preStop wait.
+const (
+	TailnetShutdownSeconds              = tailnetShutdownSeconds
+	ClusteredHubListenerShutdownSeconds = clusteredHubListenerShutdownSeconds
+)
+
 // DispatchRollingUpdate is the resolved rolling update's bounds, for the tests outside the package.
 type DispatchRollingUpdate struct {
 	MaxUnavailable int
@@ -38,7 +121,6 @@ type DispatchSettings struct {
 	Replicas           int
 	StrategyType       string
 	RollingUpdate      *DispatchRollingUpdate
-	ServeConfig        string
 	AgentSecretsURL    string
 	AppClientID        string
 	AppID              string
@@ -46,6 +128,8 @@ type DispatchSettings struct {
 	AppKeySecretKey    string
 	AppCPU             string
 	AppMemory          string
+	AppEphemeral       string
+	ProxyEphemeral     string
 	PprofPort          int
 }
 
@@ -55,24 +139,26 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 	if err != nil {
 		return DispatchSettings{}, err
 	}
+	strategy := dispatchStrategyFor(s.replicas)
 	settings := DispatchSettings{
 		DatabaseVersion:    s.databaseVersion,
 		DatabaseTier:       s.databaseTier,
 		DeletionProtection: s.deletionProtection,
 		Namespace:          s.namespace,
 		Replicas:           s.replicas,
-		StrategyType:       s.strategy.strategyType,
-		ServeConfig:        s.serveConfig,
+		StrategyType:       strategy.strategyType,
 		AgentSecretsURL:    s.agentSecretsURL,
 		AppClientID:        s.appClientID,
 		AppID:              s.appID,
 		AppKeySecretName:   s.appKeySecretName,
 		AppKeySecretKey:    s.appKeySecretKey,
-		AppCPU:             s.appCPU,
-		AppMemory:          s.appMemory,
+		AppCPU:             s.appResources.appCPU,
+		AppMemory:          s.appResources.appMemory,
+		AppEphemeral:       s.appResources.appEphemeralStorage,
+		ProxyEphemeral:     s.appResources.proxyEphemeralStorage,
 		PprofPort:          s.pprofPort,
 	}
-	if rolling := s.strategy.rollingUpdate; rolling != nil {
+	if rolling := strategy.rollingUpdate; rolling != nil {
 		settings.RollingUpdate = &DispatchRollingUpdate{MaxUnavailable: rolling.maxUnavailable, MaxSurge: rolling.maxSurge}
 	}
 	return settings, nil
@@ -87,7 +173,6 @@ func DispatchKubeconfig(endpoint, ca, name string) string {
 // for the refusal tests, with the front door's proxy in the default namespace: nil when the URL
 // renders an environment.
 func DispatchListenerEnvError(hostname, url string) error {
-	proxy := clusterLocal(hostname+"-tailnet", defaultDispatchNamespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
-	_, err := dispatchListenerEnv(hostname, proxy, hostname+"-listener", url)
+	_, err := dispatchListenerEnv(dispatchSettings{hostname: hostname, namespace: defaultDispatchNamespace}, hostname+"-listener", url)
 	return err
 }

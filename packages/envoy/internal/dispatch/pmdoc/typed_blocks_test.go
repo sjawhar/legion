@@ -1,6 +1,8 @@
 package pmdoc
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -39,6 +41,158 @@ func TestTypedBlockDirectiveRoundTrips(t *testing.T) {
 	}
 	if rendered != markdown {
 		t.Fatalf("typed block round-trip = %q, want %q", rendered, markdown)
+	}
+}
+
+// A typed block's id is written so that Go and the browser editor's engine both read it back as
+// the tree holds it, whatever a browser's update set it to (TypedBlockIDAttribute): `#id` when the
+// editor's parser reads all of it as that shortcut and it holds no `&`, else `id="…"` with `&`,
+// `"`, line feeds and carriage returns as character references. The cases are the one table
+// @legion/contracts holds, so a client finding a block's opener in a version's markdown
+// (typedBlockIdAttribute) looks for the spelling the renderer wrote:
+// `testdata/typed-block-id-spellings.json` is generated from DISPATCH_TYPED_BLOCK_ID_SPELLINGS,
+// which `packages/contracts/src/dispatch-block-ref.test.ts` holds this file to. A typed block always
+// has an id, so the table's empty one, which the renderer refuses, is checked against the writer
+// alone. One case is this test's own: U+0000 is written U+FFFD, as markdown reads it
+// (withNulsWritten), so the id reads back with each U+0000 as U+FFFD.
+func TestATypedBlockIDReadsBackAsWritten(t *testing.T) {
+	raw, err := os.ReadFile("testdata/typed-block-id-spellings.json")
+	if err != nil {
+		t.Fatalf("read table: %v", err)
+	}
+	var rows []struct {
+		ID      string `json:"id"`
+		Written string `json:"written"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("parse table: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("the shared typed block id table is empty")
+	}
+	type readBack struct{ id, opening, read string }
+	cases := []readBack{{id: "c\x00d", opening: "#c\uFFFDd", read: "c\uFFFDd"}}
+	for _, row := range rows {
+		if row.ID == "" {
+			if written := TypedBlockIDAttribute(row.ID); written != row.Written {
+				t.Errorf("TypedBlockIDAttribute(%q) = %q, want %q", row.ID, written, row.Written)
+			}
+			continue
+		}
+		cases = append(cases, readBack{id: row.ID, opening: row.Written, read: row.ID})
+	}
+	markdowns := make([]string, len(cases))
+	for index, test := range cases {
+		markdowns[index] = mustRender(t, &Node{Type: "doc", Children: []*Node{{
+			Type:     "callout",
+			Attrs:    Attrs{BlockIDAttr: test.id, "kind": "note", "title": ""},
+			Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "Body."}}}},
+		}}})
+	}
+	for index, test := range cases {
+		markdown := markdowns[index]
+		if want := ":::callout{" + test.opening + " "; !strings.HasPrefix(markdown, want) {
+			t.Errorf("id %q renders %q, want it opening %q", test.id, markdown, want)
+			continue
+		}
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Errorf("id %q: Parse(%q) = %v", test.id, markdown, err)
+			continue
+		}
+		if id := doc.Children[0].Attrs[BlockIDAttr]; id != test.read {
+			t.Errorf("id %q: Parse(%q) reads the id %q, want %q", test.id, markdown, id, test.read)
+		}
+	}
+	for index, engine := range engineReadings(t, markdowns) {
+		test := cases[index]
+		if engine == nil || len(engine.Children) == 0 || engine.Children[0].Type != "callout" {
+			t.Errorf("id %q: the engine does not read %q as a callout", test.id, markdowns[index])
+			continue
+		}
+		if id := engine.Children[0].Attrs[BlockIDAttr]; id != test.read {
+			t.Errorf("id %q: the engine reads %q with the id %q, want %q", test.id, markdowns[index], id, test.read)
+		}
+	}
+}
+
+// The reader takes a typed block's id as the browser editor's parser does - a `#` shortcut, or an
+// `id="…"` attribute with each character reference decoded and a backslash kept - and refuses what
+// that parser would read otherwise or not at all: a shortcut a quote, `<`, `=`, `>` or a backtick
+// voids, one holding `&`, which it decodes, one ending at `#`, `.` or `}`, an id written twice
+// (the editor keeps the last), an `id` with no value or an empty one (the editor mints one), and the
+// tree's own name for the id, `blockId`, which the editor refuses as undeclared.
+func TestTheTypedBlockIDSpellingsTheReaderTakesAndRefuses(t *testing.T) {
+	read := []struct{ attributes, id string }{
+		{`#a`, "a"},
+		{`id="a"`, "a"},
+		{`id="a b"`, "a b"},
+		{`id="a\b"`, `a\b`},
+		{`id="R&D"`, "R&D"},
+		{`id="R&amp;D"`, "R&D"},
+		{`id="a&#x22;b"`, `a"b`},
+		{`kind="note" id="a"`, "a"},
+	}
+	markdowns := make([]string, len(read))
+	for index, test := range read {
+		markdowns[index] = ":::callout{" + test.attributes + "}\nBody.\n:::\n"
+		doc, err := Parse(markdowns[index])
+		if err != nil {
+			t.Errorf("Parse(%q) = %v, want the id %q", markdowns[index], err, test.id)
+			continue
+		}
+		if id := doc.Children[0].Attrs[BlockIDAttr]; id != test.id {
+			t.Errorf("Parse(%q) reads the id %q, want %q", markdowns[index], id, test.id)
+		}
+	}
+	for index, engine := range engineReadings(t, markdowns) {
+		if engine == nil || len(engine.Children) == 0 || engine.Children[0].Attrs[BlockIDAttr] != read[index].id {
+			t.Errorf("the engine does not read %q with the id %q", markdowns[index], read[index].id)
+		}
+	}
+
+	for _, attributes := range []string{
+		`#`,
+		`#a b`,
+		`#a"b`,
+		`#a'b`,
+		`#a<b`,
+		`#a=b`,
+		"#a`b",
+		`#R&amp;D`,
+		`#R&D`,
+		`#a.b`,
+		`#a#b`,
+		`#a id="b"`,
+		`id="a" #b`,
+		`id="a" id="b"`,
+		`id`,
+		`id kind="note"`,
+		`id=""`,
+		`id='a'`,
+		`id=a`,
+		`id="a`,
+		`id="a"b`,
+		`blockId="a"`,
+	} {
+		markdown := ":::callout{" + attributes + "}\nBody.\n:::\n"
+		if _, err := Parse(markdown); !errors.Is(err, ErrSchema) {
+			t.Errorf("Parse(%q) = %v, want a schema refusal", markdown, err)
+		}
+	}
+}
+
+// A typed block's markdown reads `id="…"` as its block id and its tree holds that id as blockId,
+// so the schema refuses an attribute of either name.
+func TestABlockSchemaRefusesAnAttributeNamingTheBlockID(t *testing.T) {
+	for _, name := range []string{"id", BlockIDAttr} {
+		err := validateBlockSchema(BlockSchema{Version: 1, Types: []BlockTypeSchema{{
+			Name: "test", Content: BlockContentParagraphs, Render: "host",
+			Attributes: map[string]BlockAttributeSchema{name: {Kind: "string"}},
+		}}})
+		if err == nil || !strings.Contains(err.Error(), "names the block id") {
+			t.Errorf("an attribute named %q: validateBlockSchema = %v, want it refused", name, err)
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -232,6 +233,61 @@ func TestLoadForValidationSetsAShareReadOnlyAtItsSourceUnlessAMountWritesIt(t *t
 	}
 }
 
+// A Secret or ConfigMap volume's default_mode is the mode of every file it projects, written in
+// octal digits with YAML 1.1's leading 0 (kubectl's spelling) or YAML 1.2's 0o, unquoted or as a
+// string ("0440", the one octal spelling a block written as JSON can carry). It is what keeps a key
+// file at Legion's own 0440 rather than Kubernetes' default 0644, which every user in the pod may
+// read. Left out, the source carries none and Kubernetes' default stands. The loader keeps the mode
+// as written; in a pod the kubelet adds group read under the pod's fsGroup, so 0400 and 0 reach the
+// files as 0440.
+func TestLoadForValidationReadsAVolumesDefaultModeInOctal(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+`    pod:
+      volumes:
+        - {name: key, secret: {name: legion-acme-providers, items: [{key: MODEL_KEY, path: key}], default_mode: 0440}}
+        - {name: mode-0400, secret: {name: legion-operator-creds, default_mode: 0o400}}
+        - {name: route, config_map: {name: legion-operator-route, default_mode: 0444}}
+        - {name: mode-0, config_map: {name: legion-operator-roles, default_mode: 0}}
+        - {name: json, secret: {name: legion-operator-json, default_mode: "0440"}}
+        - {name: single, config_map: {name: legion-operator-single, default_mode: '0o640'}}
+        - {name: tagged, secret: {name: legion-operator-tagged, default_mode: !!int 0440}}
+        - {name: ca, secret: {name: legion-operator-ca}}
+        - {name: roles, config_map: {name: legion-operator-overlays}}
+        - {name: null-mode, secret: {name: legion-operator-null, default_mode: ~}}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := func(m *int32) string {
+		if m == nil {
+			return "unset"
+		}
+		return fmt.Sprintf("%#o", *m)
+	}
+	got := map[string]string{}
+	for _, v := range cfg.Runtime.Kubernetes.Pod.Volumes {
+		switch {
+		case v.Secret != nil:
+			got[v.Name] = mode(v.Secret.DefaultMode)
+		case v.ConfigMap != nil:
+			got[v.Name] = mode(v.ConfigMap.DefaultMode)
+		}
+	}
+	want := map[string]string{
+		"key": "0440", "mode-0400": "0400", "route": "0444", "mode-0": "0", "json": "0440", "single": "0640", "tagged": "0440",
+		"ca": "unset", "roles": "unset", "null-mode": "unset",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("volumes' defaultMode = %v, want %v", got, want)
+	}
+}
+
+// modeRefusal is load's refusal of the first volume's default_mode under its source kind, got
+// naming what the file holds there.
+func modeRefusal(kind, got string) string {
+	return "runtime.kubernetes.pod.volumes[0]." + kind + ".default_mode must be a file mode in octal digits with a leading 0 or 0o, " +
+		`from 0 to 0777, such as 0440 or "0440"; got ` + got
+}
+
 // What a block that sets only its required members settles to: the issue volume at 50Gi, both
 // pods' reservations at the daemon's default (an issue pod 3 CPU and 19Gi over an 80Gi disk limit
 // and a 6Gi disk request, the controller's pod 1 CPU and 4Gi over a 10Gi limit and a 1Gi request),
@@ -261,6 +317,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"pod", block.Pod, PodConfig{}},
 		{"session_store", block.SessionStore, ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}},
 		{"setup", block.Setup, []string(nil)},
+		{"test_postgres", block.TestPostgres, false},
 		{"repository_cache", block.RepositoryCache, RepositoryCacheConfig{
 			Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
 			Resources: Reservation{CPU: "1", CPURequest: "1", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
@@ -489,6 +546,13 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes names namespace twice",
 		},
 		{
+			// A file on the daemon's disk reaches no pod: under kubernetes a provider key is a key of
+			// the providers Secret every pod mounts.
+			name: "a provider key naming a file",
+			body: kubernetesFile + "provider_keys: {GEMINI_API_KEY: \"file:/etc/legion/providers/gemini\"}\n",
+			want: "provider_keys.GEMINI_API_KEY names the file /etc/legion/providers/gemini, which only runtime tmux reads: under runtime kubernetes a provider key is a key of the providers Secret",
+		},
+		{
 			name: "namespace absent",
 			body: kubernetesWith("    namespace: legion\n", ""),
 			want: "runtime.kubernetes.namespace is required",
@@ -553,6 +617,16 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "setup naming no command",
 			body: kubernetesFile + "    setup: []\n",
 			want: "runtime.kubernetes.setup must name a command: leave it out to run none",
+		},
+		{
+			name: "test_postgres a string",
+			body: kubernetesFile + "    test_postgres: yes please\n",
+			want: "runtime.kubernetes.test_postgres must be true or false",
+		},
+		{
+			name: "test_postgres a mapping",
+			body: kubernetesFile + "    test_postgres: {on: true}\n",
+			want: "runtime.kubernetes.test_postgres must be true or false",
 		},
 		{
 			name: "repository_cache volume zero",
@@ -1192,6 +1266,68 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.pod.volumes[0].config_map.items[0].path is required",
 		},
 		{
+			name: "a default_mode written in decimal",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 440}}]\n",
+			want: modeRefusal("secret", `"440"`),
+		},
+		{
+			name: "a quoted default_mode written in decimal",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, config_map: {name: a, default_mode: \"288\"}}]\n",
+			want: modeRefusal("config_map", `"288"`),
+		},
+		{
+			name: "a default_mode above 0777",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 01000}}]\n",
+			want: modeRefusal("secret", `"01000"`),
+		},
+		{
+			name: "a default_mode with a digit octal lacks",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 0o448}}]\n",
+			want: modeRefusal("secret", `"0o448"`),
+		},
+		{
+			name: "a default_mode that is the octal prefix alone",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: \"0o\"}}]\n",
+			want: modeRefusal("secret", `"0o"`),
+		},
+		{
+			name: "a default_mode YAML reads as a float",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 08}}]\n",
+			want: modeRefusal("secret", `"08"`),
+		},
+		{
+			name: "a default_mode with a digit separator",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 0_440}}]\n",
+			want: modeRefusal("secret", `"0_440"`),
+		},
+		{
+			name: "a default_mode in hexadecimal",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 0x120}}]\n",
+			want: modeRefusal("secret", `"0x120"`),
+		},
+		{
+			name: "a signed default_mode",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: -0440}}]\n",
+			want: modeRefusal("secret", `"-0440"`),
+		},
+		{
+			name: "a plus-signed default_mode",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: +0440}}]\n",
+			want: modeRefusal("secret", `"+0440"`),
+		},
+		{
+			name: "a default_mode that is a mapping",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: {mode: 0440}}}]\n",
+			want: modeRefusal("secret", "a mapping"),
+		},
+		{
+			// Kubernetes sets the mode of a projected volume's files for the whole volume, never per
+			// source, so a projected source takes no default_mode.
+			name: "a default_mode on a projected source",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: [{secret: {name: a, default_mode: 0440}}]}}]\n",
+			want: "unknown key runtime.kubernetes.pod.volumes[0].projected.sources[0].secret.default_mode",
+		},
+		{
 			name: "a projected volume with no sources",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: []}}]\n",
 			want: "runtime.kubernetes.pod.volumes[0].projected.sources must name at least one source",
@@ -1314,10 +1450,15 @@ func TestLoadForValidationAcceptsBindUnspecifiedWithAdvertiseHost(t *testing.T) 
 // operator and each live harness run fill in their gateway's.
 const operatorRouteAudience = "operator-audience"
 
+// operatorRouteAccount is the ServiceAccount the tests fill into the operator route's placeholder,
+// as an operator and each live harness run fill in their own.
+const operatorRouteAccount = "operator-account"
+
 // operatorRoutePod is the operator route the Go live harnesses run on
-// (deploy/kubernetes/operator-route/pod.yml), its token audience filled in with audience when that
-// is not empty, indented to sit under `runtime.kubernetes.pod`.
-func operatorRoutePod(t *testing.T, audience string) string {
+// (deploy/kubernetes/operator-route/pod.yml), its token audience filled in with audience and its
+// ServiceAccount with account, each when that one is not empty, so a test may leave either
+// placeholder standing on its own. It is indented to sit under `runtime.kubernetes.pod`.
+func operatorRoutePod(t *testing.T, audience, account string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
 	if err != nil {
@@ -1326,6 +1467,9 @@ func operatorRoutePod(t *testing.T, audience string) string {
 	pod := string(raw)
 	if audience != "" {
 		pod = strings.ReplaceAll(pod, "${MODEL_TOKEN_AUDIENCE}", audience)
+	}
+	if account != "" {
+		pod = strings.ReplaceAll(pod, "${POD_SERVICE_ACCOUNT}", account)
 	}
 	var indented strings.Builder
 	for _, line := range strings.SplitAfter(pod, "\n") {
@@ -1340,9 +1484,21 @@ func operatorRoutePod(t *testing.T, audience string) string {
 // load: nothing expands the placeholder, and a pod carrying a token for its text would have every
 // model call refused.
 func TestLoadForValidationRefusesTheOperatorRouteWithItsAudienceUnfilled(t *testing.T) {
-	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n"+operatorRoutePod(t, "")), noEnv)
+	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n"+operatorRoutePod(t, "", "")), noEnv)
 	if err == nil || !strings.Contains(err.Error(), `.service_account_token.audience "${MODEL_TOKEN_AUDIENCE}" is an unfilled placeholder`) {
 		t.Fatalf("LoadForValidation = %v, want the unfilled audience placeholder refused", err)
+	}
+}
+
+// The sibling of the test above, and a pair rather than one test because readPod reads the volumes
+// before the ServiceAccount: the unfilled audience is refused first, so only a route whose
+// audience is filled ever reaches the account's own refusal. A copy taken as it stands with the
+// gateway's audience put in, and the account placeholder left standing, is refused too: nothing
+// expands the placeholder, and the API server admits no pod for an account that does not exist.
+func TestLoadForValidationRefusesTheOperatorRouteWithItsAccountUnfilled(t *testing.T) {
+	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n"+operatorRoutePod(t, operatorRouteAudience, "")), noEnv)
+	if err == nil || !strings.Contains(err.Error(), `runtime.kubernetes.pod.service_account "${POD_SERVICE_ACCOUNT}" is an unfilled placeholder: put the ServiceAccount the pods run as in its place`) {
+		t.Fatalf("LoadForValidation = %v, want the unfilled ServiceAccount placeholder refused", err)
 	}
 }
 
@@ -1378,11 +1534,11 @@ linger_hours: 0.3
 instructions: /tmp/stage4b/instructions.md
 github_apps:
   implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    app_id: "5341240"
+    private_key_command: "agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
   review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    app_id: "5341243"
+    private_key_command: "agent-secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
 runtime:
   kubernetes:
     namespace: legion
@@ -1393,7 +1549,7 @@ runtime:
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production
     context: legion-daemon@example
     pod:
-`+operatorRoutePod(t, operatorRouteAudience))
+`+operatorRoutePod(t, operatorRouteAudience, operatorRouteAccount))
 
 	cfg, err := LoadForValidation(path, noEnv)
 	if err != nil {
@@ -1408,7 +1564,7 @@ runtime:
 	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@example" || block.Resources != DefaultResources() || block.Scheduling.NodeSelector != nil {
 		t.Errorf("kubernetes block = %+v, want the restricted context, both pods' default reservations, and no node selector", *block)
 	}
-	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != "legion-worker" || len(pod.Volumes) != 2 || len(pod.VolumeMounts) != 3 ||
+	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != operatorRouteAccount || len(pod.Volumes) != 2 || len(pod.VolumeMounts) != 3 ||
 		pod.Env["PI_CONFIG_FILES"] != "/etc/legion-operator/overlay.yml" {
 		t.Errorf("the operator pod settled as %+v, want the fixture's account, two volumes, three mounts, and its overlay", pod)
 	}
@@ -1471,6 +1627,27 @@ func TestAgentSecretsBlockRefusals(t *testing.T) {
 				t.Fatalf("err %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestAgentSecretsURLRefusalNamesNoCredential: a url carrying a user, a password, a query or a
+// fragment is refused without echoing it.
+func TestAgentSecretsURLRefusalNamesNoCredential(t *testing.T) {
+	for _, raw := range []string{
+		"https://tokuser9f3:hunter2pw@secrets.example",
+		"https://secrets.example/?token=qtok77",
+		"https://secrets.example/#qtok77",
+		"https://tokuser9f3:hunter2pw%zz@secrets.example",
+	} {
+		_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: \""+raw+"\"\n"+agentSecretsTokenFile), noEnv)
+		if err == nil || !strings.Contains(err.Error(), "agent_secrets.url must be an absolute URL") {
+			t.Fatalf("url %q: err %v, want the url refused", raw, err)
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("url %q: refusal %q names %q", raw, err, secret)
+			}
+		}
 	}
 }
 
@@ -1605,5 +1782,17 @@ func TestPluginsBlockRefusals(t *testing.T) {
 				t.Fatalf("err %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// test_postgres settles true when the file sets it, so the runtime gives every issue pod's
+// launcher the server to start and every role of that pod its DSN.
+func TestTestPostgresSettlesFromTheFile(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    test_postgres: true\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Runtime.Kubernetes.TestPostgres {
+		t.Error("test_postgres: true settled false")
 	}
 }

@@ -116,7 +116,7 @@ test("Ctrl+Alt+M comments on a project document", async ({ browser }) => {
 
 // Playwright's Linux keyboard cannot produce Mac Option's µ character. The iphone project has
 // the iPhone user agent, so this raw event is the real browser path for Cmd+Option+M's key shape.
-test("Cmd+Option+M comments on a project document on a Mac user agent", async ({
+test("Cmd+Option+M comments on a project document on a Mac user agent @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the physical-key fallback is Mac-only");

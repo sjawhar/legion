@@ -18,8 +18,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // wireSettings is GET /v1/settings's answer as the CLI reads it.
@@ -252,9 +252,10 @@ func TestRereadIsRateLimitedPerAddress(t *testing.T) {
 // at zero.
 //
 // Retry-After is the observable: it carries the refusing bucket's own Every
-// (api/limits.go's retryAfterSeconds), so it says which bucket refused and at what rate,
-// which nothing else in the answer does. The mounted shared bucket is given a depth no row here
-// can reach, so the only refusal this can meet is the address's own.
+// (ratelimit.RetryAfterSeconds, which every bucket refusal of that package carries), so it says
+// which bucket refused and at what rate, which nothing else in the answer does. The mounted
+// shared bucket is given a depth no row here can reach, so the only refusal this can meet is the
+// address's own.
 func TestOneAddressNeverOutlastsTheSharedRereadBucket(t *testing.T) {
 	for _, shared := range []time.Duration{time.Second, 4 * time.Second} {
 		t.Run(shared.String(), func(t *testing.T) {

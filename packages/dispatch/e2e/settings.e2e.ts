@@ -359,7 +359,7 @@ test("Refresh imports the architecture model and a rejected model keeps the prev
 // The Architecture sources table scrolls inside its own container, but its `sr-only` header
 // cell is absolutely positioned: without a positioned ancestor inside that container it sits
 // at the scrolled table's own x and widened the page to 417px at 390px.
-test("Settings stays inside the viewport", async ({ browser }, testInfo) => {
+test("Settings stays inside the viewport @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const alice = await asUser(browser, "alice");
 
@@ -664,9 +664,10 @@ test("a default assignee save refused while Settings is left says so when Settin
       if (route.request().method() !== "PUT") return route.fallback();
       await held.promise;
       answered = true;
+      // Dispatch's verdict, a 4xx: a 5xx is tried again under the save's key, not refused.
       return route.fulfill({
-        json: { code: "INTERNAL", error: "the default assignee save was refused" },
-        status: 500,
+        json: { code: "ASSIGNEE_NOT_ALLOWED", error: "the default assignee save was refused" },
+        status: 400,
       });
     });
     await page.goto("/settings");

@@ -8,7 +8,7 @@ tags:
   - pr-body
   - refusal
 date: 2026-10-25
-status: active
+status: superseded in part by sjawhar/legion#2423 — a pull request no longer rebuilds the claude-envoy bundle or runs `check-dist`, since main's Rebuild Claude Envoy plugin workflow commits it after each merge; the census rules and the finite field as an enum stand
 module: packages/contracts
 related_issues:
   - "INFRA-229"

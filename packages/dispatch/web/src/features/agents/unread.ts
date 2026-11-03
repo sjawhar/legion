@@ -1,7 +1,7 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { api } from "../../api/client";
+import { agentStateRequest } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
 import type {
   Message,
@@ -11,7 +11,7 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
-import { useSendMarkOnce } from "../../lib/useSendMarkOnce";
+import { useSendMarkOnce } from "../writes/useSendMarkOnce";
 
 /** The badge an unread count wears wherever it shows: the navigation, the compact header, and
  *  the agent's row. */
@@ -110,8 +110,9 @@ function useSendReadMark<V>(
   useSendMarkOnce({
     mark: value === undefined ? undefined : { key: dedupeKey(value), value: input(value) },
     onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
-    send: (body: UserAgentStateInput) => api.putAgentState(sessionId, body),
+    request: (body: UserAgentStateInput) => agentStateRequest(sessionId, body),
     shouldSend: unread !== 0,
+    target: `read:agent:${sessionId}`,
     wake: unread,
   });
 }

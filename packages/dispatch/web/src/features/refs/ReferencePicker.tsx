@@ -2,6 +2,7 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { type KeyboardEvent, type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
+import { issueQuery } from "../../api/queries";
 import {
   backdrop40,
   card,
@@ -29,10 +30,7 @@ export function ReferencePicker({ issueKey, onClose, onSelect }: ReferencePicker
   const [filter, setFilter] = useState("");
   const [expandedIssues, setExpandedIssues] = useState<Set<string>>(new Set());
   const dialog = useDialog<HTMLDivElement>({ onClose, open: true });
-  const currentIssue = useQuery({
-    queryKey: ["issue", issueKey],
-    queryFn: () => api.getIssue(issueKey),
-  });
+  const currentIssue = useQuery(issueQuery(issueKey));
   const issues = useQuery({
     enabled: currentIssue.data !== undefined,
     queryKey: ["issues", currentIssue.data?.project],

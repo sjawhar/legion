@@ -391,7 +391,7 @@ func readMigration(sql string) migrationText {
 	scanSQL(sql, func(token sqlToken) error {
 		text := sql[token.start:token.end]
 		switch {
-		case token.kind == sqlComment:
+		case token.kind == sqlComment, token.kind == sqlSpace:
 			code.WriteByte(' ')
 		case token.kind == sqlString, token.kind == sqlUnicodeEscape && text[2] == '\'':
 			code.WriteString("''")

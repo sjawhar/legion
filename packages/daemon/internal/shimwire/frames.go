@@ -29,10 +29,12 @@ const (
 	TypeGetState               = "get_state"
 	TypeAgentStart             = "agent_start"
 	TypeAgentEnd               = "agent_end"
+	TypePromptResult           = "prompt_result"
 	TypeShutdown               = "shutdown"
-	TypeAbort                  = "abort"
 	TypeAdoptWorkingCopy       = "adopt-working-copy"
 	TypeAdoptWorkingCopyResult = "adopt-working-copy-result"
+	TypeRescueUnpushed         = "rescue-unpushed"
+	TypeRescueUnpushedResult   = "rescue-unpushed-result"
 	TypeRPCChunk               = "rpc_chunk"
 	// hello2 is the hello every shim sends since DaemonAPIVersion 8: the boot token and, under a
 	// runtime that enrolls pods with the secrets broker, the pod's key thumbprint and
@@ -262,14 +264,6 @@ type GetState struct {
 	ID string `json:"id"`
 }
 
-// Abort asks OMP to end the turn it is running: it cancels the turn's tool children and the model
-// call, and answers once the agent is idle, keeping the process and its session. Its answer can
-// come before the agent_end that ends the turn on the wire, so that agent_end, not the answer, is
-// the turn's end.
-type Abort struct {
-	ID string `json:"id"`
-}
-
 // AgentStart is OMP beginning a turn. DeliveryID is set only on the shim's own synthetic replay
 // of a start it already observed (worker-shim.ts:365); OMP never sets it.
 type AgentStart struct {
@@ -279,6 +273,51 @@ type AgentStart struct {
 // AgentEnd is OMP finishing a turn. Its real form carries the whole transcript, which is why it
 // is the frame that arrives chunked.
 type AgentEnd struct{}
+
+// PromptResult is Oh My Pi reporting how one prompt's work ended, and the only frame that names
+// the prompt a turn belonged to: ID is the `prompt` command's own request id, where AgentEnd
+// carries no prompt identity at all ("that frame carries no prompt identity, so correlate
+// prompts through `prompt_result`", omp://rpc.md). An accepted prompt completes exactly once,
+// either as `data.agentInvoked: false` on its response — it finished locally and started no turn
+// — or as this frame, always written after that response.
+//
+// AgentInvoked is false for a prompt that ran no turn of its own, and Error is Oh My Pi's reason
+// when the work ended in one — an object, never a string (PromptError). Oh My Pi's own
+// prompt_result carries more than these three members — `status`, its word for how the work
+// ended, and `sessionSettled` among them — which nothing in the daemon reads; the decode drops
+// them.
+type PromptResult struct {
+	ID           string       `json:"id"`
+	AgentInvoked bool         `json:"agentInvoked"`
+	Error        *PromptError `json:"error,omitempty"`
+}
+
+// PromptError is how a prompt's work failed, as the pinned Oh My Pi declares it: `{message,
+// provider?, model?, httpStatus?, retryable}`, the "failure detail of a `prompt_result` with
+// `status: \"error\"`". Oh My Pi writes it for a prompt whose last assistant message ended with
+// stopReason "error" — a provider request its own retries could not get through, where
+// Retryable says it may still succeed later — and for one it failed outright before any turn.
+//
+// Only Message is read, as the reason a failed prompt is recorded with (PromptResult.Reason).
+// The other members are modelled so the frame survives this package whole, the way every other
+// frame does: a decode that kept only what today's reader wants would quietly drop the provider,
+// the model and the status behind a failure from anything that re-encodes it.
+type PromptError struct {
+	Message    string `json:"message"`
+	Provider   string `json:"provider,omitempty"`
+	Model      string `json:"model,omitempty"`
+	HTTPStatus int    `json:"httpStatus,omitempty"`
+	Retryable  bool   `json:"retryable"`
+}
+
+// Reason is Oh My Pi's message for work that ended in an error, and the empty string for work
+// that did not: the one thing the daemon reads of the failure.
+func (f PromptResult) Reason() string {
+	if f.Error == nil {
+		return ""
+	}
+	return f.Error.Message
+}
 
 // Shutdown asks the shim to end the wrapped process: SIGTERM, then SIGKILL if it is still running
 // when the shim's grace runs out. The shim acts on it and never forwards it.
@@ -298,6 +337,46 @@ type AdoptWorkingCopyResult struct {
 	ID    string `json:"id"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// RescueUnpushed asks the shim, before the daemon replaces its pod, to check every workspace on
+// the pod's disk for work its remote lacks and to push that work to rescue branches on that remote,
+// as the shim's role and with that role's own credential (internal/rescue). Branch is the prefix of
+// every rescue branch, which the shim numbers from 1. WorkspaceTimeoutMs bounds one workspace's
+// check and push, TimeoutMs the whole check. The daemon names the branch and the bounds, never a
+// command or a path. A shim built before this frame forwards it to its agent, which refuses it as
+// a command it does not know; the daemon reads that refusal as a pod it cannot check.
+type RescueUnpushed struct {
+	ID                 string `json:"id"`
+	Branch             string `json:"branch"`
+	WorkspaceTimeoutMs int    `json:"workspaceTimeoutMs"`
+	TimeoutMs          int    `json:"timeoutMs"`
+}
+
+// RescueUnpushedResult answers RescueUnpushed: OK with one entry per workspace on the disk, or
+// why the shim could not run the check at all.
+type RescueUnpushedResult struct {
+	ID         string            `json:"id"`
+	OK         bool              `json:"ok"`
+	Error      string            `json:"error,omitempty"`
+	Workspaces []RescueWorkspace `json:"workspaces,omitempty"`
+}
+
+// RescueWorkspace is one workspace's check: Status "clean" (nothing its remote lacks),
+// "rescued" (Branches name each rescue branch of the request's prefix the remote holds, pushed by
+// this check or an earlier one of the same pod, and the commit each holds) or "error" (Error says
+// why, and nothing of it is known to be safe).
+type RescueWorkspace struct {
+	Dir      string         `json:"dir"`
+	Status   string         `json:"status"`
+	Branches []RescueBranch `json:"branches,omitempty"`
+	Error    string         `json:"error,omitempty"`
+}
+
+// RescueBranch is one rescue branch the check pushed, and the commit it holds.
+type RescueBranch struct {
+	Name   string `json:"name"`
+	Commit string `json:"commit"`
 }
 
 // RPCChunk is one slice of a logical frame too large for a single line. Data is base64 of the
@@ -324,12 +403,14 @@ func (NegotiateProtocol) FrameType() string            { return TypeNegotiatePro
 func (Prompt) FrameType() string                       { return TypePrompt }
 func (Response) FrameType() string                     { return TypeResponse }
 func (GetState) FrameType() string                     { return TypeGetState }
-func (Abort) FrameType() string                        { return TypeAbort }
 func (AgentStart) FrameType() string                   { return TypeAgentStart }
 func (AgentEnd) FrameType() string                     { return TypeAgentEnd }
+func (PromptResult) FrameType() string                 { return TypePromptResult }
 func (Shutdown) FrameType() string                     { return TypeShutdown }
 func (AdoptWorkingCopy) FrameType() string             { return TypeAdoptWorkingCopy }
 func (AdoptWorkingCopyResult) FrameType() string       { return TypeAdoptWorkingCopyResult }
+func (RescueUnpushed) FrameType() string               { return TypeRescueUnpushed }
+func (RescueUnpushedResult) FrameType() string         { return TypeRescueUnpushedResult }
 func (RPCChunk) FrameType() string                     { return TypeRPCChunk }
 func (r Raw) FrameType() string                        { return r.Type }
 func (Hello2) FrameType() string                       { return TypeHello2 }
@@ -372,17 +453,17 @@ func (f GetState) MarshalJSON() ([]byte, error) {
 	return marshalFrame(TypeGetState, plain(f))
 }
 
-func (f Abort) MarshalJSON() ([]byte, error) {
-	type plain Abort
-	return marshalFrame(TypeAbort, plain(f))
-}
-
 func (f AgentStart) MarshalJSON() ([]byte, error) {
 	type plain AgentStart
 	return marshalFrame(TypeAgentStart, plain(f))
 }
 
 func (AgentEnd) MarshalJSON() ([]byte, error) { return marshalFrame(TypeAgentEnd, struct{}{}) }
+
+func (f PromptResult) MarshalJSON() ([]byte, error) {
+	type plain PromptResult
+	return marshalFrame(TypePromptResult, plain(f))
+}
 
 func (Shutdown) MarshalJSON() ([]byte, error) { return marshalFrame(TypeShutdown, struct{}{}) }
 
@@ -394,6 +475,16 @@ func (f AdoptWorkingCopy) MarshalJSON() ([]byte, error) {
 func (f AdoptWorkingCopyResult) MarshalJSON() ([]byte, error) {
 	type plain AdoptWorkingCopyResult
 	return marshalFrame(TypeAdoptWorkingCopyResult, plain(f))
+}
+
+func (f RescueUnpushed) MarshalJSON() ([]byte, error) {
+	type plain RescueUnpushed
+	return marshalFrame(TypeRescueUnpushed, plain(f))
+}
+
+func (f RescueUnpushedResult) MarshalJSON() ([]byte, error) {
+	type plain RescueUnpushedResult
+	return marshalFrame(TypeRescueUnpushedResult, plain(f))
 }
 
 func (f RPCChunk) MarshalJSON() ([]byte, error) {
@@ -481,6 +572,21 @@ func (f AdoptWorkingCopy) Validate() error {
 		return fmt.Errorf("%w: adopt-working-copy carries no jj identity", ErrMalformedFrame)
 	case f.TimeoutMs <= 0:
 		return fmt.Errorf("%w: adopt-working-copy timeoutMs is %d", ErrMalformedFrame, f.TimeoutMs)
+	}
+	return nil
+}
+
+// Validate refuses a rescue request the shim would refuse: no id, a branch prefix that is not one
+// of an issue's own (legion/...) or that a git refspec could misread, or a bound that is not
+// positive or puts one workspace's bound above the whole check's.
+func (f RescueUnpushed) Validate() error {
+	switch {
+	case f.ID == "":
+		return fmt.Errorf("%w: rescue-unpushed carries no id", ErrMalformedFrame)
+	case !strings.HasPrefix(f.Branch, "legion/") || strings.ContainsAny(f.Branch, " \t\n:^~?*[\\") || strings.Contains(f.Branch, ".."):
+		return fmt.Errorf("%w: rescue-unpushed branch %q is not a legion/ branch name", ErrMalformedFrame, f.Branch)
+	case f.WorkspaceTimeoutMs <= 0 || f.TimeoutMs <= 0 || f.WorkspaceTimeoutMs > f.TimeoutMs:
+		return fmt.Errorf("%w: rescue-unpushed bounds workspaceTimeoutMs %d, timeoutMs %d", ErrMalformedFrame, f.WorkspaceTimeoutMs, f.TimeoutMs)
 	}
 	return nil
 }
@@ -606,18 +712,22 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[Response](trimmed)
 	case TypeGetState:
 		return decodeInto[GetState](trimmed)
-	case TypeAbort:
-		return decodeInto[Abort](trimmed)
 	case TypeAgentStart:
 		return decodeInto[AgentStart](trimmed)
 	case TypeAgentEnd:
 		return AgentEnd{}, nil
+	case TypePromptResult:
+		return decodeInto[PromptResult](trimmed)
 	case TypeShutdown:
 		return Shutdown{}, nil
 	case TypeAdoptWorkingCopy:
 		return decodeInto[AdoptWorkingCopy](trimmed)
 	case TypeAdoptWorkingCopyResult:
 		return decodeInto[AdoptWorkingCopyResult](trimmed)
+	case TypeRescueUnpushed:
+		return decodeInto[RescueUnpushed](trimmed)
+	case TypeRescueUnpushedResult:
+		return decodeInto[RescueUnpushedResult](trimmed)
 	case TypeRPCChunk:
 		return decodeInto[RPCChunk](trimmed)
 	case TypeHello2:

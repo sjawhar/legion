@@ -3,8 +3,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
-import type { Issue, IssueDetails } from "../../api/types";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
+import { ApiError, api, NetworkError } from "../../api/client";
+import type { Issue, IssueDetails, IssueSummary } from "../../api/types";
+import type { IssueStatus } from "../project/board-model";
+import { useBoardMoves } from "../project/board-moves";
+import { projectIssuesQueryKey } from "../project/issue-filters";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {
@@ -95,7 +100,7 @@ function stubIssueApi() {
   // The server answers a PATCH with the narrow `Issue`, not `IssueDetails`: no artifacts,
   // children, or open asks. The stub mirrors that so the page is exercised against the
   // real response shape.
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(
+  const patchIssue = answerIssuePatches().mockImplementation(
     async (_key, { rank: _rank, components: _components, ...update }) =>
       narrowIssue({ ...issue, ...update })
   );
@@ -145,7 +150,9 @@ test("IssuePage keeps an unsaved route draft when a stale refetch arrives", asyn
     let saveRoute = screen.getByRole("button", { name: "Save route" });
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(saveRoute);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }, keyedAttempt)
+    );
     route = await openRouteEditor();
     saveRoute = screen.getByRole("button", { name: "Save route" });
 
@@ -157,7 +164,9 @@ test("IssuePage keeps an unsaved route draft when a stale refetch arrives", asyn
     await waitFor(() => expect(route.value).toBe(""));
 
     fireEvent.click(saveRoute);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "" }, keyedAttempt)
+    );
     expect(route.value).toBe("");
   } finally {
     unmount();
@@ -180,7 +189,9 @@ test("IssuePage keeps a route cleared while the previous save was still in fligh
     let saveRoute = screen.getByRole("button", { name: "Save route" });
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(saveRoute);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }, keyedAttempt)
+    );
     route = await openRouteEditor();
     saveRoute = screen.getByRole("button", { name: "Save route" });
 
@@ -193,7 +204,9 @@ test("IssuePage keeps a route cleared while the previous save was still in fligh
 
     expect(route.value).toBe("");
     fireEvent.click(saveRoute);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "" }, keyedAttempt)
+    );
   } finally {
     unmount();
     restore();
@@ -213,7 +226,9 @@ test("IssuePage keeps the document and a route draft across a save response", as
     let route = await openRouteEditor();
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(screen.getByRole("button", { name: "Save route" }));
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }, keyedAttempt)
+    );
     route = await openRouteEditor();
     fireEvent.change(route, { target: { value: "" } });
 
@@ -242,7 +257,9 @@ test("IssuePage ignores a stale route refetch after a newer successful save", as
     let saveRoute = screen.getByRole("button", { name: "Save route" });
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(saveRoute);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }, keyedAttempt)
+    );
     await waitFor(() =>
       expect(queryClient.getQueryData<IssueDetails>(["issue", "CORE-1"])?.route).toBe("role:a")
     );
@@ -257,7 +274,9 @@ test("IssuePage ignores a stale route refetch after a newer successful save", as
 
     fireEvent.change(route, { target: { value: "" } });
     fireEvent.click(saveRoute);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "" }, keyedAttempt)
+    );
     await waitFor(() =>
       expect(queryClient.getQueryData<IssueDetails>(["issue", "CORE-1"])?.route).toBe("")
     );
@@ -283,7 +302,9 @@ test("IssuePage keeps an unsaved title draft when a stale refetch arrives", asyn
     let title = (await screen.findByLabelText("Issue title")) as HTMLInputElement;
     fireEvent.change(title, { target: { value: "A" } });
     fireEvent.blur(title);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "A" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "A" }, keyedAttempt)
+    );
 
     // Blur exits click-to-edit mode; re-enter it to start a second, still-unsaved edit
     // before the first save's response arrives.
@@ -297,7 +318,11 @@ test("IssuePage keeps an unsaved title draft when a stale refetch arrives", asyn
 
     fireEvent.blur(title);
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Edited locally" })
+      expect(patchIssue).toHaveBeenLastCalledWith(
+        "CORE-1",
+        { title: "Edited locally" },
+        keyedAttempt
+      )
     );
     expect(title.value).toBe("Edited locally");
   } finally {
@@ -317,7 +342,7 @@ test("IssuePage ignores a same-task duplicate title save", async () => {
     fireEvent.blur(title);
 
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
-    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Guarded title" });
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Guarded title" }, keyedAttempt);
   } finally {
     unmount();
     restore();
@@ -340,7 +365,7 @@ test("IssuePage ignores same-task duplicate route saves", async () => {
     fireEvent.submit(routeForm);
 
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
-    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:guarded" });
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:guarded" }, keyedAttempt);
   } finally {
     unmount();
     restore();
@@ -357,7 +382,7 @@ test("IssuePage ignores a same-task duplicate status save", async () => {
     fireEvent.change(status, { target: { value: "backlog" } });
 
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
-    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" });
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt);
   } finally {
     unmount();
     restore();
@@ -373,7 +398,9 @@ test("IssuePage submits the selected priority through the issue mutation", async
     expect([...priority.options].map((option) => option.value)).toEqual(["", "0", "1", "2", "3"]);
     fireEvent.change(priority, { target: { value: "0" } });
 
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }, keyedAttempt)
+    );
   } finally {
     unmount();
     restore();
@@ -389,7 +416,9 @@ test("IssuePage keeps an optimistic priority selection while its save is pending
   try {
     const priority = (await screen.findByLabelText("Priority of CORE-1")) as HTMLSelectElement;
     fireEvent.change(priority, { target: { value: "0" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }, keyedAttempt)
+    );
 
     expect(priority.value).toBe("0");
 
@@ -412,7 +441,9 @@ test("IssuePage restores the previous priority after a failed save", async () =>
   try {
     const priority = (await screen.findByLabelText("Priority of CORE-1")) as HTMLSelectElement;
     fireEvent.change(priority, { target: { value: "0" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }, keyedAttempt)
+    );
     expect(priority.value).toBe("0");
 
     act(() => {
@@ -437,7 +468,9 @@ test("IssuePage preserves an edit made after a failed title save and retries tha
     let title = await openTitleEditor();
     fireEvent.change(title, { target: { value: "a" } });
     fireEvent.blur(title);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }, keyedAttempt)
+    );
 
     title = await openTitleEditor();
     fireEvent.change(title, { target: { value: "ab" } });
@@ -448,7 +481,9 @@ test("IssuePage preserves an edit made after a failed title save and retries tha
     expect(title.value).toBe("ab");
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "ab" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "ab" }, keyedAttempt)
+    );
     expect(title.value).toBe("ab");
   } finally {
     unmount();
@@ -471,7 +506,9 @@ test("IssuePage does not retry an invalid route draft after a failed save", asyn
     }
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.submit(routeForm);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }, keyedAttempt)
+    );
 
     act(() => {
       failedSave.reject(new Error("offline"));
@@ -491,7 +528,9 @@ test("IssuePage does not retry an invalid route draft after a failed save", asyn
     }
     fireEvent.change(route, { target: { value: "role:b" } });
     fireEvent.submit(routeForm);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:b" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:b" }, keyedAttempt)
+    );
   } finally {
     unmount();
     restore();
@@ -508,7 +547,9 @@ test("IssuePage does not retry an empty title draft after a failed save", async 
     let title = await openTitleEditor();
     fireEvent.change(title, { target: { value: "a" } });
     fireEvent.blur(title);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }, keyedAttempt)
+    );
 
     act(() => {
       failedSave.reject(new Error("offline"));
@@ -523,7 +564,9 @@ test("IssuePage does not retry an empty title draft after a failed save", async 
 
     fireEvent.change(title, { target: { value: "b" } });
     fireEvent.blur(title);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "b" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "b" }, keyedAttempt)
+    );
   } finally {
     unmount();
     restore();
@@ -540,7 +583,9 @@ test("IssuePage queues a title draft edited while a save is pending", async () =
     let title = await openTitleEditor();
     fireEvent.change(title, { target: { value: "a" } });
     fireEvent.blur(title);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }, keyedAttempt)
+    );
 
     title = await openTitleEditor();
     fireEvent.change(title, { target: { value: "ab" } });
@@ -552,8 +597,8 @@ test("IssuePage queues a title draft edited while a save is pending", async () =
 
     await waitFor(() =>
       expect(patchIssue.mock.calls).toEqual([
-        ["CORE-1", { title: "a" }],
-        ["CORE-1", { title: "ab" }],
+        ["CORE-1", { title: "a" }, keyedAttempt],
+        ["CORE-1", { title: "ab" }, keyedAttempt],
       ])
     );
     expect(title.value).toBe("ab");
@@ -578,7 +623,9 @@ test("IssuePage queues a route draft edited while a save is pending", async () =
     }
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.submit(routeForm);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }, keyedAttempt)
+    );
     route = await openRouteEditor();
     saveRoute = screen.getByRole("button", { name: "Save route" });
     routeForm = saveRoute.closest("form");
@@ -593,7 +640,9 @@ test("IssuePage queues a route draft edited while a save is pending", async () =
       firstSave.resolve({ ...issue, route: "role:a" });
     });
 
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:b" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:b" }, keyedAttempt)
+    );
     expect(route.value).toBe("role:b");
   } finally {
     unmount();
@@ -612,7 +661,7 @@ test("IssuePage drains a title draft after a different issue write settles", asy
     const title = await openTitleEditor();
     fireEvent.change(status, { target: { value: "backlog" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt)
     );
 
     fireEvent.change(title, { target: { value: "Queued title" } });
@@ -622,7 +671,7 @@ test("IssuePage drains a title draft after a different issue write settles", asy
     });
 
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Queued title" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Queued title" }, keyedAttempt)
     );
     expect(patchIssue).toHaveBeenCalledTimes(2);
   } finally {
@@ -642,7 +691,7 @@ test("IssuePage does not submit a route that was typed but never saved", async (
     const route = await openRouteEditor();
     fireEvent.change(status, { target: { value: "backlog" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt)
     );
 
     fireEvent.change(route, { target: { value: "role:legion" } });
@@ -668,7 +717,9 @@ test("IssuePage retries an unchanged failed title draft", async () => {
     const title = (await screen.findByLabelText("Issue title")) as HTMLInputElement;
     fireEvent.change(title, { target: { value: "a" } });
     fireEvent.blur(title);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }, keyedAttempt)
+    );
 
     act(() => {
       failedSave.reject(new Error("offline"));
@@ -677,7 +728,9 @@ test("IssuePage retries an unchanged failed title draft", async () => {
     expect(title.value).toBe("a");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "a" }, keyedAttempt)
+    );
     expect(patchIssue).toHaveBeenCalledTimes(2);
   } finally {
     unmount();
@@ -698,7 +751,7 @@ test("IssuePage renders the server's reason when a title save is refused, with n
     fireEvent.change(title, { target: { value: "Renamed" } });
     fireEvent.blur(title);
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Renamed" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Renamed" }, keyedAttempt)
     );
 
     await screen.findByText(refusal);
@@ -725,7 +778,9 @@ test("IssuePage retries an unchanged failed route draft", async () => {
     }
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.submit(routeForm);
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }, keyedAttempt)
+    );
 
     act(() => {
       failedSave.reject(new Error("offline"));
@@ -734,7 +789,9 @@ test("IssuePage retries an unchanged failed route draft", async () => {
     expect(route.value).toBe("role:a");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }, keyedAttempt)
+    );
     expect(patchIssue).toHaveBeenCalledTimes(2);
   } finally {
     unmount();
@@ -755,7 +812,7 @@ test("IssuePage retries a failed drained title before sending the queued route",
     const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
     fireEvent.change(status, { target: { value: "backlog" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt)
     );
 
     // The route input takes focus when it opens, which would blur (and submit) an open title
@@ -775,7 +832,7 @@ test("IssuePage retries a failed drained title before sending the queued route",
       statusSave.resolve({ ...issue, status: "backlog" });
     });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Queued title" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Queued title" }, keyedAttempt)
     );
     titleSave.reject(new Error("offline"));
     await screen.findByRole("alert");
@@ -783,7 +840,7 @@ test("IssuePage retries a failed drained title before sending the queued route",
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:queued" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:queued" }, keyedAttempt)
     );
     expect(patchIssue).toHaveBeenCalledTimes(4);
   } finally {
@@ -828,7 +885,7 @@ test("IssuePage saves a parent from the header's parent editor", async () => {
     fireEvent.click(screen.getByRole("button", { name: "Save parent" }));
 
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { parent: "CORE-9" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { parent: "CORE-9" }, keyedAttempt)
     );
     const link = (await screen.findByRole("link", { name: "CORE-9" })) as HTMLAnchorElement;
     expect(link.getAttribute("href")).toBe("/issues/CORE-9");
@@ -850,7 +907,9 @@ test("IssuePage clears the parent with an empty editor save", async () => {
     fireEvent.change(parent, { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: "Save parent" }));
 
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { parent: null }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { parent: null }, keyedAttempt)
+    );
     await screen.findByRole("button", { name: "Set parent issue" });
     expect(screen.queryByRole("link", { name: "CORE-9" })).toBeNull();
   } finally {
@@ -884,3 +943,61 @@ test("IssuePage renders the server's reason inline when a parent save is refused
     restore();
   }
 });
+
+// W34. Every write to one issue goes in the order it was pressed (`issue:<KEY>`), a board move's and
+// a components save's as much as the header's: a board move pressed during an outage, then a
+// status change from the issue's header, land in that order once Dispatch is back, even though the
+// move's answer is the slower of the two.
+test("a board move then a header status change land in press order after an outage", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const { queryClient, unmount } = renderIssuePage();
+  let up = false;
+  const landed: string[] = [];
+  patchIssue.mockImplementation(async (key, input, bounds) => {
+    // As `api.patchIssue` does, the request is told to `sent` before anything goes out.
+    bounds.sent?.({ body: input, method: "PATCH", path: `/api/v1/issues/${key}` });
+    if (!up) throw new NetworkError("/api/v1/issues/CORE-1", new TypeError("Failed to fetch"));
+    if (input.rank !== undefined) {
+      const slow = Promise.withResolvers<void>();
+      setTimeout(slow.resolve, 500);
+      await slow.promise;
+    }
+    landed.push(input.rank !== undefined ? `board move to ${input.status}` : `${input.status}`);
+    return narrowIssue({ ...issue, status: input.status ?? issue.status });
+  });
+  const { artifacts: _artifacts, children: _children, open_asks: _asks, ...fields } = issue;
+  const summary: IssueSummary = { ...fields, open_asks: 0 };
+  queryClient.setQueryData(projectIssuesQueryKey("CORE", []), [summary]);
+  let moveCard: ((key: string, status: IssueStatus, index: number) => Promise<void>) | undefined;
+  function Board(): null {
+    moveCard = useBoardMoves("CORE").moveCard;
+    return null;
+  }
+  const board = render(
+    <QueryClientProvider client={queryClient}>
+      <Board />
+    </QueryClientProvider>
+  );
+  try {
+    const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
+    let moved: Promise<void> | undefined;
+    act(() => {
+      moved = moveCard?.("CORE-1", "in_progress", 0);
+    });
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
+    fireEvent.change(status, { target: { value: "backlog" } });
+    up = true;
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await act(async () => {
+      await moved;
+    });
+    await waitFor(() => expect(landed).toHaveLength(2), { timeout: 4_000 });
+    expect(landed).toEqual(["board move to in_progress", "backlog"]);
+  } finally {
+    board.unmount();
+    unmount();
+    restore();
+  }
+}, 10_000);

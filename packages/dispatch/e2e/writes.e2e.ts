@@ -21,7 +21,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a failed pin shows a retryable error, never lies to the sidebar, and recovers on retry", async ({
+test("a failed pin shows a retryable error, never lies to the sidebar, and recovers on retry @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "WR", name: "Writes" });
@@ -38,7 +38,13 @@ test("a failed pin shows a retryable error, never lies to the sidebar, and recov
     }
     putAttempts += 1;
     if (putAttempts === 1) {
-      await route.abort();
+      // Dispatch's own verdict: a dropped request, a 5xx or a 429 is tried again under the
+      // write's key rather than handed back as a refusal, so only this ends the write.
+      await route.fulfill({
+        body: JSON.stringify({ code: "STATE_INPUT", error: "Dispatch refused the pin" }),
+        contentType: "application/json",
+        status: 400,
+      });
       return;
     }
     retryRequests += 1;
@@ -126,7 +132,7 @@ test("double-clicking Submit posts exactly one comment", async ({ browser }) => 
   await context.close();
 });
 
-test("a pre-fold comment lifecycle pin remains removable from Pinned", async ({
+test("a pre-fold comment lifecycle pin remains removable from Pinned @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "WR", name: "Writes" });

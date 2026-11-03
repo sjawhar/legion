@@ -32,11 +32,12 @@ const (
 	templateType    = "gcp:compute/instanceTemplate:InstanceTemplate"
 	groupType       = "gcp:compute/instanceGroupManager:InstanceGroupManager"
 
-	// Three user public keys, the placeholders core's tests use, and the keys of the listener's user
+	// Four user public keys, the placeholders core's tests use, and the keys of the listener's user
 	// and the session user, whose seeds nobody kept.
 	keyA        = "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO"
 	keyB        = "UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG"
 	keyC        = "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
+	keyD        = "UCKA5BQ7T62SA4THAXWQYT3TKRWD6SGKDXMPYZR2D7EQBYBTWA4RPYVW"
 	keyListener = "UBZEZDPQNFYMZ4J4XOLTB2IN5PBPZ6FZEGY55R623A4GPBPZLTQFKDYV"
 	keySessions = "UCNPQVMRWOOJWCD7XDVLH6MEOVFBMTV4LAQSKZYROSETYJVFAWDMNKVA"
 
@@ -54,7 +55,8 @@ const (
 
 // newMocks is the mock engine with the outputs the hub reads, as the gcp provider computes them:
 // an account's email and member, a network's and a health check's self link, a template's unique
-// self link and a group's name.
+// self link and a group's name; and those Dispatch reads, a Kubernetes Secret's resourceVersion
+// among them.
 func newMocks() *pulumitest.Mocks {
 	return &pulumitest.Mocks{
 		Computed: func(args pulumi.MockResourceArgs) (string, resource.PropertyMap) {
@@ -80,6 +82,17 @@ func newMocks() *pulumitest.Mocks {
 				out["connectionName"] = resource.NewProperty("example-project:us-central1:example-dispatch")
 			case "random:index/randomPassword:RandomPassword":
 				out["result"] = resource.NewProperty(args.Name + "-result")
+			case "kubernetes:core/v1:Secret":
+				// The API server sets a Secret's resourceVersion on every write; the state keeps the
+				// metadata the program registered, with it added.
+				metadata := resource.PropertyMap{}
+				if registered, ok := args.Inputs["metadata"]; ok && registered.IsObject() {
+					for key, value := range registered.ObjectValue() {
+						metadata[key] = value
+					}
+				}
+				metadata["resourceVersion"] = resource.NewProperty(args.Name + "-resource-version")
+				out["metadata"] = resource.NewProperty(metadata)
 			}
 			return "", out
 		},
@@ -139,9 +152,10 @@ func runNamed(t *testing.T, name string, args *gcp.NatsHubArgs, check func(*gcp.
 	return m, err
 }
 
-// exampleArgs are a hub serving a host by its machine id, Dispatch by its listener's machine id,
-// and one user with explicit permissions, running a listener of its own and admitting a client
-// with no credential as the session user, on placeholders.
+// exampleArgs are a hub serving a host by its machine id, Dispatch by its listener's machine id, a
+// listener's own user by its listener machine id, and one user with explicit permissions, running
+// a listener of its own and admitting a client with no credential as the session user, on
+// placeholders.
 func exampleArgs() *gcp.NatsHubArgs {
 	return &gcp.NatsHubArgs{
 		Users: []gcp.NATSUserArgs{
@@ -151,6 +165,7 @@ func exampleArgs() *gcp.NatsHubArgs {
 				Subscribe: nats.RulesArgs{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
 			}},
 			{Name: "example-dispatch", NKey: keyC, DispatchMachineID: pulumi.StringRef("example-dispatch")},
+			{Name: "example-listener-a", NKey: keyD, ListenerMachineID: pulumi.StringRef("example-listener-a")},
 		},
 		TailnetAuthKey: pulumi.String(authKey),
 		Hostname:       "example-hub",

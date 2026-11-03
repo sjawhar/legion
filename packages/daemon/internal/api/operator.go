@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -37,17 +38,24 @@ type DeliverRequest struct {
 	Task string `json:"task"`
 }
 
+// ForgetSessionRequest names the claim's recorded session that the operator is abandoning.
+type ForgetSessionRequest struct {
+	Session string `json:"session"`
+}
+
 // OperatorClaim is a claim as the operator sees it: everything the supervisor holds about it but
 // its two hashes.
 type OperatorClaim struct {
-	Token       claim.Token `json:"token"`
-	Tree        string      `json:"tree"`
-	Issue       string      `json:"issue"`
-	Role        claim.Role  `json:"role"`
-	Generation  uint64      `json:"generation"`
-	State       string      `json:"state"`
-	Session     string      `json:"session"`
-	SessionFile string      `json:"sessionFile"`
+	Token                claim.Token `json:"token"`
+	Tree                 string      `json:"tree"`
+	Issue                string      `json:"issue"`
+	Role                 claim.Role  `json:"role"`
+	Generation           uint64      `json:"generation"`
+	State                string      `json:"state"`
+	Session              string      `json:"session"`
+	SessionFile          string      `json:"sessionFile"`
+	ForgottenSession     string      `json:"forgottenSession,omitempty"`
+	ForgottenSessionFile string      `json:"forgottenSessionFile,omitempty"`
 	// Locator is the claim's process, the runtime's nested shape; none while nothing runs.
 	Locator         *runtime.Locator `json:"locator,omitempty"`
 	Budgets         BudgetsView      `json:"budgets"`
@@ -63,6 +71,14 @@ type OperatorClaim struct {
 	// PluginContract is the contract the claim's current registration declared, 0 when none
 	// recorded, always emitted.
 	PluginContract int `json:"pluginContract"`
+	// UpdateRound is the update round the claim is in, absent when none is open: the pod's drift
+	// round (`pod:<pod uid>`), shared by every claim of that pod, or this claim's own plugin
+	// round (`plugin:<daemon contract>`). Once its worker has answered, the process is waiting to
+	// be replaced and the daemon holds the claim's next task. UpdateHead is the commit the worker
+	// reported as its issue branch's head at origin when it answered, absent until it answers and
+	// for a worker that reported none; it is the worker's word, which nothing verifies.
+	UpdateRound string `json:"updateRound,omitempty"`
+	UpdateHead  string `json:"updateHead,omitempty"`
 }
 
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
@@ -127,6 +143,8 @@ func operatorView(c supervise.Claim) OperatorClaim {
 		SuspendedBy:     string(c.SuspendedBy),
 		SuspensionHeld:  c.SuspensionHeld,
 		PluginContract:  c.PluginContract,
+		UpdateRound:     c.UpdateRound,
+		UpdateHead:      c.UpdateHead,
 	}
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{
@@ -285,6 +303,118 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // failed claim that is not an architect's, naming who retries it (supervise's operatorRetry).
 func retryEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	return supervise.RequestOperatorRetry{Claim: c.Token}, true
+}
+
+// forgetSession clears a recorded session only when the operator names that exact session and the
+// claim has no live process. The session store is deliberately untouched.
+func (s *server) forgetSession(w http.ResponseWriter, r *http.Request) {
+	var req ForgetSessionRequest
+	if !s.readBody(w, r, &req, nil) {
+		return
+	}
+	if !requireFields(w, field{"session", req.Session}) {
+		return
+	}
+	token := claim.Token(r.PathValue("token"))
+	m, ok := s.supervisor.Machine(token)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
+		return
+	}
+	c := m.Claim()
+	if req.Session != c.Session {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+			"forget-session refused: %s records session %s; pass --session %s to start fresh", c.Token, c.Session, c.Session)))
+		return
+	}
+	if !forgettable(c.State) {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+			"forget-session refused: %s is %s; suspend, fail, or retire it before starting fresh", c.Token, c.State)))
+		return
+	}
+	if s.beforeForgetSessionHandle != nil {
+		s.beforeForgetSessionHandle()
+	}
+	ctx, decided := s.decision(r, token)
+	defer decided()
+	if s.stopped(w, "forget-session") {
+		return
+	}
+	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token, Session: req.Session}); err != nil {
+		s.operatorFailure(w, "forget-session", token, err)
+		return
+	}
+	s.log.Info("api: operator forgot session", "claim", token, "session", c.Session, "sessionFile", c.SessionFile)
+	s.operatorDone(r, token)
+	view := operatorView(m.Claim())
+	view.ForgottenSession, view.ForgottenSessionFile = c.Session, c.SessionFile
+	writeJSON(w, http.StatusOK, view)
+}
+
+func forgettable(state supervise.ClaimState) bool {
+	return state == supervise.StateQueued || state == supervise.StateSuspended || state == supervise.StateFailed || state == supervise.StateRetired
+}
+
+// retryClaim is the operator's retry of a failed claim. A failed phase worker whose issue the
+// workflow holds for that worker's own role (a held phase whose working role is the claim's role,
+// Options.RoleFor) is retried as its architect's retry_or_escalate retries it: the operator
+// applies the held phase's retry (intake.RetryOrEscalate), whose start relaunches the failed role on
+// its kept session with fresh budgets, and the route answers 202 with the claim as it is until that
+// start runs. A retry that leaves the issue held relaunched nothing (a lingering tree's members stay
+// where they stood), so the route answers 409 naming the issue rather than report a retry. Every
+// other claim is the machine's to answer (retryEvent): an architect is relaunched, and a phase
+// worker whose issue holds no phase, or holds another role's, is refused, since the next start of
+// its role relaunches it. It is how an operator relaunches the claims a runtime failed to launch —
+// every failed claim in turn, with `legion claims retry --failed` — once the cause is gone.
+func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
+	token := claim.Token(r.PathValue("token"))
+	m, ok := s.supervisor.Machine(token)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
+		return
+	}
+	c := m.Claim()
+	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.records == nil || s.roleFor == nil {
+		s.claimRequest("retry", retryEvent)(w, r)
+		return
+	}
+	if s.stopped(w, "retry") {
+		return
+	}
+	recorded, err := s.recordedIssue(r.Context(), c.Issue)
+	if err != nil {
+		s.logFailure("api: read the issue of a failed phase worker to retry", "claim", token, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record: %v", c.Issue, err)))
+		return
+	}
+	if recorded == nil || recorded.Phase != phase.Held || recorded.Hold == nil || s.roleFor(recorded.Hold.From) != c.Role {
+		s.claimRequest("retry", retryEvent)(w, r)
+		return
+	}
+	result, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("operator/retry"),
+		intake.RetryOrEscalate{Issue: c.Issue, Decision: intake.RetryDecision}, s.handlers...)
+	if err != nil {
+		s.logFailure("api: apply the operator's retry of a held phase", "claim", token, "issue", c.Issue, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not retry %s's held phase %s: %v", c.Issue, recorded.Hold.From, err)))
+		return
+	}
+	if result.Refusal != nil {
+		writeJSON(w, result.Refusal.Status, errorBody(result.Refusal.Message))
+		return
+	}
+	after, err := s.recordedIssue(r.Context(), c.Issue)
+	if err != nil {
+		s.logFailure("api: read the issue after the operator's retry of its held phase", "claim", token, "issue", c.Issue, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record after the retry: %v", c.Issue, err)))
+		return
+	}
+	if after != nil && after.Phase == phase.Held {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("%s is still held after the retry of its phase %s, so nothing relaunched %s: its tree lingers, and a lingering tree's members stay where they stood", c.Issue, recorded.Hold.From, token)))
+		return
+	}
+	s.log.Info("api: the operator retried a held phase", "claim", token, "issue", c.Issue, "phase", recorded.Hold.From)
+	s.operatorDone(r, token)
+	writeJSON(w, http.StatusAccepted, operatorView(m.Claim()))
 }
 
 // closeTree is the operator closing a tree no workflow issue backs, through its root claim: the

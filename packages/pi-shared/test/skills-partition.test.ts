@@ -70,56 +70,51 @@ test("every skill:// name a shipped skill or a daemon prompt uses is a shipped s
   expect(missing).toEqual([]);
 });
 
-// .github/workflows/release.yaml names each plugin's skills twice more: in the `changes` filter
-// that decides whether the plugin builds (`skills/<name>/**`), and in the version step that decides
-// whether a commit releases it (`--patch-path skills/<name>/` and the positional `skills/<name>/`).
-// A list there that is not the prepack's partition releases a plugin for a skill it does not ship,
-// or misses a change to one it does. The workflow is read as text: these lists are plain lines, and
-// a YAML parse would not see inside the version step's shell command.
-const release = readFileSync(path.join(REPO_ROOT, ".github/workflows/release.yaml"), "utf8").split(
-  "\n"
+// .github/workflows/release.yaml names each plugin's skills twice more, in its version arguments in
+// the workflow-level `env:` (PI_ENVOY_VERSION_ARGS, PI_LEGION_VERSION_ARGS): as
+// `--patch-path skills/<name>/` and as the positional `skills/<name>/` after `--`. The plugin's
+// build job and legion_build pass them to `release-push.sh version`, so they decide whether a commit
+// releases the plugin and which plugin pair legion_build links. A list there that is not the
+// prepack's partition releases a plugin for a skill it does not ship, or misses a change to one it
+// does; and release-bump.sh reads a --patch-path only when it is also a path after `--`, so both
+// lists must be the partition.
+const workflow: unknown = Bun.YAML.parse(
+  readFileSync(path.join(REPO_ROOT, ".github/workflows/release.yaml"), "utf8")
+);
+const releaseEnv = new Map<string, unknown>(
+  typeof workflow === "object" &&
+    workflow !== null &&
+    "env" in workflow &&
+    typeof workflow.env === "object" &&
+    workflow.env !== null
+    ? Object.entries(workflow.env)
+    : []
 );
 
-/** The `skills/<name>/**` entries of the `changes` filter `key` (`pi_envoy`, `pi_legion`). */
-function filterSkills(key: string): string[] {
-  const start = release.findIndex((line) => line.trim() === `${key}:`);
-  if (start === -1) throw new Error(`release.yaml has no changes filter ${key}`);
-  const indent = release[start].indexOf(key);
-  const names: string[] = [];
-  for (const line of release.slice(start + 1)) {
-    const trimmed = line.trim();
-    if (trimmed === "") break;
-    if (!trimmed.startsWith("-") && !trimmed.startsWith("#") && line.search(/\S/u) <= indent) break;
-    const match = trimmed.match(/^- '?skills\/([^/']+)\/\*\*'?$/u);
-    if (match !== null) names.push(match[1]);
-  }
-  return names.sort();
-}
-
-/** The `--patch-path` and the positional `skills/<name>/` entries of the version step of `tag`. */
-function versionStepSkills(tag: string): { patchPaths: string[]; positional: string[] } {
-  const start = release.findIndex((line) =>
-    line.includes(`.github/scripts/release-push.sh version ${tag} `)
+/** The `--patch-path` and the positional `skills/<name>/` entries of the env argument list `key`. */
+function versionArgsSkills(key: string): { patchPaths: string[]; positional: string[] } {
+  const args = releaseEnv.get(key);
+  if (typeof args !== "string") throw new Error(`release.yaml's env has no ${key}`);
+  const tokens = args.trim().split(/\s+/u);
+  const separator = tokens.indexOf("--");
+  if (separator === -1) throw new Error(`release.yaml's ${key} has no -- before its paths`);
+  const options = tokens.slice(0, separator).join(" ");
+  const patchPaths = [...options.matchAll(/--patch-path skills\/([^/\s]+)\/(?!\S)/gu)].map(
+    (match) => match[1]
   );
-  if (start === -1) throw new Error(`release.yaml has no version step for ${tag}`);
-  const end = release.findIndex((line, index) => index > start && line.includes("$GITHUB_OUTPUT"));
-  const command = release.slice(start, end + 1).join(" ");
-  const patchPaths: string[] = [];
-  const positional: string[] = [];
-  for (const match of command.matchAll(/(--patch-path\s+)?(?<![\w/.-])skills\/([^/\s]+)\//gu)) {
-    (match[1] === undefined ? positional : patchPaths).push(match[2]);
-  }
+  const positional = tokens
+    .slice(separator + 1)
+    .flatMap((token) => token.match(/^skills\/([^/]+)\/$/u)?.[1] ?? []);
   return { patchPaths: patchPaths.sort(), positional: positional.sort() };
 }
 
-for (const [plugin, key, tag, staged] of [
-  ["@sjawhar/pi-envoy", "pi_envoy", "pi-envoy-v", envoySkills],
-  ["@sjawhar/pi-legion", "pi_legion", "pi-legion-v", legionSkills],
+for (const [plugin, key, staged] of [
+  ["@sjawhar/pi-envoy", "PI_ENVOY_VERSION_ARGS", envoySkills],
+  ["@sjawhar/pi-legion", "PI_LEGION_VERSION_ARGS", legionSkills],
 ] as const) {
   test(`release.yaml's skill lists for ${plugin} are its partition`, () => {
-    expect(filterSkills(key), `the ${key} changes filter`).toEqual(staged);
-    const step = versionStepSkills(tag);
-    expect(step.patchPaths, `the ${tag} version step's --patch-path entries`).toEqual(staged);
-    expect(step.positional, `the ${tag} version step's positional paths`).toEqual(staged);
+    const args = versionArgsSkills(key);
+    expect(args.patchPaths, `${key}'s --patch-path entries`).toEqual(staged);
+    expect(args.positional, `${key}'s positional paths after --`).toEqual(staged);
   });
 }

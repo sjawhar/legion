@@ -1067,3 +1067,44 @@ func closedConnectionIsReplacedOnce(t *testing.T, through func(uri string) []bus
 	client.Close()
 	settle(0, 5*time.Second, "after Close")
 }
+
+// A start the server refuses returns no client, so no caller can Close what it dialled: the
+// constructor closes that connection itself, and the recovery the close begins (onClosed) finds the
+// client stopped and dials nothing. A replacement it dialled would be held by no one, connected
+// until its server went and then, with MaxReconnect -1, reconnecting for the rest of the process,
+// logging `envoy nats reconnect attempt failed` once a minute into whatever then holds the default
+// logger: TestAStuckDeliveryStillEndsTheKVWatchers failed on the ones TestARefusedRaiseNamesTheReplicaSetting
+// and TestOneServerStoppedACreateAtThreeCopiesFailsNamingTheSetting left. A single server refuses
+// a create at three copies. The server lists a connection the client closed until its read loop
+// sees the close, so the test polls its connection list rather than reading it once: on main the
+// replacement stays listed for good, and the poll runs out.
+func TestARefusedStartLeavesNoConnectionOpen(t *testing.T) {
+	srv, uri := testnats.Start(t)
+	connections := serverConnections(t, srv)
+	logs := captureBusLogs(t)
+	const name = "refused-start"
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(3), bus.WithName(name))
+	if err == nil {
+		client.Close()
+		t.Fatal("a single server took the stream at three copies")
+	}
+	// The recovery ends at once either way: cancelled, or successful once it has installed the
+	// replacement it dialled.
+	waitFor(t, 5*time.Second, "the recovery the refused start's close began to end", func() bool {
+		return logs.count(name, "envoy nats recovery cancelled") > 0 || logs.count(name, "envoy nats recovery successful") > 0
+	})
+	if got := logs.count(name, "envoy nats recovery attempt"); got != 0 {
+		t.Errorf("the recovery the refused start's close began made %d attempt(s), want none", got)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		open := connections()[name]
+		if len(open) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the server holds connection(s) %v of the refused start, want none", open)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

@@ -77,7 +77,7 @@ function list(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) {
           onToggleResolved={() => {}}
           pendingActionIds={new Set()}
           resolvedThreads={[resolved]}
-          retractedAskCount={0}
+          foldedAskCount={0}
           showResolved={false}
           threads={[open]}
           viewerLogin="alice"
@@ -166,7 +166,7 @@ test("an anchored card keeps its identity when its mark placement arrives after 
             onToggleResolved={() => {}}
             pendingActionIds={new Set()}
             resolvedThreads={[]}
-            retractedAskCount={0}
+            foldedAskCount={0}
             showResolved={false}
             threads={[thread("open")]}
             viewerLogin="alice"

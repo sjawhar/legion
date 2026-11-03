@@ -1,0 +1,12 @@
+kind: Fixed
+body: |-
+    The Delivery page's live hub no longer recomputes a view a second time for a delivery change its
+    read already holds. A recompute cleared the view's mark when it began, but its read noted the
+    change position it reads at only after its first query, so a change the hub read in between
+    marked the view again and a second population read and compute followed that sent nothing. The
+    read now takes the marks over once it holds its position, under the hub's lock; a change log
+    reset in that gap keeps the mark. An issue's retitle or a session's new title that arrives
+    while a read first names that issue or session now recomputes the view again, where the page
+    kept the old title until another change touched it.
+custom:
+    Issue: pr2693

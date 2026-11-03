@@ -40,13 +40,7 @@ const cases = [
 ];
 
 for (const { name, edge, type, code } of cases) {
-  test(`typing at a collaborator's cursor keeps what was typed: ${name}`, async ({
-    browser,
-  }, testInfo) => {
-    test.skip(
-      testInfo.project.name === "iphone",
-      "phone viewports render no peer cursors: ProofDocument passes awareness: null under 1280px"
-    );
+  test(`typing at a collaborator's cursor keeps what was typed: ${name}`, async ({ browser }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", spec, title: "Shared cursor" });
     const alice = await asUser(browser, "alice");
@@ -81,11 +75,7 @@ for (const { name, edge, type, code } of cases) {
 
 test("a reader outside the editor sees a collaborator's cursor even where their own stale selection sits", async ({
   browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "phone viewports render no peer cursors: ProofDocument passes awareness: null under 1280px"
-  );
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec, title: "Shared cursor" });
   const alice = await asUser(browser, "alice");

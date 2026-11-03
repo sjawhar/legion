@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { ArchitectureSource } from "../../api/types";
 import { ArchitectureSourcesSection } from "./ArchitectureSourcesSection";
@@ -86,9 +87,12 @@ test("a human adds an architecture source and the verified row appears", async (
     });
     fireEvent.click(section.getByRole("button", { name: "Add source" }));
     await waitFor(() =>
-      expect(putArchitectureSource).toHaveBeenLastCalledWith("CORE", "legion/arch", {
-        branch: "main",
-      })
+      expect(putArchitectureSource).toHaveBeenLastCalledWith(
+        "CORE",
+        "legion/arch",
+        { branch: "main" },
+        keyedAttempt
+      )
     );
     await waitFor(() => expect(section.getByRole("cell", { name: "legion/arch" })).toBeDefined());
     expect(section.getByRole("cell", { name: "Access verified" })).toBeDefined();
@@ -197,7 +201,9 @@ test("each architecture source of a project is its own row, refreshed and delete
     fireEvent.click(
       section.getByRole("button", { name: "Refresh architecture source acme/infra for CORE" })
     );
-    await waitFor(() => expect(syncArchitectureSource).toHaveBeenCalledWith("CORE", "acme/infra"));
+    await waitFor(() =>
+      expect(syncArchitectureSource).toHaveBeenCalledWith("CORE", "acme/infra", keyedAttempt)
+    );
     expect(syncArchitectureSource).toHaveBeenCalledTimes(1);
     await waitFor(() =>
       expect(
@@ -212,7 +218,7 @@ test("each architecture source of a project is its own row, refreshed and delete
     );
     await waitFor(() => expect(section.queryByRole("cell", { name: "legion/arch" })).toBeNull());
     expect(deleteArchitectureSource).toHaveBeenCalledTimes(1);
-    expect(deleteArchitectureSource).toHaveBeenCalledWith("CORE", "legion/arch");
+    expect(deleteArchitectureSource).toHaveBeenCalledWith("CORE", "legion/arch", keyedAttempt);
     expect(section.getByRole("cell", { name: "acme/infra" })).toBeDefined();
 
     // Saving a repository the project already has changes that source's branch: still one row.
@@ -223,9 +229,12 @@ test("each architecture source of a project is its own row, refreshed and delete
     fireEvent.change(section.getByLabelText("Branch"), { target: { value: "release" } });
     fireEvent.click(section.getByRole("button", { name: "Add source" }));
     await waitFor(() => expect(section.getByRole("cell", { name: "release" })).toBeDefined());
-    expect(putArchitectureSource).toHaveBeenCalledWith("CORE", "acme/infra", {
-      branch: "release",
-    });
+    expect(putArchitectureSource).toHaveBeenCalledWith(
+      "CORE",
+      "acme/infra",
+      { branch: "release" },
+      keyedAttempt
+    );
     expect(section.getAllByRole("cell", { name: "acme/infra" })).toHaveLength(1);
     expect(section.queryByRole("cell", { name: "main" })).toBeNull();
   } finally {

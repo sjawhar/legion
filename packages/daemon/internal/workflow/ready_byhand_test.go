@@ -75,7 +75,7 @@ func TestAByHandREADYIsToldWithItsNoteAndNoSubmitLine(t *testing.T) {
 }
 
 // The route holds READY's commit to GitHub's head, and passes the head the daemon's record held then
-// (RecordedHead), which follows GitHub only by webhook. A READY is refused only when the record
+// (RecordedHead), which follows GitHub by webhook and a periodic read. A READY is refused only when the record
 // moved after the route read it, to a head other than the commit: a push that landed in between.
 // A record still where the route read it is lagging, not moved, and READY is accepted however
 // stale it is; so is one that caught up to the commit. The refusal records nothing, so the

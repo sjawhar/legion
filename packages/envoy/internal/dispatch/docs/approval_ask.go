@@ -95,9 +95,15 @@ func RewriteApprovalAsk(
 		return model.Event{}, fmt.Errorf("rewrite approval ask: %w", err)
 	}
 	ask.EditedAt = askTimestamp(&editedAt)
-	changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, serverURL)
+	changes, err := refs.ReplaceCountedEdit(ctx, tx, "ask", ask.ID, previous.Question, ask.Question, serverURL)
 	if err != nil {
 		return model.Event{}, fmt.Errorf("index approval ask: %w", err)
+	}
+	// The rewording is a revision of the request's question part, which its ask.edited names
+	// beside the request's own references.
+	changes, err = refs.IndexAskPartsCounted(ctx, tx, *ask, serverURL, editedAt, changes)
+	if err != nil {
+		return model.Event{}, fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
 	}
 	payload := model.NewAskEditEventPayload(*ask, previous, actor, changes)
 	payload.Quiet = quiet

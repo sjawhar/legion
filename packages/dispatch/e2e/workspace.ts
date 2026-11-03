@@ -17,6 +17,7 @@ import {
   resolveAsk,
   snoozeAsk,
 } from "./api";
+import { sessionIds } from "./session-ids";
 
 // One realistic workspace, built through the public API, that fills every surface only a human
 // acts on: the Inbox (open, snoozed and document asks), the Agents page (open rows and both
@@ -32,7 +33,7 @@ export const workspaceSessions: FakeSession[] = [
     dir: "/workspaces/planner",
     machine_id: "build-host",
     roles: ["planner"],
-    session_id: "planner-session",
+    session_id: sessionIds.planner,
     title: "Planner",
   },
   {
@@ -40,7 +41,7 @@ export const workspaceSessions: FakeSession[] = [
     dir: "/workspaces/tester",
     machine_id: "build-host",
     roles: ["tester"],
-    session_id: "tester-session",
+    session_id: sessionIds.tester,
     title: "Tester",
   },
   {
@@ -48,7 +49,7 @@ export const workspaceSessions: FakeSession[] = [
     dir: "/workspaces/reviewer",
     machine_id: "review-host",
     roles: ["reviewer"],
-    session_id: "reviewer-session",
+    session_id: sessionIds.reviewer,
     title: "Reviewer",
   },
   {
@@ -56,7 +57,7 @@ export const workspaceSessions: FakeSession[] = [
     dir: "/workspaces/observer",
     machine_id: "build-host",
     roles: [],
-    session_id: "observer-session",
+    session_id: sessionIds.observer,
     title: "Observer",
   },
   // Twenty minutes stale: the Agents page folds it under Inactive (`AgentsPage.tsx`'s
@@ -67,7 +68,7 @@ export const workspaceSessions: FakeSession[] = [
     last_seen: Date.now() - 20 * 60_000,
     machine_id: "review-host",
     roles: ["archivist"],
-    session_id: "archivist-session",
+    session_id: sessionIds.archivist,
     title: "Archivist",
   },
 ];
@@ -165,34 +166,34 @@ export async function seedWorkspace(): Promise<SeededWorkspace> {
   const blocking = await createAsk(
     folds.key,
     { question: "Fold a session unseen for ten minutes under Inactive?", urgency: "blocking" },
-    { actor: actor("planner-session", { tmux: "legion:1.2" }), as: "agent" }
+    { actor: actor(sessionIds.planner, { tmux: "legion:1.2" }), as: "agent" }
   );
   const snoozed = await createAsk(
     snooze.key,
     { question: "Snooze until tomorrow morning, or for a full day?", urgency: "high" },
-    as("tester-session")
+    as(sessionIds.tester)
   );
   await snoozeAsk(snoozed.id, new Date(Date.now() + 24 * 3_600_000).toISOString(), alice);
   const answered = await createAsk(
     broadcastOrder.key,
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship the recipient-order fix?" },
-    as("reviewer-session")
+    as(sessionIds.reviewer)
   );
   await answerAsk(answered.id, { expected_edited_at: null, selected: ["Ship"] }, alice);
   const withdrawn = await createAsk(
     retracted.key,
     { question: "Keep the retracted ask out of the Inbox?" },
-    as("planner-session")
+    as(sessionIds.planner)
   );
   await resolveAsk(
     withdrawn.id,
     { kind: "retracted", reason: "Answered live." },
-    as("planner-session")
+    as(sessionIds.planner)
   );
   const rotation = await createAsk(
     rotate.key,
     { question: "Rotate the token before or after the deploy?", urgency: "med" },
-    as("reviewer-session")
+    as(sessionIds.reviewer)
   );
   const runbook = await createProjectDocument("CORE", {
     content: "# Runbook\n\nRestart, reseed, reopen the signed-in URL.\n",
@@ -201,13 +202,13 @@ export async function seedWorkspace(): Promise<SeededWorkspace> {
   const documentAsk = await createArtifactAsk(
     runbook.artifact.id,
     { question: "Keep the runbook in the repository?" },
-    as("tester-session")
+    as(sessionIds.tester)
   );
 
   const review = await createComment(
     broadcastOrder.key,
     { body: "Reviewing the diff." },
-    as("reviewer-session")
+    as(sessionIds.reviewer)
   );
   await createComment(broadcastOrder.key, {
     body: "Thanks - the order the sender ticked is the whole point.",
@@ -216,23 +217,23 @@ export async function seedWorkspace(): Promise<SeededWorkspace> {
   const mention = await createComment(broadcastOrder.key, {
     body: "@Tester please re-run the broadcast spec",
     delivery: "btw",
-    mentions: [{ target: "session:tester-session" }],
+    mentions: [{ target: `session:${sessionIds.tester}` }],
   });
   await replyToCommentDelivery(
     mention.id,
     { attempt: 1, body: "Re-ran: 2 passed." },
-    actor("tester-session")
+    actor(sessionIds.tester)
   );
 
   const directMessage = await createAgentMessage(
-    "planner-session",
+    sessionIds.planner,
     { body: "How far is the plan?", delivery: "aside" },
     alice
   );
   await replyToMessageDelivery(
     directMessage.id,
     { attempt: 1, body: "Half-way; the seed is next." },
-    actor("planner-session")
+    actor(sessionIds.planner)
   );
 
   // Not alphabetical on purpose: the broadcast page must list its recipients in the order sent.
@@ -240,7 +241,7 @@ export async function seedWorkspace(): Promise<SeededWorkspace> {
     {
       body: "Stand down and report status.",
       delivery: "steer",
-      session_ids: ["tester-session", "observer-session", "planner-session"],
+      session_ids: [sessionIds.tester, sessionIds.observer, sessionIds.planner],
     },
     alice
   );
@@ -248,13 +249,13 @@ export async function seedWorkspace(): Promise<SeededWorkspace> {
     throw new Error(`seedWorkspace: the broadcast excluded ${JSON.stringify(broadcast.excluded)}`);
   }
   const plannerCopy = broadcast.recipients.find(
-    (recipient) => recipient.session_id === "planner-session"
+    (recipient) => recipient.session_id === sessionIds.planner
   );
   if (plannerCopy === undefined) throw new Error("seedWorkspace: the planner received no copy");
   await replyToMessageDelivery(
     plannerCopy.message.id,
     { attempt: 1, body: "Standing down; build is green." },
-    actor("planner-session")
+    actor(sessionIds.planner)
   );
 
   await waitForSpecAsk(workflow.key);

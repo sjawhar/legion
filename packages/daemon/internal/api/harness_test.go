@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
@@ -54,7 +55,7 @@ func testStore(t *testing.T) *store.Store {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test the claim routes against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/api/")
 	}
@@ -75,7 +76,8 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatalf("random suffix: %v", err)
 	}
 	name := "legion_api_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -200,6 +202,9 @@ type harness struct {
 	// context was the agent's request's or one that outlives its connection.
 	reported           *[]capabilities.Report
 	reportedContextErr *[]error
+	// handoffs is the Dispatch a completion route's harness reads handoff records from
+	// (newHandoffHarness), which writeHandoff fills; nil for a harness serving no completion.
+	handoffs *statusRecorder
 }
 
 func newHarness(t *testing.T) *harness {
@@ -256,6 +261,12 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 	}
 	readied := &[]supervise.Claim{}
 	reported, reportedContextErr := &[]capabilities.Report{}, &[]error{}
+	h := &harness{
+		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup,
+		readied:            readied,
+		reported:           reported,
+		reportedContextErr: reportedContextErr,
+	}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
 		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st, PluginRelaunchable: relaunchable,
@@ -266,10 +277,8 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 			*reportedContextErr = append(*reportedContextErr, ctx.Err())
 		},
 	})
-	return &harness{
-		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler,
-		readied: readied, reported: reported, reportedContextErr: reportedContextErr,
-	}
+	h.handler = server.Handler
+	return h
 }
 
 // request sends one request through the server's own handler. A nil body sends none; a string is

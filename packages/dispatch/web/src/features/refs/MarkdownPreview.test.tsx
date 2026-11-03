@@ -1,12 +1,13 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ComponentProps, ReactNode } from "react";
 
 import { api } from "../../api/client";
-import type { IssueDetails } from "../../api/types";
+import type { IssueReferenceSummary } from "../../api/types";
 import { MarkdownPreview } from "./MarkdownPreview";
+import { installFakeParseWorker, restoreParseWorker } from "./parse-worker-fixture";
 
 /**
  * `MarkdownPreview` on its own: the inputs a real surface hands it that the one-fixture surface
@@ -16,37 +17,13 @@ import { MarkdownPreview } from "./MarkdownPreview";
  * rest of the text the `markdown`.
  */
 
-const issue: IssueDetails = {
-  route_status: null,
-  route_holder: null,
-  artifacts: [],
-  children: [],
-  closed_at: null,
-  created_at: "2026-09-09T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
-  external_links: [],
+/** CORE-1's summary read, which a reference to it shows. */
+const issue: IssueReferenceSummary = {
+  documents: [],
   key: "CORE-1",
-  labels: [],
-  last_seq: 1,
-  number: 1,
-  open_asks: [],
-  progress: { tasks: null, children: null },
-  parent: null,
-  blocked_by: [],
-  assignee: null,
-  claim: null,
-  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-  primary_artifact_id: "artifact-none",
-  priority: null,
   project: "CORE",
-  rank: "U",
-  referenced_by_count: 0,
-  route: null,
-  repo: null,
-  resolved_repo: null,
   status: "in_progress",
   title: "Design decision",
-  updated_at: "2026-09-09T00:00:00Z",
 };
 
 type PreviewProps = ComponentProps<typeof MarkdownPreview>;
@@ -99,7 +76,7 @@ test("a hit inside bold or code text is marked inside the formatting, with no sy
 });
 
 test("a hit inside a dispatch:// reference keeps its highlight on the reference's resolved title", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   // q=CORE-1: `Report on dispatch://<mark>CORE</mark><mark>-1</mark> today` - two lexemes, both
   // inside the reference the preview replaces with the issue's title.
   const { preview, rerender, view } = renderPreview({
@@ -132,7 +109,7 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
     expect(preview().textContent).not.toContain("](");
   } finally {
     view.unmount();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
@@ -214,7 +191,7 @@ test("a Dispatch picture shows as its thumbnail beside its caption, a link only 
 });
 
 test("a lead is the app's own words: syntax and a reference in it stay literal while the body formats", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
   // A session titles itself; its title is the lead of every quote of its messages.
   const lead = "Replying to **Planner** (dispatch://CORE-1) — ";
   const { preview, view } = renderPreview({ lead, lines: 1, markdown: "*body*" });
@@ -225,7 +202,7 @@ test("a lead is the app's own words: syntax and a reference in it stay literal w
     expect(preview().querySelector("[data-dispatch-ref]")).toBeNull();
   } finally {
     view.unmount();
-    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 
@@ -282,17 +259,23 @@ test("a line break inside a paragraph reads as a space, so nothing after it fall
   }
 });
 
-test("a long body is parsed whole, so formatting past any visible cut renders and leaves no syntax", async () => {
+// Past `markdownWorkerThreshold` the preview's body is parsed off the page, so this row drives
+// the faked worker (`parse-worker-fixture.ts`): the clamp it proves - the whole body parsed,
+// never the two lines the reader can see - is the one the dashboard applies to a body that size.
+test("a long body is parsed whole in the worker, so formatting past any visible cut renders and leaves no syntax", async () => {
+  const worker = installFakeParseWorker();
   const { preview, view } = renderPreview({
     lines: 2,
     markdown: `${"word ".repeat(400)}**held** and [docs](https://example.com/docs)`,
   });
   try {
+    await act(() => worker.answer(0));
     await waitFor(() => expect(preview().querySelector("strong")?.textContent).toBe("held"));
     expect(preview().textContent).not.toContain("**");
     expect(preview().textContent).not.toContain("](");
     expect(preview().textContent?.endsWith("held and docs")).toBe(true);
   } finally {
+    restoreParseWorker();
     view.unmount();
   }
 });
