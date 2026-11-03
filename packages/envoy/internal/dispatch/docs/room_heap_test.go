@@ -40,11 +40,15 @@ import (
 // which a room holds at every size weighed. The per-byte bounds are wide enough for that spread and
 // are not a number to the byte; the per-element bound is the budget's own, and fails once a copy's
 // heap an element leaves leastPerElement to mostPerElement of bytesOfHeapAnElement.
+//
+// Each row is measured in a process of its own (measuredAlone): every row collects twelve times,
+// and inside the package's whole run each collection walks the gigabyte or more that run holds by
+// then, which took this test 318 s on this pod on 2026-11-03 against 11 s alone, with the same
+// readings. The row's state is built in that process alone, so the run itself builds none.
 func TestAResidentRoomsHeapPerByteOfItsMarkdown(t *testing.T) {
 	skipUnderRace(t)
 	const leastPerElement, mostPerElement = 0.85, 1.3
 	for _, size := range []int{51 << 10, 524 << 10, 1 << 20} {
-		state, rendering := residentRoomState(t, size)
 		for _, room := range []struct {
 			name                      string
 			edited                    bool
@@ -55,6 +59,10 @@ func TestAResidentRoomsHeapPerByteOfItsMarkdown(t *testing.T) {
 			{"edited", true, 2, 30, 120},
 		} {
 			t.Run(fmt.Sprintf("%dKiB/%s", size>>10, room.name), func(t *testing.T) {
+				if !measuredAlone(t) {
+					return
+				}
+				state, rendering := residentRoomState(t, size)
 				held := heldByResidentRoom(t, state, room.edited)
 				perByte := float64(held) / float64(rendering.Bytes)
 				perElement := float64(held) / float64(rendering.Elements*room.copies)
