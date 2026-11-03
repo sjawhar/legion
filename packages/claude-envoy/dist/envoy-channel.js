@@ -36978,7 +36978,7 @@ var dispatchToolSpecs = [
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
       reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
-      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
+      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'. human does not " + "apply to an approval request a newer version moved: it stays with you until dispatch " + "request-approval hands it back at the current version.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: commentValidation
@@ -37024,7 +37024,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. A find that opens with a list marker ('- ', '5. ', with an optional '[ ] ' or '[x] ' after it) and matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and a box matching only a task item in that state. A find or quote anchor stays inside one block, and in a table inside one cell: ' | ' is the boundary markdown writes between two cells, not text a cell holds, so a quote that runs across cells is refused, naming the cells; change several cells with one operation per cell in the same batch, and anchor on one cell's text. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exceptions are an item a find's list marker selected (it matched no text as written): replace(find=\"5. Old\", with=\"5. New\") gives the item the text 'New' under its own number, and a with that is the marker alone is INVALID_OP; and a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', where a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37071,7 +37071,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
-    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect runs `plan-gap-analyst` and `plan-reviewer`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it: " + "request approval again once that revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; the carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect runs `plan-gap-analyst` and `plan-reviewer`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it, until " + "a later version's text is exactly the approved version's again, as when an accidental " + "edit is undone exactly, and no decision block in it was decided since: that version " + "carries the approval and the document reads approved at it, so nothing is requested for " + "it. When the document does not read approved, request approval again once that revision " + "is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; a carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37175,7 +37175,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_project",
     example: { key: "CORE", name: "Core" },
-    description: "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " + "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " + "with dispatch projects. A key that already exists is refused " + "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " + `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` + `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. Do not use ` + "it when an existing project already covers the work; file an issue there with dispatch issue instead.",
+    description: "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " + "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " + "with dispatch projects. When a person asks for a project, make the key from its name. Check the key with " + "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use. " + "A key that already exists is refused " + "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " + `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` + `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. When no person ` + "asked for a project and an existing project already covers the work, do not create a project. File an " + "issue in that project with dispatch issue.",
     arguments: (z) => ({
       key: z.string().describe("The new project's key, such as CORE."),
       name: z.string({ max: PROJECT_NAME_MAX }).describe(`The project's name, shown beside its key, at most ${PROJECT_NAME_MAX} characters.`)
@@ -42930,15 +42930,18 @@ import {
   openSync as openSync2,
   readdirSync,
   readFileSync as readFileSync3,
+  readlinkSync as readlinkSync2,
   renameSync as renameSync2,
   rmSync as rmSync3,
   statSync as statSync2,
   unlinkSync,
+  utimesSync,
   writeFileSync as writeFileSync2
 } from "fs";
 import { isAbsolute as isAbsolute2, join as join3, resolve as resolve2 } from "path";
 var ASKGATE_RECORD = "askgate";
 var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
+var STORE_BEAT_MS = 10 * 60000;
 var MARKERS = "markers";
 var ALWAYS_GATED = {
   dispatch_ask: true,
@@ -43003,7 +43006,25 @@ function processStart(pid) {
     return null;
   }
 }
-function ownerLive(owner) {
+var ownNamespace;
+function pidNamespace() {
+  if (ownNamespace === undefined) {
+    try {
+      ownNamespace = /^pid:\[([0-9]+)\]$/.exec(readlinkSync2("/proc/self/ns/pid"))?.[1] ?? null;
+    } catch {
+      ownNamespace = null;
+    }
+  }
+  return ownNamespace;
+}
+function ownerLive(owner, now) {
+  if (owner.ns !== null && owner.ns !== pidNamespace()) {
+    try {
+      return now - storeTouched(owner.store) <= MARKER_MAX_AGE_MS;
+    } catch {
+      return false;
+    }
+  }
   if (owner.start !== null)
     return processStart(owner.pid) === owner.start;
   try {
@@ -43013,11 +43034,11 @@ function ownerLive(owner) {
     return !hasErrnoCode(error, "ESRCH");
   }
 }
-function isOwner(value) {
+function isOwnerText(value) {
   if (typeof value !== "object" || value === null)
     return false;
-  const { pid, start, store } = value;
-  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && typeof store === "string" && store.startsWith("/");
+  const { pid, start, ns, store } = value;
+  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && (ns === undefined || ns === null || typeof ns === "string" && /^[0-9]+$/.test(ns)) && typeof store === "string" && store.startsWith("/");
 }
 function parseOwner(text) {
   let data;
@@ -43026,16 +43047,16 @@ function parseOwner(text) {
   } catch {
     return;
   }
-  if (!isOwner(data) || !("v" in data) || data.v !== 2)
+  if (!isOwnerText(data) || data.v !== 2)
     return;
-  const { pid, start, store, mode } = data;
+  const { pid, start, ns, store, mode } = data;
   return {
-    owner: { pid, start, store },
+    owner: { pid, start, ns: ns ?? null, store },
     mode: mode === "block" ? "block" : "warn"
   };
 }
 var OWNER_FILE = ".json";
-var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
+var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+)(?:-([0-9]+))?)?$/;
 function storeTouched(store) {
   const own = statSync2(store).mtimeMs;
   try {
@@ -43046,6 +43067,7 @@ function storeTouched(store) {
     throw error;
   }
 }
+var UNNAMESPACED_STORE_MAX_AGE_MS = 14 * 86400000;
 function sweepStores(root, now) {
   const parent = join3(root, "askgate");
   let names;
@@ -43060,15 +43082,42 @@ function sweepStores(root, now) {
       continue;
     const store = join3(parent, name);
     try {
-      if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
+      const owner = { pid: Number(match[1]), start: match[2] ?? null, ns: match[3] ?? null, store };
+      if (ownerLive(owner, now))
         continue;
-      if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
+      const unnamespaced = owner.start !== null && owner.ns === null;
+      const keep = unnamespaced ? UNNAMESPACED_STORE_MAX_AGE_MS : MARKER_MAX_AGE_MS;
+      if (now - storeTouched(store) <= keep)
         continue;
       rmSync3(store, { recursive: true, force: true });
     } catch {}
   }
 }
-function askgateState(dir) {
+function recordNamesStore(dir) {
+  const record = join3(dir, ASKGATE_RECORD);
+  let names;
+  try {
+    names = readdirSync(record);
+  } catch (error) {
+    return !hasErrnoCode(error, "ENOENT");
+  }
+  for (const name of names) {
+    if (!name.endsWith(OWNER_FILE))
+      continue;
+    try {
+      const parsed = parseOwner(readFileSync3(join3(record, name), "utf-8"));
+      if (parsed === undefined)
+        return true;
+      statSync2(parsed.owner.store);
+      return true;
+    } catch (error) {
+      if (!hasErrnoCode(error, "ENOENT"))
+        return true;
+    }
+  }
+  return false;
+}
+function askgateState(dir, now = Date.now()) {
   const record = join3(dir, ASKGATE_RECORD);
   let names;
   try {
@@ -43094,8 +43143,9 @@ function askgateState(dir) {
     const parsed = parseOwner(text);
     if (parsed === undefined)
       return { kind: "broken", problem: `${file}, is not an AskGate record` };
-    if (ownerLive(parsed.owner))
+    if (ownerLive(parsed.owner, now)) {
       live.push({ file, store: parsed.owner.store, mode: parsed.mode });
+    }
   }
   if (live.length === 0)
     return { kind: "off" };
@@ -43964,15 +44014,26 @@ function withinWindow(items, now) {
   const start = now - SESSION_ANSWERS_WINDOW_MS;
   return items.filter((item) => Date.parse(item.at) >= start);
 }
+function sessionAnswersWords(items) {
+  return items.map((item) => JSON.stringify([
+    item.kind,
+    item.id,
+    item.author.id,
+    item.at,
+    item.edited_at ?? null,
+    item.selected ?? null,
+    item.text
+  ]));
+}
 var MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
 function leftOutLine(count, namesCommand) {
   const counted = `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters`;
   return namesCommand ? `${counted}: run \`dispatch answers\` to read every one in full.` : `${counted}.`;
 }
-function renderSessionAnswers(items, options) {
-  const shown = withinWindow(items, Number(options.now));
-  const unsent = shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
-  const count = shown.length + unsent;
+function renderShown(items, options) {
+  const inWindow = withinWindow(items, Number(options.now));
+  const unsent = inWindow.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
+  const count = inWindow.length + unsent;
   if (count === 0)
     return;
   const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
@@ -43980,7 +44041,7 @@ As read at ${options.cached.readAt}; this read failed: ${failureSentence(options
   const namesCommand = options.withoutCommand !== true;
   const blocks = [];
   let length = header.length;
-  for (const item of shown) {
+  for (const item of inWindow) {
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
     const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after, namesCommand).length);
@@ -43990,9 +44051,14 @@ As read at ${options.cached.readAt}; this read failed: ${failureSentence(options
     length += 2 + block.length;
   }
   const leftOut = count - blocks.length;
-  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]].join(`
+  const text = [
+    header,
+    ...blocks,
+    ...leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]
+  ].join(`
 
 `);
+  return { text, shown: inWindow.slice(0, blocks.length) };
 }
 function renderSessionAnswersList(items, options) {
   const shown = withinWindow(items, Number(options.now));
@@ -44065,18 +44131,24 @@ async function readSessionAnswers(options) {
   const entries = state.sessions.get(session) ?? new Map;
   state.sessions.set(session, entries);
   const carry = (cache, reason, noRoute = false) => {
-    const text = cache === undefined ? undefined : renderSessionAnswers(cache.items, {
+    const rendered = cache === undefined ? undefined : renderShown(cache.items, {
       now: now(),
       total: cache.total,
       cached: { readAt: cache.read_at, reason },
       withoutCommand: noRoute
     });
-    if (cache === undefined || text === undefined) {
+    if (cache === undefined || rendered === undefined) {
       if (noRoute)
         return { text: undefined, source: "unavailable", reason };
       return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
     }
-    return { text, source: "cache", readAt: cache.read_at, reason };
+    return {
+      text: rendered.text,
+      source: "cache",
+      readAt: cache.read_at,
+      words: sessionAnswersWords(rendered.shown),
+      reason
+    };
   };
   if (!dispatch.enabled) {
     const url = options.dispatchUrl;
@@ -44166,13 +44238,12 @@ async function readSessionAnswers(options) {
     return noRoute();
   if ("failure" in outcome)
     return carry(current.cache, outcome.failure);
+  const rendered = renderShown(outcome.cache.items, { now: now(), total: outcome.cache.total });
   return {
-    text: renderSessionAnswers(outcome.cache.items, {
-      now: now(),
-      total: outcome.cache.total
-    }),
+    text: rendered?.text,
     source: "fresh",
-    readAt: outcome.cache.read_at
+    readAt: outcome.cache.read_at,
+    words: sessionAnswersWords(rendered?.shown ?? [])
   };
 }
 async function sessionAnswersSettled(session) {
@@ -44234,7 +44305,7 @@ function renderAdvice(tool, key, advice, opts) {
   }
   const superseded = advice.superseded_approval;
   if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
-    lines.push(`Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`);
+    lines.push(`Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version} or a later write stores the text of version ${superseded.approved_version} again exactly, with no decision block in it decided since: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`);
   }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
     const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies. Their reply ends this: post then what you held back." : "Progress ledger or scratchpad? If so, stop.";
@@ -44742,7 +44813,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
     return id === undefined || versionName !== undefined && url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
-  const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
+  const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children|decisions)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
     const [, key = "", page, artifact, ask, comment, message] = issuePage;
     const version = versionOf("v");
@@ -44757,6 +44828,8 @@ function dispatchRefFromUrl(value, serverUrl) {
       return `dispatch://${key}/artifact/spec${version}`;
     if (page === "spec")
       return `dispatch://${key}/spec${blockOf("v")}`;
+    if (page === "decisions")
+      return `dispatch://${key}/artifact/decisions-md`;
     if (page !== undefined)
       return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
@@ -45139,6 +45212,18 @@ var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
   const hints = asks.slice(0, askHintLimit).map((ask) => `${ask.id.slice(0, 8)}\u2026 ${textHead(ask.question)}`);
   return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
+}
+async function movedApprovalLine(client, askID) {
+  const ask = (await client.getAsk(askID).catch(() => {
+    return;
+  }))?.ask;
+  const approval = ask?.approval;
+  if (ask?.kind !== "approval" || approval === undefined)
+    return;
+  if (approval.requested_version >= approval.version)
+    return;
+  const owner = ask.issue_key === null ? `--project ${ask.approval_artifact?.project ?? "<project>"} --artifact ${approval.artifact_id}` : ask.approval_artifact?.primary === true ? `--issue ${ask.issue_key}` : `--issue ${ask.issue_key} --artifact ${approval.artifact_id}`;
+  return `The reply did not hand the ask to the human: it is the approval request for ${approval.name} ` + `at version ${approval.requested_version}, and ${approval.name} is now version ${approval.version}. ` + "No reply hands a moved approval request back. Once the human has agreed to every point in " + `version ${approval.version}, run: dispatch request-approval ${owner} --summary ` + `'<what changed since version ${approval.requested_version}>'`;
 }
 async function invalidReplyToAskProblem(client, owner, resolved) {
   if (owner.kind === "issue") {
@@ -46546,9 +46631,11 @@ async function executeDispatchTool(input) {
       });
       if (replyToAsk !== undefined) {
         const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
+        const moved = requestedTurn !== "agent" && comment.ask_waiting_on === "agent" ? await movedApprovalLine(client, replyToAsk) : undefined;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
+            ...moved === undefined ? [] : [moved],
             ...adviceLines
           ].join(`
 `),
@@ -47236,7 +47323,8 @@ function pruneSessions(root, now) {
       continue;
     const dir = join5(sessions, entry.name);
     try {
-      if (now - statSync3(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+      const idle = now - statSync3(dir).mtimeMs > IDLE_SESSION_MS;
+      if (idle && askgateState(dir, now).kind === "off" && !recordNamesStore(dir)) {
         rmSync4(dir, { recursive: true, force: true });
       }
     } catch (error) {
@@ -47990,7 +48078,9 @@ var legionClaimView = strictObject({
   state: _enum2(LEGION_CLAIM_STATES),
   locator: legionLocator.optional(),
   capabilities: legionCapabilityReportView.optional(),
-  pluginContract: number2().int().nonnegative()
+  pluginContract: number2().int().nonnegative(),
+  updateRound: nonEmptyString.optional(),
+  updateHead: nonEmptyString.optional()
 });
 var legionHandoffRecordView = strictObject({
   id: nonEmptyString,
@@ -48206,6 +48296,14 @@ var LegionReadyRequest = strictObject({
   generation: number2().int().positive(),
   capabilities: LegionCapabilityReport.optional()
 });
+var LegionReadyForUpdateRequest = strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  generation: number2().int().positive(),
+  round: nonEmptyString,
+  head: string2().optional()
+});
 var LegionControllerRegisterResponse = strictObject({
   claimToken: nonEmptyString,
   role: literal("controller"),
@@ -48260,7 +48358,9 @@ var LegionOperatorClaimResponse = strictObject({
   pending: legionDeliveryView.optional(),
   suspendedBy: _enum2(["unknown", "operator", "daemon", "exit"]).optional(),
   suspensionHeld: literal(true).optional(),
-  pluginContract: number2().int().nonnegative()
+  pluginContract: number2().int().nonnegative(),
+  updateRound: nonEmptyString.optional(),
+  updateHead: nonEmptyString.optional()
 });
 var LegionOperatorClaimsResponse = strictObject({
   claims: array(LegionOperatorClaimResponse)
@@ -48522,6 +48622,7 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) => read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
+    readyForUpdate: (input) => acknowledge("/legion/v1/claims/ready-for-update", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
     grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) => post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),
@@ -48613,25 +48714,41 @@ function paneLatestHandoff(file, env, cwd, fetchImpl = fetch) {
 function paneHandoffReport(file, env, cwd) {
   return (phase, role) => findHandoffReport({ phase, role, env, latestHandoff: paneLatestHandoff(file, env, cwd) });
 }
-function requiredVariable(env, name) {
+function requiredVariable(env, name, purpose) {
   const value = env[name];
   if (value === undefined || value === "") {
-    throw new Error(`${name} is not set, so handoff_complete cannot find what to report`);
+    throw new Error(`${name} is not set, so ${purpose}`);
   }
   return value;
 }
+var FOR_HANDOFF = "handoff_complete cannot find what to report";
+function issueBranch(env, purpose) {
+  const issue = requiredVariable(env, "LEGION_ISSUE", purpose);
+  if (!DISPATCH_KEY_PATTERN.test(issue)) {
+    throw new Error(`LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`);
+  }
+  return { issue, bookmark: `legion/${issue}` };
+}
+function pushedBranch(bookmark) {
+  return `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
+}
 var STANDING = ["log", "-r", "@-", "--no-graph", "-T", "commit_id"];
+async function findPushedBranchHead(input) {
+  const { env } = input;
+  const jj = input.jj ?? pathJj;
+  const purpose = "ready_for_update cannot find the branch head to report";
+  const workspace = requiredVariable(env, "LEGION_WORKSPACE", purpose);
+  const { bookmark } = issueBranch(env, purpose);
+  return jj(["log", "-r", pushedBranch(bookmark), "--no-graph", "-T", "commit_id"], workspace);
+}
 async function findHandoffReport(input) {
   const { phase, role, env } = input;
   const jj = input.jj ?? pathJj;
   const handoff = FILE_BACKED[phase];
   if (handoff === undefined || handoff.role !== role) {
-    return { commit: await jj(STANDING, requiredVariable(env, "LEGION_WORKSPACE")) };
+    return { commit: await jj(STANDING, requiredVariable(env, "LEGION_WORKSPACE", FOR_HANDOFF)) };
   }
-  const issue = requiredVariable(env, "LEGION_ISSUE");
-  if (!DISPATCH_KEY_PATTERN.test(issue)) {
-    throw new Error(`LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`);
-  }
+  const { issue, bookmark } = issueBranch(env, FOR_HANDOFF);
   let record;
   try {
     record = await input.latestHandoff(issue, handoff.word);
@@ -48645,9 +48762,8 @@ async function findHandoffReport(input) {
   const report = { handoffId: record.id, handoffVersion: record.version };
   if (role !== "implementer")
     return report;
-  const workspace = requiredVariable(env, "LEGION_WORKSPACE");
-  const bookmark = `legion/${issue}`;
-  const remote = `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
+  const workspace = requiredVariable(env, "LEGION_WORKSPACE", FOR_HANDOFF);
+  const remote = pushedBranch(bookmark);
   const stands = await jj(STANDING, workspace);
   const tip = await jj(["log", "-r", `${remote} & ${stands}::`, "--no-graph", "-T", "commit_id"], workspace);
   if (tip === "") {
@@ -51014,7 +51130,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 45
+  daemonApiVersion: 46
 };
 
 // src/channel-forwarder.ts
@@ -51144,7 +51260,7 @@ function createChannelForwarder(connection, options) {
 
 // src/claude-channel.ts
 import { spawnSync } from "child_process";
-import { readdirSync as readdirSync3, readFileSync as readFileSync6, readlinkSync as readlinkSync2 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync6, readlinkSync as readlinkSync3 } from "fs";
 import { homedir as homedir3 } from "os";
 import { basename as basename2, join as join6, resolve as resolve3, sep } from "path";
 var PLUGIN_SERVER = "envoy";
@@ -51391,7 +51507,7 @@ function cacheDirectoryName(marketplace) {
 function processExecutable(pid) {
   if (process.platform === "linux") {
     try {
-      return readlinkSync2(`/proc/${pid}/exe`);
+      return readlinkSync3(`/proc/${pid}/exe`);
     } catch {
       return;
     }
@@ -51410,7 +51526,7 @@ function stdoutIsTerminal(pid) {
   if (process.platform !== "linux")
     return;
   try {
-    const target = readlinkSync2(`/proc/${pid}/fd/1`);
+    const target = readlinkSync3(`/proc/${pid}/fd/1`);
     return target.startsWith("/dev/pts/") || /^\/dev\/tty[^S]/.test(target) || target === "/dev/tty";
   } catch {
     return;
@@ -51418,7 +51534,7 @@ function stdoutIsTerminal(pid) {
 }
 function workingDirectory(pid) {
   try {
-    return readlinkSync2(`/proc/${pid}/cwd`);
+    return readlinkSync3(`/proc/${pid}/cwd`);
   } catch {
     return;
   }
@@ -51857,6 +51973,8 @@ async function bootLegionClaim(host) {
     await host.afterRegister?.(claim);
     host.setCapability({
       sessionID: host.registration.sessionId,
+      claimToken: claim.claimToken,
+      generation: claim.generation,
       tree: claim.tree,
       issue: claim.issue,
       role: claim.role,
@@ -52078,6 +52196,8 @@ function stepPhaseStall(state, input) {
       return { state: { state: "open", count: 0 } };
     case "phase-closed":
       return { state: { state: "closed", count: 0 } };
+    case "update-answered":
+      return state.state === "closed" ? { state } : { state: { state: "awaiting-update", count: 0 } };
     case "inbound-event":
       return state.state === "closed" ? { state } : { state: { state: "open", count: 0 } };
     case "tool-call":
@@ -52093,6 +52213,9 @@ function stepPhaseStall(state, input) {
       return { state, reminder: reminderText(input.lastAssistantText) };
     }
   }
+}
+function recordedPhaseStall(state) {
+  return state === "awaiting-update" ? "waiting" : state;
 }
 function phaseStallFrom(data) {
   if (!("state" in data) || typeof data.state !== "string")
@@ -52174,7 +52297,7 @@ function createPhaseReminder(deps) {
   let lastMessage = "";
   let recorded = "";
   const entryOf = () => ({
-    state: stall.state,
+    state: recordedPhaseStall(stall.state),
     count: stall.count,
     reported,
     ...reportKey === undefined ? {} : { reportKey },
@@ -52351,6 +52474,10 @@ function createPhaseReminder(deps) {
         lastAssistantText: text,
         backgroundWork: options?.backgroundWork
       });
+      if (stall.state === "awaiting-update") {
+        continued = false;
+        return;
+      }
       if (stall.state === "waiting") {
         continued = false;
         armReminder(reminderText(text), deps.limits.waitingMs);
@@ -52618,6 +52745,7 @@ function createPhaseHookEndpoint(deps) {
   return {
     deliveryWritten: noteWritten,
     phaseClosed: () => reminder.apply({ kind: "phase-closed" }),
+    updateAnswered: () => reminder.apply({ kind: "update-answered" }),
     stop: dropTimer,
     handle: async (input) => {
       const parsed = hookArguments.safeParse(input);
@@ -52668,7 +52796,12 @@ function createPhaseHookEndpoint(deps) {
 }
 
 // ../pi-shared/src/legion-phase-ops.ts
-var PHASE_OPS = ["read_record", "handoff_complete", "request_backward_move"];
+var PHASE_OPS = [
+  "read_record",
+  "handoff_complete",
+  "request_backward_move",
+  "ready_for_update"
+];
 var requiredString = (op, field) => {
   const message = `${op} requires ${field}`;
   return string2({ error: message }).refine((value) => value.trim() !== "", { error: message });
@@ -52691,7 +52824,8 @@ var PhaseOpArguments = discriminatedUnion("op", [
       error: (issue) => typeof issue.input === "string" && issue.input.trim() !== "" ? `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}` : "request_backward_move requires to"
     }),
     reason: requiredString("request_backward_move", "reason")
-  })
+  }),
+  operation("ready_for_update", { round: requiredString("ready_for_update", "round") })
 ], {
   error: (issue) => issue.code === "invalid_union" ? `op is one of ${PHASE_OPS.join(", ")}` : undefined
 });
@@ -52724,7 +52858,7 @@ var PHASE_OP_SENTENCES = {
   requestBackwardMove: "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " + "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. "
 };
 function legionToolDescription(host) {
-  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A planning, implementing, testing or reviewing phase ends with a handoff record on the " + "Dispatch issue: write it with `dispatch handoff-write --issue <issue> --phase <plan|implement|test|review> --body-file <file>` before " + "calling. This call reads the phase's newest record from Dispatch and reports it; the implementer's round also reports the commit " + "`legion/<issue>@origin` names, so push the branch first; retro and the merger's READY report the commit the workspace stands on. It " + "refuses, posting nothing, a phase with no record, a Dispatch that does not answer, or an implementer's `@-` not yet on " + "`legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_SESSION_MISMATCH (another session wrote the record), HANDOFF_NOT_NEW (the record is the one you named for your previous phase: " + "write this phase's handoff), " + "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " + "the phase hands you now: end the turn without completing; the task of the assignment it hands you now is work of its own, so do that work and " + "complete it with a handoff of its own, never this record or verdict again), the implementer's completion of implementing with no open " + "pull request on `legion/<issue>` and none recorded " + "merged (HANDOFF_NO_PULL_REQUEST: open it; one naming a closed pull request is the architect's to decide) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A planning, implementing, testing or reviewing phase ends with a handoff record on the " + "Dispatch issue: write it with `dispatch handoff-write --issue <issue> --phase <plan|implement|test|review> --body-file <file>` before " + "calling. This call reads the phase's newest record from Dispatch and reports it; the implementer's round also reports the commit " + "`legion/<issue>@origin` names, so push the branch first; retro and the merger's READY report the commit the workspace stands on. It " + "refuses, posting nothing, a phase with no record, a Dispatch that does not answer, or an implementer's `@-` not yet on " + "`legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_SESSION_MISMATCH (another session wrote the record), HANDOFF_NOT_NEW (the record is the one you named for your previous phase: " + "write this phase's handoff), " + "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " + "the phase hands you now: end the turn without completing; the task of the assignment it hands you now is work of its own, so do that work and " + "complete it with a handoff of its own, never this record or verdict again), the implementer's completion of implementing with no open " + "pull request on `legion/<issue>` and none recorded " + "merged (HANDOFF_NO_PULL_REQUEST: open it; one naming a closed pull request is the architect's to decide) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + "ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the " + "daemon takes your answer for that round alone. Push every commit you want kept to the issue branch " + "first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The " + "daemon holds your next task until your process comes back on the new pod, in this same session. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
 }
 async function mintClaimGrant(daemon, claim) {
   const { grantId } = await daemon.grant({
@@ -52778,6 +52912,26 @@ async function executePhaseOp(runtime, input) {
         ...issue === undefined ? {} : { issue }
       });
       return {};
+    }
+    case "ready_for_update": {
+      let head = "";
+      let failure;
+      try {
+        head = await runtime.branchHead();
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      await daemon.readyForUpdate({
+        claimToken: claim.claimToken,
+        sessionId: claim.sessionID,
+        secret: claim.secret,
+        generation: claim.generation,
+        round: args.round,
+        ...head === "" ? {} : { head }
+      });
+      return failure === undefined ? {} : {
+        note: "The daemon has your ready_for_update signal. The signal reports no branch head, " + "because the branch-head lookup failed. The daemon checks no head, so your signal " + "counts without one. Repair what the lookup's message names before your next jj " + `command. The lookup said: ${failure}`
+      };
     }
   }
 }
@@ -52835,6 +52989,7 @@ async function executeLegionTool(runtime, input, signal) {
     daemon: runtime.daemon,
     claim,
     handoffReport: runtime.handoffReport,
+    branchHead: runtime.branchHead,
     ...signal === undefined ? {} : { restart: { signal } }
   }, input);
 }
@@ -53995,12 +54150,15 @@ async function runEnvoyChannelServer() {
       const legionRuntime = {
         daemon,
         claim: () => claim?.capability(),
-        handoffReport: paneHandoffReport(configFile, process.env, directory)
+        handoffReport: paneHandoffReport(configFile, process.env, directory),
+        branchHead: () => findPushedBranchHead({ env: process.env })
       };
       const answer = await executeLegionTool(legionRuntime, request.params.arguments, extra.signal);
       const op = request.params.arguments?.["op"];
       if (op === "handoff_complete" || op === "request_backward_move")
         phaseHook?.phaseClosed();
+      else if (op === "ready_for_update")
+        phaseHook?.updateAnswered();
       return mcpResult(answer);
     }
     if (runtime === undefined)

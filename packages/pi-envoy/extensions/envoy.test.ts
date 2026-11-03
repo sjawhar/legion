@@ -21,13 +21,19 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
-import { askgateState } from "@legion/envoy-client/askgate-marker";
+import {
+  askgateState,
+  MARKER_MAX_AGE_MS,
+  STORE_BEAT_MS,
+} from "@legion/envoy-client/askgate-marker";
 import { RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { forgetKeyedLayerMemory } from "@legion/envoy-client/dispatch-http";
@@ -1250,6 +1256,28 @@ async function bootAskNudge(
  */
 function withSelfCheck(context: SessionContext): SessionContext {
   return { ...context, runEphemeralTurn: async () => ({ replyText: "PROCEEDING" }) };
+}
+
+// Lets every promise and I/O callback queued so far run: the mocked NATS and listener paths settle
+// within a few turns, since nothing in them waits on a clock.
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 25; turn += 1) {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setImmediate(resolve);
+    await promise;
+  }
+}
+
+// Polls `condition` between event-loop turns. Only the resubscribe path waits on a real timer
+// (`ENVOY_RESUBSCRIBE_DELAY_MS`, 10 ms in these tests), which no fake clock reaches, and a busy
+// machine runs it later than any fixed sleep allows; the deadline is measured on the monotonic
+// clock, which `setSystemTime` leaves alone.
+async function until(condition: () => boolean, what: string): Promise<void> {
+  const deadline = performance.now() + 2_000;
+  while (!condition()) {
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await settle();
+  }
 }
 
 describe("envoy OMP extension", () => {
@@ -3553,6 +3581,22 @@ describe("envoy OMP extension", () => {
     expect(process.env.DISPATCH_HOST).toBe("omp");
   });
 
+  test("adds nothing to PATH when another name for its bin directory is already on it", async () => {
+    // What Oh My Pi does for the manifest's `omp.bin`: the directory goes on PATH under the
+    // plugin's installed path, a name that this module's own location (its realpath) never shows.
+    const installed = mkdtempSync(join(tmpdir(), "pi-envoy-installed-"));
+    const installedBin = join(installed, "bin");
+    symlinkSync(join(import.meta.dir, "..", "bin"), installedBin);
+    try {
+      process.env.PATH = [installedBin, "/usr/bin", "/bin"].join(delimiter);
+      await import("./envoy.ts?plugin-bin-installed-path");
+
+      expect(process.env.PATH).toBe([installedBin, "/usr/bin", "/bin"].join(delimiter));
+    } finally {
+      rmSync(installed, { recursive: true, force: true });
+    }
+  });
+
   test("names the top-level session in DISPATCH_SESSION_ID at start and after a switch", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?dispatch-session-id");
@@ -4138,6 +4182,37 @@ console.log(JSON.stringify(args));
       expect(recordOf("ses_askgate_next")).toBeNull();
       expect(existsSync(store)).toBe(false);
       expect(notifications).toEqual([]);
+    }, 30_000);
+    // A process of another pid namespace that shares the state directory (the host, seen from an
+    // agent box, or the other way round) cannot look this one up by its pid: it counts the record
+    // live, and its prune keeps the store, only while the store keeps changing. So the instance
+    // touches its store every STORE_BEAT_MS while it keeps a record, makes it again when such a
+    // process removed it, and stops at shutdown.
+    test("while it keeps a record, the instance touches its store every beat and makes it again when it is gone", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-record-beat");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      jest.useFakeTimers();
+      try {
+        await fixture.handlers.get("session_start")?.({}, context);
+        const store = recordOf("ses_askgate")?.[0]?.store ?? "";
+        const idle = new Date(Date.now() - MARKER_MAX_AGE_MS - 60_000);
+        utimesSync(store, idle, idle);
+        jest.advanceTimersByTime(STORE_BEAT_MS);
+        expect(Date.now() - statSync(store).mtimeMs).toBeLessThan(STORE_BEAT_MS);
+        rmSync(store, { recursive: true });
+        jest.advanceTimersByTime(STORE_BEAT_MS);
+        expect(statSync(join(store, "markers")).isDirectory()).toBe(true);
+        expect(askgateState(sessionDirectory(process.env, "ses_askgate")).kind).toBe("on");
+        await fixture.handlers.get("session_shutdown")?.({}, context);
+        expect(existsSync(store)).toBe(false);
+        jest.advanceTimersByTime(STORE_BEAT_MS);
+        expect(existsSync(store)).toBe(false);
+      } finally {
+        jest.useRealTimers();
+      }
     }, 30_000);
     // The independent review at 6fd926853, item 1: every session start, switch, branch and host
     // move rebinds a session, and the rebind wrote this process's owner file from OMP_ASKGATE
@@ -14960,7 +15035,10 @@ console.log(JSON.stringify(args));
     // Now kill it the way a dropped connection does. The close marker from the
     // first switch must have been consumed, so recovery still happens.
     reopened?.end();
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await until(
+      () => natsState.controls.get("notifications.agent.ses_home") !== reopened,
+      "the topic to be subscribed again after its genuine death"
+    );
 
     const recovered = natsState.controls.get("notifications.agent.ses_home");
     expect(recovered).toBeDefined();
@@ -14973,11 +15051,10 @@ console.log(JSON.stringify(args));
         "genuine-death"
       )
     );
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    expect(
-      fixture.messages.some((m) => m.includes("delivered after a genuine iterator death"))
-    ).toBe(true);
+    await until(
+      () => fixture.messages.some((m) => m.includes("delivered after a genuine iterator death")),
+      "the message sent on the recovered subscription"
+    );
   });
 
   test("permits redelivery after a failed injection and warns with the envelope id", async () => {
@@ -15300,15 +15377,20 @@ console.log(JSON.stringify(args));
 
     // Kill the iterator the way a closed/errored connection does.
     first?.end();
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await until(
+      () => natsState.controls.get("notifications.agent.ses_deaf") !== first,
+      "the topic to be subscribed again after its iterator ended"
+    );
 
     const second = natsState.controls.get("notifications.agent.ses_deaf");
     expect(second).toBeDefined();
     expect(second).not.toBe(first);
 
     second?.push(forwardedRoleEnvelope("legion-controller", "post-recovery message", "recovery"));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(fixture.messages.some((m) => m.includes("post-recovery message"))).toBe(true);
+    await until(
+      () => fixture.messages.some((m) => m.includes("post-recovery message")),
+      "the message sent on the recovered subscription"
+    );
   });
 
   test("a heartbeat tick during a registry outage warns once instead of rejecting unhandled", async () => {
@@ -15691,27 +15773,6 @@ describe("messages missed while the subscription was down", () => {
   interface ReplayRequest {
     readonly session_id: string;
     readonly subjects: readonly { readonly subject: string; readonly after?: number }[];
-  }
-
-  // Lets every promise and I/O callback queued so far run: a sweep's listener call and its
-  // deliveries settle within a few turns, since nothing in the mocked path waits on a clock.
-  async function settle(): Promise<void> {
-    for (let turn = 0; turn < 25; turn += 1) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setImmediate(resolve);
-      await promise;
-    }
-  }
-
-  // Polls `condition` between event-loop turns. Only the resubscribe path waits on a real timer
-  // (`ENVOY_RESUBSCRIBE_DELAY_MS`, 10 ms here), which no fake clock reaches; the deadline is
-  // measured on the monotonic clock, which `setSystemTime` leaves alone.
-  async function until(condition: () => boolean, what: string): Promise<void> {
-    const deadline = performance.now() + 2_000;
-    while (!condition()) {
-      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await settle();
-    }
   }
 
   // NATS subject matching: `*` is one token, `>` one or more trailing tokens.
@@ -17686,23 +17747,6 @@ describe("consumer delivery", () => {
   const AGENT = `notifications.agent.${SESSION}`;
   const RELAY = `notifications.envoy.deliver.${SESSION}`;
   const STREAM = "stream-1";
-
-  // Lets every promise and I/O callback queued so far run.
-  async function settle(): Promise<void> {
-    for (let turn = 0; turn < 25; turn += 1) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setImmediate(resolve);
-      await promise;
-    }
-  }
-
-  async function until(condition: () => boolean, what: string): Promise<void> {
-    const deadline = performance.now() + 2_000;
-    while (!condition()) {
-      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await settle();
-    }
-  }
 
   /** A peer session's message to the session under test. */
   function peer(label: string): string {

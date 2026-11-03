@@ -167,20 +167,31 @@ function textOf(message: unknown): string {
     .join("");
 }
 
-/** The request's last message, which must be the list as a user message of its own with no cache
- *  anchor, and its text. */
+/** The request's one list (or failure line), a user message of its own with no cache anchor, and
+ *  its text. */
 function listOf(request: Request): string {
-  const last = messagesOf(request).at(-1);
-  expect(last).toMatchObject({ role: "user" });
-  expect(JSON.stringify(last)).not.toContain("cache_control");
-  const text = textOf(last);
-  expect(isSessionAnswersText(text)).toBe(true);
-  return text;
+  const lists = messagesOf(request).filter((message) => isSessionAnswersText(textOf(message)));
+  expect(lists).toHaveLength(1);
+  const [list] = lists;
+  expect(list).toMatchObject({ role: "user" });
+  expect(JSON.stringify(list)).not.toContain("cache_control");
+  return textOf(list);
+}
+
+/** The request's list, which must be its last message: where a list that shows something new goes. */
+function lastListOf(request: Request): string {
+  expect(isSessionAnswersText(textOf(messagesOf(request).at(-1)))).toBe(true);
+  return listOf(request);
 }
 
 /** Whether any message of the request is a list or the failure line. */
 function carriesList(request: Request): boolean {
   return messagesOf(request).some((message) => isSessionAnswersText(textOf(message)));
+}
+
+/** The request's messages without its list. */
+function withoutList(request: Request): unknown[] {
+  return messagesOf(request).filter((message) => !isSessionAnswersText(textOf(message)));
 }
 
 /** A cached list's read time and the reason its header gives, from the header's second line. */
@@ -508,7 +519,7 @@ test.skipIf(skipped)(
     expect(rest).toEqual([]);
     expect(carriesList(first as Seen)).toBe(false);
     // Compared after JSON parsing: the text the model reads, not its escaped bytes.
-    const list = listOf(second as Seen);
+    const list = lastListOf(second as Seen);
     expect(list).toBe(renderSessionAnswers([item], { now: Date.now() }));
     expect(list).toContain(item.text);
   },
@@ -763,9 +774,10 @@ test.skipIf(skipped)(
     const [n, next, ...rest] = session.turns;
     if (n === undefined || next === undefined) throw new Error("want two turns");
     expect(rest).toEqual([]);
-    // Each list is the last message, with no cache_control (listOf), and they differ.
-    expect(listOf(n)).toBe(renderSessionAnswers([older], { now: Date.now() }));
-    expect(listOf(next)).toBe(renderSessionAnswers([newer, older], { now: Date.now() }));
+    // Each list shows a new item, so each is the last message, with no cache_control, and they
+    // differ.
+    expect(lastListOf(n)).toBe(renderSessionAnswers([older], { now: Date.now() }));
+    expect(lastListOf(next)).toBe(renderSessionAnswers([newer, older], { now: Date.now() }));
     // N's messages through its last cache_control-bearing one are N+1's first, byte for byte.
     const messages = messagesOf(n);
     const anchor = messages.findLastIndex((message) =>
@@ -778,6 +790,66 @@ test.skipIf(skipped)(
     );
     console.log(
       `(h) request N+1's last two messages: ${JSON.stringify(messagesOf(next).slice(-2))}`
+    );
+  },
+  180_000
+);
+
+// A list that shows nothing new is no new turn: on the turns after the one it first went on, it
+// stays right after the message it followed there, each request ends with its own last message,
+// and the list's bytes are inside the prefix the next request reads from the cache.
+test.skipIf(skipped)(
+  "(o) a list with nothing new stays where it first went: later requests end with their own message and cache through it",
+  async () => {
+    const item = answer("ask_o", "Ship the first way.", 2);
+    const session = await runSession(binary(), [
+      { route: { kind: "list", items: [item] } },
+      { prompt: "First question." },
+      { prompt: "Second question." },
+      { prompt: "Third question." },
+    ]);
+
+    const [first, second, third, ...rest] = session.turns;
+    if (first === undefined || second === undefined || third === undefined) {
+      throw new Error("want three turns");
+    }
+    expect(rest).toEqual([]);
+    const expected = renderSessionAnswers([item], { now: Date.now() });
+    expect(lastListOf(first)).toBe(expected);
+    const listAt = (request: Request) =>
+      messagesOf(request).findIndex((message) => isSessionAnswersText(textOf(message)));
+    for (const [request, prompt] of [
+      [second, "Second question."],
+      [third, "Third question."],
+    ] as const) {
+      expect(listOf(request)).toBe(expected);
+      expect(textOf(messagesOf(request).at(-1))).toBe(prompt);
+      expect(textOf(messagesOf(request)[listAt(request) - 1])).toBe("First question.");
+    }
+    // Turn 2's messages through its last cache anchor, which comes after the list, are turn 3's
+    // first, the same content once the anchors are set aside: the binary sends an anchored text
+    // message as a block with `cache_control` and an unanchored one as a plain string, which the
+    // Messages API reads as that one text block.
+    const bare = (messages: readonly unknown[]) =>
+      JSON.stringify(
+        messages.map((message) =>
+          typeof message === "object" && message !== null && "content" in message
+            ? {
+                ...message,
+                content:
+                  typeof message.content === "string"
+                    ? [{ type: "text", text: message.content }]
+                    : message.content,
+              }
+            : message
+        )
+      ).replaceAll(/,?"cache_control":\{[^}]*\}/g, "");
+    const anchor = messagesOf(second).findLastIndex((message) =>
+      JSON.stringify(message).includes("cache_control")
+    );
+    expect(anchor).toBeGreaterThan(listAt(second));
+    expect(bare(messagesOf(third).slice(0, anchor + 1))).toBe(
+      bare(messagesOf(second).slice(0, anchor + 1))
     );
   },
   180_000
@@ -919,7 +991,7 @@ test.skipIf(skipped)(
     // turn's request without its list, message for message, and carries none.
     const compacted = messagesOf(compaction);
     expect(textOf(compacted.at(-1))).toBe("Third question.");
-    expect(shapeOf(compacted)).toEqual(shapeOf(messagesOf(third).slice(0, -1)));
+    expect(shapeOf(compacted)).toEqual(shapeOf(withoutList(third)));
     expect(carriesList(compaction)).toBe(false);
     expect(listOf(third)).toBe(renderSessionAnswers([item], { now: Date.now() }));
     expect(listOf(fourth)).toBe(renderSessionAnswers([item], { now: Date.now() }));
@@ -962,7 +1034,7 @@ test.skipIf(skipped)(
     // turn's request without its list, message for message: nothing of the reply after the cut.
     const compacted = messagesOf(compaction);
     expect(textOf(compacted.at(-1))).toContain("ENVOY-DELIVERY: CI finished.");
-    expect(shapeOf(compacted)).toEqual(shapeOf(messagesOf(delivered).slice(0, -1)));
+    expect(shapeOf(compacted)).toEqual(shapeOf(withoutList(delivered)));
     expect(carriesList(compaction)).toBe(false);
     expect(listOf(delivered)).toBe(renderSessionAnswers([item], { now: Date.now() }));
     expect(listOf(fourth)).toBe(renderSessionAnswers([item], { now: Date.now() }));

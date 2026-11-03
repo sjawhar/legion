@@ -84,10 +84,12 @@ describe("Dispatch pictures", () => {
       const shot = await within(view.container).findByRole("img", { name: "shot.png" });
       expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1");
       expect(shot.getAttribute("loading")).toBe("lazy");
-      // Scaled to the column, never taller than 24rem.
-      expect(shot.className.split(" ")).toEqual(
-        expect.arrayContaining(["max-h-96", "max-w-full", "w-auto", "object-contain"])
+      // At its own size scaled down to the column, with no cap on its height.
+      const classes = shot.className.split(" ");
+      expect(classes).toEqual(
+        expect.arrayContaining(["max-w-full", "w-auto", "h-auto", "object-contain"])
       );
+      expect(classes.some((name) => name.startsWith("max-h-"))).toBe(false);
       expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=1");
       // A picture with no caption is named by its slug.
       const plan = within(view.container).getByRole("img", { name: "plan-png" });
@@ -151,7 +153,7 @@ describe("Dispatch pictures", () => {
     }
   });
 
-  test("a Dispatch picture that pins no version reads as its reference, with the image's thumbnail", async () => {
+  test("a Dispatch picture that pins no version shows its latest version inline", async () => {
     const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
       issueSummary([picture])
     );
@@ -160,18 +162,99 @@ describe("Dispatch pictures", () => {
     );
 
     try {
-      const link = await within(view.container).findByRole("link", { name: "shot.png" });
-      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
-      expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/artifact/shot-png");
-      // The plain reference's thumbnail is the latest version, in the 40 px shape.
-      await waitFor(() =>
-        expect(link.querySelector("img")?.getAttribute("src")).toBe(
-          "/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"
-        )
-      );
-      expect(link.querySelector("img")?.className.split(" ")).toContain("h-10");
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/2");
+      expect(shot.className.split(" ")).toContain("max-w-full");
+      expect(shot.className.split(" ")).not.toContain("h-10");
+      expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png");
     } finally {
       getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a version-less picture whose latest version fails to load draws the next version", async () => {
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />
+      </QueryClientProvider>
+    );
+
+    try {
+      const v2 = await within(view.container).findByRole("img", { name: "shot.png" });
+      fireEvent.error(v2);
+      await waitFor(() =>
+        expect(within(view.container).queryByRole("img", { name: "shot.png" })).toBeNull()
+      );
+      // An upload of version 3 refreshes the summary, as its event does.
+      act(() => {
+        queryClient.setQueryData(
+          ["issue-summary", "CORE-1"],
+          issueSummary([{ ...picture, latest_version: 3 }])
+        );
+      });
+      const v3 = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(v3.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3");
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a picture line that pins no version and names a document reads as its reference", async () => {
+    const notes: IssueReferenceSummaryDocument = {
+      id: "artifact-notes",
+      kind: "doc",
+      latest_version: 4,
+      name: "notes.md",
+      primary: false,
+      slug: "notes-md",
+    };
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issueSummary([notes]));
+    const view = render(
+      withQueries(<MarkdownBody markdown="![notes](dispatch://CORE-1/artifact/notes-md)" />)
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "notes.md" });
+      expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-md");
+      expect(view.container.querySelector("img")).toBeNull();
+    } finally {
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a plain click on a picture opens it at full size instead of following its link", async () => {
+    const view = render(
+      withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png@v1)" />)
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      const click = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+      shot.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(true);
+      const lightbox = document.querySelector<HTMLDialogElement>(
+        '[data-testid="picture-lightbox"]'
+      );
+      expect(lightbox?.open).toBe(true);
+      expect(lightbox?.querySelector("img")?.getAttribute("src")).toBe(
+        "/api/v1/issues/CORE-1/artifacts/shot-png/versions/1"
+      );
+      lightbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+
+      // Opened again, the layer goes with the body that opened it.
+      shot.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, cancelable: true }));
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).not.toBeNull();
+      view.unmount();
+      expect(document.querySelector('[data-testid="picture-lightbox"]')).toBeNull();
+    } finally {
       view.unmount();
     }
   });

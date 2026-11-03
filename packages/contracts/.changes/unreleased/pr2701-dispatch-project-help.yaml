@@ -1,0 +1,4 @@
+kind: Changed
+body: |-
+  `dispatch project`'s help now says: when a person asks for a project, make the key from its
+  name and create it, and ask the person only when `dispatch projects` shows that the key is in use.

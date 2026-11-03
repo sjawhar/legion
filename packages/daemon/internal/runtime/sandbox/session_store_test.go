@@ -193,12 +193,13 @@ func withoutSessionKey(pod *corev1.Pod) *corev1.Pod {
 
 // A pod carries its whole session store for its life — the providers volume's projection under
 // postgres, its launchers' proxy flags under cloudsql-iam — so a pod created under any other store
-// than a pod created now would get holds a move, and the relaunch replaces it: its next generation
-// would name a URL file the pod has no way to produce. A change of kind in either direction counts,
-// and so does a changed key, or a changed instance, database or login under the same kind. A pod
-// an earlier release created under the file store, which configure now refuses, holds one under
-// either database store.
-func TestAPodUnderAnotherSessionStoreHoldsAMove(t *testing.T) {
+// than a pod created now would get has drifted, and its update round replaces it: its next
+// generation would name a URL file the pod has no way to produce, and the workers in it are asked
+// to push their work before it is ended. A change of kind in either direction counts, and so does
+// a changed key, or a changed instance, database or login under the same kind. A pod an earlier
+// release created under the file store, which configure now refuses, has drifted under either
+// database store.
+func TestAPodUnderAnotherSessionStoreHasDrifted(t *testing.T) {
 	runtimeFor := func(store ompsessions.Store) *Runtime {
 		t.Helper()
 		opts := testOptions()
@@ -236,9 +237,9 @@ func TestAPodUnderAnotherSessionStoreHoldsAMove(t *testing.T) {
 		"a cloudsql-iam pod under the same database": {cloudSQL, pod(cloudSQL), false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			moved := tc.r.movedInPod(tc.pod, workerSpec(t).Role)
+			moved := tc.r.driftedInPod(tc.pod, workerSpec(t).Role)
 			if got := slices.ContainsFunc(moved, func(m movedAddress) bool { return m.where == "the session store" }); got != tc.moved {
-				t.Errorf("movedInPod = %v, want the session store moved %t", moved, tc.moved)
+				t.Errorf("driftedInPod = %v, want the session store moved %t", moved, tc.moved)
 			}
 		})
 	}

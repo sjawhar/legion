@@ -105,8 +105,8 @@ set -g set-clipboard on
 
 A session with Dispatch configured — a top-level session, a Legion pane or a `task` subagent —
 sends two extra user messages with every model request of its conversation. At the head, after
-any compaction summary, it sends the `dispatch-first` skill, whose text never changes. At the
-tail, after the request's last message, it sends what people wrote to the session in the last 72
+any compaction summary, it sends the `dispatch-first` skill, whose text never changes. It also
+sends what people wrote to the session in the last 72
 hours that Dispatch delivered to it: answers to its asks, replies on them and in its comment
 threads, comments on its documents and routed issues, mentions, and messages, newest first and
 word for word. A subagent reads its parent's list. The list stays under 8,000 characters (at most 7,999): the oldest
@@ -119,9 +119,15 @@ own `404 NOT_FOUND` "no route for …". Against that Dispatch a request carries 
 `dispatch answers` cannot read it either; a list read before from it is still carried, its
 left-out line naming no command; the log says once per session that the Dispatch has no answers
 route; and that Dispatch is not asked again for 5 minutes. Any other answer, a proxy's 404 page or
-a 200 that is no answers list included, is a failed read. The list sits at the tail so that a
-change in it costs only its own tokens: the cached conversation before it is sent byte for byte as
-before.
+a 200 that is no answers list included, is a failed read.
+
+The list goes after the request's last message only on the request where it first shows an item,
+or new words in one. On every request after that it stays right after the message it followed
+there, so the request ends with its own last message and the model does not take a list with
+nothing new in it for a new turn; it keeps that place when it only loses items or its header
+changes. After a compaction summarizes that message, or in a new process, the list goes after the
+last message once more. It is never at the head, so a change in it costs only the bytes after it,
+and a list that keeps its place is inside the cached prefix of the next request.
 
 Oh My Pi also builds requests that are not turns of the conversation from it; those carry the
 skill but no list, and wait on no read: a side turn (a Dispatch BTW, the stop-time self-check,
@@ -191,10 +197,13 @@ The extension registers no Dispatch tool. Agents reach Dispatch through the `dis
 their shell: `dispatch --help` lists its commands, `dispatch <command> --help` each one's flags and
 an example, and the `dispatch` skill teaches when to use each. The package ships `bin/dispatch`, a
 shim that runs the bundled `dist/dispatch.js` (built from `@legion/envoy-client`'s
-`bin/dispatch.ts`) with `bun`. At load the extension puts that `bin/` first on `PATH`, sets
-`DISPATCH_HOST=omp` and hands the session's envoy.json on as `ENVOY_CONFIG_FILE`; each session
-start, switch and branch sets `DISPATCH_SESSION_ID` to the session's id, so a command acts as the
-session whose shell ran it and reads the file that session reads.
+`bin/dispatch.ts`) with `bun`. The manifest's `omp.bin` names that `bin/`, so an Oh My Pi that
+supports the field puts it on `PATH` under the plugin's installed path, which keeps working when a
+symlinked plugins root is re-pointed and its old target removed; under an older Oh My Pi the
+extension puts `bin/` first on `PATH` itself at load. The extension also sets `DISPATCH_HOST=omp`
+and hands the session's envoy.json on as `ENVOY_CONFIG_FILE`; each session start, switch and
+branch sets `DISPATCH_SESSION_ID` to the session's id, so a command acts as the session whose shell
+ran it and reads the file that session reads.
 
 A session reads one envoy.json, with a section for Dispatch and one for Envoy:
 
@@ -388,16 +397,34 @@ gated write only when it consumes one, so a write sent any other way is refused 
 
 - **The record.** While the gate is bound, pi-envoy keeps one owner-only file for its process in
   the `askgate/` directory of the CLI's state directory of each session id it binds
-  (`<state>/sessions/<id>/askgate/<pid>-<start>.json`, where `<state>` is `DISPATCH_STATE_DIR`,
-  else `$XDG_STATE_HOME/dispatch`, else `~/.local/state/dispatch`). It names the Oh My Pi process,
-  its Linux start time, and the process's owner-only marker store. Each process writes and removes
-  only its own file, so two processes that bind one session never drop each other. pi-envoy sets
+  (`<state>/sessions/<id>/askgate/<pid>-<start>-<ns>.json`, where `<state>` is
+  `DISPATCH_STATE_DIR`, else `$XDG_STATE_HOME/dispatch`, else `~/.local/state/dispatch`). It names
+  the Oh My Pi process, its Linux start time, its pid namespace (the inode `/proc/self/ns/pid`
+  names), and the process's owner-only marker store. Each process writes and removes only its own
+  file, so two processes that bind one session never drop each other. pi-envoy sets
   `DISPATCH_STATE_DIR` in the session's environment when it is not set, so a command that changes
   `HOME` or `XDG_STATE_HOME` still finds the record. A record of a session the process switched
   away from stays until the process exits, since a shell or an eval kernel started before the
   switch still acts as that session. A record whose process is gone, or whose pid another process
   now holds, is inert, and the CLI's session pruning keeps a directory whose record is live. A
   record pi-envoy cannot write is a notice in the session, at start or at a switch.
+- **Other pid namespaces.** One state directory can serve processes of several pid namespaces: the
+  host's and those of the containers that mount the host's state directory, each with a pid
+  namespace of its own. A pid and a start time name a process only in the namespace they were read
+  in, so the CLI looks up by pid only an owner of its own namespace. An owner of another one counts
+  live while its marker store changed within the last two hours; the process touches its store
+  every ten minutes while it keeps a record, so a live one never looks gone from another namespace.
+  The process also makes its store again, empty, before each write of its own file, so a store that
+  another process removed is back by the gate's next call. A record written by an older pi-envoy
+  names no namespace and is still looked up by pid in the reader's own. The pruning keeps a store
+  such a pi-envoy named for 14 days rather than two hours, since its process may be a live one of
+  another namespace, which touches its store only when it mints a marker, and it keeps a session
+  directory whose record names a store that is still there. A process of another namespace that
+  reads the record (the host's CLI, for a box's session) is never that session's own agent, whose
+  calls run in its process's namespace, so it reads such an owner live only by its store. Every
+  `dispatch` command that shares the state directory must be this release or later (pi-envoy's,
+  and the copy Claude Code sessions run): an earlier one reads a namespaced owner by pid, and its
+  pruning can still remove a box session's idle directory.
 - **The marker.** The gate mints one file in the store for each literal call it lets run, created
   owner-only and exclusively. It binds the exact argument vector the CLI receives and, behind a
   review or a deliberate pass (a rebuttal, a breaker trip), the digest of the arguments the dry
@@ -408,7 +435,8 @@ gated write only when it consumes one, so a write sent any other way is refused 
   its marker until
   shutdown, and a marker older than two hours, longer than any tool's time limit, is refused and
   removed. The process removes its store when it exits; the CLI's daily session pruning removes
-  the store of a process that is gone and that nothing changed for two hours.
+  the store of a process that is gone and that nothing changed for two hours, which for a process
+  of another pid namespace is how it is known to be gone.
 - **The check.** After `--help`, `--dry-run` and the session and Dispatch settings, and before a
   gated write posts, the CLI reads the session's record. With a live one it reads each file the
   argv names once and consumes one matching marker by unlinking it: exactly one process wins, so a

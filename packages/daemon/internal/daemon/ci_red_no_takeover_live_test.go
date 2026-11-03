@@ -388,13 +388,25 @@ func (c *ciRedClaimant) grant() string {
 	return granted.GrantID
 }
 
-// complete reports this role's completion of the phase it works, from the turn it is in, and
-// returns the status and the refusal the daemon answered.
-func (c *ciRedClaimant) complete(summary, commit, verdict string) (int, api.Failure) {
+// handoff seeds on the run's Dispatch board version 1 of this claim's record of phase word,
+// written by this claim's own registered session, as `dispatch handoff-write` leaves it, and
+// answers its id. A completion of a file-backed phase names a record, and the daemon reads it
+// back from Dispatch and refuses one another session wrote (api/handoff.go's handoffRecord), so
+// every completion below writes its own first, as a worker does.
+func (c *ciRedClaimant) handoff(word string) string {
+	return c.r.board.handoff(c.r.key, word, c.session)
+}
+
+// complete reports this role's completion of the phase it works, from the turn it is in, naming
+// the handoff record of that phase this claim wrote, and returns the status and the refusal the
+// daemon answered. Every record the board seeds is version 1 of its own id, so each completion
+// names a record of its own and no two are the same one.
+func (c *ciRedClaimant) complete(summary, commit, verdict, handoffID string) (int, api.Failure) {
 	t := c.r.t
 	t.Helper()
 	status, body := c.r.d.request(http.MethodPost, "/legion/v1/handoff/complete",
-		api.HandoffCompleteRequest{GrantID: c.grant(), Summary: summary, Commit: commit, Verdict: verdict}, false)
+		api.HandoffCompleteRequest{GrantID: c.grant(), Summary: summary, Commit: commit, Verdict: verdict,
+			HandoffID: handoffID, HandoffVersion: 1}, false)
 	if status == http.StatusOK {
 		return status, api.Failure{}
 	}
@@ -414,7 +426,7 @@ func (r *ciRedNoTakeoverLive) testerWorksItsAssignment() {
 	r.imp = r.claimant(claim.RoleImplementer, "ses_implementer")
 	r.note("the implementer is registered and ready on the launch this boot made for the claim the fixture left mid-launch")
 	r.imp.startTurn("")
-	if status, failure := r.imp.complete("implemented it", ciRedFirstHead, ""); status != http.StatusOK {
+	if status, failure := r.imp.complete("implemented it", ciRedFirstHead, "", r.imp.handoff("implement")); status != http.StatusOK {
 		t.Fatalf("the implementer's completion = %d %s %s, want 200", status, failure.Code, failure.Error)
 	}
 	r.imp.endTurn()
@@ -526,7 +538,7 @@ func (r *ciRedNoTakeoverLive) staleAssignmentRefused() {
 	r.waitFor("the pull request at the pushed head", func(got api.Issue) bool {
 		return got.PullRequest != nil && got.PullRequest.Head == ciRedSecondHead
 	})
-	if status, failure := r.imp.complete("fixed the red", ciRedSecondHead, ""); status != http.StatusOK {
+	if status, failure := r.imp.complete("fixed the red", ciRedSecondHead, "", r.imp.handoff("implement")); status != http.StatusOK {
 		t.Fatalf("the implementer's second completion = %d %s %s, want 200", status, failure.Code, failure.Error)
 	}
 	r.imp.endTurn()
@@ -540,7 +552,7 @@ func (r *ciRedNoTakeoverLive) staleAssignmentRefused() {
 	if stale.State != string(supervise.StateWorking) {
 		t.Fatalf("the tester is %s, want it still working the turn it began in step 1", stale.State)
 	}
-	status, failure := r.test.complete("tested it", ciRedFirstTesterHandoff, "pass")
+	status, failure := r.test.complete("tested it", ciRedFirstTesterHandoff, "pass", r.test.handoff("test"))
 	if status != http.StatusConflict || failure.Code != "HANDOFF_STALE_ASSIGNMENT" {
 		t.Fatalf("the completion from the tester's old turn = %d %s %s, want 409 HANDOFF_STALE_ASSIGNMENT", status, failure.Code, failure.Error)
 	}
@@ -556,7 +568,7 @@ func (r *ciRedNoTakeoverLive) staleAssignmentRefused() {
 	r.test.endTurn()
 	prompt := r.test.takeTask("Phase: testing")
 	r.note("read back: the tester's first turn ended and the second assignment's task reached it (%s)", firstLine(prompt.Message))
-	if status, failure := r.test.complete("tested the fix", ciRedSecondTesterHandoff, "pass"); status != http.StatusOK {
+	if status, failure := r.test.complete("tested the fix", ciRedSecondTesterHandoff, "pass", r.test.handoff("test")); status != http.StatusOK {
 		t.Fatalf("the completion from the tester's new turn = %d %s %s, want 200", status, failure.Code, failure.Error)
 	}
 	r.test.endTurn()
@@ -657,7 +669,6 @@ func (r *ciRedNoTakeoverLive) publishPush(from, to string) {
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
 		"kind": "push", "repo": liveRepo, "ref": "refs/heads/legion/" + r.key, "before": from, "after": to,
-		"changed_paths": "src/widget.go", "changed_paths_truncated": "false", "forced": "false",
 		"pusher": "legion-implement[bot]", "commit_count": "1", "head_subject": "fix the red",
 	})
 	if err != nil {

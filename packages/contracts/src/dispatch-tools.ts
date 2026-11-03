@@ -1048,7 +1048,7 @@ export const dispatchToolSpecs = [
     description:
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " +
-      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
+      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. A find that opens with a list marker ('- ', '5. ', with an optional '[ ] ' or '[x] ' after it) and matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and a box matching only a task item in that state. A find or quote anchor stays inside one block, and in a table inside one cell: ' | ' is the boundary markdown writes between two cells, not text a cell holds, so a quote that runs across cells is refused, naming the cells; change several cells with one operation per cell in the same batch, and anchor on one cell's text. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exceptions are an item a find's list marker selected (it matched no text as written): replace(find=\"5. Old\", with=\"5. New\") gives the item the text 'New' under its own number, and a with that is the marker alone is INVALID_OP; and a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', where a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block\'s id, type, opening words and token, and each table\'s rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ' +
@@ -1222,15 +1222,19 @@ export const dispatchToolSpecs = [
       "nothing, and a different one is refused, since it would rewrite the card the human is " +
       "reading. Approve and Request changes each close the request, so the next call opens a new " +
       "one. Call it once per revision, when the revision is complete, never after each edit. An " +
-      "approval goes stale when the document changes outside its decision blocks after it: " +
-      "request approval again once that revision is complete and " +
+      "approval goes stale when the document changes outside its decision blocks after it, until " +
+      "a later version's text is exactly the approved version's again, as when an accidental " +
+      "edit is undone exactly, and no decision block in it was decided since: that version " +
+      "carries the approval and the document reads approved at it, so nothing is requested for " +
+      "it. When the document does not read approved, request approval again once that revision " +
+      "is complete and " +
       HUMAN_AGREED_TO_DOCUMENT +
       ", with a one-sentence summary naming what changed since the earlier approval: the card " +
       "names that approval (version, date, reviewer) and its Show diff control carries the detail. " +
       "A human's own answer to a decision block carries the approval to the version it writes when " +
       "that answer is the whole change since the approved version, so nothing is requested for " +
       "it. A new version of a Legion root spec closes its armed design gate until a human " +
-      "approves it; the carried approval reopens it too. " +
+      "approves it; a carried approval reopens it too. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
@@ -1510,11 +1514,14 @@ export const dispatchToolSpecs = [
     description:
       "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " +
       "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " +
-      "with dispatch projects. A key that already exists is refused " +
+      "with dispatch projects. When a person asks for a project, make the key from its name. Check the key with " +
+      "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use. " +
+      "A key that already exists is refused " +
       "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " +
       `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` +
-      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. Do not use ` +
-      "it when an existing project already covers the work; file an issue there with dispatch issue instead.",
+      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. When no person ` +
+      "asked for a project and an existing project already covers the work, do not create a project. File an " +
+      "issue in that project with dispatch issue.",
     arguments: (z) => ({
       key: z.string().describe("The new project's key, such as CORE."),
       name: z
