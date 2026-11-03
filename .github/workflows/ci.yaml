@@ -83,17 +83,31 @@ permissions:
   actions: read
   checks: write
 
-# Runners: each job that runs longer than about two minutes, and worker-image.yaml's build, runs
-# on the self-hosted runner scale set the repository variable LEGION_CI_RUNNER names (legion-ci),
-# through one runs-on expression written the same way in every such job, so a grep for
-# LEGION_CI_RUNNER finds them all. With the variable unset they run on ubuntu-24.04, so deleting
-# it is the rollback. Each such job's first step after checkout is
-# .github/actions/self-hosted-prereqs, which installs what the pool's runner image lacks. The
-# short jobs stay on ubuntu-24.04, and so does every job that holds a credential beyond the job's
-# own token (worker-image.yaml's attest). The expression keeps a fork's pull request on
-# ubuntu-24.04, but that is no security boundary: such a run uses the fork's copy of this file,
-# which can name any runner. The boundary is the repository setting that requires approval before
-# a workflow from an outside collaborator runs.
+# Runners: the jobs that run longer than about two minutes may run on the self-hosted runner scale
+# set the repository variable LEGION_CI_RUNNER names (legion-ci), through one of two runs-on
+# expressions, each written the same way wherever it is used, so a grep for LEGION_CI_RUNNER
+# finds them all. With the variable unset every job runs on ubuntu-24.04, so deleting it is the
+# rollback.
+#   * A job of this file that only tests (it publishes and deploys nothing) uses the pool on a
+#     push, a merge group and a same-repository pull request:
+#     `(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name ==
+#     github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04'`.
+#   * A job whose output is published or deployed, worker-image.yaml's build and docs-site.yaml's
+#     build, uses the pool on a same-repository pull request only:
+#     `github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name ==
+#     github.repository && vars.LEGION_CI_RUNNER || 'ubuntu-24.04'`. A pull request's job on the
+#     pool runs privileged on nodes the pool shares, so it could leave something there that a later
+#     job reads; a build that main publishes, attests or deploys therefore always runs on a fresh
+#     GitHub-hosted VM, and a pull request's build (an image's sha- tag, which no deployment pins)
+#     may use the pool.
+# Each job that may use the pool runs .github/actions/self-hosted-prereqs first after checkout,
+# which installs what the pool's runner image lacks. The short jobs stay on ubuntu-24.04, and so
+# does every job that holds a credential beyond the job's own token (worker-image.yaml's attest).
+# pi-legion stays too: its skill-scenario rig bind-mounts paths under /tmp into docker, which the
+# pool's Docker daemon, a sidecar sharing only the work directory, cannot see. Both expressions
+# keep a fork's pull request on ubuntu-24.04, but that is no security boundary: such a run uses
+# the fork's copy of this file, which can name any runner. The boundary is the repository setting
+# that requires approval before a workflow from an outside collaborator runs.
 
 # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
 # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
@@ -750,7 +764,6 @@ jobs:
             # the package.
             pi_legion:
               - '.github/workflows/ci.yaml'
-              - '.github/actions/self-hosted-prereqs/**'
               - *bun_install
               - *biome
               - 'packages/pi-legion/**'
@@ -1725,6 +1738,11 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/self-hosted-prereqs
+      # Playwright and the daemon's install-script tests run node, and the pool's runner image has
+      # none: the same Node.js docs-site.yaml uses, on either runner.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
@@ -1901,13 +1919,17 @@ jobs:
       # internal/launcher's role-namespace tests start each role generation in unprivileged user,
       # mount, PID and IPC namespaces, as an issue pod's launcher does, and t.Fatal rather than
       # skip under GITHUB_ACTIONS. Ubuntu 24.04 restricts unprivileged user namespaces with an
-      # AppArmor sysctl, so the job turns it off on its throwaway runner (`|| true`: a runner
-      # image without the key restricts nothing), and the unshare after it is the verdict that
-      # the restriction is gone.
-      - name: Allow unprivileged user namespaces (the launcher's role-namespace tests)
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          unshare --user --map-root-user true
+      # AppArmor sysctl, so on a GitHub-hosted runner, a throwaway VM, the job turns it off
+      # (`|| true`: a runner image without the key restricts nothing). The sysctl is not
+      # namespaced, so on the self-hosted pool it would write the shared node's kernel; there the
+      # step is skipped and the runner pod's own security settings must allow the namespaces.
+      # On either runner the unshare after it is the verdict that nothing restricts them.
+      - name: Allow unprivileged user namespaces on a GitHub-hosted runner
+        if: runner.environment == 'github-hosted'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Check unprivileged user namespaces are allowed (the launcher's role-namespace tests)
+        run: unshare --user --map-root-user true
 
       - name: Test the Go daemon
         run: go test -count=1 -timeout 20m ./...
@@ -2169,7 +2191,7 @@ jobs:
   pi-legion:
     needs: changes
     if: needs.changes.outputs.pi_legion == 'true'
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The NATS server the Envoy role claim of extensions/controller-start-omp.test.ts's controller
     # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
@@ -2182,7 +2204,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/self-hosted-prereqs
       - uses: ./.github/actions/setup-bun
       - uses: ./.github/actions/install-jj
       # extensions/legion-phase-stall-omp.test.ts and controller-start-omp.test.ts run the pinned
@@ -2290,6 +2311,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/self-hosted-prereqs
+      # Playwright and the daemon's install-script tests run node, and the pool's runner image has
+      # none: the same Node.js docs-site.yaml uses, on either runner.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -2427,6 +2453,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/self-hosted-prereqs
+      # Playwright and the daemon's install-script tests run node, and the pool's runner image has
+      # none: the same Node.js docs-site.yaml uses, on either runner.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

@@ -102,7 +102,7 @@ jobs:
     # release.yaml's build-only call, workflow_dispatch), so it builds.
     # .github/scripts/check-image-trigger-paths.sh admits this call-mode term.
     if: ${{ inputs.attest_digest == '' }}
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 30
     # Job-level (not workflow-level): this file is a called workflow, and job-level concurrency
     # behaves identically for its two triggers, `workflow_call` and `workflow_dispatch`.
@@ -332,9 +332,9 @@ jobs:
   attest:
     needs: build
     if: ${{ !cancelled() && github.event_name != 'pull_request' && !inputs.skip_attest && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.attest_digest != '')) }}
-    # Always GitHub-hosted, while the build may run on the legion-ci pool (ci.yaml's header says
-    # when): the signing certificate names the runner environment of this job, and a verifier that
-    # refuses self-hosted runners accepts only a github-hosted one.
+    # GitHub-hosted, as the build is on every event this job runs on: only a pull request's build
+    # may use the legion-ci pool (ci.yaml's header says why), and this job never runs on a pull
+    # request. So the runner environment the signing certificate names is that of the build too.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # id-token: write is the OIDC token Sigstore issues the signing certificate for; attestations:

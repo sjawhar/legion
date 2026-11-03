@@ -6,7 +6,10 @@
 # resolves). If the pin moves and the saved help does not, the tests keep passing on the old help,
 # and a command the new gh's help spells otherwise is first refused in a pane. So this check fails
 # until the two name one gh: raising gh is the pin's edit and `testdata/regenerate-gh-help.sh`, run
-# with the new gh, together.
+# with the new gh, together. The self-hosted pool installs gh in
+# `.github/actions/self-hosted-prereqs`, whose `gh_version=X.Y.Z` must name the same gh, so the
+# daemon's gh-backed tests run against it on the pool as in the image; that edit carries the new
+# release's `gh_sha256` too, which the action checks before it unpacks anything.
 #
 # Run from anywhere: .github/scripts/check-gh-version.sh
 # CI runs it in ci.yaml's lint job, and its tests in ci.yaml's test job.
@@ -21,6 +24,7 @@ from pathlib import Path
 
 DOCKERFILE = Path("packages/daemon/docker/worker.Dockerfile")
 VERSION = Path("packages/daemon/cmd/legion/testdata/gh-help/VERSION")
+PREREQS = Path(".github/actions/self-hosted-prereqs/action.yml")
 
 
 def fatal(path: Path, message: str) -> None:
@@ -60,5 +64,21 @@ if saved.group(1) != pinned.group(1):
         f"{pinned.group(1)}: run packages/daemon/cmd/legion/testdata/regenerate-gh-help.sh with gh "
         f"{pinned.group(1)}",
     )
-print(f"the saved gh help is gh {saved.group(1)}'s, the worker image's pin")
+
+action_pins = [
+    (number, match.group(1))
+    for number, line in enumerate(read(PREREQS).splitlines(), start=1)
+    if (match := re.fullmatch(r"\s*gh_version=(\S*)\s*", line))
+]
+if len(action_pins) != 1:
+    fatal(PREREQS, f"{PREREQS} must set gh_version exactly once, as gh_version=X.Y.Z; it does {len(action_pins)} times")
+action_line, action_pin = action_pins[0]
+if action_pin != pinned.group(1):
+    fatal(
+        PREREQS,
+        f"{PREREQS}:{action_line}: gh_version={action_pin}, and {DOCKERFILE}:{line} pins gh "
+        f"{pinned.group(1)}: set gh_version={pinned.group(1)} and gh_sha256 to the SHA-256 "
+        f"gh_{pinned.group(1)}_checksums.txt lists for gh_{pinned.group(1)}_linux_amd64.tar.gz",
+    )
+print(f"the saved gh help and the self-hosted pool's gh are gh {saved.group(1)}, the worker image's pin")
 PY

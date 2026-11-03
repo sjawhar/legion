@@ -632,6 +632,7 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 ### How it is built — and the iteration rule
 
 `.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action` and `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses).
+A pull request's build, which publishes only a `sha-` tag that no deployment pins, may run on the repository's self-hosted runner pool when the repository variable `LEGION_CI_RUNNER` names it, while every build on `main` and its attestation stay on GitHub-hosted runners (`.github/workflows/ci.yaml`'s header says why).
 Its layer cache is the GitHub Actions cache under the image's own scope (`cache-from: type=gha,scope=worker-image`).
 Only a build on `main` writes it, only the final image's layers (`cache-to: type=gha,mode=min,scope=worker-image,ignore-error=true`);
 a pull request's build reads what main wrote and writes none, because a newer head can cancel that build in the middle of a cache export, and because GitHub never lets a `main` run restore a branch's entries, so no pull request can put a layer into the attested release build.
@@ -667,7 +668,7 @@ A filter on the pushed commits alone would leave such a head unguarded.
 The `worker-image` job of `ci.yaml` grants the called workflow its `packages`/`contents` permissions, which apply to same-repo pull requests (this repository takes no fork PRs, whose token would be read-only).
 The `attest` job's `id-token` and `attestations` scopes reach a pull request run only if it drops that job's `if:`, and its attestation then names `refs/pull/<n>/merge`, which the verify command above refuses.
 
-**The image is built only by this workflow, on the GitHub-hosted runner.**
+**The image is built only by this workflow, on a CI runner** (GitHub-hosted for every build on `main`).
 Never build it on a workstation — no `docker build`, `docker buildx`, or `docker compose build`:
 an unrelated buildx job took the devbox host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is not a workstation).
 Iterate by pushing the PR branch (trigger 2;

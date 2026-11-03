@@ -56,7 +56,7 @@ env:
 
 jobs:
   build:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 25
     # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
     # truncate.

@@ -4,12 +4,16 @@ description: >-
   pool through the LEGION_CI_RUNNER repository variable (ci.yaml's header says which). The pool
   runs the stock ghcr.io/actions/actions-runner image: Ubuntu 24.04 with git, curl, jq, unzip,
   python3, sudo and the docker CLI with buildx, and none of the rest of GitHub's ubuntu-24.04
-  image. This step installs, from Ubuntu's own archive, what those jobs use from the hosted image
-  without installing it themselves. On a GitHub-hosted runner it does nothing.
+  image. This step installs what those jobs use from the hosted image without installing it
+  themselves: gh from its GitHub release, the rest from Ubuntu's own archive. On a GitHub-hosted
+  runner it does nothing.
 
-  gh: ci-ok-report.sh, every job's last step, lists the run's artifacts and jobs and posts ci-ok
-  with it, and so do lint's check-pr-text.sh and post-check-run.sh; the daemon's gh-backed tests
-  skip without one.
+  gh, the release the worker image ships (worker.Dockerfile's `ARG GH_TOOL`, which
+  .github/scripts/check-gh-version.sh holds `gh_version` below to), checked against the SHA-256
+  that release's gh_<version>_checksums.txt lists: ci-ok-report.sh, every job's last step, lists
+  the run's artifacts and jobs and posts ci-ok with it, and so do lint's check-pr-text.sh and
+  post-check-run.sh; the daemon's gh-backed tests are written against that gh's help. Raising gh
+  edits `gh_version` and `gh_sha256` here with the Dockerfile's pin.
 
   yq: ci-ok-report.sh reads CI_OK_SELECTED_BY out of ci.yaml with it.
 
@@ -26,7 +30,9 @@ description: >-
   locales: envoy-go runs `sudo locale-gen en_US.UTF-8`, and the daemon's locale cases skip
   without that locale, which this step generates, as the hosted image has it.
 
-  nodejs: the daemon's Claude Code install-script tests skip without node.
+  Node.js is not installed here: Ubuntu's is 18, and Playwright needs 20 or newer. A job that
+  runs node takes it from actions/setup-node after this step, as docs-site.yaml, dispatch,
+  dispatch-browser-multiprocess and test do.
 runs:
   using: composite
   steps:
@@ -37,5 +43,13 @@ runs:
         set -euo pipefail
         sudo apt-get -o Acquire::Retries=3 update -qq
         sudo apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends \
-          gh yq python3-yaml gcc libc6-dev zstd postgresql-client locales nodejs
+          yq python3-yaml gcc libc6-dev zstd postgresql-client locales
         sudo locale-gen en_US.UTF-8
+        gh_version=2.98.0
+        gh_sha256=3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de
+        tarball="$RUNNER_TEMP/gh_${gh_version}_linux_amd64.tar.gz"
+        curl -fsSL -o "$tarball" "https://github.com/cli/cli/releases/download/v${gh_version}/gh_${gh_version}_linux_amd64.tar.gz"
+        echo "$gh_sha256  $tarball" | sha256sum -c -
+        sudo tar -xzf "$tarball" -C /usr/local --strip-components=1 "gh_${gh_version}_linux_amd64/bin/gh"
+        rm "$tarball"
+        gh --version
