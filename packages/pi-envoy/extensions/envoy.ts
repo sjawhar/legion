@@ -1879,10 +1879,11 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   // Opens every subject of `topic` not already open, and returns once the server has every one of
-  // them; answers whether this call opened any, which is when its caller has something to tell the
-  // listener. A queued task subscribes through its handle, which hands in its own `connect`: a
-  // connection its task outran refuses there, before the first subject opens, so nothing a newer
-  // pass has since settled is reopened behind its back.
+  // them or the connection's bound has passed with the asking handed to the background
+  // (`confirmSubscribed`); answers whether this call opened any, which is when its caller has
+  // something to tell the listener. A queued task subscribes through its handle, which hands in
+  // its own `connect`: a connection its task outran refuses there, before the first subject opens,
+  // so nothing a newer pass has since settled is reopened behind its back.
   const subscribe = async (
     topic: string,
     connect: () => Promise<NatsConnection> = ensureConnection

@@ -10816,11 +10816,13 @@ console.log(JSON.stringify(args));
   });
 
   test("an agent stream control subject whose connection closes under its round trip is closed, not left for no pass to reopen", async () => {
-    // `watchAgentStream` returns at once while `agentStreamControl` names the session, so a
-    // control subject left open after an open that gave up would never be opened again and never
-    // be registered: a viewer's replay request and its watch pings would reach nothing, for the
-    // life of the session. Only a connection closed for good makes the open give up; a rejection
-    // on a connection that is not closed leaves it to go on, confirmed in the background.
+    // `watchAgentStream` returns at once while `agentStreamControl` names a subscription, so an
+    // open that gave up and left the field set would have no pass reopen the control subject: a
+    // viewer's replay request and its watch pings would reach nothing. `pumpAgentStreamControl`'s
+    // own end path clears the field and reopens one resubscribe delay later once the subscription
+    // ends, and this row holds the open to clearing it itself rather than leaving the subject to
+    // that path. Only a connection closed for good makes the open give up; a rejection on a
+    // connection that is not closed leaves it to go on, confirmed in the background.
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?control-flush-fails");
     const fixture = createPi();
@@ -18533,9 +18535,11 @@ describe("consumer delivery", () => {
 
   test("a relay subject whose connection closes under its round trip is closed, and the next tick opens it", async () => {
     // `retryRelay` bails while `owner.subscription` is set and `pumpRelay` starts no retry for a
-    // subscription whose owner no longer names it, so a relay subject left open after an open
-    // that gave up would stay open, unregistered and unrelayed. Only a connection closed for good
-    // makes the open give up; a rejection on a connection that is not closed leaves it to go on.
+    // subscription whose owner no longer names it, so an open that gave up and left the field set
+    // would have neither the reconcile pass nor `retryRelay` reopen the relay: it would stay open,
+    // unregistered and unrelayed until the pump's own end path cleared the field. Only a
+    // connection closed for good makes the open give up; a rejection on a connection that is not
+    // closed leaves it to go on.
     natsState.failFlushClosesConnection = true;
     natsState.failFlushOnSubject = RELAY;
     const session = await bootConsumer("relay-flush-fails");
