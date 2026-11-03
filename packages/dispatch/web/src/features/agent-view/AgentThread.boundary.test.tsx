@@ -5,6 +5,7 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
 import type { AgentStreamFrame } from "@legion/contracts";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
@@ -53,20 +54,28 @@ function Harness({ messages }: { messages: KeyedMessage[] }): ReactNode {
     onNew: async () => undefined,
   });
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <AgentThread
-        commands={undefined}
-        contentIds={messages.map((message) => turnKey(message.metadata?.custom ?? {}, message.id))}
-        empty="Nothing yet."
-        held={false}
-        ownSendCount={0}
-        placeholder="Message the session…"
-        replayCount={0}
-        resetKey="session-1"
-        sends={NO_SESSION_SENDS}
-        sessionId="session-1"
-      />
-    </AssistantRuntimeProvider>
+    // The composer's paste and drop upload through the app's write store, which is held per
+    // query client, so the thread needs one even where nothing here uploads.
+    <QueryClientProvider client={new QueryClient()}>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <AgentThread
+          commands={undefined}
+          contentIds={messages.map((message) =>
+            turnKey(message.metadata?.custom ?? {}, message.id)
+          )}
+          empty="Nothing yet."
+          held={false}
+          modes={["steer"]}
+          onPickMode={() => {}}
+          ownSendCount={0}
+          placeholder="Message the session…"
+          replayCount={0}
+          resetKey="session-1"
+          sends={NO_SESSION_SENDS}
+          sessionId="session-1"
+        />
+      </AssistantRuntimeProvider>
+    </QueryClientProvider>
   );
 }
 

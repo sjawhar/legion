@@ -3,7 +3,7 @@ import {
   type ThreadMessageLike,
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
-import type { AgentStreamCommand } from "@legion/contracts";
+import type { AgentStreamCommand, MessageDeliveryMode } from "@legion/contracts";
 import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
 
 import type { Message, MessageRead } from "../../api/types";
@@ -46,6 +46,8 @@ export function AgentRuntimeThread({
   commands,
   conversation,
   empty,
+  modes,
+  onPickMode,
   onSend,
   ownSendCount,
   sends,
@@ -61,6 +63,10 @@ export function AgentRuntimeThread({
   commands: readonly AgentStreamCommand[] | undefined;
   conversation: AgentConversation;
   empty: string;
+  /** The delivery modes this session takes, which the `/` list offers beside its commands. */
+  modes: readonly MessageDeliveryMode[];
+  /** Picks the mode the next message goes in, as the header's "Send as" select does. */
+  onPickMode: (mode: MessageDeliveryMode) => void;
   /** Hands `body` to the session as a write of its own, as the page's delivery mode stands. */
   onSend: (body: string) => void;
   /** Bumped once per message this viewer sent that the session accepted, so their own send takes
@@ -212,6 +218,8 @@ export function AgentRuntimeThread({
         contentIds={contentIds}
         empty={empty}
         held={sendDisabled}
+        modes={modes}
+        onPickMode={onPickMode}
         ownSendCount={ownSendCount}
         placeholder={placeholder}
         replayCount={replayCount}

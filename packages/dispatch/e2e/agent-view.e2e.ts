@@ -13,7 +13,7 @@ import {
 } from "./api";
 import { expectConsecutiveLinksClear, expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
-import { MESSAGE_REFUSED, navigateInApp, refusePosts } from "./sends";
+import { dropPicture, MESSAGE_REFUSED, navigateInApp, pastePicture, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 /**
@@ -691,7 +691,11 @@ test("the composer completes the session's slash commands and sends a picked one
 
     await input.fill("/");
     const list = page.getByRole("listbox", { name: "Slash commands" });
+    // The three modes this session takes lead the list, then its own commands.
     await expect(list.getByRole("option")).toHaveText([
+      /^Send\s*delivery mode/,
+      /^Aside\s*delivery mode/,
+      /^BTW\s*delivery mode/,
       /^\/compact/,
       /^\/skill:dispatch/,
       /^\/new\s*terminal only/,
@@ -714,6 +718,115 @@ test("the composer completes the session's slash commands and sends a picked one
         message: "/compact",
         payload: expect.objectContaining({ delivery: expect.objectContaining({ mode: "steer" }) }),
       });
+  } finally {
+    await context.close();
+  }
+});
+
+// The `/` list is also where the delivery mode is picked, for a reader whose hands are on the
+// keyboard: it offers every mode the session takes, and a pick sets the header's "Send as" and
+// writes nothing at all into the message, where a command pick writes `/name `.
+test("the live view's slash list offers each delivery mode, and a pick sets Send as and writes no text", async ({
+  browser,
+}) => {
+  // A session of its own: the relay's replay is process-global, and the planner's is the one
+  // other rows read. This one advertises all three modes and publishes no commands.
+  const everyMode: FakeSession = {
+    ...planner,
+    session_id: "01a0e0c1-0000-7000-8000-00000000d111",
+    title: "Every mode",
+  };
+  await setLiveSessions([planner, everyMode]);
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${everyMode.session_id}/live`);
+    const composer = page.getByTestId("agent-composer");
+    const input = composer.locator("textarea");
+    const mode = page.getByRole("combobox", { name: "Delivery mode" });
+    await expect(mode).toHaveValue("steer");
+
+    await input.fill("/");
+    const list = page.getByRole("listbox", { name: "Slash commands" });
+    await expect(list.getByRole("option")).toHaveText([
+      /^Send\s*delivery mode/,
+      /^Aside\s*delivery mode/,
+      /^BTW\s*delivery mode/,
+    ]);
+
+    // Typed on, the list narrows to the one mode whose name starts with it; picking it sets the
+    // header's mode and leaves the box empty, with no `/btw` for the session to read.
+    await input.pressSequentially("bt");
+    await expect(list.getByRole("option")).toHaveText([/^BTW\s*delivery mode/]);
+    await input.press("Enter");
+    await expect(input).toHaveValue("");
+    await expect(list).toHaveCount(0);
+    await expect(mode).toHaveValue("btw");
+    await expect(input).toHaveAttribute("placeholder", /delivered as BTW/);
+
+    // Nothing went out: the pick is a choice, not a message.
+    expect(await getSentMessages()).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});
+
+// A session that refuses a steer - a Claude Code session does - advertises fewer modes, and the
+// list offers only what it takes, as the header's select does.
+test("the live view's slash list offers only the modes a session that takes fewer advertises", async ({
+  browser,
+}) => {
+  const asideOnly: FakeSession = {
+    ...planner,
+    capabilities: ["aside"],
+    session_id: "01a0e0c1-0000-7000-8000-00000000d222",
+    title: "Aside only",
+  };
+  await setLiveSessions([planner, asideOnly]);
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${asideOnly.session_id}/live`);
+    const input = page.getByTestId("agent-composer").locator("textarea");
+    await input.fill("/");
+    const list = page.getByRole("listbox", { name: "Slash commands" });
+    await expect(list.getByRole("option")).toHaveText([/^Aside\s*delivery mode/]);
+  } finally {
+    await context.close();
+  }
+});
+
+// A picture a person has in hand reaches the session the way it reaches an issue: pasted or
+// dropped into the box it is being written in. It uploads to the session's own artifacts and its
+// Markdown line joins the draft, after whatever was already typed.
+test("a picture pasted into the live view and one dropped on it upload to the session and join the draft", async ({
+  browser,
+}) => {
+  const withFiles: FakeSession = {
+    ...planner,
+    session_id: "01a0e0c1-0000-7000-8000-00000000d333",
+    title: "Files",
+  };
+  await setLiveSessions([planner, withFiles]);
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${withFiles.session_id}/live`);
+    const composer = page.getByTestId("agent-composer");
+    const input = composer.locator("textarea");
+    await input.fill("Look at this:");
+
+    // The reference the draft gains names the session as the file's owner: only an upload
+    // Dispatch stored under this session answers with `dispatch://agent/<id>/artifact/…@v1`.
+    const pasted = `![shot.png](dispatch://agent/${withFiles.session_id}/artifact/shot-png@v1)`;
+    await pastePicture(input, "shot.png");
+    await expect(input).toHaveValue(`Look at this: ${pasted}`);
+
+    // The drop is taken by the composer itself, which is where a file dragged onto the box
+    // lands: the input is assistant-ui's and carries no handler of its own.
+    const dropped = `![floor.png](dispatch://agent/${withFiles.session_id}/artifact/floor-png@v1)`;
+    await dropPicture(composer, "floor.png");
+    await expect(input).toHaveValue(`Look at this: ${pasted} ${dropped}`);
   } finally {
     await context.close();
   }

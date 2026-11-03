@@ -250,6 +250,39 @@ test("a project with a source opens on its Architecture: bars, drill-down, detai
   }
 });
 
+// The reason box is a multi-line input, so Enter writes a line in it and Ctrl/Cmd+Enter saves -
+// the rule every Dispatch-owned multi-line input keeps. This one sits in a form, so the key
+// submits that form, which is the same save its button makes.
+test("the architecture reason box writes a line on Enter and saves on Ctrl/Cmd+Enter", async ({
+  browser,
+}) => {
+  const issues = await seedArchitecture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto("/projects/CORE/architecture?view=unassigned");
+    const unassigned = page.getByTestId("unassigned-list");
+    await unassigned.getByRole("button", { name: "Not architectural…" }).click();
+    const reason = unassigned.getByRole("textbox", {
+      name: `Why ${issues.loose.key} is not architectural`,
+    });
+    await reason.fill("A flag sweep");
+
+    // Enter writes a line and saves nothing: the regression guard for the key that saves.
+    await reason.press("Enter");
+    await reason.pressSequentially("no component owns it");
+    await expect(reason).toHaveValue("A flag sweep\nno component owns it");
+    expect((await getIssue(issues.loose.key)).components.mode).toBe("inherit");
+
+    await reason.press("ControlOrMeta+Enter");
+    await expect
+      .poll(() => getIssue(issues.loose.key).then((issue) => issue.components))
+      .toMatchObject({ mode: "none", reason: "A flag sweep\nno component owns it" });
+  } finally {
+    await context.close();
+  }
+});
+
 test("Refresh with a broken model keeps the last model up behind an error banner; /issues keeps its filter; a project without a source opens on Issues", async ({
   browser,
 }) => {

@@ -157,6 +157,42 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
   }
 });
 
+// The broadcast box is a multi-line input, so Enter writes a line in it and Ctrl/Cmd+Enter is
+// what sends - the rule every Dispatch-owned multi-line input keeps. This composer is no form,
+// so the key has nothing to submit and the box sends itself.
+test("the broadcast box writes a line on Enter and sends on Ctrl/Cmd+Enter", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
+  await setLiveSessions([planner, tester]);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    await page
+      .getByRole("region", { name: "Agents" })
+      .getByRole("button", { name: "No Dispatch activity (2)" })
+      .click();
+    await page.getByRole("checkbox", { name: "Select Planner for broadcast" }).check();
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const box = composer.getByRole("textbox", { name: "Broadcast message" });
+    await box.fill("First line");
+
+    // Enter writes a line and sends nothing: the regression guard for the key that sends.
+    await box.press("Enter");
+    await box.pressSequentially("Second line");
+    await expect(box).toHaveValue("First line\nSecond line");
+    expect(await listBroadcasts()).toEqual([]);
+
+    await box.press("ControlOrMeta+Enter");
+    await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
+    const [summary] = await listBroadcasts();
+    expect(summary?.body).toBe("First line\nSecond line");
+  } finally {
+    await alice.close();
+  }
+});
+
 // LEGION-540. A broadcast's body is Markdown wherever it shows: the broadcast page's header, the
 // recipient's copy on the Agents page, and the list's one-line preview. A numbered list is a
 // list, not one run-on line, on the desktop and on a phone; and the preview, which runs the list

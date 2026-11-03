@@ -35,6 +35,7 @@ import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
 import { RefusableButton } from "../../components/RefusableButton";
+import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSending } from "../../hooks/useSending";
 import { compareTimestamps } from "../../lib/timestamps";
 import {
@@ -1096,6 +1097,18 @@ function BroadcastComposer({
   // line on screen shows it), so a refusal naming agents names them as `AgentName` does.
   const refusal = sendState.refusal === null ? null : sendState.refusal.map(text.part).join("");
   const noticeId = useId();
+  /** The press Send makes, which Ctrl/Cmd+Enter in the message makes too. This composer is no
+   *  form, so the key has nothing to submit and calls this itself; it owes the refusal Send
+   *  owes, which `RefusableButton` applies to a click alone. */
+  const send = () => {
+    if (refusal !== null) return;
+    onSend({
+      input: composed.input,
+      key: composed.key,
+      picked: !defaulted,
+      selected: [...selected],
+    });
+  };
 
   // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,
   // so it takes about a third of a phone screen: the heading on one line, the recipients in one
@@ -1164,6 +1177,7 @@ function BroadcastComposer({
         aria-label="Broadcast message"
         className={`mt-2 block w-full rounded-lg border px-3 py-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-full narrow-or-short:mt-0 narrow-or-short:max-h-32 short:col-span-2 narrow-or-short:min-h-16! narrow-or-short:field-sizing-content short:max-h-16 ${inputClasses(true)}`}
         onChange={(event) => onBody(event.target.value)}
+        onKeyDown={(event) => submitOnModifiedEnter(event, { onFormlessSubmit: send })}
         placeholder="One message, sent to each selected agent"
         rows={3}
         value={body}
@@ -1180,14 +1194,7 @@ function BroadcastComposer({
       <RefusableButton
         className="mt-2 narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4"
         describedBy={sendState.notice === null || sendState.refusalOnNotice ? undefined : noticeId}
-        onPress={() =>
-          onSend({
-            input: composed.input,
-            key: composed.key,
-            picked: !defaulted,
-            selected: [...selected],
-          })
-        }
+        onPress={send}
         refusal={refusal}
         refusalShownBy={sendState.refusalOnNotice ? noticeId : undefined}
       >

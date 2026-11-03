@@ -1109,14 +1109,18 @@ function type(input: HTMLTextAreaElement, value: string): void {
 
 function commandOptions(): string[] {
   return within(screen.getByRole("listbox", { name: "Slash commands" }))
-    .getAllByRole("option")
+    .queryAllByRole("option")
     .map((option) => option.textContent ?? "");
 }
 
+/** The three delivery-mode rows this session's list leads with, in the "Send as" order. */
+const MODE_OPTIONS = ["Senddelivery mode", "Asidedelivery mode", "BTWdelivery mode"];
+
 // A message that starts with `/` is a command line at the session's terminal, so the composer
-// completes the session's own commands there: every runnable one first, a command only its
-// terminal runs after them (listed, so the person learns it will not run here), and as the
-// person types, names that start with what they typed before names that merely hold it.
+// completes the session's own commands there, behind the delivery modes the list always offers:
+// every runnable command first, one only its terminal runs after them (listed, so the person
+// learns it will not run here), and as the person types, names that start with what they typed
+// before names that merely hold it.
 test("the composer completes the session's slash commands, filtering as the person types", async () => {
   const input = await renderWithCommands(COMMANDS);
   await waitFor(() => expect(input.placeholder).toContain("/"));
@@ -1124,6 +1128,7 @@ test("the composer completes the session's slash commands, filtering as the pers
   type(input, "/");
   await waitFor(() =>
     expect(commandOptions()).toEqual([
+      ...MODE_OPTIONS,
       "/compactCompact the session's context",
       "/jobsShow background jobs",
       "/recompile",
@@ -1172,8 +1177,10 @@ test("arrow keys move through the commands, and after Escape Enter sends what wa
   const input = await renderWithCommands(COMMANDS);
 
   type(input, "/");
-  await waitFor(() => expect(commandOptions()).toHaveLength(4));
-  fireEvent.keyDown(input, { key: "ArrowDown" });
+  await waitFor(() => expect(commandOptions()).toHaveLength(MODE_OPTIONS.length + 4));
+  // Four steps down from the first mode row reaches the second command, so the arrows are shown
+  // crossing from the modes into the session's own commands.
+  for (let step = 0; step < 4; step += 1) fireEvent.keyDown(input, { key: "ArrowDown" });
   await waitFor(() =>
     expect(
       within(screen.getByRole("listbox", { name: "Slash commands" })).getByRole("option", {
@@ -1208,19 +1215,22 @@ test("a session with hundreds of commands shows fifty of them", async () => {
   const input = await renderWithCommands(many);
 
   type(input, "/");
-  await waitFor(() => expect(commandOptions()).toHaveLength(50));
-  expect(commandOptions()[0]).toBe("/skill:s000");
+  await waitFor(() => expect(commandOptions()).toHaveLength(MODE_OPTIONS.length + 50));
+  expect(commandOptions()[MODE_OPTIONS.length]).toBe("/skill:s000");
 });
 
-// Completion is offered only where the session would run the text as a command: a session that
-// sent no command list cannot, a `/` inside a message is just text at a terminal too, and a BTW
-// is a side question the session answers rather than input it runs. None of them mentions `/`.
-test("no completion is offered without a command list, for a / mid-message, or in BTW", async () => {
+// A command completion is offered only where the session would run the text as a command: a
+// session that sent no command list cannot, a `/` inside a message is just text at a terminal
+// too, and a BTW is a side question the session answers rather than input it runs. Neither
+// placeholder names commands. The delivery modes are the list's own rows and are offered
+// throughout, since picking one is how a reader leaves BTW without reaching for the header, so
+// both placeholders still name the key that opens them.
+test("no command completion is offered without a command list, for a / mid-message, or in BTW", async () => {
   const silent = await renderWithCommands();
-  expect(silent.placeholder).not.toContain("/");
+  expect(silent.placeholder).toContain("/ for send modes");
+  expect(silent.placeholder).not.toContain("commands");
   type(silent, "/");
-  await Bun.sleep(50);
-  expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
+  await waitFor(() => expect(commandOptions()).toEqual(MODE_OPTIONS));
 
   cleanup();
   for (const spy of spies.splice(0)) spy.mockRestore();
@@ -1233,9 +1243,26 @@ test("no completion is offered without a command list, for a / mid-message, or i
     target: { value: "btw" },
   });
   await waitFor(() => expect(input.placeholder).toContain("delivered as BTW"));
-  expect(input.placeholder).not.toContain("/");
+  expect(input.placeholder).toContain("/ for send modes");
+  expect(input.placeholder).not.toContain("commands");
+  type(input, "/");
+  await waitFor(() => expect(commandOptions()).toEqual(MODE_OPTIONS));
   type(input, "/co");
   await Bun.sleep(50);
+  expect(commandOptions()).toEqual([]);
+});
+
+// Picking a mode from the list is the header's "Send as" pick: it sets the mode, writes nothing
+// into the message, and keeps whatever was typed after the name.
+test("picking a delivery mode from the slash list sets Send as and writes no text", async () => {
+  const input = await renderWithCommands(COMMANDS);
+  const mode = screen.getByRole("combobox", { name: "Delivery mode" }) as HTMLSelectElement;
+
+  type(input, "/bt");
+  await waitFor(() => expect(commandOptions()).toEqual(["BTWdelivery mode"]));
+  fireEvent.keyDown(input, { key: "Enter" });
+  await waitFor(() => expect(mode.value).toBe("btw"));
+  expect(input.value).toBe("");
   expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
 });
 

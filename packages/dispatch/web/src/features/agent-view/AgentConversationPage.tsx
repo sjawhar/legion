@@ -56,6 +56,14 @@ function deliveryModes(capabilities: readonly string[]): MessageDeliveryMode[] {
   return advertised.length === 0 ? ["aside"] : advertised;
 }
 
+/** What the composer's placeholder says the `/` list holds. It always holds the delivery modes
+ *  (`deliveryModes` answers with at least one), so the key is always worth naming; a session
+ *  that published commands of its own has those in the list above them. */
+function slashHint(hasCommands: boolean, hasModes: boolean): string {
+  if (hasCommands) return ", / for commands";
+  return hasModes ? ", / for send modes" : "";
+}
+
 /**
  * What an empty transcript means for this session, which only the session can say: it answers
  * the relay on its control subject, or nobody is there. Saying "the next turn appears here" to a
@@ -264,13 +272,15 @@ export function AgentConversationPage(): ReactNode {
           commands={commands}
           conversation={conversation}
           empty={emptyText(responding)}
+          modes={modes}
+          onPickMode={setPicked}
           onSend={onSend}
           ownSendCount={ownSendCount}
           sends={sends}
           placeholder={
             switchPending
               ? "Waiting for the session to answer the switch…"
-              : `Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`
+              : `Message ${label} — delivered as ${MODE_LABELS[mode]}${slashHint(commands !== undefined, modes.length > 0)}…`
           }
           replayCount={replays}
           resetKey={sessionId}

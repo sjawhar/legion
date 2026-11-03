@@ -9,9 +9,14 @@ import {
   type Unstable_TriggerItem,
   type Unstable_TriggerMatcher,
   unstable_useTriggerPopoverScopeContext,
+  useAui,
   useAuiState,
 } from "@assistant-ui/react";
-import type { AgentStreamCommand } from "@legion/contracts";
+import {
+  type AgentStreamCommand,
+  DELIVERY_CAPABILITIES,
+  type MessageDeliveryMode,
+} from "@legion/contracts";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { ChevronIcon } from "../../components/DisclosureToggle";
@@ -37,6 +42,8 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
+import { MODE_LABELS } from "../conversation/delivery";
 import { PendingSendTurn } from "../conversation/PendingSendTurn";
 import type { SessionSends } from "../conversation/useSessionSends";
 import { AgentName } from "../refs/AgentName";
@@ -217,6 +224,13 @@ function AssistantMessage(): ReactNode {
  *  hundreds, and the person narrows them by typing. */
 const SHOWN_COMMANDS = 50;
 
+/** Where the typed `/name` ends: at the first space after the slash, else at the end of the
+ *  message. The span `atMessageStart` matches, and the span a mode pick drops. */
+function commandNameEnd(text: string, trigger: string): number {
+  const nameEnd = text.slice(trigger.length).search(/\s/u);
+  return nameEnd === -1 ? text.length : trigger.length + nameEnd;
+}
+
 /**
  * Where a slash command is being typed: only a `/` that starts the message, since the session runs
  * the text as a command only from the start of its input, as its terminal does, and only while the
@@ -227,9 +241,8 @@ const atMessageStart: Unstable_TriggerMatcher = (text, trigger, cursor) => {
   if (!text.startsWith(trigger)) return null;
   const query = text.slice(trigger.length, cursor);
   if (/\s/u.test(query)) return null;
-  const nameEnd = text.slice(trigger.length).search(/\s/u);
   return {
-    endOffset: nameEnd === -1 ? text.length : trigger.length + nameEnd,
+    endOffset: commandNameEnd(text, trigger),
     offset: 0,
     query,
   };
@@ -245,6 +258,35 @@ const slashFormatter: Unstable_DirectiveFormatter = {
   parse: (text) => [{ kind: "text", text }],
   serialize: (item) => `/${item.id}`,
 };
+
+/** The prefix a mode row's id carries, so a session with a command of its own named `aside`
+ *  still has a row the popover can tell from the mode's. */
+const MODE_ITEM = "mode:";
+
+/** The mode a row stands for, or undefined for one of the session's commands. */
+function itemMode(item: Unstable_TriggerItem): MessageDeliveryMode | undefined {
+  return DELIVERY_CAPABILITIES.find((mode) => mode === item.metadata?.mode);
+}
+
+/**
+ * The delivery modes the list offers, in the order the "Send as" select has them and narrowed by
+ * what the person typed after the slash. They lead the list: there are at most three of them, and
+ * a session with every skill installed lists hundreds of commands behind them.
+ */
+function matchingModes(
+  modes: readonly MessageDeliveryMode[],
+  query: string
+): Unstable_TriggerItem[] {
+  const typed = query.toLowerCase();
+  return modes
+    .filter((mode) => MODE_LABELS[mode].toLowerCase().startsWith(typed))
+    .map((mode) => ({
+      id: `${MODE_ITEM}${mode}`,
+      label: MODE_LABELS[mode],
+      metadata: { mode },
+      type: "delivery",
+    }));
+}
 
 /**
  * The commands that match what the person typed after the slash, at most `SHOWN_COMMANDS`: every
@@ -281,9 +323,9 @@ function matchingCommands(
     }));
 }
 
-/** One command in the list: its name, a muted `terminal only` where the session cannot run it,
- *  and its description. The highlighted row stays in view as the arrows move through a list
- *  taller than the popover. */
+/** One row of the list: a mode's label, or a command's name and its description, with a muted
+ *  note where the row is a delivery mode or a command only the session's terminal runs. The
+ *  highlighted row stays in view as the arrows move through a list taller than the popover. */
 function CommandItem({ index, item }: { index: number; item: Unstable_TriggerItem }): ReactNode {
   const highlighted = unstable_useTriggerPopoverScopeContext().highlightedIndex === index;
   const row = useRef<HTMLButtonElement>(null);
@@ -305,7 +347,9 @@ function CommandItem({ index, item }: { index: number; item: Unstable_TriggerIte
     >
       <span className="flex items-baseline gap-2 self-stretch">
         <span className={`font-medium ${textPrimaryOnSurface}`}>{item.label}</span>
-        {item.metadata?.terminalOnly === true ? (
+        {itemMode(item) !== undefined ? (
+          <span className={`text-xs ${textOptionDescription}`}>delivery mode</span>
+        ) : item.metadata?.terminalOnly === true ? (
           <span className={`text-xs ${textOptionDescription}`}>terminal only</span>
         ) : null}
       </span>
@@ -321,16 +365,56 @@ function CommandItem({ index, item }: { index: number; item: Unstable_TriggerIte
   );
 }
 
-/** The session's slash commands, offered while the message starts with `/`. A pick writes
- *  `/name ` into the message; sending it is the composer's ordinary Send. */
-function SlashCommands({ commands }: { commands: readonly AgentStreamCommand[] }): ReactNode {
+/**
+ * A mode pick writes nothing into the message: it is the header's "Send as" pick made from the
+ * list. The popover takes one behaviour child, and that is the directive the session's own
+ * commands need, so the mode rows take a selection override instead - which drops the `/name`
+ * the person typed, exactly as an action's `removeOnExecute` would, and leaves whatever they had
+ * written after it.
+ */
+function ModePicks({ onPick }: { onPick: (mode: MessageDeliveryMode) => void }): ReactNode {
+  const { registerSelectItemOverride, setCursorPosition } =
+    unstable_useTriggerPopoverScopeContext();
+  const aui = useAui();
+  useEffect(
+    () =>
+      registerSelectItemOverride((item) => {
+        const mode = itemMode(item);
+        if (mode === undefined) return false;
+        const text = aui.composer.getState().text;
+        const rest = text.slice(commandNameEnd(text, "/"));
+        aui.composer.setText(rest.startsWith(" ") ? rest.slice(1) : rest);
+        setCursorPosition(0);
+        onPick(mode);
+        return true;
+      }),
+    [aui, onPick, registerSelectItemOverride, setCursorPosition]
+  );
+  return null;
+}
+
+/** The delivery modes the session takes and its own slash commands, offered while the message
+ *  starts with `/`. A mode pick sets "Send as" and writes nothing; a command pick writes
+ *  `/name ` into the message, and sending it is the composer's ordinary Send. */
+function SlashCommands({
+  commands,
+  modes,
+  onPickMode,
+}: {
+  commands: readonly AgentStreamCommand[];
+  modes: readonly MessageDeliveryMode[];
+  onPickMode: (mode: MessageDeliveryMode) => void;
+}): ReactNode {
   const adapter = useMemo(
     () => ({
       categories: () => [],
       categoryItems: () => [],
-      search: (query: string) => matchingCommands(commands, query),
+      search: (query: string) => [
+        ...matchingModes(modes, query),
+        ...matchingCommands(commands, query),
+      ],
     }),
-    [commands]
+    [commands, modes]
   );
   return (
     <ComposerPrimitive.Unstable_TriggerPopover
@@ -341,6 +425,7 @@ function SlashCommands({ commands }: { commands: readonly AgentStreamCommand[] }
       matcher={atMessageStart}
     >
       <ComposerPrimitive.Unstable_TriggerPopover.Directive formatter={slashFormatter} />
+      <ModePicks onPick={onPickMode} />
       <ComposerPrimitive.Unstable_TriggerPopoverItems className="contents">
         {(items) =>
           items.map((item, index) => <CommandItem index={index} item={item} key={item.id} />)
@@ -364,6 +449,8 @@ export function AgentThread({
   contentIds,
   empty,
   held,
+  modes,
+  onPickMode,
   ownSendCount,
   placeholder,
   replayCount,
@@ -371,8 +458,8 @@ export function AgentThread({
   sends,
   sessionId,
 }: {
-  /** The slash commands the composer completes; none is offered while this is undefined or
-   *  empty. */
+  /** The slash commands the composer completes, beside the delivery modes it always offers;
+   *  none is offered while this is undefined or empty. */
   commands: readonly AgentStreamCommand[] | undefined;
   /** Every turn of the transcript, in the order it is rendered, by the key each one carries in
    *  `data-message-id`: what the follow hook counts as new and finds the reader's place in. */
@@ -381,6 +468,11 @@ export function AgentThread({
   /** Whether a model or thinking switch is pending on this session: Send is disabled, still
    *  reading "Send", until it ends, and `placeholder` is what says why. */
   held: boolean;
+  /** The delivery modes this session takes, in the order the header's "Send as" select has
+   *  them: the `/` list offers each of them. */
+  modes: readonly MessageDeliveryMode[];
+  /** Picks the mode the next message goes in, as the header's select does. */
+  onPickMode: (mode: MessageDeliveryMode) => void;
   /** Bumped once per message this viewer sent that the session accepted. */
   ownSendCount: number;
   placeholder: string;
@@ -415,6 +507,14 @@ export function AgentThread({
   const boxEmpty = useAuiState((state) => state.composer.isEmpty);
   const refusal = boxEmpty && !held ? "Type a message first." : null;
   const hintId = useId();
+  // A file pasted or dropped into the composer is the session's own artifact, as one pasted into
+  // a direct message on the Agents page is, and its line joins the draft rather than replacing
+  // it: the person keeps what they had typed.
+  const aui = useAui();
+  const upload = useDraftUpload((text) =>
+    aui.composer.setText(appendToDraft(aui.composer.getState().text, text))
+  );
+  const uploadOwner = useMemo(() => ({ session: sessionId }), [sessionId]);
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
       <ErrorBoundary region="this conversation" resetKey={resetKey}>
@@ -485,10 +585,15 @@ export function AgentThread({
         <ComposerPrimitive.Root
           className={`relative mt-3 flex flex-col gap-1 border-t pt-3 ${borderDefault}`}
           data-testid="agent-composer"
+          // The input is assistant-ui's own, so the paste and the drop are taken here, where
+          // they bubble to: a file goes to the session's artifacts in place of the paste, and
+          // the text the browser would have pasted never reaches the box. `onDragOver` is what
+          // makes the form a drop target at all - without it the browser opens the file.
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => upload.drop(event, uploadOwner)}
+          onPaste={(event) => upload.paste(event, uploadOwner)}
         >
-          {commands === undefined || commands.length === 0 ? null : (
-            <SlashCommands commands={commands} />
-          )}
+          <SlashCommands commands={commands ?? []} modes={modes} onPickMode={onPickMode} />
           <div className="flex items-end gap-2">
             <ComposerPrimitive.Input
               className={`min-h-11 flex-1 rounded-lg px-3 py-2 text-sm ${inputClasses(false)}`}
@@ -509,6 +614,9 @@ export function AgentThread({
               Send
             </RefusableButton>
           </div>
+          {/* An upload still out, and the reason one was refused with its Retry, under the box
+              the file was dropped into. */}
+          <DraftUploadStatus upload={upload} />
           {/* While a switch is pending this line says what the box's placeholder says, which the
               text typed may hide; with nothing typed it says why Send refuses; otherwise it says
               how to send. */}
