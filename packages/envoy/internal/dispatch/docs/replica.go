@@ -45,8 +45,8 @@ import (
 // holding, and the commit that fills the gap - whose update carries only what that commit's own
 // transaction integrated - would integrate nothing of what waited, so the replica would never
 // hold it. A commit that only parked has no update observer (ygo calls none for a transaction
-// that changes nothing), so its entry is drained by the next drainer: the peer's own update hook
-// (onPeerUpdate), a later commit's observer, or an exact read (readPoint).
+// that changes nothing), so the room drains its entry right after the transaction instead, from
+// ygo's after-transaction callback (onLoadDocument), whatever path the update reached the room by.
 //
 // Applying the parked part integrates nothing, so it renders nothing new: its transaction names
 // no changed type (crdt.Transaction.ChangedTypes), so it touches no block of the record the

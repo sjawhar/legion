@@ -694,32 +694,46 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		// hands it on.
 		s.observeRoomUpdates(room, replica)
 	})
+	// A commit that changed nothing the room holds - one whose whole update waits for an edit the
+	// room has not received, so it only parked - has no update observer (ygo calls OnUpdate only
+	// for a transaction that changes the document, reearth/ygo#350), but ygo logs it, with what it
+	// parked (crdt.LoggedUpdate.Parked). ygo calls OnAfterTransaction for every committed
+	// transaction, outside the document's lock and before OnUpdate, so the replica is drained here
+	// for a transaction that changed no shared type while the log holds something: the replica
+	// takes the commit, and what it parked is queued for the store (classifyDrained), whichever
+	// path the update reached the room by - a peer's connection, or a published write whose
+	// update waits on an item a cold fork read from the store. A transaction that changed a
+	// shared type is drained by the update observer above, after the steps it takes first.
+	doc.OnAfterTransaction(func(txn *crdt.Transaction) {
+		if replica.log.Pending() > 0 && len(txn.ChangedTypes()) == 0 {
+			s.observeRoomUpdates(room, replica)
+		}
+	})
 	return nil
 }
 
-// onPeerUpdate drains a room's log after ygo applies a peer's update, and stores what the update
-// parked. An update that changed the document already ran its OnUpdate observers, which drained it
-// there, but handed the room's persistence only what it integrated; one that only parked bytes - it
-// waits for an edit the room has not received - has no OnUpdate at all. Either way this is the one
-// place the parked bytes are made durable (classifyDrained, storeParked), before ygo answers the
-// peer and before ygo's Shutdown, which waits for this hook, can let the process exit. The hook
-// runs on the peer's read loop, which holds no lock of the service's, so it can wait for the
-// document's lock the store takes; an OnUpdate observer cannot, since it runs on the goroutine that
-// committed, which can be a settlement holding that lock.
+// onPeerUpdate stores what a peer's update parked, once ygo has applied it. ygo hands the room's
+// persistence only what an update integrated, through OnUpdate, and nothing at all for one that
+// only parked bytes - it waits for an edit the room has not received - so this is the one place
+// the parked bytes are made durable: the drain the apply ran (the room's update observer, or its
+// after-transaction drain for a commit that changed nothing, onLoadDocument) queued them
+// (classifyDrained), and storeParked appends them before ygo answers the peer and before ygo's
+// Shutdown, which waits for this hook, can let the process exit. The hook runs on the peer's read
+// loop, which holds no lock of the service's, so it can wait for the document's lock the store
+// takes; an OnUpdate observer cannot, since it runs on the goroutine that committed, which can be
+// a settlement holding that lock.
 func (s *Service) onPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
 	if err := apply(); err != nil {
 		return err
-	}
-	if replica := s.replicaOf(info.Doc); replica != nil {
-		s.observeRoomUpdates(info.Room, replica)
 	}
 	s.storeParked(info.Room)
 	return nil
 }
 
 // observeRoomUpdates drains replica's log and arms the settlement the drained updates owe. It runs
-// from the room's OnUpdate observer for every commit that changed the document, and after a peer's
-// apply for one that only parked (onPeerUpdate). The caller holds no replica lock.
+// from the room's update observer for every commit that changed the document, and from its
+// after-transaction drain for one that changed nothing (onLoadDocument). The caller holds no
+// replica lock.
 func (s *Service) observeRoomUpdates(room string, replica *renderedReplica) {
 	settles, changed := replica.observe(room)
 	if changed && s.afterCreditUpdate != nil {

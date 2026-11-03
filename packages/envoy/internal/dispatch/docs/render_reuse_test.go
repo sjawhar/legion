@@ -16,6 +16,7 @@ import (
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
+	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -162,6 +163,9 @@ type shadowUpdate struct {
 	// contentChanged.
 	classes int
 	class   bool
+	// parkedOnly says the commit only parked what waits for an edit the room lacks: ygo calls no
+	// update observer for it, and hands the room's persistence nothing of it.
+	parkedOnly bool
 }
 
 type shadowRead struct {
@@ -197,6 +201,13 @@ func watchRenders(t *testing.T, service *Service, artifactID string) *renderShad
 		sh.mu.Unlock()
 		doc.OnUpdate(func(update []byte, origin any) {
 			sh.observed(shadow, log, replica, update, origin)
+		})
+		// As the service's own after-transaction drain does, only for a transaction that changed
+		// no shared type while the log holds an update: a commit that only parked.
+		doc.OnAfterTransaction(func(txn *crdt.Transaction) {
+			if log.Pending() > 0 && len(txn.ChangedTypes()) == 0 {
+				sh.observedWithoutUpdate(shadow, log, replica)
+			}
 		})
 		return nil
 	}
@@ -292,11 +303,15 @@ func (room *shadowRoom) take(sh *renderShadow, log *crdt.UpdateLog) {
 		markdown, _, _ := shadowRender(room.doc)
 		changed := markdown == nil || room.markdown == nil || *markdown != *room.markdown
 		room.markdown = markdown
-		room.updates = append(room.updates, &shadowUpdate{update: logged.Update, origin: logged.Origin, changed: changed})
+		room.updates = append(room.updates, &shadowUpdate{
+			update: logged.Update, origin: logged.Origin, changed: changed,
+			parkedOnly: len(logged.Parked) > 0 && bytes.Equal(logged.Update, emptyUpdateV1),
+		})
 	}
 }
 
-// observed runs after the service's own update observer for each commit of room.
+// observed runs after the service's own update observer for each commit of room that changed the
+// document.
 func (sh *renderShadow) observed(room *shadowRoom, log *crdt.UpdateLog, replica *renderedReplica, update []byte, origin any) {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
@@ -327,9 +342,38 @@ func (sh *renderShadow) observed(room *shadowRoom, log *crdt.UpdateLog, replica 
 			sh.service.unlockState(sh.artifactID, state)
 		}
 	}
-	// The replica as this commit's observer left it, against the shadow at the same commit: under
-	// the replica's lock, holding every commit its log handed over, and with no commit landing
-	// while the shadow catches up (the replica's log is opened first, so a commit reaches it first).
+	sh.alignLocked(room, log, replica)
+}
+
+// observedWithoutUpdate runs after the service's own after-transaction drain for each transaction
+// of room that changed no shared type (onLoadDocument). A commit that only parked is logged but
+// has no update observer, so this is where it counts as observed - once, by the transaction that
+// made it, which is the one that logged it; a transaction that logged nothing compares nothing.
+func (sh *renderShadow) observedWithoutUpdate(room *shadowRoom, log *crdt.UpdateLog, replica *renderedReplica) {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if sh.closed {
+		log.Drain()
+		return
+	}
+	room.take(sh, log)
+	observed := false
+	for _, candidate := range room.updates {
+		if candidate.parkedOnly && candidate.observed == 0 {
+			candidate.observed++
+			observed = true
+		}
+	}
+	if observed {
+		sh.alignLocked(room, log, replica)
+	}
+}
+
+// alignLocked compares the replica as this commit's drain left it with the shadow at the same
+// commit: under the replica's lock, holding every commit its log handed over, and with no commit
+// landing while the shadow catches up (the replica's log is opened first, so a commit reaches it
+// first). The caller holds sh.mu.
+func (sh *renderShadow) alignLocked(room *shadowRoom, log *crdt.UpdateLog, replica *renderedReplica) {
 	replica.mu.Lock()
 	defer replica.mu.Unlock()
 	if replica.doc == nil || replica.log.Pending() > 0 {
@@ -542,6 +586,14 @@ func (sh *renderShadow) check(t *testing.T) {
 				}
 			}
 			if _, repair := update.origin.(*identityClosureOrigin); repair {
+				continue
+			}
+			// A commit that only parked hands the room's persistence nothing, so no class is
+			// recorded for it (classifyDrained).
+			if update.parkedOnly {
+				if update.classes != 0 {
+					t.Errorf("room %d commit %d: %d classes recorded for a commit that only parked", roomIndex, index, update.classes)
+				}
 				continue
 			}
 			if update.classes != 1 {
@@ -1274,11 +1326,13 @@ func TestRenderReuseARoomBehindTheHeadRendersThePublish(t *testing.T) {
 
 // E15. A peer sends the room the second of its two transactions first: its structs wait for the
 // first transaction's, which the room lacks, so the room parks them and the commit integrates
-// nothing. The replica takes what each commit parked beside what it integrated
-// (crdt.LoggedUpdate.Parked, renderedReplica), so it holds what the room holds parked while it
-// waits, and when the first transaction arrives both integrate what waited behind it: the room,
-// the replica and a render of the room all hold the text of both transactions, and the commit
-// that brought them is a content change.
+// nothing. ygo calls no update observer for that commit, but logs it with what it parked
+// (crdt.LoggedUpdate.Parked), and the room drains it right after the transaction
+// (onLoadDocument's after-transaction drain), so the replica holds what the room holds parked
+// while it waits, and the peer's update hook stores those parked bytes (onPeerUpdate). When the
+// first transaction arrives both integrate what waited behind it: the room, the replica and a
+// render of the room all hold the text of both transactions, and the commit that brought them is
+// a content change.
 func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T) {
 	service, artifactID, sh := newWarmRenderReuseRoom(t)
 	live := service.srv.GetDoc(artifactID)
@@ -1302,7 +1356,7 @@ func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T
 	second := crdt.EncodeStateAsUpdateV1(peer.doc, between)
 
 	m := sh.measure()
-	sendPeerUpdate(t, live, second)
+	sendPeerUpdate(t, service, artifactID, live, second)
 	logged := drainOneLoggedUpdate(t, parked, "the peer's second transaction")
 	if logged.Parked == nil {
 		t.Fatal("the room logged nothing parked for an update whose structs wait for an earlier one of the same peer")
@@ -1315,7 +1369,7 @@ func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T
 		t.Error("the room renders a paragraph of the peer's while the transaction that holds its place is missing")
 	}
 
-	sendPeerUpdate(t, live, first)
+	sendPeerUpdate(t, service, artifactID, live, first)
 	integrated := drainOneLoggedUpdate(t, parked, "the peer's first transaction")
 	if integrated.Parked != nil {
 		t.Error("the commit that fills the gap parked something of its own, so nothing here is tested")
@@ -1334,12 +1388,14 @@ func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T
 		t.Errorf("the replica renders %s and the room %d bytes", describeRendering(markdown), len(rendered))
 	}
 	// The commit that integrated what the room parked rendered two blocks more, so it changed the
-	// room's markdown; the commit that only parked changed nothing of it.
+	// room's markdown; the commit that only parked changed nothing of it. ygo hands the room's
+	// persistence no update for that commit, so what is stored of it is the bytes it parked, which
+	// the peer's update hook stored as no content change.
 	if changed := storedClassOf(t, service, artifactID, integrated.Update); !changed {
 		t.Error("the commit that integrated what the room parked was not recorded as a content change")
 	}
-	if changed := storedClassOf(t, service, artifactID, logged.Update); changed {
-		t.Error("the commit that only parked was recorded as a content change")
+	if changed := storedClassOf(t, service, artifactID, logged.Parked); changed {
+		t.Error("the bytes the commit that only parked kept were recorded as a content change")
 	}
 	m.expect(t, renderPaths{observerUntouched: 1, observerRendered: 1}, 0)
 }
@@ -1361,11 +1417,14 @@ func peerAppendsBlock(t *testing.T, peer *roomPeer, markdown string) {
 	}
 }
 
-// sendPeerUpdate applies one of the peer's updates to the room as its connection would, and
-// returns once the room's update observer has run for it.
-func sendPeerUpdate(t *testing.T, live *crdt.Doc, update []byte) {
+// sendPeerUpdate applies one of the peer's updates to the room as its connection does - through
+// the service's peer update hook (onPeerUpdate) - and returns once the room's update observer, or
+// its after-transaction drain for a commit that changed nothing, has run for it.
+func sendPeerUpdate(t *testing.T, service *Service, artifactID string, live *crdt.Doc, update []byte) {
 	t.Helper()
-	if err := crdt.ApplyUpdateV1(live, update, "peer"); err != nil {
+	if err := service.onPeerUpdate(ygws.PeerUpdateInfo{Room: artifactID, Doc: live, Update: update, Origin: "peer"}, func() error {
+		return crdt.ApplyUpdateV1(live, update, "peer")
+	}); err != nil {
 		t.Fatalf("apply the peer's update to the room: %v", err)
 	}
 }
