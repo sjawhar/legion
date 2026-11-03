@@ -13,6 +13,12 @@
 # `review:<id>:<line>` or `review-comment:<id>:<line>` (the id GitHub gives that issue comment,
 # review or review comment), never its text.
 #
+# It also requires the title to be a conventional commit subject (`type(scope): summary`, the
+# scope and a `!` optional): squash merges use the title as main's commit subject, and the release
+# workflows version from conventional subjects; a merge the Legion daemon submits writes an empty
+# squash body, so on it the title is the only text they read. That failure prints no title text
+# either.
+#
 # It reads the event payload GitHub writes to GITHUB_EVENT_PATH, never the step's environment,
 # which the runner prints in the job log. A pull_request or pull_request_review payload carries
 # the pull request: its number, title, body, branch name, and the base and head sha the run
@@ -30,10 +36,10 @@
 # and skip it, is stripped first.
 #
 # Usage: GITHUB_EVENT_PATH=<payload> GITHUB_REPOSITORY=<owner>/<repo> .github/scripts/check-pr-text.sh
-# CI runs it in ci.yaml's lint job (that file says when it runs), and in pr-title.yaml at every
-# push, draft or not, when a pull request is opened, reopened or edited, when a review on it is
-# submitted or edited, and when the merge queue runs its group; its tests are in
-# check-private-names.test.sh.
+# CI runs it in ci.yaml's lint job at every push to a pull request that is not a draft and when a
+# draft is marked ready (lint posts the verdict as pr-title), and in pr-title.yaml when a pull
+# request is opened, reopened or edited, when a review on it is submitted or edited, and when the
+# merge queue runs its group; its tests are in check-private-names.test.sh.
 set -euo pipefail
 
 event=${GITHUB_EVENT_PATH:?GITHUB_EVENT_PATH must name the pull request event payload}
@@ -54,6 +60,11 @@ head=$(jq -er '.head.sha' "$pull")
 jq -r '.title' "$pull" | tr -d '\000' > "$text/title"
 jq -r '.body // ""' "$pull" | tr -d '\000' > "$text/body"
 jq -r '.head.ref' "$pull" | tr -d '\000' > "$text/branch"
+title_status=0
+if ! grep -qE '^[a-z]+(\([^)]+\))?!?: .+' "$text/title"; then
+  echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a merge the Legion daemon submits writes an empty squash body, so on it the title is the only text they read."
+  title_status=1
+fi
 
 # GitHub limits this route to 250 commits for a call with no paging parameter: `?per_page=100` is
 # that parameter, and asks for the largest page GitHub serves; `--paginate` then reads every page
@@ -145,8 +156,12 @@ if [ "$status" -ne 0 ] && grep -q -E "(^|[:=])$kind_pattern:[0-9]+:" "$work/repo
   echo "    edit history, which anyone who can read the repository can open; a submitted review"
   echo "    cannot be deleted, so edit its body and delete the old revision from that history."
   echo "    Then re-run the newest failed run of each check that reported it on the current head:"
-  echo "    lint, and pr-title once for each event that is red (\`gh run rerun <run-id> --failed\`)."
+  echo "    lint, which also posts the push's pr-title, and pr-title.yaml's run once for each other"
+  echo "    event that is red (\`gh run rerun <run-id> --failed\`)."
   echo "    Never re-run an older run: a re-run reads the comments again but checks the title and"
   echo "    body as they were at its own event, so it could pass over a newer run that failed."
+fi
+if [ "$status" -eq 0 ] && [ "$title_status" -ne 0 ]; then
+  exit 1
 fi
 exit "$status"

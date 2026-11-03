@@ -564,6 +564,15 @@ check "a title naming a deployment issue key fails" "$(is "$status" 1)"
 check "names the title" "$(contains "$out" 'title:1: names the private deployment repository')"
 check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
 
+run_pr_text "Keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+check "a title that is no conventional commit subject fails" "$(is "$status" 1)"
+check "says the title must be one" \
+  "$(contains "$out" '^::error::PR title must be a conventional commit subject (type(scope): summary)')"
+check "does not print the title" "$(is "$(contains "$out" 'Keep the inbox order')" false)"
+
+run_pr_text "feat!: keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+check "a breaking change with no scope passes" "$(is "$status" 0)"
+
 run_pr_text "fix(dispatch): keep the inbox order" "$(printf 'Line one.\nAs %s Labs found.\n' "$company_proper")" "fix: keep the order"
 check "a body naming the company fails" "$(is "$status" 1)"
 check "names the body's line" "$(contains "$out" 'body:2: names the company')"
