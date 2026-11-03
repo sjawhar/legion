@@ -58,6 +58,12 @@ are not findings. When nothing changes the work, say so in one line.
   starts or stops anything, in a file, a repository, a cluster or a service. Run jj with
   `--ignore-working-copy`, because every other jj command records the working copy. When you are
   not sure that a command only reads, do not run it.
+- Read a piped command's status with `${PIPESTATUS[0]}`, or with `set -o pipefail` inside a
+  subshell of that one line; never set `pipefail` at the top level of your shell, where a later
+  `cmd | head` exits 141 and the next command loses its output. Never pipe a write — a `dispatch`
+  command that records something, or any command whose own output tells you what it did — into
+  `head`, `tail` or `grep`: the status you read would be the pager's, and the line that says what
+  happened is the line you cut.
 - Your session also carries the Dispatch and Envoy tools: read with them if you need to, but write
   nothing through them — no issue, comment, ask, message, suggestion or document edit, and nothing
   sent or published.
