@@ -2672,9 +2672,12 @@ jobs:
   # -race. The API package's live-feed and delivery-hub tests wait for the event log's safe
   # horizon, which any open transaction on the job's Postgres delays. Each package's TestMain
   # opens the store through DISPATCH_TEST_DATABASE_URL and skips every store test without it
-  # (internal/dispatch/store/storetest/storetest.go:67-71), and a skip is a pass, so the service
-  # and the variable are load-bearing. The step's -timeout 20m fires before the job's 30 minutes:
-  # about 1 minute of setup and 2 to download and compile, then the step's 20.
+  # (internal/dispatch/store/storetest/storetest.go:67-71), and the API package's contract tests
+  # open the broker's store through BROKER_TEST_DATABASE_URL and skip without it
+  # (internal/dispatch/api/contract_test.go:81, internal/broker/store/storetest/storetest.go).
+  # A skip is a pass, so the service and both variables are load-bearing. The step's -timeout 20m
+  # fires before the job's 30 minutes: about 1 minute of setup and 2 to download and compile, then
+  # the step's 20.
   envoy-go-api:
     needs: changes
     if: needs.changes.outputs.envoy_go_api == 'true'
@@ -2694,6 +2697,7 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2971,6 +2975,9 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The contract tests (internal/dispatch/api/contract_test.go:81) skip without the broker's
+      # store, as envoy-go-api's comment says.
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
