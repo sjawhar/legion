@@ -383,10 +383,11 @@ test("Conversation draws a message of 8,000 list items without holding the main 
   }
 });
 
-// The ask card draws a long body in its thread, not in its question: the server caps a question
-// at `contracts.AskQuestionMax` (2,000 UTF-16 units), under the worker's own threshold, so no ask
-// question can carry this list. The surface under test is the same one - the Inbox's ask card,
-// drawing a body through `MarkdownBody` - and its reply is the longest body it ever draws.
+// The ask card draws a long body in its thread, not in its question: the server holds a question
+// and its options together to `DISPATCH_EVENT_BODY_MAX` (32,000 UTF-16 units), which this list
+// fills on its own, so the list reaches the card as a reply. The surface under test is the same
+// one - the Inbox's ask card, drawing a body through `MarkdownBody` - and its reply is the
+// longest body it ever draws.
 test("the Inbox's ask card draws a reply of 8,000 list items without holding the main thread for a second", async ({
   browser,
 }) => {

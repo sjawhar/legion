@@ -58,7 +58,7 @@ func TestACommentEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
 		t.Fatalf("the events are not the two comments written, oldest first: %v, %v", cut["id"], intact["id"])
 	}
 
-	wantCut := strings.Repeat("a", 15_000) + "\n\n" + strings.Repeat("a", 15_000)
+	wantCut := paragraphBody(2, 15_000)
 	if cut["body"] != wantCut {
 		t.Fatalf("the event of a three-paragraph comment carries %d units, want its first two paragraphs (%d units)",
 			len16(cut["body"].(string)), len16(wantCut))
@@ -95,7 +95,7 @@ func TestAMessageEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
 	if len(payloads) != 1 {
 		t.Fatalf("the issue carries %d message.created events, want one", len(payloads))
 	}
-	wantCut := strings.Repeat("a", 15_000) + "\n\n" + strings.Repeat("a", 15_000)
+	wantCut := paragraphBody(2, 15_000)
 	if payloads[0]["body"] != wantCut || payloads[0]["body_truncated"] != true {
 		t.Fatalf("the event of a three-paragraph message carries %d units (body_truncated=%v), want its first two paragraphs (%d units) and true",
 			len16(payloads[0]["body"].(string)), payloads[0]["body_truncated"], len16(wantCut))
@@ -134,7 +134,7 @@ func TestAnAnchorRefreshCarriesTheCutBody(t *testing.T) {
 	if refreshed["id"] != anchored.ID {
 		t.Fatalf("the refresh names comment %v, want the anchored one %s", refreshed["id"], anchored.ID)
 	}
-	wantCut := strings.Repeat("a", 15_000) + "\n\n" + strings.Repeat("a", 15_000)
+	wantCut := paragraphBody(2, 15_000)
 	if refreshed["body"] != wantCut || refreshed["body_truncated"] != true {
 		t.Fatalf("the refresh carries %d units (body_truncated=%v), want the first two paragraphs (%d units) and true",
 			len16(refreshed["body"].(string)), refreshed["body_truncated"], len16(wantCut))

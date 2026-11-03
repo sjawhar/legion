@@ -733,11 +733,8 @@ func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArti
 	case "issue":
 		return issueHref
 	case "document":
-		// A document hit always has its artifact; reading it here says so.
+		// A document hit always has its artifact, so documentHref above is its document's.
 		href := documentHref
-		if owner.Kind != "document" {
-			href = issueDocumentHref(issueHref, artifact, primary)
-		}
 		href += "?q=" + url.QueryEscape(query)
 		if matchBlock != nil {
 			href += "#b-" + text.EncodeBlockID(*matchBlock)

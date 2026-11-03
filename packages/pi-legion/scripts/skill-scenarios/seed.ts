@@ -304,8 +304,6 @@ async function seedSpecIssue(file: string, source: string, spec?: string): Promi
     if (ask.kind !== "question" || ask.state !== "answered" || answer === null) continue;
     if (inSpec.has(ask.id)) continue;
     let opened: Ask | undefined;
-    // The question goes as the source holds it: Dispatch owns the bound on a question and
-    // refuses one past it, so nothing is cut here.
     steps.push({
       at: time(ask.created_at, asksFile),
       write: async () => {

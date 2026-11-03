@@ -589,6 +589,9 @@ export async function withWholeEventBody(
   dispatchClient: () => DispatchClient | undefined,
   session?: string
 ): Promise<string> {
+  // The server writes the key literally, so a frame whose text does not hold it carries no cut
+  // body and needs no parsing.
+  if (!raw.includes("body_truncated")) return raw;
   let envelope: unknown;
   try {
     envelope = JSON.parse(raw);

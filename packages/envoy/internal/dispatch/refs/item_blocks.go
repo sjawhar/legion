@@ -395,24 +395,24 @@ func indexItemBlocks(
 	if err := storeItemState(ctx, tx, kind, tables, itemID, revision, counter, source.bodySum); err != nil {
 		return nil, err
 	}
-	if err := writeItemWindows(ctx, tx, kind, itemID, next, ids, source); err != nil {
+	if err := writeItemWindows(ctx, tx, kind, itemID, ids, source); err != nil {
 		return nil, err
 	}
 	return moved, nil
 }
 
-// writeItemWindows writes the windows of the item's blocks (next, under ids), in the caller's
-// transaction. Every call writes them, a call that found nothing changed included: the window
-// of a text that did not move is a no-op upsert (writeWindows), and an item whose blocks are
-// indexed and whose windows are not - one written before meaning search moved to windows, one
+// writeItemWindows writes the windows of the item's blocks (source.blocks, under ids), in the
+// caller's transaction. Every call writes them, a call that found nothing changed included: the
+// window of a text that did not move is a no-op upsert (writeWindows), and an item whose blocks
+// are indexed and whose windows are not - one written before meaning search moved to windows, one
 // whose write failed between the two - takes them from the next index of its blocks.
-func writeItemWindows(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID string, next []itemblocks.Block, ids []string, source itemBlockSource) error {
+func writeItemWindows(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID string, ids []string, source itemBlockSource) error {
 	context, err := source.windowContext(ctx, tx)
 	if err != nil {
 		return err
 	}
-	blocks := make([]embed.Block, len(next))
-	for i, block := range next {
+	blocks := make([]embed.Block, len(source.blocks))
+	for i, block := range source.blocks {
 		blocks[i] = embed.Block{ID: ids[i], Type: block.Type, Text: block.Text}
 	}
 	return writeWindows(ctx, tx, kind.WindowKind(), kind.WindowOwnerKey(itemID), embed.Windows(context, blocks))

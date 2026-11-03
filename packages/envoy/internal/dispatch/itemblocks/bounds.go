@@ -51,7 +51,7 @@ func Check(field, body string) error {
 		return &CountExceeded{Field: field, Blocks: len(blocks), Limit: contracts.DispatchItemBlocks}
 	}
 	for index, block := range blocks {
-		if units := units16(block.Text); units > contracts.DispatchBlockUnits {
+		if units := Units16(block.Text); units > contracts.DispatchBlockUnits {
 			return &CapExceeded{
 				Field:    field,
 				Position: index + 1,
@@ -64,10 +64,10 @@ func Check(field, body string) error {
 	return nil
 }
 
-// units16 is text's length in UTF-16 code units, how the server counts a text: a rune outside the
+// Units16 is text's length in UTF-16 code units, how the server counts a text: a rune outside the
 // Basic Multilingual Plane counts as the two units its surrogate pair takes. A byte that is not
 // valid UTF-8 reads as U+FFFD, one unit, as the JSON encoder writes it.
-func units16(text string) int {
+func Units16(text string) int {
 	units := 0
 	for _, r := range text {
 		units += utf16.RuneLen(r)

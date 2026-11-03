@@ -45,11 +45,7 @@ func EstimateTokens(texts []string) int {
 	const charsPerToken = 4
 	total := 0
 	for _, t := range texts {
-		n := utf8.RuneCountInString(t)
-		if n > MaxInputRunes {
-			n = MaxInputRunes
-		}
-		total += n
+		total += min(utf8.RuneCountInString(t), MaxInputRunes)
 	}
 	return total / charsPerToken
 }

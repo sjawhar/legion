@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf16"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
@@ -17,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -523,19 +523,9 @@ func validateWrittenAskBlocks(tree *pmdoc.Node) error {
 // between them. An ask written in a document and one opened through a route are measured the
 // same way, so neither can carry a wording the other would refuse.
 func AskWordingUnits(question string, options []model.AskOption) int {
-	units := askUnits16(question)
+	units := itemblocks.Units16(question)
 	for _, option := range options {
-		units += askUnits16(option.Label) + askUnits16(option.Description)
-	}
-	return units
-}
-
-// askUnits16 is text's length in UTF-16 code units, how the server counts every text it bounds:
-// a rune outside the Basic Multilingual Plane counts as the two units its surrogate pair takes.
-func askUnits16(text string) int {
-	units := 0
-	for _, r := range text {
-		units += utf16.RuneLen(r)
+		units += itemblocks.Units16(option.Label) + itemblocks.Units16(option.Description)
 	}
 	return units
 }

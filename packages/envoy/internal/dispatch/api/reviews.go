@@ -256,7 +256,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	// rides the ask.answered event, and the review it writes carries it too.
 	if reason != nil {
 		if length := len16(*reason); length > contracts.DispatchEventBodyMax {
-			s.writeHandlerError(w, capExceededError("reason", length, contracts.DispatchEventBodyMax))
+			capExceeded(w, "reason", length, contracts.DispatchEventBodyMax)
 			return
 		}
 	}

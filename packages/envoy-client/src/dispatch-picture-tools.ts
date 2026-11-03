@@ -230,11 +230,21 @@ export async function eventTextsWhole(
   client: DispatchClient,
   events: readonly Event[]
 ): Promise<DatedText[]> {
+  // Several events of one page can name the same comment or message, and every read of it
+  // answers the same current body, so one read serves them all. The map is written before the
+  // first await, so callbacks running together share the read rather than each starting one.
+  const reads = new Map<string, Promise<string | undefined>>();
   const whole = await Promise.all(
     events.map(async (event) => {
       const item = bodyWasCut(event.payload) ? carriedItem(event) : undefined;
       if (item === undefined) return eventTexts(event);
-      const body = await wholeCarriedBody(client, item);
+      const key = `${item.resource}:${item.id}`;
+      let read = reads.get(key);
+      if (read === undefined) {
+        read = wholeCarriedBody(client, item);
+        reads.set(key, read);
+      }
+      const body = await read;
       return body === undefined ? eventTexts(event) : [{ text: body, at: event.created_at }];
     })
   );

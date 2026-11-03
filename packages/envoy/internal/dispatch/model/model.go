@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
-	"unicode/utf8"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 )
@@ -1554,14 +1553,17 @@ type ChangedReference struct {
 // pair is carried whole or not at all. A byte that is not valid UTF-8 reads as U+FFFD and counts
 // as the one unit the JSON encoder writes for it, as itemblocks counts it.
 func EventBody(body string) (string, bool) {
+	// A rune never takes more UTF-16 units than UTF-8 bytes, so a body inside the bound in bytes
+	// is inside it in units and rides whole.
+	if len(body) <= contracts.DispatchEventBodyMax {
+		return body, false
+	}
 	units, end := 0, -1
-	for at := 0; at < len(body); {
-		r, size := utf8.DecodeRuneInString(body[at:])
+	for index, r := range body {
 		if units+utf16.RuneLen(r) > contracts.DispatchEventBodyMax {
-			end = at
+			end = index
 			break
 		}
-		at += size
 		units += utf16.RuneLen(r)
 	}
 	if end < 0 {

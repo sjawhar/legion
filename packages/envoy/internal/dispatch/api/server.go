@@ -39,7 +39,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
-	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -1149,37 +1148,16 @@ func countExceededError(code, field string, count, limit int) *apiError {
 		"%s is %d over the %d-item limit (%d/%d)", field, count-limit, limit, count, limit)
 }
 
-// blockCapExceededError is the refusal of a body with a block over contracts.DispatchBlockUnits:
-// the typed error's own message, which names the block, with the status and code every cap
-// refusal carries.
-func blockCapExceededError(err *itemblocks.CapExceeded) *apiError {
-	return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err.Error())
-}
-
-// blockCountExceededError is the refusal of a body holding more than contracts.DispatchItemBlocks
-// blocks, worded by the typed error itself as blockCapExceededError's is.
-func blockCountExceededError(err *itemblocks.CountExceeded) *apiError {
-	return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err.Error())
-}
-
 // blockBoundError is what a route answers an itemblocks.Check with: nil where the body passed
-// both bounds, else the refusal the typed error words, through the builder above that owns it.
+// both bounds, else the refusal the typed error words (itemblocks.CapExceeded names the block,
+// itemblocks.CountExceeded the count), with the status and code every cap refusal carries.
 // Every route that bounds a body calls this one helper, so a route added later cannot word the
-// same refusal differently. Check answers only those two types or nil; another error, which no
-// caller can produce, still comes back as a refusal rather than a panic.
+// same refusal differently.
 func blockBoundError(err error) *apiError {
-	var countExceeded *itemblocks.CountExceeded
-	var capExceeded *itemblocks.CapExceeded
-	switch {
-	case err == nil:
+	if err == nil {
 		return nil
-	case errors.As(err, &countExceeded):
-		return blockCountExceededError(countExceeded)
-	case errors.As(err, &capExceeded):
-		return blockCapExceededError(capExceeded)
-	default:
-		return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err)
 	}
+	return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "%s", err)
 }
 
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {

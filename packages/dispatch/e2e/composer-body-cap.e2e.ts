@@ -2,7 +2,7 @@ import { DISPATCH_BLOCK_UNITS } from "@legion/contracts/dispatch-tools";
 import { expect, test } from "@playwright/test";
 
 import { createIssue, createProject } from "./api";
-import { bodyOf, paragraphsOf } from "./bodies";
+import { blockCapRefusal, bodyOf, paragraphsOf } from "./bodies";
 import { barAction, composer, openSpec, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -49,9 +49,7 @@ test("the comment composer takes a 40,000-character body, and shows the server's
     // One paragraph a character past the server's block bound: the composer sends it, and what
     // the reader is shown is the server's refusal, naming the block and the bound.
     const tooLong = bodyOf(DISPATCH_BLOCK_UNITS + 1);
-    const refusal =
-      `body block 1 (paragraph) is 1 characters over the ${DISPATCH_BLOCK_UNITS}-character ` +
-      `block limit (${DISPATCH_BLOCK_UNITS + 1}/${DISPATCH_BLOCK_UNITS})`;
+    const refusal = blockCapRefusal(DISPATCH_BLOCK_UNITS + 1);
     await field.fill(tooLong);
     await expect.poll(async () => (await field.inputValue()).length).toBe(tooLong.length);
     await form.getByRole("button", { exact: true, name: "Send" }).click();

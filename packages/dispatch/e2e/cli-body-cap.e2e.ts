@@ -12,7 +12,7 @@ import {
   listComments,
   listIssueMessages,
 } from "./api";
-import { bodyOf, paragraphsOf } from "./bodies";
+import { blockCapRefusal, bodyOf, paragraphsOf } from "./bodies";
 import { type CliRun, runDispatch } from "./dispatch-cli";
 import { resetDatabase } from "./seed";
 
@@ -45,9 +45,7 @@ test("dispatch posts a comment and a message of 40,000 characters, and prints th
   const whole = paragraphsOf(40_000);
   // One paragraph, one character over the bound the server holds each block to.
   const tooLong = bodyOf(DISPATCH_BLOCK_UNITS + 1);
-  const refusal =
-    `body block 1 (paragraph) is 1 characters over the ${DISPATCH_BLOCK_UNITS}-character ` +
-    `block limit (${DISPATCH_BLOCK_UNITS + 1}/${DISPATCH_BLOCK_UNITS})`;
+  const refusal = blockCapRefusal(DISPATCH_BLOCK_UNITS + 1);
   const home = mkdtempSync(join(tmpdir(), "dispatch-cli-body-cap-"));
 
   try {

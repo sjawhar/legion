@@ -191,7 +191,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	// event beside the ask's wording, so it takes the same bound.
 	if input.Text != nil {
 		if length := len16(*input.Text); length > contracts.DispatchEventBodyMax {
-			s.writeHandlerError(w, capExceededError("text", length, contracts.DispatchEventBodyMax))
+			capExceeded(w, "text", length, contracts.DispatchEventBodyMax)
 			return
 		}
 	}
@@ -303,7 +303,7 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 	// A resolution's reason rides the ask.resolved event, so it takes the event's bound; before
 	// the transition opens its transaction, so nothing is written.
 	if length := len16(reason); length > contracts.DispatchEventBodyMax {
-		s.writeHandlerError(w, capExceededError("reason", length, contracts.DispatchEventBodyMax))
+		capExceeded(w, "reason", length, contracts.DispatchEventBodyMax)
 		return
 	}
 	// Settlement's own retraction reason is how a resolution written before this rule is

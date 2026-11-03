@@ -1,6 +1,7 @@
 package embed
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -159,19 +160,9 @@ func pieces(context string, block Block) []Window {
 // each text that holds anything, a blank line between them. A block holding no text is covered
 // by its window and adds nothing to what is embedded.
 func windowText(context string, texts ...string) string {
-	var built strings.Builder
-	write := func(part string) {
-		if part == "" {
-			return
-		}
-		if built.Len() > 0 {
-			built.WriteString("\n\n")
-		}
-		built.WriteString(part)
-	}
-	write(text.HeadRunes(context, windowTextChars))
-	for _, part := range texts {
-		write(part)
-	}
-	return built.String()
+	parts := make([]string, 0, len(texts)+1)
+	parts = append(parts, text.HeadRunes(context, windowTextChars))
+	parts = append(parts, texts...)
+	parts = slices.DeleteFunc(parts, func(part string) bool { return part == "" })
+	return strings.Join(parts, "\n\n")
 }

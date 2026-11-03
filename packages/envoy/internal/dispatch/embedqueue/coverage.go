@@ -27,20 +27,20 @@ const coverageStatementRows = 500
 // rather than wait out ten minutes.
 var identityRecheckInterval = 10 * time.Minute
 
-// coverageSource is one kind of row meaning search ranks: its FROM clause (from, plus where when
-// the kind needs a filter), and the expressions for its id, its text and when it was written.
+// coverageSource is one kind of row meaning search ranks: its FROM clause (from), and the
+// expressions for its id, its text and when it was written.
 // For a kind with a source table - the issue - id and text are the kind's write-time trigger's
 // own (0073, as 0140 replaced it), byte for byte, so a row the coverage pass writes is the row
-// the trigger would have written, and a row the trigger wrote is never seen as stale; from and
-// where are the items search ranks (api/search.go's meaning candidate CTEs), which the trigger
-// can exceed.
+// the trigger would have written, and a row the trigger wrote is never seen as stale; from is
+// the items search ranks (api/search.go's meaning candidate CTEs), which the trigger can
+// exceed.
 //
 // A kind that declares no source table (from empty) is one whose rows the indexers own: the
 // window kinds, whose rows are written by the indexer of the owner's blocks and by the
 // block-index tick's window arm (refs.writeWindows). Its items are its own rows, so the pass
 // adds none and repairs none and the report counts the windows that exist. owned reads that.
 type coverageSource struct {
-	kind, from, where, id, text, writtenAt string
+	kind, from, id, text, writtenAt string
 }
 
 // owned reports whether the indexers own which rows of the kind exist, so the coverage pass
@@ -99,12 +99,8 @@ func (s coverageSource) allItems() string {
 			select e.id, e.text_snapshot as text, e.content_hash as hash, e.pending_since as written_at
 			from embeddings e where e.kind = '%s') s`, s.kind)
 	}
-	where := ""
-	if s.where != "" {
-		where = " where " + s.where
-	}
 	return fmt.Sprintf(`select s.id, s.text, encode(sha256(convert_to(s.text, 'UTF8')), 'hex') as hash, s.written_at
-		from (select %s as id, %s as text, %s as written_at from %s%s) s`, s.id, s.text, s.writtenAt, s.from, where)
+		from (select %s as id, %s as text, %s as written_at from %s) s`, s.id, s.text, s.writtenAt, s.from)
 }
 
 // insertMissing adds a pending row for up to $2 items of the kind that have none, exactly as the

@@ -612,15 +612,12 @@ function askUrgency(args: ToolArguments): AskUrgency | undefined {
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
 
-/** The question text sent to Dispatch: the ref is appended unless the question already cites it. */
-function questionWithRef(question: string, ref: string | undefined): string {
-  return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
-}
-
 /** The question text sent to Dispatch: the ref appended unless the question already cites it.
  *  Dispatch holds the pair to its own bound and refuses a longer one. */
 function askQuestionWithRef(args: ToolArguments): string {
-  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
+  const question = stringArg(args, "question");
+  const ref = optionalString(args, "ref");
+  return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
 }
 
 /** The tools whose `images` argument sends pictures. */

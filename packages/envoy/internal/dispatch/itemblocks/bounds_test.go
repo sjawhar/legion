@@ -46,7 +46,7 @@ func renderedUnits(t *testing.T, body string) int {
 	if err != nil {
 		t.Fatalf("pmdoc.Render: %v", err)
 	}
-	return units16(rendered)
+	return Units16(rendered)
 }
 
 // paddedTable is a table whose rows carry one cell where its header carries two: pmdoc.Render
@@ -128,7 +128,7 @@ func TestCheckCountsARuneOutsideTheBasicPlaneAsTwoUnits(t *testing.T) {
 // though each renders longer than a block may be.
 func TestCheckMeasuresTheTextAsWritten(t *testing.T) {
 	table := paddedTable((contracts.DispatchBlockUnits - 20) / 6)
-	if units := units16(table); units != contracts.DispatchBlockUnits {
+	if units := Units16(table); units != contracts.DispatchBlockUnits {
 		t.Fatalf("the table is %d units as written, want %d", units, contracts.DispatchBlockUnits)
 	}
 	if rendered := renderedUnits(t, table); rendered <= contracts.DispatchBlockUnits {
@@ -138,7 +138,7 @@ func TestCheckMeasuresTheTextAsWritten(t *testing.T) {
 
 	const listUnits = 31_956
 	list := escapedList(listUnits)
-	if units := units16(list); units != listUnits {
+	if units := Units16(list); units != listUnits {
 		t.Fatalf("the list is %d units as written, want %d", units, listUnits)
 	}
 	if rendered := renderedUnits(t, list); rendered <= contracts.DispatchBlockUnits {
