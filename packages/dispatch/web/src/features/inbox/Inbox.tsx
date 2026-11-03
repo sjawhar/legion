@@ -59,9 +59,10 @@ import {
   rowType,
   rowUrgency,
 } from "./list-row";
+import { useMarkAllRead } from "./mark-all";
 import { useMotionHold } from "./motion-hold";
 import { PaneDivider, usePaneWidth } from "./PaneDivider";
-import { type PlacedRow, usePaneSelection } from "./pane-selection";
+import { type PlacedRow, ReadHoldContext, usePaneSelection } from "./pane-selection";
 import { useFoldedGroups, useThreadOrder } from "./preferences";
 import { questionLine } from "./question-line";
 import { ReadingPane } from "./ReadingPane";
@@ -710,6 +711,34 @@ export function Inbox({
         : new Set([...current].filter((id) => listed.has(id)))
     );
   }, [listedIds]);
+  // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
+  // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
+  // (their own ask-back, an agent's note or reply), it is kept - `held` - where the reader last
+  // saw it, until their focus or pointer leaves it; `release` re-renders so the row is chosen
+  // afresh without it and takes its new place then.
+  const viewport = useRef<ViewportAnchor>(null);
+  const anchor = viewport.current?.interacted() ?? null;
+  /** The rows the reader can see, in the order they see them, as this list last rendered them:
+   *  what the motion hold is read against, and what the selection steps through. */
+  const presented = useRef<readonly PlacedRow[]>([]);
+  const answered = useRef<string | null>(null);
+  const [, setReleased] = useState(0);
+  const release = () => setReleased((count) => count + 1);
+  const openFoldedBand = useCallback(
+    (key: string) => {
+      if (folded.has(key)) toggleFold(key);
+    },
+    [folded, toggleFold]
+  );
+  const paneSelection = usePaneSelection({
+    bulkSnoozing,
+    filter,
+    listRef,
+    openFoldedBand: useCallback(() => openFoldedBand(LATER_GROUP_KEY), [openFoldedBand]),
+    paneShown,
+    presented,
+    snoozing,
+  });
   // What this list holds, and computed here rather than after the early returns so the bindings
   // below speak for exactly the rows on the page.
   const agent = filter.agent;
@@ -725,9 +754,20 @@ export function Inbox({
   const askRows: InboxListRow[] = (
     filter.section === "needs-you" ? waitingOnHuman(fromAgent) : fromAgent
   ).map((ask) => ({ ask, kind: "ask" }));
-  const threadRows: InboxListRow[] = asksOnly
-    ? []
-    : (adoptedThreads ?? []).map((thread) => ({ kind: "thread", thread }));
+  // The thread rows the list draws: what the server last answered, plus every row the reader
+  // read in place that answer no longer holds (`paneSelection.readHeld`). A row read while the
+  // column shows it, or read as a card where there is no column, stays where it was read and is
+  // drawn as read, so neither the next list read nor a live refresh moves the list under them.
+  const listedThreads = asksOnly ? [] : (adoptedThreads ?? []);
+  const listedThreadIds = new Set(listedThreads.map((thread) => rowId({ kind: "thread", thread })));
+  const threadRows: InboxListRow[] = [
+    ...listedThreads.map((thread): InboxListRow => ({ kind: "thread", thread })),
+    ...(asksOnly
+      ? []
+      : [...paneSelection.readHeld]
+          .filter(([id]) => !listedThreadIds.has(id))
+          .map(([, thread]): InboxListRow => ({ kind: "thread", thread }))),
+  ];
   /** Every row this list could hold before its five fields narrow it: what the bar counts. */
   const candidates = [...askRows, ...threadRows];
   // The filters decide what is listed, with one exception: a row whose "Assign to me" write is
@@ -744,6 +784,14 @@ export function Inbox({
   );
   const shown = sortRows(narrowed, sort, viewer ?? "");
   const byId = new Map(shown.map((row) => [rowId(row), row]));
+  // The bar's **Mark all read**, over exactly this list: its filters, the read mark of the list
+  // read it is showing, and the rows it is showing.
+  const markAll = useMarkAllRead({
+    asOf: threads.data?.as_of,
+    filters,
+    rows: shown,
+    state: threadState,
+  });
   // Where each row sits, judged against the clock at render: a snoozed row rejoins its band on
   // the first render after its moment passes. Computed here, with the selection, rather than
   // after the early returns, because the bar's count and the bindings both read it.
@@ -792,34 +840,6 @@ export function Inbox({
   // same predicate, so the two cannot drift: a pick whose optimistic move folds every marked row
   // into Later empties `selected`, not the marks behind it, and Clear still has work to do.
   const bulkBarShown = selected.length > 0 || bulkSnoozing !== 0 || bulkRefusal !== undefined;
-  // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
-  // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
-  // (their own ask-back, an agent's note or reply), it is kept - `held` - where the reader last
-  // saw it, until their focus or pointer leaves it; `release` re-renders so the row is chosen
-  // afresh without it and takes its new place then.
-  const viewport = useRef<ViewportAnchor>(null);
-  const anchor = viewport.current?.interacted() ?? null;
-  /** The rows the reader can see, in the order they see them, as this list last rendered them:
-   *  what the motion hold is read against, and what the selection steps through. */
-  const presented = useRef<readonly PlacedRow[]>([]);
-  const answered = useRef<string | null>(null);
-  const [, setReleased] = useState(0);
-  const release = () => setReleased((count) => count + 1);
-  const openFoldedBand = useCallback(
-    (key: string) => {
-      if (folded.has(key)) toggleFold(key);
-    },
-    [folded, toggleFold]
-  );
-  const paneSelection = usePaneSelection({
-    bulkSnoozing,
-    filter,
-    listRef,
-    openFoldedBand: useCallback(() => openFoldedBand(LATER_GROUP_KEY), [openFoldedBand]),
-    paneShown,
-    presented,
-    snoozing,
-  });
   // The refetch a recorded answer triggers returns the list the optimistic removal already
   // produced, so it re-renders nothing on its own; release explicitly. The reader's own answer
   // is one of the ways the selection is handed on, and only while it is still the selected
@@ -1164,6 +1184,7 @@ export function Inbox({
         assignees={filter.assignees}
         filters={filters}
         group={groupBy}
+        markAll={markAll}
         onAssigneesChange={(next) => changeFilter({ ...filter, assignees: next })}
         onClearAgent={() => changeFilter({ ...filter, agent: undefined, section: undefined })}
         onFiltersChange={(next) =>
@@ -1205,41 +1226,45 @@ export function Inbox({
   // unmount the whole list, taking the keyboard's focus, the bulk bar and every row's state
   // with it and mounting a fresh one a commit later.
   const page = (listColumn: ReactNode, subject: InboxListRow | undefined): ReactNode => (
-    <div className={paneShown ? "flex min-h-0 flex-1 flex-col gap-4" : "space-y-4"}>
-      {header}
-      {paneShown ? (
-        // The two columns are a grid of two fractions, so the share the reader dragged the
-        // divider to is exactly the share the pane takes, at any width; the divider is the
-        // column between them and takes its own.
-        <div
-          className="grid min-h-0 flex-1"
-          ref={columnsRef}
-          style={{
-            gridTemplateColumns:
-              subject === undefined
-                ? "minmax(0, 1fr)"
-                : `minmax(0, ${1 - paneWidth}fr) auto minmax(0, ${paneWidth}fr)`,
-          }}
-        >
-          {listColumn}
-          {subject === undefined ? null : (
-            <>
-              <PaneDivider columns={columnsRef} onWidthChange={setPaneWidth} width={paneWidth} />
-              <div className="min-w-0" ref={paneRef}>
-                <ReadingPane
-                  onAnswered={recordAnswered}
-                  onSnoozeLive={onSnoozeLive}
-                  row={subject}
-                  viewer={viewer}
-                />
-              </div>
-            </>
-          )}
-        </div>
-      ) : (
-        listColumn
-      )}
-    </div>
+    // Every thread this list draws - in the column, and in a card below its width - reports its
+    // own read here, which holds the row it was read in (`pane-selection.ts`).
+    <ReadHoldContext value={paneSelection.holdRead}>
+      <div className={paneShown ? "flex min-h-0 flex-1 flex-col gap-4" : "space-y-4"}>
+        {header}
+        {paneShown ? (
+          // The two columns are a grid of two fractions, so the share the reader dragged the
+          // divider to is exactly the share the pane takes, at any width; the divider is the
+          // column between them and takes its own.
+          <div
+            className="grid min-h-0 flex-1"
+            ref={columnsRef}
+            style={{
+              gridTemplateColumns:
+                subject === undefined
+                  ? "minmax(0, 1fr)"
+                  : `minmax(0, ${1 - paneWidth}fr) auto minmax(0, ${paneWidth}fr)`,
+            }}
+          >
+            {listColumn}
+            {subject === undefined ? null : (
+              <>
+                <PaneDivider columns={columnsRef} onWidthChange={setPaneWidth} width={paneWidth} />
+                <div className="min-w-0" ref={paneRef}>
+                  <ReadingPane
+                    onAnswered={recordAnswered}
+                    onSnoozeLive={onSnoozeLive}
+                    row={subject}
+                    viewer={viewer}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        ) : (
+          listColumn
+        )}
+      </div>
+    </ReadHoldContext>
   );
 
   if (shown.length === 0 && held === undefined) {

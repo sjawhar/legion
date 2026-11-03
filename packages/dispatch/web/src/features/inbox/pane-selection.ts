@@ -1,12 +1,28 @@
-import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
+import { createContext, type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import type { MyReplyRow } from "../../api/types";
 import { buildInboxPath, type InboxRoute } from "../refs/routes";
 import { answerDraft } from "./answer-drafts";
 import { ROW_ATTRIBUTE } from "./inbox-row";
 import { type InboxListRow, rowId } from "./list-row";
 import { answerOutstanding } from "./outstanding-answers";
 import type { InboxSection } from "./sections";
+
+/** What a surface drawing a thread of the list tells the list once the reader has read it: the
+ *  row stays where they read it, drawn as read, rather than being taken away under their eyes
+ *  by the next read of the list. */
+export type ReadHold = (thread: MyReplyRow) => void;
+
+/**
+ * The hold the Inbox puts on a row the reader has just read, as a context rather than a prop:
+ * the thread is drawn by `ThreadBody`, which the reading column reaches through four bodies of
+ * its own and the card reaches through `ThreadRowCard`, and neither route carries a prop of the
+ * list's. Each Inbox provides its own - the page's and the drawer's holds are separate - and
+ * with no provider a thread marks itself read and holds nothing, which is what a thread drawn
+ * outside the list does.
+ */
+export const ReadHoldContext = createContext<ReadHold | undefined>(undefined);
 
 /** A row as the reader last saw it: the band it was drawn under and the turn band it sat in,
  *  whatever the server says now. */
@@ -45,8 +61,19 @@ export interface PaneSelectionOptions {
 }
 
 export interface PaneSelection {
+  /** Records that the reader has read a thread where the list is drawing it, which holds its
+   *  row (`readHeld`). */
+  holdRead: ReadHold;
   /** The row the column is showing, by its `rowId`, or undefined while it shows none. */
   id: string | undefined;
+  /**
+   * The rows the reader has read in place and the list therefore keeps, by `rowId`, each as it
+   * stood when they read it and drawn as read. With the column on, a row leaves this hold when
+   * the selection moves off it; without one - below the column's width, and in the drawer,
+   * where nothing is selected - a card read there stays until the Inbox is left, so the list
+   * never moves under the reader.
+   */
+  readHeld: ReadonlyMap<string, MyReplyRow>;
   /** Selects a row, or nothing, and writes it to the address. */
   select: (id: string | undefined) => void;
   /** The selection as it stands now, for a callback whose closure is older than it: an answer's
@@ -94,6 +121,38 @@ export function usePaneSelection({
    *  address would read back as a reader's own navigation and select the row again, one step
    *  behind every `j`. */
   const shownItem = useRef<string | undefined>(undefined);
+
+  /** The rows read in place and held here, by `rowId`. A hold is taken as the thread is marked
+   *  read, with the row as it stood then, so the list keeps drawing it after the next list read
+   *  has dropped it. */
+  const [readHeld, setReadHeld] = useState<ReadonlyMap<string, MyReplyRow>>(() => new Map());
+  const holdRead = useCallback((thread: MyReplyRow) => {
+    setReadHeld((current) => {
+      const id = rowId({ kind: "thread", thread });
+      if (current.has(id)) return current;
+      // Held as read: the row the list draws from here on says so, whatever the read it came
+      // from said. An Agent row's unread replies are its ids; every other row's is its mark.
+      const read = { ...thread, unread: false, unread_count: 0 };
+      return new Map(current).set(
+        id,
+        thread.kind === "agent"
+          ? { ...read, unread_reply_ids: [] }
+          : { ...read, read_through: thread.reply.created_at }
+      );
+    });
+  }, []);
+  // The hold ends when the selection moves off the row: the column is the reader's place in the
+  // list, and a row they have walked off is the next list read's to take. Where nothing is
+  // selected - below the column's width, and in the drawer - nothing is released, so a card read
+  // there stays until the Inbox is left with it.
+  useEffect(() => {
+    if (!paneShown) return;
+    setReadHeld((current) => {
+      if (current.size === 0) return current;
+      const kept = [...current].filter(([id]) => id === selectedId);
+      return kept.length === current.size ? current : new Map(kept);
+    });
+  }, [paneShown, selectedId]);
 
   /** Every row this list holds, a folded band's included: what `?item=` is answered against. */
   const listedRows = useRef<readonly PlacedRow[]>([]);
@@ -191,9 +250,14 @@ export function usePaneSelection({
    * a deferred row, for the one write whose own optimistic update takes the row out of the Inbox
    * read rather than merely out of this view.
    *
-   * A row the reader has neither typed nor sent an answer to is held by nothing - every thread
-   * row included, which has no answer of any kind - the first row this list selected for them
-   * included.
+   * A thread the reader has read where it stands (`readHeld`). The list keeps that row too, so
+   * the column normally finds it among the rendered rows; this is the same hold read from here,
+   * so a commit whose list has already dropped it - a refetch landing between the two - still
+   * leaves the thread in front of the reader until they select another row.
+   *
+   * A row held by none of the three - an ask they have neither typed nor sent an answer to, a
+   * thread they have not read - leaves the column as it leaves the list, the first row this
+   * list selected for them included.
    */
   const paneRow = (listed: InboxListRow | undefined): InboxListRow | undefined => {
     const subject = paneSubject.current;
@@ -209,7 +273,11 @@ export function usePaneSelection({
       paneSubject.current = undefined;
       return undefined;
     }
-    const kept = subject.kept || answerOutstanding(selectedId) || answerDraft(selectedId) !== "";
+    const kept =
+      subject.kept ||
+      answerOutstanding(selectedId) ||
+      answerDraft(selectedId) !== "" ||
+      readHeld.has(selectedId);
     paneSubject.current = kept ? { kept: true, row: subject.row } : undefined;
     return kept ? subject.row : undefined;
   };
@@ -295,8 +363,10 @@ export function usePaneSelection({
   }, [paneShown, selectedId, selectedRow]);
 
   return {
+    holdRead,
     id: selectedId,
     nextAfterSelected,
+    readHeld,
     select,
     selectedNow,
     selectedRow,

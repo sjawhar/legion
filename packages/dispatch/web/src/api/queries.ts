@@ -116,13 +116,17 @@ export const myRepliesCountQuery = () =>
     queryFn: async () => (await api.listMyReplies({ kind: INBOX_THREAD_KINDS, limit: 1 })).total,
   });
 
+/** The prefix both states of the Inbox's unpaged thread read share: what a refresh rule tests
+ *  the listed rows under, whichever state the page is on (`api/event-refresh.ts`). */
+export const inboxThreadsKey = [...myRepliesKey, "inbox"] as const;
+
 /** Every thread row the Inbox lists, in one unpaged read: the Reply and Agent rows of the list,
  *  under **Unread** or, with the switch on, every one of them. The Inbox page and its drawer
  *  read this and nothing else does - a surface that wants one owner's unread set reads
  *  `myRepliesOwnerQuery` below. */
 export const inboxThreadsQuery = (state: "all" | "unread") =>
   queryOptions({
-    queryKey: [...myRepliesKey, "inbox", state],
+    queryKey: [...inboxThreadsKey, state],
     queryFn: () => api.listMyReplies({ kind: INBOX_THREAD_KINDS, state }),
   });
 

@@ -3,6 +3,7 @@ import {
   agentMessagesQuery,
   architectureSourcesQuery,
   inboxQuery,
+  inboxThreadsKey,
   myRepliesKey,
   projectArchitectureSourcesQuery,
   projectDefaultAssigneesQuery,
@@ -104,15 +105,18 @@ function inboxRowOfAsk(id: string): RefreshTarget {
   };
 }
 
-/** The Replies page (`RepliesPage`'s `[...myRepliesKey, "page"]`, every page it loaded), when a
- *  row of it is a thread on issue `key`: each row shows its issue's title. */
-function repliesPageRowsOf(key: string): RefreshTarget {
+/** The Inbox's own thread reads (`inboxThreadsQuery`, either state), when one of their rows is a
+ *  thread on issue `key`: a Reply row shows its issue's title and priority, and whether it is
+ *  listed at all turns on who the issue is assigned to (`myRepliesOwner` in the server's
+ *  replies.go leaves out an open ask on an open issue assigned to the reader, which the Inbox
+ *  lists under Waiting on you instead). Built like `inboxRowsOf`: it needs no field of the
+ *  event's, so an older server's event reaches it too. */
+function inboxThreadRowsOf(key: string): RefreshTarget {
   return {
-    exact: true,
-    queryKey: [...myRepliesKey, "page"],
+    queryKey: inboxThreadsKey,
     when: (data) =>
-      rowsOf<MyRepliesResponse>((data as { pages?: unknown } | undefined)?.pages).some((page) =>
-        rowsOf<MyReplyRow>(page.rows).some((row) => row.issue?.key === key)
+      rowsOf<MyReplyRow>((data as MyRepliesResponse | undefined)?.rows).some(
+        (row) => row.issue?.key === key
       ),
   };
 }
@@ -366,7 +370,10 @@ function isMessageEvent(event: Event): boolean {
 // (`comment.answered`), an issue message or a reply to one, an answer - and an ask opening
 // (settlement restoring one) or being resolved, which decides whether the Inbox lists its thread
 // instead. An edit, a resolution of a comment, a delivery or a claim moves no row.
-const REPLIES_WRITES: Partial<Record<EventType, true>> = {
+//
+// An issue-less `message.created` or `message.answered` is here for the Inbox's Agent rows: a
+// one-off message to a session, and that session's reply to one.
+const INBOX_THREAD_WRITES: Partial<Record<EventType, true>> = {
   "comment.created": true,
   "comment.answered": true,
   "message.created": true,
@@ -377,21 +384,32 @@ const REPLIES_WRITES: Partial<Record<EventType, true>> = {
 };
 
 /**
- * Whether the viewer's Replies page (`["me", "replies"]`, its count and every owner's unread set)
- * can have moved: a write above, or an issue closing or reopening, which moves its open asks'
- * threads between the Inbox and the Replies page (`myRepliesUnread` in the server's replies.go).
- * `thread_logins` names whose rows the write moved, so only theirs, and the writer's own, refresh.
- * Without it every one of those writes refreshes, except an `issue.updated` that says it moved no
- * status: the server names the logins on every status move, a close and a reopen among them.
+ * Whether the viewer's Inbox thread rows (`["me", "replies"]`: both states of the unpaged read,
+ * the unread count and every owner's unread set) can have moved: a write above, or an issue
+ * closing, reopening or being reassigned, each of which moves its open asks' threads into or out
+ * of the Reply rows (`myRepliesOwner` in the server's replies.go).
+ *
+ * `thread_logins` names whose rows the write moved - for an issue-less message the thread root's
+ * author, which is the person whose Agent row it is - so only theirs, and the writer's own,
+ * refresh. Without it every one of those writes refreshes, except an `issue.updated` that says it
+ * moved neither status nor assignee: the server names the logins on every status move, a close
+ * and a reopen among them, and on every assignee move.
+ *
+ * The known limit: an older server mid-deploy writes no `thread_logins` on a reassignment, so a
+ * Reply row that should appear here - an open ask on an issue assigned away from the viewer -
+ * does not until the next list read. The conditional target beside this rule
+ * (`inboxThreadRowsOf`) covers the other direction, where a listed row carries the issue's key.
  */
-function movesReplies(event: Event, viewer: string | undefined): boolean {
+function movesInboxThreads(event: Event, viewer: string | undefined): boolean {
   const issueWrite = event.type === "issue.closed" || event.type === "issue.updated";
-  if (REPLIES_WRITES[event.type] !== true && !issueWrite) {
+  if (INBOX_THREAD_WRITES[event.type] !== true && !issueWrite) {
     return false;
   }
   const logins = payloadStrings(event, "thread_logins");
   if (logins === undefined) {
-    return !(event.type === "issue.updated" && issueChanges(event)?.has("status") === false);
+    if (event.type !== "issue.updated") return true;
+    const changes = issueChanges(event);
+    return changes === undefined || changes.has("status") || changes.has("assignee");
   }
   if (viewer === undefined) {
     return true;
@@ -495,9 +513,13 @@ function issueWriteTargets(
   if (!created && titleOrStatus) {
     targets.push(pinnedRow(key));
   }
-  // A row of the Replies page shows its thread's issue title.
-  if (!created && moved("title")) {
-    targets.push(repliesPageRowsOf(key));
+  // An Inbox thread row shows its thread's issue title and its priority, and an assignee move
+  // decides whether an open ask's thread is listed here at all. The assignee rule is the
+  // conditional half of the belt `movesInboxThreads` describes: it needs no field the server
+  // only recently writes, so it catches a reassignment an older server's event says nothing of,
+  // in the one direction a listed row can be tested for.
+  if (!created && (moved("title") || moved("priority") || moved("assignee"))) {
+    targets.push(inboxThreadRowsOf(key));
   }
 
   // An Inbox row shows its issue's title, status, priority and assignee, and lists an open ask
@@ -601,7 +623,7 @@ function documentTargets(event: Event, viewer: string | undefined): RefreshTarge
   if (movesOpenAsks(event)) {
     targets.push({ queryKey: projectsKey });
   }
-  if (movesReplies(event, viewer)) {
+  if (movesInboxThreads(event, viewer)) {
     targets.push({ queryKey: myRepliesKey });
   }
   appendAnswersPage(targets, event);
@@ -674,13 +696,17 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     return targets;
   }
   if (event.type === "user_agent_state.updated") {
-    // Another tab or device of this viewer read or cleared a conversation: refresh the badge.
+    // Another tab or device of this viewer read or cleared a conversation: refresh the badge,
+    // and the Inbox's thread rows with it - an Agent row's unread replies are that state's, so
+    // a read made on the Agents page or in the live view takes the row out of the list here.
     return isViewer(payloadString(event, "login"), viewer)
-      ? [{ queryKey: userAgentStateQuery().queryKey }]
+      ? [{ queryKey: userAgentStateQuery().queryKey }, { queryKey: myRepliesKey }]
       : [];
   }
   if (event.type === "user_thread_state.updated") {
     // Another tab or device of this viewer read a thread: drop its row and its count here too.
+    // The event names one thread, or none at all - a Mark all read names its project and no
+    // thread - and either way every one of the viewer's thread reads is refreshed.
     return isViewer(payloadString(event, "login"), viewer) ? [{ queryKey: myRepliesKey }] : [];
   }
   if (event.type === "subscription.remove_requested") {
@@ -698,9 +724,17 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // queries only exist while a broadcast page is mounted. A reply in a direct conversation can
     // be unread for its asker, and the count lives in the viewer's per-agent state; every reply
     // row is written with a message.answered event, so only that event can move the count.
-    return event.type === "message.answered"
-      ? [{ queryKey }, { queryKey: ["broadcast"] }, { queryKey: userAgentStateQuery().queryKey }]
-      : [{ queryKey }, { queryKey: ["broadcast"] }];
+    //
+    // The Inbox's Agent rows are the same two writes: the message that opens one and the reply
+    // that makes it unread. `thread_logins` names the thread root's author, whose row it is.
+    const targets: RefreshTarget[] = [{ queryKey }, { queryKey: ["broadcast"] }];
+    if (event.type === "message.answered") {
+      targets.push({ queryKey: userAgentStateQuery().queryKey });
+    }
+    if (movesInboxThreads(event, viewer)) {
+      targets.push({ queryKey: myRepliesKey });
+    }
+    return targets;
   }
   if (event.issue_key === null) {
     return documentTargets(event, viewer);
@@ -716,7 +750,7 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // Every event an issue owns moves its `last_seq`, which a project list's unread dot reads.
     { queryKey: project === undefined ? ["issues", "project"] : ["issues", "project", project] },
   ];
-  if (movesReplies(event, viewer)) {
+  if (movesInboxThreads(event, viewer)) {
     targets.push({ queryKey: myRepliesKey });
   }
   if (changesReferenceGraph(event)) {

@@ -16,7 +16,7 @@
  */
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, useContext, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -40,6 +40,7 @@ import {
 } from "../../theme/classes";
 import { AgentMessageComposer, agentSendKey } from "../agents/AgentMessageComposer";
 import { agentReplyTo, newestAttempt } from "../agents/exchange-delivery";
+import { useMarkShownRepliesRead } from "../agents/unread";
 import type { ComposerOwner } from "../conversation/composer-model";
 import { rootOf } from "../conversation/conversation-model";
 import { MentionComposer } from "../conversation/MentionComposer";
@@ -48,7 +49,10 @@ import { AgentName } from "../refs/AgentName";
 import { agentsQuery } from "../refs/agent-registry";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { type RepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
+import { type DwellRef, useDwell } from "../shell/useDwell";
 import { AskCard } from "./AskCard";
+import { ReadHoldContext } from "./pane-selection";
 import { useThreadOrder } from "./preferences";
 import { earlierRepliesLabel, threadLayout } from "./thread-layout";
 
@@ -136,6 +140,7 @@ function ThreadTurnView({
  */
 function ThreadTurns({
   composer,
+  markNewest,
   openAtFirstUnread,
   replies,
   root,
@@ -143,6 +148,9 @@ function ThreadTurns({
   unread,
 }: {
   composer: ReactNode;
+  /** The read mark's watch, placed on the thread's newest message: once that message has been
+   *  on screen long enough (`useDwell`), the thread is read. */
+  markNewest: DwellRef;
   /** Whether the thread scrolls its first unread message into view when it opens, which the
    *  reading pane does under **Oldest first** and a card never does. */
   openAtFirstUnread: boolean;
@@ -174,9 +182,18 @@ function ThreadTurns({
   const firstUnreadId = [...(root === undefined ? [] : [root]), ...shown].find((turn) =>
     unread.has(turn.id)
   )?.id;
+  // The thread's newest message, whatever order it is drawn in: the one the read mark watches.
+  // Every message is drawn and an unread one is never folded away, so it is always on the page.
+  const newestId = (replies.at(-1) ?? root)?.id;
   const turnView = (turn: ThreadTurn): ReactNode => (
     <div key={turn.id} ref={turn.id === firstUnreadId ? firstUnread : undefined}>
-      <ThreadTurnView first={turn.id === firstUnreadId} turn={turn} unread={unread.has(turn.id)} />
+      <div ref={turn.id === newestId ? markNewest : undefined}>
+        <ThreadTurnView
+          first={turn.id === firstUnreadId}
+          turn={turn}
+          unread={unread.has(turn.id)}
+        />
+      </div>
     </div>
   );
   // The fold and what it holds are one block, drawn furthest from the newest message: under the
@@ -220,6 +237,55 @@ function threadSendKey(threadId: string): readonly unknown[] {
   return ["inbox-thread-reply", threadId];
 }
 
+/**
+ * The read mark a Reply row's thread carries: the dwell rule the thread's own pages already use
+ * (`useMarkThreadRead`, `features/shell/useDwell.ts`) over the row's own newest write, with the
+ * list's hold on the row it was read in. The returned ref goes on the newest message.
+ */
+function useThreadRead(thread: MyReplyRow, owner: RepliesOwner | undefined): DwellRef {
+  const hold = useContext(ReadHoldContext);
+  return useMarkThreadRead({
+    // A row the reader has already read needs no mark, and reads no unread set to decide it.
+    enabled: thread.unread,
+    newestShownAt: thread.reply.created_at,
+    onRead: () => hold?.(thread),
+    owner,
+    threadId: thread.thread_id,
+  });
+}
+
+/** The replies an Agent thread marks when nothing has dwelled yet. */
+const NO_REPLIES: readonly Message[] = [];
+
+/**
+ * An Agent row's read mark. Its replies are read by id (`useMarkShownRepliesRead`), never by
+ * moving the session's own read mark, so a reply in the live conversation or in another thread
+ * of the same session stays unread. The watch is the Reply rows' dwell rule, on the thread's
+ * newest message, and it marks the unread replies the row names among the ones drawn - every
+ * one of them at or before that newest message, since the body draws the thread whole.
+ */
+function useAgentThreadRead(thread: MyReplyRow, replies: readonly Message[]): DwellRef {
+  const hold = useContext(ReadHoldContext);
+  const unreadIds = thread.unread_reply_ids ?? [];
+  // Which set of unread replies has dwelled, as `useMarkThreadRead` keeps which reply has: a
+  // reply that arrives while the thread is on screen is read only once it has dwelled too.
+  const seen = `${thread.thread_id} ${unreadIds.join(" ")}`;
+  const [read, setRead] = useState<string | undefined>(undefined);
+  const ref = useDwell({
+    enabled: thread.unread && unreadIds.length > 0,
+    onDwell: () => {
+      setRead(seen);
+      hold?.(thread);
+    },
+    resetKey: seen,
+  });
+  useMarkShownRepliesRead(
+    thread.session?.id ?? "",
+    read === seen ? replies.filter((reply) => unreadIds.includes(reply.id)) : NO_REPLIES
+  );
+  return ref;
+}
+
 /** A comment thread on an issue, or in a project document: every comment whose reply chain leads
  *  to the row's root. */
 function CommentThreadBody({
@@ -232,6 +298,10 @@ function CommentThreadBody({
   thread: MyReplyRow;
 }): ReactNode {
   const queryClient = useQueryClient();
+  const markNewest = useThreadRead(
+    thread,
+    owner.kind === "issue" ? { issue: owner.issueKey } : { artifact: owner.artifactId }
+  );
   const issueKey = owner.kind === "issue" ? owner.issueKey : undefined;
   const issue = useQuery({ ...issueQuery(issueKey), enabled: issueKey !== undefined });
   // The reads the issue's Conversation and the document's margin already hold, under their own
@@ -283,6 +353,7 @@ function CommentThreadBody({
           />
         )
       }
+      markNewest={markNewest}
       openAtFirstUnread={openAtFirstUnread}
       replies={replies}
       root={rootTurn}
@@ -323,6 +394,7 @@ function MessageThreadBody({
   thread: MyReplyRow;
 }): ReactNode {
   const queryClient = useQueryClient();
+  const markNewest = useThreadRead(thread, { issue: issueKey });
   const issue = useQuery(issueQuery(issueKey));
   const messagesKey = ["issue-messages", issueKey];
   const messages = useQuery({
@@ -368,6 +440,7 @@ function MessageThreadBody({
           />
         )
       }
+      markNewest={markNewest}
       openAtFirstUnread={openAtFirstUnread}
       replies={replies}
       root={rootTurn}
@@ -378,8 +451,25 @@ function MessageThreadBody({
 }
 
 /** The thread of an ask: the ask's own card, which draws the question, its answer and its
- *  exchange, and answers or replies in place. */
-function AskThreadBody({ thread }: { thread: MyReplyRow }): ReactNode {
+ *  exchange, and answers or replies in place. The card draws the thread whole, so the mark
+ *  watches the card itself rather than one message inside it: the newest write is in it, and
+ *  the dwell rule reads a card taller than the screen as the screen filling with it. */
+function AskThreadBody({
+  artifactId,
+  thread,
+}: {
+  artifactId: string | undefined;
+  thread: MyReplyRow;
+}): ReactNode {
+  const issueKey = thread.issue?.key;
+  const markNewest = useThreadRead(
+    thread,
+    issueKey !== undefined
+      ? { issue: issueKey }
+      : artifactId === undefined
+        ? undefined
+        : { artifact: artifactId }
+  );
   const read = useQuery({
     queryKey: ["ask-thread", thread.thread_id],
     queryFn: () => api.getAsk(thread.thread_id),
@@ -390,7 +480,7 @@ function AskThreadBody({ thread }: { thread: MyReplyRow }): ReactNode {
     return <p className={`mt-2 text-sm ${dangerText}`}>Could not load this thread.</p>;
   }
   return (
-    <div className="mt-2" data-inbox-thread={thread.thread_id}>
+    <div className="mt-2" data-inbox-thread={thread.thread_id} ref={markNewest}>
       <AskCard
         ask={read.data.ask}
         initialThread={read.data}
@@ -445,6 +535,12 @@ function AgentThreadBody({
   const agent = live.data?.find((candidate) => candidate.session_id === sessionId);
   const sendKey = agentSendKey(sessionId ?? "");
   const hold = useSending(sendKey);
+  // Read before the loading branches, because the mark below is a hook: the thread's own
+  // conversation among the session's, which is undefined until the read lands.
+  const read: MessageRead | undefined = messages.data?.find(
+    (candidate) => candidate.message.id === thread.thread_id
+  );
+  const markNewest = useAgentThreadRead(thread, read?.replies ?? NO_REPLIES);
   if (sessionId === undefined) {
     return <p className={`mt-2 text-sm ${dangerText}`}>This message names no session.</p>;
   }
@@ -452,9 +548,6 @@ function AgentThreadBody({
   if (messages.isError) {
     return <p className={`mt-2 text-sm ${dangerText}`}>Could not load this conversation.</p>;
   }
-  const read: MessageRead | undefined = messages.data.find(
-    (candidate) => candidate.message.id === thread.thread_id
-  );
   const newest = read === undefined ? undefined : (read.replies.at(-1) ?? read.message);
   const turn = (message: Message): ThreadTurn =>
     messageTurn(
@@ -489,6 +582,7 @@ function AgentThreadBody({
             </div>
           )
         }
+        markNewest={markNewest}
         openAtFirstUnread={openAtFirstUnread}
         replies={turns.slice(1)}
         root={turns[0]}
@@ -542,7 +636,7 @@ export function ThreadBody({
       return <AgentThreadBody openAtFirstUnread={openAtFirstUnread} thread={thread} />;
     }
     if (thread.kind === "ask") {
-      return <AskThreadBody thread={thread} />;
+      return <AskThreadBody artifactId={artifactId} thread={thread} />;
     }
     const issueKey = thread.issue?.key;
     if (thread.kind === "message") {

@@ -5,6 +5,8 @@ import type {
   AskSnooze,
   CreateAgentMessageInput,
   Issue,
+  MarkInboxReadRequest,
+  MarkInboxReadResponse,
   Message,
   UpdateIssueInput,
   UserAgentState,
@@ -142,6 +144,14 @@ export const answerThreadReads = () =>
   answerRoute<
     (id: string, body: { read_through: string }, bounds: WriteBounds) => Promise<unknown>
   >("PUT", "/api/v1/me/threads/*/read");
+
+/** `POST /api/v1/me/inbox/read` (`markInboxReadRequest`): the Inbox's Mark all read, called
+ *  with the body and the bounds. */
+export const answerInboxReads = () =>
+  answerRoute<(body: MarkInboxReadRequest, bounds: WriteBounds) => Promise<MarkInboxReadResponse>>(
+    "POST",
+    "/api/v1/me/inbox/read"
+  );
 
 /** `PUT /api/v1/me/asks/{id}/snooze` (`askSnoozeRequest`). */
 export const answerAskSnoozes = () =>

@@ -3,6 +3,7 @@ import { type ReactNode, useState } from "react";
 import { MultiSelect } from "../../components/MultiSelect";
 import {
   borderDefault,
+  dangerText,
   focusVisibleRing,
   surfaceMutedBg,
   textSecondaryOnCanvas,
@@ -26,6 +27,7 @@ import {
   inFieldFilter,
 } from "./grouping";
 import type { InboxListRow } from "./list-row";
+import { MARK_ALL_REFUSED_TEXT, type MarkAllRead } from "./mark-all";
 import type { ThreadOrder } from "./preferences";
 import { EVERYONE_FILTER_VALUE, inAssigneeFilter, UNASSIGNED_FILTER_VALUE } from "./sections";
 import { ViewMenu } from "./ViewMenu";
@@ -81,6 +83,7 @@ export function InboxBar({
   assignees,
   filters,
   group,
+  markAll,
   onAssigneesChange,
   onClearAgent,
   onFiltersChange,
@@ -107,6 +110,9 @@ export function InboxBar({
   assignees: readonly string[] | undefined;
   filters: InboxFilters;
   group: InboxGroupBy;
+  /** The list's own **Mark all read** (`mark-all.ts`): the bar offers it while there is an
+   *  unread Reply or Agent row to mark, and says so when a press was refused. */
+  markAll: MarkAllRead;
   onAssigneesChange: (next: readonly string[] | undefined) => void;
   onClearAgent: () => void;
   onFiltersChange: (next: InboxFilters) => void;
@@ -203,7 +209,24 @@ export function InboxBar({
         >
           Filter
         </button>
-        {/* The right end of the row. **Mark all read** sits between these two. */}
+        {/* Between **Filter** and **View**, and only while the list holds an unread Reply or
+            Agent row. It asks nothing first: the rows go, and a refusal brings them back. */}
+        {markAll.offered ? (
+          <button
+            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-semibold outline-none focus-visible:ring-2 ${focusVisibleRing} ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnCanvas}`}
+            data-inbox-mark-all=""
+            onClick={markAll.markAll}
+            type="button"
+          >
+            Mark all read
+          </button>
+        ) : null}
+        {markAll.refused ? (
+          <p className={`text-sm ${dangerText}`} data-inbox-mark-all-refused="" role="alert">
+            {MARK_ALL_REFUSED_TEXT}
+          </p>
+        ) : null}
+        {/* The right end of the row. */}
         <div className="ml-auto">
           <ViewMenu
             allThreadCount={allThreadCount}

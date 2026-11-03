@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { myRepliesKey } from "../../api/queries";
-import type { MyReplyRow, OpenAskOwner } from "../../api/types";
+import type { MyReplyRow, OpenAskOwner, UserAgentState } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   borderDefault,
@@ -15,6 +15,7 @@ import {
   textPrimaryOnCanvas,
   unreadDotBg,
 } from "../../theme/classes";
+import { storeAgentState } from "../agents/unread";
 import type { DispatchReferenceRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
@@ -64,11 +65,25 @@ export function threadReferenceRoute(thread: MyReplyRow): DispatchReferenceRoute
  */
 export function ThreadRowCard({ thread }: { thread: MyReplyRow }): ReactNode {
   const queryClient = useQueryClient();
-  const markRead = useKeyedWrite({
+  const session = thread.session?.id;
+  const markRead = useKeyedWrite<UserAgentState | undefined>({
     label: () => "Thread marked read",
-    write: (_variables, bounds) =>
-      api.markThreadRead(thread.thread_id, thread.reply.created_at, bounds),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: myRepliesKey }),
+    // An Agent row is read by id, as every read of one is: its session's own read mark covers
+    // replies in the live conversation and in its other threads, which this press has not
+    // shown. Every other row carries a thread mark, which this moves to its newest write.
+    write: async (_variables, bounds) => {
+      if (thread.kind === "agent" && session !== undefined) {
+        return api.putAgentState(session, { read_replies: thread.unread_reply_ids ?? [] }, bounds);
+      }
+      await api.markThreadRead(thread.thread_id, thread.reply.created_at, bounds);
+      return undefined;
+    },
+    onSuccess: (state) => {
+      if (state !== null && state !== undefined && session !== undefined) {
+        storeAgentState(queryClient, session, state);
+      }
+      return queryClient.invalidateQueries({ queryKey: myRepliesKey });
+    },
   });
   const owner = threadOwner(thread);
   const row = { kind: "thread", thread } as const;

@@ -78,6 +78,8 @@ import type {
   ItemBlocks,
   ListUsersResponse,
   MachineLoginsResponse,
+  MarkInboxReadRequest,
+  MarkInboxReadResponse,
   Message,
   MessageDelivery,
   MessageRead,
@@ -464,6 +466,15 @@ export function threadReadRequest(threadId: string, readThrough: string): WriteR
     method: "PUT",
     path: `/api/v1/me/threads/${pathSegment(threadId)}/read`,
   };
+}
+
+/** `POST /api/v1/me/inbox/read`: the Inbox's **Mark all read** (`markInboxRead`). One request
+ *  marks every unread thread the list route would answer under the same narrowing whose newest
+ *  write is at or before `read_through`, which is that list read's own `as_of`. */
+export function markInboxReadRequest(
+  body: MarkInboxReadRequest
+): WriteRequest<MarkInboxReadResponse> {
+  return { body, method: "POST", path: "/api/v1/me/inbox/read" };
 }
 
 /** `PUT /api/v1/me/issues/{key}/state`: the person's state of an issue (`putIssueState`). */
@@ -1074,6 +1085,13 @@ export class DispatchApiClient {
    *  moved. */
   async markThreadRead(threadId: string, readThrough: string, bounds: WriteBounds): Promise<void> {
     await this.send(threadReadRequest(threadId, readThrough), bounds);
+  }
+
+  /** `POST /api/v1/me/inbox/read`: mark the Inbox's unread threads read in one request, narrowed
+   *  as the list is narrowed and no further than `body.read_through`. Answers how many it
+   *  marked. */
+  markInboxRead(body: MarkInboxReadRequest, bounds: WriteBounds): Promise<MarkInboxReadResponse> {
+    return this.send<MarkInboxReadResponse>(markInboxReadRequest(body), bounds);
   }
 
   async removeAskFollower(id: string, sessionId: string, bounds: WriteBounds): Promise<void> {

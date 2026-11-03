@@ -36,6 +36,8 @@ import type {
   IssueDetails,
   IssueSummary,
   ItemBlocks,
+  MarkInboxReadRequest,
+  MarkInboxReadResponse,
   Message,
   MessageDelivery,
   MessageRead,
@@ -317,6 +319,16 @@ export function markThreadRead(
     { read_through: readThrough },
     options
   );
+}
+
+/** `POST /api/v1/me/inbox/read`: the Inbox's **Mark all read** - mark every unread thread the
+ *  list route answers under the same narrowing whose newest write is at or before
+ *  `body.read_through`. Answers how many threads it marked. */
+export function markInboxRead(
+  body: MarkInboxReadRequest,
+  options: ApiOptions = {}
+): Promise<MarkInboxReadResponse> {
+  return request<MarkInboxReadResponse>("/api/v1/me/inbox/read", "POST", body, options);
 }
 
 /** `PUT /api/v1/me/asks/{id}/snooze`: the caller's own snooze on an Inbox row, until

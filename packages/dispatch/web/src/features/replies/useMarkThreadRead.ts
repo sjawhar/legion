@@ -34,10 +34,15 @@ export interface MarkThreadReadOptions {
   /** The server timestamp of the newest reply the surface shows; with none there is nothing to
    *  read. */
   readonly newestShownAt: string | undefined;
+  /** Told the moment that reply has been on screen long enough to count as read, as the mark is
+   *  made rather than when the server takes it: the Inbox holds the row it was read in on this
+   *  (`features/inbox/pane-selection.ts`). */
+  readonly onRead?: () => void;
 }
 
 /**
- * Marks one thread of the Replies page read once the reader has seen its newest reply: the
+ * Marks one thread read once the reader has seen its newest reply - the rule the issue's
+ * Conversation, a document's margin, an ask's card and the Inbox's threads all read by: the
  * returned ref goes on that reply's own element, and once it has been three-quarters on screen for
  * a second (`useDwell`, whose one IntersectionObserver every thread on the page shares) the thread
  * is marked read through that reply's timestamp (`PUT /api/v1/me/threads/{id}/read`), once per
@@ -52,6 +57,7 @@ export interface MarkThreadReadOptions {
 export function useMarkThreadRead({
   enabled,
   newestShownAt,
+  onRead,
   owner,
   threadId,
 }: MarkThreadReadOptions): DwellRef {
@@ -70,7 +76,9 @@ export function useMarkThreadRead({
   const ref = useDwell({
     enabled: unread,
     onDwell: () => {
-      if (newestShownAt !== undefined) setSeen({ at: newestShownAt, threadId });
+      if (newestShownAt === undefined) return;
+      setSeen({ at: newestShownAt, threadId });
+      onRead?.();
     },
     resetKey: `${threadId} ${newestShownAt ?? ""}`,
   });
