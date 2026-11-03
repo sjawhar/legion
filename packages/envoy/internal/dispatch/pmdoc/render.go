@@ -643,7 +643,7 @@ func opensWithUnwrittenParagraph(item *Node) bool {
 // firstRule reports whether a rule opening the blocks is written `***` too.
 //
 // One blank line is written wherever the block after would otherwise be absorbed: a block that
-// cannot open on the line after a paragraph (opensAfterParagraph), written after a block that
+// cannot open on the line after the block before it (opensAfterBlock, mergesIntoQuote), written after a block that
 // ends in a paragraph a lazy line continues (blockEndsInParagraph), would be read as that
 // paragraph's own text - a paragraph taken into the quote before it, a list that interrupts no
 // paragraph read as text, an empty item's marker read as a setext underline. The item then reads
@@ -678,7 +678,7 @@ func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string
 				switch {
 				case spread && !spreadElsewhere(blocks):
 					blanks = definitionSpreadBlanks(child) - own
-				case spread || own == 0 && !opensAfterParagraph(child) && !endsInClosedList(previous):
+				case spread || own == 0 && !opensAfterParagraphAlone(child) && !endsInClosedList(previous):
 					blanks = 1
 				}
 			}

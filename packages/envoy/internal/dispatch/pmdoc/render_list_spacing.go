@@ -17,9 +17,9 @@ func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 		return spacing, true
 	}
 	// next can open on the list's next line: a list opens there whatever its first item, and so
-	// does a block that opens after a paragraph as well (opensAfterParagraph), or anything where
+	// does a block that opens after a paragraph as well (opensAfterParagraphAlone), or anything where
 	// the list ends in no paragraph it would continue (endsInParagraph).
-	opensOnNextLine := isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)
+	opensOnNextLine := isList(next) || opensAfterParagraphAlone(next) || !endsInParagraph(list)
 	// One blank line would spread something: what it spaces, where one does (spacingAfterList); in
 	// a typed block in a footnote definition outside quotes, the list's last item, which the
 	// browser editor reads any blank line after the list as spreading (spacedAfter), unless it is
@@ -257,12 +257,13 @@ func isList(n *Node) bool {
 	return n.Type == "bullet_list" || n.Type == "ordered_list"
 }
 
-// opensAfterParagraph reports whether block opens on the line after a paragraph without a blank
+// opensAfterParagraphAlone reports whether block opens on the line after a paragraph without a blank
 // line: a quote, a code block (written fenced), a heading written on one line, a rule, a typed
 // block, a footnote definition, a bullet list, or an ordered list starting at one, whose first
-// item holds something (an empty item interrupts no paragraph, emptyItemGuard). A table is
-// opensAfterBlock's to answer, since the block before it decides.
-func opensAfterParagraph(block *Node) bool {
+// item holds something (an empty item interrupts no paragraph, emptyItemGuard). Two blocks answer
+// to opensAfterBlock instead, since what stands before them decides: a table, and a list, which
+// opens after a container whatever its first item is.
+func opensAfterParagraphAlone(block *Node) bool {
 	if _, typed := typedBlock(block.Type); typed {
 		return true
 	}
@@ -295,7 +296,7 @@ func opensAfterBlock(previous, child *Node) bool {
 	if isList(child) && previous.Type != "paragraph" {
 		return true
 	}
-	return opensAfterParagraph(child)
+	return opensAfterParagraphAlone(child)
 }
 
 // mergesIntoQuote reports whether child, written on the line after previous with no blank line
@@ -325,12 +326,12 @@ func continuesTable(block *Node) bool {
 
 // opensWithListThatCannotInterrupt reports whether block is a quote whose first block, or the
 // first block of a quote it opens with, is a list whose first item cannot interrupt a paragraph
-// (opensAfterParagraph).
+// (opensAfterParagraphAlone).
 func opensWithListThatCannotInterrupt(block *Node) bool {
 	for block.Type == "blockquote" && len(block.Children) > 0 {
 		block = block.Children[0]
 		if isList(block) {
-			return !opensAfterParagraph(block)
+			return !opensAfterParagraphAlone(block)
 		}
 	}
 	return false
