@@ -278,11 +278,22 @@ function ownerLive(owner: AskgateOwner, now: number): boolean {
   }
 }
 
+/** An owner file's content, as `isOwnerText` admits it. */
+interface OwnerText {
+  readonly v?: unknown;
+  readonly pid: number;
+  readonly start: string | null;
+  /** Absent in a file written before the namespace was kept. */
+  readonly ns?: string | null;
+  readonly store: string;
+  readonly mode?: unknown;
+}
+
 /**
  * Whether `value` is an owner file's content: its pid, start time and store, and its pid namespace,
  * which a file written before the namespace was kept does not carry.
  */
-function isOwnerText(value: unknown): value is Record<string, unknown> {
+function isOwnerText(value: unknown): value is OwnerText {
   if (typeof value !== "object" || value === null) return false;
   const { pid, start, ns, store } = value as Record<string, unknown>;
   return (
@@ -311,7 +322,7 @@ function parseOwner(text: string): { owner: AskgateOwner; mode: AskgateMode } | 
   if (!isOwnerText(data) || data.v !== 2) return undefined;
   const { pid, start, ns, store, mode } = data;
   return {
-    owner: { pid, start, ns: ns ?? null, store } as AskgateOwner,
+    owner: { pid, start, ns: ns ?? null, store },
     mode: mode === "block" ? "block" : "warn",
   };
 }
