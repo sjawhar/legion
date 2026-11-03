@@ -20,9 +20,10 @@ const (
 )
 
 // A review's kind: who gave it. ReviewKindPerson is a person's review, given by answering an
-// approval request or from the document header, or carried to a later version in their name;
-// ReviewKindPlanReview is a plan review's approval of a plan version, which no person is asked
-// for (the approval request route refuses a plan document).
+// approval request or from the document header; ReviewKindPlanReview is a plan review's approval
+// of a plan version, which no person is asked for (the approval request route refuses a plan
+// document). A review Dispatch carries to a later version keeps the kind of the review it
+// carries (writeCarriedReview), so a restored plan version is still the plan review's approval.
 const (
 	ReviewKindPerson     = "person"
 	ReviewKindPlanReview = "plan_review"

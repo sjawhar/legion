@@ -152,7 +152,8 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	// sees them, read again under the locks: a document version that landed between the resolve
 	// and the lock would otherwise have the result recorded against the words it replaced, and
 	// a check reworded from before_merge to after_merge would be judged by the `when` it carried
-	// before the lock.
+	// before the lock. The digest is read under the locks either way, and the `when` only when
+	// that digest moved, which is the only way the block's words can have changed.
 	if err := s.refreshResolvedCheck(r.Context(), tx, &check, input.Check); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -449,12 +450,21 @@ func unknownCheck(value string) error {
 
 // refreshResolvedCheck re-reads, under the locks the transaction holds, the indexed version and
 // digest of a check resolved before it opened (recordCheckResult), so the row records the block
-// as it stands at the commit, and its `when` with them: the refusal a closed issue earns turns
-// on `when`, which was read before the lock, and a version landing in between can have reworded
-// it. A block the index no longer holds is no check any more. The live document the `when`
-// comes from was folded by the resolve a moment ago, so this second read of it is the cached
-// one (docs/read_cache.go).
+// as it stands at the commit, and its `when` with them when that block moved: the refusal a
+// closed issue earns turns on `when`, which was read before the lock, and a version landing in
+// between can have reworded it. A block the index no longer holds is no check any more.
+//
+// The digest is document_blocks.text_sha256, the sha256 of the block's whole markdown as the
+// index writes it (refs.BlockTextSum over markdown[From:To]), its opening line and that line's
+// attributes included, so a check reworded from before_merge to after_merge carries a digest of
+// its own. A digest the resolve already read is therefore the same words under the same `when`,
+// and the live document is not read a second time for them. That read is the slow one to hold
+// two issue row locks across: a document version landing between the resolve and the lock is
+// exactly what leaves the read cache cold (docs/read_cache.go), so the one case the second read
+// would answer differently is the one it would answer slowest in. Only a digest that moved pays
+// for it.
 func (s *server) refreshResolvedCheck(ctx context.Context, q queryer, check *resolvedCheck, named string) error {
+	resolved := check.SHA256
 	err := q.QueryRow(ctx, `
 		select changed_version, text_sha256 from document_blocks
 		where artifact_id = $1::uuid and block_id = $2 and type = 'check'
@@ -464,6 +474,9 @@ func (s *server) refreshResolvedCheck(ctx context.Context, q queryer, check *res
 	}
 	if err != nil {
 		return fmt.Errorf("read the check %s of document %s: %w", check.BlockID, check.ArtifactID, err)
+	}
+	if check.SHA256 == resolved {
+		return nil
 	}
 	check.When, check.Text, err = s.checkBlockWords(ctx, check.ArtifactID, check.BlockID)
 	return err

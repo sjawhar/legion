@@ -71,14 +71,14 @@ const issueSummaryHead = `
 	       count(a.id) filter (where i.closed_at is null),
 	       ` + issueProgressColumns + `,
 	       ` + issueComponentsColumns + `,
-	       ` + issueRepoColumns + `
+	       ` + refs.IssueRepoColumns + `
 	from issues i`
 
 var issueSummaryTail = `
 	left join asks a on a.issue_key = i.key and a.state = 'open'
 	` + issueProgressLateral + `
 	` + issueComponentsLateral + `
-	` + issueRepoLateral + `
+	` + refs.IssueRepoLateral + `
 	where ($1 = '' or i.project_key = $1)
 	  and ($2 = '' or i.status = $2)
 	  and ($3 = '' or i.parent_key = $3)
@@ -435,11 +435,11 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 		       i.last_seq, `+issueClaimColumns+`,
 		       `+issueProgressColumns+`,
 		       `+issueComponentsColumns+`,
-		       `+issueRepoColumns+`
+		       `+refs.IssueRepoColumns+`
 		from issues i
 		`+issueProgressLateral+`
 		`+issueComponentsLateral+`
-		`+issueRepoLateral+`
+		`+refs.IssueRepoLateral+`
 		where i.key = $1
 	`, key).Scan(append(targets, repo.targets()...)...); err != nil {
 		return model.Issue{}, model.IssueProgress{}, err

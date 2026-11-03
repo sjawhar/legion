@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -407,26 +406,12 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		s.writeHandlerError(w, err)
 		return
 	}
-	// The coverage is read before the transaction opens. Reading it folds the issue's live spec,
-	// which for a document no room holds is a cold read bounded by a minute
-	// (docs/read_cache.go), and no owner row lock is held across a read that long: four writers
-	// parked on one issue's row lock already cost a read of an unrelated issue the whole
-	// seventeen seconds the lock was held (store/pool.go). Nothing the lock protects is settled
-	// by it — the coverage is a report the answer carries, and a gap refuses nothing.
-	requested, err := s.loadArtifact(r.Context(), pool, r.PathValue("id"))
+	// The coverage is read before the transaction opens, and a read that fails leaves the
+	// request recorded all the same (approvalCoverage).
+	coverage, coverageUnread, err := s.approvalCoverage(r.Context(), pool, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
-	}
-	// A coverage read that fails does not fail the request: the request still goes through, as
-	// it did before the answer carried any coverage at all, and the answer says the coverage
-	// was not read rather than naming gaps it could not count.
-	coverage, err := s.coverageOfSpec(r.Context(), pool, requested)
-	coverageUnread := err != nil
-	if coverageUnread {
-		slog.Warn("dispatch: read the coverage an approval request reports",
-			"artifact", requested.ID, "error", err)
-		coverage = []string{}
 	}
 
 	tx, err := s.begin(r.Context())
@@ -453,7 +438,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	// document in one card, so it is refused on any other document: on the Verification
 	// document itself it would name that document twice, and the one answer would write two
 	// reviews and two artifact.approved events on it.
-	if input.IncludeVerification && (artifact.IssueKey == nil || !artifact.Primary) {
+	if input.IncludeVerification && !isSpecDocument(artifact) {
 		writeError(w, "NOT_SPEC_DOCUMENT", http.StatusConflict,
 			"include_verification asks for the issue's spec and its Verification document together, and this document is not the issue's spec: request approval of it alone")
 		return
@@ -476,7 +461,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		{ArtifactID: artifact.ID, Name: artifact.Name, Version: version, RequestedVersion: version},
 	}
 	if input.IncludeVerification {
-		verification, err := s.verificationDocumentFor(r.Context(), tx, artifact)
+		verification, err := s.verificationDocumentFor(r.Context(), tx, *artifact.IssueKey)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -804,16 +789,15 @@ func artifactMetadata(ctx context.Context, q queryer, id string) (model.Artifact
 	return artifact, nil
 }
 
-// verificationDocumentFor is the Verification document of the issue artifact belongs to, at its
-// current settled version, for a request that asks a human to approve both at once. A document
-// with no issue, an issue with no Verification document and one with no settled version each
-// refuse the request, since there is nothing to name beside the spec.
-func (s *server) verificationDocumentFor(ctx context.Context, q queryer, artifact model.Artifact) (model.AskApprovalDocument, error) {
+// verificationDocumentFor is the Verification document of the issue issueKey names, at its
+// current settled version, for a request that asks a human to approve it and the issue's spec at
+// once. An issue with no Verification document, and one whose Verification document has no
+// settled version, each refuse the request, since there is nothing to name beside the spec. The
+// one caller is behind the NOT_SPEC_DOCUMENT guard, which already refuses a document that is no
+// issue's spec (isSpecDocument), so a document with no issue never reaches here.
+func (s *server) verificationDocumentFor(ctx context.Context, q queryer, issueKey string) (model.AskApprovalDocument, error) {
 	const noVerification = "the issue has no Verification document to approve beside this one; write verification.md first, or request approval of this document alone"
-	if artifact.IssueKey == nil {
-		return model.AskApprovalDocument{}, errorf(http.StatusConflict, "NO_VERIFICATION_DOCUMENT", "%s", noVerification)
-	}
-	verification, held, err := s.verificationDocument(ctx, q, *artifact.IssueKey, "")
+	verification, held, err := s.verificationDocument(ctx, q, issueKey, "")
 	if err != nil {
 		return model.AskApprovalDocument{}, fmt.Errorf("read the issue's Verification document: %w", err)
 	}

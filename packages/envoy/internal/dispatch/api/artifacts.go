@@ -1716,6 +1716,15 @@ func documentPlays(artifact model.Artifact, role string) bool {
 	return artifact.Role == role || (artifact.Role == "" && artifact.Slug == roleSlugs[role])
 }
 
+// isSpecDocument reports whether an artifact already read is an issue's spec: the primary
+// document of an issue. Both readers that ask it about an approval ask it here — the coverage
+// an approval request's answer carries (approvalCoverage), which only a spec has, and
+// include_verification, which names the spec and its issue's Verification document together
+// (requestArtifactApproval).
+func isSpecDocument(artifact model.Artifact) bool {
+	return artifact.Primary && artifact.IssueKey != nil
+}
+
 // documentRolePredicate holds the artifacts row of the table aliased `alias` to the issue's
 // document of one role: the role itself, or the slug a document of that name carries, for a row
 // a rolling deploy left with no role. `alias` is empty where the query names no alias.

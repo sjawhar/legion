@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -188,16 +189,33 @@ func servingBlockCounts(ctx context.Context, q queryer, specArtifactID string, i
 	return served, nil
 }
 
-// coverageOfSpec is the coverage an approval request's answer carries: the issue's, when the
-// document being approved is that issue's spec, and none for any other document. A read that
-// fails is the request's error, since the answer must not say a covered spec has gaps.
-func (s *server) coverageOfSpec(ctx context.Context, q queryer, artifact model.Artifact) ([]string, error) {
-	if !artifact.Primary || artifact.IssueKey == nil {
-		return []string{}, nil
+// approvalCoverage is the coverage an approval request's answer carries for the document id
+// names, and whether that coverage could not be read. The gaps are the issue's, when that
+// document is the issue's spec (isSpecDocument), and none for any other document.
+//
+// It is read before the request opens its transaction. Reading it folds the issue's live spec,
+// which for a document no room holds is a cold read bounded by a minute (docs/read_cache.go),
+// and no owner row lock is held across a read that long: four writers parked on one issue's row
+// lock already cost a read of an unrelated issue the whole seventeen seconds the lock was held
+// (store/pool.go). Nothing the lock protects is settled here - the coverage is a report the
+// answer carries, and a gap refuses nothing.
+//
+// A coverage read that fails does not fail the request: it is logged here, the request is
+// recorded as it was before the answer carried any coverage at all, and unread says the answer
+// could not count the gaps rather than that it found none. Reading the document itself is the
+// request's error, as it is inside the transaction.
+func (s *server) approvalCoverage(ctx context.Context, q queryer, id string) (gaps []string, unread bool, err error) {
+	artifact, err := s.loadArtifact(ctx, q, id)
+	if err != nil {
+		return nil, false, err
+	}
+	if !isSpecDocument(artifact) {
+		return []string{}, false, nil
 	}
 	coverage, err := s.issueCoverage(ctx, q, *artifact.IssueKey)
 	if err != nil {
-		return nil, err
+		slog.Warn("dispatch: read the coverage an approval request reports", "artifact", artifact.ID, "error", err)
+		return []string{}, true, nil
 	}
-	return missingCheckGaps(coverage), nil
+	return missingCheckGaps(coverage), false, nil
 }

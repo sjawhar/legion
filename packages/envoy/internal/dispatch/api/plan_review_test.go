@@ -54,6 +54,56 @@ func TestPlanReviewApprovesAPlanVersionAndNoPersonIsAsked(t *testing.T) {
 	}
 }
 
+// A plan version whose text is the text the plan review approved carries that approval
+// (docs.carryApproval's restore), and the carry stays the plan review's: the carried review and
+// the artifact.approved it emits both record kind plan_review, so the document's chip still reads
+// "Approved by plan review" and the agent that restored the text is never recorded as a person
+// approving a plan.
+func TestARestoredPlanVersionCarriesThePlanReviewsOwnKind(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	issue := createInteractionIssue(t, handler, "PLAN", "Restore the approved plan", "A spec\n")
+	plan := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "plan.md", "# Plan\n\nThe service ships behind a flag.\n")
+	if recorded := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+plan.Artifact.ID+"/plan-reviews",
+		map[string]any{"actor": sessionActor(), "version": 1}); recorded.Code != http.StatusCreated {
+		t.Fatalf("record the plan review: status=%d body=%s", recorded.Code, recorded.Body.String())
+	}
+
+	// The agent edits the approved plan and undoes the edit exactly, so version 3 is version 1's
+	// text byte for byte.
+	agentEdit(t, handler, plan.Artifact.ID, 2, replaceOp("behind a flag.", "behind a flag and a canary."))
+	agentEdit(t, handler, plan.Artifact.ID, 3, replaceOp("behind a flag and a canary.", "behind a flag."))
+	if restored, approved := versionMarkdown(t, handler, plan.Artifact.ID, 3), versionMarkdown(t, handler, plan.Artifact.ID, 1); restored != approved {
+		t.Fatalf("version 3 = %q, want version 1's text %q", restored, approved)
+	}
+	requireReviewCarriedWith(t, handler, plan.Artifact.ID, 3, 1, restoreSentence(1), nil)
+	reviews := listReviews(t, handler, plan.Artifact.ID)
+	if len(reviews) != 2 || reviews[0].Version != 3 || reviews[0].Kind != "plan_review" {
+		t.Fatalf("reviews of the plan = %#v, want the carry of version 3 recorded as a plan review", reviews)
+	}
+
+	carried := 0
+	for _, event := range carryEvents(t, handler, issue.Key) {
+		if event.Type != "artifact.approved" {
+			continue
+		}
+		payload := decodePayload[struct {
+			Version int    `json:"version"`
+			Kind    string `json:"kind"`
+		}](t, event)
+		if payload.Version != 3 {
+			continue
+		}
+		carried++
+		if payload.Kind != "plan_review" {
+			t.Fatalf("the restored artifact.approved = %s, want kind plan_review", event.Payload)
+		}
+	}
+	if carried != 1 {
+		t.Fatalf("artifact.approved events for version 3 = %d, want the one the carry appended", carried)
+	}
+}
+
 // Only a plan document is approved by a plan review: the issue's spec, and every other document,
 // is refused.
 func TestPlanReviewRefusesEveryDocumentThatIsNotAPlan(t *testing.T) {

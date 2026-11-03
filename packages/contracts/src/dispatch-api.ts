@@ -617,9 +617,10 @@ export type ArtifactReviewState = "approved" | "changes_requested";
 /** The part an issue's document plays beside its spec. */
 export type DocumentRole = "verification" | "plan";
 
-/** Who gave a review: `person` for one a person gave or Dispatch carried in their name,
- *  `plan_review` for a plan review's approval of a plan version. Absent from a Dispatch older
- *  than review kinds, which wrote people's reviews alone. */
+/** Who gave a review: `person` for one a person gave, `plan_review` for a plan review's approval
+ *  of a plan version. A review Dispatch carried forward to a later version keeps the kind of the
+ *  review it carried, so a plan version restored to its approved text is still `plan_review`.
+ *  Absent from a Dispatch older than review kinds, which wrote people's reviews alone. */
 export type ArtifactReviewKind = "person" | "plan_review";
 
 /** One human review of a document, pinned to the version it was given on. A review is given one

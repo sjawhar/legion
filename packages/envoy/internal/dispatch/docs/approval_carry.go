@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -64,10 +65,13 @@ import (
 // accidental edit undone exactly, or a version a route wrote over a document that changed nothing -
 // and each decision block of N is as its row has it (rowBackedBlocks), so no block in it shows
 // other than what was decided: a block A showed open that someone answered since comes back in A's
-// bytes while its row holds that answer, and carries nothing. Such an N holds nothing its reviewer
-// has not agreed to, so Dispatch records his approval of N in his name, in the transaction that
-// writes N, rather than asking him to approve A's text again. Only the newest review carries this
-// way: when it requests changes no approval stands, and an older approval was superseded by it.
+// bytes while its row holds that answer, and carries nothing. Such an N holds nothing its
+// reviewer has not agreed to, so Dispatch records that reviewer's approval of N in their name
+// and of their review's own kind, in the transaction that writes N, rather than asking them to
+// approve A's text again: the newest review of a plan.md is the plan review that approved A, so
+// a restored plan version reads approved by that plan review and not by the session whose write
+// restored it. Only the newest review carries this way: when it requests changes no approval
+// stands, and an older approval was superseded by it.
 // A's markdown is compared as it was stored, so a renderer change between A and N leaves N a
 // change, as N's diff against A shows. A version whose decision blocks differ from A's does not
 // hold A's text, so the answer carry alone decides it, as before this rule.
@@ -178,7 +182,12 @@ func restoreApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 
 // writeCarriedReview writes the carry of review to version number of artifactID with reason: the
 // open approval request's answer, Approve in the approver's name, when one is open, then the
-// approved review and its artifact.approved. It returns those events in that order.
+// approved review and its artifact.approved. The carry records the kind of the review it
+// carries, since it is that review's approval it follows: a plan version restored to the text
+// its plan review approved stays approved by that plan review, not by the session that wrote the
+// version (ReviewKindPlanReview). A row read from artifact_reviews always names its kind, and a
+// review that names none is a person's, as the column's default says. It returns those events in
+// that order.
 func writeCarriedReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, review model.ArtifactReview, reason, serverURL string) ([]model.Event, error) {
 	var appended []model.Event
 	var askID *string
@@ -209,7 +218,7 @@ func writeCarriedReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, a
 			appended = append(appended, answered)
 		}
 	}
-	_, event, err := WriteReview(ctx, tx, broker, artifact, number, "approved", ReviewKindPerson, review.Actor, &reason, askID)
+	_, event, err := WriteReview(ctx, tx, broker, artifact, number, "approved", cmp.Or(review.Kind, ReviewKindPerson), review.Actor, &reason, askID)
 	if err != nil {
 		return nil, err
 	}

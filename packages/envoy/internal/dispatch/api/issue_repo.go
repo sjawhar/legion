@@ -9,8 +9,6 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // parseIssueRepo decodes the tri-state `repo` field of an issue write. Absent → (nil, false): leave
@@ -49,15 +47,9 @@ func checkIssueRepoMapped(ctx context.Context, tx pgx.Tx, repo, project string) 
 	return err
 }
 
-// issueRepoLateral and issueRepoColumns are refs' repository-resolution rule, the one every read
-// that resolves an issue's repository is built on: the issue reads here, the currency mark and
-// the pull-request head attribution (refs.IssueRepository). They are named here, as
-// parentDepthCap names refs.IssueDepthCap, so this package's queries read as its own text.
-var issueRepoLateral = refs.IssueRepoLateral
-
-const issueRepoColumns = refs.IssueRepoColumns
-
-// repoScan receives issueRepoColumns for one issue.
+// repoScan receives refs.IssueRepoColumns for one issue: refs' repository-resolution rule, the
+// one every read that resolves an issue's repository is built on - the issue reads here, the
+// currency mark and the pull-request head attribution (refs.IssueRepository).
 type repoScan struct {
 	own, resolved *string
 	tooDeep       bool

@@ -680,8 +680,9 @@ type ArtifactReview struct {
 	ArtifactID string `json:"artifact_id"`
 	Version    int    `json:"version"`
 	State      string `json:"state"`
-	// Kind is who gave the review: "person" for one a person gave or Dispatch carried in their
-	// name, "plan_review" for a plan review's approval of a plan version.
+	// Kind is who gave the review: "person" for one a person gave, "plan_review" for a plan
+	// review's approval of a plan version. A review Dispatch carried forward to a later version
+	// keeps the kind of the review it carried.
 	Kind      string    `json:"kind"`
 	Actor     Actor     `json:"actor"`
 	Reason    *string   `json:"reason"`
