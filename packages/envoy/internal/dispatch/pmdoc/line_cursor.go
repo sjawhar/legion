@@ -1,9 +1,5 @@
 package pmdoc
 
-import (
-	"github.com/yuin/goldmark/ast"
-)
-
 // A line read in columns, as micromark reads it: the cursor below is what every container's
 // continuation and every blankness test of the port runs on (prepare_list.go).
 
@@ -114,98 +110,4 @@ func moveContainerExits(events []spreadEvent) {
 			events[lineIndex] = event
 		}
 	}
-}
-
-// prepareLists runs prepareList over every list in the stream, a list inside an item before the
-// list that holds it, as mdast-util-from-markdown's compiler does.
-func prepareLists(events []spreadEvent) spreads {
-	found := spreads{}
-	var stack []int
-	for index := range events {
-		if events[index].token != tokenList {
-			continue
-		}
-		if events[index].enter {
-			stack = append(stack, index)
-			continue
-		}
-		if len(stack) == 0 {
-			continue
-		}
-		start := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		prepareList(events, start, index, found)
-	}
-	return found
-}
-
-// prepareList is mdast-util-from-markdown's prepareList (dev/lib/index.js) over the events of one
-// list: an item is spread by a blank line standing in the item itself - at no nested container,
-// at no item's own marker - before the line endings that end it, and the list is spread where
-// more than one line ending ends one of its items.
-func prepareList(events []spreadEvent, start, length int, found spreads) {
-	containerBalance := -1
-	listSpread := false
-	var listItem ast.Node
-	lineIndex, firstBlankLineIndex := 0, 0
-	atMarker := false
-
-	for index := start; index <= length; index++ {
-		event := events[index]
-		switch event.token {
-		case tokenList, tokenQuote:
-			if event.enter {
-				containerBalance++
-			} else {
-				containerBalance--
-			}
-			atMarker = false
-		case tokenLineEndingBlank:
-			if listItem != nil && !atMarker && containerBalance == 0 && firstBlankLineIndex == 0 {
-				firstBlankLineIndex = index
-			}
-			atMarker = false
-		case tokenItemPrefix:
-			// Empty: an item's own marker tokens leave atMarker alone.
-		default:
-			atMarker = false
-		}
-
-		opensItem := containerBalance == 0 && event.enter && event.token == tokenItemPrefix
-		closesList := containerBalance == -1 && !event.enter && event.token == tokenList
-		if !opensItem && !closesList {
-			continue
-		}
-		if listItem != nil {
-			lineIndex = 0
-			for tail := index - 1; tail >= 0; tail-- {
-				token := events[tail].token
-				if token == tokenLineEnding || token == tokenLineEndingBlank {
-					if lineIndex > 0 {
-						events[lineIndex].token = tokenLineEndingBlank
-						listSpread = true
-					}
-					events[tail].token = tokenLineEnding
-					lineIndex = tail
-					continue
-				}
-				if token == tokenQuotePrefix {
-					continue
-				}
-				break
-			}
-			if firstBlankLineIndex > 0 && (lineIndex == 0 || firstBlankLineIndex < lineIndex) {
-				found[listItem] = true
-			}
-		}
-		if opensItem {
-			listItem = event.node
-			if _, seen := found[listItem]; !seen {
-				found[listItem] = false
-			}
-			firstBlankLineIndex = 0
-			atMarker = true
-		}
-	}
-	found[events[start].node] = listSpread
 }
