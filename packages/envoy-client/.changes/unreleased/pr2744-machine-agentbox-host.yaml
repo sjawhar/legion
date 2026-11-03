@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+    A session in an agent box reports the machine the box runs on (`AGENTBOX_HOST`), not the
+    container's hostname (`agentbox-<hash>`), as its Envoy registration's `host`, in
+    `envoy_whoami` and as a Dispatch write's origin machine. `ENVOY_MACHINE_ID` still wins.
+time: 2026-11-03T23:10:00.000000Z
+custom:
+    Issue: pr2744
