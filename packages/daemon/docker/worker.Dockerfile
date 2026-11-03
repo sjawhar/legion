@@ -159,7 +159,7 @@ ARG PGDG_KEY_SHA256=0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e
 # ghcr.io/sjawhar/legion/ci, the copy of oven/bun:1.4.4-slim (.github/ci-images.yaml)
 FROM ghcr.io/sjawhar/legion/ci@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 AS plugin
 WORKDIR /repo
-# jq: the same omp.extensions rewrite release.yaml's pi_envoy_build and pi_legion_build jobs run.
+# jq: the same version and omp.extensions rewrites release.yaml's pi_envoy_build and pi_legion_build jobs run.
 # python3/make/g++: native devDependencies in the workspace lockfile (mirrors
 # packages/envoy/docker/Dockerfile).
 # hadolint ignore=DL3008
@@ -222,17 +222,23 @@ COPY scripts/pi-plugin-prepack.sh scripts/pi-plugin-prepack.sh
 COPY scripts/third-party-notices.ts scripts/third-party-notices.ts
 
 # Each plugin ships from this checkout with the steps release.yaml's pi_envoy_build and
-# pi_legion_build jobs run before `bun pm pack`: the manifest pointed at the one packed bundle (the
-# prepack refuses to pack with the source manifest). Each tarball is unpacked into a directory: `omp
-# plugin install` links a directory and rejects a tarball path (ENOTDIR).
+# pi_legion_build jobs run before `bun pm pack`: the release version set (PI_ENVOY_VERSION and
+# PI_LEGION_VERSION, the pair a release resolved for this commit and links into `legion`; empty
+# outside a release, which keeps the manifest's own version) and the manifest pointed at the one
+# packed bundle (the prepack refuses to pack with the source manifest). So an image built from a
+# commit carries that commit's plugin code, labelled with the version its release links into
+# `legion`, never a registry's build. Each tarball is unpacked into a directory: `omp plugin
+# install` links a directory and rejects a tarball path (ENOTDIR).
+ARG PI_ENVOY_VERSION
 WORKDIR /repo/packages/pi-envoy
-RUN jq '.omp.extensions = ["dist/envoy.js"]' package.json > tmp.json \
+RUN jq --arg v "$PI_ENVOY_VERSION" '(if $v != "" then .version = $v else . end) | .omp.extensions = ["dist/envoy.js"]' package.json > tmp.json \
     && mv tmp.json package.json \
     && rm -f ./*.tgz && bun pm pack \
     && mkdir -p /out/pi-envoy \
     && tar xzf ./*.tgz -C /out/pi-envoy --strip-components=1
 WORKDIR /repo/packages/pi-legion
-RUN jq '.omp.extensions = ["dist/legion.js"]' package.json > tmp.json \
+ARG PI_LEGION_VERSION
+RUN jq --arg v "$PI_LEGION_VERSION" '(if $v != "" then .version = $v else . end) | .omp.extensions = ["dist/legion.js"]' package.json > tmp.json \
     && mv tmp.json package.json \
     && rm -f ./*.tgz && bun pm pack \
     && mkdir -p /out/pi-legion \
@@ -1084,10 +1090,24 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # It needs the natives step 3 extracted, which the cached probe layer above carries. The step leaves no
 # residue: Oh My Pi's logs, and the Go telemetry counters the capability check's `go version` writes
 # under HOME (the toolchain step's XDG_CONFIG_HOME does not reach a probe that runs as a pod would).
+# Each plugin root's package.json must name the version of this checkout's manifest (bind-mounted
+# from the build context, so the image keeps no copy), or the release version a release passes
+# (PI_ENVOY_VERSION, PI_LEGION_VERSION): an image whose plugin roots name any other version, or no
+# version, fails here.
 ARG LEGION_REVISION
 ARG PI_LEGION_VERSION
 ARG PI_ENVOY_VERSION
-RUN set -eu; \
+RUN --mount=type=bind,source=packages/pi-envoy/package.json,target=/tmp/source/pi-envoy.json \
+    --mount=type=bind,source=packages/pi-legion/package.json,target=/tmp/source/pi-legion.json \
+    set -eu; \
+    for plugin in pi-envoy pi-legion; do \
+      case "$plugin" in pi-envoy) want="${PI_ENVOY_VERSION:-}" ;; *) want="${PI_LEGION_VERSION:-}" ;; esac; \
+      if [ -n "$want" ]; then source="the release's"; else \
+        source="this commit's"; want="$(jq -er '.version | strings' "/tmp/source/$plugin.json")"; \
+      fi; \
+      have="$(jq -er '.version | strings' "/opt/legion/$plugin/package.json")"; \
+      echo "$plugin: /opt/legion/$plugin $have, $source $want"; test "$have" = "$want"; \
+    done; \
     for dir in /opt/legion /opt/legion/bin /var/run/legion /var/run/legion/gh /var/run/legion/private \
       /var/run/legion/state /var/run/legion/agent-secrets; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
@@ -1112,7 +1132,7 @@ RUN set -eu; \
     agent_secrets="$(command -v agent-secrets)"; test "$agent_secrets" = /opt/legion/bin/agent-secrets; \
     version="$(legion version)"; echo "$version"; \
     expected="legion (devel) commit ${LEGION_REVISION}"; \
-    if [ -n "$PI_LEGION_VERSION" ] && [ -n "$PI_ENVOY_VERSION" ]; then \
+    if [ -n "${PI_LEGION_VERSION:-}" ] && [ -n "${PI_ENVOY_VERSION:-}" ]; then \
       expected="$(printf '%s\nplugins @sjawhar/pi-legion %s @sjawhar/pi-envoy %s' "$expected" "$PI_LEGION_VERSION" "$PI_ENVOY_VERSION")"; \
     fi; \
     test "$version" = "$expected"; \

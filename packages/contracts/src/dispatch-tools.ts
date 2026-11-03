@@ -97,8 +97,14 @@ function documentOwnerValidation(
   };
 }
 
-const ARTIFACT_OWNER_AND_SOURCE_RULE =
-  "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.";
+const ARTIFACT_SOURCE_RULE = "Exactly one of path or content is required.";
+const ARTIFACT_OWNER_AND_SOURCE_RULE = `${ARTIFACT_SOURCE_RULE} Exactly one of issue and project is required; with project, artifact names the document.`;
+
+/** Joins the parts of a rule a call broke, so a refusal never names a part the call kept. */
+function brokenParts(parts: ReadonlyArray<readonly [boolean, string]>): string | undefined {
+  const broken = parts.filter(([kept]) => !kept).map(([, message]) => message);
+  return broken.length === 0 ? undefined : broken.join(" ");
+}
 
 const CONTENT_IS_MARKDOWN =
   "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
@@ -126,12 +132,14 @@ function artifactProblem(value: unknown): string | undefined {
     readonly path?: unknown;
     readonly content?: unknown;
   };
-  if (
-    !artifactOwner.check(value) ||
-    (typeof input.path === "string") === (typeof input.content === "string")
-  ) {
-    return ARTIFACT_OWNER_AND_SOURCE_RULE;
-  }
+  const ownerOrSourceProblem = brokenParts([
+    [artifactOwner.check(value), artifactOwner.message],
+    [
+      (typeof input.path === "string") !== (typeof input.content === "string"),
+      ARTIFACT_SOURCE_RULE,
+    ],
+  ]);
+  if (ownerOrSourceProblem !== undefined) return ownerOrSourceProblem;
   if (typeof input.content !== "string" || typeof input.name !== "string") return undefined;
   const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
   if (extension === undefined || MARKDOWN_EXTENSION.test(extension)) return undefined;
@@ -139,32 +147,50 @@ function artifactProblem(value: unknown): string | undefined {
 }
 
 const documentEditOwner = documentOwnerValidation(true);
+const PRECONDITION_RULE = "A precondition selects exactly one of document or blocks.";
+
+function preconditionKept(value: unknown): boolean {
+  const input = value as { readonly precondition?: unknown };
+  if (input.precondition === undefined) return true;
+  if (typeof input.precondition !== "object" || input.precondition === null) return false;
+  const precondition = input.precondition as {
+    readonly document?: unknown;
+    readonly blocks?: unknown;
+  };
+  return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
+}
+
+function documentEditProblem(value: unknown): string | undefined {
+  return brokenParts([
+    [documentEditOwner.check(value), documentEditOwner.message],
+    [preconditionKept(value), PRECONDITION_RULE],
+  ]);
+}
+
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    if (!documentEditOwner.check(value)) return false;
-    const input = value as { readonly precondition?: unknown };
-    if (input.precondition === undefined) return true;
-    if (typeof input.precondition !== "object" || input.precondition === null) return false;
-    const precondition = input.precondition as {
-      readonly document?: unknown;
-      readonly blocks?: unknown;
-    };
-    return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
-  },
-  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`,
+  check: (value) => documentEditProblem(value) === undefined,
+  message: `${documentEditOwner.message} ${PRECONDITION_RULE}`,
+  refusal: (value) =>
+    documentEditProblem(value) ?? `${documentEditOwner.message} ${PRECONDITION_RULE}`,
 };
 
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
 const commentOwner = documentOwnerValidation(true);
+const COMMENT_TURN_RULE =
+  "turn requires reply_to_ask: turn says who holds an open ask's thread after the reply. Pass reply_to_ask with the open ask's id, or drop turn.";
+
+function commentProblem(value: unknown): string | undefined {
+  const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
+  return brokenParts([
+    [commentOwner.check(value), commentOwner.message],
+    [input.turn === undefined || typeof input.reply_to_ask === "string", COMMENT_TURN_RULE],
+  ]);
+}
+
 const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
-    return (
-      commentOwner.check(value) &&
-      (input.turn === undefined || typeof input.reply_to_ask === "string")
-    );
-  },
-  message: `${commentOwner.message} turn requires reply_to_ask.`,
+  check: (value) => commentProblem(value) === undefined,
+  message: `${commentOwner.message} ${COMMENT_TURN_RULE}`,
+  refusal: (value) => commentProblem(value) ?? `${commentOwner.message} ${COMMENT_TURN_RULE}`,
 };
 
 const ISSUE_UPDATE_FIELDS_RULE =
@@ -241,26 +267,36 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
  * issue or document, so the id is all there is.
  */
 const readOwner = documentOwnerValidation(false);
+const READ_OWNER_RULE =
+  "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one.";
+const READ_MESSAGE_RULE =
+  "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.";
+
+/** dispatch_read's refusal: a call with message breaks only the message rule, and a call
+ *  without it only the owner rule. */
+function readProblem(value: unknown): string | undefined {
+  const input = value as {
+    readonly message?: unknown;
+    readonly issue?: unknown;
+    readonly project?: unknown;
+    readonly artifact?: unknown;
+    readonly ref?: unknown;
+  };
+  if (typeof input.message !== "string") {
+    return readOwner.check(value) ? undefined : READ_OWNER_RULE;
+  }
+  const alone =
+    input.issue === undefined &&
+    input.project === undefined &&
+    input.artifact === undefined &&
+    input.ref === undefined;
+  return alone ? undefined : READ_MESSAGE_RULE;
+}
+
 const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    const input = value as {
-      readonly message?: unknown;
-      readonly issue?: unknown;
-      readonly project?: unknown;
-      readonly artifact?: unknown;
-      readonly ref?: unknown;
-    };
-    if (typeof input.message !== "string") return readOwner.check(value);
-    return (
-      input.issue === undefined &&
-      input.project === undefined &&
-      input.artifact === undefined &&
-      input.ref === undefined
-    );
-  },
-  message:
-    "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " +
-    "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.",
+  check: (value) => readProblem(value) === undefined,
+  message: `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
+  refusal: (value) => readProblem(value) ?? `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
 };
 
 /** Component attachment modes an issue write accepts. */
@@ -1222,15 +1258,19 @@ export const dispatchToolSpecs = [
       "nothing, and a different one is refused, since it would rewrite the card the human is " +
       "reading. Approve and Request changes each close the request, so the next call opens a new " +
       "one. Call it once per revision, when the revision is complete, never after each edit. An " +
-      "approval goes stale when the document changes outside its decision blocks after it: " +
-      "request approval again once that revision is complete and " +
+      "approval goes stale when the document changes outside its decision blocks after it, until " +
+      "a later version's text is exactly the approved version's again, as when an accidental " +
+      "edit is undone exactly, and no decision block in it was decided since: that version " +
+      "carries the approval and the document reads approved at it, so nothing is requested for " +
+      "it. When the document does not read approved, request approval again once that revision " +
+      "is complete and " +
       HUMAN_AGREED_TO_DOCUMENT +
       ", with a one-sentence summary naming what changed since the earlier approval: the card " +
       "names that approval (version, date, reviewer) and its Show diff control carries the detail. " +
       "A human's own answer to a decision block carries the approval to the version it writes when " +
       "that answer is the whole change since the approved version, so nothing is requested for " +
       "it. A new version of a Legion root spec closes its armed design gate until a human " +
-      "approves it; the carried approval reopens it too. " +
+      "approves it; a carried approval reopens it too. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
@@ -1510,11 +1550,14 @@ export const dispatchToolSpecs = [
     description:
       "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " +
       "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " +
-      "with dispatch projects. A key that already exists is refused " +
+      "with dispatch projects. When a person asks for a project, make the key from its name. Check the key with " +
+      "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use. " +
+      "A key that already exists is refused " +
       "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " +
       `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` +
-      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. Do not use ` +
-      "it when an existing project already covers the work; file an issue there with dispatch issue instead.",
+      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. When no person ` +
+      "asked for a project and an existing project already covers the work, do not create a project. File an " +
+      "issue in that project with dispatch issue.",
     arguments: (z) => ({
       key: z.string().describe("The new project's key, such as CORE."),
       name: z

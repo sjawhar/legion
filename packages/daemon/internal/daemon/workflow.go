@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -47,7 +48,12 @@ type workflowRuntime struct {
 	admission *admit.Admission
 	handlers  []intake.Handler
 	dispatch  dispatch.Client
-	tokens    appauth.Tokens
+	// designGate is the project's design-gate policy, which the send-time narrowing of a held
+	// architect task reads: a catch-up it writes to another tree's architect is composed under it
+	// (rootTask, workflow.CatchUpTheTreesOwed). The empty policy is the default one
+	// (config.DesignGate.OrDefault).
+	designGate config.DesignGate
+	tokens     appauth.Tokens
 	// forget drops the token source's cached leases for an App and owner, a token GitHub refused
 	// (tokenRefused).
 	forget          appauth.Forgetter
@@ -104,7 +110,9 @@ type workflowRuntime struct {
 	// defaultBranches is each repository as GitHub names it and its default branch, read under
 	// githubAPI and kept defaultBranchTTL: what an issue's record takes its repository and default
 	// branch from when it is first recorded (ResolveRepository), and what the mapping serves each
-	// repository as (nameAccepted).
+	// repository as (nameAccepted). Every read of it is made of the repository the mapping serves
+	// the asked-for one as (repositories.serving), so a name recorded before a configured
+	// rename's transfer is read on the installation that holds the repository now.
 	defaultBranches *defaultBranches
 	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
 	// boot, refreshMapping on a mapping change); installs answers each App's installation on a
@@ -273,7 +281,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
-		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
+		defaultBranches: newDefaultBranches(tokens, repos, githubAPI, defaultBranchTTL, time.Now),
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
 	if err := w.loadMapping(ctx); err != nil {
@@ -307,8 +315,9 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// sequence or status it has already seen (Engine.dispatchIssue), which is exactly the
 	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
 	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
+	w.designGate = cfg.Gates.Design
 	w.pool = st.Pool()
-	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
+	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, cfg.RepositoryRenames, log); err != nil {
 		return nil, err
 	}
 	return w, nil
@@ -335,6 +344,7 @@ func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflo
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
 		ReviewAppLogin: reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
+		RepositoryRenames: cfg.RepositoryRenames,
 	}
 	if build.Revision != "" {
 		engine.BuiltFrom = build.Repository
@@ -374,7 +384,8 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		return err
 	}
 	w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, Renames: cfg.RepositoryRenames,
+		AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
 		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
 	})
@@ -420,6 +431,129 @@ func (w *workflowRuntime) phaseHolds(ctx context.Context, key string, queuedFor 
 		return true, nil
 	}
 	return issue.Phase == queuedFor && (generation == 0 || generation == issue.Generation), nil
+}
+
+// rootHears answers supervise's Deps.RootHears from the issue record: a root architect's task of a
+// run names no phase, so no phase ever drops it, and it waits on the claim until that claim next
+// runs — which a park, a hand back to `todo` or a linger can put generations later. The decisions
+// such a task names are held by its delivery and told when the turn that takes it starts
+// (store's holdKeptDecisions, tellKeptDecisions), so sending it while the tree has nobody to act on
+// it would spend a person's decision on an architect no run of the root owns. The answer is the
+// workflow's one reading of that question
+// (workflow.ArchitectHears), which the hand-over of a released decision reads too, in a short
+// read-only transaction of its own: a root that hears is one that is its tree's root, runs, does
+// not linger and does not wait in `todo` for its slot.
+//
+// A claim on an issue the daemon does not record hears, as it holds for the phase: there is no
+// record only for a claim the workflow never made.
+func (w *workflowRuntime) rootHears(ctx context.Context, c supervise.Claim, _ supervise.Delivery) (bool, error) {
+	var hears bool
+	if err := pgx.BeginTxFunc(ctx, w.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		root, err := w.records.Issue(ctx, tx, c.Tree)
+		if err != nil || root == nil {
+			hears = err == nil
+			return err
+		}
+		hears, err = workflow.ArchitectHears(ctx, tx, w.records, *root)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("read whether the root of %s has an architect to hear its task: %w", c.Tree, err)
+	}
+	return hears, nil
+}
+
+// rootTask answers supervise's Deps.RootTask: what a root architect's held task of a run says now,
+// at the moment it is about to be sent. Such a task names the decisions a person made while nobody
+// in the root's tree could hear them, and holds those rows on its own delivery until the turn that
+// takes it confirms (the claim store's putDelivery, 20261101163106_parked_decisions). An issue it names can
+// have left this tree while the task waited — a child a linger handed to Legion, a parked child a
+// person's todo orphaned, a grandchild handed over beside its parent — and the tree it stands in
+// now is the one that owes the person an answer, not this one.
+//
+// So this is where such a decision is dropped from the task, in one write: the rows whose issue
+// has left the claim's tree lose this delivery's hold (record.Store.ReleaseHeldDecisions), which
+// leaves each KEPT for its own tree to name, and the architect of each tree they are now owed to
+// is written a fresh catch-up naming them at once, exactly as a hand-over writes one
+// (workflow.CatchUpTheTreesOwed). The decisions whose issue the record still shows in this tree
+// stay, in the order the task named them, and the text is written again from them
+// (workflow.KeptDecisionsTask), which is the wording the start that queued the task used. An issue
+// the record does not hold is kept rather than dropped: a person's decision is never lost, and
+// this answer drops one only where the record says another tree is owed it. A task left naming
+// nothing is retired rather than sent, and its delivery's write releases whatever it still held.
+//
+// It is the machine that asks, because the machine owns the pending delivery: the hand-over that
+// moved the issue commits in a transaction of its own, with no lock on this claim, and a task
+// rewritten there would be overwritten by the machine's next write of what memory still held. The
+// write here serializes with every fact (intake.SerializeFacts), since it writes the catch-up a
+// ready would write, and takes no lock of the daemon's: the machine asks it holding its own.
+func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d supervise.Delivery) (string, []byte, error) {
+	if len(d.Kept) == 0 {
+		return d.Task, d.Kept, nil
+	}
+	var named record.KeptDecisions
+	if err := json.Unmarshal(d.Kept, &named); err != nil {
+		return "", nil, fmt.Errorf("decode what the task held for %s names: %w", c.Token, err)
+	}
+	stays := record.KeptDecisions{Approved: named.Approved, Latest: named.Latest}
+	var left []record.DecisionMark
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		if err := intake.SerializeFacts(scoped, tx); err != nil {
+			return fmt.Errorf("serialize the narrowing with every fact: %w", err)
+		}
+		holds, err := w.records.HeldKeptRefs(scoped, tx, c.Token, d.ID)
+		if err != nil {
+			return err
+		}
+		stays.Decisions, left = nil, nil
+		for _, mark := range named.Decisions {
+			if !slices.Contains(holds, mark.Ref) {
+				// The row this mark named is not this delivery's any more, and only these take a
+				// row a delivery holds: a newer decision on the same reference replaced it, an
+				// earlier send released it to the tree its issue moved to, or that tree's start or
+				// catch-up claimed or told it once its issue left (this delivery's hold is void
+				// there). Either way something else answers the person, and this task names it no
+				// longer. Dropping the mark here, before any send, is also what keeps the claim
+				// store's put-back (holdKeptDecisions) to its one case: every unconfirmed write of
+				// the delivery puts back a named decision whose row is missing in this tree, and
+				// the only such row is one this delivery's own confirmation told before the
+				// machine took that confirmation back.
+				continue
+			}
+			issue, err := w.records.Issue(scoped, tx, mark.Issue)
+			if err != nil {
+				return err
+			}
+			if issue != nil && issue.Tree != c.Tree {
+				left = append(left, mark)
+				continue
+			}
+			stays.Decisions = append(stays.Decisions, mark)
+		}
+		if len(left) == 0 {
+			return nil
+		}
+		trees, err := w.records.ReleaseHeldDecisions(scoped, tx, c.Token, d.ID, left)
+		if err != nil {
+			return err
+		}
+		return workflow.CatchUpTheTreesOwed(scoped, tx, w.records, w.designGate, trees, time.Now().UTC())
+	}); err != nil {
+		return "", nil, fmt.Errorf("read what the task held for %s still names of %s's tree: %w", c.Token, c.Tree, err)
+	}
+	committed()
+	if len(stays.Decisions) == len(named.Decisions) {
+		return d.Task, d.Kept, nil
+	}
+	task := workflow.KeptDecisionsTask(c.Tree, stays)
+	if task == "" {
+		return "", nil, nil
+	}
+	kept, err := keptJSON(&stays)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode what the task held for %s still names: %w", c.Token, err)
+	}
+	return task, kept, nil
 }
 
 // treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
@@ -565,9 +699,18 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 }
 
 // identity is the bot a role's commits are authored by: its App's, from the lease the token
-// source mints for owner, the owner of the repository the role works (the identity is fetched once
-// per App and cached).
-func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
+// source mints for the owner whose installation holds the repository the role works (the identity
+// is fetched once per App and cached).
+//
+// recorded is the repository the issue's record names, and the mint is made for the owner GitHub
+// serves it under now (repositories.serving): the record keeps the name it was written under for
+// its whole life, while after a transfer the installation that covers the repository is the owner
+// it moved to's. Taking the repository rather than an owner is what keeps that mapping here, in
+// the one place both callers reach — a launch's spec (specs.SpawnSpec) and a working copy's
+// adoption (adoptIdentity) — so neither can mint on an owner the repository has left and fail
+// every launch of a tree open at the transfer.
+func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, recorded ghrepo.Repository) (runtime.GitIdentity, error) {
+	owner := w.repositories.serving(recorded).Owner()
 	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), owner)
 	if err != nil {
 		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, owner, err)
@@ -620,8 +763,8 @@ func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, paylo
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
-		supervision.plan.tools, w.log)
+		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
+		w.repositories, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
 	supervision.enqueue = w.enqueueOutbox

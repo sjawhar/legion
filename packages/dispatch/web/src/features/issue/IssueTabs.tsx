@@ -13,6 +13,7 @@ function tabs(artifactCount: number): readonly TabDefinition<IssueTab>[] {
       ? { id: "artifacts", label: "Artifacts" }
       : { id: "artifacts", label: "Artifacts", count: artifactCount },
     { id: "activity", label: "Activity" },
+    { id: "decisions", label: "Decisions" },
   ];
 }
 

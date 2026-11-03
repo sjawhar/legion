@@ -94,7 +94,7 @@ The page prints the broker's own record of the request:
 | Secrets | The secrets asked for: `DEMO_API_KEY` |
 | Requested by (verified by the broker) | The enrollment asking, as kind, operator and runtime id: `session · example-host-build:2150654:335907311 · ada@example.com` |
 | Reason | The `--reason` the agent gave: Deploy the example service |
-| Lasts once approved | How long a grant would last: until the session ends, or the `--ttl` the agent asked for |
+| Lasts once approved | How long a grant would last: 12 hours, the `--ttl` the agent asked for, or until the session ends for a secret tagged `default-grant=session` |
 | Requested, Expires | When it was asked, and when it [expires](/legion/broker/concepts/#approvals) undecided |
 | Approver | `ada@example.com` |
 | State | pending, or how it was decided, by whom and when |
@@ -114,8 +114,8 @@ agent-secrets: DEMO_API_KEY from the broker AGENT_SECRETS_URL names (AWS Secrets
 deploying with a 18-character key
 ```
 
-The grant outlives the command: it lasts until the session ends, unless the agent asked for less
-with `--ttl`. Meanwhile the same session asking for exactly the same secrets gets it again without
+The grant outlives the command: it lasts 12 hours (or until the session ends for a secret tagged
+`default-grant=session`), unless the agent asked for another lifetime with `--ttl`. Meanwhile the same session asking for exactly the same secrets gets it again without
 asking anyone; `agent-secrets self` lists the session's live grants, and the broker and kind of
 store they are at:
 
@@ -126,8 +126,8 @@ kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
 source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
-grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, until this session ends)
-grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, until this session ends)
+grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, expires 2026-10-11T03:56:07Z)
+grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, expires 2026-10-11T03:56:07Z)
 ```
 
 ## When the answer is no
