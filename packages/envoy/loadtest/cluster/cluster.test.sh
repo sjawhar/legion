@@ -165,6 +165,10 @@ readonly real_path=$PATH
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/cluster-test.XXXXXX")
 readonly fake=$tmp/fake bin=$tmp/bin
 readonly ns=loadtest-test
+# (w)'s step, a wrapper of cluster.sh's main so that the wait on its runner job polls often
+# enough for the kill in that case to be read at a poll and not waited out: what the case leaves
+# running, and what the cleanup below ends.
+readonly killed_step=$tmp/step-killed.sh
 
 cleanup() {
   local f pid
@@ -176,7 +180,7 @@ cleanup() {
   # A case that failed before its assertions could see the step end leaves the step shell (w)
   # killed, its disk watcher and its wait on the runner job behind; a cluster.sh that passes (w)
   # ends all three itself.
-  pkill -f "$cluster step --namespace $ns " 2>/dev/null || true
+  pkill -f "$killed_step step --namespace $ns " 2>/dev/null || true
   rm -rf -- "$tmp"
 }
 trap cleanup EXIT
@@ -193,8 +197,11 @@ pass() { printf 'PASS: %s\n' "$*"; }
 
 mkdir -p "$fake" "$bin" "$fake/stepdir"
 
+# Every fake below is run thousands of times by one test run, so each is kept to the one process
+# the call itself is: /bin/bash rather than an env lookup of its own, and its own built-ins rather
+# than a pipeline, which is three more processes at every call.
 cat >"$bin/kubectl" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 # The fake kubectl: records each call, flags one without -n <FAKE_NS>, answers from FAKE_DIR.
 set -u
 printf '%s\n' "$*" >>"$FAKE_DIR/kubectl.log"
@@ -202,8 +209,11 @@ printf '%s\n' "$*" >>"$FAKE_DIR/kubectl.log"
 # calls of one cluster.sh command whatever the run's daemons (each a session of its own, setsid)
 # call in between, and whatever lines one call's arguments span. Not the process group: kube and
 # kube_for run kubectl under timeout, which gives each call a process group of its own. Truncated
-# to stay one short write, which the kernel appends whole.
-call_sid=$(sed -E 's/^.*\) //' "/proc/$$/stat" | cut -d' ' -f4)
+# to stay one short write, which the kernel appends whole. The session is read from /proc here,
+# past the command name's own brackets, since the fields after it are plain numbers.
+read -r call_stat <"/proc/$$/stat"
+call_fields=(${call_stat##*') '})
+call_sid=${call_fields[3]}
 call_args=${*//$'\n'/\\n}
 printf '%s\t%s\n' "$call_sid" "${call_args:0:1000}" >>"$FAKE_DIR/kubectl-calls.log"
 verb="" sel="" ctr="" prev="" has_ns=false seen=false cmd=()
@@ -546,7 +556,7 @@ exit 0
 EOF
 
 cat >"$bin/gh" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 # The fake gh: the production repository's two files and each commit's first parent.
 printf '%s\n' "$*" >>"$FAKE_DIR/gh.log"
 case $* in
@@ -564,7 +574,7 @@ esac
 EOF
 
 cat >"$bin/curl" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 # The fake curl: a registry manifest read answers 200 with a digest, or 404 for a ref listed in
 # FAKE_DIR/missing-refs; a token read answers a token; a Dispatch artifact version download (-o
 # OUT) writes FAKE_DIR/parts/<slug>, after it reads the bearer header from its standard input.
@@ -600,7 +610,7 @@ esac
 EOF
 
 cat >"$bin/go" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 # The fake go: `go build -o PATH ./loadtest` writes a fake loadgen to PATH, `go build ... -o PATH
 # ./cmd/dispatch`, in a directory that holds cmd/dispatch/storedorder.go, a fake envoy-dispatch,
 # with GOWORK and CGO_ENABLED recorded in FAKE_DIR/go-dispatch.log, the tree's storedorder.go files
@@ -653,7 +663,7 @@ if [ "${*: -1}" = ./cmd/dispatch ]; then
   rm -f -- "$FAKE_DIR/go-subcommands.go"
   [ ! -f cmd/dispatch/subcommands.go ] || cp cmd/dispatch/subcommands.go "$FAKE_DIR/go-subcommands.go"
   cat >"$out" <<'DISPATCH'
-#!/usr/bin/env bash
+#!/bin/bash
 # The fake envoy-dispatch: stored-order records its arguments and DATABASE_URL, then answers as
 # FAKE_STORED_ORDER says: clean (the default), mismatch or nosummary.
 printf 'args %s\nDATABASE_URL %s\n' "$*" "${DATABASE_URL:-}" >>"$FAKE_DIR/stored-order.log"
@@ -682,7 +692,7 @@ DISPATCH
   exit 0
 fi
 cat >"$out" <<'LOADGEN'
-#!/usr/bin/env bash
+#!/bin/bash
 printf '%s\n' "$*" >>"$FAKE_DIR/loadgen.log"
 if [ "${FAKE_LOADGEN_FAIL:-}" = "$1" ]; then
   echo "fake loadgen: $1 failed" >&2
@@ -744,7 +754,7 @@ chmod +x "$out"
 EOF
 
 cat >"$bin/git" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 # The fake git: the git store holds a commit SHA when FAKE_DIR/git-trees/SHA lists its tree's files,
 # and its tree holds each listed file and each directory above one, each file empty unless
 # FAKE_DIR/git-files/SHA/<path> holds its content; `cat-file -p SHA:PATH` prints a file, and
@@ -795,18 +805,18 @@ esac
 EOF
 
 cat >"$bin/uv" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 # The fake uv: zstd_compress's `uv run ... python3 -c ...` passes its input through.
 cat
 EOF
 
 cat >"$bin/dispatch" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 printf '%s\n' "$*" >>"$FAKE_DIR/dispatch.log"
 EOF
 
 cat >"$bin/hostname" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/bash
 echo test-worker-0
 EOF
 
@@ -815,7 +825,7 @@ EOF
 # watcher's 30 s, where a test sets them), are recorded and return at once; every other sleep (the
 # daemons' loops, their start waits) is the real one.
 cat >"$bin/sleep" <<EOF
-#!/usr/bin/env bash
+#!/bin/bash
 if [ "\$*" = 3 ] || [[ " \${FAKE_FAST_SLEEP:-none} " == *" \$* "* ]]; then
   printf '%s\n' "\$*" >>"\$FAKE_DIR/sleep.log"
   exit 0
@@ -2015,17 +2025,23 @@ pass "the sampler writes an error line with no number when its exec fails, and a
 
 # ---- (h) nats.yaml against a fresh render ------------------------------------------------------------
 
-if PATH=$real_path command -v go >/dev/null &&
-  PATH=$real_path curl -fsS --max-time 20 -o /dev/null https://nats-io.github.io/k8s/helm/charts/index.yaml 2>/dev/null; then
+# The comparison renders the chart archive this repository keeps (infra/gcp/testdata, where
+# infra's own chart test renders it) rather than downloading one: render-nats.sh refuses any
+# archive whose sha256 is not the pinned one, so the download could only ever return those bytes
+# or fail, and a render off the copy proves what a render off the download proved. It also leaves
+# this case with nothing to reach but the helm module, so it neither waits on the public internet
+# nor prints SKIP on an attempt whose network was down while another attempt's printed PASS.
+if PATH=$real_path command -v go >/dev/null; then
   # shellcheck disable=SC2031 # (e) to (g) source cluster.sh in subshells; its here and tmp stay there
-  PATH=$real_path bash "$here/render-nats.sh" --pin-from "$here/manifests/nats.yaml" --out "$tmp/nats.yaml" 2>"$tmp/out" ||
+  PATH=$real_path bash "$here/render-nats.sh" --chart "$here/../../infra/gcp/testdata/nats-2.15.1.tgz" \
+    --pin-from "$here/manifests/nats.yaml" --out "$tmp/nats.yaml" 2>"$tmp/out" ||
     fail "render-nats.sh failed"
   # shellcheck disable=SC2031 # as above
   diff -u "$here/manifests/nats.yaml" "$tmp/nats.yaml" >"$tmp/out" ||
     fail "manifests/nats.yaml differs from a fresh render; run render-nats.sh and commit its output"
   pass "manifests/nats.yaml equals a fresh render of chart nats/nats 2.15.1 with nats-values.yaml"
 else
-  printf 'SKIP: go or the network does not reach helm and the chart, so manifests/nats.yaml was not compared with a fresh render\n'
+  printf 'SKIP: no go here, so helm cannot render and manifests/nats.yaml was not compared with a fresh render\n'
 fi
 
 # ---- (i) the replay residual's seed-check lines -------------------------------------------------
@@ -2310,7 +2326,15 @@ done
 orphan_alive=no
 kill -0 "$orphan_hb" 2>/dev/null && orphan_alive=yes
 orphan_patches=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
-sleep 1
+# The heartbeat is a session of its own (setsid), so the kube patch it was making when it stopped
+# is a process of its group: once that group holds nothing, no patch of this run can land any
+# more. One that still runs patches at every cycle, and the fake sleep makes a cycle cost nothing,
+# so the patches below are counted around its end and not around a stretch of clock; the 10 s is a
+# backstop for a heartbeat that never stops, which the counts then catch.
+for ((i = 0; i < 500; i++)); do
+  kill -0 -- "-$orphan_hb" 2>/dev/null || break
+  sleep 0.02
+done
 orphan_patches_after=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
 run_cluster down --namespace "$ns"
 [ "$orphan_alive" = no ] ||
@@ -2392,14 +2416,21 @@ for ((i = 0; i < 200; i++)); do
   sleep 0.1
 done
 sampler_lines=$(wc -l <"$sampler_dir/cgroup.jsonl" 2>/dev/null || echo 0)
-sleep 6
+# The sampler is a session of its own (setsid) and its eight role loops are in its group, so once
+# that group holds nothing, no loop of it can append again. A loop that outlived it appends an
+# error line every 5 s, which the count below catches inside the 10 s backstop this wait gives a
+# group that never empties.
+for ((i = 0; i < 500; i++)); do
+  kill -0 -- "-$sampler_pid" 2>/dev/null || break
+  sleep 0.02
+done
 sampler_lines_after=$(wc -l <"$sampler_dir/cgroup.jsonl" 2>/dev/null || echo 0)
 run_cluster down --namespace "$ns"
 [ "$sampler_alive" = no ] ||
   fail "the sampler daemon (pid $sampler_pid) still runs 20 s after the last command of its run ended and its heartbeat stopped: its eight kubectl execs stay open and it appends an error line of each to cgroup.jsonl every 5 s for ever"
 [ ! -f "$sampler_dir/sampler.pid" ] || fail "the sampler that stopped left its pidfile $sampler_dir/sampler.pid"
 [ "$sampler_lines_after" = "$sampler_lines" ] ||
-  fail "cgroup.jsonl grew by $((sampler_lines_after - sampler_lines)) lines in the 6 s after the sampler was gone: a role loop of it still samples"
+  fail "cgroup.jsonl grew by $((sampler_lines_after - sampler_lines)) lines after the sampler was gone: a role loop of it still samples"
 unset FAKE_FAST_SLEEP
 pass "the sampler stops once no heartbeat of its run is alive, with the kubectl exec of every role loop, and removes its pidfile"
 
@@ -2644,11 +2675,19 @@ run_cluster seed --namespace "$ns"
 ((RC == 0)) || fail "seed exited $RC: $(cat "$tmp/out")"
 # The step's load never ends (FAKE_RC_UNTIL_STOP) and the volume has room, so the watcher polls
 # on. Only its own 30 s poll is a fast sleep, which it records in sleep.log: the step's shell sits
-# in runner_wait's real 15 s sleep when the kill arrives, as a step does while its load runs.
+# in runner_wait's real sleep when the kill arrives, as a step does while its load runs. That
+# poll is this step's one bound: the kill below is read at the poll after it, so the shorter the
+# poll the sooner the two subshells the kill leaves behind end, and what they must do -- end at
+# their own next poll rather than poll on -- is the same at any poll length.
 df_seq "$pg_size $pg_used_low $pg_free_low"
 : >"$fake/sleep.log"
+cat >"$killed_step" <<EOF
+source "$cluster"
+RUNNER_POLL_SECONDS=2
+main "\$@"
+EOF
 FAKE_PG_DF_SEQ=$fake/df-seq FAKE_RC_UNTIL_STOP=1 FAKE_FAST_SLEEP=30 \
-  bash "$cluster" step --namespace "$ns" pgkill 1 --duration 1m >"$tmp/out" 2>&1 &
+  bash "$killed_step" step --namespace "$ns" pgkill 1 --duration 1m >"$tmp/out" 2>&1 &
 kill_step=$!
 # The waits in this case are the step's own doing, never a stretch of wall clock: this one ends
 # at the watcher's first nap, which the fake sleep records, and at once if the step ends first.
@@ -2693,7 +2732,7 @@ kill_dfs=$(grep -c -- 'df -B1 --output' "$fake/kubectl.log" || true)
 # running here and no job is stopped. Nothing but cluster.sh ends them: the cleanup's pkill runs
 # long after this.
 await_gone "${kill_kids[@]}" ||
-  fail "the step's disk watcher and its wait on the runner job ($(pgrep -af "$cluster step --namespace $ns " | tr '\n' ';')) still run after the step shell was killed: they poll on, so the watcher records pg_disk in a dead step's directory and the wait stops the job step-pgkill at the step's deadline, which a later run's step of that name would be"
+  fail "the step's disk watcher and its wait on the runner job ($(pgrep -af "$killed_step step --namespace $ns " | tr '\n' ';')) still run after the step shell was killed: they poll on, so the watcher records pg_disk in a dead step's directory and the wait stops the job step-pgkill at the step's deadline, which a later run's step of that name would be"
 kill_dfs_after=$(grep -c -- 'df -B1 --output' "$fake/kubectl.log" || true)
 ! grep -qx 'step-pgkill' "$fake/runner-stops" 2>/dev/null ||
   fail "the disk watcher of a killed step stopped the runner job step-pgkill after the kill: $(cat "$fake/runner-stops")"
@@ -2703,8 +2742,8 @@ kill_dfs_after=$(grep -c -- 'df -B1 --output' "$fake/kubectl.log" || true)
   fail "the killed step's disk watcher made $((kill_dfs_after - kill_dfs)) more reads of the volume before it ended: it reads on under the threshold"
 ! grep -qx 30 "$fake/sleep.log" ||
   fail "the killed step's disk watcher took $(grep -cx 30 "$fake/sleep.log") more 30 s naps after it was reaped: it polls on for ever"
-! pgrep -f "$cluster step --namespace $ns " >/dev/null 2>&1 ||
-  fail "the step still runs here although its disk watcher and its wait on the runner job ended: $(pgrep -af "$cluster step --namespace $ns " | tr '\n' ';')"
+! pgrep -f "$killed_step step --namespace $ns " >/dev/null 2>&1 ||
+  fail "the step still runs here although its disk watcher and its wait on the runner job ended: $(pgrep -af "$killed_step step --namespace $ns " | tr '\n' ';')"
 ! grep -qx 'step-pgkill' "$fake/runner-stops" 2>/dev/null ||
   fail "the killed step's wait on its runner job stopped step-pgkill: $(cat "$fake/runner-stops")"
 unset FAKE_FAST_SLEEP
@@ -3313,12 +3352,14 @@ stop_watchdog_end() {
   grep -qF "no exit status within $RUNNER_STOP_GRACE_SECONDS s of the SIGTERM" "$oneread_out" ||
     fail "that wait did not say that it sent the SIGKILL its grace ran out on: $(cat "$oneread_out")"
   unset FAKE_RC_UNTIL_KILL
-  # The TERM that lands while the watcher is inside its read of the lock. Every read fails and
-  # each takes a real second (FAKE_LOCK_GET_DELAY), so the watcher's three tries are some 7 s
-  # long and the TERM, sent once the first of them has failed, lands inside that act. The
-  # watcher takes it as a flag and leaves at the end of the act, recording nothing: a TERM
-  # ignored there would leave pg_disk_watch_stop waiting on a watcher that polls on.
-  export FAKE_RC_UNTIL_STOP=1 FAKE_LOCK_GET_FAIL=1 FAKE_LOCK_GET_DELAY=1 FAKE_FAST_SLEEP=30
+  # The TERM that lands while the watcher is inside its act. Every read of the lock fails and
+  # each takes FAKE_LOCK_GET_DELAY, with the guard's real 2 s between two of them, so the
+  # watcher's three tries are some 4 s long and the TERM, sent once the first of them has
+  # failed, lands inside that act. The watcher takes it as a flag and leaves at the end of the
+  # act, recording nothing: a TERM ignored there would leave pg_disk_watch_stop waiting on a
+  # watcher that polls on. What the delay has to be is longer than the test takes to see the
+  # first failure and send the TERM, not a second.
+  export FAKE_RC_UNTIL_STOP=1 FAKE_LOCK_GET_FAIL=1 FAKE_LOCK_GET_DELAY=0.2 FAKE_FAST_SLEEP=30
   rm -f -- "$fake/lock-get-fails" "$fake/lock-get-oks" "$oneread_dir/step-failed.json"
   df_seq "$pg_size $pg_used_high $pg_free_high"
   pg_disk_watch pgterm "$oneread_dir" step-pgterm "$oneread_dir/.pg-disk.jsonl" "$self" "$self_start" 2>"$oneread_out" &
@@ -3405,11 +3446,15 @@ kill_tries() { grep -c -- 'kill -KILL' "$fake/kubectl.log" || true; }
   mkdir -p "$RUN_DIR/logs" "$unreach_dir"
   self=$BASHPID
   self_start=$(proc_start "$self")
-  # The guard's 2 s between tries is a fast sleep; the wait's 15 s poll is a real one, so each
-  # stage of its stop takes one poll and no assertion counts a spin. Three seconds of grace, so
-  # the bound is one poll wide.
+  # The guard's 2 s between tries is a fast sleep; the wait's poll is a real one, so each stage
+  # of its stop takes one poll and no assertion counts a spin. A stop falls due a grace after
+  # the stage before it, so the first poll at or after it is a whole poll less that grace past
+  # it: with the poll at least twice the grace, as RUNNER_POLL_SECONDS is to
+  # RUNNER_STOP_GRACE_SECONDS in a run, that one try is also the last, which is the one try the
+  # counts below read.
   export FAKE_FAST_SLEEP=2
-  RUNNER_STOP_GRACE_SECONDS=3
+  RUNNER_POLL_SECONDS=4
+  RUNNER_STOP_GRACE_SECONDS=1
   export FAKE_RUNNER_EXEC_FAIL=$unreach_fail
   # The deadline has passed and the runner pod is gone: no TERM leaves this pod, and the job's
   # .rc cannot be read either.
@@ -3473,10 +3518,10 @@ kill_tries() { grep -c -- 'kill -KILL' "$fake/kubectl.log" || true; }
   # records the exit status that SIGKILL makes it record, and no exec of the runner answers
   # after it, so no read of the wait's can ever bring that exit status back. The last of the
   # three bounds ends the wait one grace past the SIGKILL; with none the wait polls for ever
-  # for a .rc nothing can hand it. The wait's 15 s poll is a fast sleep here, so what it waits
+  # for a .rc nothing can hand it. The wait's poll is a fast sleep here, so what it waits
   # out is that grace and not a poll: a wait that kept no bound of its own would end at its
   # first poll after the SIGKILL, which is at once.
-  export FAKE_RC_UNTIL_KILL=1 FAKE_RUNNER_EXEC_FAIL_AT_KILL=1 FAKE_FAST_SLEEP="2 15"
+  export FAKE_RC_UNTIL_KILL=1 FAKE_RUNNER_EXEC_FAIL_AT_KILL=1 FAKE_FAST_SLEEP="2 $RUNNER_POLL_SECONDS"
   rm -f -- "$unreach_fail" "$fake/runner-stops" "$fake/runner-kills" "$fake/runner-kill-times" "$fake/rc-kill-polls"
   kills=$(kill_tries)
   (
@@ -3514,6 +3559,10 @@ kill_tries() { grep -c -- 'kill -KILL' "$fake/kubectl.log" || true; }
   # failed and went back to polling, and the TERM there leaves it without a second act --
   # instead of a watcher that polls on until pg_disk_watch_stop kills it at its bound.
   export FAKE_PG_DF_SEQ=$fake/df-seq FAKE_RC_UNTIL_STOP=1
+  # The watcher's poll is a real sleep here, and the act below is its first: the shorter it is
+  # the sooner that act comes, and it has only to outlast the microseconds between the act's
+  # record of the failure, which the wait below reads, and the TERM that follows it.
+  PG_DISK_POLL_SECONDS=4
   df_seq "$pg_size $pg_used_high $pg_free_high"
   rm -f -- "$fake/runner-stops" "$unreach_dir/step-failed.json"
   : >"$unreach_fail"
@@ -3521,7 +3570,7 @@ kill_tries() { grep -c -- 'kill -KILL' "$fake/kubectl.log" || true; }
   pg_disk_watch pgterm "$unreach_dir" step-pgterm "$unreach_dir/.pg-disk.jsonl" "$self" "$self_start" 2>"$unreach_out" &
   PG_DISK_WATCHER=$! PG_DISK_WATCH_STEP=pgterm
   watcher=$PG_DISK_WATCHER
-  # The watcher's 30 s poll is a real sleep here, so the act below is its only one: a watcher
+  # The watcher's poll is a real sleep here, so the act below is its only one: a watcher
   # that took the TERM leaves before the next nap ends, and one that lost it acts again.
   until [ -f "$unreach_dir/step-failed.json" ] || ! kill -0 "$watcher" 2>/dev/null; do sleep 0.05; done
   [ -f "$unreach_dir/step-failed.json" ] ||
@@ -3548,8 +3597,8 @@ kill_tries() { grep -c -- 'kill -KILL' "$fake/kubectl.log" || true; }
   # under the threshold at every reading here -- it records no failure, stops no runner job and
   # stops no browser typing, and pg_disk_watch_stop returns well inside its bound.
   # FAKE_PG_DF_DELAY holds that one exec open until this case lets it answer; the watcher's
-  # 30 s poll is a fast sleep, so the read it waits in is all it waits in.
-  export FAKE_PG_DF_DELAY=60 FAKE_FAST_SLEEP="2 30"
+  # poll is a fast sleep, so the read it waits in is all it waits in.
+  export FAKE_PG_DF_DELAY=60 FAKE_FAST_SLEEP="2 $PG_DISK_POLL_SECONDS"
   rm -f -- "$unreach_fail" "$fake/pg-df-started" "$fake/pg-df-go" "$fake/runner-stops" "$fake/runner-kills"
   df_seq "$pg_size $pg_used_high $pg_free_high"
   mkdir -p "$unreach_read_dir"
@@ -3604,14 +3653,19 @@ run_cluster seed --namespace "$ns"
 unreach_hb=$(<"$LOADTEST_CLUSTER_ROOT/$unreach_run/heartbeat.pid")
 kill -TERM -- "-$unreach_hb" 2>/dev/null || true
 until ! kill -0 "$unreach_hb" 2>/dev/null; do sleep 0.05; done
-# Two bounds a test can reach, as (dd) reaches the grace: the slack the wait gives the loadgen
-# run over the bound that run was started with, and the grace each step of its stop gets.
-# Everything else -- the parse, the lock, the run's daemons, the step's shell and its EXIT trap
-# -- is the step command's own.
+# The bounds a test can reach, as (dd) reaches the grace: the warm-up and drain the step's
+# loadgen run is given, which with its window and the slack make the bound the wait starts from,
+# the grace each step of its stop gets, and how often the wait polls. Everything else -- the
+# parse, the lock, the run's daemons, the step's shell and its EXIT trap -- is the step
+# command's own. Short ones here: what this case drives is the wait past that bound, which is
+# the same wait however long the window it was given was.
 cat >"$tmp/step-bounded.sh" <<EOF
 source "$cluster"
+STEP_WARMUP=1s
+STEP_GRACE=1s
 RUNNER_RUN_SLACK_SECONDS=1
-RUNNER_STOP_GRACE_SECONDS=3
+RUNNER_STOP_GRACE_SECONDS=1
+RUNNER_POLL_SECONDS=2
 main "\$@"
 EOF
 rm -f -- "$fake/runner-starts" "$fake/runner-stops" "$fake/rc-polls"
@@ -3645,7 +3699,13 @@ done
 unreach_hb_alive=no
 kill -0 "$unreach_hb" 2>/dev/null && unreach_hb_alive=yes
 unreach_patches=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
-sleep 1
+# As in (o): the heartbeat's own session holds whatever patch it was making, so the counts below
+# are taken around the end of that group, with 10 s for one that never ends and whose patches
+# the count then catches.
+for ((i = 0; i < 500; i++)); do
+  kill -0 -- "-$unreach_hb" 2>/dev/null || break
+  sleep 0.02
+done
 unreach_patches_after=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
 [ "$unreach_hb_alive" = no ] ||
   fail "the heartbeat daemon (pid $unreach_hb) still runs 5 s after the step command it outlived ended: a run no command drives keeps its lock fresh"

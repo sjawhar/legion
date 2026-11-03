@@ -2,7 +2,7 @@
 # render-nats.sh: regenerates manifests/nats.yaml, the cluster copy's three-pod NATS JetStream hub,
 # so that a run needs no helm and no chart download.
 #
-#   render-nats.sh [--out FILE] [--pin-from FILE]
+#   render-nats.sh [--out FILE] [--pin-from FILE] [--chart FILE]
 #
 # It downloads chart nats/nats 2.15.1 from https://nats-io.github.io/k8s/helm/charts/, refuses an
 # archive whose sha256 is not the chart index's b209c627…58cc1 (the value INFRA-549 records),
@@ -14,6 +14,11 @@
 # --out FILE writes FILE instead of manifests/nats.yaml. --pin-from FILE takes each image's digest
 # from FILE (an earlier render) instead of the registry: cluster.test.sh re-renders that way and
 # compares, so a tag that moved since the committed render does not fail the comparison.
+# --chart FILE renders the archive FILE instead of downloading one, by the same sha256: the
+# archive the chart repository serves for 2.15.1 is those bytes or nothing, since any others are
+# refused here, so cluster.test.sh renders the copy this repository keeps
+# (infra/gcp/testdata/nats-2.15.1.tgz, which infra's own chart test renders) and reaches no
+# network.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -37,16 +42,19 @@ ALLOWED_KINDS=" ConfigMap Deployment Secret Service StatefulSet "
 
 out=$here/manifests/nats.yaml
 pin_from=""
+chart=""
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || die "$1 needs a value"
   case $1 in
     --out) out=$2 ;;
     --pin-from) pin_from=$2 ;;
+    --chart) chart=$2 ;;
     *) usage ;;
   esac
   shift 2
 done
 [ -z "$pin_from" ] || [ -f "$pin_from" ] || die "--pin-from $pin_from is not a file"
+[ -z "$chart" ] || [ -f "$chart" ] || die "--chart $chart is not a file"
 for tool in curl go sha256sum jq; do
   command -v "$tool" >/dev/null || die "render-nats.sh needs $tool on PATH"
 done
@@ -54,12 +62,19 @@ done
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/render-nats.XXXXXX")
 trap 'rm -rf -- "$tmp"' EXIT
 
-curl -fsSL --max-time 60 -o "$tmp/index.yaml" "$CHART_REPO/index.yaml" || die "could not read $CHART_REPO/index.yaml"
-url=$(grep -oE "https://[^[:space:]\"']+/nats-$CHART_VERSION\.tgz" "$tmp/index.yaml" | head -n1)
-[ -n "$url" ] || die "$CHART_REPO/index.yaml lists no nats-$CHART_VERSION.tgz"
-curl -fsSL --max-time 120 -o "$tmp/nats.tgz" "$url" || die "could not download $url"
+# The archive, from --chart or the chart repository, and what to name in a refusal. Either way its
+# sha256 must be the pinned one: that is what makes a vendored copy no weaker than a download.
+if [ -n "$chart" ]; then
+  chart_from=$chart
+  cp -- "$chart" "$tmp/nats.tgz" || die "could not read $chart"
+else
+  curl -fsSL --max-time 60 -o "$tmp/index.yaml" "$CHART_REPO/index.yaml" || die "could not read $CHART_REPO/index.yaml"
+  chart_from=$(grep -oE "https://[^[:space:]\"']+/nats-$CHART_VERSION\.tgz" "$tmp/index.yaml" | head -n1)
+  [ -n "$chart_from" ] || die "$CHART_REPO/index.yaml lists no nats-$CHART_VERSION.tgz"
+  curl -fsSL --max-time 120 -o "$tmp/nats.tgz" "$chart_from" || die "could not download $chart_from"
+fi
 sha=$(sha256_of "$tmp/nats.tgz")
-[ "$sha" = "$CHART_SHA256" ] || die "$url has sha256 $sha, not $CHART_SHA256; refusing it"
+[ "$sha" = "$CHART_SHA256" ] || die "$chart_from has sha256 $sha, not $CHART_SHA256; refusing it"
 
 sets=()
 pins=()

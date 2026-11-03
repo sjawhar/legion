@@ -269,6 +269,15 @@ RUNNER_STOP_GRACE_SECONDS=120
 # started with (its warm-up, window, grace and drain): a job that is slow to come back is still
 # the step's to measure, and past it the wait stops the job at its deadline.
 RUNNER_RUN_SLACK_SECONDS=900
+# How often runner_wait reads the runner job's exit status, and how often it tries the stop it
+# owes past its deadline. It is longer than one stop's grace, so a stop that kubectl cannot
+# deliver is tried once more and then given up on, rather than at every poll of the grace.
+RUNNER_POLL_SECONDS=15
+# A step's warm-up before its window and the drain after it, which run_step passes loadgen and
+# the wait on that run adds to the window for the bound it starts the run with. cluster.test.sh
+# gives a step short ones where what it drives is the wait past that bound.
+STEP_WARMUP=30s
+STEP_GRACE=20s
 RUN_LABEL=dispatch-loadtest/run
 ROLE_LABEL=dispatch-loadtest/role
 LEGION_REPO=sjawhar/legion
@@ -1775,7 +1784,7 @@ runner_wait() {
       note "job $name: no exit status was read from the runner pod within $RUNNER_STOP_GRACE_SECONDS s of the SIGKILL; the wait ends and gives no exit status"
       return 1
     fi
-    sleep 15
+    sleep "$RUNNER_POLL_SECONDS"
   done
   kube_read exec runner -c runner -- cat "/work/logs/$name.log" >"$log_dir/$name.log" 2>/dev/null || true
   printf '%s\n' "$rc"
@@ -2605,7 +2614,7 @@ run_step() {
   [ ! -e "$dir" ] || die "$dir exists: name another step, or remove it"
   [ -f "$RUN_DIR/seed.json" ] || die "no $RUN_DIR/seed.json: cluster.sh seed first"
   ensure_daemons
-  local events requests sessions rng_seed=1 warmup=30s
+  local events requests sessions rng_seed=1 warmup=$STEP_WARMUP grace=$STEP_GRACE
   events=$(awk -v f="$factor" 'BEGIN { printf "%g", 4 * f }')
   requests=$(awk -v f="$factor" 'BEGIN { printf "%g", 60 * f }')
   sessions=$(loadgen_local series-sessions "$factor") || die "loadgen series-sessions $factor failed"
@@ -2629,11 +2638,12 @@ run_step() {
   runner_put "$dir/copy-meta.json" "/work/meta/$name.json"
 
   endpoints
-  run_in_runner "$name" "$dir" "step-$name" $((30 + $(duration_seconds "$duration") + 20 + RUNNER_RUN_SLACK_SECONDS)) \
+  run_in_runner "$name" "$dir" "step-$name" \
+    $(($(duration_seconds "$warmup") + $(duration_seconds "$duration") + $(duration_seconds "$grace") + RUNNER_RUN_SLACK_SECONDS)) \
     /work/loadgen run -allow-foreign -name "$name" -out "/work/steps/$name" \
     -seed /work/seed.json -copy-meta "/work/meta/$name.json" -build-commit "$(state .dispatch_commit)" \
     -events "$events" -sessions "$sessions" -requests "$requests" -duration "$duration" \
-    -warmup "$warmup" -grace 20s -rng-seed "$rng_seed" "${ENDPOINTS[@]}"
+    -warmup "$warmup" -grace "$grace" -rng-seed "$rng_seed" "${ENDPOINTS[@]}"
   note "step $name done: $dir"
 }
 

@@ -139,6 +139,12 @@ stack_ports() {
   done
 }
 
+# How many times lock_root tries a busy root's lock before it refuses, a tenth of a second apart:
+# 3 s in all, which is the pause a run that starts while another is ending waits out.
+# LOADTEST_LOCK_WAIT_TRIES overrides it, as common.test.sh does, where a case has a holder hold
+# the lock for a window and the caller's whole wait has to fit inside it.
+LOCK_WAIT_TRIES=${LOADTEST_LOCK_WAIT_TRIES:-30}
+
 # lock_field NAME RECORD: the value of NAME= in a lock record.
 lock_field() { sed -n "s/^$1=//p" <<<"$2"; }
 
@@ -214,14 +220,15 @@ lock_root() {
     return 0
   fi
   exec 9>&-
-  # Try the lock for up to 3 s, on descriptor 8: lock_holders lists the processes with descriptor 9
-  # on the file, and a waiting caller is none of them. While it fails, read the holder's record,
-  # which the holder writes just after it locks, and stop at a complete record whose pid runs in this
-  # PID namespace. A complete record whose pid does not is a holder whose children still hold the
-  # lock (stop when lock_holders names them), one that has just ended (the next try takes the lock),
-  # or one in another PID namespace, which this one never sees.
+  # Try the lock LOCK_WAIT_TRIES times, a tenth of a second apart, on descriptor 8: lock_holders
+  # lists the processes with descriptor 9 on the file, and a waiting caller is none of them.
+  # While it fails, read the holder's record, which the holder writes just after it locks, and
+  # stop at a complete record whose pid runs in this PID namespace. A complete record whose pid
+  # does not is a holder whose children still hold the lock (stop when lock_holders names them),
+  # one that has just ended (the next try takes the lock), or one in another PID namespace, which
+  # this one never sees.
   local record="" holders="" runs=false i
-  for ((i = 0; i < 30; i++)); do
+  for ((i = 0; i < LOCK_WAIT_TRIES; i++)); do
     ((i == 0)) || sleep 0.1
     exec 8<>"$file"
     if flock -n 8; then

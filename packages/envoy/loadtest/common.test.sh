@@ -268,7 +268,9 @@ case_invisible_holder() {
   pids+=("$holder")
   wait_for "${temporary_dir}/ready-d" || { fail "(d) the holder on descriptor 7 did not take the lock"; return; }
 
-  try_lock "$root"
+  # The holder holds the lock throughout, so the caller waits out every try it has and is then
+  # refused: three of them refuse it by the same reading of the record as thirty do.
+  try_lock "$root" LOADTEST_LOCK_WAIT_TRIES=3
   if ((rc == 0)) || [[ $out == *ADMITTED* ]]; then
     fail "(d) a caller was admitted while a process that this PID namespace cannot see held the lock"
     return
@@ -321,13 +323,16 @@ case_waiting_callers() {
   pids+=("$holder")
   wait_for "${temporary_dir}/ready-f" || { fail "(f) the holder on descriptor 7 did not take the lock"; return; }
 
-  # Caller 1 sits in its first flock for 4 s; caller 2 starts once caller 1 is in it, and waits its
-  # whole 3 s while caller 1 has the lock file open.
+  # Caller 1 sits in its first flock for the 4 s its slow flock takes; caller 2 starts once
+  # caller 1 is in it, and waits out every try it has while caller 1 has the lock file open. Five
+  # tries, half a second in all, so that whole wait is well inside caller 1's flock however
+  # loaded the machine is; what the case reads is whom each refusal names, which no number of
+  # tries decides.
   local mark="${temporary_dir}/flock-f" n i waiters=() rcs=()
   for n in 1 2; do
     local path="$PATH"
     [[ $n == 2 ]] || path="${slow_flock}:${PATH}"
-    env -u LOADTEST_LOCK_TOKEN PATH="$path" LOADTEST_TEST_FLOCK_MARK="$mark" \
+    env -u LOADTEST_LOCK_TOKEN PATH="$path" LOADTEST_TEST_FLOCK_MARK="$mark" LOADTEST_LOCK_WAIT_TRIES=5 \
       bash -c 'echo "$$" >"$3"; source "$1"; lock_root "$2"' caller \
       "$helper" "$root" "${temporary_dir}/caller-f${n}.pid" >"${temporary_dir}/caller-f${n}.out" 2>&1 9>&- &
     waiters+=("$!")
@@ -382,7 +387,9 @@ case_foreign_record_live_pid() {
   pids+=("$holder")
   wait_for "${temporary_dir}/ready-g" || { fail "(g) the holder on descriptor 7 did not take the lock"; return; }
 
-  try_lock "$root"
+  # As in (d): the holder holds the lock throughout, so three tries read the record the same way
+  # thirty do.
+  try_lock "$root" LOADTEST_LOCK_WAIT_TRIES=3
   if ((rc == 0)) || [[ $out == *ADMITTED* ]]; then
     fail "(g) a caller was admitted while a process that this PID namespace cannot see held the lock"
     return
@@ -469,21 +476,24 @@ case_stack_ports() {
   [ -z "$overlap" ] || { out="$one"$'\n'"$two" fail "(i) two roots share the ports $(tr '\n' ' ' <<<"$overlap")"; return; }
   [ "$(wc -l <<<"$one")" = 7 ] || { out="$one" fail "(i) a root's ports are not the 7 stack.json keys"; return; }
 
-  # Every port of every block, against every other: all inside 1024-65535, none twice.
+  # Every port of every block, against every other: all inside 1024-65535, none twice. The 1400
+  # ports are written in one shell, default_port's own output rather than a command substitution
+  # of it (a process per port, which is all this check used to cost), and read back by one awk.
   local report
   report=$(bash -c '
     source "$1"
-    declare -A seen=()
-    bad=""
     for ((k = 0; k < PORT_BLOCKS; k++)); do
       for key in "${PORT_KEYS[@]}"; do
-        p=$(default_port "$key" "$k")
-        ((p >= 1024 && p <= 65535)) || bad+="block $k $key is on port $p, outside 1024-65535; "
-        [ -z "${seen[$p]:-}" ] || bad+="block $k $key and ${seen[$p]} are both on port $p; "
-        seen[$p]="block $k $key"
+        printf "%s %s " "$k" "$key"
+        default_port "$key" "$k"
       done
-    done
-    printf "%s" "$bad"' blocks "$helper")
+    done' blocks "$helper" |
+    awk '{
+      if ($3 < 1024 || $3 > 65535) { bad = bad "block " $1 " " $2 " is on port " $3 ", outside 1024-65535; " }
+      if ($3 in seen) { bad = bad "block " $1 " " $2 " and " seen[$3] " are both on port " $3 "; " }
+      seen[$3] = "block " $1 " " $2
+    }
+    END { printf "%s", bad }')
   [ -z "$report" ] || { fail "(i) the port blocks do not hold: $report"; return; }
 
   # A variable moves its own port alone.
