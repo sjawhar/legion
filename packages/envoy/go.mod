@@ -144,8 +144,11 @@ require (
 // members wait in open upstream pull requests: CloseRoom closes a browser that joins while it runs
 // (#331); a document logs each commit's update in commit order under its own lock (UpdateLog,
 // #332), against which the room's update observer measures each update; a remote update's scans
-// can be bounded (#333); parked delete ranges are capped, and a room loads its stored state with
-// the cap lifted (#334); a map-valued text format no longer panics with the lock held (#335); a
+// can be bounded (#333); parked delete ranges are capped, and ygo lifts a room's pending cap until
+// its own load of that room's stored state returns (#334), which decodes nothing here: ygo is
+// handed no bytes (LoadDoc), and the room decodes its stored state itself under the cap, in the
+// load hook ygo runs once it has set it (bootstrapLoadedState); a map-valued text format no longer
+// panics with the lock held (#335); a
 // transaction names the shared types it changed and every shared type its container
 // (ChangedTypes and Parent, #336), so the room's update observer renders only the top-level blocks
 // an update touched; awareness reaches its sending peer and a read-only peer gets a

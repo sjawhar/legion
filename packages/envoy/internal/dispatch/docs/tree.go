@@ -319,20 +319,32 @@ func renderDocument(doc *crdt.Doc) (string, error) {
 	return documentMarkdown(tree)
 }
 
-// renderDocumentForUpdate is renderDocument of the document whose fragment is fragment, without
-// pmdoc.Read's deep copy (pmdoc.ReadForRendering), recording the rendering's layout from the same
-// render: for the update observer's render, which runs the render and discards the tree before
-// releasing the replica's lock (renderedReplica.updateChangesMarkdown), so nothing retains the
-// tree past this call to alias a later reader - a caller that reads tree past the call (the ask
-// blocks updateChangesMarkdown hands classify, walked before the lock is released) aliases none of
-// it by doing so, since tree itself, not a copy of it, is what the caller walks.
-func renderDocumentForUpdate(fragment *crdt.YXmlFragment) (string, *pmdoc.Node, *pmdoc.Layout, error) {
+// readFragmentForRendering is the tree fragment holds, read without pmdoc.Read's deep copy
+// (pmdoc.ReadForRendering), for the two renders that read a room's live fragment:
+// renderDocumentForUpdate and renderFragmentMarkdown. A nil fragment is a document that is not
+// loaded, and a tree the reader refuses is that document's schema error (documentSchemaError).
+func readFragmentForRendering(fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
 	if fragment == nil {
-		return "", nil, nil, errDocUnloaded
+		return nil, errDocUnloaded
 	}
 	tree, err := pmdoc.ReadForRendering(fragment)
 	if err != nil {
-		return "", nil, nil, documentSchemaError(err)
+		return nil, documentSchemaError(err)
+	}
+	return tree, nil
+}
+
+// renderDocumentForUpdate is renderDocument of the document whose fragment is fragment, read
+// without pmdoc.Read's deep copy (readFragmentForRendering), recording the rendering's layout from
+// the same render: for the update observer's render, which runs the render and discards the tree
+// before releasing the replica's lock (renderedReplica.updateChangesMarkdown), so nothing retains
+// the tree past this call to alias a later reader - a caller that reads tree past the call (the
+// ask blocks updateChangesMarkdown hands classify, walked before the lock is released) aliases
+// none of it by doing so, since tree itself, not a copy of it, is what the caller walks.
+func renderDocumentForUpdate(fragment *crdt.YXmlFragment) (string, *pmdoc.Node, *pmdoc.Layout, error) {
+	tree, err := readFragmentForRendering(fragment)
+	if err != nil {
+		return "", nil, nil, err
 	}
 	markdown, _, layout, err := documentRenderingWithLayout(tree)
 	return markdown, tree, layout, err
@@ -344,12 +356,9 @@ func renderDocumentForUpdate(fragment *crdt.YXmlFragment) (string, *pmdoc.Node, 
 // fold of a document's stored updates (renderStoredFold) - which pmdoc.RenderWithLayout would
 // hand a pmdoc.Layout each has nothing to do with.
 func renderFragmentMarkdown(fragment *crdt.YXmlFragment) (string, error) {
-	if fragment == nil {
-		return "", errDocUnloaded
-	}
-	tree, err := pmdoc.ReadForRendering(fragment)
+	tree, err := readFragmentForRendering(fragment)
 	if err != nil {
-		return "", documentSchemaError(err)
+		return "", err
 	}
 	return documentMarkdown(tree)
 }
