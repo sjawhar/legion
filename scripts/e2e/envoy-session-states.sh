@@ -1692,8 +1692,14 @@ check_every_plugin_shows_the_state() {
   # appending to claude.out after the turn's `result` line lands: a run of this check has refused
   # on a read of the live file whose own evidence copy, taken a moment earlier, carried the two
   # fields. One snapshot is both what the check judged and what the evidence holds.
-  if ! shows_state "$work/claude.out"; then
+  # A turn ends on one more `result` line than the file held, and a line of that kind is written
+  # for a resume as well as for an answer, so a turn can be judged finished on a resume while the
+  # answer is still coming (seen once: a run whose claude.out ended SUBSCRIBED, '', RESUMED and
+  # only then the tool's JSON). Each arm therefore waits for the answer itself, bounded, and the
+  # retry is what a turn that truly answered something else gets.
+  if ! wait_until 120 "Claude Code's answer to carry the session's state" shows_state "$work/claude.out"; then
     claude_turn "Call the envoy_sessions tool again for $peer and reply with its answer's state and last_seen fields verbatim, as JSON." || return 1
+    wait_until 120 "Claude Code's second answer to carry the session's state" shows_state "$work/claude.out" || true
   fi
   cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
   shows_state "$evidence/answers/$check.claude.out" ||
@@ -1745,8 +1751,11 @@ check_every_plugin_names_a_stored_follower() {
   # As check 7a: Claude Code's turn ends on its `result` line and the model is free to summarise
   # what the tool answered, so one turn's prose is no measure of it. A second turn asking for the
   # answer's own field settles it; the assertion is unchanged, and both turns' output is kept.
-  if ! names_stored_for "$work/claude.out" "$follower"; then
+  # Waited for rather than read once, as check 7a's arm is and for the same reason: a turn ends on
+  # a `result` line, which a resume writes too.
+  if ! wait_until 120 "Claude Code's answer to name the stored-for follower" names_stored_for "$work/claude.out" "$follower"; then
     claude_turn "Call the envoy_publish tool again with topic $topic and message \"$marker\", and reply with its answer's unresponsive field verbatim, as JSON." || return 1
+    wait_until 120 "Claude Code's second answer to name the stored-for follower" names_stored_for "$work/claude.out" "$follower" || true
   fi
   cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
   names_stored_for "$evidence/answers/$check.claude.out" "$follower" ||
