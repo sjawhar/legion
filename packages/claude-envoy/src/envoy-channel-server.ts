@@ -68,7 +68,7 @@ import {
   type SubscribeResult,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
-import { paneHandoffReport } from "@legion/pi-shared/handoff-record"
+import { findPushedBranchHead, paneHandoffReport } from "@legion/pi-shared/handoff-record"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -1827,6 +1827,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
         // The pane's own environment and PATH's jj, and the Dispatch this session's envoy.json
         // names, which the pane's `dispatch handoff-write` wrote the record to.
         handoffReport: paneHandoffReport(configFile, process.env, directory),
+        branchHead: () => findPushedBranchHead({ env: process.env }),
       }
       // The request's signal aborts on the client's notifications/cancelled, which ends a wait
       // for a restarting daemon.
@@ -1834,9 +1835,13 @@ export async function runEnvoyChannelServer(): Promise<void> {
       // A call that returned without throwing: a completion, and a backward move, which hands the
       // issue to another phase. Either way this session's phase is no longer open, and the
       // reminder must stop — the same two operations the Oh My Pi host closes its phase on
-      // (`createLegionTool` in `packages/pi-legion/src/tools.ts`).
+      // (`createLegionTool` in `packages/pi-legion/src/tools.ts`). `ready_for_update` ends no
+      // phase: it answers the pod's update task, and the worker then waits for its process to be
+      // replaced, so the `Stop` of the turn it answered in blocks nothing (`updateAnswered`,
+      // `./legion-phase-hook`), as the Oh My Pi host's `onUpdateAnswered` does.
       const op = request.params.arguments?.["op"]
       if (op === "handoff_complete" || op === "request_backward_move") phaseHook?.phaseClosed()
+      else if (op === "ready_for_update") phaseHook?.updateAnswered()
       return mcpResult(answer)
     }
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")

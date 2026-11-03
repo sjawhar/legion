@@ -22,6 +22,7 @@ import {
   pictureReference,
   referenceRouteFromHref,
   routeHasMargin,
+  routeIsInbox,
   routeProjectOf,
   shortForm,
 } from "./routes";
@@ -949,5 +950,18 @@ test("routeHasMargin is true for issue and project-document routes and false for
   }
   for (const pathname of withoutMargin) {
     expect([pathname, routeHasMargin(pathname)]).toEqual([pathname, false]);
+  }
+});
+
+// The shell reads this to give the Inbox's reading pane the whole viewport and to leave the
+// peek-at-the-inbox drawer out of a page that is the Inbox (`app.tsx`, `Sidebar.tsx`), so an
+// address that renders `InboxPage` and answers false here renders the Inbox without its own
+// scroller and offers a peek at the page the person is on.
+test("routeIsInbox covers every path that renders the Inbox, and not the machine page", () => {
+  for (const pathname of ["/", "/credentials/record-old-broker", "/credentials"]) {
+    expect([pathname, routeIsInbox(pathname)]).toEqual([pathname, true]);
+  }
+  for (const pathname of ["/credentials/machine", "/agents", "/settings", "/issues/CORE-1"]) {
+    expect([pathname, routeIsInbox(pathname)]).toEqual([pathname, false]);
   }
 });

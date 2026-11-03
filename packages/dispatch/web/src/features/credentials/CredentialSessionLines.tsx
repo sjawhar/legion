@@ -34,7 +34,7 @@ function statusText(line: CredentialSessionLine): string {
  * checked. A request's id is an unsigned claim (`session.ts`), and an unlisted id's name is its
  * short form `session:<8>…`, which a forged id (or any session started in the same minute)
  * shares; so the person approving reads the whole id, and the state in words rather than only
- * the mark's ring. The full id breaks anywhere, so it never widens the record page's grid.
+ * the mark's ring. The full id breaks anywhere, so it never widens the Inbox row that holds it.
  */
 function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
   return (
@@ -47,15 +47,15 @@ function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): R
 }
 
 /**
- * The credential request's session: the Inbox row and the record page both render this one
- * component (LEGION-587), so a running, not-running, couldn't-check or unnamed session always
- * reads identically in both places. Each id is an `AgentName` and its full id, and a line says
- * in words when its session isn't running or could not be checked. Takes the agents list (and
- * its loading/error state) as props rather than calling `useAgents` itself: a page that renders
- * several of these (the Inbox's pending-requests list) reads the list once from its own
- * page-level `useAgents` call, and that one read decides every line's status, so the words
- * follow the same `["agents"]` query as each name's mark. Renders bare text/links,
- * no wrapping element: each call site supplies its own layout.
+ * The credential request's session, as the Inbox's pending-requests row renders it
+ * (`CredentialRequestsSection.tsx`, the one caller: a machine login carries no session id, so the
+ * machine page's facts show none). Each id is an `AgentName` and its full id, and a line says in
+ * words when its session isn't running or could not be checked. Takes the agents list (and its
+ * loading/error state) as props rather than calling `useAgents` itself: the Inbox renders one of
+ * these per pending row and reads the list once from its own page-level `useAgents` call, and that
+ * one read decides every line's status, so the words follow the same `["agents"]` query as each
+ * name's mark. Renders bare text/links, no wrapping element: the call site supplies its own
+ * layout.
  */
 export function CredentialSessionLines({
   agents,
