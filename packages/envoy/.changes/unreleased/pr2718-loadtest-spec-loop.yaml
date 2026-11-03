@@ -1,0 +1,17 @@
+kind: Added
+body: |-
+  The load test can drive a Dispatch deployment with the Verified Linux spec loop's own records
+  and its own work.
+  `loadgen loop-seed-plan` plans the loop's seed from its per-proposal table by requirement id
+  (891 issues, 334,536 threads with 130,066 replies over part documents, 6,057 review pages and
+  536 review indexes), under every document, margin, record and anchor cap and with spare quote
+  rows for the threads a run writes; `loadgen loop-seed-write` writes it under idempotency keys
+  and resumes where it stopped; `loadgen loop-seed-check` reads the counts back; and
+  `loadgen loop-seed-export` turns the result into the file a step addresses it through.
+  `loadgen seed-finish` now waits, where it is given a Dispatch URL, until meaning search lacks
+  no vector, and `loadgen stub-embed` serves Dispatch's own Azure embedder contract over https
+  for a deployment with no model service.
+  A step given that seed writes verdicts, requirements and status changes over the loop's seven
+  read routes, starts and stops unit sessions beside one driver session, counts the
+  notifications each class was owed against what it got, and judges the step on a pass rule that
+  adds notification loss and Cloud SQL's CPU and voids a step its own generator starved.

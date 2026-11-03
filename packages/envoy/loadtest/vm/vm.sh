@@ -48,10 +48,19 @@
 #   load-listener-1..4  generator   500m   512 MiB
 #
 # Dispatch runs with host networking because its profiling port binds 127.0.0.1 only
-# (cmd/dispatch/pprof.go), so the profile is fetched from the application VM itself, over ssh,
-# rather than from this pod or from the generator; the step does that fetch, and the -pprof
-# endpoint loadgen is given is whatever the deployment file names, since nothing here can make a
-# loopback port reachable from another machine.
+# (cmd/dispatch/pprof.go), so that port answers on the application VM's own loopback and nowhere
+# else. Two readers need it, and each reaches it its own way. The profiles a step keeps are
+# fetched after the load from the application VM itself, over ssh. The in-run sampler reads
+# Dispatch's goroutines, its pool acquire waiters and its heap while the step runs
+# (sample.go:325, :453 and :508), and it runs inside `loadgen run` on the generator VM, so step
+# opens a tunnel for the life of the load -- `ssh -N -L <ports.pprof_tunnel>:127.0.0.1:<ports.
+# pprof> <the application VM>`, run on the generator VM -- and gives loadgen
+# `-pprof http://127.0.0.1:<ports.pprof_tunnel>`. The step proves that tunnel answers
+# /debug/pprof/goroutine?debug=1 before it sends any load and refuses itself by name when it does
+# not: pass criterion (e), "Dispatch's pool acquire waiters p50 = 0", is FAIL for want of a
+# measurement (curves.go passCriteria), so a step whose sampler cannot reach that port measures
+# nothing worth keeping. The tunnel is closed when the step ends, however it ends. It is the
+# harness's own and not the deployment's: no row of check's table reads it.
 #
 # Dispatch's identity is DISPATCH_IDENTITY=header:X-Dispatch-User with
 # DISPATCH_IDENTITY_HEADER_TRUSTED=1 and a shared agent token, as stack.sh's start_dispatch sets
@@ -76,9 +85,9 @@
 #                 "expect": {"databaseVersion": "POSTGRES_18", "settings.edition": "ENTERPRISE"}},
 #    "images": {"dispatch": "...@sha256:...", "listener": "...@sha256:...",
 #               "proxy": "...@sha256:...", "nats": "...@sha256:..."},
-#    "ports": {"dispatch": 8766, "pprof": 6060, "proxy": 5432, "listener": 9020,
-#              "hub_listener": 9030, "nats": 4222, "nats_monitor": 8222, "stub_embed": 8443,
-#              "load_listeners": [9021, 9022, 9023, 9024]},
+#    "ports": {"dispatch": 8766, "pprof": 6060, "pprof_tunnel": 16060, "proxy": 5432,
+#              "listener": 9020, "hub_listener": 9030, "nats": 4222, "nats_monitor": 8222,
+#              "stub_embed": 8443, "load_listeners": [9021, 9022, 9023, 9024]},
 #    "secrets": {"dispatch_token": "...", "listener_token": "...", "embed_key": "..."},
 #    "paths": {"remote_root": "/var/lib/dispatch-loadtest"},
 #    "production_addresses": ["10.139.0.2:5432", "10.138.0.10:4222"]}
@@ -87,9 +96,12 @@
 # answer and each value what that path must read, so a change of production's instance is a
 # change of the deployment file and not of this script. production_addresses are the addresses R2
 # forbids; check proves each one refuses a connection from each VM. The optional keys and their
-# defaults: ssh_command "ssh", paths.loadgen "$LOADTEST_ROOT/bin/loadgen",
-# paths.remote_loadgen "<remote_root>/loadgen", paths.nats_store "<remote_root>/nats",
-# paths.cert "<remote_root>/stub-embed.pem", paths.cgroup
+# defaults: ssh_command "ssh", ports.pprof_tunnel 16060 (the port on the generator VM that a
+# step's profiling tunnel listens on), pprof_tunnel_command
+# "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes" (the command that opens it, run on the
+# generator VM; the forward and the application VM are appended to it), paths.loadgen
+# "$LOADTEST_ROOT/bin/loadgen", paths.remote_loadgen "<remote_root>/loadgen", paths.nats_store
+# "<remote_root>/nats", paths.cert "<remote_root>/stub-embed.pem", paths.cgroup
 # "/sys/fs/cgroup/system.slice/docker-%s.scope", token_url, sqladmin and compute (the Google
 # endpoints, for a test server), and the whole of load (below).
 #
@@ -141,6 +153,17 @@ SSH_SECONDS=300
 RUN_SLACK_SECONDS=900
 # How long the stub embedder is given to write its certificate before up gives up on it.
 STUB_EMBED_SECONDS=60
+# How long the step's profiling tunnel is given to answer before the step is refused, and how
+# long between two reads through it.
+TUNNEL_SECONDS=60
+TUNNEL_POLL_SECONDS=2
+# The port the tunnel listens on, on the generator VM, and the command that opens it there. Both
+# are the deployment file's to change (ports.pprof_tunnel, pprof_tunnel_command): the generator's
+# own ssh may need a key, a jump host or a port of its own, and a test server stands in for it.
+# ExitOnForwardFailure is what makes a port already in use a refusal rather than a tunnel that
+# answers nothing.
+PPROF_TUNNEL_PORT_DEFAULT=16060
+PPROF_TUNNEL_COMMAND_DEFAULT="ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes"
 # The Google endpoints and the metadata server's token, each overridable in the deployment file
 # so a test server can stand in for them (cloudsqlcpu.go does the same).
 TOKEN_URL_DEFAULT=http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
@@ -709,15 +732,18 @@ loadgen_bin() {
   printf '%s\n' "${OPT[loadgen]:-$(cfg .paths.loadgen "${LOADTEST_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest}/bin/loadgen")}"
 }
 
-# endpoints: every endpoint flag of loadgen seed and run (guard.go), into ENDPOINTS. Each one is
-# the deployment's own, which is what R2 asks and what check reads back.
+# endpoints [PPROF]: every endpoint flag of loadgen seed and run (guard.go), into ENDPOINTS. Each
+# one is the deployment's own, which is what R2 asks and what check reads back. PPROF is the
+# profiling endpoint loadgen is given: the deployment file's own by default, and a step's tunnel
+# on the generator VM's loopback while a step runs, since that is where loadgen run runs and the
+# profiling port answers on the application VM's loopback alone.
 endpoints() {
   ENDPOINTS=(
     -allow-foreign
     -url "$(dispatch_url)" -token "$(cfg .secrets.dispatch_token)"
     -listener "$(listener_url)" -listener-token "$(cfg .secrets.listener_token)"
     -nats "$(nats_url)" -nats-mon "$(nats_mon_url)"
-    -pprof "$(pprof_url)" -pg "$(pg_url "$(cfg .cloudsql.database dispatch)")"
+    -pprof "${1:-$(pprof_url)}" -pg "$(pg_url "$(cfg .cloudsql.database dispatch)")"
   )
 }
 
@@ -841,6 +867,10 @@ cmd_check() {
   check_run_duration
   check_production_refused
   printf '| check | expected | found | ok |\n| --- | --- | --- | --- |\n%s' "$CHECK_ROWS"
+  # The table is the deployment's, so the tunnel is not in it: it is the harness's own, opened
+  # on the generator VM by each step and closed with it, and between steps there is nothing of
+  # it on either VM for check to read.
+  note "check: the step's profiling tunnel is no row of this table. It is the harness's, not the deployment's: step opens it on the generator VM (port $(pprof_tunnel_port) to 127.0.0.1:$(port_of pprof) on the application VM), proves it, and closes it when the step ends."
   if ((CHECK_BAD > 0)); then
     note "check: $CHECK_BAD of the readings differ from the specification; the table above names each"
     return 1
@@ -1027,6 +1057,107 @@ sampler_stop() {
   SAMPLER_PID=""
 }
 
+# ---- the profiling tunnel -----------------------------------------------------------------------
+
+# The step's tunnel from the generator VM to Dispatch's profiling port on the application VM's
+# loopback. It exists for the sampler inside `loadgen run`, which reads goroutines, the pool's
+# acquire waiters and the heap while the step runs (sample.go) from the generator VM, where
+# nothing else can reach a port that binds 127.0.0.1 on another machine. It is no part of the
+# deployment: check reads no row of it, up starts none and down stops none; it lives exactly as
+# long as one step's load.
+
+# pprof_tunnel_port: the port the tunnel listens on, on the generator VM.
+pprof_tunnel_port() { cfg_valid port .ports.pprof_tunnel "$PPROF_TUNNEL_PORT_DEFAULT"; }
+
+# pprof_tunnel_url: what a step gives loadgen as -pprof. It is a loopback address of the
+# generator VM, where loadgen run runs, and never of this pod.
+pprof_tunnel_url() { printf 'http://127.0.0.1:%s\n' "$(pprof_tunnel_port)"; }
+
+# pprof_tunnel_pid_file, pprof_tunnel_log: where the tunnel's pid and its output are kept on the
+# generator VM.
+pprof_tunnel_pid_file() { printf '%s/pprof-tunnel.pid\n' "$(remote_work)"; }
+pprof_tunnel_log() { printf '%s/pprof-tunnel.log\n' "$(remote_work)"; }
+
+# tunnel_kill: whatever the pid file on the generator VM names, ended there, and the file
+# removed. TERM first, KILL after 10 s, so no step leaves an ssh of its own behind holding the
+# port the next step needs. A failure to reach the VM is not raised: a step that cannot ssh has
+# already failed on something louder than this.
+tunnel_kill() {
+  # shellcheck disable=SC2016 # expanded by the generator's sh
+  on_vm generator sh -c '
+    pid=$(cat "$1" 2>/dev/null)
+    if [ -n "$pid" ]; then
+      kill -TERM "$pid" 2>/dev/null
+      i=0
+      while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 10 ]; do
+        sleep 1
+        i=$((i + 1))
+      done
+      kill -KILL "$pid" 2>/dev/null
+    fi
+    rm -f "$1"
+    exit 0' sh "$(pprof_tunnel_pid_file)" >/dev/null 2>&1 || true
+  return 0
+}
+
+# tunnel_start NAME: the tunnel opened on the generator VM and proven to answer. It returns 1
+# with TUNNEL_REFUSAL saying what went wrong, which run_step turns into the step's refusal: a
+# step whose sampler cannot read the profiling port measures no pool acquire waiters, and
+# criterion (e) is then FAIL for want of a measurement (curves.go passCriteria), so the step is
+# refused before it sends any load rather than run for nothing.
+tunnel_start() {
+  local name=$1 port remote_port probe raw cmd=() waited=0
+  TUNNEL_REFUSAL=""
+  port=$(pprof_tunnel_port)
+  remote_port=$(port_of pprof)
+  raw=$(cfg .pprof_tunnel_command "$PPROF_TUNNEL_COMMAND_DEFAULT")
+  read -r -a cmd <<<"$raw"
+  ((${#cmd[@]})) || die "the deployment file $CONFIG gives an empty pprof_tunnel_command"
+  if ! on_vm generator mkdir -p -- "$(remote_work)"; then
+    TUNNEL_REFUSAL="making $(remote_work) on the generator VM failed."
+    return 1
+  fi
+  tunnel_kill
+  TUNNEL_OPEN=1
+  # shellcheck disable=SC2016 # expanded by the generator's sh
+  if ! on_vm generator sh -c 'pid_file=$1 log=$2; shift 2; rm -f "$pid_file"; nohup "$@" >"$log" 2>&1 </dev/null & echo "$!" >"$pid_file"' \
+    sh "$(pprof_tunnel_pid_file)" "$(pprof_tunnel_log)" \
+    "${cmd[@]}" -L "$port:127.0.0.1:$remote_port" "$(vm_ssh app)"; then
+    TUNNEL_REFUSAL="starting the profiling tunnel on the generator VM failed (its output is $(pprof_tunnel_log) there)."
+    return 1
+  fi
+  probe="$(pprof_tunnel_url)/debug/pprof/goroutine?debug=1"
+  until on_vm generator curl -fsS --max-time 10 "$probe" >/dev/null 2>&1; do
+    if ((waited >= TUNNEL_SECONDS)); then
+      TUNNEL_REFUSAL="the generator VM could not read $probe through the profiling tunnel to port $remote_port on the application VM within $TUNNEL_SECONDS s (the tunnel's output is $(pprof_tunnel_log) there)."
+      return 1
+    fi
+    sleep "$TUNNEL_POLL_SECONDS"
+    waited=$((waited + TUNNEL_POLL_SECONDS))
+  done
+  note "step $name: the profiling tunnel answers $probe on the generator VM, which reaches Dispatch's port $remote_port on the application VM's loopback"
+}
+
+# tunnel_stop: the step's tunnel closed, whatever ended the step. run_step sets it as an EXIT
+# trap before it opens one, so a refusal, an interrupt and a failure anywhere below all close it;
+# it does nothing when no tunnel is open, and it never changes the exit status it runs under.
+tunnel_stop() {
+  [ -n "${TUNNEL_OPEN:-}" ] || return 0
+  TUNNEL_OPEN=""
+  tunnel_kill
+  return 0
+}
+
+# step_cleanup: the sampler and the tunnel both ended, whatever ended the step. run_step sets it
+# as its EXIT trap before it opens either, so a refusal, an interrupt, a failure of the ssh that
+# carries the load and a failure of anything after it all leave neither behind: a sampler left
+# running holds one ssh per VM open and goes on appending to a finished step's cgroup.jsonl.
+step_cleanup() {
+  sampler_stop
+  tunnel_stop
+  return 0
+}
+
 # ---- a step -----------------------------------------------------------------------------------------
 
 # load_value FILTER DEFAULT: one number or word of the deployment file's load object.
@@ -1118,8 +1249,19 @@ run_step() {
   note "step $name: factor $factor, $EVENTS events/s, $REQUESTS requests/s, $SESSIONS sessions, $UNIT_STARTS unit starts/s, window $duration after $warmup"
 
   reset_deployment "$dir/reset.json"
-  endpoints
+  # The step's -pprof is the tunnel's loopback address on the generator VM, and the tunnel is
+  # opened and proven before any load: the sampler inside loadgen run reads Dispatch's pool
+  # acquire waiters through it, and criterion (e) is judged on nothing without them. The EXIT
+  # trap ends both the tunnel and the sampler however the step ends -- a refusal below, an
+  # interrupt, a failure of the ssh that carries the load, a failure of the collection after it.
+  endpoints "$(pprof_tunnel_url)"
   seconds=$(($(duration_seconds "$warmup") + $(duration_seconds "$duration") + 20 + RUN_SLACK_SECONDS))
+  trap step_cleanup EXIT
+  if ! tunnel_start "$name"; then
+    step_cleanup
+    rm -rf -- "$dir"
+    die "step $name is refused: $TUNNEL_REFUSAL Without the profiling tunnel loadgen's sampler reads no goroutines, no pool acquire waiters and no heap while the step runs, so pass criterion (e), Dispatch's pool acquire waiters p50 = 0, is FAIL for want of a measurement and the step measures nothing. Its directory is removed, so the step runs again under its own name once the tunnel can be opened."
+  fi
   sampler_start
   local args=(
     run -name "$name" -out "$work/steps/$name"
@@ -1136,7 +1278,8 @@ run_step() {
   [ -z "$ROUTE_MIX" ] || args+=(-route-mix "$ROUTE_MIX")
   args+=("${ENDPOINTS[@]}")
   on_vm_for "$seconds" generator "$remote" "${args[@]}" >"$dir/loadgen.out" 2>&1 || rc=$?
-  sampler_stop
+  step_cleanup
+  trap - EXIT
   if ! vms_running; then
     note "step $name is discarded: $VMS_STOPPED. A VM that Google stopped at its 72-hour run-time limit is not a Dispatch failure; start it again and run this step over."
     rm -rf -- "$dir"

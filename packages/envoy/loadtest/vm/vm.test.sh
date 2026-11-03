@@ -11,9 +11,12 @@
 # ssh target, computing from each `run` the NanoCpus, Memory, network mode and storage option
 # that docker itself would record, which its `inspect` then answers, so a reading the test wants
 # to differ is one file to rewrite; `curl` answers the metadata server, the Cloud SQL Admin API,
-# the Compute API, Dispatch's /healthz and the profiling port; `psql` keeps a database list;
+# the Compute API, Dispatch's /healthz, the profiling port and, only while the fake tunnel of
+# that port runs, a read through the step's profiling tunnel; `psql` keeps a database list;
 # `nc` refuses every address unless the test says otherwise; `loadgen` records its argv and
-# writes the files the next step reads. `jq` is the real one.
+# writes the files the next step reads; `pprof-tunnel` is the deployment file's
+# pprof_tunnel_command, which stands for the `ssh -N -L ...` a step runs on the generator VM.
+# `jq` is the real one.
 #
 # Asserts that: (a) every subcommand refuses a missing --config, and refuses one that is not
 # readable JSON, before it reaches a VM; (b) up starts every container of the specification, in
@@ -38,7 +41,12 @@
 # so is one whose VM is already stopped, and series stops on it; (k) seed runs the plan, the
 # write on the generator VM, the check, the export and seed-finish with the embedding gate, and
 # records each phase's wall clock and the gate's progress; (l) down stops every container and
-# leaves the VMs and the instance alone.
+# leaves the VMs and the instance alone; (m) step opens the profiling tunnel on the generator VM
+# and proves it with a read of /debug/pprof/goroutine?debug=1 through it before loadgen run,
+# gives loadgen that tunnel as -pprof, takes its local port from the deployment file and 16060
+# when it names none, closes it when the step ends -- no process and no pid file left on the
+# generator VM -- and refuses the step by name, before any load and leaving no directory, when
+# the tunnel does not answer.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -192,7 +200,21 @@ case $url in
     fi
     ;;
   */healthz) cat "$FAKE_DIR/healthz" ;;
-  *debug/pprof/*) printf 'fake profile of %s\n' "$url" ;;
+  *debug/pprof/*)
+    # A read of the application VM's own profiling port always answers. A read of any other port
+    # is one through the step's tunnel, and answers only while the fake tunnel that forwards
+    # that port runs: the tunnel records its pid and its port in FAKE_DIR/tunnel-up, and this is
+    # how a test proves the tunnel was opened before the step and closed when it ended.
+    port=${url#http://127.0.0.1:}
+    port=${port%%/*}
+    if [ "$port" != "$(cat "$FAKE_DIR/pprof-port")" ]; then
+      up=$FAKE_DIR/tunnel-up
+      [ -f "$up" ] || { printf 'fake curl: connection refused on %s\n' "$url" >&2; exit 7; }
+      kill -0 "$(awk '{print $1}' "$up")" 2>/dev/null && [ "$(awk '{print $2}' "$up")" = "$port" ] ||
+        { printf 'fake curl: connection refused on %s\n' "$url" >&2; exit 7; }
+    fi
+    printf 'fake profile of %s\n' "$url"
+    ;;
   *) printf 'fake curl: no answer for %s\n' "$url" >&2; exit 22 ;;
 esac
 exit 0
@@ -335,6 +357,33 @@ printf 'sleep\t%s\n' "$*" >>"$FAKE_DIR/actions.log"
 exit 0
 EOF
 
+cat >"$bin/pprof-tunnel" <<EOF
+#!/usr/bin/env bash
+REAL_SLEEP=$REAL_SLEEP
+EOF
+cat >>"$bin/pprof-tunnel" <<'EOF'
+# The fake tunnel: what the deployment file's pprof_tunnel_command names, standing for
+# `ssh -N -L <port>:127.0.0.1:<pprof port> <the application VM>` run on the generator VM. It
+# records its argv, says in FAKE_DIR/tunnel-up which port now answers and under which pid, and
+# ends on TERM as ssh does. FAKE_DIR/tunnel-refuses makes it exit at once, as ssh does when the
+# forward cannot be made (ExitOnForwardFailure) or the application VM refuses the connection.
+set -u
+printf 'tunnel\t%s\n' "$*" >>"$FAKE_DIR/actions.log"
+printf '%s\n' "$*" >>"$FAKE_DIR/tunnel.log"
+forward=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    -L) forward=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$forward" ] || { echo 'fake tunnel: no -L forward' >&2; exit 2; }
+[ ! -f "$FAKE_DIR/tunnel-refuses" ] || exit 255
+printf '%s %s\n' "$$" "${forward%%:*}" >"$FAKE_DIR/tunnel-up"
+trap 'exit 0' TERM INT
+while :; do "$REAL_SLEEP" 0.2; done
+EOF
+
 chmod +x "$bin"/*
 export PATH="$bin:$PATH"
 
@@ -347,7 +396,9 @@ readonly proxy_image=gcr.io/cloud-sql-connectors/cloud-sql-proxy@sha256:33333333
 readonly nats_image=mirror.gcr.io/library/nats@sha256:4444444444444444444444444444444444444444444444444444444444444444
 
 readonly config=$tmp/deployment.json
-jq -n --arg remote "$remote" --arg loadgen "$bin/loadgen" \
+readonly tunnel_port=16161
+jq -n --arg remote "$remote" --arg loadgen "$bin/loadgen" --arg tunnel "$bin/pprof-tunnel" \
+  --argjson tunnel_port "$tunnel_port" \
   --arg dispatch "$dispatch_image" --arg listener "$listener_image" \
   --arg proxy "$proxy_image" --arg nats "$nats_image" '{
   project: "theorem-agent-infra", zone: "us-west1-a",
@@ -366,8 +417,10 @@ jq -n --arg remote "$remote" --arg loadgen "$bin/loadgen" \
       "settings.tier": "db-custom-16-61440", "settings.availabilityType": "REGIONAL"}
   },
   images: {dispatch: $dispatch, listener: $listener, proxy: $proxy, nats: $nats},
-  ports: {dispatch: 8766, pprof: 6060, proxy: 5432, listener: 9020, hub_listener: 9030,
-    nats: 4222, nats_monitor: 8222, stub_embed: 8443, load_listeners: [9021, 9022, 9023, 9024]},
+  pprof_tunnel_command: $tunnel,
+  ports: {dispatch: 8766, pprof: 6060, pprof_tunnel: $tunnel_port, proxy: 5432, listener: 9020,
+    hub_listener: 9030, nats: 4222, nats_monitor: 8222, stub_embed: 8443,
+    load_listeners: [9021, 9022, 9023, 9024]},
   secrets: {dispatch_token: "dispatch-secret", listener_token: "listener-secret",
     embed_key: "embed-secret"},
   paths: {remote_root: ($remote + "/app"), remote_work: ($remote + "/work"),
@@ -384,6 +437,7 @@ write_fixtures() {
     jq -n --arg n "$name" '{name: $n, status: "RUNNING", scheduling: {maxRunDuration: "259200s"}}' >"$fake/compute-$name.json"
   done
   printf '{"status": "ok"}\n' >"$fake/healthz"
+  printf '6060\n' >"$fake/pprof-port"
 }
 
 reset_fake() {
@@ -782,5 +836,65 @@ stopped=$(actions | grep '^stop ' | sed 's/^stop //' | sort -u | tr '\n' ' ')
 actions | grep -q '^start ' && fail "down started something"
 grep -q 'left as they are' "$tmp/out" || fail "down does not say that the VMs and the instance are left alone"
 pass "down stops every container and leaves the VMs and the Cloud SQL instance alone"
+
+# ---- (m) the step's profiling tunnel ---------------------------------------------------------
+
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the tunnel cases"
+seeded_run
+run_vm step --config "$config" 1x 1 --duration 10m
+((RC == 0)) || fail "the step of the tunnel cases failed: see the output above"
+
+# The tunnel forwards a port of the generator VM, where loadgen run runs, to the profiling port
+# on the application VM's loopback, which is the one place that port answers.
+grep -q -- "^-L $tunnel_port:127.0.0.1:6060 lt@10.138.0.21$" "$fake/tunnel.log" ||
+  fail "the step's tunnel is not '-L $tunnel_port:127.0.0.1:6060 lt@10.138.0.21': $(cat "$fake/tunnel.log")"
+tunnel_at=$(grep -n '^tunnel	' "$fake/actions.log" | head -n1 | cut -d: -f1)
+probe_at=$(grep -n "^curl	http://127.0.0.1:$tunnel_port/debug/pprof/goroutine?debug=1$" "$fake/actions.log" | head -n1 | cut -d: -f1)
+run_at=$(grep -n '^loadgen	run ' "$fake/actions.log" | head -n1 | cut -d: -f1)
+[ -n "$tunnel_at" ] || fail "step opened no profiling tunnel"
+[ -n "$probe_at" ] || fail "step did not prove the tunnel with a read of /debug/pprof/goroutine?debug=1 through it"
+[ -n "$run_at" ] && ((tunnel_at < probe_at)) && ((probe_at < run_at)) ||
+  fail "step did not open the tunnel ($tunnel_at) and prove it ($probe_at) before loadgen run (${run_at:-none})"
+line=$(tail -n1 "$fake/loadgen-run.log")
+[[ $line == *"-pprof http://127.0.0.1:$tunnel_port"* ]] ||
+  fail "step's loadgen run does not read the profiling port through the tunnel: $line"
+[[ $line == *"-pprof http://10.138.0.21"* ]] &&
+  fail "step gave loadgen an address of the application VM, which its sampler cannot reach: $line"
+pass "step opens the profiling tunnel on the generator VM and proves it with a read of /debug/pprof/goroutine?debug=1 before loadgen run, which reads the profiling port through it"
+
+tunnel_pid=$(awk '{print $1}' "$fake/tunnel-up")
+[ -n "$tunnel_pid" ] || fail "the fake tunnel recorded no pid"
+kill -0 "$tunnel_pid" 2>/dev/null &&
+  fail "the step left its profiling tunnel running on the generator VM (pid $tunnel_pid)"
+[ ! -e "$remote/work/pprof-tunnel.pid" ] || fail "the step left its tunnel's pid file on the generator VM"
+pass "the step's profiling tunnel is closed when the step ends, leaving no process and no pid file on the generator VM"
+
+# The local port is the deployment file's, and 16060 when it names none.
+jq 'del(.ports.pprof_tunnel)' "$config" >"$tmp/default-tunnel.json"
+run_vm step --config "$tmp/default-tunnel.json" 3x 3 --duration 10m
+((RC == 0)) || fail "a step on a deployment file with no ports.pprof_tunnel failed: see the output above"
+grep -q -- '^-L 16060:127.0.0.1:6060 lt@10.138.0.21$' "$fake/tunnel.log" ||
+  fail "a deployment file with no ports.pprof_tunnel did not take the default port: $(cat "$fake/tunnel.log")"
+[[ $(tail -n1 "$fake/loadgen-run.log") == *"-pprof http://127.0.0.1:16060"* ]] ||
+  fail "a step on the default tunnel port did not give loadgen that port: $(tail -n1 "$fake/loadgen-run.log")"
+pass "the tunnel's local port comes from the deployment file, and 16060 is its default"
+
+# A tunnel that cannot be opened refuses the step by name, before any load: a step whose sampler
+# cannot read the profiling port can never be judged on pass criterion (e).
+: >"$fake/tunnel-refuses"
+runs_before=$(wc -l <"$fake/loadgen-run.log")
+run_vm step --config "$config" 2x 2 --duration 10m
+((RC != 0)) || fail "step ran with a profiling tunnel that does not answer"
+grep -q 'step 2x is refused' "$tmp/out" || fail "the refusal does not name the step"
+grep -q 'pool acquire waiters p50 = 0' "$tmp/out" ||
+  fail "the refusal does not say which pass criterion cannot be measured without the tunnel"
+[ "$(wc -l <"$fake/loadgen-run.log")" = "$runs_before" ] ||
+  fail "a step whose tunnel does not answer sent its load all the same"
+[ ! -e "$(run_dir)/steps/2x" ] ||
+  fail "a refused step left its directory, so it cannot run again under its own name"
+rm -f "$fake/tunnel-refuses"
+pass "a step whose profiling tunnel does not answer is refused by name, before any load, and leaves no directory behind"
 
 printf 'PASS: packages/envoy/loadtest/vm/vm.test.sh\n'

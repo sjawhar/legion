@@ -371,6 +371,7 @@ type writer struct {
 	capExceeded int
 	newParts    int
 	pageResyncs int
+	pageReads   int
 }
 
 // loopQuotes is the requirement kind's inventory on one proposal: the part document its threads
@@ -386,14 +387,21 @@ type loopQuotes struct {
 }
 
 // loopPage is the verdict kind's state on one review page: the generation of the text this run
-// believes the page holds, which starts at 0 (what the seed writer wrote, loopPageText) and is
-// re-read from the page when a verdict's op did not apply (resyncPage), and the lock that keeps
-// two verdicts off one page, as the issue's lock keeps two edits off one spec. A verdict's find
-// is the page's current text, so two verdicts that drew it at once would send the same find and
-// the second would be refused for a page the first had already rewritten.
+// believes the page holds, whether it knows it, and the lock that keeps two verdicts off one
+// page, as the issue's lock keeps two edits off one spec. A verdict's find is the page's current
+// text, so two verdicts that drew it at once would send the same find and the second would be
+// refused for a page the first had already rewritten.
+//
+// A run learns the generation by reading the page before its first verdict on it rather than by
+// assuming the seed's 0. A step of the deployment resets the database from its template first,
+// so every page is at 0 then and the read confirms it; a run on a database an earlier run
+// already wrote would otherwise send one find no page holds and record a refused write for each
+// of the seed's 6,057 review pages, which criterion (a), committed events/s at or above 0.95 of
+// offered, would read as Dispatch dropping writes.
 type loopPage struct {
-	mu  sync.Mutex
-	gen int
+	mu    sync.Mutex
+	gen   int
+	known bool
 }
 
 // The classes of request the loop's writes send. A write kind's own request and the extra
@@ -437,6 +445,9 @@ type loopRun struct {
 	// page for the generation the page stands at (resyncPage): a response this run lost, or a
 	// page another run has written since.
 	PageResyncs int `json:"page_resyncs"`
+	// PageReads counts the review pages this run read once before its first verdict on them, to
+	// learn the generation the page stands at. One per page a step's verdicts touched.
+	PageReads int `json:"page_reads"`
 }
 
 func newWriter(a *api, sf seedFile, loop *loopSeed, nonce int64, lg *log.Logger) *writer {
@@ -495,7 +506,8 @@ func (w *writer) loopRecord() *loopRun {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	out := &loopRun{Requests: []loopRequests{}, Reopens: w.reopens,
-		CapExceeded: w.capExceeded, NewParts: w.newParts, PageResyncs: w.pageResyncs}
+		CapExceeded: w.capExceeded, NewParts: w.newParts, PageResyncs: w.pageResyncs,
+		PageReads: w.pageReads}
 	for _, class := range loopClasses {
 		c := w.reqs[class]
 		if c == nil {
@@ -568,6 +580,11 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 		defer pg.mu.Unlock()
 		pr := &w.loop.Proposals[p.issue]
 		page := pr.ReviewPages[p.page]
+		// The first verdict of this run on this page reads the page for the generation it
+		// stands at, rather than assuming the seed's 0: see loopPage.
+		if !pg.known {
+			w.readPageGeneration(ctx, pg, p)
+		}
 		path = "/api/v1/artifacts/" + page.ArtifactID + "/edits"
 		body = map[string]any{
 			"ops": []map[string]any{{"op": "replace",
@@ -622,7 +639,7 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 		pg := &w.pages[p.issue][p.page]
 		switch {
 		case res.ok():
-			pg.gen++
+			pg.gen, pg.known = pg.gen+1, true
 		case res.status != http.StatusTooManyRequests:
 			w.resyncPage(ctx, pg, p, is.Key)
 		}
@@ -774,10 +791,28 @@ func (w *writer) resync(ctx context.Context, issue int) {
 // is one this run cannot reproduce, which it logs rather than guesses at. The page's lock is the
 // caller's.
 func (w *writer) resyncPage(ctx context.Context, pg *loopPage, p eventPlan, key string) {
-	page := w.loop.Proposals[p.issue].ReviewPages[p.page]
 	w.mu.Lock()
 	w.pageResyncs++
 	w.mu.Unlock()
+	w.readPage(ctx, pg, p, key)
+}
+
+// readPageGeneration is the same read before this run's first verdict on a page, which learns
+// the generation rather than recovering from a find that missed; it is counted apart from a
+// resync (loopRun.PageReads) because it costs one read and no refused write.
+func (w *writer) readPageGeneration(ctx context.Context, pg *loopPage, p eventPlan) {
+	w.mu.Lock()
+	w.pageReads++
+	w.mu.Unlock()
+	w.readPage(ctx, pg, p, w.loop.Proposals[p.issue].Key)
+}
+
+// readPage reads a review page and takes the generation its paragraph names. A page whose text
+// names none is one this run cannot reproduce, which it logs rather than guesses at, leaving the
+// generation it had; a page it read is known, so the next verdict on it sends no speculative
+// find. The page's lock is the caller's.
+func (w *writer) readPage(ctx context.Context, pg *loopPage, p eventPlan, key string) {
+	page := w.loop.Proposals[p.issue].ReviewPages[p.page]
 	res, markdown := w.artifactText(ctx, page.ArtifactID, who{})
 	n, ok := loopPageGeneration(markdown)
 	if !ok {
@@ -785,5 +820,5 @@ func (w *writer) resyncPage(ctx context.Context, pg *loopPage, p eventPlan, key 
 			p.kind, key, page.ArtifactID, res.status, trunc(res.body), res.err)
 		return
 	}
-	pg.gen = n
+	pg.gen, pg.known = n, true
 }

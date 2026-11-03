@@ -293,9 +293,10 @@ func loopVerdictOp(t *testing.T, call loopWriteCall) (find, with string) {
 	return find, with
 }
 
-// TestLoopVerdictWritesAReviewPageVersion: a verdict is one POST to the review page's edits route
-// that replaces the page's paragraph with the next generation of it, and its summary carries the
-// run's marker, so the artifact.version it commits is the write's own event.
+// TestLoopVerdictWritesAReviewPageVersion: this run's first verdict on a page reads it for the
+// generation it stands at, then sends one POST to the review page's edits route that replaces
+// the page's paragraph with the next generation of it, and its summary carries the run's
+// marker, so the artifact.version it commits is the write's own event.
 func TestLoopVerdictWritesAReviewPageVersion(t *testing.T) {
 	ls := loopTestSeed(t)
 	page := ls.Proposals[0].ReviewPages[1]
@@ -307,18 +308,24 @@ func TestLoopVerdictWritesAReviewPageVersion(t *testing.T) {
 		t.Fatalf("the verdict answered %d %q", rec.Status, rec.TransportErr)
 	}
 	calls := stub.sent()
-	if len(calls) != 1 {
-		t.Fatalf("a verdict sent %d requests, want one: %+v", len(calls), calls)
+	if len(calls) != 2 {
+		t.Fatalf("a first verdict sent %d requests, want the page's read and the write: %+v", len(calls), calls)
 	}
-	if calls[0].method != "POST" || calls[0].path != "/api/v1/artifacts/"+page.ArtifactID+"/edits" {
-		t.Fatalf("the verdict sent %s %s", calls[0].method, calls[0].path)
+	if calls[0].method != "GET" || calls[0].path != "/api/v1/artifacts/"+page.ArtifactID+"/text" {
+		t.Fatalf("the first verdict's first request is %s %s, want the page's text", calls[0].method, calls[0].path)
+	}
+	if n := w.loopRecord().PageReads; n != 1 {
+		t.Errorf("page reads = %d, want one", n)
+	}
+	if calls[1].method != "POST" || calls[1].path != "/api/v1/artifacts/"+page.ArtifactID+"/edits" {
+		t.Fatalf("the verdict sent %s %s", calls[1].method, calls[1].path)
 	}
 	tag := markerTag(42, 3)
-	summary, _ := calls[0].body["summary"].(string)
+	summary, _ := calls[1].body["summary"].(string)
 	if !strings.Contains(summary, tag) {
 		t.Errorf("the verdict's summary %q carries no marker", summary)
 	}
-	find, with := loopVerdictOp(t, calls[0])
+	find, with := loopVerdictOp(t, calls[1])
 	if want := loopPageBody(0, page.Index, 0, page.Bytes); find != want {
 		t.Errorf("the verdict looked for %d bytes, want the page's %d at generation 0", len(find), len(want))
 	}
@@ -371,8 +378,12 @@ func TestLoopVerdictCarriesThePageAndLeavesItTheSameSize(t *testing.T) {
 		t.Errorf("the page is %d bytes, want the %d the plan drew for it", afterFirst, page.Bytes)
 	}
 	// Each request carries the page twice, within a few percent of its planned size: the
-	// heading the op leaves alone is the only part of the page it does not carry.
+	// heading the op leaves alone is the only part of the page it does not carry. The first
+	// call is the page's read, which carries nothing.
 	for i, call := range stub.sent() {
+		if call.method != "POST" {
+			continue
+		}
 		find, with := loopVerdictOp(t, call)
 		for what, text := range map[string]string{"find": find, "with": with} {
 			if off := math.Abs(float64(len(text))-float64(page.Bytes)) / float64(page.Bytes); off > 0.03 {
@@ -380,6 +391,9 @@ func TestLoopVerdictCarriesThePageAndLeavesItTheSameSize(t *testing.T) {
 					i, what, len(text), page.Bytes)
 			}
 		}
+	}
+	if n := w.loopRecord().PageReads; n != 1 {
+		t.Errorf("ten verdicts on one page read it %d times, want once", n)
 	}
 	if n := loopRequestCount(t, w, loopClassVerdict); n != 10 {
 		t.Errorf("the verdict class counts %d requests, want 10", n)
@@ -399,8 +413,12 @@ func TestLoopVerdictResynchronisesAPageItsFindMissed(t *testing.T) {
 	// The page stands five generations on from the seed's, where this run's verdict will not
 	// look, and the first edit is refused outright.
 	stub.hold(page.ArtifactID, loopPageText(0, page.Index, 5, page.Bytes))
-	stub.refuse = func(path string, n int) (int, string) {
-		if n == 1 && strings.HasSuffix(path, "/edits") {
+	edits := 0
+	stub.refuse = func(path string, _ int) (int, string) {
+		if !strings.HasSuffix(path, "/edits") {
+			return 0, ""
+		}
+		if edits++; edits == 1 {
 			return http.StatusConflict, "PRECONDITION_FAILED"
 		}
 		return 0, ""
@@ -421,11 +439,13 @@ func TestLoopVerdictResynchronisesAPageItsFindMissed(t *testing.T) {
 	if n := w.loopRecord().PageResyncs; n != 1 {
 		t.Errorf("the loop record counts %d resynchronisations, want 1", n)
 	}
-	// The re-read is the page's text route, and it is no verdict: the class counts the two
+	// The run reads the page once before its first verdict and once more after the refusal; the
+	// re-read is the page's text route, and neither read is a verdict: the class counts the two
 	// verdicts and no more.
 	calls := stub.sent()
-	if len(calls) != 3 || calls[1].method != "GET" || calls[1].path != "/api/v1/artifacts/"+page.ArtifactID+"/text" {
-		t.Fatalf("the writer sent %d requests, want the refused edit, the page's text and the edit: %+v", len(calls), calls)
+	if len(calls) != 4 || calls[0].method != "GET" || calls[2].method != "GET" ||
+		calls[2].path != "/api/v1/artifacts/"+page.ArtifactID+"/text" {
+		t.Fatalf("the writer sent %d requests, want the page's read, the refused edit, the re-read and the edit: %+v", len(calls), calls)
 	}
 	if n := loopRequestCount(t, w, loopClassVerdict); n != 2 {
 		t.Errorf("the verdict class counts %d requests, want 2", n)
@@ -458,11 +478,11 @@ func TestLoopVerdictsOnOnePageSerialise(t *testing.T) {
 		}
 	}
 	calls := stub.sent()
-	if len(calls) != 2 {
-		t.Fatalf("two verdicts sent %d requests, want two: %+v", len(calls), calls)
+	if len(calls) != 3 || calls[0].method != "GET" {
+		t.Fatalf("two verdicts sent %d requests, want the page's read and two edits: %+v", len(calls), calls)
 	}
-	firstFind, firstWith := loopVerdictOp(t, calls[0])
-	secondFind, secondWith := loopVerdictOp(t, calls[1])
+	firstFind, firstWith := loopVerdictOp(t, calls[1])
+	secondFind, secondWith := loopVerdictOp(t, calls[2])
 	if firstFind != loopPageBody(0, page.Index, 0, page.Bytes) {
 		t.Errorf("the first verdict looked for text that is no generation of the page")
 	}
