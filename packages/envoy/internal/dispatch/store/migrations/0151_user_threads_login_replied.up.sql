@@ -1,0 +1,16 @@
+-- 0151_user_threads_login_replied.up.sql
+--
+-- INFRA-450: the Inbox reads a person's threads in two states. Unread is served by
+-- user_threads_unread (0095), partial on the stored unread flag; state=all reads every row of
+-- theirs that somebody else has written in (replied_at is not null), which that index does not
+-- cover, so without this one the read is a scan of user_threads, a row per person per thread
+-- anyone ever wrote in. The column order is the read's own: the login it narrows to, then the
+-- order it answers in (api/replies.go, myRepliesEverything), so one index scan answers it.
+--
+-- Building the index takes SHARE on user_threads, so the writes its triggers make wait for the
+-- build; the table is small (727 unread rows across every person on 2026-10-31) and the build
+-- rewrites no row and refuses none, so the window is milliseconds and its census answers 0.
+-- Migrations run in one transaction, so create index concurrently is impossible here; it is a
+-- plain create index, as 0148's is. The release before this one never reads the index, so that
+-- release serves beside it unchanged.
+create index user_threads_login_replied on user_threads (login, replied_at desc, thread_id desc) where replied_at is not null;

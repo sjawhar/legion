@@ -87,8 +87,8 @@ func TestMyRepliesListsACommentThreadASessionRepliedIn(t *testing.T) {
 	})
 
 	page := getMyReplies(t, handler, "alice", "")
-	if page.Total != 1 || len(page.Rows) != 1 || page.Limit != 50 || page.Offset != 0 {
-		t.Fatalf("page = %#v, want one row of the default page", page)
+	if page.Total != 1 || len(page.Rows) != 1 || page.Limit != 0 || page.Offset != 0 {
+		t.Fatalf("page = %#v, want one row of an unpaged read", page)
 	}
 	row := page.Rows[0]
 	if row.ThreadID != root.ID || row.Kind != "comment" || row.Ref != "/issues/"+issue.Key+"/comments/"+root.ID {
@@ -108,14 +108,20 @@ func TestMyRepliesListsACommentThreadASessionRepliedIn(t *testing.T) {
 	}
 }
 
-// What the page leaves out and what it keeps: an open ask the Inbox lists is left out, since its row
-// in Waiting on you already shows the reply; an open ask on a closed issue, which the Inbox hides,
-// stays; so do an answered ask's later reply and a resolved comment thread, until read.
+// What the page leaves out and what it keeps: an open ask the Inbox lists in Waiting on you is
+// left out, since its row there already shows the reply, and that is an open ask on an open issue
+// assigned to the caller; an open ask on a closed issue, which the Inbox hides, stays; so do an
+// answered ask's later reply and a resolved comment thread, until read. The four sides of the
+// assignee rule are TestInboxRowsKeepAnOpenAskNobodyElsesInboxRowCovers.
 func TestMyRepliesKeepsWhatTheInboxDoesNotShow(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Open ask", "A spec")
 	closing := createAnswerListIssue(t, handler, "Closing")
 	answered := createAnswerListIssue(t, handler, "Answered")
+	// Alice filed each of them, so each is assigned to her; the open asks below are hers to
+	// answer, which is what keeps them off this page.
+	assignIssue(t, handler, issue.Key, "alice")
+	assignIssue(t, handler, closing.Key, "alice")
 
 	open := createAnswerListAsk(t, handler, issue.Key, "Which way?")
 	createThreadComment(t, handler, issue.Key, map[string]any{"body": "Why ask?", "ask_id": open.ID}, "alice")

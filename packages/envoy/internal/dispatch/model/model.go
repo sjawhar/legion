@@ -1181,26 +1181,59 @@ type MyReplyReply struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// MyReplyRow is one thread the caller wrote in where someone else has written since the caller
-// last read it: an ask's thread, a comment thread by its root, or an issue message thread by its
-// root. Ref is the SPA route of the thread's root, never the reply's.
+// MyReplySession is the agent session an Agent row's thread was sent to: the session's id and the
+// name Dispatch knows it by (its newest stamped session title, or the id when it has stamped
+// none).
+type MyReplySession struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// MyReplyRow is one thread the caller is reading in the Inbox: a Reply row - an ask's thread, a
+// comment thread by its root, or an issue message thread by its root, which somebody else has
+// written in - or an Agent row, one of the caller's one-off messages to an agent session with a
+// reply from that session. Ref is the SPA route of the thread's root, never the reply's; for an
+// Agent row it is the session's live view.
 type MyReplyRow struct {
-	ThreadID string           `json:"thread_id"`
+	ThreadID string `json:"thread_id"`
+	// Kind is ask | comment | message for a Reply row, or agent for an Agent row.
 	Kind     string           `json:"kind"`
 	Ref      string           `json:"ref"`
 	Issue    *OpenAskIssue    `json:"issue,omitempty"`
 	Document *OpenAskDocument `json:"document,omitempty"`
-	Subject  string           `json:"subject"`
-	Reply    MyReplyReply     `json:"reply"`
+	// Priority is the owning issue's coarse priority, absent on a row with no issue or none set.
+	Priority *int `json:"priority,omitempty"`
+	// Project is the thread owner's project key, absent on an Agent row, which has no owner.
+	Project *string      `json:"project,omitempty"`
+	Subject string       `json:"subject"`
+	Reply   MyReplyReply `json:"reply"`
+	// ReadThrough is the caller's read mark on the thread (user_threads.read_through), absent on
+	// an Agent row, whose replies are read by id rather than by a mark.
+	ReadThrough *time.Time `json:"read_through,omitempty"`
+	// Unread says whether the row still holds a write the caller has not read: always true under
+	// state=unread, either way under state=all.
+	Unread bool `json:"unread"`
+	// UnreadCount is how many writes in the thread the caller has not read: for a Reply row the
+	// comments, messages and answers somebody else wrote after ReadThrough, for an Agent row the
+	// session replies in UnreadReplyIDs.
+	UnreadCount int `json:"unread_count"`
+	// UnreadReplyIDs are an Agent row's unread session replies, which the Inbox marks read by id.
+	UnreadReplyIDs []string `json:"unread_reply_ids,omitzero"`
+	// Anchor is the document mark the thread's root is anchored to, when it has one.
+	Anchor *Anchor `json:"anchor,omitempty"`
+	// Session is the agent session an Agent row's thread was sent to.
+	Session *MyReplySession `json:"session,omitempty"`
 }
 
-// MyRepliesResponse is a page of the caller's unread threads, newest reply first, and how many
-// there are in all.
+// MyRepliesResponse is the caller's Inbox threads, newest reply first, and how many there are in
+// all. AsOf is the database time of the one snapshot every row was read in, which is what a
+// mark-all passes back as its read mark.
 type MyRepliesResponse struct {
 	Rows   []MyReplyRow `json:"rows"`
 	Total  int          `json:"total"`
 	Limit  int          `json:"limit"`
 	Offset int          `json:"offset"`
+	AsOf   time.Time    `json:"as_of"`
 }
 
 // SessionAnswer kinds: an ask's current answer (its ID is the ask's), a comment, or a message.

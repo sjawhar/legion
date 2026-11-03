@@ -1050,27 +1050,55 @@ export interface MyReplyReply {
   readonly created_at: string;
 }
 
-/** One thread the caller wrote in where someone else has written since the caller last read it:
- *  an ask's thread, a comment thread by its root, or an issue message thread by its root. */
+/** One thread the caller is reading in the Inbox on `GET /api/v1/me/replies`: a Reply row - an
+ *  ask's thread, a comment thread by its root, or an issue message thread by its root, which
+ *  somebody else has written in - or an Agent row, one of the caller's one-off messages to an
+ *  agent session with a reply from that session. */
 export interface MyReplyRow {
-  /** The ask's id, or the comment or message thread's root id: what
-   *  `PUT /api/v1/me/threads/{id}/read` marks. */
+  /** The ask's id, the comment or message thread's root id, or an Agent row's root message id:
+   *  what `PUT /api/v1/me/threads/{id}/read` marks. */
   readonly thread_id: string;
-  readonly kind: "ask" | "comment" | "message";
-  /** Relative Dispatch deep link to the thread's root, never to the reply. */
+  readonly kind: "ask" | "comment" | "message" | "agent";
+  /** Relative Dispatch deep link to the thread's root, never to the reply; the session's live
+   *  view, `/agents/<session id>/live`, for an Agent row. */
   readonly ref: string;
   readonly issue?: Pick<Issue, "key" | "title">;
   readonly document?: InboxDocument;
+  /** The owning issue's coarse priority, absent on a row with no issue or none set. */
+  readonly priority?: IssuePriority;
+  /** The thread owner's project key, absent on an Agent row, which has no owner. */
+  readonly project?: string;
   /** The ask's question, or the root's first line, at most 160 characters. */
   readonly subject: string;
   readonly reply: MyReplyReply;
+  /** The caller's read mark on the thread (`user_threads.read_through`), absent on an Agent row,
+   *  whose replies are read by id rather than by a mark. */
+  readonly read_through?: string;
+  /** Whether the row still holds a write the caller has not read: always true under
+   *  `state=unread`, either way under `state=all`. */
+  readonly unread: boolean;
+  /** How many writes in the thread the caller has not read: for a Reply row the comments,
+   *  messages and answers somebody else wrote after `read_through`, for an Agent row the session
+   *  replies in `unread_reply_ids`. */
+  readonly unread_count: number;
+  /** An Agent row's unread session replies, which the Inbox marks read by id. */
+  readonly unread_reply_ids?: string[];
+  /** The document mark the thread's root is anchored to, when it has one. */
+  readonly anchor?: Anchor;
+  /** The agent session an Agent row's thread was sent to: its id and the name Dispatch knows it
+   *  by (its newest stamped session title, or the id when it has stamped none). */
+  readonly session?: { readonly id: string; readonly name: string };
 }
 
 export interface MyRepliesResponse {
   readonly rows: MyReplyRow[];
   readonly total: number;
+  /** The page size the caller named, or 0 when they named none and the answer holds every row. */
   readonly limit: number;
   readonly offset: number;
+  /** The database time of the one snapshot every row was read in, which a mark-all passes back as
+   *  its read mark. */
+  readonly as_of: string;
 }
 
 /** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per
