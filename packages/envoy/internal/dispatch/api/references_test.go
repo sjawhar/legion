@@ -348,9 +348,16 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 		t.Fatalf("since the introducing event kept %#v; want no edges", since.Edges)
 	}
 	// The read waits for an observation taken after it to be proven safe, so it answers the
-	// message committed before it; awaitGraphEdges re-reads only in case an open transaction
-	// elsewhere on the shared test cluster holds the horizon back past referencesSinceWait.
-	if since := awaitGraphEdges(t, handler, url.Values{"to": {askRef}, "since": {strconv.FormatInt(messageEventID-1, 10)}}, 1); since.Edges[0].SourceSeq == nil || *since.Edges[0].SourceSeq != messageEventID {
+	// message committed before it. A read that answered inside referencesSinceWait had that
+	// proof, so its answer is final and a wrong one fails the test at once; awaitSinceRead reads
+	// again only a read held past that wait, which an open transaction elsewhere on the shared
+	// test cluster can cause.
+	since := awaitSinceRead(t, "since the event before the message, ?to= "+askRef+", wanting the message's backlink",
+		func() model.GraphReferences {
+			return graphEdges(t, handler, url.Values{"to": {askRef}, "since": {strconv.FormatInt(messageEventID-1, 10)}})
+		},
+		func(read model.GraphReferences) bool { return len(read.Edges) == 1 })
+	if since.Edges[0].SourceSeq == nil || *since.Edges[0].SourceSeq != messageEventID {
 		t.Fatalf("since the prior event = %#v; want the backlink", since.Edges)
 	}
 
@@ -374,25 +381,6 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 }
 
-// awaitGraphEdges reads query until it answers want edges. A since read answers every edge whose
-// event committed before it unless an open transaction holds the event log's safe horizon back
-// past referencesSinceWait, when it answers only the edges at or below the horizon; the wait is
-// generous, since an open write anywhere on the test cluster holds the horizon back.
-func awaitGraphEdges(t *testing.T, handler http.Handler, query url.Values, want int) model.GraphReferences {
-	t.Helper()
-	deadline := time.Now().Add(eventFeedWait)
-	for {
-		read := graphEdges(t, handler, query)
-		if len(read.Edges) == want {
-			return read
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("GET /api/v1/references?%s = %#v after %s; want %d edges", query.Encode(), read.Edges, eventFeedWait, want)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 // awaitSinceRead reads again until holds accepts the answer, because a since read answers only
 // the edges at or below the event log's safe horizon, and any transaction holding a transaction
 // id on the Postgres instance holds that horizon back: in this package, storetest's own
@@ -402,13 +390,13 @@ func awaitGraphEdges(t *testing.T, handler http.Handler, query url.Values, want 
 // so it is read again, bounded by eventFeedWait. A read that answered within referencesSinceWait
 // was not held back: what it listed is what it owed, so holds failing on it, a missing edge as
 // much as a duplicate or a wrongly stamped one, is a product failure and fails the test at once.
-// The what argument names the read in either failure.
+// The what argument names the read in either failure. It returns the answer holds accepted.
 func awaitSinceRead(
 	t *testing.T,
 	what string,
 	read func() model.GraphReferences,
 	holds func(model.GraphReferences) bool,
-) {
+) model.GraphReferences {
 	t.Helper()
 	deadline := time.Now().Add(eventFeedWait)
 	for {
@@ -416,7 +404,7 @@ func awaitSinceRead(
 		answer := read()
 		took := time.Since(started)
 		if holds(answer) {
-			return
+			return answer
 		}
 		if took < referencesSinceWait {
 			t.Fatalf("%s answered %#v in %s, inside %s: the horizon held nothing back, so that is every edge it owes",
@@ -531,7 +519,9 @@ func TestReferencesSinceWithholdsEveryMentionAboveAnOpenLowerEvent(t *testing.T)
 	if err := open.Commit(ctx); err != nil {
 		t.Fatalf("commit the lower event: %v", err)
 	}
-	read := awaitGraphEdges(t, handler, query, 2)
+	read := awaitSinceRead(t, "since "+strconv.FormatInt(low-1, 10)+" ?to= "+targetRef+", wanting both mentions once the lower event has committed",
+		func() model.GraphReferences { return graphEdges(t, handler, query) },
+		func(read model.GraphReferences) bool { return len(read.Edges) == 2 })
 	var seqs []int64
 	for _, edge := range read.Edges {
 		if edge.Kind != "mentions" || edge.SourceSeq == nil {
