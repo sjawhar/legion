@@ -407,6 +407,10 @@ func (c *stubConn) BundleWorkspace(context.Context, string, time.Duration) (runt
 	return runtime.WorkspaceBundle{}, errors.New("the stream stub bundles no workspace")
 }
 
+func (c *stubConn) RescueUnpushed(context.Context, runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	return nil, errors.New("the stream stub does not run push checks")
+}
+
 func (c *stubConn) AgentSecretsEnrollment(context.Context, string) error {
 	return errors.New("the stream stub does not enroll agent secrets")
 }

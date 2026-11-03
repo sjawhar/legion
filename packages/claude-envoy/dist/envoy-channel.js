@@ -37071,7 +37071,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
-    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect runs `plan-gap-analyst` and `plan-reviewer`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it: " + "request approval again once that revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; the carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect runs `plan-gap-analyst` and `plan-reviewer`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it, until " + "a later version's text is exactly the approved version's again, as when an accidental " + "edit is undone exactly, and no decision block in it was decided since: that version " + "carries the approval and the document reads approved at it, so nothing is requested for " + "it. When the document does not read approved, request approval again once that revision " + "is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; a carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37175,7 +37175,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_project",
     example: { key: "CORE", name: "Core" },
-    description: "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " + "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " + "with dispatch projects. A key that already exists is refused " + "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " + `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` + `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. Do not use ` + "it when an existing project already covers the work; file an issue there with dispatch issue instead.",
+    description: "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " + "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " + "with dispatch projects. When a person asks for a project, make the key from its name. Check the key with " + "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use. " + "A key that already exists is refused " + "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " + `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` + `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. When no person ` + "asked for a project and an existing project already covers the work, do not create a project. File an " + "issue in that project with dispatch issue.",
     arguments: (z) => ({
       key: z.string().describe("The new project's key, such as CORE."),
       name: z.string({ max: PROJECT_NAME_MAX }).describe(`The project's name, shown beside its key, at most ${PROJECT_NAME_MAX} characters.`)
@@ -42930,15 +42930,18 @@ import {
   openSync as openSync2,
   readdirSync,
   readFileSync as readFileSync3,
+  readlinkSync as readlinkSync2,
   renameSync as renameSync2,
   rmSync as rmSync3,
   statSync as statSync2,
   unlinkSync,
+  utimesSync,
   writeFileSync as writeFileSync2
 } from "fs";
 import { isAbsolute as isAbsolute2, join as join3, resolve as resolve2 } from "path";
 var ASKGATE_RECORD = "askgate";
 var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
+var STORE_BEAT_MS = 10 * 60000;
 var MARKERS = "markers";
 var ALWAYS_GATED = {
   dispatch_ask: true,
@@ -43003,7 +43006,25 @@ function processStart(pid) {
     return null;
   }
 }
-function ownerLive(owner) {
+var ownNamespace;
+function pidNamespace() {
+  if (ownNamespace === undefined) {
+    try {
+      ownNamespace = /^pid:\[([0-9]+)\]$/.exec(readlinkSync2("/proc/self/ns/pid"))?.[1] ?? null;
+    } catch {
+      ownNamespace = null;
+    }
+  }
+  return ownNamespace;
+}
+function ownerLive(owner, now) {
+  if (owner.ns !== null && owner.ns !== pidNamespace()) {
+    try {
+      return now - storeTouched(owner.store) <= MARKER_MAX_AGE_MS;
+    } catch {
+      return false;
+    }
+  }
   if (owner.start !== null)
     return processStart(owner.pid) === owner.start;
   try {
@@ -43013,11 +43034,11 @@ function ownerLive(owner) {
     return !hasErrnoCode(error, "ESRCH");
   }
 }
-function isOwner(value) {
+function isOwnerText(value) {
   if (typeof value !== "object" || value === null)
     return false;
-  const { pid, start, store } = value;
-  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && typeof store === "string" && store.startsWith("/");
+  const { pid, start, ns, store } = value;
+  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && (ns === undefined || ns === null || typeof ns === "string" && /^[0-9]+$/.test(ns)) && typeof store === "string" && store.startsWith("/");
 }
 function parseOwner(text) {
   let data;
@@ -43026,16 +43047,16 @@ function parseOwner(text) {
   } catch {
     return;
   }
-  if (!isOwner(data) || !("v" in data) || data.v !== 2)
+  if (!isOwnerText(data) || data.v !== 2)
     return;
-  const { pid, start, store, mode } = data;
+  const { pid, start, ns, store, mode } = data;
   return {
-    owner: { pid, start, store },
+    owner: { pid, start, ns: ns ?? null, store },
     mode: mode === "block" ? "block" : "warn"
   };
 }
 var OWNER_FILE = ".json";
-var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
+var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+)(?:-([0-9]+))?)?$/;
 function storeTouched(store) {
   const own = statSync2(store).mtimeMs;
   try {
@@ -43046,6 +43067,7 @@ function storeTouched(store) {
     throw error;
   }
 }
+var UNNAMESPACED_STORE_MAX_AGE_MS = 14 * 86400000;
 function sweepStores(root, now) {
   const parent = join3(root, "askgate");
   let names;
@@ -43060,15 +43082,42 @@ function sweepStores(root, now) {
       continue;
     const store = join3(parent, name);
     try {
-      if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
+      const owner = { pid: Number(match[1]), start: match[2] ?? null, ns: match[3] ?? null, store };
+      if (ownerLive(owner, now))
         continue;
-      if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
+      const unnamespaced = owner.start !== null && owner.ns === null;
+      const keep = unnamespaced ? UNNAMESPACED_STORE_MAX_AGE_MS : MARKER_MAX_AGE_MS;
+      if (now - storeTouched(store) <= keep)
         continue;
       rmSync3(store, { recursive: true, force: true });
     } catch {}
   }
 }
-function askgateState(dir) {
+function recordNamesStore(dir) {
+  const record = join3(dir, ASKGATE_RECORD);
+  let names;
+  try {
+    names = readdirSync(record);
+  } catch (error) {
+    return !hasErrnoCode(error, "ENOENT");
+  }
+  for (const name of names) {
+    if (!name.endsWith(OWNER_FILE))
+      continue;
+    try {
+      const parsed = parseOwner(readFileSync3(join3(record, name), "utf-8"));
+      if (parsed === undefined)
+        return true;
+      statSync2(parsed.owner.store);
+      return true;
+    } catch (error) {
+      if (!hasErrnoCode(error, "ENOENT"))
+        return true;
+    }
+  }
+  return false;
+}
+function askgateState(dir, now = Date.now()) {
   const record = join3(dir, ASKGATE_RECORD);
   let names;
   try {
@@ -43094,8 +43143,9 @@ function askgateState(dir) {
     const parsed = parseOwner(text);
     if (parsed === undefined)
       return { kind: "broken", problem: `${file}, is not an AskGate record` };
-    if (ownerLive(parsed.owner))
+    if (ownerLive(parsed.owner, now)) {
       live.push({ file, store: parsed.owner.store, mode: parsed.mode });
+    }
   }
   if (live.length === 0)
     return { kind: "off" };
@@ -44255,7 +44305,7 @@ function renderAdvice(tool, key, advice, opts) {
   }
   const superseded = advice.superseded_approval;
   if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
-    lines.push(`Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`);
+    lines.push(`Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version} or a later write stores the text of version ${superseded.approved_version} again exactly, with no decision block in it decided since: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`);
   }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
     const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies. Their reply ends this: post then what you held back." : "Progress ledger or scratchpad? If so, stop.";
@@ -44763,7 +44813,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
     return id === undefined || versionName !== undefined && url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
-  const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
+  const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children|decisions)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
     const [, key = "", page, artifact, ask, comment, message] = issuePage;
     const version = versionOf("v");
@@ -44778,6 +44828,8 @@ function dispatchRefFromUrl(value, serverUrl) {
       return `dispatch://${key}/artifact/spec${version}`;
     if (page === "spec")
       return `dispatch://${key}/spec${blockOf("v")}`;
+    if (page === "decisions")
+      return `dispatch://${key}/artifact/decisions-md`;
     if (page !== undefined)
       return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
@@ -47271,7 +47323,8 @@ function pruneSessions(root, now) {
       continue;
     const dir = join5(sessions, entry.name);
     try {
-      if (now - statSync3(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+      const idle = now - statSync3(dir).mtimeMs > IDLE_SESSION_MS;
+      if (idle && askgateState(dir, now).kind === "off" && !recordNamesStore(dir)) {
         rmSync4(dir, { recursive: true, force: true });
       }
     } catch (error) {
@@ -51207,7 +51260,7 @@ function createChannelForwarder(connection, options) {
 
 // src/claude-channel.ts
 import { spawnSync } from "child_process";
-import { readdirSync as readdirSync3, readFileSync as readFileSync6, readlinkSync as readlinkSync2 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync6, readlinkSync as readlinkSync3 } from "fs";
 import { homedir as homedir3 } from "os";
 import { basename as basename2, join as join6, resolve as resolve3, sep } from "path";
 var PLUGIN_SERVER = "envoy";
@@ -51454,7 +51507,7 @@ function cacheDirectoryName(marketplace) {
 function processExecutable(pid) {
   if (process.platform === "linux") {
     try {
-      return readlinkSync2(`/proc/${pid}/exe`);
+      return readlinkSync3(`/proc/${pid}/exe`);
     } catch {
       return;
     }
@@ -51473,7 +51526,7 @@ function stdoutIsTerminal(pid) {
   if (process.platform !== "linux")
     return;
   try {
-    const target = readlinkSync2(`/proc/${pid}/fd/1`);
+    const target = readlinkSync3(`/proc/${pid}/fd/1`);
     return target.startsWith("/dev/pts/") || /^\/dev\/tty[^S]/.test(target) || target === "/dev/tty";
   } catch {
     return;
@@ -51481,7 +51534,7 @@ function stdoutIsTerminal(pid) {
 }
 function workingDirectory(pid) {
   try {
-    return readlinkSync2(`/proc/${pid}/cwd`);
+    return readlinkSync3(`/proc/${pid}/cwd`);
   } catch {
     return;
   }

@@ -179,14 +179,18 @@ type PodUpdateOpen struct {
 // it records.
 //
 // The three steps are the same for both kinds. The consequence is not. A pod's round deletes the
-// pod and the disk the workspace is on, so work the worker does not push is lost. A plugin round
-// keeps both: the daemon starts the process again on its own plugin, in the same pod, once the
-// worker's turn has ended (endPodUpdate relaunches no working claim), so no turn is lost.
+// pod and the disk the workspace is on, so work the worker does not push is lost, and so is every
+// scratch and temporary file the worker keeps on that disk outside its commits: a log, a harness,
+// a measurement it still needs as evidence. Step 1 says so, and tells it where such a file goes
+// before it answers. A plugin round keeps both: the daemon starts the process again on its own
+// plugin, in the same pod, once the worker's turn has ended (endPodUpdate relaunches no working
+// claim), so no turn is lost.
 //
 // Another agent reads it, so it follows ASD-STE100: one instruction per sentence, active voice,
 // and no word that has a second reading.
 func UpdateTask(round, reasons string) string {
-	first, consequence := "The daemon must replace the pod that runs this issue's roles.",
+	first, keep, consequence := "The daemon must replace the pod that runs this issue's roles.",
+		` The pod's scratch and temporary files go with the pod: logs, test output, a harness, any file outside your commits. If you need such a file as evidence, put it on Dispatch before you answer.`,
 		`The replacement deletes the pod and the disk. The disk holds your workspace. Work that you do not push is lost.
 
 The daemon starts your process again on the new pod, in this same session.`
@@ -194,7 +198,7 @@ The daemon starts your process again on the new pod, in this same session.`
 	// Claim.InPluginRound reads too), so the words can never disagree with what endPodUpdate does
 	// for the same round.
 	if IsPluginRound(round) {
-		first, consequence = "The daemon must start your process again on a different plugin.",
+		first, keep, consequence = "The daemon must start your process again on a different plugin.", "",
 			`The restart keeps the pod and the disk. The disk holds your workspace. Work that you do not push stays on the disk. The restart waits until your turn ends.
 
 The daemon starts your process again on this same pod, in this same session.`
@@ -203,13 +207,13 @@ The daemon starts your process again on this same pod, in this same session.`
 
 Do these three steps now:
 
-1. Push every commit you want to keep to this issue's branch.
+1. Push every commit you want to keep to this issue's branch.%s
 2. Call the `+"`legion`"+` tool with op: "ready_for_update" and round: "%s".
 3. End your turn.
 
 If your `+"`legion`"+` tool has no "ready_for_update" operation, do step 1 and step 3 only. End your last message with a line that starts with WAITING and names this round, so your own plugin does not continue the turn. The daemon reads the end of this turn as your answer.
 
-%s The daemon holds your next task until your process runs again. Do not start new work now.`, first, reasons, round, consequence)
+%s The daemon holds your next task until your process runs again. Do not start new work now.`, first, reasons, keep, round, consequence)
 }
 
 // PodUpdateEnded is the update round over for this claim: every update_* field goes, and the task

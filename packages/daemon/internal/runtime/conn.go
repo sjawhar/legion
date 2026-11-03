@@ -32,6 +32,43 @@ func RefusalReason(err error) string {
 // an unknown command. Asking the same shim again changes neither.
 var ErrTokenRefused = errors.New("runtime: the shim did not read its projected token")
 
+// ErrRescueUnsupported is a shim that does not know `rescue-unpushed`: one built before the push
+// check, which forwards the frame to its agent, and the agent refuses it as a command it does not
+// know. Nothing was checked and nothing was pushed. Every other failure of the check is not this.
+var ErrRescueUnsupported = errors.New("runtime: the pod's shim predates the push check")
+
+// RescueRequest is one push check of a pod's disk: the prefix of every rescue branch, which the
+// shim numbers from 1, the bound of one workspace's check and push, and the bound of the whole.
+type RescueRequest struct {
+	Branch           string
+	WorkspaceTimeout time.Duration
+	Timeout          time.Duration
+}
+
+// WorkspaceRescue is one workspace's push check, as the shim that ran it reports it.
+type WorkspaceRescue struct {
+	// Dir is the workspace's directory on the pod's disk.
+	Dir string
+	// Status is RescueClean, RescueRescued or RescueFailed.
+	Status string
+	// Branches is each rescue branch pushed for it, with the commit it holds.
+	Branches []RescuedBranch
+	// Error is why a failed check failed.
+	Error string
+}
+
+// RescuedBranch is one rescue branch a push check pushed, and the commit it holds.
+type RescuedBranch struct {
+	Name, Commit string
+}
+
+// The statuses of a workspace's push check.
+const (
+	RescueClean   = "clean"
+	RescueRescued = "rescued"
+	RescueFailed  = "error"
+)
+
 // WorkspaceBundleTimeout is how long the agent's side is given to build its workspace's bundle:
 // a handful of jj reads and one `git bundle create` over the commits no remote branch holds,
 // which is a pack of a working copy's own change and a few unpushed commits, never the clone's
@@ -68,6 +105,10 @@ type Conn interface {
 	// away. A bundle larger than MaxWorkspaceBundleBytes is refused rather than sent, with the
 	// size it would have been in the refusal, so the release can stop and record why.
 	BundleWorkspace(ctx context.Context, issue string, timeout time.Duration) (WorkspaceBundle, error)
+	// RescueUnpushed asks the agent's shim to check every workspace on its pod's disk for work the
+	// remote lacks and to push that work to rescue branches, as the agent's role. A shim that does
+	// not know the request is ErrRescueUnsupported; every other error is transport or a refusal.
+	RescueUnpushed(ctx context.Context, request RescueRequest) ([]WorkspaceRescue, error)
 	// AgentSecretsEnrollment hands the agent's shim the secrets broker's enrollment id for its
 	// process, which the shim keeps beside the key it generated.
 	AgentSecretsEnrollment(ctx context.Context, enrollmentID string) error

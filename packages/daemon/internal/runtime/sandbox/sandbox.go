@@ -1029,6 +1029,39 @@ func (r *Runtime) BundleWorkspace(ctx context.Context, issue string, role claim.
 	return bundle, nil
 }
 
+// RescueUnpushed has the claim's shim run the push check of its issue pod's disk over the claim's
+// connection (internal/rescue): the shim runs git and jj as the role, with the role's gh files
+// answering the clone's credential helper, so no credential leaves the pod and none reaches the
+// daemon. The recorded process must still be the claim's running pod: the connection is its.
+func (r *Runtime) RescueUnpushed(ctx context.Context, k runtime.Known, request runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	if err := k.Validate(); err != nil {
+		return nil, fmt.Errorf("sandbox runtime: push check: %w", err)
+	}
+	if k.Locator == nil {
+		return nil, fmt.Errorf("push check of %s: the claim records no process to ask", k.Claim)
+	}
+	loc := *k.Locator
+	if err := r.checkLocator(loc); err != nil {
+		return nil, err
+	}
+	view, err := r.view(loc.Sandbox.Name)
+	if err != nil {
+		return nil, fmt.Errorf("push check of %s's pod: %w", loc.Claim, err)
+	}
+	if view.pod == nil || string(view.pod.UID) != loc.Sandbox.PodUID || terminal(view.pod) {
+		return nil, fmt.Errorf("push check of %s: its recorded role process %s is not in its running issue pod", loc.Claim, loc.Incarnation)
+	}
+	conn, ok := r.conns.Conn(loc.Claim)
+	if !ok {
+		return nil, fmt.Errorf("push check of %s's pod: the claim has no connection to ask over", loc.Claim)
+	}
+	report, err := conn.RescueUnpushed(ctx, request)
+	if err != nil {
+		return nil, fmt.Errorf("push check of %s's pod: %w", loc.Claim, err)
+	}
+	return report, nil
+}
+
 // ReconcileOrphans deletes the project's Sandboxes nothing owns, once older than grace. An issue
 // Sandbox is owned by its tree's lifecycle: it is an orphan once its tree's cleanup confirmed or
 // when it has no lifecycle, which a launch whose create reached the API after its tree's cleanup

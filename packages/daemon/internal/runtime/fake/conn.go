@@ -153,6 +153,12 @@ func (c *Conn) Bundlings() []Bundling {
 // FailBundleWorkspace makes every later BundleWorkspace return err; nil clears it.
 func (c *Conn) FailBundleWorkspace(err error) { c.fail("BundleWorkspace", err) }
 
+// RescueUnpushed answers a disk with no workspace on it: the daemon asks the push check through
+// its runtime (runtime.Runtime.RescueUnpushed), whose fake answers what a test scripts there.
+func (c *Conn) RescueUnpushed(context.Context, runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	return nil, nil
+}
+
 // AgentSecretsEnrollment records the enrollment id the daemon asked the agent's shim to keep.
 func (c *Conn) AgentSecretsEnrollment(_ context.Context, enrollmentID string) error {
 	c.mu.Lock()

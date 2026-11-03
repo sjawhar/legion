@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/rescue/rescuetest"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -1026,6 +1027,61 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 			p.next(t)
 			if got := frameTypes(child.received(t)); !reflect.DeepEqual(got, []string{shimwire.TypeGetState}) {
 				t.Fatalf("OMP read %v; adopt-working-copy is the shim's own", got)
+			}
+		})
+	}
+}
+
+// `rescue-unpushed` is answered by the shim itself, as its role and in its role's environment: it
+// checks every workspace on the disk its LEGION_WORKSPACE is on, pushes what the remote lacks to a
+// rescue branch, and answers one entry per workspace; OMP never sees the frame. A shim with no
+// LEGION_WORKSPACE has no disk to check and refuses.
+func TestRescueUnpushedChecksTheDiskAndAnswersTheDaemon(t *testing.T) {
+	d := rescuetest.New(t, "WIDGETS-42")
+	d.Write(d.Workspace, "feature.txt", "work jj alone holds\n")
+	d.JJ("commit", "-m", "work jj alone holds")
+	commit := d.JJ("log", "--no-graph", "-r", "@-", "-T", "commit_id")
+	for _, tc := range []struct {
+		name        string
+		noWorkspace bool
+	}{{name: "a shim on the issue's workspace"}, {name: "a shim with no LEGION_WORKSPACE", noWorkspace: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := socketPath(t)
+			daemon := listen(t, path)
+			child := newOMP(t)
+			cfg := config(t, path, child)
+			cfg.Env = append(slices.Clone(d.Env), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker, "FAKE_OMP_LOG="+child.log)
+			if !tc.noWorkspace {
+				cfg.Env = append(cfg.Env, "LEGION_WORKSPACE="+d.Workspace)
+			}
+			run(t, cfg, newClock())
+			p := daemon.accept(t)
+			p.open(t)
+
+			request := shimwire.RescueUnpushed{ID: "r1", Branch: "legion/WIDGETS-42-rescue-9d3f0c7a", WorkspaceTimeoutMs: 60_000, TimeoutMs: 120_000}
+			p.send(t, request)
+			got, ok := p.next(t).(shimwire.RescueUnpushedResult)
+			if !ok || got.ID != request.ID {
+				t.Fatalf("the shim answered %#v, want a result for %s", got, request.ID)
+			}
+			if tc.noWorkspace {
+				if got.OK || !strings.Contains(got.Error, "LEGION_WORKSPACE is not set") {
+					t.Fatalf("the shim answered %#v, want a refusal naming LEGION_WORKSPACE", got)
+				}
+			} else {
+				want := []shimwire.RescueWorkspace{{Dir: d.Workspace, Status: "rescued", Branches: []shimwire.RescueBranch{{Name: request.Branch + "-1", Commit: commit}}}}
+				if !got.OK || !reflect.DeepEqual(got.Workspaces, want) {
+					t.Fatalf("the shim answered %#v, want %+v", got, want)
+				}
+				if held := d.RemoteBranch(request.Branch + "-1"); held != commit {
+					t.Fatalf("the remote holds %s-1 at %q, want %s", request.Branch, held, commit)
+				}
+			}
+
+			p.send(t, shimwire.GetState{ID: "after"})
+			p.next(t)
+			if got := frameTypes(child.received(t)); !reflect.DeepEqual(got, []string{shimwire.TypeGetState}) {
+				t.Fatalf("OMP read %v; rescue-unpushed is the shim's own", got)
 			}
 		})
 	}

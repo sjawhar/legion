@@ -315,11 +315,20 @@ func (r *podUpdateRig) awaitSwept(role claim.Role, what string, want func(superv
 	return r.claimOf(role)
 }
 
-// signal is the worker answering ready_for_update, as api's claims/ready-for-update posts it.
+// signal is the worker answering ready_for_update, as api's claims/ready-for-update posts it. The
+// worker answers from inside the turn the round's ask started, after Oh My Pi acknowledged that
+// ask, so the answer waits for the machine to have handled each acknowledgement it is owed
+// (supervise.PromptAcked). Answered while one is still in flight, the machine decides that
+// acknowledgement after the answer, and a sweep that reads it then masks the answer (roundGroup)
+// and asks the runtime nothing, which CI run 41563218953 is the reproduction of.
 func (r *podUpdateRig) signal(role claim.Role, head string) {
 	r.t.Helper()
+	m, ok := r.sup.Machine(r.tokens[role])
+	if !ok {
+		r.t.Fatalf("%s is not supervised", role)
+	}
+	m.Wait()
 	c := r.claimOf(role)
-	m, _ := r.sup.Machine(r.tokens[role])
 	if err := m.Handle(r.ctx, supervise.PodUpdateSignalled{
 		Claim: c.Token, Generation: c.Generation, Session: c.Session, Round: c.UpdateRound, Head: head,
 	}); err != nil {
@@ -2043,6 +2052,12 @@ func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	// registers there, holds a session from that moment, and has answered nothing.
 	rig.startInPod(claim.RoleTester, podUpdatePod)
 
+	// The call below is the one sweep the test makes, over a group it built by hand, so nothing
+	// may still be deciding when it reads the claims: a machine mid-decision reads as not having
+	// answered (roundGroup's mask), and the sweep would then decide nothing at all rather than
+	// refuse the replacement — under the race detector, 4 runs in 30 on the base this change sits
+	// on.
+	rig.settleAll()
 	rig.s.reconcilePodUpdates(rig.ctx, group)
 
 	if calls := rig.replacements(); len(calls) != 0 {
