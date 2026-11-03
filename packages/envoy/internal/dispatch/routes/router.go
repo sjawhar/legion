@@ -130,6 +130,9 @@ type AppContextOptions struct {
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL       string
 	AgentSecretsTokenFile string
+	// LegionDaemonTokenFile is the token file the operator relay to a Legion daemon presents;
+	// empty sends no bearer. See api.DepsInput.
+	LegionDaemonTokenFile string
 	// Files is the uploaded-file store main built from DISPATCH_FILE_STORE_BUCKET; nil keeps
 	// files in Postgres. See api.DepsInput.
 	Files            files.Store
@@ -190,6 +193,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		AgentStream:            opts.AgentStream,
 		AgentSecretsURL:        opts.AgentSecretsURL,
 		AgentSecretsTokenFile:  opts.AgentSecretsTokenFile,
+		LegionDaemonTokenFile:  opts.LegionDaemonTokenFile,
 		Files:                  opts.Files,
 		TestHooksEnabled:       opts.TestHooksEnabled,
 		RouteRosterTTL:         opts.RouteRosterTTL,

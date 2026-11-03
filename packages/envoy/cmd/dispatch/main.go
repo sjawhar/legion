@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/legion"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
@@ -123,6 +124,12 @@ type bootConfig struct {
 	// by the broker client on each call, never here: a projected token rotates.
 	AgentSecretsURL       string
 	AgentSecretsTokenFile string
+	// LegionDaemonTokenFile is DISPATCH_LEGION_DAEMON_TOKEN_FILE, the file holding Dispatch's own
+	// projected Kubernetes ServiceAccount token minted for a Legion daemon's audience, which the
+	// operator relay PUT /api/v1/legion/{project}/settings presents. Read by that relay on each
+	// call, never here: a projected token rotates. Empty sends no bearer, and whatever the
+	// daemon answers is what the caller sees; the minute's state read presents none either way.
+	LegionDaemonTokenFile string
 	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in,
 	// gs://<bucket> for Cloud Storage or an S3 bucket's name (files.Open). Empty keeps them in
 	// Postgres.
@@ -617,6 +624,12 @@ func main() {
 
 	go architecture.Run(ctx, appCtx.Architecture(), leases)
 
+	// dispatch://INFRA-1077: each project whose legion_settings row names a Legion daemon has its
+	// `GET /legion/v1/state` read once a minute from one replica, under the `legion-state` lease,
+	// and every value that moved recorded. It is a timer and not a woken loop for the reason the
+	// delivery reconcile below is: a remote daemon announces nothing Dispatch can listen for.
+	go legion.RunSampler(ctx, database.Pool, leases)
+
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
 	// a client, exactly like the outbox above. Both take the event broker: each writes
@@ -986,6 +999,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE is required when DISPATCH_AGENT_SECRETS_URL is set: Dispatch calls the broker with its own projected Kubernetes ServiceAccount token")
 		}
 	}
+	boot.LegionDaemonTokenFile = strings.TrimSpace(env.get("DISPATCH_LEGION_DAEMON_TOKEN_FILE"))
 	boot.Embedder, err = resolveEmbedder(env)
 	if err != nil {
 		return bootConfig{}, err
@@ -1283,6 +1297,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	built.GitHubAPIBase = boot.GitHubAPIBase
 	built.AgentSecretsURL = boot.AgentSecretsURL
 	built.AgentSecretsTokenFile = boot.AgentSecretsTokenFile
+	built.LegionDaemonTokenFile = boot.LegionDaemonTokenFile
 	built.TestHooksEnabled = boot.TestHooksEnabled
 	built.RouteRosterTTL = boot.RouteRosterTTL
 	built.ListenerRosterUncached = boot.ListenerRosterUncached

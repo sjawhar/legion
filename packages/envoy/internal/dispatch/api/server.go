@@ -111,6 +111,13 @@ type Deps struct {
 	// is unconfigured) means the feature is off: the pending list answers null, and every other
 	// handler that needs it answers 404 FEATURE_OFF.
 	AgentSecrets *agentsecrets.Client
+	// LegionDaemonTokenFile is the file holding Dispatch's own projected Kubernetes
+	// ServiceAccount token, minted for a Legion daemon's audience
+	// (DISPATCH_LEGION_DAEMON_TOKEN_FILE); the operator relay PUT /api/v1/legion/{project}/settings
+	// presents it, read at call time so a rotation is picked up. Empty sends no bearer, and
+	// whatever the daemon answers is what the caller sees. The minute's state read presents it
+	// never: GET /legion/v1/state authenticates nobody.
+	LegionDaemonTokenFile string
 	// Files holds uploaded files' bytes outside Postgres (cmd/dispatch: DISPATCH_FILE_STORE_BUCKET);
 	// nil keeps them in each version's row, and a row that still holds bytes is served from the
 	// row either way (files.BackfillRows moves them).
@@ -190,6 +197,9 @@ type DepsInput struct {
 	// projected Kubernetes ServiceAccount token, which the client presents on every broker call.
 	AgentSecretsURL       string
 	AgentSecretsTokenFile string
+	// LegionDaemonTokenFile is the token file the operator relay to a Legion daemon presents;
+	// empty sends no bearer. See Deps.LegionDaemonTokenFile.
+	LegionDaemonTokenFile string
 	// Files is the uploaded-file store; nil keeps files in Postgres. See Deps.Files.
 	Files            files.Store
 	TestHooksEnabled bool
@@ -272,6 +282,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		BrokerTokens:           input.BrokerTokens,
 		AgentStream:            input.AgentStream,
 		AgentSecrets:           agentSecretsClient,
+		LegionDaemonTokenFile:  strings.TrimSpace(input.LegionDaemonTokenFile),
 		Files:                  input.Files,
 		TestHooksEnabled:       input.TestHooksEnabled,
 		StreamHeartbeat:        heartbeat,
