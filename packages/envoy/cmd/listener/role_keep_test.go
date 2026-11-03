@@ -179,7 +179,7 @@ func TestAPublishWithKeepFalseToAnUnheldRoleIsRefusedAndKeepsNothing(t *testing.
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("publish with keep: false to an unheld role: status %d, body %s; want 404", recorder.Code, recorder.Body.String())
 	}
-	if body := recorder.Body.String(); body != "{\"error\":\"no holder for role "+role+"\",\"reason\":\"unclaimed\"}\n" {
+	if body := recorder.Body.String(); body != "{\"error\":\"no holder for role "+role+"\",\"reason\":\"unclaimed\",\"claim_revision\":0}\n" {
 		t.Fatalf("body = %q", body)
 	}
 	assertNothingKept(t, client, role)
@@ -776,7 +776,7 @@ func TestAPublishToARoleNoClaimCanNameIsRefusedAndKeepsNothing(t *testing.T) {
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("publish to a role no claim can name: status %d, body %s; want 404", recorder.Code, recorder.Body.String())
 	}
-	if body := recorder.Body.String(); body != "{\"error\":\"no holder for role "+role+"\",\"reason\":\"unclaimed\"}\n" {
+	if body := recorder.Body.String(); body != "{\"error\":\"no holder for role "+role+"\",\"reason\":\"unclaimed\",\"claim_revision\":0}\n" {
 		t.Fatalf("body = %q", body)
 	}
 	assertNothingKept(t, client, role)

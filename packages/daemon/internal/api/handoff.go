@@ -403,11 +403,17 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 		}
 		s.log.Warn("api: read the open pull request on a completing implementer's branch; the completion is applied unread, and the required-checks pass records the pull request it finds", attributes...)
 	}
-	repository, err := ghrepo.Parse("the GitHub repository of "+issue.Key, issue.GitHubRepo)
+	recordedRepo, err := ghrepo.Parse("the GitHub repository of "+issue.Key, issue.GitHubRepo)
 	if err != nil {
 		logUnread(err)
 		return true
 	}
+	// This read is GitHub's own, so it is minted for and addressed at the repository GitHub holds
+	// the recorded one under now (ghrepo.Renames.Serving, whose doc says why both halves are
+	// taken): the token is the half the old owner cannot supply, since after a transfer the
+	// installation covering the repository is the owner it moved to's. The log line above and the
+	// fact applied below go on naming issue.GitHubRepo, the name the record is held under.
+	repository := s.serving(recordedRepo)
 	lease, err := s.tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
 		logUnread(fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err))
@@ -496,9 +502,10 @@ func byHandShare(mergeNote string) string {
 }
 
 // readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub, in
-// the repository issue's record names, for a merger's ready: true, and is what they leave
-// (readyAnswer). Every refusal is written before the fact is applied, so nothing is recorded under
-// the completion's key and the corrected retry at the same commit is applied:
+// the repository GitHub holds the issue's recorded one under now (serving), for a merger's
+// ready: true, and is what they leave (readyAnswer). Every refusal is written before the fact is
+// applied, so nothing is recorded under the completion's key and the corrected retry at the same
+// commit is applied:
 //
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
 //     READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
@@ -506,8 +513,9 @@ func byHandShare(mergeNote string) string {
 //     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
-// The reads are made as the implement App, minted for the repository's owner, whose token never
-// leaves the daemon; a runtime that boots without Apps publishes no READY (leaseForGrant).
+// The reads are made as the implement App, minted for the owner of the repository GitHub serves,
+// whose token never leaves the daemon; a runtime that boots without Apps publishes no READY
+// (leaseForGrant).
 func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (answer readyAnswer, ok bool) {
 	repository, err := issue.Repository()
 	if err != nil {
@@ -515,6 +523,12 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", fmt.Sprintf("the record of %s names no repository its pull request can be read in", issue.Key))
 		return readyAnswer{}, false
 	}
+	// READY's checks are GitHub's own reads, so they are minted for and addressed at the
+	// repository GitHub holds the recorded one under now (ghrepo.Renames.Serving, whose doc says
+	// why both halves are taken): the token is the half the old owner cannot supply, since after
+	// a transfer the installation covering the repository is the owner it moved to's, and without
+	// it a tree open at the transfer would never publish READY.
+	repository = s.serving(repository)
 	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement, repository.Owner())
 	if !ok {
 		return readyAnswer{}, false
