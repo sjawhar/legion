@@ -13,7 +13,7 @@ import (
 
 func TestLauncherWithoutInitialStateIsUncertain(t *testing.T) {
 	launchers := testLaunchers()
-	launchers.accept(workerToken, testTree, shimwire.LauncherHello{PodUID: "pod", LauncherID: "launcher"})
+	launchers.accept(workerToken, testTree, rigNow, shimwire.LauncherHello{PodUID: "pod", LauncherID: "launcher"})
 	if state, connected := launchers.state(workerToken, "pod"); connected {
 		t.Fatalf("launcher with no initial state is connected: %+v", state)
 	}
@@ -23,7 +23,7 @@ func TestLauncherExitBeforeStartResultStaysExited(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	launchers := testLaunchers()
-	session := launchers.accept(workerToken, testTree, shimwire.LauncherHello{PodUID: "pod", LauncherID: "launcher"})
+	session := launchers.accept(workerToken, testTree, rigNow, shimwire.LauncherHello{PodUID: "pod", LauncherID: "launcher"})
 	server, peer := net.Pipe()
 	t.Cleanup(func() { _ = server.Close(); _ = peer.Close() })
 	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))
@@ -55,7 +55,7 @@ func TestLauncherExitBeforeStartResultStaysExited(t *testing.T) {
 
 func TestLauncherClosesAnOversizedUnterminatedFrame(t *testing.T) {
 	launchers := testLaunchers()
-	session := launchers.accept(workerToken, testTree, shimwire.LauncherHello{PodUID: "pod", LauncherID: "launcher"})
+	session := launchers.accept(workerToken, testTree, rigNow, shimwire.LauncherHello{PodUID: "pod", LauncherID: "launcher"})
 	server, peer := net.Pipe()
 	t.Cleanup(func() { _ = server.Close(); _ = peer.Close() })
 	done := make(chan struct{})
@@ -73,7 +73,7 @@ func TestLauncherClosesAnOversizedUnterminatedFrame(t *testing.T) {
 
 func TestLauncherFromPreviousPodCannotAnswerForReplacement(t *testing.T) {
 	launchers := testLaunchers()
-	old := launchers.accept(workerToken, testTree, shimwire.LauncherHello{PodUID: "old-pod", LauncherID: "old-launcher"})
+	old := launchers.accept(workerToken, testTree, rigNow, shimwire.LauncherHello{PodUID: "old-pod", LauncherID: "old-launcher"})
 	old.state.Child = &shimwire.LauncherChild{Generation: 7}
 	close(old.ready)
 	if state, connected := launchers.state(workerToken, "new-pod"); connected {
@@ -84,7 +84,7 @@ func TestLauncherFromPreviousPodCannotAnswerForReplacement(t *testing.T) {
 	if got, err := launchers.await(ctx, workerToken, "new-pod"); err == nil || got != nil {
 		t.Fatalf("replacement launch was routed to the old pod: session=%p, err=%v", got, err)
 	}
-	current := launchers.accept(workerToken, testTree, shimwire.LauncherHello{PodUID: "new-pod", LauncherID: "new-launcher"})
+	current := launchers.accept(workerToken, testTree, rigNow.Add(time.Minute), shimwire.LauncherHello{PodUID: "new-pod", LauncherID: "new-launcher"})
 	close(current.ready)
 	if got, err := launchers.await(context.Background(), workerToken, "new-pod"); err != nil || got != current {
 		t.Fatalf("replacement launcher not selected: session=%p, err=%v", got, err)
@@ -93,7 +93,7 @@ func TestLauncherFromPreviousPodCannotAnswerForReplacement(t *testing.T) {
 
 func TestLauncherCommandWriteHonorsItsDeadline(t *testing.T) {
 	launchers := testLaunchers()
-	session := launchers.accept(workerToken, testTree, shimwire.LauncherHello{PodUID: "pod", LauncherID: "launcher"})
+	session := launchers.accept(workerToken, testTree, rigNow, shimwire.LauncherHello{PodUID: "pod", LauncherID: "launcher"})
 	server, peer := net.Pipe()
 	t.Cleanup(func() { _ = server.Close(); _ = peer.Close() })
 	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))

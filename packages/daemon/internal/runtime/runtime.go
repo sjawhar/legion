@@ -203,10 +203,11 @@ type WorkspaceBundler interface {
 	BundleWorkspace(ctx context.Context, issue string, role claim.Role) (WorkspaceBundle, error)
 }
 
-// SavedWorkspaceBundle answers the bundle an issue's last release saved for the pod of podUID to
-// restore, and false when there is none to send: an issue never released, one whose restore the
-// launcher confirmed, one whose release a wake cancelled, and one whose bundle has had its one
-// restore attempt already. It is the other half of WorkspaceBundler: the save's own store
+// SavedWorkspaceBundle answers the bundle an issue's last release saved for the pod of podUID,
+// created at podCreated, to restore, and false when there is none to send: an issue never
+// released, one whose restore the launcher confirmed, one whose release a wake cancelled, one
+// whose bundle has had its one restore attempt already, and one whose bundle was saved after the
+// pod was created. It is the other half of WorkspaceBundler: the save's own store
 // (store.Store.TakeWorkspaceBundleForRestore), handed to the runtime so that the runtime, which
 // alone knows when a replacement pod's launcher is up, can carry the saved work back into the new
 // workspace before any role of that pod starts.
@@ -216,7 +217,14 @@ type WorkspaceBundler interface {
 // it ran in memory, so a roles container that restarts comes back to the pod's own disk with that
 // record gone and the workspace hours of work past the save; the daemon's record is what keeps
 // the bundle from being applied over that work.
-type SavedWorkspaceBundle func(ctx context.Context, issue, podUID string) (WorkspaceBundle, bool, error)
+//
+// podCreated is what decides whose attempt it is. The runtime calls this at every start of every
+// role, and a release stops the roles of the pod it is releasing, so a role relaunched in that
+// pod before the teardown deletes it is one of those calls — in the very workspace the work was
+// taken from, which needs nothing put back. Only a pod created after the save may spend the
+// attempt; the released pod and anything older are refused, so the work is still there for the
+// pod that replaces it.
+type SavedWorkspaceBundle func(ctx context.Context, issue, podUID string, podCreated time.Time) (WorkspaceBundle, bool, error)
 
 // WorkspaceBundleRestored is the runtime's confirmation that the pod replacing the released one
 // has put the issue's saved work back: its launcher ran the restore and reported that it

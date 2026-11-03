@@ -716,12 +716,18 @@ var servicesGVR = corev1.SchemeGroupVersion.WithResource("services")
 
 var podsGVR = corev1.SchemeGroupVersion.WithResource("pods")
 
+// createPod makes the pod a Running Sandbox stands for, as the controller and the API server
+// between them do: a uid of its own, and the creation instant the API server stamps, which the
+// runtime reads to decide whether a release's saved work is this pod's to restore
+// (launcherSession.podCreated). The rig's clock is that stamp, so a test that advances it before
+// a pod is replaced gets a replacement newer than the one it replaced.
 func (g *rig) createPod(s *sandbox) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: s.Name, Namespace: testNamespace, Labels: s.Spec.PodTemplate.Metadata.Labels,
-			UID:             types.UID(fmt.Sprintf("uid-pod-%d", g.uids.Add(1))),
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "agents.x-k8s.io/v1beta1", Kind: "Sandbox", Name: s.Name, UID: s.UID, Controller: new(true)}},
+			UID:               types.UID(fmt.Sprintf("uid-pod-%d", g.uids.Add(1))),
+			CreationTimestamp: metav1.NewTime(*g.now.Load()),
+			OwnerReferences:   []metav1.OwnerReference{{APIVersion: "agents.x-k8s.io/v1beta1", Kind: "Sandbox", Name: s.Name, UID: s.UID, Controller: new(true)}},
 		},
 		Spec:   s.Spec.PodTemplate.Spec,
 		Status: corev1.PodStatus{Phase: corev1.PodPending},
@@ -776,7 +782,7 @@ func (g *rig) reportLauncher(token claim.Token, state shimwire.LauncherState) {
 	if pod == nil {
 		g.t.Fatal("cannot report launcher state without its pod")
 	}
-	s := g.r.launchers.accept(token, launcherIssue(token), shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
+	s := g.r.launchers.accept(token, launcherIssue(token), pod.CreationTimestamp.Time, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
 	s.mu.Lock()
 	s.state = state
 	close(s.ready)
@@ -887,7 +893,7 @@ func (g *rig) connect(token claim.Token) { g.connectRunning(token, 0) }
 func (g *rig) connectRunning(token claim.Token, running uint64) {
 	server, client := net.Pipe()
 	pod := g.pod(SandboxName(token))
-	session := g.r.launchers.accept(token, launcherIssue(token), shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
+	session := g.r.launchers.accept(token, launcherIssue(token), pod.CreationTimestamp.Time, shimwire.LauncherHello{LauncherID: "test-" + string(token), PodUID: string(pod.UID)})
 	g.t.Cleanup(func() { _ = client.Close() })
 	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))
 	go func() {

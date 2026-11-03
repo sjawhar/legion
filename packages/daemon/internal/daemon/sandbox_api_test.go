@@ -253,7 +253,10 @@ func (a *issueSandboxAPI) launcherTokensLocked(pod string) map[string]string {
 
 // createPodLocked makes the pod the Sandbox's podTemplate describes, Ready: the controller's own
 // pod, owned by the Sandbox, carrying its labels, with every init container completed and every
-// container running, as sandbox/rig_test.go's createPod and runningStatusOf build it.
+// container running, as sandbox/rig_test.go's createPod and runningStatusOf build it. Its
+// creationTimestamp is the one an API server stamps and serves, to the second: the daemon reads
+// it to decide whether a release's saved work is this pod's to restore, and the pod a wake makes
+// after the save is the one that may take it (store.TakeWorkspaceBundleForRestore).
 func (a *issueSandboxAPI) createPodLocked(name string, sandbox map[string]any) string {
 	spec, _ := sandbox["spec"].(map[string]any)
 	template, _ := kubeClone(spec)["podTemplate"].(map[string]any)
@@ -279,7 +282,7 @@ func (a *issueSandboxAPI) createPodLocked(name string, sandbox map[string]any) s
 		"apiVersion": "v1", "kind": "Pod",
 		"metadata": map[string]any{
 			"name": name, "namespace": sandboxNamespace, "labels": labels,
-			"uid": podUID,
+			"uid": podUID, "creationTimestamp": time.Now().UTC().Format(time.RFC3339),
 			"ownerReferences": []any{map[string]any{
 				"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox", "name": name, "uid": uid, "controller": true,
 			}},

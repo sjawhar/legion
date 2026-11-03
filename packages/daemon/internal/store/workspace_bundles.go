@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -44,10 +45,11 @@ func (s *Store) PutWorkspaceBundle(ctx context.Context, issue string, release in
 }
 
 // TakeWorkspaceBundleForRestore answers the bundle issue's last release saved and records, in the
-// same statement, that it has had its one restore attempt, against the pod of podUID whose
-// launcher it is about to be sent to. It answers false when the issue has no bundle — one never
-// released, one whose restore the launcher confirmed, one whose release a wake cancelled — and
-// when the row already carries an attempt.
+// same statement, that it has had its one restore attempt, against the pod of podUID, created at
+// podCreated, whose launcher it is about to be sent to. It answers false when the issue has no
+// bundle — one never released, one whose restore the launcher confirmed, one whose release a wake
+// cancelled — when the row already carries an attempt, and when the pod is not newer than the
+// save.
 //
 // One attempt per bundle is the rule, and this statement is where it is kept. The launcher's own
 // record of the restore it ran lives in the process that ran it: a roles container that restarts
@@ -57,19 +59,42 @@ func (s *Store) PutWorkspaceBundle(ctx context.Context, issue string, release in
 // any slice leaves the daemon, so a send that fails halfway, a restore that fails and a restore
 // whose report never arrived all leave the same row: one no pod is sent again.
 //
+// Which pod may spend that attempt is podCreated's own rule, and it is the other half of the
+// same one. Every start of every role takes the bundle for its pod (sandbox's launchers.start),
+// and a release stops the roles of the pod it is releasing: a role relaunched in that pod,
+// between the save and the teardown that deletes the pod, is such a start. That pod's workspace
+// is the one the work was taken from, so it needs nothing put back, and letting it spend the
+// attempt would leave the pod that replaces it — the one with an empty workspace — sent nothing,
+// while the row stayed and held the issue's pod (workflow.IdleHoldBundleUnrestored). A pod
+// created before the save is that released pod, or one older still; only a pod created after it
+// can be the replacement.
+//
+// The comparison rests on two instants from two clocks: podCreated is the pod's creationTimestamp
+// as the Kubernetes API server stamped it, and the row's `at` is when the shim took the bundle,
+// by the clock of the node the released pod ran on (runtime.WorkspaceBundle.At). It cannot tell
+// them apart more finely than the coarser of the two: a creationTimestamp has one-second
+// resolution, so the save is read to its own second and a pod created inside that second is
+// taken as the newer one. Nor can it see clock skew. A badly skewed node stamps a save in the
+// replacement pod's future and the restore is refused — which keeps the bundle, holds the issue's
+// pod and loses no work, and is the direction to fail in; the opposite, a restore spent on the
+// pod being released, is the work never reaching the pod that needs it.
+//
 // The row stays. A bundle nothing restored holds the issue's pod (workflow.IdleHoldBundleUnrestored)
 // and keeps the work in the database until the issue's own work is over (outbox's
 // dropReleasedWork), which is what the launcher's notice tells the roles.
-func (s *Store) TakeWorkspaceBundleForRestore(ctx context.Context, issue, podUID string) (runtime.WorkspaceBundle, bool, error) {
+func (s *Store) TakeWorkspaceBundleForRestore(ctx context.Context, issue, podUID string, podCreated time.Time) (runtime.WorkspaceBundle, bool, error) {
 	if podUID == "" {
 		return runtime.WorkspaceBundle{}, false, fmt.Errorf("the restore attempt of the workspace bundle of %s needs the pod it is sent to", issue)
+	}
+	if podCreated.IsZero() {
+		return runtime.WorkspaceBundle{}, false, fmt.Errorf("the restore attempt of the workspace bundle of %s needs when the pod %s it is sent to was created", issue, podUID)
 	}
 	var b runtime.WorkspaceBundle
 	var tips, bookmarks []byte
 	err := s.pool.QueryRow(ctx, `update workspace_bundles set attempt_pod_uid = $2, attempt_at = now()
-		where issue = $1 and attempt_pod_uid is null
+		where issue = $1 and attempt_pod_uid is null and date_trunc('second', at) <= $3
 		returning bundle, at, head, tips, bookmarks, release_id`,
-		issue, podUID).Scan(&b.Bundle, &b.At, &b.Head, &tips, &bookmarks, &b.Release)
+		issue, podUID, podCreated).Scan(&b.Bundle, &b.At, &b.Head, &tips, &bookmarks, &b.Release)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return runtime.WorkspaceBundle{}, false, nil
 	}

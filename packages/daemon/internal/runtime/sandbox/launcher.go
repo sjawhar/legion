@@ -47,9 +47,16 @@ type launcherSession struct {
 	// issue is the exact issue key this launcher's pod is of, as the role Secret's annotation
 	// carried it to the hello's authentication (launcherCredential.issue): the key the release
 	// saved that workspace's bundle under. "" for a pod of no issue, the project controller's.
-	issue  string
-	id     string
-	podUID string
+	issue string
+	// podCreated is when the API server stamped this launcher's pod created
+	// (corev1.Pod's CreationTimestamp, as the resolver read it off the pod the connection was
+	// accepted for). It is what says whether this pod is the one a release's saved work is for:
+	// only a pod created after the save may take the bundle's one restore attempt
+	// (store.TakeWorkspaceBundleForRestore), so a role relaunched in the pod being released,
+	// which is older than the save, spends nothing.
+	podCreated time.Time
+	id         string
+	podUID     string
 
 	mu      sync.Mutex
 	conn    net.Conn
@@ -64,11 +71,11 @@ func newLaunchers(saved runtime.SavedWorkspaceBundle, restored runtime.Workspace
 	return &launchers{sessions: map[claim.Token]*launcherSession{}, saved: saved, restored: restored, log: log}
 }
 
-// accept registers a launcher connection of the pod of issue. The newest authenticated connection
-// for a role wins: a half-open predecessor is closed so its pending requests fail instead of
-// waiting forever.
-func (d *launchers) accept(token claim.Token, issue string, hello shimwire.LauncherHello) *launcherSession {
-	s := &launcherSession{owner: d, token: token, issue: issue, id: hello.LauncherID, podUID: hello.PodUID,
+// accept registers a launcher connection of the pod of issue, created at podCreated. The newest
+// authenticated connection for a role wins: a half-open predecessor is closed so its pending
+// requests fail instead of waiting forever.
+func (d *launchers) accept(token claim.Token, issue string, podCreated time.Time, hello shimwire.LauncherHello) *launcherSession {
+	s := &launcherSession{owner: d, token: token, issue: issue, podCreated: podCreated, id: hello.LauncherID, podUID: hello.PodUID,
 		ready: make(chan struct{}), waiters: map[string]chan shimwire.Frame{}}
 	d.mu.Lock()
 	old := d.sessions[token]
@@ -325,12 +332,19 @@ const bundleRestoreBound = 2 * time.Minute
 // over work a running pod's roles have done since the save. The work itself stays in the
 // database, which holds the issue's pod (workflow.IdleHoldBundleUnrestored) until the issue's
 // work is over.
+//
+// Whose attempt it is the session's own pod decides. A release stops the roles of the pod it is
+// releasing, so a role relaunched in that pod before the teardown deletes it reaches here too,
+// for the workspace the work was taken from; the store is told when this pod was created
+// (launcherSession.podCreated) and refuses every pod that is not newer than the save, so such a
+// relaunch is sent nothing and leaves the attempt for the pod that replaces it.
 func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, podUID string) {
 	if d.saved == nil || d.restored == nil {
 		return
 	}
 	// The session names the issue its pod is of, as the Secret its launcher authenticated with
-	// did. A launcher that never arrives is the start's own error to report, not this hop's.
+	// did, and when that pod was created, as the API server stamped it. A launcher that never
+	// arrives is the start's own error to report, not this hop's.
 	session, err := d.await(ctx, token, podUID)
 	if err != nil || session.issue == "" {
 		return
@@ -338,7 +352,7 @@ func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, pod
 	issue := session.issue
 	restoring, cancel := context.WithTimeout(ctx, bundleRestoreBound)
 	defer cancel()
-	bundle, saved, err := d.saved(restoring, issue, podUID)
+	bundle, saved, err := d.saved(restoring, issue, podUID, session.podCreated)
 	if err != nil {
 		d.log.Warn("launcher bundle: the saved workspace bundle could not be taken for this pod's one restore attempt, so the pod starts on what was pushed",
 			"issue", issue, "launcher", token, "pod", podUID, "error", err)

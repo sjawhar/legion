@@ -21,13 +21,16 @@ const testRelease int64 = 11
 // savedWorkspaceBundle is a release's saved work as the store holds it: more than one
 // shimwire.LauncherBundlePayloadBytes of git bundle, so the hop to the launcher is a sequence of
 // slices and not one frame, with the head, the tips and the bookmark a restore needs beside it.
+// It was taken before the rig's clock starts, so every pod the rig makes is one created after
+// the save — the only kind a bundle's one restore attempt is for
+// (store.TakeWorkspaceBundleForRestore). A test of the pod the work came off sets At itself.
 func savedWorkspaceBundle() runtime.WorkspaceBundle {
 	return runtime.WorkspaceBundle{
 		Bundle:    bytes.Repeat([]byte("PACKjj\x00\x02"), (600<<10)/8),
 		Head:      "f2f134541b30dfa5160a5d1ce5e17b76c967c661",
 		Tips:      []string{"da4f9f492e9f8349389c243743e0a000cd1c676f"},
 		Bookmarks: map[string]string{"legion/" + testTree: "dffe88ae2f793e13436cef3921adc988433fbd4e"},
-		At:        time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC),
+		At:        rigNow.Add(-time.Minute),
 		Release:   testRelease,
 	}
 }
@@ -160,6 +163,99 @@ func TestAFailedRestoreKeepsTheSavedWorkAndSendsItToNoPodAgain(t *testing.T) {
 	}
 }
 
+// A release stops the roles of the pod it is releasing, and a role relaunched in that pod before
+// the teardown deletes it starts like any other: it asks the store for the issue's saved work.
+// That pod is the one the work was taken off — its workspace holds every commit of it — so it
+// must be sent nothing, and it must not spend the bundle's one restore attempt either: the pod
+// the wake makes next is the one with an empty workspace, and an attempt spent here would leave
+// it sent nothing while the row stayed and held the issue's pod
+// (workflow.IdleHoldBundleUnrestored). Only a pod created after the save may take it.
+func TestARelaunchInThePodBeingReleasedLeavesTheAttemptForItsReplacement(t *testing.T) {
+	st := migratedStore(t)
+	g := newRig(t, nil, withOptions(func(o *Options) {
+		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
+	}))
+	spec := workerSpec(t)
+	g.spawn(spec)
+	released := g.pod(SandboxName(spec.Claim))
+
+	// The release takes the workspace's unpushed work off that pod and saves it, while the pod
+	// and its roles are still there.
+	saved := savedWorkspaceBundle()
+	saved.At = rigNow.Add(time.Minute)
+	if err := st.PutWorkspaceBundle(g.ctx, testTree, saved.Release, saved); err != nil {
+		t.Fatalf("save the released workspace's bundle: %v", err)
+	}
+	g.advance(2 * time.Minute)
+
+	// A role of the pod being released is relaunched — a crash, a stale-plugin pair, the
+	// release's own stop answered by the supervisor — before the teardown deletes the pod.
+	before := len(g.sent(spec.Claim))
+	g.connect(spec.Claim)
+	g.r.launchers.restoreWorkspace(g.ctx, spec.Claim, string(released.UID))
+	for _, frame := range g.sent(spec.Claim)[before:] {
+		if slice, ok := frame.(shimwire.LauncherBundle); ok {
+			t.Fatalf("the pod being released was sent slice %d of %d of release %d, want nothing: its own workspace is where the work came from",
+				slice.Index, slice.Count, slice.Release)
+		}
+	}
+
+	// The teardown takes the pod, the wake brings its replacement, and that pod — created after
+	// the save — is answered the whole of the work.
+	if err := g.kube.Tracker().Delete(podsGVR, testNamespace, SandboxName(spec.Claim)); err != nil {
+		t.Fatalf("delete the released pod: %v", err)
+	}
+	g.advance(time.Hour)
+	g.eventually("the replacement pod's launcher", func() bool {
+		pod := g.pod(SandboxName(spec.Claim))
+		if pod == nil || pod.UID == released.UID {
+			return false
+		}
+		g.r.launchers.mu.Lock()
+		defer g.r.launchers.mu.Unlock()
+		session := g.r.launchers.sessions[spec.Claim]
+		return session != nil && session.podUID == string(pod.UID)
+	})
+	replacement := g.pod(SandboxName(spec.Claim))
+	if !replacement.CreationTimestamp.Time.After(saved.At) {
+		t.Fatalf("the replacement pod was created %s, want it after the save at %s", replacement.CreationTimestamp, saved.At)
+	}
+	before = len(g.sent(spec.Claim))
+	g.r.launchers.restoreWorkspace(g.ctx, spec.Claim, string(replacement.UID))
+	var body []byte
+	for _, frame := range g.sent(spec.Claim)[before:] {
+		slice, ok := frame.(shimwire.LauncherBundle)
+		if !ok {
+			t.Fatalf("the replacement pod's launcher was sent %v, want the bundle's slices", frameTypes(g.sent(spec.Claim)[before:]))
+		}
+		body = append(body, slice.Payload...)
+	}
+	read, err := shimwire.ParseWorkspaceBundle(body)
+	if err != nil {
+		t.Fatalf("the slices the replacement pod was sent rebuilt no workspace bundle: %v", err)
+	}
+	if !bytes.Equal(read.Bundle, saved.Bundle) || read.Head != saved.Head ||
+		!slices.Equal(read.Tips, saved.Tips) || !maps.Equal(read.Bookmarks, saved.Bookmarks) {
+		t.Fatalf("the replacement pod was sent %d bytes at head %s with tips %v and bookmarks %v, want the %d saved at %s, %v and %v",
+			len(read.Bundle), read.Head, read.Tips, read.Bookmarks, len(saved.Bundle), saved.Head, saved.Tips, saved.Bookmarks)
+	}
+
+	// That send was the attempt. The replacement pod's own roles container restarting is the
+	// case the rule is for, and it is sent nothing.
+	before = len(g.sent(spec.Claim))
+	g.connect(spec.Claim)
+	g.r.launchers.restoreWorkspace(g.ctx, spec.Claim, string(replacement.UID))
+	for _, frame := range g.sent(spec.Claim)[before:] {
+		if slice, ok := frame.(shimwire.LauncherBundle); ok {
+			t.Fatalf("the replacement pod's second launcher was sent slice %d of %d of release %d, want nothing: the bundle has had its one restore attempt",
+				slice.Index, slice.Count, slice.Release)
+		}
+	}
+	if size, held, err := st.WorkspaceBundleSize(g.ctx, testTree); err != nil || !held || size != len(saved.Bundle) {
+		t.Fatalf("the store holds %d bytes (held=%t, %v), want the %d saved kept until a launcher reports the restore", size, held, err, len(saved.Bundle))
+	}
+}
+
 // A launcher keeps the report of its restore until some connection carries it, so one can reach
 // the daemon after the issue has been released again and that release has saved a bundle of its
 // own. The report names the release it restored, and the delete reads it: the newer bundle stays,
@@ -182,14 +278,14 @@ func TestALateRestoreReportLeavesTheBundleOfANewerRelease(t *testing.T) {
 
 	d := newLaunchers(st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	spec := workerSpec(t)
-	session := d.accept(spec.Claim, testTree, shimwire.LauncherHello{LauncherID: "late", PodUID: "pod-uid"})
+	session := d.accept(spec.Claim, testTree, rigNow, shimwire.LauncherHello{LauncherID: "late", PodUID: "pod-uid"})
 	frames, err := bundleFrames(testTree, first)
 	if err != nil {
 		t.Fatal(err)
 	}
 	d.restoreReported(session, shimwire.LauncherRestored{ID: frames[0].ID, Release: first.Release, OK: true})
 
-	kept, held, err := st.TakeWorkspaceBundleForRestore(ctx, testTree, "pod-uid")
+	kept, held, err := st.TakeWorkspaceBundleForRestore(ctx, testTree, "pod-uid", rigNow)
 	if err != nil {
 		t.Fatal(err)
 	}

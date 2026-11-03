@@ -90,7 +90,10 @@ func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 		if err != nil || SandboxName(token) != hello.Sandbox {
 			return nil, "launcher credential does not name this pod's role"
 		}
-		return r.launchers.accept(token, credential.issue, hello), ""
+		// The pod the connection is accepted for carries the instant the API server created it,
+		// which decides whether a release's saved work is this pod's to restore
+		// (launchers.restoreWorkspace).
+		return r.launchers.accept(token, credential.issue, view.pod.CreationTimestamp.Time, hello), ""
 	}
 }
 
