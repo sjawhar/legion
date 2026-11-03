@@ -5,9 +5,10 @@ body: |
   re-uses that machine's launcher credential in the exchange's own transaction and names it in
   the token answer's `credential_id` and `credential_expires_at`. The machine enrols a `session`
   under that credential, so every secrets route works for it exactly as a pod's does. The
-  credential is keyed by the machine (`<account>@<project>/<zone>/<instance id>` for a token
-  minted on a Compute Engine instance, `<account>#<key thumbprint>` for one minted anywhere else)
-  and names its fleet's service and no person, so the machine reads the secrets that service owns
+  credential is keyed by the machine and the key it trades with
+  (`<account>@<project>/<zone>/<instance id>#<key thumbprint>` for a token minted on a Compute
+  Engine instance, `<account>#<key thumbprint>` for one minted anywhere else) and names its
+  fleet's service and no person, so the machine reads the secrets that service owns
   and the shared agent-tier ones and never a person's; a fleet's `BROKER_VM_EXCHANGE_ACCOUNTS`
   person and project reach its Dispatch token alone. Migration `0024`
   retires every live `vm` enrollment, with its grants and its pending requests, and takes the

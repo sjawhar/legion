@@ -33,11 +33,11 @@ const controllerDispatchTradeWait = 60 * time.Second
 //
 // Nothing of that credential is written to a file and no DISPATCH_TOKEN_FILE points at one.
 // Such a token is bound to the key its holder proves: Dispatch refuses it presented as a bearer
-// (RFC 9449 Section 7.2, `brokertoken.Presented`), and the client resolves every bearer —
-// DISPATCH_TOKEN_FILE, then DISPATCH_TOKEN, then the token an envoy.json holds — before it
-// consults the broker at all. A pointer to such a token is therefore a pointer the session
-// cannot spend, and handing it one shuts the broker route off; controllerEnvironment hands it
-// none, and controllerStart drops an inherited one.
+// (RFC 9449 Section 7.2, `brokertoken.Presented`), so a pointer to it is a pointer the session
+// cannot spend. controllerEnvironment hands the session DISPATCH_TOKEN_BROKER=1 instead, under
+// which its client reads no bearer from any source — not DISPATCH_TOKEN_FILE, not DISPATCH_TOKEN,
+// not the token the operator's envoy.json holds — and turns Dispatch off with an error when it
+// can trade none; controllerStart also drops an inherited DISPATCH_TOKEN and DISPATCH_TOKEN_FILE.
 //
 // What this start does do is trade once itself, before the daemon mints a capability: a machine
 // that proves no identity, a deployment that names no broker, or a broker that refuses this
