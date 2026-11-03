@@ -25,10 +25,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 )
 
 const (
@@ -75,10 +75,12 @@ func keyDir() string {
 	return filepath.Dir(helper.DefaultSocket(os.Getenv))
 }
 
-// brokerBaseURL is the broker's address as brokerURLVar gives it, without a trailing slash, and
-// empty when the variable is unset: the one place every form reads it.
+// brokerBaseURL is the broker's address as brokerURLVar gives it, without the slashes it ends in
+// (brokerclient.WithoutTrailingSlashes, the rule both halves of this client read an address by),
+// and empty when the variable is unset or holds nothing but slashes: the one place every form
+// reads it.
 func brokerBaseURL() string {
-	return strings.TrimSuffix(os.Getenv(brokerURLVar), "/")
+	return brokerclient.WithoutTrailingSlashes(os.Getenv(brokerURLVar))
 }
 
 // helperSocket is AGENT_SECRETS_HELPER_SOCK, else the helper's default socket; named reports
@@ -90,13 +92,14 @@ func helperSocket() (sock string, named bool) {
 	return helper.DefaultSocket(os.Getenv), false
 }
 
-// approveURL is AGENT_SECRETS_APPROVE_URL, Dispatch's origin, without a trailing slash: the base
-// of the machine-login page (/credentials/machine) where `machine login` sends a person to type
-// its code (machine.go). That page is the only thing this setting names: a pending secret request
-// names the page on the secrets broker its own answer carries as approve_url, and reads nothing
-// from here. Empty when unset.
+// approveURL is AGENT_SECRETS_APPROVE_URL, Dispatch's origin, without the slashes it ends in (the
+// same brokerclient.WithoutTrailingSlashes every other address here is read by): the base of the
+// machine-login page (/credentials/machine) where `machine login` sends a person to type its code
+// (machine.go). That page is the only thing this setting names: a pending secret request names
+// the page on the secrets broker its own answer carries as approve_url, and reads nothing from
+// here. Empty when unset.
 func approveURL() string {
-	return strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/")
+	return brokerclient.WithoutTrailingSlashes(os.Getenv("AGENT_SECRETS_APPROVE_URL"))
 }
 
 // requestSessionID answers the session id every request and exec form sends with its request

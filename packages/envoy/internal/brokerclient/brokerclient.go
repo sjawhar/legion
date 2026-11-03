@@ -152,7 +152,9 @@ func (e *RefusedError) Permanent() bool {
 
 // Config is one client: the broker it trades at, the identity it trades, and the key it proves.
 type Config struct {
-	// BrokerURL is the broker's base URL, with or without a trailing slash.
+	// BrokerURL is the broker's base URL, with or without the slashes it ends in: New drops
+	// every one of them (WithoutTrailingSlashes), and an address that is nothing but slashes
+	// counts as no broker URL at all.
 	BrokerURL string
 	// Key is this process's own DPoP key, whose public half alone reaches the broker. A person's
 	// sign-in proves the box key `agent-secrets login` made; every other caller proves a key it
@@ -214,11 +216,22 @@ type Client struct {
 	held *Token
 }
 
+// WithoutTrailingSlashes is raw without the slashes it ends in: the one rule both halves of this
+// client read an address by, the TypeScript half's being `withoutTrailingSlashes` in
+// packages/broker-client/src/token-client.ts. An operator types the address by hand into a unit
+// file, a pod's environment or a shell, so an address ending in more than one slash is a typo
+// rather than a shape to refuse; dropping one slash of two would leave this half posting
+// `//v1/...` where the other half posts `/v1/...`, and a proof's htu is the URL the caller built,
+// so a path the broker's own mux then cleans no longer matches the proof and the trade is refused
+// naming the credential rather than the URL an operator could fix.
+func WithoutTrailingSlashes(raw string) string { return strings.TrimRight(raw, "/") }
+
 // New is the client Config describes. It refuses a configuration that could never trade — no
 // broker, no key, no identity — rather than failing at the first call.
 func New(cfg Config) (*Client, error) {
+	brokerURL := WithoutTrailingSlashes(strings.TrimSpace(cfg.BrokerURL))
 	switch {
-	case strings.TrimSpace(cfg.BrokerURL) == "":
+	case brokerURL == "":
 		return nil, errors.New("brokerclient: no broker URL")
 	case cfg.Key == nil:
 		return nil, errors.New("brokerclient: no DPoP key: a trade is judged on a proof of the caller's own key")
@@ -227,7 +240,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	client := &Client{
 		wake:                 make(chan struct{}, 1),
-		brokerURL:            strings.TrimSuffix(strings.TrimSpace(cfg.BrokerURL), "/"),
+		brokerURL:            brokerURL,
 		key:                  cfg.Key,
 		subject:              cfg.Subject,
 		actor:                cfg.Actor,
