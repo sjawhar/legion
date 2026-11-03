@@ -2639,16 +2639,18 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
   ].join("\n");
 }
 
+/** The person a credential acts for, as `GET /api/v1/whoami` names them: the owner of a personal
+ *  or broker-issued token, and a signed-in person's own login in the canonical lowercase every
+ *  stored login and assignee carries. `null` for a credential that acts for nobody, which the
+ *  shared token and a service-account token are. */
+function whoamiPerson(identity: WhoamiResponse): string | null {
+  return identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
+}
+
 /** How much of an ask's question the Inbox summary's line carries. The event summaries' head
  *  (`textHead`) is longer: a question is one line among four counted bands here, and the whole of
  *  it is one `dispatch read` away. */
 const INBOX_QUESTION_HEAD = 80;
-
-/** The first `INBOX_QUESTION_HEAD` characters of a question, on one line. */
-function inboxQuestion(question: string): string {
-  const flat = question.replace(/\s+/g, " ").trim();
-  return flat.length > INBOX_QUESTION_HEAD ? `${flat.slice(0, INBOX_QUESTION_HEAD)}…` : flat;
-}
 
 /**
  * Whether the person has deferred this row and its moment is still ahead: the Inbox page's own
@@ -2695,7 +2697,7 @@ function inboxAskOwner(row: InboxRow): { readonly label: string; readonly ref: s
 function inboxAskLine(row: InboxRow): string {
   const { label, ref } = inboxAskOwner(row);
   const priority = row.priority === null ? "P-" : `P${row.priority}`;
-  return `- ${label} · ${priority} · ${row.kind} · ${inboxQuestion(row.question)} · ${ref}`;
+  return `- ${label} · ${priority} · ${row.kind} · ${textHead(row.question, INBOX_QUESTION_HEAD)} · ${ref}`;
 }
 
 /** One pending credential request: what it asks for, when, the sessions it names and the page
@@ -2720,17 +2722,17 @@ function credentialRequestLine(request: CredentialPendingRow): string {
  * with its count, then the rows under it, in the order the page bands them. The rows within a
  * band are the server's order and nothing re-sorts them.
  *
- * `Needs you` counts the page's `needsYou` (`.../features/inbox/BlockedOnYou.tsx`): the asks
- * waiting on a person that the viewer has not deferred and that sit on their own issues
- * (`waitingOnYou`), plus every credential request, which is the viewer's by construction because
- * the list is read as `?approver=me`. The rows it lists are the band's, which is the same set:
- * `?assignee=me` keeps only the asks on issues assigned to the caller, as the page's default view
- * does, so `isMine` narrows nothing a read of this command's own routes returns.
+ * `Needs you` is the page's `needsYou` (`.../features/inbox/BlockedOnYou.tsx`): the asks waiting
+ * on a person that the viewer has not deferred and that sit on their own issues (`waitingOnYou`),
+ * plus every credential request, which is the viewer's by construction because the list is read
+ * as `?approver=me`. Here that is the band's own rows and nothing narrower, since `?assignee=me`
+ * keeps only the asks on issues assigned to the caller, as the page's default view does; counting
+ * the rows it prints is therefore the page's rule, and it is the one count that cannot disagree
+ * with the lines under it.
  */
 function formatInboxSummary(
   rows: readonly InboxRow[],
   requests: readonly CredentialPendingRow[],
-  viewer: string | null,
   now: number
 ): string {
   const sections = { agent: [] as InboxRow[], human: [] as InboxRow[], later: [] as InboxRow[] };
@@ -2738,13 +2740,8 @@ function formatInboxSummary(
     const section = inboxSection(row, now);
     if (section !== undefined) sections[section].push(row);
   }
-  // `isMine`: an ask on an issue assigned to the viewer. Every row of this read already is one,
-  // so this drops nothing; it is here because the count is the page's rule and not the band's.
-  // A credential that acts for no person counts nothing, as the page counts nothing for a login
-  // it has not resolved yet.
-  const yours = sections.human.filter((row) => viewer !== null && row.issue?.assignee === viewer);
   return [
-    `Needs you ${yours.length + requests.length}`,
+    `Needs you ${sections.human.length + requests.length}`,
     ...sections.human.map(inboxAskLine),
     "",
     `Waiting on agents ${sections.agent.length}`,
@@ -3612,7 +3609,7 @@ export async function executeDispatchTool(
     if (!sessionId) throw new Error("host session id is required for dispatch whoami");
     const client = dispatchClient();
     const identity = await client.whoami();
-    const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
+    const owner = whoamiPerson(identity);
     // A Dispatch that predates verified service tokens omits the field entirely.
     const service = identity.kind === "agent" ? (identity.service ?? null) : null;
     // So does one that predates broker-issued tokens, which are the only credential that proves
@@ -3643,10 +3640,16 @@ export async function executeDispatchTool(
   }
   if (input.tool === "dispatch_inbox") {
     const client = dispatchClient();
+    // All three reads at once: they depend on nothing of each other, and the credential list is
+    // the slow one, since Dispatch relays it to the secrets broker. Its rejection is caught at
+    // the start so that a refusal of the other two, which throws first, leaves no unhandled one.
+    const pending = client.credentialPending().then(
+      (answer) => ({ answer }),
+      (error: unknown) => ({ error })
+    );
     let identity: WhoamiResponse;
     let rows: InboxRow[];
     try {
-      // Both reads at once: the login whose own asks the count is of, and the rows themselves.
       [identity, rows] = await Promise.all([client.whoami(), client.inbox("me")]);
     } catch (error) {
       // Both routes read the caller's own scopes, and a credential without `person` is refused
@@ -3654,14 +3657,12 @@ export async function executeDispatchTool(
       // on, so it reaches the text.
       throw refusalWithCode(error);
     }
-    const viewer = identity.kind === "user" ? identity.login : identity.owner;
+    const viewer = whoamiPerson(identity);
+    const settled = await pending;
     let requests: readonly CredentialPendingRow[] = [];
     const warnings: string[] = [];
-    try {
-      // A Dispatch with no secrets broker answers null, which is an ordinary deployment: it has
-      // no credential requests, so it lists and counts none.
-      requests = (await client.credentialPending())?.pending ?? [];
-    } catch (error) {
+    if ("error" in settled) {
+      const error = settled.error;
       // The asks are the greater part of the Inbox, so one failed read of the broker's list does
       // not cost the caller the rest of it. A refusal for want of a scope is the exception: the
       // credential itself is wrong, and reporting that as a missing section would hide it.
@@ -3673,9 +3674,13 @@ export async function executeDispatchTool(
           ? `${error.code} ${error.message}`
           : messageFor(error);
       warnings.push(`dispatch: warning: credential requests could not be read: ${refusal}`);
+    } else {
+      // A Dispatch with no secrets broker answers null, which is an ordinary deployment: it has
+      // no credential requests, so it lists and counts none.
+      requests = settled.answer?.pending ?? [];
     }
     return {
-      text: formatInboxSummary(rows, requests, viewer, Date.now()),
+      text: formatInboxSummary(rows, requests, Date.now()),
       details: {
         viewer,
         asks: rows.length,

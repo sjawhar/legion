@@ -42,10 +42,8 @@ type liveStreamer interface {
 	// once the socket has ended, which ends ctx too, and otherwise ctx's error once ctx (the
 	// subscription's own) ends.
 	SendWait(ctx context.Context, frame any) error
-	// Human reports whether the caller is a person (cookie identity) rather than a bearer.
-	Human() bool
-	// Holds reports whether the caller's credential holds one OAuth scope, as the socket read
-	// the scopes at the upgrade: the gate a view a person's credential alone may watch uses,
+	// Holds reports whether the caller's credential holds one OAuth scope, as the socket kept
+	// that credential at the upgrade: the gate a view only a person's credential may watch uses,
 	// since requireScope gates a route and no frame carries a credential.
 	Holds(scope string) bool
 }
@@ -141,8 +139,6 @@ func (stream *liveSubscriptionStream) ended(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
-
-func (stream *liveSubscriptionStream) Human() bool { return stream.socket.human }
 
 func (stream *liveSubscriptionStream) Holds(scope string) bool { return stream.socket.holds(scope) }
 

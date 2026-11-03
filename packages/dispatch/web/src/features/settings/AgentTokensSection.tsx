@@ -1,8 +1,9 @@
+import { DISPATCH_SCOPES } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
-import type { AgentToken, CreatedAgentToken } from "../../api/types";
+import type { AgentToken, CreatedAgentToken, DispatchScope } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useCopyFeedback } from "../../hooks/useCopyFeedback";
 import { compareTimestamps } from "../../lib/timestamps";
@@ -62,43 +63,45 @@ function lostTokens(
 /** The OAuth scope a personal token holds, as its checkbox reads it: what the reader ticks, and
  *  the line under it saying what a token holding it may do. */
 interface TokenScope {
-  readonly id: string;
+  readonly id: DispatchScope;
   readonly label: string;
   readonly allows: string;
 }
 
-const SCOPE_PERSON = "person";
-const SCOPE_APPROVE = "approve";
-
-/** Both scopes a personal token can hold, in the order a row shows them. */
+/** Both scopes a personal token can hold, in the order a row shows them. The ids are the
+ *  contract's own (`DISPATCH_SCOPES`), so a row cannot offer a scope the server does not mint. */
 const TOKEN_SCOPES: readonly TokenScope[] = [
   {
     allows: "Reads and writes as you: issues, comments, asks, documents and messages.",
-    id: SCOPE_PERSON,
+    id: "person",
     label: "Act as you",
   },
   {
     allows: "Answers approvals for you, and approves the credentials agents ask you for.",
-    id: SCOPE_APPROVE,
+    id: "approve",
     label: "Approve and control credentials",
   },
 ];
 
 /** Both scopes: what a new token holds unless the reader clears one. */
-const BOTH_SCOPES: readonly string[] = TOKEN_SCOPES.map((scope) => scope.id);
+const BOTH_SCOPES: readonly DispatchScope[] = DISPATCH_SCOPES;
 
 /** The whole set a token holds after one box is ticked or cleared, in `TOKEN_SCOPES` order.
  *  No token holds `approve` without `person`, so ticking Approve ticks Act as you and clearing
  *  Act as you clears Approve: the server refuses every other pair (400 TOKEN_SCOPES_INPUT), and
  *  a row that offered one would be a refusal waiting to happen. */
-function scopesAfterChoice(held: readonly string[], scope: string, ticked: boolean): string[] {
+function scopesAfterChoice(
+  held: readonly DispatchScope[],
+  scope: DispatchScope,
+  ticked: boolean
+): DispatchScope[] {
   const next = new Set(held);
   if (ticked) {
     next.add(scope);
-    if (scope === SCOPE_APPROVE) next.add(SCOPE_PERSON);
+    if (scope === "approve") next.add("person");
   } else {
     next.delete(scope);
-    if (scope === SCOPE_PERSON) next.delete(SCOPE_APPROVE);
+    if (scope === "person") next.delete("approve");
   }
   return TOKEN_SCOPES.filter((each) => next.has(each.id)).map((each) => each.id);
 }
@@ -111,9 +114,9 @@ function TokenScopeChoices({
   onChoose,
   subject,
 }: {
-  chosen: readonly string[];
+  chosen: readonly DispatchScope[];
   disabled: boolean;
-  onChoose: (scopes: string[]) => void;
+  onChoose: (scopes: DispatchScope[]) => void;
   subject: string;
 }): ReactNode {
   return (
@@ -146,7 +149,7 @@ export function AgentTokensSection(): ReactNode {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   /** What the mint form's boxes hold: both scopes until the reader clears one. */
-  const [newScopes, setNewScopes] = useState<readonly string[]>(BOTH_SCOPES);
+  const [newScopes, setNewScopes] = useState<readonly DispatchScope[]>(BOTH_SCOPES);
   const [shownToken, setShownToken] = useState<CreatedAgentToken>();
   /** When the token list was last read again after a mint whose answer was lost. */
   const [rereadAt, setRereadAt] = useState<number | undefined>(undefined);
@@ -155,7 +158,7 @@ export function AgentTokensSection(): ReactNode {
   // The form shows a refused mint beside the name it was refused over.
   const createToken = useKeyedWrite({
     inline: true,
-    label: (input: { name: string; before: readonly string[]; scopes: readonly string[] }) =>
+    label: (input: { name: string; before: readonly string[]; scopes: readonly DispatchScope[] }) =>
       `New agent token ${input.name}`,
     write: ({ name: label, scopes }, bounds) =>
       api.createAgentToken({ name: label, scopes: [...scopes] }, bounds),
@@ -195,7 +198,7 @@ export function AgentTokensSection(): ReactNode {
   /** One row's two boxes, written as the whole set the token is to hold. The row reads the set
    *  back from the list, so the boxes follow the write rather than the press. */
   const setTokenScopes = useKeyedWrite({
-    label: (input: { id: string; name: string; scopes: string[] }) =>
+    label: (input: { id: string; name: string; scopes: DispatchScope[] }) =>
       `What agent token ${input.name} may do`,
     write: (input, bounds) => api.setAgentTokenScopes(input.id, input.scopes, bounds),
     onSuccess: (updated, input) => {

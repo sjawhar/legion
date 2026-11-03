@@ -515,8 +515,6 @@ func (stream *gatedStream) SendWait(ctx context.Context, frame any) error {
 	}
 }
 
-func (stream *gatedStream) Human() bool { return false }
-
 func (stream *gatedStream) Holds(string) bool { return false }
 
 // next is the next frame the subscription sent, within eventFeedWait.

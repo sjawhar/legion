@@ -24,6 +24,8 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialPendingResponse,
+  CredentialPendingRow,
   DispatchServiceErrorShape,
   EditArtifactInput,
   EditArtifactResponse,
@@ -72,37 +74,17 @@ import {
 
 import { textHead } from "./ask-answer";
 
-export type { DispatchServiceErrorShape } from "@legion/contracts";
+export type {
+  CredentialPendingResponse,
+  CredentialPendingRow,
+  CredentialSession,
+  DispatchServiceErrorShape,
+} from "@legion/contracts";
 
 /** The stored bytes of one version of an uploaded file, and the MIME type Dispatch serves them as. */
 export interface ArtifactFileVersion {
   readonly mime: string;
   readonly bytes: Uint8Array;
-}
-
-/** A credential request's two session ids, each read independently by the secrets broker:
- *  `request` is the id the request itself stated, `enrollment` the id its requesting enrollment
- *  stated. Either is null where that id was never set, and a machine login answers both null. */
-export interface CredentialSession {
-  readonly request: string | null;
-  readonly enrollment: string | null;
-}
-
-/** One pending credential request of `GET /api/v1/credential-requests?approver=me`, relayed from
- *  the secrets broker word for word. `identifiers` are the secret rule keys, or the one hostname
- *  of a machine login; `requested_at` is RFC 3339. `session` is absent from a broker older than
- *  those ids, and `approve_url` from a machine login's row, which carries no broker page. */
-export interface CredentialPendingRow {
-  readonly record_id: string;
-  readonly kind: string;
-  readonly identifiers: string[];
-  readonly requested_at: string;
-  readonly session?: CredentialSession;
-  readonly approve_url?: string;
-}
-
-export interface CredentialPendingResponse {
-  readonly pending: CredentialPendingRow[];
 }
 
 export class DispatchServiceError extends Error {

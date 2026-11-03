@@ -115,7 +115,10 @@ describe("renderSessionAnswers", () => {
   test("an item an agent wrote for its person names the agent beside the person", () => {
     const throughSession = {
       ...answer,
-      author: { ...answer.author, act: { session: "0123456789abcdef", scopes: ["person"] } },
+      author: {
+        ...answer.author,
+        act: { session: "0123456789abcdef", scopes: ["person" as const] },
+      },
     };
     expect(renderSessionAnswerItem(throughSession)).toStartWith(
       "2026-10-27T11:00:00Z · user ana@example.com, acting through session 0123456789abcdef · answered your ask"

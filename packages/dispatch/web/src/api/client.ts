@@ -58,6 +58,7 @@ import type {
   DeliverySessionGroup,
   DeliverySettings,
   DeliverySettingsInput,
+  DispatchScope,
   DispatchUser,
   DocumentReferenceSummary,
   EditCommentInput,
@@ -923,7 +924,11 @@ export class DispatchApiClient {
   /** `PATCH /api/v1/me/agent-tokens/{id}`: the whole set of scopes the token is to hold, which
    *  replaces the set it holds now, answering the updated token. A scope the caller does not hold
    *  itself is refused, as it is at the mint. */
-  setAgentTokenScopes(id: string, scopes: string[], bounds: WriteBounds): Promise<AgentToken> {
+  setAgentTokenScopes(
+    id: string,
+    scopes: DispatchScope[],
+    bounds: WriteBounds
+  ): Promise<AgentToken> {
     return this.send<AgentToken>(
       { body: { scopes }, method: "PATCH", path: `/api/v1/me/agent-tokens/${pathSegment(id)}` },
       bounds

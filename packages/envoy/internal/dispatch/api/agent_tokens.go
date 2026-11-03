@@ -186,7 +186,9 @@ func tokenScopes(w http.ResponseWriter, actor model.Actor, requested *[]string) 
 	if requested == nil {
 		return callerScopes(actor), true
 	}
-	scopes := make([]string, 0, len(*requested))
+	// At most the two scopes this deployment knows, whatever the body holds: an unknown word is
+	// refused and a repeat is folded, so a long array buys no room.
+	scopes := make([]string, 0, 2)
 	for _, scope := range *requested {
 		if scope != model.ScopePerson && scope != model.ScopeApprove {
 			writeError(w, codeTokenScopesInput, http.StatusBadRequest, fmt.Sprintf(
@@ -194,7 +196,9 @@ func tokenScopes(w http.ResponseWriter, actor model.Actor, requested *[]string) 
 				scope, model.ScopePerson, model.ScopeApprove))
 			return nil, false
 		}
-		if !slices.Contains(callerScopes(actor), scope) {
+		// Act is nil for a browser, whose person holds every scope, which is what Holds answers
+		// for one; a token's act carries the set its own row names.
+		if !actor.Act.Holds(scope) {
 			refuseMissingScope(w, scope, fmt.Sprintf(
 				"this request's credential does not hold the %s scope, so it cannot give it to a token", scope))
 			return nil, false

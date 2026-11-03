@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
-import type { AgentToken } from "../../api/types";
+import type { AgentToken, DispatchScope } from "../../api/types";
 import { AgentTokensSection } from "./AgentTokensSection";
 
 const token: AgentToken = {
@@ -136,7 +136,7 @@ test("a token's row shows the scopes it holds, and each change sends the whole s
   const personOnly: AgentToken = { ...token, scopes: ["person"] };
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([personOnly]);
   const setAgentTokenScopes = spyOn(api, "setAgentTokenScopes").mockImplementation(
-    async (id: string, scopes: string[]) => ({ ...personOnly, id, scopes })
+    async (id: string, scopes: DispatchScope[]) => ({ ...personOnly, id, scopes })
   );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 

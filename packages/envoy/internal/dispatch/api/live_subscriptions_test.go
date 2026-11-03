@@ -15,6 +15,7 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // fakeLiveKind stands in for the events and agent views, which a live socket starts as it starts
@@ -38,7 +39,7 @@ func (k *fakeLiveKind) kind(resumes bool) liveKind {
 
 func (k *fakeLiveKind) start(ctx context.Context, stream liveStreamer, sub string, view LiveView, resume *EventsLiveResume) (liveSubscription, *LiveError) {
 	ctx, cancel := context.WithCancel(ctx)
-	running := &fakeLiveSubscription{sub: sub, view: view, resume: resume, human: stream.Human(), cancel: cancel, done: make(chan struct{})}
+	running := &fakeLiveSubscription{sub: sub, view: view, resume: resume, holdsPerson: stream.Holds(model.ScopePerson), cancel: cancel, done: make(chan struct{})}
 	event := json.RawMessage(`{"pad":"` + strings.Repeat("x", k.pad) + `"}`)
 	go func() {
 		defer close(running.done)
@@ -79,11 +80,11 @@ func (k *fakeLiveKind) none(t *testing.T, within time.Duration, what string) {
 
 // fakeLiveSubscription is one subscription a fakeLiveKind started.
 type fakeLiveSubscription struct {
-	sub    string
-	view   LiveView
-	resume *EventsLiveResume
-	human  bool
-	cancel context.CancelFunc
+	sub         string
+	view        LiveView
+	resume      *EventsLiveResume
+	holdsPerson bool
+	cancel      context.CancelFunc
 	// done closes once the subscription's goroutine returns; err is then what SendWait answered
 	// that ended its sending, nil when it sent every frame.
 	done  chan struct{}
@@ -411,20 +412,20 @@ func TestAResumeOfTheWrongShapeIsAnInvalidFrame(t *testing.T) {
 	client.refusal(t, 10*time.Second, "i", "DELIVERY_NOT_CONFIGURED")
 }
 
-func TestASubscriptionKnowsWhetherItsCallerIsAPerson(t *testing.T) {
+func TestASubscriptionKnowsWhichScopesItsCallerHolds(t *testing.T) {
 	events := newFakeLiveKind(0, 0)
 	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}}, nil)
 	for name, test := range map[string]struct {
-		header http.Header
-		human  bool
+		header      http.Header
+		holdsPerson bool
 	}{
-		"a person signed in": {asUser("alice"), true},
-		"an agent's bearer":  {withBearer("agent-token"), false},
+		"a person signed in":      {asUser("alice"), true},
+		"the deployment's bearer": {withBearer("agent-token"), false},
 	} {
 		client := rig.dial(t, test.header)
 		client.send(t, liveSubscribe("e", eventsView(), ""))
-		if started := events.next(t, 5*time.Second, name+"'s events subscription"); started.human != test.human {
-			t.Errorf("%s: the subscription's stream says Human() = %t, want %t", name, started.human, test.human)
+		if started := events.next(t, 5*time.Second, name+"'s events subscription"); started.holdsPerson != test.holdsPerson {
+			t.Errorf("%s: the subscription's stream says Holds(person) = %t, want %t", name, started.holdsPerson, test.holdsPerson)
 		}
 	}
 }
@@ -499,7 +500,7 @@ func TestSendWaitReturnsWhenItsSubscriptionStops(t *testing.T) {
 	t.Run("the socket ends", func(t *testing.T) {
 		// The socket's end ends the subscription's context too, which derives from the socket's, and
 		// SendWait answers the socket's end whichever of the two it sees first.
-		socket := newLiveSocket(context.Background(), nil, false, nil)
+		socket := newLiveSocket(context.Background(), nil, nil)
 		socket.stream = make(chan liveStreamFrame, 1)
 		stream := &liveSubscriptionStream{socket: socket}
 		ctx, cancel := context.WithCancel(socket.ctx)

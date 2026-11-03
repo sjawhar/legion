@@ -988,7 +988,7 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 			accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
 			// A credential that holds no scope, not the absence of one: the deployment's one
 			// shared token is nobody's, so it acts as no person.
-			return model.Actor{Credential: &model.Credential{}}, false, nil
+			return model.Actor{Credential: scopelessCredential}, false, nil
 		}
 		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {
 			return s.serviceTokenActor(r, token)
@@ -1013,12 +1013,19 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 	accesslog.Note(r.Context(), accesslog.KindUser, login)
 	// A person at a browser is the person, so their cookie holds every scope and names no agent
 	// that acted for them.
-	return model.Actor{
-		Kind:       "user",
-		ID:         login,
-		Credential: &model.Credential{Scopes: []string{model.ScopePerson, model.ScopeApprove}},
-	}, true, nil
+	return model.Actor{Kind: "user", ID: login, Credential: personCredential}, true, nil
 }
+
+// The two credentials every request of their kind shares. Each is a fact of the deployment
+// rather than of one request — a browser's cookie holds both scopes, and the shared token and a
+// service-account token hold none — and the cookie's is on the dashboard's hottest path, so
+// allocating either per request would be waste. Nothing writes a Credential or appends to its
+// Scopes: Holds reads, requireScope copies the slice header onto the act it records, and
+// tokenScopes builds a set of its own.
+var (
+	scopelessCredential = &model.Credential{}
+	personCredential    = &model.Credential{Scopes: []string{model.ScopePerson, model.ScopeApprove}}
+)
 
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
 // projected service-account token. A rejected token is a 401 of its own: it
@@ -1046,7 +1053,7 @@ func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, 
 	accesslog.Note(r.Context(), accesslog.KindService, claims.Subject)
 	// A credential that holds no scope, not the absence of one: a pod's projected token proves a
 	// workload and no person, so it acts as nobody.
-	return model.Actor{Service: &claims.Subject, Credential: &model.Credential{}}, false, nil
+	return model.Actor{Service: &claims.Subject, Credential: scopelessCredential}, false, nil
 }
 
 // actorFrom is the actor a write records: the caller optionalActor resolved, or, for a bearer
