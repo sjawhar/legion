@@ -1522,7 +1522,7 @@ func (r *outbox) releaseIssue(ctx context.Context, row record.OutboxRow, payload
 
 // cancelRelease undoes a release that did not finish: the bundle it may have stored is deleted,
 // and the resume of each claim it suspended and still holds is queued with the release's mark
-// deleted, in one transaction (store.CancelIssueRelease). The resume is the start row a wake
+// deleted, all in one transaction (store.CancelIssueRelease). The resume is the start row a wake
 // writes, which the outbox resumes a suspended claim by, so a cancelled release leaves the pod
 // exactly as a wake would have left it — and leaves it durably: a resume the daemon cannot run
 // now is a row its lane runs later, where a resume held in memory alone was lost with the
@@ -1533,15 +1533,12 @@ func (r *outbox) releaseIssue(ctx context.Context, row record.OutboxRow, payload
 // resume queued above the close's own rows would supersede them and leave the roles of a done
 // issue running in a Sandbox nothing deletes.
 //
-// A bundle that cannot be deleted does not stop the rest: the cancel runs whatever the delete
-// answered, since a release left marked would hold the pod against every later decision, and
-// the row that could not be deleted is the issue's one bundle, which the next release replaces
-// and the issue's close drops (dropReleasedWork).
+// The bundle goes in that same transaction and never in a call of its own, so a delete that
+// fails leaves the release marked and the lane runs the whole cancel again. A cancel that went
+// on without it left the pod standing with its roles resumed and a copy of their work waiting
+// in the database for the issue's next pod, which would restore it over everything they pushed
+// in between.
 func (r *outbox) cancelRelease(ctx context.Context, issue, tree string, hold workflow.IdleHold, why string) error {
-	if err := r.trees.DeleteWorkspaceBundle(ctx, issue); err != nil {
-		r.log.Warn("outbox: the bundle of a cancelled release could not be deleted; its pod goes on with the work in its own workspace",
-			"issue", issue, "error", err)
-	}
 	resumed, err := r.trees.CancelIssueRelease(ctx, r.project, issue, r.releaseResume(issue, tree), record.OutOfWorkflow)
 	if err != nil {
 		return err

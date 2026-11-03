@@ -118,7 +118,7 @@ func TestTheIdleViewReadsTheUnrestoredBundleAndTheRunningHoldStreak(t *testing.T
 	}
 
 	if err := st.PutWorkspaceBundle(ctx, rootIssue, 7,
-		runtime.WorkspaceBundle{Bundle: []byte("PACK"), Head: "abc", At: now}); err != nil {
+		runtime.WorkspaceBundle{Bundle: []byte("PACK"), Head: "abc", At: now, PodUID: "pod-being-released"}); err != nil {
 		t.Fatalf("save a bundle for %s: %v", rootIssue, err)
 	}
 	if err := st.RecordPodHold(ctx, PodHold{Project: "legion", Issue: rootIssue, Reason: "image", At: now}); err != nil {

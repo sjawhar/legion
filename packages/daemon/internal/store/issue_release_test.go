@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/wait"
 )
@@ -548,6 +549,51 @@ func TestACancelKeepsTheMarkUntilItsResumesAreQueued(t *testing.T) {
 	}
 	if releaseMarked(t, st) {
 		t.Fatal("the cancel queued its resumes and left the mark standing")
+	}
+}
+
+// The bundle a cancelled release saved goes in the cancel's own transaction, with the resumes and
+// the mark. The pod that work came off is the pod the resumes bring back, with the work in its own
+// workspace, so the row is a second copy of a live disk's work: left behind it would hold the
+// issue's pod (workflow.IdleHoldBundleUnrestored) and wait for whatever pod the issue made next —
+// an eviction's, an update round's, a park and unpark's — to restore it over everything those
+// roles pushed in the meantime.
+//
+// One transaction is what makes that true of a cancel that fails too: a resume the store cannot
+// queue leaves the mark standing and the bundle with it, so the row's retry runs the whole cancel
+// again rather than going on with the bundle already gone or already kept.
+func TestACancelDeletesTheBundleItsReleaseSavedInTheSameTransaction(t *testing.T) {
+	const first, boundary, last = 18, 20, 22
+	st := migratedStore(t)
+	ctx := context.Background()
+	openRunningTree(t, st)
+	markRelease(t, st, first, boundary, last, 0, claim.RoleArchitect)
+	releasedClaim(t, st, claim.RoleArchitect)
+	var release int64
+	if err := st.Pool().QueryRow(ctx, `select id from issue_releases where issue = $1`, rootIssue).Scan(&release); err != nil {
+		t.Fatalf("read the id of the release of %s: %v", rootIssue, err)
+	}
+	saved := runtime.WorkspaceBundle{Bundle: []byte("PACK the work of the cancelled release"),
+		Head: "f2f134541b30dfa5160a5d1ce5e17b76c967c661", At: time.Now().UTC(), PodUID: "pod-being-released"}
+	if err := st.PutWorkspaceBundle(ctx, rootIssue, release, saved); err != nil {
+		t.Fatalf("save the release's bundle: %v", err)
+	}
+
+	refused := errors.New("the resume could not be encoded")
+	if _, err := st.CancelIssueRelease(ctx, "legion", rootIssue, func(claim.Role, uint64) (IdleReleaseRow, error) {
+		return IdleReleaseRow{}, refused
+	}, record.OutOfWorkflow); !errors.Is(err, refused) {
+		t.Fatalf("a cancel whose resume could not be built = %v, want %v", err, refused)
+	}
+	if _, held, err := st.WorkspaceBundleSize(ctx, rootIssue); err != nil || !held {
+		t.Fatalf("after a cancel that failed the store holds the bundle = %t (%v), want it kept with the mark", held, err)
+	}
+
+	if _, err := st.CancelIssueRelease(ctx, "legion", rootIssue, resumeRow, record.OutOfWorkflow); err != nil {
+		t.Fatalf("carry the cancel out: %v", err)
+	}
+	if _, held, err := st.WorkspaceBundleSize(ctx, rootIssue); err != nil || held {
+		t.Fatalf("after the cancel the store holds the bundle = %t (%v), want it deleted with the mark", held, err)
 	}
 }
 

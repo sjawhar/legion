@@ -22,8 +22,10 @@ const testRelease int64 = 11
 // shimwire.LauncherBundlePayloadBytes of git bundle, so the hop to the launcher is a sequence of
 // slices and not one frame, with the head, the tips and the bookmark a restore needs beside it.
 // It was taken before the rig's clock starts, so every pod the rig makes is one created after
-// the save — the only kind a bundle's one restore attempt is for
-// (store.TakeWorkspaceBundleForRestore). A test of the pod the work came off sets At itself.
+// the save — the only kind a bundle is sent to
+// (store.TakeWorkspaceBundleForRestore). Its source pod, the pod the work came off, is a pod of
+// an earlier life of the issue that the rig never makes, so no pod of the rig is refused by uid;
+// a test of the pod the work came off names that pod itself.
 func savedWorkspaceBundle() runtime.WorkspaceBundle {
 	return runtime.WorkspaceBundle{
 		Bundle:    bytes.Repeat([]byte("PACKjj\x00\x02"), (600<<10)/8),
@@ -32,6 +34,7 @@ func savedWorkspaceBundle() runtime.WorkspaceBundle {
 		Bookmarks: map[string]string{"legion/" + testTree: "dffe88ae2f793e13436cef3921adc988433fbd4e"},
 		At:        rigNow.Add(-time.Minute),
 		Release:   testRelease,
+		PodUID:    "pod-the-release-took-the-work-off",
 	}
 }
 
@@ -169,7 +172,8 @@ func TestAFailedRestoreKeepsTheSavedWorkAndSendsItToNoPodAgain(t *testing.T) {
 // must be sent nothing, and it must not spend the bundle's one restore attempt either: the pod
 // the wake makes next is the one with an empty workspace, and an attempt spent here would leave
 // it sent nothing while the row stayed and held the issue's pod
-// (workflow.IdleHoldBundleUnrestored). Only a pod created after the save may take it.
+// (workflow.IdleHoldBundleUnrestored). The store knows that pod by the uid the save recorded,
+// so it is the pod's identity and not its clock that leaves the attempt where it belongs.
 func TestARelaunchInThePodBeingReleasedLeavesTheAttemptForItsReplacement(t *testing.T) {
 	st := migratedStore(t)
 	g := newRig(t, nil, withOptions(func(o *Options) {
@@ -180,9 +184,11 @@ func TestARelaunchInThePodBeingReleasedLeavesTheAttemptForItsReplacement(t *test
 	released := g.pod(SandboxName(spec.Claim))
 
 	// The release takes the workspace's unpushed work off that pod and saves it, while the pod
-	// and its roles are still there.
+	// and its roles are still there: the save names that pod, as the runtime's own does
+	// (Runtime.BundleWorkspace).
 	saved := savedWorkspaceBundle()
 	saved.At = rigNow.Add(time.Minute)
+	saved.PodUID = string(released.UID)
 	if err := st.PutWorkspaceBundle(g.ctx, testTree, saved.Release, saved); err != nil {
 		t.Fatalf("save the released workspace's bundle: %v", err)
 	}
@@ -285,13 +291,13 @@ func TestALateRestoreReportLeavesTheBundleOfANewerRelease(t *testing.T) {
 	}
 	d.restoreReported(session, shimwire.LauncherRestored{ID: frames[0].ID, Release: first.Release, OK: true})
 
-	kept, held, err := st.TakeWorkspaceBundleForRestore(ctx, testTree, "pod-uid", rigNow)
+	kept, take, err := st.TakeWorkspaceBundleForRestore(ctx, testTree, "pod-uid", rigNow)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !held || !bytes.Equal(kept.Bundle, second.Bundle) || kept.Release != second.Release {
-		t.Fatalf("after the first release's report the store holds %q of release %d (held=%t), want the %q release %d saved since",
-			kept.Bundle, kept.Release, held, second.Bundle, second.Release)
+	if take != runtime.WorkspaceBundleSend || !bytes.Equal(kept.Bundle, second.Bundle) || kept.Release != second.Release {
+		t.Fatalf("after the first release's report the store holds %q of release %d (take=%v), want the %q release %d saved since",
+			kept.Bundle, kept.Release, take, second.Bundle, second.Release)
 	}
 	// The pod of the second release restores it, and that report drops it.
 	later, err := bundleFrames(testTree, second)
@@ -350,5 +356,75 @@ func TestARefusedBundleSliceStillStartsTheRoleAndKeepsTheSavedWork(t *testing.T)
 	}
 	if !held || size != len(saved.Bundle) {
 		t.Fatalf("after the refusal the store holds %d bytes (held=%t), want the %d saved kept", size, held, len(saved.Bundle))
+	}
+}
+
+// The replacement pod refused because its node's clock ran ahead of the API server's is sent
+// nothing, and so is every pod after it.
+//
+// A save is stamped by the clock of the node the released pod ran on, and a pod's
+// creationTimestamp by the API server's; a node minutes ahead stamps the save in the
+// replacement pod's own future, so that pod reads as older than the work it was made to carry
+// and is refused. Refusing is the direction to fail in — the work stays in the database and the
+// pod starts on what its fetch provisioned — but the refusal has to close the bundle. That pod
+// stands for hours with its roles working and pushing to the issue's branch, and the pod made
+// after it, by an eviction or an update round or a park and unpark, has a workspace provisioned
+// from everything they pushed: sending it the bundle would run `jj edit` and
+// `jj bookmark set --allow-backwards` back over all of it.
+func TestAReplacementPodRefusedByClockSkewLeavesNothingForThePodAfterIt(t *testing.T) {
+	st := migratedStore(t)
+	saved := savedWorkspaceBundle()
+	// The node that took the bundle is a minute ahead of the API server that stamps the pods.
+	saved.At = rigNow.Add(time.Minute)
+	if err := st.PutWorkspaceBundle(context.Background(), testTree, saved.Release, saved); err != nil {
+		t.Fatalf("save the released workspace's bundle: %v", err)
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) {
+		o.SavedWorkspaceBundle, o.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
+	}))
+	spec := workerSpec(t)
+	g.spawn(spec)
+	refused := g.pod(SandboxName(spec.Claim))
+	if refused.CreationTimestamp.Time.After(saved.At) {
+		t.Fatalf("the replacement pod was created %s, want the skewed save at %s to be later", refused.CreationTimestamp, saved.At)
+	}
+	for _, frame := range g.sent(spec.Claim) {
+		if slice, ok := frame.(shimwire.LauncherBundle); ok {
+			t.Fatalf("the refused pod was sent slice %d of %d of release %d, want nothing: it reads as older than the save",
+				slice.Index, slice.Count, slice.Release)
+		}
+	}
+	// Its roles ran for an hour and pushed what they did; then the pod went and another came.
+	if err := g.kube.Tracker().Delete(podsGVR, testNamespace, SandboxName(spec.Claim)); err != nil {
+		t.Fatalf("delete the refused pod: %v", err)
+	}
+	g.advance(time.Hour)
+	g.eventually("the pod after the refused one", func() bool {
+		pod := g.pod(SandboxName(spec.Claim))
+		if pod == nil || pod.UID == refused.UID {
+			return false
+		}
+		g.r.launchers.mu.Lock()
+		defer g.r.launchers.mu.Unlock()
+		session := g.r.launchers.sessions[spec.Claim]
+		return session != nil && session.podUID == string(pod.UID)
+	})
+	after := g.pod(SandboxName(spec.Claim))
+	if !after.CreationTimestamp.Time.After(saved.At) {
+		t.Fatalf("the pod after the refused one was created %s, want it after the save at %s: the save's own clock no longer refuses it",
+			after.CreationTimestamp, saved.At)
+	}
+	before := len(g.sent(spec.Claim))
+	g.r.launchers.restoreWorkspace(g.ctx, spec.Claim, string(after.UID))
+	for _, frame := range g.sent(spec.Claim)[before:] {
+		if slice, ok := frame.(shimwire.LauncherBundle); ok {
+			t.Fatalf("the pod after the refused one was sent slice %d of %d of release %d, want nothing: the refusal was the bundle's one attempt",
+				slice.Index, slice.Count, slice.Release)
+		}
+	}
+	// The work is kept whole, for a person to carry out of the database, and it holds the
+	// issue's pod until the issue's work is over (workflow.IdleHoldBundleUnrestored).
+	if size, held, err := st.WorkspaceBundleSize(g.ctx, testTree); err != nil || !held || size != len(saved.Bundle) {
+		t.Fatalf("after the refusal the store holds %d bytes (held=%t, %v), want the %d saved kept", size, held, err, len(saved.Bundle))
 	}
 }

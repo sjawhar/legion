@@ -486,7 +486,9 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 		// replaces the released one before any role of that pod starts. The confirmation deletes
 		// the bundle of the release the launcher's report names and no other, so a report that
 		// arrives late takes no newer release's work with it. The read is the bundle's one restore
-		// attempt: it records the pod it is sent to and answers nothing for that bundle again.
+		// attempt: the first pod that is not the one the work came off takes it, whether the
+		// bundle is sent or that pod is refused as no newer than the save, and nothing is
+		// answered for that bundle again.
 		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
 			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames)}

@@ -167,15 +167,18 @@ func insertOutboxRow(ctx context.Context, tx pgx.Tx, issue string, row IdleRelea
 // is record's to encode, as every row of a release is (IdleReleaseRow).
 type ReleaseResumeRow func(role claim.Role, generation uint64) (IdleReleaseRow, error)
 
-// CancelIssueRelease ends a release that did not finish, in one transaction: the resume of each
-// claim this release suspended and still holds is queued, and the mark goes with them. The two
-// are one act because either alone is a wrong state of the pod: a mark deleted before the
-// resumes are durable leaves those roles `released` in a pod that still stands, with no backstop
-// — a release arms one only once its pod is gone — and nothing left to read that says they are
-// owed a process, since the next row of the release reads the release as over and the next idle
-// tick sees a pod whose claims are suspended. Queueing the resumes rather than relaunching here
-// is what makes them durable: the row is the daemon's own record of what the pod is owed, and
-// its lane retries it until the role has it back.
+// CancelIssueRelease ends a release that did not finish, in one transaction: the bundle that
+// release saved is deleted, the resume of each claim this release suspended and still holds is
+// queued, and the mark goes with them. The three are one act because any of them alone is a
+// wrong state of the pod: a mark deleted before the resumes are durable leaves those roles
+// `released` in a pod that still stands, with no backstop — a release arms one only once its
+// pod is gone — and nothing left to read that says they are owed a process, since the next row
+// of the release reads the release as over and the next idle tick sees a pod whose claims are
+// suspended; and a bundle left behind is a copy of work the pod the roles resume in holds on
+// its own disk, waiting for some later pod of the issue to restore it over whatever those roles
+// push in the meantime. Queueing the resumes rather than relaunching here is what makes them
+// durable: the row is the daemon's own record of what the pod is owed, and its lane retries it
+// until the role has it back.
 //
 // It answers the roles it queued a resume for: the claims this release suspended that are still
 // suspended as `released`. A claim another path took over — a close, a linger, an operator —
@@ -214,13 +217,25 @@ func (s *Store) CancelIssueRelease(ctx context.Context, project, issue string, r
 			return err
 		}
 		resumed = nil
+		var release int64
 		var suspended []string
-		err := tx.QueryRow(ctx, `select suspended from issue_releases where project = $1 and issue = $2`,
-			project, issue).Scan(&suspended)
+		err := tx.QueryRow(ctx, `select id, suspended from issue_releases where project = $1 and issue = $2`,
+			project, issue).Scan(&release, &suspended)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
+			return err
+		}
+		// The bundle this release saved goes with the mark, in this transaction. The pod it was
+		// taken off is the pod the roles resume in, with that work in its own workspace, so the
+		// row holds a copy of work a live disk has; left behind it would hold the issue's pod
+		// (workflow.IdleHoldBundleUnrestored) and wait for a pod created after the save — an
+		// eviction's, an update round's, a park and unpark's — which would restore it over
+		// however much its roles had pushed since. A delete that fails fails the cancel, which
+		// its row's lane runs again; a cancel that left the bundle behind and went on was that
+		// sequence's first step.
+		if _, err := tx.Exec(ctx, `delete from workspace_bundles where issue = $1 and release_id = $2`, issue, release); err != nil {
 			return err
 		}
 		roles, err := stillReleasedRoles(ctx, tx, project, issue, suspended)

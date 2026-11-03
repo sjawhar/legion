@@ -37,7 +37,39 @@ type WorkspaceBundle struct {
 	// a restore names the release whose work it put back and deletes no other
 	// (internal/runtime/sandbox's restoreReported).
 	Release int64
+	// PodUID is the uid of the pod the work was taken off: the issue pod the save's own
+	// BundleWorkspace asked, which the runtime fills because only it knows which pod the role
+	// it asked was running in (sandbox's Runtime.BundleWorkspace reads it off the claim's
+	// locator). The store keeps it on the row (store.Store.PutWorkspaceBundle) and refuses that
+	// pod by it: a role relaunched in the pod being released asks for the bundle like any other
+	// start, its workspace is the one the work came from, and it must leave the attempt for the
+	// pod that replaces it. The read fills it back in from the row.
+	PodUID string
 }
 
 // Size is the bundle's length in bytes, which the release records and the 40 MiB bound reads.
 func (b WorkspaceBundle) Size() int { return len(b.Bundle) }
+
+// WorkspaceBundleTake is what one pod's ask of an issue's saved bundle did to that bundle
+// (store.Store.TakeWorkspaceBundleForRestore). A bundle is offered to one pod only — the first
+// pod that is not the one its work came off to ask for it — and the ask that reaches that pod
+// closes it to every later one, whether the body was sent or refused.
+type WorkspaceBundleTake int
+
+const (
+	// WorkspaceBundleNone: there is nothing to send this pod and nothing was recorded. The issue
+	// was never released, its restore is confirmed, a wake cancelled its release, the bundle has
+	// had its one attempt already, or this pod is the one the work was taken off.
+	WorkspaceBundleNone WorkspaceBundleTake = iota
+	// WorkspaceBundleSend: this pod takes the bundle, and the row records the attempt as its
+	// before a byte of it leaves the daemon.
+	WorkspaceBundleSend
+	// WorkspaceBundleRefusedOlder: this pod is not the one the work came off and was not created
+	// after the save, so it is not the pod the release's teardown replaced — or it is, under a
+	// node clock that runs ahead of the API server's — and nothing is sent to it. The refusal is
+	// the bundle's one attempt: no later pod is sent it either, since the roles of this pod go
+	// on working and pushing, and a bundle applied over that work would move the issue's
+	// bookmarks back behind it. The work stays in the database for a person to recover and holds
+	// the issue's pod (workflow.IdleHoldBundleUnrestored).
+	WorkspaceBundleRefusedOlder
+)

@@ -51,9 +51,11 @@ type launcherSession struct {
 	// podCreated is when the API server stamped this launcher's pod created
 	// (corev1.Pod's CreationTimestamp, as the resolver read it off the pod the connection was
 	// accepted for). It is what says whether this pod is the one a release's saved work is for:
-	// only a pod created after the save may take the bundle's one restore attempt
-	// (store.TakeWorkspaceBundleForRestore), so a role relaunched in the pod being released,
-	// which is older than the save, spends nothing.
+	// a pod created after the save is the pod the teardown's launch made and is sent the work,
+	// and one that is not is refused, which spends the bundle's one attempt and sends it to no
+	// pod again (store.TakeWorkspaceBundleForRestore). The pod the work was taken off is told
+	// apart by its uid and not by this, so a role relaunched in the pod being released spends
+	// nothing.
 	podCreated time.Time
 	id         string
 	podUID     string
@@ -333,11 +335,15 @@ const bundleRestoreBound = 2 * time.Minute
 // database, which holds the issue's pod (workflow.IdleHoldBundleUnrestored) until the issue's
 // work is over.
 //
-// Whose attempt it is the session's own pod decides. A release stops the roles of the pod it is
-// releasing, so a role relaunched in that pod before the teardown deletes it reaches here too,
-// for the workspace the work was taken from; the store is told when this pod was created
-// (launcherSession.podCreated) and refuses every pod that is not newer than the save, so such a
-// relaunch is sent nothing and leaves the attempt for the pod that replaces it.
+// Whose attempt it is the session's own pod decides, and the store decides it: a release stops
+// the roles of the pod it is releasing, so a role relaunched in that pod before the teardown
+// deletes it reaches here too, for the workspace the work was taken from, and the store knows
+// that pod by the uid the save recorded and answers it nothing, leaving the attempt for the pod
+// that replaces it. Every other pod spends the attempt the first time it asks, and a pod that
+// is not newer than the save (launcherSession.podCreated) spends it on a refusal: nothing is
+// sent to it, and nothing is sent to the pod after it either, since its roles go on working and
+// pushing from the workspace its own fetch provisioned. That refusal is this hop's one warning
+// an operator must read — the work is in the database and no pod will put it back on its own.
 func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, podUID string) {
 	if d.saved == nil || d.restored == nil {
 		return
@@ -352,16 +358,23 @@ func (d *launchers) restoreWorkspace(ctx context.Context, token claim.Token, pod
 	issue := session.issue
 	restoring, cancel := context.WithTimeout(ctx, bundleRestoreBound)
 	defer cancel()
-	bundle, saved, err := d.saved(restoring, issue, podUID, session.podCreated)
+	bundle, take, err := d.saved(restoring, issue, podUID, session.podCreated)
 	if err != nil {
 		d.log.Warn("launcher bundle: the saved workspace bundle could not be taken for this pod's one restore attempt, so the pod starts on what was pushed",
 			"issue", issue, "launcher", token, "pod", podUID, "error", err)
 		return
 	}
+	if take == runtime.WorkspaceBundleRefusedOlder {
+		d.log.Warn("launcher bundle: this pod was not created after the release's save, so the saved workspace bundle is refused and no pod is sent it again; the work stays in the daemon's database and holds the issue's pod",
+			"issue", issue, "launcher", token, "pod", podUID, "created", session.podCreated,
+			"saved", bundle.At, "head", bundle.Head, "release", bundle.Release)
+		return
+	}
 	// Nothing was released, the restore is already confirmed, the release saved a workspace that
-	// had nothing unpushed, or this bundle has had its one attempt: the pod starts on what its
-	// fetch provisioned, as every pod of an issue that was never released does.
-	if !saved || len(bundle.Bundle) == 0 {
+	// had nothing unpushed, this bundle has had its one attempt, or this is the pod the work was
+	// taken off: the pod starts on what its fetch provisioned, as every pod of an issue that was
+	// never released does.
+	if take != runtime.WorkspaceBundleSend || len(bundle.Bundle) == 0 {
 		return
 	}
 	frames, err := bundleFrames(issue, bundle)
