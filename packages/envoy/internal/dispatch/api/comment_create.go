@@ -299,9 +299,9 @@ func (s *server) normalizeCommentThreadTarget(
 // names a block of that comment, as the client and the tool that write it mean, where only a
 // reply naming the ask names one of the ask's parts. The ask is ordered against a write of its
 // own by its owner's lock (store.LockOwner), which this transaction took before it read either
-// (lockCommentOwner), and under which asks.go's readAskForTransition reads the row. The index
-// the item owes is queued on ledger, which is nil on
-// a route that holds no write phase (the delivery replies), where it is written at once.
+// (lockCommentOwner), and under which asks.go's readAskForTransition reads the row. The index the
+// item owes is queued on ledger, which is nil on a route that holds no write phase (the delivery
+// replies), where it is written at once.
 func (s *server) namedReplyBlock(
 	ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, kind refs.ItemKind, itemID, blockID string,
 ) (*namedBlock, error) {

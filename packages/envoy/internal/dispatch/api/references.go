@@ -34,14 +34,7 @@ func (s *server) replaceReferences(
 	return refs.ReplaceCounted(ctx, tx, fromKind, fromID, body, s.deps.ServerURL)
 }
 
-// queueAskParts is queueItemReferences' shape for an ask, whose parts - its question, its options
-// and its answer - are its blocks: it plans the parts this transaction's write leaves, as they
-// stand at `at`, writing nothing, resolves the counted targets the plan moves and merges them
-// into beside, what the same write already holds, and queues the index's statements on ledger,
-// where the route makes the write, so the event it appends names them all
-// (docs.Ledger.QueueAskParts). The route queues the ask's own row write before calling: every
-// part table references the ask's row, so the index's statements have to follow that write in the
-// batch.
+// queueAskParts is docs.Ledger.QueueAskParts bound to this server's URL.
 func (s *server) queueAskParts(
 	ctx context.Context,
 	ledger *docs.Ledger,
