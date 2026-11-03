@@ -193,6 +193,16 @@ type ReleaseResumeRow func(role claim.Role, generation uint64) (IdleReleaseRow, 
 // without acting, its Sandbox is never deleted, and the roles of a done issue run on in it with
 // their launcher tokens and `gh` credentials. outOfWorkflow is the workflow's rule for a status
 // that takes an issue out of it (record.OutOfWorkflow), which the store does not restate.
+//
+// The transaction takes the shared serializer before that read, as every other writer of the
+// issue's lifecycle does (ReleaseIdleIssue, IssueRelease, IssueSuspension), and the lock rather
+// than the read is what holds the gate. A park or a close is one fact transaction that moves the
+// issue's status and queues the close's rows together, so without the lock a cancel can read the
+// status from before that transaction and still take its resume's id from the sequence after it:
+// a resume standing above a close that committed, which is the one order the gate exists to
+// refuse. Under the lock the two commit in a line, and neither order leaves that state — a cancel
+// that runs first queues its resume below the close's rows, which supersede it, and one that runs
+// after reads the issue as left and queues nothing.
 func (s *Store) CancelIssueRelease(ctx context.Context, project, issue string, resume ReleaseResumeRow,
 	outOfWorkflow func(status string) bool) ([]claim.Role, error) {
 	if project == "" || issue == "" || resume == nil || outOfWorkflow == nil {
@@ -200,6 +210,9 @@ func (s *Store) CancelIssueRelease(ctx context.Context, project, issue string, r
 	}
 	var resumed []claim.Role
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		if err := treelifecycle.Serialize(ctx, tx); err != nil {
+			return err
+		}
 		resumed = nil
 		var suspended []string
 		err := tx.QueryRow(ctx, `select suspended from issue_releases where project = $1 and issue = $2`,

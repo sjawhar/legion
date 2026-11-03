@@ -10,8 +10,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/pods"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // The idle view is one read per issue and it reads the four activity columns from the store, not
@@ -308,4 +310,123 @@ func TestIdlePodsListsOnlyIssuesWithALiveClaim(t *testing.T) {
 	if len(pods) != 1 || pods[0] != rootIssue {
 		t.Fatalf("pods = %v, want %s alone", pods, rootIssue)
 	}
+}
+
+// A cancel and a park of the same issue in flight together cannot end with a resume standing
+// above the close. The park is the act production runs: one fact transaction that takes the
+// issue out of the workflow and queues the close's own row together, under the shared
+// serializer. The cancel reads the issue's standing and takes its resume's id from the same
+// outbox sequence, so with no lock of its own it can read the status from before that
+// transaction and still insert above the row it queued. The resume then supersedes the close:
+// the close's suspension finishes without acting, the issue's Sandbox is never deleted, and the
+// roles of a parked issue run on in it with their launcher tokens and `gh` credentials.
+//
+// The interleaving is driven, not hoped for: the park holds its transaction open with its row
+// already queued while the cancel runs, which is the whole window. Without
+// treelifecycle.Serialize at the head of the cancel's transaction the cancel runs straight
+// through it — nothing it reads or writes meets a row the park holds — and the close stops
+// acting; with it the cancel waits for the park's commit and reads the issue as one that left.
+// Both outcomes are read here rather than only the wait, so the failure the lock prevents is
+// reported as the end state it leaves.
+func TestACancelRacingAParkLeavesNoResumeAboveTheClose(t *testing.T) {
+	const first, boundary, last = 18, 20, 22
+	st := migratedStore(t)
+	ctx := context.Background()
+	openRunningTree(t, st)
+	releasedClaim(t, st, claim.RoleImplementer)
+	markRelease(t, st, first, boundary, last, 0, claim.RoleImplementer)
+
+	park, err := st.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = park.Rollback(ctx) }()
+	if err := treelifecycle.Serialize(ctx, park); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := park.Exec(ctx, `update issues set phase = 'done', status = 'backlog',
+		linger_until = now() + interval '1 hour' where key = $1`, rootIssue); err != nil {
+		t.Fatalf("park the root: %v", err)
+	}
+	var closeRow int64
+	if err := park.QueryRow(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token)
+		values ('issue_suspend', $1, '{"tree":"LEGION-208","generation":1,"treeGeneration":1}', 0, now(), '', '')
+		returning id`, rootIssue).Scan(&closeRow); err != nil {
+		t.Fatalf("queue the close's own row: %v", err)
+	}
+
+	type cancelled struct {
+		roles []claim.Role
+		err   error
+	}
+	done := make(chan cancelled, 1)
+	go func() {
+		roles, err := st.CancelIssueRelease(ctx, "legion", rootIssue, resumeRow, record.OutOfWorkflow)
+		done <- cancelled{roles: roles, err: err}
+	}()
+
+	var got cancelled
+	var finished bool
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case got = <-done:
+			finished = true
+		default:
+		}
+		if finished || waitingOnTheSerializer(t, st) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the cancel neither finished nor waited for the park's serializer")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := park.Commit(ctx); err != nil {
+		t.Fatalf("commit the park: %v", err)
+	}
+	if !finished {
+		got = <-done
+	}
+	if got.err != nil {
+		t.Fatalf("carry the cancel out: %v", got.err)
+	}
+
+	if len(got.roles) != 0 {
+		t.Fatalf("resumed = %v, want none: the claims of an issue a park took out of the workflow are its close's", got.roles)
+	}
+	var above int
+	if err := st.Pool().QueryRow(ctx, `select count(*) from outbox where issue = $1 and kind = 'supervise'
+		and payload->>'op' = 'start' and id > $2`, rootIssue, closeRow).Scan(&above); err != nil {
+		t.Fatal(err)
+	}
+	if above != 0 {
+		t.Fatalf("%d resume rows stand above the close's row %d; the close is superseded, its Sandbox is never deleted, and the parked issue's roles run on in it", above, closeRow)
+	}
+	if releaseMarked(t, st) {
+		t.Fatal("the cancel left its mark behind; every later decision would read a release that is over")
+	}
+
+	// The consequence itself: the close's own suspension acts, which is what deletes the issue's
+	// Sandbox and takes the pod's role Secrets with it.
+	act, err := st.IssueSuspension(ctx, "legion",
+		IssueClose{Issue: rootIssue, Tree: rootIssue, IssueGeneration: 1, TreeGeneration: 1, Row: closeRow},
+		record.OutOfWorkflow)
+	if err != nil || !act {
+		t.Fatalf("the close after the race = %t, %v; want it to act", act, err)
+	}
+}
+
+// waitingOnTheSerializer is whether a backend of this test's database other than the reader waits
+// on an advisory lock: the shared serializer (treelifecycle.Serialize) is the only one the store
+// takes by that name outside a migration, so a waiter here is a transaction held at its head.
+func waitingOnTheSerializer(t *testing.T, st *Store) bool {
+	t.Helper()
+	var waiting bool
+	if err := st.Pool().QueryRow(context.Background(), `select exists (select 1 from pg_stat_activity
+		where datname = current_database() and pid <> pg_backend_pid()
+		and wait_event_type = 'Lock' and wait_event = 'advisory')`).Scan(&waiting); err != nil {
+		t.Fatalf("read pg_stat_activity: %v", err)
+	}
+	return waiting
 }
