@@ -145,6 +145,7 @@ function toolFor(
       role,
       sessionID: "ses_208",
       claimToken: `legion-omp-legion-208-${role}`,
+      generation: 5,
       tree,
       issue: "LEGION-208",
       secret: "claim-secret",
@@ -153,7 +154,9 @@ function toolFor(
       throw new Error("no controller grant expected");
     },
     onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+    onUpdateAnswered: () => undefined,
     handoffReport: async () => ({ handoffId: HANDOFF_ID, handoffVersion: 1, commit: COMMIT }),
+    branchHead: async () => "",
     resolveDocument: async () => {
       throw new Error("no document lookup expected");
     },

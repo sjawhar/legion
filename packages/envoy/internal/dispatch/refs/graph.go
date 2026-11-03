@@ -49,22 +49,30 @@ type Query struct {
 	// drew a lower id and committed later.
 	Through *int64
 	// WholeDocuments, on a document's "in" read, lists the items and documents that cite it or
-	// one of its current blocks, and no block: a citing document is listed by its own edges.
+	// one of its current blocks, and no block: a citing document is listed by its own edges,
+	// and an ask that cites it from a part by its ask row (asksCitingTheDocument).
 	WholeDocuments bool
 }
 
 // AskBacklinkExclusions is what "referenced by" never means for an ask: its own clarification
-// thread, which every ask surface renders inline. The count on a card and the rows its panel
-// opens read the same exclusion.
-var AskBacklinkExclusions = []string{"replies_to"}
+// thread, which every ask surface renders inline, and its own parts, each part_of it, which are
+// the ask's own text. The count on a card and the rows its panel opens read the same exclusion.
+var AskBacklinkExclusions = []string{"replies_to", "part_of"}
 
 // BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
 // list carries beside a row, counted the same way the rows behind it are listed. It counts only
 // edges whose source is a node kind this build reads, so the count is the rows its list shows,
-// and counts a document's, comment's or message's mention once for each of its blocks' links to
-// the node, in place of the item's own edge (heldByABlock): a comment citing a node from two
-// paragraphs counts 2, and a document's block pointing at the node counts once whatever its link's
-// kind. A node with no inbound edge is absent from the result; the caller decides what zero means.
+// and counts a document's, comment's, message's or ask's mention once for each of its blocks'
+// links to the node, in place of the item's own edge (heldByABlock): a comment citing a node
+// from two paragraphs counts 2, and a document's block pointing at the node counts once whatever
+// its link's kind. An edge at a current block of a counted item is counted as that item's, since
+// the item's own read lists it (readEdgeRows): a comment citing one part of an ask counts once
+// for that ask. A node with no inbound edge is absent from the result; the caller decides what
+// zero means.
+//
+// An ask is counted with its own clarification thread and its own parts excluded
+// (AskBacklinkExclusions), which is also what keeps a reply that answers one of its parts from
+// being counted beside the reply's edge to the ask itself.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -76,14 +84,21 @@ func BacklinkCounts(
 	if len(ids) == 0 {
 		return counts, nil
 	}
-	sql := `select g.to_id, count(*)::int from graph_edges g
-		where g.to_kind = $1 and g.to_id = any($2) and g.from_kind = any($3) and not ` + heldByABlock("g")
 	args := []any{toKind, ids, nodeKinds}
+	narrow := ` and g.from_kind = any($3) and not ` + heldByABlock("g")
 	if len(excludeKinds) > 0 {
 		args = append(args, excludeKinds)
-		sql += " and not (g.kind = any($4))"
+		narrow += " and not (g.kind = any($4))"
 	}
-	rows, err := q.Query(ctx, sql+" group by g.to_id", args...)
+	arms := `select g.to_id from graph_edges g where g.to_kind = $1 and g.to_id = any($2)` + narrow
+	if item := ItemKind(toKind); slices.Contains(itemKinds, item) {
+		tables, _ := item.tables()
+		arms += ` union all
+			select b.` + tables.item + `::text from graph_edges g
+			join ` + tables.blocks + ` b on b.node_id = g.to_id and b.position is not null
+			where g.to_kind = '` + item.BlockKind() + `' and b.` + tables.item + `::text = any($2)` + narrow
+	}
+	rows, err := q.Query(ctx, `select id, count(*)::int from (`+arms+`) e (id) group by id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
 	}
@@ -112,21 +127,48 @@ type edgeRow struct {
 	otherID   string
 	createdAt time.Time
 	sourceSeq *int64
-	// atBlock is the node id of the queried document's, comment's or message's block at the
-	// queried end, on such a read of an edge at one of its blocks.
+	// atBlock is the node id of the queried document's, comment's, message's or ask's block at
+	// the queried end — a part, for an ask — on such a read of an edge at one of its blocks.
 	atBlock *string
 }
 
-// heldByABlock is true of a document's, comment's or message's mention edge (graph_edges row
-// alias) when a block of that item holds a link of any kind to the same target, listed or not:
-// that block's own edge is listed and counted in its place, so each link shows once. A typed
-// block's pointer is also written in the document's text, so the document's mention of the target
-// is hidden behind the pointer's edge, and stays hidden while the pointer's target has a type the
-// pointer does not allow (block_ref_listed). An item the block index has not reached holds no
-// block link, so its own edge stays.
+// itemKinds is every item kind whose blocks the graph reads, in the order a predicate over all
+// three writes them.
+var itemKinds = []ItemKind{ItemComment, ItemMessage, ItemAsk}
+
+// itemBlockKinds is the SQL list of the storage kind of every item kind's blocks
+// (ItemKind.BlockKind), and blockNodeKinds that list with a document's block kind too, the kinds
+// a block node of any kind is stored under. A predicate over them is written from these, so an
+// item kind a later build adds reaches every one of them at once.
+var (
+	itemBlockKinds = blockKindList()
+	blockNodeKinds = blockKindList("block")
+)
+
+// blockKindList is the parenthesised SQL list of kinds, each item kind's block kind after the
+// ones it is given.
+func blockKindList(kinds ...string) string {
+	quoted := make([]string, 0, len(kinds)+len(itemKinds))
+	for _, kind := range kinds {
+		quoted = append(quoted, `'`+kind+`'`)
+	}
+	for _, item := range itemKinds {
+		quoted = append(quoted, `'`+item.BlockKind()+`'`)
+	}
+	return `(` + strings.Join(quoted, ", ") + `)`
+}
+
+// heldByABlock is true of a document's, comment's, message's or ask's mention edge (graph_edges
+// row alias) when a block of that item holds a link of any kind to the same target, listed or
+// not: that block's own edge is listed and counted in its place, so each link shows once. A
+// typed block's pointer is also written in the document's text, so the document's mention of the
+// target is hidden behind the pointer's edge, and stays hidden while the pointer's target has a
+// type the pointer does not allow (block_ref_listed). An item the block index has not reached
+// holds no block link, so its own edge stays; an ask's question part holds the links its row
+// holds, so the row's edge is the one hidden.
 func heldByABlock(alias string) string {
 	holders := []string{blockHolds(alias, "artifact", "block_refs", "artifact_id")}
-	for _, item := range []ItemKind{ItemComment, ItemMessage} {
+	for _, item := range itemKinds {
 		tables, _ := item.tables()
 		holders = append(holders, blockHolds(alias, string(item), tables.refs, tables.item))
 	}
@@ -157,22 +199,34 @@ func itemBlockIDs(kind ItemKind, param string) string {
 	return `(select b.node_id from ` + tables.blocks + ` b where b.` + tables.item + ` = ` + param + `::uuid and b.position is not null)`
 }
 
-// repliesToABlockOf is true of a graph_edges row alias that is the replies_to edge of a reply
-// naming a current block of the item of kind whose uuid is the numbered parameter param: the
-// reply is listed under that block, by its replies_to edge to it.
-func repliesToABlockOf(kind ItemKind, alias, param string) string {
-	tables, _ := kind.tables()
-	return `(` + alias + `.kind = 'replies_to' and ` + alias + `.from_kind = '` + string(kind) + `' and ` + alias + `.from_id in (
-		select r.id::text from ` + tables.items + ` r where r.replies_to_block in ` + itemBlockIDs(kind, param) + `))`
+// repliesToABlockOf is true of a graph_edges row alias that is the replies_to edge of a reply of
+// kind replies naming a current block of the item of kind owner whose uuid is the numbered
+// parameter param: the reply is listed under that block, by its replies_to edge to it. The two
+// kinds are the same for a comment's blocks and a message's; an ask's thread is comments, so a
+// reply to one of its parts is a comment.
+func repliesToABlockOf(replies, owner ItemKind, alias, param string) string {
+	tables, _ := replies.tables()
+	return `(` + alias + `.kind = 'replies_to' and ` + alias + `.from_kind = '` + string(replies) + `' and ` + alias + `.from_id in (
+		select r.id::text from ` + tables.items + ` r where r.replies_to_block in ` + itemBlockIDs(owner, param) + `))`
 }
 
-// itemRead is the item whose blocks' edges a query's read lists with its own: a comment or a
-// message, named by its uuid as the item's own edges name it (canonical, lowercase), as every
-// item that holds blocks is. A comment or message reference whose id is no such uuid names no
-// item with blocks.
+// repliesFrom is the kind of item that replies to a block of an item of kind: a comment answers a
+// comment's block and an ask's part, both in comments.replies_to_block, and a message answers a
+// message's block.
+func repliesFrom(kind ItemKind) ItemKind {
+	if kind == ItemMessage {
+		return ItemMessage
+	}
+	return ItemComment
+}
+
+// itemRead is the item whose blocks' edges a query's read lists with its own: an ask, a comment
+// or a message, named by its uuid as the item's own edges name it (canonical, lowercase), as
+// every item that holds blocks is. An ask, comment or message reference whose id is no such uuid
+// names no item with blocks.
 func itemRead(query Query) (ItemKind, bool) {
 	kind := ItemKind(query.Kind)
-	if kind != ItemComment && kind != ItemMessage {
+	if !slices.Contains(itemKinds, kind) {
 		return "", false
 	}
 	if id, err := uuid.Parse(query.ID); err != nil || id.String() != query.ID {
@@ -182,10 +236,10 @@ func itemRead(query Query) (ItemKind, bool) {
 }
 
 // blockKindAt is the storage kind of the blocks a read of a node of kind lists edges at: a
-// document's blocks, or a comment's or message's.
+// document's blocks, or an ask's, a comment's or a message's.
 func blockKindAt(kind string) string {
-	if kind == string(ItemComment) || kind == string(ItemMessage) {
-		return ItemKind(kind).BlockKind()
+	if item := ItemKind(kind); slices.Contains(itemKinds, item) {
+		return item.BlockKind()
 	}
 	return "block"
 }
@@ -261,8 +315,10 @@ func resolveEdges(ctx context.Context, q Queryer, query Query) ([]resolvedEdge, 
 }
 
 // readEdgeRows reads the rows a query lists, as arms over graph_edges that its filters then
-// narrow. A document's, comment's or message's read adds the edges at its blocks (see Query),
-// and every inbound read lists an item's mention from the block holding it (heldByABlock).
+// narrow. A document's, comment's, message's or ask's read adds the edges at its blocks — an
+// ask's parts among them (see Query) — and every inbound read lists an item's mention from the
+// block holding it (heldByABlock). A whole-document read lists each citer by its item instead,
+// an ask citing the document from a part included (asksCitingTheDocument).
 func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error) {
 	args := []any{query.Kind, query.ID}
 	document := query.Kind == "artifact"
@@ -276,13 +332,13 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 	case query.Direction == "in":
 		source := `not ` + heldByABlock("g")
 		if document && query.WholeDocuments {
-			// The document's citers, each by its own edges: a document's, a comment's or a
-			// message's blocks are listed by their item.
-			source = `g.from_kind not in ('block', 'comment_block', 'message_block')`
+			// The document's citers, each by its own edges: a document's, an ask's, a comment's
+			// or a message's blocks are listed by their item.
+			source = `g.from_kind not in ` + blockNodeKinds
 		}
 		own := source
 		if itemBlocks {
-			own += ` and not ` + repliesToABlockOf(item, "g", "$3")
+			own += ` and not ` + repliesToABlockOf(repliesFrom(item), item, "g", "$3")
 		}
 		arms = `select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, null::text
 			from graph_edges g where g.to_kind = $1 and g.to_id = $2 and ` + own
@@ -292,6 +348,13 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 			union all
 			select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, g.to_id
 			from graph_edges g where g.to_kind = 'block' and g.to_id in ` + documentBlockIDs("$2") + ` and ` + source
+			if query.WholeDocuments {
+				// An ask's row holds its question's links alone, so the only edge from an ask
+				// that cites the document in an option or in its answer is that part's.
+				arms += `
+			union all
+			` + asksCitingTheDocument("$2")
+			}
 		case itemBlocks:
 			arms += `
 			union all
@@ -384,9 +447,9 @@ type nodeLoader func(ctx context.Context, q Queryer, kind string, byRefKey bool,
 
 // nodeLoaders resolves each node kind this build knows. These are node kinds, the ends of an
 // edge, not edge kinds: a node kind a newer build adds to the graph is addressable, listed and
-// counted only once it has an entry here. The keys are the kinds graph_edges stores; a comment's
-// or message's block is stored as comment_block or message_block and resolves to a node of kind
-// block, as a document's block does.
+// counted only once it has an entry here. The keys are the kinds graph_edges stores; an ask's,
+// a comment's or a message's block is stored as ask_block, comment_block or message_block and
+// resolves to a node of kind block, as a document's block does.
 var nodeLoaders = map[string]nodeLoader{
 	"issue":         loadIssueNodes,
 	"artifact":      loadArtifactNodes,
@@ -396,6 +459,7 @@ var nodeLoaders = map[string]nodeLoader{
 	"component":     loadComponentNodes,
 	"session":       loadSessionNodes,
 	"block":         loadBlockNodes,
+	"ask_block":     loadAskBlockNodes,
 	"comment_block": loadCommentBlockNodes,
 	"message_block": loadMessageBlockNodes,
 }

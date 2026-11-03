@@ -1,9 +1,9 @@
-// handlers_ui_records.go: GET /v1/credential-requests/{record} and POST .../approve and .../deny,
-// the routes that read one record and decide a machine login, and the record shape that read and
-// POST /v1/machine-logins/lookup both answer. A machine login is decided on the caller's word by
-// a listed service calling with its own Kubernetes ServiceAccount token: the token proves which
-// service is calling, and the service names the deciding person in the body's approver field,
-// who must be one the record's rule admits (record.MayDecide) and must type the login's code.
+// handlers_ui_records.go: POST /v1/credential-requests/{record}/approve and .../deny, the two
+// routes that decide a machine login, and the record shape POST /v1/machine-logins/lookup
+// answers. A machine login is decided on the caller's word by a listed service calling with its
+// own Kubernetes ServiceAccount token: the token proves which service is calling, and the
+// service names the deciding person in the body's approver field, who must be one the record's
+// rule admits (record.MayDecide) and must type the login's code.
 // Each such decision is logged with the caller that relayed it and the approver it named. A
 // secret request is never decided here, by any caller: it is decided only on the broker's own
 // approval page (internal/broker/approval), by a person signed in to the broker, and the two
@@ -29,8 +29,10 @@ import (
 // independently (LEGION-587): Enrollment is the id the requesting session's own enrollment
 // stated when it enrolled, Request is the id the request itself stated as an unsigned override
 // in its body. Either is null when that id was never set; a machine login (which has no request
-// row and no requesting enrollment) always answers both null. GET /v1/pending's own
-// pendingEntry.Session carries this same shape (handlers_ui_pending.go).
+// row and no requesting enrollment) always answers both null, so every record POST
+// /v1/machine-logins/lookup answers carries two nulls. GET /v1/pending's own
+// pendingEntry.Session carries this same shape (handlers_ui_pending.go), where a secret
+// request's row names the ids it has.
 type recordSessionResp struct {
 	// The id the request itself stated as an unsigned override in its body; null when it named
 	// none.
@@ -74,8 +76,7 @@ type recordDecisionResp struct {
 	CredentialID *string `json:"credential_id"`
 }
 
-// recordResponse is a credential-request record as GET /v1/credential-requests/{record} and POST
-// /v1/machine-logins/lookup answer it.
+// recordResponse is a credential-request record as POST /v1/machine-logins/lookup answers it.
 type recordResponse struct {
 	// The record's id: the SHA-256 of its text.
 	RecordID string `json:"record_id"`
@@ -111,15 +112,9 @@ type recordResponse struct {
 	RequestedAt time.Time `json:"requested_at"`
 	// How it was decided; null while pending.
 	Decided *recordDecisionResp `json:"decided"`
-	// A secret request's page on the broker, <BROKER_PUBLIC_URL>/approve/<record>, where a person
-	// signed in to the broker decides it; absent for a machine login, which is decided with its
-	// typed code, and absent wherever the page cannot be named.
-	ApproveURL string `json:"approve_url,omitempty"`
 }
 
-// buildRecordResponse is the record shape GET /v1/credential-requests/{record} and POST
-// /v1/machine-logins/lookup both answer, apart from approve_url, which only a caller holding the
-// server fills in.
+// buildRecordResponse builds the record shape POST /v1/machine-logins/lookup answers.
 func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 	resp := recordResponse{
 		RecordID: detail.RecordID, Kind: detail.Kind, State: detail.State, Approver: detail.Approver,
@@ -136,30 +131,6 @@ func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 		resp.Decided = &recordDecisionResp{Event: detail.Decided.Event, At: detail.Decided.At, CredentialID: strPtr(detail.Decided.CredentialID)}
 	}
 	return resp
-}
-
-// readRecord answers one credential-request record. A secret request's answer also names the
-// broker's own page where a person signed in to the broker decides it, exactly as the pending
-// list's row does; a machine login, which is decided with its typed code, names none.
-func (s *server) readRecord(w http.ResponseWriter, r *http.Request, _ string) {
-	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")
-	if !ok {
-		return
-	}
-	detail, err := s.deps.Machine.ReadRecord(r.Context(), recordID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
-		return
-	case err != nil:
-		writeInternal(w, "read credential request", err)
-		return
-	}
-	resp := buildRecordResponse(detail)
-	if detail.Kind == record.KindAgentSecret {
-		resp.ApproveURL = s.approveURL(detail.RecordID)
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // decideBody is both approve's and deny's request body for a machine login, {"approver", "code"}.

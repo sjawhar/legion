@@ -11,11 +11,13 @@ import (
 )
 
 // idleNow is the moment every row of the table decides at, and idlePeriod the idle period it
-// decides against: a pod that has recorded nothing for ten minutes is released.
+// decides against: a pod that has recorded nothing for ten minutes is released. idlePod is the
+// pod the issue's roles run in, which an update round over that pod is named for.
 var (
 	idleNow      = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	idlePeriod   = 10 * time.Minute
 	idleContract = 47
+	idlePod      = "9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22"
 )
 
 // idleChild is a child issue's pod that every condition of the rule holds for: in the workflow
@@ -60,9 +62,9 @@ func idleRoot() pods.IdleView {
 // The rule is pure, so each row is the view, the clock, the idle period, the image verdict and
 // the daemon's plugin contract and nothing else.
 //
-// One condition the plan names is deliberately absent: "no INFRA-484 update round open on the
-// pod" reads supervise.Claim.UpdateRound, a field this branch does not have. It arrives with
-// sjawhar/legion#2538, whose forward merge adds its row here.
+// The condition this branch left out until sjawhar/legion#2538 landed — "no INFRA-484 update
+// round open on the pod" — is the two rows below the plugin contract's: #2538 is on main now,
+// and the rule reads supervise.Claim.UpdateRound with supervise.IsPodRound.
 func TestTheIdleRuleNamesTheOneConditionThatHeldEachPod(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -144,6 +146,26 @@ func TestTheIdleRuleNamesTheOneConditionThatHeldEachPod(t *testing.T) {
 			name:  "a live claim speaks an older plugin contract",
 			view:  func() pods.IdleView { v := idleChild(); v.Claims[0].PluginContract = idleContract - 1; return v }(),
 			image: true, want: IdleHoldPluginContract,
+		},
+		{
+			name: "an update round of the pod is open on a live claim",
+			view: func() pods.IdleView {
+				v := idleChild()
+				v.Claims[0].UpdateRound = supervise.PodRound(idlePod)
+				return v
+			}(),
+			image: true, want: IdleHoldUpdateRound,
+		},
+		{
+			// A round the suspended tester still records is the round of a pod it is no longer
+			// in: it holds nothing, exactly as its state and its contract hold nothing.
+			name: "only a suspended claim records an update round",
+			view: func() pods.IdleView {
+				v := idleChild()
+				v.Claims[1].UpdateRound = supervise.PodRound(idlePod)
+				return v
+			}(),
+			image: true, want: IdleHoldNone, roles: []claim.Role{claim.RoleImplementer},
 		},
 		{
 			name:  "a role is in a turn",

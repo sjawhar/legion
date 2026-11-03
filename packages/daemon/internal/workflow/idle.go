@@ -29,6 +29,9 @@ const (
 	// IdleHoldPluginContract: a live claim of the pod speaks a plugin contract other than the
 	// daemon's current one.
 	IdleHoldPluginContract
+	// IdleHoldUpdateRound: an update round of the pod is open on a live claim of it, so the pod
+	// is already being replaced and the replacement is waiting for its workers to push.
+	IdleHoldUpdateRound
 	// IdleHoldInTurn: a claim of the pod has a process in a turn, starting or stopping, or one
 	// whose launch is not yet known.
 	IdleHoldInTurn
@@ -79,6 +82,7 @@ var idleHoldNames = map[IdleHold]string{
 	IdleHoldAwaitingPerson:   "awaiting_person",
 	IdleHoldImage:            "image",
 	IdleHoldPluginContract:   "plugin_contract",
+	IdleHoldUpdateRound:      "update_round",
 	IdleHoldInTurn:           "in_turn",
 	IdleHoldDelivery:         "delivery_waiting",
 	IdleHoldBackgroundWork:   "background_work",
@@ -141,6 +145,16 @@ type IdleDecision struct {
 //     plugin contract: a released pod comes back as a fresh pod on the configured image, so a pod
 //     already behind is a relaunch's to replace, not a release's to save;
 //
+//   - no update round of the pod is open on a live claim of it (sjawhar/legion#2538, read from
+//     supervise.Claim.UpdateRound with supervise.IsPodRound, the predicate Claim.InPodRound()
+//     is): such a pod is already being replaced, and the replacement waits until every worker in
+//     it has pushed its work and answered. A release that deleted the pod under that wait would
+//     leave the round to read its own pod as one that went, and to tell the issue that the
+//     workers which had not answered lost what they had not pushed. A claim's own plugin round
+//     is not this condition's: that claim speaks a contract other than this daemon's, which the
+//     condition above already holds the pod for, and such a round keeps the pod and the disk
+//     anyway;
+//
 //   - no claim of the pod has a process in a turn, starting or stopping, or whose launch is not
 //     yet known. Failed, retired and already suspended claims stay as they are and hold nothing;
 //
@@ -156,10 +170,10 @@ type IdleDecision struct {
 //
 //   - the pod has done nothing the daemon recorded for the whole idle period.
 //
-// The plan names one more condition, "no INFRA-484 update round open on the pod", which reads
-// supervise.Claim.UpdateRound through InPodRound(). That field does not exist on this branch; it
-// arrives with sjawhar/legion#2538, and the forward merge that brings it in adds its row here and
-// one row to the table test.
+// A pod round is a live claim's, as the claim records it, and a claim that left the round keeps
+// the round it left (supervise.Claim.UpdateRound): the round is over for every claim of it only
+// when the daemon clears it, so a pod is released once the round's own end has run and not
+// before.
 func IdleRelease(view pods.IdleView, now time.Time, idle time.Duration, onConfiguredImage bool, contract int) IdleDecision {
 	if !view.Found {
 		return IdleDecision{Hold: IdleHoldNoPod}
@@ -192,6 +206,11 @@ func IdleRelease(view pods.IdleView, now time.Time, idle time.Duration, onConfig
 	for _, c := range view.Claims {
 		if c.Live() && c.PluginContract != contract {
 			return IdleDecision{Hold: IdleHoldPluginContract}
+		}
+	}
+	for _, c := range view.Claims {
+		if c.Live() && supervise.IsPodRound(c.UpdateRound) {
+			return IdleDecision{Hold: IdleHoldUpdateRound}
 		}
 	}
 	for _, c := range view.Claims {

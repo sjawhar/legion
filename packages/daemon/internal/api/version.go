@@ -472,6 +472,32 @@ package api
 // takes 45 and a store migration named for the UTC moment it was written, as the collision note
 // says.)
 //
+// 46: INFRA-484 -- the update round, which replaces a pod only once the work on it is pushed.
+// `POST /legion/v1/claims/ready-for-update` is a new claim route in the shape of `claims/ready`
+// (`claim.ReadyForUpdateRequest`: `claimToken`, `sessionId`, `secret`, `generation`, `round`, and
+// an optional `head`), answering 204: it is the worker's answer to the update task — everything
+// it wants kept is pushed, and its process may now be replaced. `round` is the round the task it
+// read named, and the daemon takes the answer only for the round that claim stands in, refusing
+// any other with 409 and a sentence naming both rounds. `head` is the commit the worker reports
+// as the head of its issue branch at `origin`, empty when the branch is not there. Both
+// plugins gain the `ready_for_update` op that posts it, so a worker under either one can end its
+// round. A claim whose update round is open is served on its contract of before the round, on
+// every route: the claim routes, the grants route's claim form and every grant-bearing route,
+// where a stale plugin contract otherwise refuses. Every claim view gains the round it is in and
+// the head its worker reported when it answered — `updateRound` and `updateHead`, both absent
+// when there is none — on the state's claims (`api.ClaimView`) and on the operator's
+// (`api.OperatorClaim`), which `packages/contracts/src/legion-api.ts` mirrors; a strict reader
+// before 46 refuses a state carrying either. `legion.yaml` gains `pod_update_retask_hours` and
+// `pod_update_notice_hours`, which the settings carry as the two numbers they are. A plugin
+// before 46 has no op to signal with, so its worker answers by ending the turn the task started
+// (supervise.PodUpdateContract names this number), and a daemon before 46 answers that op's post
+// a 404; the boot gate and `legion probe-image` refuse either pair. (This branch took 43 while
+// main's consumer lag was unmerged, then 44, then 45, and its store
+// migration 0065; main landed the consumer lag at 43, the Claude Code background-task variable at
+// 44 and the handoff records at 45 first, with store migrations 0065, 0066 and 0067, so this
+// change takes the number above them. Its migration is named for the moment it was written,
+// 20261029195520, since main closed the numbered series at 0067.)
+//
 // 48: an idle issue pod is released, so a plugin tells the daemon what its session is doing and a
 // released claim is a new suspension source. Each session reports its activity to the daemon on
 // POST /legion/v1/claims/activity, authenticated by its claim as `claims/ready` is: whether it
@@ -491,6 +517,7 @@ package api
 // daemon. No session-facing body carries the new `suspendedBy` value: the state's
 // `strandedClaims` keeps the three keys it has had since 23, and an operator reads a released
 // claim apart from a suspended one on the operator claim routes, which no plugin calls. This
-// change adds ten store migrations. (This branch took 47; main then landed 45, which put #2538
-// on 46 and #2539 on 47, so this branch takes the number above them, as the collision note says.)
+// change adds ten store migrations. (This branch took 47 while main's #2538 was unmerged; main
+// then landed 45 and, as sjawhar/legion#2538, 46, and sjawhar/legion#2539 takes 47, so this
+// branch takes the number above them, as the collision note says.)
 const DaemonAPIVersion = 48

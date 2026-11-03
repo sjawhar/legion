@@ -55,12 +55,14 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
     "read_record",
     "read_release_records",
     "handoff_complete",
+    "ready_for_update",
   ],
   "phase-worker": [
     "request_backward_move",
     "read_record",
     "read_release_records",
     "handoff_complete",
+    "ready_for_update",
   ],
   controller: ["read_state", "set_status"],
 };
@@ -106,6 +108,7 @@ function toolSchema(pi: PiApi): unknown {
     summary: phase.summary,
     verdict: phase.verdict,
     ready: phase.ready,
+    round: phase.round,
     status: z.enum(ISSUE_STATUSES).optional(),
   });
 }
@@ -145,12 +148,18 @@ export function createLegionTool(deps: {
   readonly controllerGrant: (sessionId: string) => Promise<LegionGrant>;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
+  /** Told of each `ready_for_update` that succeeded: the session has answered the daemon's
+   * update task on its pod, and its phase stays open. */
+  readonly onUpdateAnswered: (context: SessionContext) => void;
   /** What a completion of `phase` by `role` reports beside its summary (`findHandoffReport`): for
    * a file-backed phase the role works, the newest Dispatch handoff record of the phase, with the
    * pushed tip of `legion/<issue>@origin` for the implementer; otherwise the commit the workspace
    * stands on. Throws naming the remedy when the phase has no record, Dispatch does not answer, or
    * the implementer's work is not pushed. */
   readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>;
+  /** The head of `legion/<issue>@origin` an update signal reports, read with the pane's jj
+   * (`findPushedBranchHead`), and `""` when the branch is not on the remote. */
+  readonly branchHead: () => Promise<string>;
   /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
    * looked up in Dispatch as a `dispatch` command's `--artifact` is; throws naming the reference
    * when none matches, or when it names two documents. */
@@ -164,7 +173,9 @@ export function createLegionTool(deps: {
     session,
     controllerGrant,
     onPhaseCompleted,
+    onUpdateAnswered,
     handoffReport,
+    branchHead,
     resolveDocument,
     restartClock,
   } = deps;
@@ -211,13 +222,19 @@ export function createLegionTool(deps: {
         }
         if (active.kind !== "controller" && isPhaseOp(operation)) {
           const answer = await executePhaseOp(
-            { daemon: daemon(), claim: active, handoffReport, restart },
+            { daemon: daemon(), claim: active, handoffReport, branchHead, restart },
             parameters
           );
           // A call that returned without throwing: a completion, and a backward move, which hands
           // the issue to another phase. Either way this session's phase is no longer open.
+          // `ready_for_update` ends no phase: it answers the pod's update task, and the worker
+          // then waits for its process to be replaced rather than working, so the turn it ends
+          // after answering earns no reminder (the `update-answered` input of
+          // `@legion/pi-shared/phase-stall`).
           if (operation === "handoff_complete" || operation === "request_backward_move") {
             onPhaseCompleted(context);
+          } else if (operation === "ready_for_update") {
+            onUpdateAnswered(context);
           }
           return jsonSuccess(answer);
         }

@@ -37,6 +37,9 @@ export interface LegionToolRuntime {
    * the pane's environment and Dispatch): throws naming the remedy when the phase has no handoff
    * record, Dispatch does not answer, or the implementer's work is not pushed. */
   readonly handoffReport: (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport>
+  /** The head of `legion/<issue>@origin` a `ready_for_update` signal reports
+   * (`findPushedBranchHead` with the pane's environment): `""` when the branch is not there. */
+  readonly branchHead: () => Promise<string>
 }
 
 /** Runs one call of the `legion` tool and answers its JSON result; a refusal throws its reason.
@@ -58,6 +61,7 @@ export async function executeLegionTool(
       daemon: runtime.daemon,
       claim,
       handoffReport: runtime.handoffReport,
+      branchHead: runtime.branchHead,
       ...(signal === undefined ? {} : { restart: { signal } }),
     },
     input,

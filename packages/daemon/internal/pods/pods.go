@@ -59,6 +59,10 @@ type IdleClaim struct {
 	ActivityBackground     bool
 	ActivityKinds          []string
 	ActivityNextReminderAt time.Time
+	// UpdateRound is the update round the claim is in, "" when none is open: the pod round every
+	// claim of a drifted pod shares, or the claim's own plugin round (supervise.Claim.UpdateRound,
+	// read with supervise.IsPodRound as Claim.InPodRound() reads it).
+	UpdateRound string
 	// UpdatedAt is when the claim's row was last written: every state the machine persisted and
 	// every activity report. The newest UpdatedAt of a pod's claims is when the pod last did
 	// anything the daemon recorded, which is what the idle period is measured from.
