@@ -382,6 +382,9 @@ install_provider_route() {
   {
     echo "# Written by rig.sh install_provider_route: $model is the one model, and no other provider"
     echo "# a session or a subagent could fall back to without a word is enabled."
+    # The handler limit the gateway and key-file installers write, and which load_label requires
+    # of every profile: AskGate's review is one tool call, and the default limit cuts it short.
+    printf 'extensionHandlers:\n  toolCallTimeoutMs: 120000\n'
     printf 'enabledModels:\n  - %s\n' "$model"
     printf 'disabledProviders:\n'
     printf '  - %s\n' anthropic amazon-bedrock bedrock-mantle google ollama llama.cpp lm-studio

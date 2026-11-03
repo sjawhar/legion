@@ -2729,18 +2729,21 @@ const indented = (text: string, depth = 6) =>
 const DESIGN_HEADINGS = ["## Design", "## Acceptance", "## Requirements"];
 
 /** Whether the run held the conversation before it wrote the design (`skill://dispatch-writing-specs`,
- *  "The conversation"), read from what Dispatch recorded rather than from the transcript's prose:
+ *  "The conversation"), read from what Dispatch recorded rather than from the transcript's prose.
+ *  Both scores are measured against the first version that states a design (`DESIGN_HEADINGS`),
+ *  which is what the rule names - "before the spec states any design" - and not against the
+ *  document's first version: creating the document and opening the first question are one act of
+ *  an agent's turn, and a measurement two seconds wide would read the order of two writes nobody
+ *  made in an order.
  *
- *  - `asked`: the session's first question to the person (agent-asks.json, the seeded asks and the
- *    approval request left out) is older than its first version of the spec. A run that writes a
- *    spec first and asks after it fails, however short that first draft is.
- *  - `grew`: no version of the spec states a design (`DESIGN_HEADINGS`) before a person has
- *    answered a question of the run's own. The first such version is compared with the oldest
- *    answer Dispatch recorded, so a draft of the problem alone passes and one that states the
- *    design before any answer does not.
+ *  - `asked`: the session's first question to the person (agent-asks.json, the seeded asks and
+ *    the approval request left out) is older than that version. A run that states a design and
+ *    asks after it fails, however short that first draft is.
+ *  - `grew`: a person had answered a question of the run's own before that version.
  *
- *  A run whose session wrote no version is neither: it scores both false, as a run that wrote the
- *  spec with no question does. */
+ *  A run whose session wrote no version at all fails both, as a run that wrote a spec with no
+ *  question does. A run that stated no design yet passes both: it has written nothing the rule
+ *  holds back. */
 export function conversationOrder(
   runDir: string,
   own: string
@@ -2761,23 +2764,24 @@ export function conversationOrder(
     .map((ask) => ask.created_at ?? "")
     .filter((at) => at !== "")
     .toSorted()[0];
-  const asked = firstAsk !== undefined && firstAsk < (first.created_at ?? "");
-  const answers = asks
-    .map((ask) => ask.answer?.at ?? "")
-    .filter((at) => at !== "")
-    .toSorted();
   const design = versions.find((version) => {
     const file = path.join(runDir, "spec-versions", `${version.version}.md`);
     if (!existsSync(file)) return false;
     const text = readFileSync(file, "utf8");
     return DESIGN_HEADINGS.some((heading) => text.includes(heading));
   });
+  const asked =
+    design === undefined || (firstAsk !== undefined && firstAsk < (design.created_at ?? ""));
+  const answers = asks
+    .map((ask) => ask.answer?.at ?? "")
+    .filter((at) => at !== "")
+    .toSorted();
   const grew =
     design === undefined || (answers[0] !== undefined && answers[0] < (design.created_at ?? ""));
   const notes: string[] = [];
-  if (!asked)
+  if (!asked && design !== undefined)
     notes.push(
-      `conversation: the first spec version (${first.version}, ${first.created_at ?? "?"}) came before any question to the person (${firstAsk ?? "none"})`
+      `conversation: version ${design.version} (${design.created_at ?? "?"}) states a design, and the run had asked the person nothing by then (${firstAsk ?? "no question"})`
     );
   if (!grew && design !== undefined)
     notes.push(

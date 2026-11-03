@@ -3982,7 +3982,7 @@ test("asked and grew: a run that writes the spec before it asks fails, however s
     grew: "false",
   });
   expect(rowOf("spec-writing-head-140")).toContain(
-    `conversation: the first spec version (2, ${second(120)}) came before any question to the person (${second(150)})`
+    `conversation: version 2 (${second(120)}) states a design, and the run had asked the person nothing by then (${second(150)})`
   );
   expect(rowOf("spec-writing-head-140")).toContain(
     `conversation: version 2 (${second(120)}) states a design, and the person had answered nothing by then (${second(170)})`
