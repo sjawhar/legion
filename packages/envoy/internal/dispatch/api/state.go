@@ -63,10 +63,11 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		LastReadSeq *int      `json:"last_read_seq"`
 		Dismissed   *[]string `json:"dismissed"`
 		Seq         *int64    `json:"seq"`
-		// Actor is read off the body and not used: this state is the calling person's, keyed on
-		// the login requireScope resolves, and a bearer that names its session here is naming a
-		// writer this row has no column for. The field stays so a client that has always sent
-		// one is not refused for an unknown key (decodeJSON).
+		// Actor names no writer of this row: the state is the calling person's, keyed on the
+		// login requireScope resolves, and the row has no column for a session. The session it
+		// names is the acting agent's, which goes on the act of the event this write appends
+		// (actSessionFromBody); a client that has always sent one is not refused for an unknown
+		// key either (decodeJSON).
 		Actor *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -75,6 +76,9 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 	}
 	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
+		return
+	}
+	if actor, ok = actSessionFromBody(w, actor, input.Actor); !ok {
 		return
 	}
 	if input.LastReadSeq != nil && *input.LastReadSeq < 0 {

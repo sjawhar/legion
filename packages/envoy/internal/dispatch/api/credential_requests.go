@@ -10,6 +10,10 @@
 // machine-login list send the login requireScope resolved, in Dispatch's canonical lowercase form,
 // as the approver, which the broker takes on Dispatch's word, and never forward the browser's body,
 // so nothing a browser sends can name the approver.
+//
+// These decisions write no Dispatch event - the broker records the decision itself - so the agent
+// that made one for its person is recorded on Dispatch's own access-log line instead
+// (noteActingAgent), which is the only record of the decision Dispatch keeps.
 package api
 
 import (
@@ -19,9 +23,27 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
+
+// noteActingAgent names the agent behind a decision on this request's access-log line: the
+// session the act names, and otherwise the personal token, by its owner, which is what the line
+// already says of a token that named no session (accesslog.KindToken). A browser's actor names
+// no agent, so its line keeps the person optionalActor noted. The last Note wins and a session
+// noted after a token keeps that token as the line's credential, so one line still carries both
+// who acted and what they presented.
+func noteActingAgent(r *http.Request, actor model.Actor) {
+	if actor.Act == nil {
+		return
+	}
+	if actor.Act.Session != "" {
+		accesslog.Note(r.Context(), accesslog.KindSession, actor.Act.Session)
+		return
+	}
+	accesslog.Note(r.Context(), accesslog.KindToken, actor.ID)
+}
 
 // requireAgentSecrets answers 404 FEATURE_OFF when this Dispatch has no broker configured
 // (DISPATCH_AGENT_SECRETS_URL unset); every credential-request route but the pending list needs it
@@ -147,6 +169,7 @@ func (s *server) approveCredentialRecord(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	noteActingAgent(r, actor)
 	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return
@@ -164,6 +187,7 @@ func (s *server) denyCredentialRecord(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	noteActingAgent(r, actor)
 	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return
@@ -177,9 +201,11 @@ func (s *server) denyCredentialRecord(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) lookupMachineCredential(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove); !ok {
+	actor, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove)
+	if !ok {
 		return
 	}
+	noteActingAgent(r, actor)
 	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return
@@ -219,6 +245,7 @@ func (s *server) revokeCredentialGrant(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	noteActingAgent(r, actor)
 	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return
@@ -255,6 +282,7 @@ func (s *server) revokeMachineLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	noteActingAgent(r, actor)
 	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return

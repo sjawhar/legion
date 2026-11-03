@@ -25,11 +25,24 @@ const (
 // broker-issued token proved, TokenID and TokenName the personal token presented, and Scopes the
 // scopes that credential holds. A browser's cookie is the person themselves acting, so it names
 // no agent and carries none of this.
+//
+// Scopes is a snapshot of the credential as it stood at the act, and is never read back from the
+// token: a person who narrows a token afterwards narrows what it may do next, and must not
+// retroactively un-approve what it approved while it held approve (docs.carryVerdict reads these
+// scopes to decide whether an answer can carry an approval).
 type ActorAct struct {
 	Session   string   `json:"session,omitempty"`
 	TokenID   string   `json:"token_id,omitempty"`
 	TokenName string   `json:"token_name,omitempty"`
 	Scopes    []string `json:"scopes,omitempty"`
+}
+
+// Holds reports whether the act was made under one scope, as Credential.Holds reports it of the
+// live credential. A nil act is the person themselves acting, who holds every scope, so it holds
+// each one: a reader asking "was this act allowed to approve" must read a browser's answer as
+// allowed.
+func (a *ActorAct) Holds(scope string) bool {
+	return a == nil || slices.Contains(a.Scopes, scope)
 }
 
 // Credential is the request's credential as optionalActor resolved it: the scopes it holds, and
@@ -1171,13 +1184,18 @@ type AskOption struct {
 
 // AskAnswer is a human response to an ask. ID is the id of the block the ask's current answer is
 // stored as, read as an option's is and never written by a caller; a superseded answer, which no
-// part of the ask holds, carries none.
+// part of the ask holds, carries none. Act names the agent that made this answer for the person
+// User names, and is absent when the person answered themselves at a browser; the answer is the
+// person's either way, which every reader that matches User against the answering actor relies
+// on. The asks row's answer is jsonb, so an answer stored before this field existed simply
+// carries no act.
 type AskAnswer struct {
 	ID       string    `json:"id,omitempty"`
 	User     string    `json:"user"`
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
+	Act      *ActorAct `json:"act,omitempty"`
 }
 
 // UnmarshalJSON decodes an answer and reads a null or absent selected as an empty list: an answer

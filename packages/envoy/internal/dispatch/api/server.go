@@ -694,6 +694,11 @@ type apiError struct {
 	// that carries none. Only a refusal that knows when the caller may come back sets it
 	// (brokerTokenActor's 429); writeHandlerError writes the header.
 	retryAfter int
+	// scope is the OAuth scope a missing-scope refusal names, and is empty for every other
+	// refusal. Only missingScopeError sets it; writeHandlerError writes the challenge header
+	// from it, so a refusal a handler returns as an error is the same answer refuseMissingScope
+	// writes directly.
+	scope string
 }
 
 func (e *apiError) Error() string { return e.message }
@@ -763,6 +768,9 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		if apiErr.retryAfter > 0 {
 			// Before the body: writeError writes the status and the headers go with it.
 			w.Header().Set("Retry-After", strconv.Itoa(apiErr.retryAfter))
+		}
+		if apiErr.scope != "" {
+			w.Header().Set("WWW-Authenticate", insufficientScopeChallenge(apiErr.scope))
 		}
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
 		// A 500 the handler named is a server fault like any other, so the operator's log shows it.
@@ -1153,13 +1161,28 @@ func (s *server) decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst 
 // token holds the set its own row names.
 const codeScopeRequired = "OAUTH_SCOPE_REQUIRED"
 
+// insufficientScopeChallenge is the WWW-Authenticate header RFC 6750 section 3.1 gives a refusal
+// for a scope the credential does not hold. Both ways of writing that refusal go through it, so
+// a caller cannot tell them apart by the challenge.
+func insufficientScopeChallenge(scope string) string {
+	return fmt.Sprintf("Bearer error=%q, scope=%q", "insufficient_scope", scope)
+}
+
 // refuseMissingScope answers 403 OAUTH_SCOPE_REQUIRED for one scope the request's credential
 // does not hold, under the challenge RFC 6750 section 3.1 gives that refusal. writeError sets no
 // header, so the header goes on here and the body through it, which keeps the refusal the same
 // shape as every other.
 func refuseMissingScope(w http.ResponseWriter, scope, message string) {
-	w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer error=%q, scope=%q", "insufficient_scope", scope))
+	w.Header().Set("WWW-Authenticate", insufficientScopeChallenge(scope))
 	writeError(w, codeScopeRequired, http.StatusForbidden, message)
+}
+
+// missingScopeError is refuseMissingScope as an error, for a check that cannot run at the gate
+// because what it reads is known only once a row is loaded (answerAsk's approval asks).
+// writeHandlerError writes the challenge header from the error's scope, so such a refusal is the
+// gate's own answer in every part a caller can see.
+func missingScopeError(scope, message string) *apiError {
+	return &apiError{status: http.StatusForbidden, code: codeScopeRequired, message: message, scope: scope}
 }
 
 // requireScope answers the person a request acts for, refusing a credential that does not hold
@@ -1226,6 +1249,39 @@ func (s *server) requireScope(w http.ResponseWriter, r *http.Request, scopes ...
 		}
 	}
 	return model.Actor{Kind: "user", ID: model.CanonicalLogin(person), Act: act}, true
+}
+
+// actSessionFromBody records on actor's act the session the request body names, for the two
+// person-scope handlers that already decode a body actor: answerAsk and putUserState. A
+// credential that proved no session of its own - a personal token - names its agent nowhere
+// else on a route whose body is already read, so the body's actor is taken for it, exactly as
+// `?session=` is taken on every other route (requireScope). A credential that did prove one - a
+// broker-issued token - decides it, and a body naming another session is the disagreement
+// bearerSessionActor and requireScope both refuse, 403 ACTOR_SESSION_MISMATCH, rather than a
+// write recorded as a session the caller merely asked for.
+//
+// Only these two routes read it: decodeJSON refuses an unknown field, so a body actor on a route
+// whose input struct does not declare one is a 400, and four of the mutating rows a person's
+// scope opened are DELETEs with no body at all. A browser's actor names no agent (act is nil),
+// so there is nothing for a body to name, and its body actor is ignored here as it always was.
+func actSessionFromBody(w http.ResponseWriter, actor model.Actor, supplied *model.Actor) (model.Actor, bool) {
+	named := ""
+	if supplied != nil && supplied.Kind == "session" {
+		named = strings.TrimSpace(supplied.ID)
+	}
+	if actor.Act == nil || named == "" {
+		return actor, true
+	}
+	if actor.Act.Session != "" && actor.Act.Session != named {
+		writeError(w, "ACTOR_SESSION_MISMATCH", http.StatusForbidden, fmt.Sprintf(
+			"this request acts for session %s; its actor names another session", actor.Act.Session))
+		return model.Actor{}, false
+	}
+	// A copy, so a handler holding the actor requireScope answered keeps the act it was given.
+	act := *actor.Act
+	act.Session = named
+	actor.Act = &act
+	return actor, true
 }
 
 // requireCallerScope refuses a request whose credential does not hold one scope, for a check
