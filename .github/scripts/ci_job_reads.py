@@ -337,8 +337,29 @@ def go_notices_runs():
 # simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
-go test -timeout 20m ./internal/dispatch/api
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m"""
+mkdir -p "$RUNNER_TEMP/go-test-json"
+s=0
+go test -json -count=1 -timeout 20m ./internal/dispatch/api > "$RUNNER_TEMP/go-test-json/unit-api.json" || s=$?
+go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -json -count=1 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit-rest.json" || s=$?
+jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+[ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+exit $s"""
+NATSLIVE_STEP = "Test the container-backed NATS matrix (natslive)"
+NATSLIVE_SCRIPT = """\
+mkdir -p "$RUNNER_TEMP/go-test-json"
+s=0
+go test -json -count=1 -tags natslive ./internal/testnats/ > "$RUNNER_TEMP/go-test-json/natslive.json" || s=$?
+jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+[ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+exit $s"""
+INTEGRATION_STEP = "Integration test envoy (a real NATS server, in the test process)"
+INTEGRATION_SCRIPT = """\
+mkdir -p "$RUNNER_TEMP/go-test-json"
+s=0
+go test -json -count=1 -timeout 300s ./internal/integration/ > "$RUNNER_TEMP/go-test-json/integration.json" || s=$?
+jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+[ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+exit $s"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -611,19 +632,25 @@ GATES = [
     gate("claude_envoy", "claude-envoy", reads=CLAUDE_ENVOY_BUILD + biome(at("claude-envoy", "Lint Claude Envoy plugin")) + bun_job("claude-envoy") + CI_SELF),
 
     gate("envoy_go", "envoy-go", runs=[
-        step_run("envoy-go", "Integration test envoy (a real NATS server, in the test process)",
-                 "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
-        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -tags natslive ./internal/testnats/", ENVOY,
-                 ["./internal/testnats/"], tags="natslive"),
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
     ], exact=[
+        # Each go test step of this job writes a `go test -json` stream to a file and replays it
+        # to the log, so none of them is in the simple form: -json is not a flag the check
+        # reduces and a redirect is not in that form either (dispatch://INFRA-1075).
+        #
         # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues
         # on the service's one checkpointer beside the other package binaries), then ./... but it
         # and internal/integration, which the integration step tests: counted as all of ./....
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
             (ENVOY, ["./internal/dispatch/api"], "go test -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
+        ]),
+        pinned_step("envoy-go", NATSLIVE_STEP, ENVOY, NATSLIVE_SCRIPT, [
+            (ENVOY, ["./internal/testnats/"], "go test -tags natslive ./internal/testnats/", {"tags": "natslive"}),
+        ]),
+        pinned_step("envoy-go", INTEGRATION_STEP, ENVOY, INTEGRATION_SCRIPT, [
+            (ENVOY, ["./internal/integration/"], "go test ./internal/integration/", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
         pinned_step("envoy-go", PACK_STEP, ENVOY, PACK_SCRIPT, [

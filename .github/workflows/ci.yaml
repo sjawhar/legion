@@ -31,7 +31,7 @@ name: CI
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
 # build the same listener and natsd, listener-server-change, which builds the listener, and
-# dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-infra
+# dispatch-browser-multiprocess, envoy-go and envoy-go-race-docs, which save none), go-envoy-infra
 # (envoy-infra-go) and go-notices (lint's notices step). Each family keeps one entry, keyed on the
 # Go version its job's setup-go installed, so it is refreshed only when Go is bumped. A go.sum
 # change downloads only the changed modules, and Go's build cache is content-addressed, so a stale
@@ -1788,6 +1788,9 @@ jobs:
       - name: Test ci-ok's report and the check-run post (a stand-in gh)
         run: .github/scripts/ci-ok-report.test.sh
 
+      - name: Test the go test -json reader the envoy-go measurement is read through
+        run: .github/scripts/go-test-times.test.sh
+
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
 
@@ -2538,10 +2541,23 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # go-envoy, restored only: its modules are the envoy module's, but this job builds the test
+      # binary of every package of that module, not the listener and natsd the family's saving
+      # jobs build, so it saves none. Without it this job compiles 93 test binaries from nothing
+      # (dispatch://INFRA-1075).
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
       - name: Check Go formatting
         run: |
           unformatted=$(gofmt -l .)
@@ -2572,6 +2588,15 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
+      # Each `go test` step of this job writes its `go test -json` stream to a file under
+      # $RUNNER_TEMP/go-test-json, which the upload step below publishes as one artifact per run
+      # attempt. .github/scripts/go-test-times.py ranks the tests and packages of such a stream,
+      # and compares two of them, which is how this job's time is measured (dispatch://INFRA-1075).
+      # The stream is a file rather than the log because `go test -json` is verbose: each step
+      # replays the package result lines to the log, and the whole stream only when it failed, so
+      # a green log reads as it did and a red one carries every failing test's output.
+      # -count=1 keeps the restored build cache from replaying a stored result as `(cached)`.
+      #
       # The API package owns the largest set of Postgres-backed tests. Running it with the other
       # package binaries makes all of their per-test database cleanup queue on the service's one
       # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
@@ -2581,15 +2606,26 @@ jobs:
       # delays.
       - name: Unit test envoy Go package
         run: |
-          go test -timeout 20m ./internal/dispatch/api
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m
+          mkdir -p "$RUNNER_TEMP/go-test-json"
+          s=0
+          go test -json -count=1 -timeout 20m ./internal/dispatch/api > "$RUNNER_TEMP/go-test-json/unit-api.json" || s=$?
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -json -count=1 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit-rest.json" || s=$?
+          jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+          [ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+          exit $s
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
       # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
       # behind the natslive tag, and this step is where it runs (INFRA-250).
       - name: Test the container-backed NATS matrix (natslive)
-        run: go test -tags natslive ./internal/testnats/
+        run: |
+          mkdir -p "$RUNNER_TEMP/go-test-json"
+          s=0
+          go test -json -count=1 -tags natslive ./internal/testnats/ > "$RUNNER_TEMP/go-test-json/natslive.json" || s=$?
+          jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+          [ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+          exit $s
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
@@ -2617,8 +2653,25 @@ jobs:
           bash deploy/scripts/autodeploy_test.sh
         working-directory: packages/envoy
       - name: Integration test envoy (a real NATS server, in the test process)
-        run: go test ./internal/integration/ -timeout 300s -count=1
+        run: |
+          mkdir -p "$RUNNER_TEMP/go-test-json"
+          s=0
+          go test -json -count=1 -timeout 300s ./internal/integration/ > "$RUNNER_TEMP/go-test-json/integration.json" || s=$?
+          jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+          [ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+          exit $s
         working-directory: packages/envoy
+      # Always, because a red attempt's times are the ones a reader needs, and one artifact per
+      # attempt because a run's artifacts are listed per run, not per attempt, and a download by
+      # name picks one of several of that name without saying so
+      # (docs/solutions/github/run-download-by-name-picks-one-of-several-same-named-artifacts.md).
+      - name: Upload the go test -json streams
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: envoy-go-test-json-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/go-test-json/
+          if-no-files-found: warn
       - name: Build envoy services
         run: go build ./cmd/dispatch ./cmd/listener
         working-directory: packages/envoy
