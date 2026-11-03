@@ -138,9 +138,11 @@ the root, and a child that carries part of a root requirement proves that part w
 the child's own Verification document whose `serves` names the requirement, which clears the
 root's coverage flag for it. The root's own checks are proven at the root's own head, or on the
 default branch for an `after_merge` check, in the root's last round.
-An issue with no Verification document, or with one that holds no `before_merge` check, is
-proved by nothing: send it back and write the checks yourself, which closes no design gate while
-dispatch://INFRA-175 has not shipped.
+An issue with no Verification document, or with one that holds no `before_merge` check, is a gap
+the tester and the reviewer name and neither refuses, so your acceptance is the only gate on it:
+name that gap in your acceptance comment and decide there, accepting the issue or sending it back
+with the checks you write yourself, which closes no design gate while dispatch://INFRA-175 has
+not shipped.
 A tester completion that rejects the implementer's results goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets the surface built
 in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and not

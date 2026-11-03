@@ -58,7 +58,7 @@ other change to the head voids it.
   run at the head holds the job, or nothing will run it (a check only a commit status reports, a
   workflow another repository defines), tell the architect and do not approve.
   Approval is refused while any `before_merge` check of the issue's own Verification document has no passing result that is current at the head being reviewed: `REQUEST_CHANGES` naming each such check by its block id, and `dispatch results --issue <issue>` is the read that decides it.
-  An issue with no Verification document, or whose Verification document holds no `before_merge` check, has no evidence at all. That is a `REQUEST_CHANGES` that says which of the two it is, and you tell the architect, who writes the checks. Approve neither case.
+  An issue with no Verification document, or whose Verification document holds no `before_merge` check, is a gap you name in the review body, never a review that asks for changes: say which of the two it is, and tell the architect, who writes the checks. Your own findings and the checks that do exist still decide the review, and on an issue that has none the architect's acceptance is the gate.
   A result is current at that head while the head is the head of an open pull request, or the final head of a merged one, attributed to the check's own issue. A child's pull request never makes a root check's result current, and a child never records the result that proves a root's check. A child that carries part of a root's requirement proves it with a check on the child's own Verification document whose `serves` names that requirement, and that result is current at the child's head. A root's own checks are proven at the root's own head, or on the default branch for an `after_merge` check, in the root's last round.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
@@ -127,11 +127,13 @@ reviewing until you finish.
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
   as its `Reason:` line and counts a review round. The acceptance comment names each check with
-  its result. An issue with no Verification document, or with no `before_merge` check, is
-  accepted by nobody: the architect sends it back and writes the checks itself, which closes no
-  design gate while dispatch://INFRA-175 has not shipped. The architect also reads the
-  reviewer's own
-  prose commits here, with the rest of the evidence, and that read is no new round. It does not
+  its result. An issue with no Verification document, or with no `before_merge` check, reaches
+  the architect as a gap the tester and the reviewer named and neither refused, so the
+  architect's acceptance is the only gate on it: the acceptance comment names that gap and
+  decides there, accepting the issue or sending it back with the checks the architect writes,
+  which closes no design gate while dispatch://INFRA-175 has not shipped. The architect also
+  reads the reviewer's own prose commits here, with the rest of the evidence, and that read is no
+  new round. It does not
   accept while the issue holds a finding ask no controller has taken (`findings.md`, "When no
   controller takes it"). The issue's approval is gated by the `before_merge` checks of its own
   Verification document at its own head, so a child's result against a root's check proves

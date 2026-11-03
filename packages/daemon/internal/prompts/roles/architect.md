@@ -80,9 +80,11 @@ The gate is the `before_merge` checks of the issue's own Verification document, 
 issue's own head: a result one of its children recorded against one of its checks proves nothing
 for it, and a child that carries part of its requirement proves that part with a check on the
 child's own Verification document whose `serves` names the requirement.
-An issue with no Verification document, or with one that holds no `before_merge` check, is
-proved by nothing: send it back and write the checks yourself, which closes no design gate while
-dispatch://INFRA-175 has not shipped.
+An issue with no Verification document, or with one that holds no `before_merge` check, is a gap
+the tester and the reviewer name and neither refuses, so your acceptance is the only gate on it:
+name that gap in your acceptance comment and decide there, accepting the issue or sending it back
+with the checks you write yourself, which closes no design gate while dispatch://INFRA-175 has
+not shipped.
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
 `READY`: the daemon starts the implementer on it once you sign off. Every started role stays live
 until its issue closes, so an `envoy_publish` to a role that finished its phase still reaches its

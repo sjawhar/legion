@@ -116,11 +116,11 @@ Verification document whose `serves` names that requirement. A root's own checks
 the root's own head, or on the default branch for an `after_merge` check, in the root's last
 round.
 
-**An issue with no `before_merge` check has no gate.** An issue with no Verification document,
-or with one that holds no `before_merge` check, passes the tester, the reviewer and the
-architect on no evidence at all. The tester records that as a failure, the reviewer as a
-`REQUEST_CHANGES` that says which of the two it is, and both tell the architect, who writes the
-checks.
+**An issue with no `before_merge` check is a named gap.** An issue with no Verification document,
+or with one that holds no `before_merge` check, has no evidence of its own. The tester names that
+gap in its handoff and the reviewer in its review, and neither one sends the issue back for it;
+both tell the architect, who writes the checks, and the architect's acceptance comment names the
+gap and decides there, which is the only gate on such an issue.
 
 ## The rules every phase's evidence follows
 

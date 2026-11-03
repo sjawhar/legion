@@ -247,36 +247,76 @@ func TestNoComposedPromptSaysLegionRefusesAMergeOverACheck(t *testing.T) {
 	}
 }
 
-// An issue with no Verification document, or with one holding no `before_merge` check, has no
-// gate: every gate counts the `check` blocks that exist, so nothing refuses an issue that has
-// none, which is every issue in flight when this ships. The tester fails the phase, the reviewer
-// requests changes, and the architect writes the checks, so each of those composed prompts names
-// the empty case and the answer its role gives it. Each is also told what a child proves: a
-// child's own check whose `serves` names the root's requirement, never a result against the
-// root's own check.
-func TestTheComposedPromptsRefuseAnIssueWithNoBeforeMergeCheck(t *testing.T) {
+// An issue with no Verification document, or with one holding no `before_merge` check, is a
+// coverage gap every role names and none refuses (dispatch://INFRA-174, R1 and R2): every gate
+// counts the `check` blocks that exist, and a rule that made the empty case a failure would stop
+// every issue in flight on the day these prompts deploy. So the tester records the gap in its
+// handoff without failing the phase for it, the reviewer names it in its review without asking
+// for changes over it, and the architect's acceptance comment names it and decides, which is the
+// only gate on an issue that has no `before_merge` check. Each composed prompt that carries the
+// rule says the empty case and its role's answer to it, and no paragraph of that rule calls the
+// case a failure or a request for changes. Each is also told what a child proves: a child's own
+// check whose `serves` names the root's requirement, never a result against the root's own check.
+func TestTheComposedPromptsNameAnIssueWithNoBeforeMergeCheckAsAGap(t *testing.T) {
 	composer, err := New(t.TempDir())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	const empty = "no Verification document, or with one that holds no `before_merge` check"
+	// A rule paragraph that says any of these has made the gap a refusal again. They are matched
+	// against the lower-cased paragraph, so a sentence that opens with one is caught too.
+	refusals := []string{"a failure", "a test failure", "fail the phase", "fails the phase",
+		"request_changes", "request changes", "requests changes", "`rejected`",
+		"is proved by nothing", "has no evidence at all", "accepted by nobody"}
 	for _, tc := range []struct {
-		role   claim.Role
-		isRoot bool
-		answer string
+		role    claim.Role
+		isRoot  bool
+		answers []string
 	}{
-		{claim.RoleTester, false, "that too is a test failure"},
-		{claim.RoleReviewer, false, "submit `REQUEST_CHANGES` saying which of the two it is"},
-		{claim.RoleArchitect, false, "write the checks yourself"},
-		{claim.RoleArchitect, true, "write the checks yourself"},
+		{claim.RoleTester, false, []string{"is a gap you name, never a reason of its own to send the issue back"}},
+		{claim.RoleReviewer, false, []string{"is a gap you name in your review, never a review that asks for changes"}},
+		{claim.RoleArchitect, false, []string{"your acceptance is the only gate on it", "name that gap in your acceptance comment and decide there"}},
+		{claim.RoleArchitect, true, []string{"your acceptance is the only gate on it", "name that gap in your acceptance comment and decide there"}},
 	} {
 		text := composedText(t, composer, tc.role, tc.isRoot)
-		for _, want := range []string{empty, tc.answer, "`serves` names"} {
-			if !strings.Contains(text, want) {
+		paragraphs := ruleParagraphs(text, empty)
+		if len(paragraphs) == 0 {
+			t.Errorf("the composed %s prompt (root %t) omits %q", tc.role, tc.isRoot, empty)
+		}
+		for _, paragraph := range paragraphs {
+			for _, refusal := range refusals {
+				if strings.Contains(strings.ToLower(paragraph), refusal) {
+					t.Errorf("the composed %s prompt (root %t) still calls the gap %q: %s",
+						tc.role, tc.isRoot, refusal, paragraph)
+				}
+			}
+		}
+		for _, want := range append(tc.answers, "`serves` names") {
+			if !strings.Contains(foldWhitespace(text), want) {
 				t.Errorf("the composed %s prompt (root %t) omits %q", tc.role, tc.isRoot, want)
 			}
 		}
 	}
+}
+
+// foldWhitespace is one line of text, so a phrase a hard-wrapped prompt breaks over two lines is
+// still one phrase to match.
+func foldWhitespace(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+// ruleParagraphs are the blank-line-separated paragraphs of a composed prompt that hold marker,
+// each folded to one line: a paragraph is the span a reader takes the rule and its framing from,
+// so it is the span a test asks what the rule calls its case. A composed prompt holds one per
+// part that carries the rule (the role's own part and the core its phase shares).
+func ruleParagraphs(text, marker string) []string {
+	var found []string
+	for _, paragraph := range strings.Split(text, "\n\n") {
+		if folded := foldWhitespace(paragraph); strings.Contains(folded, marker) {
+			found = append(found, folded)
+		}
+	}
+	return found
 }
 
 // What a phase proved is a result recorded against a `check` block of the issue's Verification
