@@ -101,6 +101,8 @@ review_round_cap: 4
 max_fix_attempts: 5
 controller: daemon
 worker_backends: {tester: omp}
+repository_renames:
+  - {from: acme/widgets-legacy, to: acme/widgets}
 capabilities:
   decided:
     pool-capacity: "the pool is sized by hand for the admission cap"
@@ -241,6 +243,11 @@ func populatedState(t *testing.T) State {
 									Container: "roles", Generation: 2,
 								},
 							},
+							// The pod's update round, which every claim of that pod shares: the daemon
+							// replaces the pod only once each has answered. This one has, and reported
+							// the head it pushed.
+							UpdateRound: "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+							UpdateHead:  "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128",
 						},
 						HandoffRecord: &HandoffRecordView{ID: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", Version: 1},
 						Rounds:        0,
@@ -266,6 +273,9 @@ func populatedState(t *testing.T) State {
 								OK:          []string{"subagents", "dispatch-envoy-tools"},
 								Open:        []CapabilityGap{{Name: "github", Detail: "gh api user: HTTP 401: Bad credentials"}},
 							},
+							// The same round, on the worker that has not answered it yet: no head is
+							// reported until a worker answers.
+							UpdateRound: "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
 						},
 						HandoffCommit: "",
 						Rounds:        2,
@@ -552,6 +562,21 @@ func TestReadyRequestGolden(t *testing.T) {
 	})
 }
 
+// The ready-for-update request is the worker's answer to its pod's update task: the claim it
+// holds, the generation it answers for, the round the task it read named — the one round the
+// answer counts for — and the head of `legion/<issue>@origin` it reports, which the daemon
+// records and verifies nothing of.
+func TestReadyForUpdateRequestGolden(t *testing.T) {
+	golden(t, "ready-for-update.json", claim.ReadyForUpdateRequest{
+		ClaimToken: "legion-legion-legion-208-implementer",
+		SessionID:  "ses_implementer_208",
+		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		Generation: 5,
+		Round:      "pod:9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22",
+		Head:       "9f1c0a7d4b2e6f8a3c5d1e7b9a0f2c4d6e8b1a35",
+	})
+}
+
 // A session's report shows on its claim as the names it proved and the gaps it did not, each side
 // in the report's order, and both sides are arrays on the wire even when empty: a session that
 // proved every row has `"open": []`, not `null`, under the plugin's strict reader.
@@ -664,6 +689,10 @@ func operatorClaim() OperatorClaim {
 			Interrupted: true,
 		},
 		SuspensionHeld: true,
+		// The claim's own plugin round: its process speaks a plugin contract this daemon does not,
+		// and it is replaced only once its worker has pushed its work and answered, which it has.
+		UpdateRound: "plugin:43",
+		UpdateHead:  "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128",
 	}
 }
 

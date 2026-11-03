@@ -819,7 +819,6 @@ func githubPayload(event string, body map[string]any) string {
 		}
 		addCappedBody(data, issueBody)
 	case "push":
-		changedPaths, truncated := githubPushChangedPaths(body)
 		data = map[string]string{
 			"kind":   "push",
 			"repo":   repo,
@@ -828,16 +827,10 @@ func githubPayload(event string, body map[string]any) string {
 			"before": stringValue(body["before"]),
 			"pusher": nestedString(body, "pusher", "name"),
 			// sender is the account that pushed, as a pull request's synchronize names it.
-			"sender":                  nestedString(body, "sender", "login"),
-			"head_subject":            firstNonEmptyLine(nestedString(body, "head_commit", "message")),
-			"commit_count":            strconv.Itoa(len(sliceValue(body["commits"]))),
-			"compare_url":             stringValue(body["compare"]),
-			"changed_paths":           strings.Join(changedPaths, "\n"),
-			"changed_paths_truncated": strconv.FormatBool(truncated),
-			// forced is always "true" or "false": a force push's commits are listed from the merge
-			// base, so its changed paths do not describe what it did to the head it replaced, and a
-			// consumer tells an older listener, which sends no forced, from a push that was not forced.
-			"forced": strconv.FormatBool(boolValue(body["forced"])),
+			"sender":       nestedString(body, "sender", "login"),
+			"head_subject": firstNonEmptyLine(nestedString(body, "head_commit", "message")),
+			"commit_count": strconv.Itoa(len(sliceValue(body["commits"]))),
+			"compare_url":  stringValue(body["compare"]),
 		}
 	case "workflow_run":
 		headBranch := nestedString(body, "workflow_run", "head_branch")
@@ -1375,63 +1368,16 @@ func slackFilesSuffix(files []any) string {
 	return fmt.Sprintf(" (%d file(s): %s)", len(files), first(label, 80))
 }
 
-// maxPushChangedPaths caps the unique paths a push payload lists, and maxPushChangedPathRunes caps
-// their text, newlines included: git bounds no path's length, and the envelope carries the list
-// whole, so a count alone does not keep it under NATS's max payload. A push past either sets
-// changed_paths_truncated so a consumer never mistakes a capped list for the whole change. The
-// budget lists a hundred paths of about 320 runes each.
-const (
-	maxPushChangedPaths     = 100
-	maxPushChangedPathRunes = 32 << 10
-)
-
-// githubPushChangedPaths collects the unique paths across every pushed commit's added, removed,
-// and modified lists, in first-seen order, capped at maxPushChangedPaths and
-// maxPushChangedPathRunes. A path is listed whole or not at all, so the list ends at the first
-// unique path past either cap, and truncated reports that one was seen; repeats of an
-// already-listed path never count. Only commits[] is read — head_commit is one of them.
-func githubPushChangedPaths(body map[string]any) (paths []string, truncated bool) {
-	seen := map[string]struct{}{}
-	runes := 0
-	for _, item := range sliceValue(body["commits"]) {
-		commit := mapValue(item)
-		for _, key := range [...]string{"added", "removed", "modified"} {
-			for _, value := range sliceValue(commit[key]) {
-				path := stringValue(value)
-				if path == "" {
-					continue
-				}
-				if _, dup := seen[path]; dup {
-					continue
-				}
-				size := utf8.RuneCountInString(path)
-				if len(paths) > 0 {
-					size++ // the newline that joins it to the list
-				}
-				if len(paths) == maxPushChangedPaths || runes+size > maxPushChangedPathRunes {
-					return paths, true
-				}
-				seen[path] = struct{}{}
-				paths = append(paths, path)
-				runes += size
-			}
-		}
-	}
-	return paths, false
-}
-
 // payloadJSON encodes a webhook payload without its empty fields. Every value is copied from the
 // webhook and the listener publishes the envelope whole, so each is capped at maxEnvelopeTextRunes
-// (a body, which says it was cut, caps itself first); only changed_paths, which
-// githubPushChangedPaths bounds by whole paths, runs longer.
+// (a body, which says it was cut, caps itself first).
 func payloadJSON(data map[string]string) string {
 	for key, value := range data {
-		switch {
-		case value == "":
+		if value == "" {
 			delete(data, key)
-		case key != "changed_paths":
-			data[key] = truncateWithEllipsis(value, maxEnvelopeTextRunes)
+			continue
 		}
+		data[key] = truncateWithEllipsis(value, maxEnvelopeTextRunes)
 	}
 	out, _ := json.Marshal(data)
 	return string(out)
@@ -1508,14 +1454,13 @@ func truncateWithEllipsis(s string, maxRunes int) string {
 	return string([]rune(s)[:maxRunes]) + "…"
 }
 
-// maxEnvelopeTextRunes caps each text an envelope copies from its webhook body, but for a push's
-// changed paths, which maxPushChangedPathRunes bounds as a list. The listener publishes an envelope
-// to NATS whole, and a publish larger than the server's max payload (1 MiB by default) fails, so no
-// field may grow with the webhook it came from. The listener checks a delivery's signature, not its
-// fields' lengths, so a field GitHub itself bounds (its interface stops a title at 256 characters)
-// is capped as well as one it does not (a ref, a path, a workflow name, a commit message). A comment
-// or review body, which GitHub allows up to 65,536 characters, is cut without an ellipsis and says
-// so in body_truncated.
+// maxEnvelopeTextRunes caps each text an envelope copies from its webhook body. The listener
+// publishes an envelope to NATS whole, and a publish larger than the server's max payload (1 MiB
+// by default) fails, so no field may grow with the webhook it came from. The listener checks a
+// delivery's signature, not its fields' lengths, so a field GitHub itself bounds (its interface
+// stops a title at 256 characters) is capped as well as one it does not (a ref, a path, a workflow
+// name, a commit message). A comment or review body, which GitHub allows up to 65,536 characters,
+// is cut without an ellipsis and says so in body_truncated.
 const maxEnvelopeTextRunes = 2048
 
 func capBody(s string) (string, bool) {

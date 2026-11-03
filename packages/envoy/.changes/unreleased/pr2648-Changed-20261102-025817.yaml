@@ -1,0 +1,5 @@
+kind: Changed
+body: The `envoy-infra` Pulumi plugin now carries the download URL of the repository its release ran in, built into the binary, so a plugin published from a repository under another owner or name points Pulumi at that repository's releases instead of a compiled-in literal; a build made with no such flag, a developer's among them, serves the same address as before.
+time: 2026-11-02T02:58:17.175765869Z
+custom:
+    Issue: pr2648

@@ -15279,7 +15279,7 @@ var dispatchToolSpecs = [
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
       reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
-      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
+      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'. human does not " + "apply to an approval request a newer version moved: it stays with you until dispatch " + "request-approval hands it back at the current version.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: commentValidation
@@ -15325,7 +15325,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. A find that opens with a list marker ('- ', '5. ', with an optional '[ ] ' or '[x] ' after it) and matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and a box matching only a task item in that state. A find or quote anchor stays inside one block, and in a table inside one cell: ' | ' is the boundary markdown writes between two cells, not text a cell holds, so a quote that runs across cells is refused, naming the cells; change several cells with one operation per cell in the same batch, and anchor on one cell's text. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exceptions are an item a find's list marker selected (it matched no text as written): replace(find=\"5. Old\", with=\"5. New\") gives the item the text 'New' under its own number, and a with that is the marker alone is INVALID_OP; and a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', where a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -18562,15 +18562,26 @@ function withinWindow(items, now) {
   const start = now - SESSION_ANSWERS_WINDOW_MS;
   return items.filter((item) => Date.parse(item.at) >= start);
 }
+function sessionAnswersWords(items) {
+  return items.map((item) => JSON.stringify([
+    item.kind,
+    item.id,
+    item.author.id,
+    item.at,
+    item.edited_at ?? null,
+    item.selected ?? null,
+    item.text
+  ]));
+}
 var MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
 function leftOutLine(count, namesCommand) {
   const counted = `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters`;
   return namesCommand ? `${counted}: run \`dispatch answers\` to read every one in full.` : `${counted}.`;
 }
-function renderSessionAnswers(items, options) {
-  const shown = withinWindow(items, Number(options.now));
-  const unsent = shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
-  const count = shown.length + unsent;
+function renderShown(items, options) {
+  const inWindow = withinWindow(items, Number(options.now));
+  const unsent = inWindow.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
+  const count = inWindow.length + unsent;
   if (count === 0)
     return;
   const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
@@ -18578,7 +18589,7 @@ As read at ${options.cached.readAt}; this read failed: ${failureSentence(options
   const namesCommand = options.withoutCommand !== true;
   const blocks = [];
   let length = header.length;
-  for (const item of shown) {
+  for (const item of inWindow) {
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
     const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after, namesCommand).length);
@@ -18588,9 +18599,14 @@ As read at ${options.cached.readAt}; this read failed: ${failureSentence(options
     length += 2 + block.length;
   }
   const leftOut = count - blocks.length;
-  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]].join(`
+  const text = [
+    header,
+    ...blocks,
+    ...leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]
+  ].join(`
 
 `);
+  return { text, shown: inWindow.slice(0, blocks.length) };
 }
 function renderSessionAnswersList(items, options) {
   const shown = withinWindow(items, Number(options.now));
@@ -18663,18 +18679,24 @@ async function readSessionAnswers(options) {
   const entries = state.sessions.get(session) ?? new Map;
   state.sessions.set(session, entries);
   const carry = (cache, reason, noRoute = false) => {
-    const text = cache === undefined ? undefined : renderSessionAnswers(cache.items, {
+    const rendered = cache === undefined ? undefined : renderShown(cache.items, {
       now: now(),
       total: cache.total,
       cached: { readAt: cache.read_at, reason },
       withoutCommand: noRoute
     });
-    if (cache === undefined || text === undefined) {
+    if (cache === undefined || rendered === undefined) {
       if (noRoute)
         return { text: undefined, source: "unavailable", reason };
       return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
     }
-    return { text, source: "cache", readAt: cache.read_at, reason };
+    return {
+      text: rendered.text,
+      source: "cache",
+      readAt: cache.read_at,
+      words: sessionAnswersWords(rendered.shown),
+      reason
+    };
   };
   if (!dispatch.enabled) {
     const url = options.dispatchUrl;
@@ -18764,13 +18786,12 @@ async function readSessionAnswers(options) {
     return noRoute();
   if ("failure" in outcome)
     return carry(current.cache, outcome.failure);
+  const rendered = renderShown(outcome.cache.items, { now: now(), total: outcome.cache.total });
   return {
-    text: renderSessionAnswers(outcome.cache.items, {
-      now: now(),
-      total: outcome.cache.total
-    }),
+    text: rendered?.text,
     source: "fresh",
-    readAt: outcome.cache.read_at
+    readAt: outcome.cache.read_at,
+    words: sessionAnswersWords(rendered?.shown ?? [])
   };
 }
 async function sessionAnswersSettled(session) {
@@ -19737,6 +19758,18 @@ var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
   const hints = asks.slice(0, askHintLimit).map((ask) => `${ask.id.slice(0, 8)}\u2026 ${textHead(ask.question)}`);
   return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
+}
+async function movedApprovalLine(client, askID) {
+  const ask = (await client.getAsk(askID).catch(() => {
+    return;
+  }))?.ask;
+  const approval = ask?.approval;
+  if (ask?.kind !== "approval" || approval === undefined)
+    return;
+  if (approval.requested_version >= approval.version)
+    return;
+  const owner = ask.issue_key === null ? `--project ${ask.approval_artifact?.project ?? "<project>"} --artifact ${approval.artifact_id}` : ask.approval_artifact?.primary === true ? `--issue ${ask.issue_key}` : `--issue ${ask.issue_key} --artifact ${approval.artifact_id}`;
+  return `The reply did not hand the ask to the human: it is the approval request for ${approval.name} ` + `at version ${approval.requested_version}, and ${approval.name} is now version ${approval.version}. ` + "No reply hands a moved approval request back. Once the human has agreed to every point in " + `version ${approval.version}, run: dispatch request-approval ${owner} --summary ` + `'<what changed since version ${approval.requested_version}>'`;
 }
 async function invalidReplyToAskProblem(client, owner, resolved) {
   if (owner.kind === "issue") {
@@ -21144,9 +21177,11 @@ async function executeDispatchTool(input) {
       });
       if (replyToAsk !== undefined) {
         const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
+        const moved = requestedTurn !== "agent" && comment.ask_waiting_on === "agent" ? await movedApprovalLine(client, replyToAsk) : undefined;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
+            ...moved === undefined ? [] : [moved],
             ...adviceLines
           ].join(`
 `),
