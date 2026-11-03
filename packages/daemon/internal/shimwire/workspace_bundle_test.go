@@ -3,6 +3,7 @@ package shimwire
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -239,5 +240,25 @@ func TestAWorkspaceBundleSlicesIntoFramesUnderTheLineLimit(t *testing.T) {
 	if again[0].ID != frames[0].ID || changed[0].ID == frames[0].ID || resaved[0].ID == frames[0].ID {
 		t.Fatalf("the same bundle sliced to %q, another to %q and the same work of a later release to %q, want only the first to repeat %q",
 			again[0].ID, changed[0].ID, resaved[0].ID, frames[0].ID)
+	}
+}
+
+// The bound is on the body the sequence carries, not on its parts: a bundle just under it, with
+// a header the same body must also hold, is over it, and the two measured apart would pass. The
+// case is unreachable from a release, which stops at 40 MiB, and it is what the doc of
+// MaxWorkspaceBundleBodyBytes and runtime's wire test both claim the wire enforces.
+func TestABundleUnderTheBoundWhoseBodyIsOverItIsRefused(t *testing.T) {
+	saved := WorkspaceBundle{
+		Bundle: bytes.Repeat([]byte("PACKjj\x00\x02"), MaxWorkspaceBundleBodyBytes/8),
+		Head:   "f2f134541b30dfa5160a5d1ce5e17b76c967c661",
+		At:     time.Date(2026, 11, 1, 9, 30, 0, 0, time.UTC),
+	}
+	if len(saved.Bundle) > MaxWorkspaceBundleBodyBytes {
+		t.Fatalf("the bundle alone is %d bytes, over the %d bound: this case proves nothing about the sum",
+			len(saved.Bundle), MaxWorkspaceBundleBodyBytes)
+	}
+	_, err := SplitWorkspaceBundle("restore-1", 7, saved)
+	if !errors.Is(err, ErrMalformedFrame) {
+		t.Fatalf("a bundle of %d bytes whose body is over the %d bound sliced with %v", len(saved.Bundle), MaxWorkspaceBundleBodyBytes, err)
 	}
 }

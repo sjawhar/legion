@@ -844,7 +844,10 @@ func BundleDigest(body []byte) string {
 }
 
 // marshalWorkspaceBundle renders b as the body ParseWorkspaceBundle reads. JSON escapes its own
-// newlines, so the header line is one line.
+// newlines, so the header line is one line. The body it builds is the whole of what the sequence
+// carries — the header, the newline and the bundle's own bytes — so that whole is what
+// MaxWorkspaceBundleBodyBytes bounds, and the two parts are never measured apart: each under the
+// bound and the body over it is the shape this refuses.
 func marshalWorkspaceBundle(b WorkspaceBundle) ([]byte, error) {
 	if b.Head == "" {
 		return nil, fmt.Errorf("%w: a workspace bundle carries no head", ErrMalformedFrame)
@@ -852,17 +855,14 @@ func marshalWorkspaceBundle(b WorkspaceBundle) ([]byte, error) {
 	if len(b.Bundle) == 0 {
 		return nil, fmt.Errorf("%w: a workspace bundle carries no bundle", ErrMalformedFrame)
 	}
-	if len(b.Bundle) > MaxWorkspaceBundleBodyBytes {
-		return nil, fmt.Errorf("%w: a workspace bundle of %d bytes is over the %d a launcher_bundle sequence carries",
-			ErrMalformedFrame, len(b.Bundle), MaxWorkspaceBundleBodyBytes)
-	}
 	head, err := json.Marshal(b)
 	if err != nil {
 		return nil, err
 	}
-	if len(head) > MaxWorkspaceBundleBodyBytes {
-		return nil, fmt.Errorf("%w: a workspace bundle header of %d bytes is over the %d a launcher_bundle sequence carries",
-			ErrMalformedFrame, len(head), MaxWorkspaceBundleBodyBytes)
+	// Written as a subtraction rather than a sum, so the measurement itself cannot overflow.
+	if len(b.Bundle) > MaxWorkspaceBundleBodyBytes-1-len(head) {
+		return nil, fmt.Errorf("%w: a workspace bundle of %d bytes and a header of %d are over the %d a launcher_bundle sequence carries",
+			ErrMalformedFrame, len(b.Bundle), len(head), MaxWorkspaceBundleBodyBytes)
 	}
 	body := make([]byte, 0, len(head)+1+len(b.Bundle))
 	body = append(body, head...)
