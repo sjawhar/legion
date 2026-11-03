@@ -713,9 +713,16 @@ func TestAnActivityReportDatedAheadOfTheDaemonIsBoundedToItsReceipt(t *testing.T
 	if known, err := store.PutClaimActivity(ctx, c.Token, ahead); err != nil || !known {
 		t.Fatalf("PutClaimActivity of the report dated ahead = %t, %v", known, err)
 	}
+	after := time.Now().UTC()
 	stored, _, _, _ := storedActivity(t, store, c.Token)
-	if stored.Before(before) || stored.After(time.Now().UTC()) {
-		t.Fatalf("a report dated %s was stored as %s, want the daemon's receipt time", ahead.At, stored)
+	// The receipt the row kept is a timestamptz, which holds microseconds, so the stored
+	// instant is the Go instant of the receipt with its nanoseconds dropped: it can sit up to
+	// a microsecond below the window's own lower bound, which is what the window is truncated
+	// for. The report's time, two hours ahead, is outside the window either way, so this still
+	// fails on a report that was stored unbounded.
+	if stored.Before(before.Truncate(time.Microsecond)) || stored.After(after) {
+		t.Fatalf("a report dated %s was stored as %s, want the daemon's receipt time between %s and %s",
+			ahead.At, stored, before, after)
 	}
 
 	// The session's next honest report is written, which is what the unbounded time cost.
