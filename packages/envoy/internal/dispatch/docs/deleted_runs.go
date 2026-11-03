@@ -13,13 +13,16 @@ import (
 // holds deleted already, which is most of a reconnecting browser's whole-state handoff.
 
 // deletedRuns is the delete ranges a room is known to hold deleted, each client's sorted and
-// merged: the room's whole delete set at its load (seed, crdt.DeleteSetFromDoc), and every range of
-// every update the room has been charged the structure of since - a browser's update the peer hook
-// admitted, a transaction of the server's own (roomCharge.wrote) - with the GC runs and deleted
-// items it integrated (record). A clock it lists that the room holds is deleted; one the room does
-// not hold yet is in a range the room keeps parked, since ygo parks the part of a range past the
-// clocks it holds (sjawhar/ygo v1.54.1-sami.3, crdt/delete_set.go:385-397, crdt/update.go:783-786)
-// and an update is listed only once its apply has returned. A delete range it covers whole adds no
+// merged: the room's whole delete set at its load (seed, crdt.DeleteSetFromDoc), the ranges of
+// every update the room has been charged the structure of since - a browser's update the peer
+// hook admitted, a transaction of the server's own (roomCharge.wrote) - (record), and the clocks
+// every transaction of the room integrated deleted, a GC run's and a deleted item's, read from
+// the update ygo encoded of that transaction: a server write's as its charge walks it
+// (integrated), a browser's as the room's update observer hands its commit over (listed,
+// roomCharge.applied). A clock it lists that the room holds is deleted; one the room does not hold
+// yet is in a range the room keeps parked, since ygo parks the part of a range past the clocks it
+// holds (sjawhar/ygo v1.54.1-sami.3, crdt/delete_set.go:385-397, crdt/update.go:783-786) and an
+// update is listed only once its apply has returned. A delete range it covers whole adds no
 // struct, and one that overlaps what it lists none at an end inside it (splitEnds), so neither the
 // structure part nor the struct total charges a browser's whole-state handoff for the delete set it
 // carries. Without it the structure part, which no count clears, would charge the room's whole
@@ -36,6 +39,22 @@ import (
 // which over-charges and never under-charges. The list holds sixteen bytes for each run of the
 // room's delete set, beside the tombstone of at least one struct, 129 bytes or more
 // (bytesOfHeapAStruct), that each run deletes, and it goes with the room.
+//
+// It lists no clock a browser's bytes claim. A GC run or a deleted item a browser sends says
+// which clocks it holds deleted, not which the room does: ygo integrates a struct from the first
+// clock the room does not hold (sjawhar/ygo v1.54.1-sami.3, crdt/item.go:82-90), so a GC run over
+// clocks the room holds live deletes none of them, and one whose predecessor is missing parks and
+// deletes nothing yet. Listing such a run was a forgery one 22-byte frame could send: with the
+// room's live text listed deleted, a later delete range over it was covered (covers) and left no
+// end split (splitEnds), so the struct total, the structure part and the frame total each charged
+// it nothing until the measurer's next count. Clipping the run to the clocks past the state vector
+// the hook's weighing read is not enough either, since no lock is held from that read to the apply
+// (weighPeerUpdate) and another browser's update or a server write can fill those clocks live in
+// between. Reading the room's whole delete set after such an apply is not the answer either: a
+// crafted browser sends a frame of a few bytes, one GC run of a client id of its own, as often as
+// the decode cap lets it, and each of them would walk the room's whole store. So the room lists
+// what its own transaction integrated instead, from the update ygo encoded of it, which no
+// browser writes and no apply racing it can forge.
 type deletedRuns struct {
 	mu      sync.RWMutex
 	clients map[uint64][]clockRun
@@ -43,6 +62,10 @@ type deletedRuns struct {
 
 // clockRun is the clocks [start, end) of one client.
 type clockRun struct{ start, end uint64 }
+
+// deletedRun is the clocks [clock, clock+length) of one client that one struct of an update
+// integrated deleted, as a walk of that update read them (roomCharge.applied).
+type deletedRun struct{ client, clock, length uint64 }
 
 // seed lists every range of set, the room's delete set at its load.
 func (d *deletedRuns) seed(set *crdt.IDSet) {
@@ -131,28 +154,55 @@ func (d *deletedRuns) splitEnds(client, clock, length uint64) (start, end bool) 
 
 // record lists every range of the delete set of update, which a walk found at deletesAt
 // (updateTally.deletesAt), once the room has been charged its structure - a browser's update the
-// peer hook admitted, or a transaction of the server's own (roomCharge.wrote); and, where born says
-// the update carries structs that integrate deleted - a GC run, a deleted item, which the delete
-// set of every encode of the room's state lists from then on (buildDeleteSet, sjawhar/ygo
-// v1.54.1-sami.3, crdt/update.go:665-678) though no delete range named them - their clocks too,
-// from a walk of the whole update rather than of its delete set alone. It walks as a room's own
-// state is walked (fromRoom), which refuses only what ygo cannot decode: the server's writes can
-// carry what no browser sends, and an update the hook admitted passed the stricter walk already.
-// Nil records nothing.
-func (d *deletedRuns) record(update []byte, deletesAt int, born bool) {
+// peer hook admitted, or a transaction of the server's own (roomCharge.wrote). It walks as a
+// room's own state is walked (fromRoom), which refuses only what ygo cannot decode: the server's
+// writes can carry what no browser sends, and an update the hook admitted passed the stricter
+// walk already. The structs of the update are not read here: a browser's say which clocks the
+// browser holds deleted, not which the room does, and a transaction's own are listed from the
+// update the room encoded of it (integrated, listed). Nil records nothing.
+func (d *deletedRuns) record(update []byte, deletesAt int) {
 	if d == nil {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if born {
-		_, _ = walkUpdate(update, fromRoom, (*deletedRunsRecorder)(d))
-		return
-	}
 	_ = walkDeleteSet(update, deletesAt, fromRoom, (*deletedRunsRecorder)(d))
 }
 
-// deletedRunsRecorder is record's visitor, which its caller holds the lock for.
+// integrated lists the ranges of the delete set of update and the clocks of every struct of it
+// that integrates deleted - a GC run, a deleted item (bornDeleted), which the delete set of every
+// encode of the room's state lists from then on (buildDeleteSet, sjawhar/ygo v1.54.1-sami.3,
+// crdt/update.go:665-678) though no delete range named them - from one walk of the whole update
+// rather than of its delete set alone. Its update is ygo's own encode of a transaction the room
+// committed, which the room's update observer hands over (roomCharge.wrote): ygo writes it from
+// the state before the transaction (buildPhase2 and encodeV1Locked, crdt/doc.go:604-620 and
+// crdt/update.go:366-406), so every struct in it is a struct the room's store holds, and one born
+// deleted is one the room holds deleted. A browser's bytes are never read this way
+// (deletedRuns). Nil lists nothing.
+func (d *deletedRuns) integrated(update []byte) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, _ = walkUpdate(update, fromRoom, (*deletedRunsRecorder)(d))
+}
+
+// listed lists runs, the clocks the structs of one transaction of the room integrated deleted: a
+// walk of the update ygo encoded of that transaction read them, and its caller holds no lock of
+// this list (roomCharge.applied). Nil, a room no load charged, lists nothing.
+func (d *deletedRuns) listed(runs []deletedRun) {
+	if d == nil || len(runs) == 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, run := range runs {
+		d.addLocked(run.client, run.clock, run.length)
+	}
+}
+
+// deletedRunsRecorder is record's and integrated's visitor, which its caller holds the lock for.
 type deletedRunsRecorder deletedRuns
 
 func (r *deletedRunsRecorder) walkedStruct(walked updateStruct) {

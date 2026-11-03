@@ -45,8 +45,13 @@ func chargeParts(charge *roomCharge) (structure, content, measuredAt, weight int
 // the document the room holds adds nothing, nor does an update the walk refuses, which is never
 // applied. A count of the room's rendering re-bases its counted part and leaves the structure
 // part as it was.
+//
+// The room drains its own commits, as every loaded room does (keepReplica, websocket.go's update
+// observer): the clocks an admitted update integrated deleted are listed as the room's from the
+// update ygo encoded of that commit (roomCharge.applied), so the handoff that carries them back
+// is charged nothing for them.
 func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount(t *testing.T) {
-	service, room, replica, charge := chargedPeerRoom(t)
+	service, room, replica, charge := drainedPeerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n")
 	service.measurer.interval = noInterval
 	admit := func(what string, update []byte) int64 {
 		t.Helper()

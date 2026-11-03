@@ -818,19 +818,20 @@ func (r *renderedReplica) drainedSeq(room string) (seq uint64, settles bool) {
 // chargeAdded charges the room's charge in the room budget what each of updates added: the content
 // a transaction added (contentAdded), whoever wrote it - a browser's update the peer hook
 // admitted, or the server's own write, a repair's included - never the update's bytes, which carry
-// the room's whole delete set on every transaction; and, for a transaction the hook did not apply
-// (roomTotals.hookApplies) - an API write's publish, an injected update, settlement's repair, any
-// other write of the server's own - its structure too, as the hook charges a browser's
-// (roomCharge.wrote), which refuses none of them. Each committed update is charged exactly once,
-// by the observer whose drain of the room's update log hands it over, whichever observer that is:
-// charged by the observer it was handed to, as it once was, an update another observer had
-// already drained and rendered would be charged after the rendering that holds it was published,
-// so the count of that rendering would not re-base the charge past it. Charged here, before the
-// replica renders any of them, each is held by the rendering the replica publishes next (keep,
-// publishSize), and that rendering's count re-bases the charge past it. The replica's own copy of
-// the room, which the room's load hands it (keepReplica), is the room's second copy, which the
-// charge has held since the room loaded (roomCopies). A replica no room's load charged (a test's)
-// charges nothing.
+// the room's whole delete set on every transaction, with the clocks the transaction integrated
+// deleted listed as the room's from that same walk (roomCharge.applied, deletedRuns); and, for a
+// transaction the hook did not apply (roomTotals.hookApplies) - an API write's publish, an
+// injected update, settlement's repair, any other write of the server's own - its structure too,
+// as the hook charges a browser's (roomCharge.wrote), which refuses none of them. Each committed
+// update is charged exactly once, by the observer whose drain of the room's update log hands it
+// over, whichever observer that is: charged by the observer it was handed to, as it once was, an
+// update another observer had already drained and rendered would be charged after the rendering
+// that holds it was published, so the count of that rendering would not re-base the charge past
+// it. Charged here, before the replica renders any of them, each is held by the rendering the
+// replica publishes next (keep, publishSize), and that rendering's count re-bases the charge past
+// it. The replica's own copy of the room, which the room's load hands it (keepReplica), is the
+// room's second copy, which the charge has held since the room loaded (roomCopies). A replica no
+// room's load charged (a test's) charges nothing.
 func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 	charge := r.roomCharge()
 	if charge == nil {
@@ -838,7 +839,7 @@ func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 	}
 	for _, update := range updates {
 		if r.structs.hookApplies(update.Origin) {
-			charge.adds(contentAdded(update.Update))
+			charge.applied(update.Update)
 			continue
 		}
 		charge.wrote(update.Update)

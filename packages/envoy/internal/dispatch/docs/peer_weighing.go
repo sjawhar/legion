@@ -62,7 +62,10 @@ type peerWeighing struct {
 	// frame (frameBytes, deleteFrameBytes), what it adds to the room's frame total.
 	unrendered, frame uint64
 	// born is whether any struct past the room's state integrates deleted (bornDeleted), whose
-	// clocks the room's delete set holds from then on (deletedRuns.record).
+	// clocks the room's delete set holds from then on. It is read by the charge of a write of the
+	// server's own, which lists those clocks from the update ygo encoded of the transaction
+	// (deletedRuns.integrated); a browser's are listed from that update too, where the room's
+	// update observer drains it (roomCharge.applied).
 	born bool
 	// retired is the clients the room's history lists as retired by a rebuild, each with the clock
 	// it had reached (roomTotals.retired), nil for a room never rebuilt or no load listed, and

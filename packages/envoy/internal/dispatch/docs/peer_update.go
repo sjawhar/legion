@@ -345,12 +345,16 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	// Moved to what the hook admitted only after the apply returns, so a recount that read the
 	// total's admissions before its encode cannot miss what this apply integrated
 	// (roomTotals.recount). Its delete ranges are listed as the room's, so a later update
-	// carrying them again is charged nothing for them (deletedRuns).
+	// carrying them again is charged nothing for them (deletedRuns). Its structs are not listed
+	// here at all: a browser's GC run or deleted item names clocks the room can hold live, which
+	// ygo leaves live, so the clocks an apply of one did integrate deleted are listed from the
+	// update ygo encoded of its transaction, where the room's update observer drains it
+	// (roomCharge.applied).
 	structs.landed(added)
 	if !charged {
 		charge.grew(weighed.structureHeap())
 	}
-	charge.deletes().record(info.Update, tally.deletesAt, weighed.born)
+	charge.deletes().record(info.Update, tally.deletesAt)
 	return nil
 }
 
