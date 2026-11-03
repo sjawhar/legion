@@ -37,16 +37,17 @@ cd packages/envoy
 go test -timeout 20m ./internal/dispatch/api
 ```
 
-CI's `envoy-go` job runs it that way, alone and before the module's other packages
-(`.github/workflows/ci.yaml`), and `envoy-go-race-api`, the race job that runs that package by
-itself, gives it 30 minutes; `docs` runs under `-race` in `envoy-go-race-docs`, which gives it 60.
+CI runs it that way, alone on a runner of its own, in the `envoy-go-api` job, and `docs` the same
+way in `envoy-go-docs`, apart from the module's other packages in `envoy-go`
+(`.github/workflows/ci.yaml`); `envoy-go-race-api`, the race job that runs that package by itself,
+gives it 30 minutes, and `docs` runs under `-race` in `envoy-go-race-docs`, which gives it 60.
 A command that runs one of its tests by name (`-run`) needs no deadline of its own. Run it alone
 rather than beside the module's other Postgres-backed packages: together they share one database
 service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
 (`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).
 
 `packages/daemon/internal/daemon` is the daemon's such package. On CI's runners it took up to
-694 s without `-race`, under the test job's `go test -timeout 20m ./...`, and 306 to 600 s under
+694 s without `-race`, under the test job's `go test -timeout 20m ./...`, and up to 600 s under
 `-race`, where go test's own ten minutes ran out on main at 2201840998; the test job's race step
 gives it 30 minutes. On a busy machine it takes longer still (908 s under `-race` on a shared
 devbox), so a command that runs the whole package, alone or in a pattern that includes it,

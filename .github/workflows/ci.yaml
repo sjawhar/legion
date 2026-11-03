@@ -110,6 +110,8 @@ env:
       "dispatch-browser-multiprocess": "dispatch_browser_multiprocess",
       "claude-envoy": "claude_envoy",
       "envoy-go": "envoy_go",
+      "envoy-go-api": "envoy_go_api",
+      "envoy-go-docs": "envoy_go_docs",
       "envoy-infra-go": "envoy_infra_go",
       "envoy-go-race": "envoy_go_race",
       "envoy-go-race-pmdoc": "envoy_go_race_pmdoc",
@@ -152,6 +154,8 @@ jobs:
       dispatch_browser_multiprocess: ${{ steps.filter.outputs.dispatch_browser_multiprocess }}
       claude_envoy: ${{ steps.filter.outputs.claude_envoy }}
       envoy_go: ${{ steps.filter.outputs.envoy_go }}
+      envoy_go_api: ${{ steps.filter.outputs.envoy_go_api }}
+      envoy_go_docs: ${{ steps.filter.outputs.envoy_go_docs }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
       envoy_go_race_pmdoc: ${{ steps.filter.outputs.envoy_go_race_pmdoc }}
@@ -929,7 +933,7 @@ jobs:
             # non-test .go file under packages/envoy (event_insert_guard_test.go:32 and
             # review_write_guard_test.go:44 use the same walk), so this filter keeps the wide root
             # rather than the package list its closure would give.
-            envoy_go_race_api:
+            envoy_go_race_api: &envoy_go_api_reads
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/**'
@@ -940,7 +944,7 @@ jobs:
             # (INFRA-490). This is the closure of ./internal/dispatch/docs/ (`go list -deps -test
             # -race`), one pattern per directory, with the testdata of each directory that has
             # one and what those packages embed.
-            envoy_go_race_docs:
+            envoy_go_race_docs: &envoy_go_docs_reads
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/internal/contracts/*'
@@ -980,6 +984,14 @@ jobs:
               - 'packages/envoy/internal/stacktest/*'
               # internal/dispatch/docs/approval_carry_test.go:26.
               - 'packages/contracts/fixtures/decision-blocks/**'
+            # envoy-go-api's and envoy-go-docs' unit runs read what the two race jobs above read:
+            # the files only a run without -race compiles
+            # (internal/dispatch/api/copy_lock_order_test.go, keyed_write_guard_test.go,
+            # internal/dispatch/docs/race_disabled_test.go) sit in directories those filters name.
+            envoy_go_api:
+              - *envoy_go_api_reads
+            envoy_go_docs:
+              - *envoy_go_docs_reads
             # `go test -tags memory ./cmd/dispatch`. memory_profile_test.go reads four guides only
             # when DISPATCH_EDIT_PROFILE_OUT is set (its line 126), which CI never sets, so they are
             # not here. cmd/dispatch/nats_unreachable_test.go, which carries no tag, starts the
@@ -1892,7 +1904,7 @@ jobs:
       # tests hold a fake clock, so they are deterministic under it.
       #
       # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took 306 to
+      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
       # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
       # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
       # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
@@ -2572,17 +2584,15 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
-      # The API package owns the largest set of Postgres-backed tests. Running it with the other
-      # package binaries makes all of their per-test database cleanup queue on the service's one
-      # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
-      # default ten minutes (523 s on a workstation), and the documents package about nine with the
-      # rest, so every package here gets 20. The API package's live-feed and delivery-hub tests also
-      # wait for the event log's safe horizon, which any open transaction on this job's Postgres
-      # delays.
+      # Every package of the module but three: internal/integration, which the integration step
+      # below runs, and the Dispatch API and the document service, the two slowest, which run in
+      # envoy-go-api and envoy-go-docs (their comment says why). The packages left still share the
+      # service's one checkpointer for their per-test database cleanup, and the slowest of them,
+      # the listener, took 521 to 536 s here (runs 41636545772, 41628426418), so every package
+      # gets 20 minutes, twice go test's default.
       - name: Unit test envoy Go package
         run: |
-          go test -timeout 20m ./internal/dispatch/api
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m
+          go list ./... | grep -Ev '/integration|/internal/dispatch/(api|docs)$' | xargs go test -timeout 20m
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
@@ -2640,6 +2650,100 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
+  # The Dispatch API and the document service, the two slowest packages of envoy-go's unit run,
+  # each on a runner of its own. In one job beside the rest of the module they took envoy-go past
+  # its 45 minutes: its unit step ran 25 to 38 minutes on 2026-11-03, the API alone first (550 to
+  # 720 s) and then the module, the documents package the slowest of it (600 to 850 s), and the
+  # job was cancelled with every test passed on main at 75dbe53b (run 41628426418, job
+  # 125907216932). The API package owns the largest set of Postgres-backed tests, and beside other
+  # package binaries all of their per-test database cleanup queues on the service's one
+  # checkpointer, so it never shares a step with them. The race lane runs both packages too, but
+  # not in place of these jobs: a static guard (internal/dispatch/api/copy_lock_order_test.go),
+  # the heap measurements (internal/dispatch/docs/upload_memory_test.go) and the full seed counts
+  # of the render storms (render_storm_test.go, render_formatting_test.go) run only without
+  # -race. The API package's live-feed and delivery-hub tests wait for the event log's safe
+  # horizon, which any open transaction on the job's Postgres delays. Each package's TestMain
+  # opens the store through DISPATCH_TEST_DATABASE_URL and skips every store test without it
+  # (internal/dispatch/store/storetest/storetest.go:67-71), and a skip is a pass, so the service
+  # and the variable are load-bearing. The step's -timeout 20m fires before the job's 30 minutes:
+  # about 1 minute of setup and 2 to download and compile, then the step's 20.
+  envoy-go-api:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_api == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      - name: Unit test the Dispatch API
+        run: go test -timeout 20m ./internal/dispatch/api/
+        working-directory: packages/envoy
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
+  # The document service's unit run, the other half of envoy-go-api's comment above.
+  envoy-go-docs:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_docs == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      - name: Unit test the document service
+        run: go test -timeout 20m ./internal/dispatch/docs/
+        working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
         if: always()

@@ -2771,12 +2771,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 - Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the Envoy jobs this module's tagged and race suites run in among them:
-  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-pmdoc` (`envoy_go_race_pmdoc`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` (`envoy_go_race_docs`) and `envoy-infra-go` (`envoy_infra_go`).
+  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-api` (`envoy_go_api`), `envoy-go-docs` (`envoy_go_docs`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-pmdoc` (`envoy_go_race_pmdoc`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` (`envoy_go_race_docs`) and `envoy-infra-go` (`envoy_infra_go`).
   Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read.
   Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request.
   `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses;
   a file a test reads through `..` and a go command a test starts are rows of `.github/scripts/ci_job_reads.py`, which the change that adds them extends, since the check finds neither by itself.
-  `envoy-go`, gated by its broad `envoy_go` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module;
+  `envoy-go`, gated by its broad `envoy_go` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change but those of `internal/dispatch/api` and `internal/dispatch/docs`, which `envoy-go-api` and `envoy-go-docs` run on runners of their own (`internal/integration` in a step of its own in `envoy-go`), so together they also run the untagged tests of every other job's packages in that module;
   `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go`.
 
 ## Security

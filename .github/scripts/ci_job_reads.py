@@ -337,8 +337,7 @@ def go_notices_runs():
 # simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
-go test -timeout 20m ./internal/dispatch/api
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m"""
+go list ./... | grep -Ev '/integration|/internal/dispatch/(api|docs)$' | xargs go test -timeout 20m"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -618,11 +617,10 @@ GATES = [
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
     ], exact=[
-        # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues
-        # on the service's one checkpointer beside the other package binaries), then ./... but it
-        # and internal/integration, which the integration step tests: counted as all of ./....
+        # ./... but internal/integration, which the integration step tests, and the Dispatch API
+        # and the document service, which envoy-go-api and envoy-go-docs test: counted as all of
+        # ./....
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
-            (ENVOY, ["./internal/dispatch/api"], "go test -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
@@ -648,6 +646,16 @@ GATES = [
         (NOTICES, f"{at('envoy-go', 'Pack envoy binaries')} runs it"),
         (GO_TARGETS, f"{at('envoy-go', 'Pack envoy binaries')}: jq -r '.envoy[]'"),
     ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + CI_SELF),
+
+    gate("envoy_go_api", "envoy-go-api", runs=[
+        step_run("envoy-go-api", "Unit test the Dispatch API", "go test -timeout 20m ./internal/dispatch/api/",
+                 ENVOY, ["./internal/dispatch/api/"]),
+    ], reads=setup_go("envoy-go-api", f"{ENVOY}/go.mod") + CI_SELF),
+
+    gate("envoy_go_docs", "envoy-go-docs", runs=[
+        step_run("envoy-go-docs", "Unit test the document service", "go test -timeout 20m ./internal/dispatch/docs/",
+                 ENVOY, ["./internal/dispatch/docs/"]),
+    ], reads=setup_go("envoy-go-docs", f"{ENVOY}/go.mod") + CI_SELF),
 
 
     gate("envoy_infra_go", "envoy-infra-go", runs=[
