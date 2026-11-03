@@ -1,0 +1,15 @@
+kind: Fixed
+body: |
+  `agent-secrets-helper` reads the broker's address by the one rule the clients keep
+  (`brokerclient.WithoutTrailingSlashes`): `serve` drops every slash `AGENT_SECRETS_URL` ends in,
+  and `install` drops every slash of `--url` or `AGENT_SECRETS_URL` before it writes the unit's
+  `Environment=AGENT_SECRETS_URL=` line. Both dropped one slash of however many, so a typed
+  `https://secrets.example//` left the helper signing launcher proofs for `//v1/enrollments` —
+  refused `LAUNCHER_INVALID`, which clears the machine credential, so no session on the box can
+  enrol until a person approves a new machine login — and `install` persisted that typo into the
+  unit every later start reads. An address of nothing but slashes is no address at all: `install`
+  refuses it with the message it gives when no URL is named at all, and `serve` refuses it as a
+  missing `AGENT_SECRETS_URL`.
+time: 2026-11-04T06:30:00.000000000Z
+custom:
+  Issue: pr2636

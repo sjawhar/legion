@@ -78,7 +78,7 @@ type config struct {
 func loadConfig(getenv func(string) string) (config, error) {
 	home := getenv("HOME")
 	cfg := config{
-		URL:          strings.TrimSuffix(getenv(brokerclient.BrokerURLVar), "/"),
+		URL:          brokerclient.WithoutTrailingSlashes(getenv(brokerclient.BrokerURLVar)),
 		Socket:       getenv("AGENT_SECRETS_HELPER_SOCK"),
 		OperatorFile: getenv("AGENT_SECRETS_OPERATOR_FILE"),
 		MachineFile:  getenv("AGENT_SECRETS_MACHINE_FILE"),

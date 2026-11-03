@@ -100,7 +100,10 @@ func install(args []string, getenv func(string) string, exe string, stdout io.Wr
 	if *url == "" {
 		*url = getenv("AGENT_SECRETS_URL")
 	}
-	*url = strings.TrimSuffix(*url, "/")
+	// Every trailing slash, the one rule the clients read the address by, and before the check
+	// below: a URL of nothing but slashes is no broker URL at all and is refused here rather
+	// than written into the unit as an empty value.
+	*url = brokerclient.WithoutTrailingSlashes(*url)
 	if *url == "" {
 		return errors.New("install needs the broker's URL: pass --url URL or set AGENT_SECRETS_URL")
 	}
