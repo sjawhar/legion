@@ -672,7 +672,7 @@ ARG GOPLS_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
 COPY packages/daemon/docker/language-servers/package.json /in/language-servers/package.json
 COPY packages/daemon/docker/codegraph/package.json /in/codegraph/package.json
-# The seventeen reads below (thirteen LICENSE/NOTICE fetches, four HEAD checks) are independent
+# The eighteen reads below (fourteen LICENSE/NOTICE fetches, four HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
 # rarely), and running unauthenticated GitHub raw-content requests in parallel risks tripping its
@@ -694,7 +694,8 @@ RUN set -eu; \
     fetch() { curl -fsSL "$(gh_raw_url "$1" "$2" "$3")" -o "/in/$4"; }; \
     fetch oven-sh/bun "bun-v${BUN_VERSION}" LICENSE.md bun-LICENSE.md; \
     fetch "$omp_repo" "$omp_tag" LICENSE omp-LICENSE; \
-    fetch "$omp_repo" "$omp_tag" THIRD-PARTY-NOTICES.txt omp-THIRD-PARTY-NOTICES.txt; \
+    fetch "$omp_repo" "$omp_tag" packages/coding-agent/THIRD-PARTY-NOTICES.txt omp-coding-agent-THIRD-PARTY-NOTICES.txt; \
+    fetch "$omp_repo" "$omp_tag" packages/natives/THIRD-PARTY-NOTICES.txt omp-natives-THIRD-PARTY-NOTICES.txt; \
     fetch "$jj_repo" "$jj_tag" LICENSE jj-LICENSE; \
     fetch cli/cli "$gh_tag" LICENSE gh-LICENSE; \
     fetch astral-sh/uv "$UV_VERSION" LICENSE-APACHE uv-LICENSE-APACHE; \
@@ -738,7 +739,8 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "npm packages inlined into the claude-envoy plugin, /opt/legion/claude-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/claude-envoy-notices \
       "Bun ${BUN_VERSION}, /usr/local/bin/bun: LICENSE.md of github.com/oven-sh/bun at bun-v${BUN_VERSION}" /in/bun-LICENSE.md \
       "Oh My Pi, /opt/omp and the native module it extracted into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
-      "Oh My Pi: THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-THIRD-PARTY-NOTICES.txt \
+      "Oh My Pi, /opt/omp: packages/coding-agent/THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-coding-agent-THIRD-PARTY-NOTICES.txt \
+      "Oh My Pi's native module, /home/legion/.omp/natives: packages/natives/THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-natives-THIRD-PARTY-NOTICES.txt \
       "jj, /usr/local/bin/jj: LICENSE of github.com/${jj_repo} at ${jj_tag}" /in/jj-LICENSE \
       "jj: the Rust crates it links" /in/jj-crates \
       "GitHub CLI, /usr/local/bin/gh: LICENSE of github.com/cli/cli at ${gh_tag}" /in/gh-LICENSE \
@@ -841,7 +843,7 @@ WORKDIR /home/legion
 #    first run in the image, so the CodeGraph link also extracts OMP's native module from the
 #    binary (no network) into /home/legion/.omp/natives/<version>/ — the build's success is the
 #    check. From 18.11.0 OMP writes only the variant the CPU selects, so this is the build runner's
-#    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, so a pod whose node selects the same
+#    (ubuntu-24.04, AVX2), 116 MiB; this layer ships it, so a pod whose node selects the same
 #    variant extracts nothing, while a node that selects the other has each role write that one into
 #    its own home overlay's upper layer, on the pod's role-homes volume, at its first OMP run: up to
 #    six copies in an issue pod. The probes in the final step never wait on it.
