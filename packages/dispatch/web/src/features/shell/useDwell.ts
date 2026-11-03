@@ -8,14 +8,36 @@ const DWELL_MS = 1_000;
  *  share is read again as it scrolls rather than only as it crosses one line. */
 const OBSERVED_SHARES = Array.from({ length: 21 }, (_, step) => step / 20);
 
+/**
+ * The box an element is read in, which is not always the window: the nearest ancestor that clips
+ * it vertically, else the observer's own root. The Inbox's reading pane is such an ancestor - an
+ * inner scroller a couple of hundred pixels shorter than the window - and measuring the window
+ * there made the rule below unmeetable, so a reply taller than the pane was never marked read
+ * however long its reader scrolled it (INFRA-450). A clipping box taller than the root shows no
+ * more than the root does, so the smaller of the two is what the reader can see at once.
+ */
+function readableHeight(entry: IntersectionObserverEntry): number {
+  const root = entry.rootBounds?.height ?? window.innerHeight;
+  for (let node = entry.target.parentElement; node !== null; node = node.parentElement) {
+    if (node === document.body || node === document.documentElement) break;
+    const overflow = window.getComputedStyle(node).overflowY;
+    if (overflow === "visible" || overflow === "clip") continue;
+    // A box the layout has not sized yet clips nothing anyone can read, so the root still rules.
+    return node.clientHeight > 0 ? Math.min(root, node.clientHeight) : root;
+  }
+  return root;
+}
+
 /** Whether an entry's element is on screen enough to read: three-quarters of it visible, or, for
- *  an element taller than the screen, which can never show three-quarters of itself, three-quarters
- *  of the screen filled by it. */
+ *  an element taller than the box it is read in, which can never show three-quarters of itself,
+ *  three-quarters of that box filled by it. The second test walks for its box, so it runs only
+ *  when the first has failed - which is the tall element it exists for. */
 function readable(entry: IntersectionObserverEntry): boolean {
   if (!entry.isIntersecting) return false;
-  const screen = entry.rootBounds?.height ?? window.innerHeight;
-  const needed = DWELL_THRESHOLD * Math.min(entry.boundingClientRect.height, screen);
-  return entry.intersectionRect.height >= needed;
+  if (entry.intersectionRect.height >= DWELL_THRESHOLD * entry.boundingClientRect.height) {
+    return true;
+  }
+  return entry.intersectionRect.height >= DWELL_THRESHOLD * readableHeight(entry);
 }
 
 export interface DwellOptions {
