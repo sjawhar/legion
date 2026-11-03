@@ -101,21 +101,27 @@ func tokenCommandField(role AppRole) string {
 func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, readOnly bool) (map[string]releasedInstallation, error) {
 	key := fmt.Sprintf("%s|%s|%t", role, strings.ToLower(owner), readOnly)
 	m.mu.Lock()
+	if m.root.Err() != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("%s: the token manager is closed", tokenCommandField(role))
+	}
 	run, ok := m.commands[key]
 	if !ok {
 		run = &commandRun{done: make(chan struct{})}
 		m.commands[key] = run
+		m.runs.Add(1)
 		go func() {
-			bounded, cancel := context.WithTimeout(context.Background(), tokenCommandLimit)
+			defer m.runs.Done()
+			bounded, cancel := context.WithTimeout(m.root, tokenCommandLimit)
 			defer cancel()
 			run.installations, run.err = m.execTokenCommand(bounded, role, app, owner, readOnly)
 			if run.err == nil && owner == "" {
 				m.recordOwners(role, run.installations)
 			}
 			m.mu.Lock()
+			close(run.done)
 			delete(m.commands, key)
 			m.mu.Unlock()
-			close(run.done)
 		}()
 	}
 	m.mu.Unlock()
@@ -125,6 +131,13 @@ func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.
 	case <-ctx.Done():
 		return nil, &TransientError{Err: fmt.Errorf("%s for %q is still running after %v (a grant may wait on a person's approval): %w", tokenCommandField(role), owner, ctx.Err(), ErrCommandPending)}
 	}
+}
+
+// Close ends every token_command still running and waits for each to exit; a later call needing
+// one is refused. The daemon calls it as the workflow stops.
+func (m *Manager) Close() {
+	m.stop()
+	m.runs.Wait()
 }
 
 // recordOwners records the accounts of a release of every installation as role's installations.

@@ -461,3 +461,69 @@ func TestTokenModeCommandEnvironmentAndDeadline(t *testing.T) {
 		t.Fatalf("a command past its deadline = %v, want a transient error", err)
 	}
 }
+
+// A caller waiting on another's mint, which ended only because that caller's deadline did, joins
+// the command still running under its own context and gets its lease.
+func TestTokenModeAWaiterOutlivesTheInitiatorsDeadline(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	gate := filepath.Join(dir, "gate")
+	command := fmt.Sprintf(`while [ ! -e %q ]; do sleep 0.05; done; printf '{"installations":{"acme":{"installation_id":1,"token":"ghs_waited","expires_at":"%s"}}}'`,
+		gate, now.Add(time.Hour).Format(time.RFC3339))
+	github := &fakeTokenGitHub{slug: "legion-implementer", appID: "12345"}
+	server := github.serve(t)
+	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "12345", TokenCommand: command}},
+		Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }})
+	short, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	initiator := make(chan error, 1)
+	go func() {
+		_, err := tokens.Token(short, Implement, "acme")
+		initiator <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	waiter := make(chan Lease, 1)
+	go func() {
+		lease, err := tokens.Token(context.Background(), Implement, "acme")
+		if err != nil {
+			t.Errorf("the waiter = %v, want the lease", err)
+		}
+		waiter <- lease
+	}()
+	if err := <-initiator; !errors.Is(err, ErrCommandPending) {
+		t.Fatalf("the initiator = %v, want ErrCommandPending", err)
+	}
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case lease := <-waiter:
+		if lease.Token != "ghs_waited" {
+			t.Fatalf("the waiter's lease = %+v, want the running command's token", lease)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the waiter never got the lease")
+	}
+}
+
+// Close ends a command still running and waits for it; a later mint is refused.
+func TestTokenModeCloseEndsARunningCommand(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "pid")
+	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: fmt.Sprintf(`echo $$ >%q; sleep 600`, pidFile)}}, Options{})
+	short, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if _, err := tokens.Token(short, Implement, "acme"); !errors.Is(err, ErrCommandPending) {
+		t.Fatalf("Token = %v, want ErrCommandPending", err)
+	}
+	closed := make(chan struct{})
+	go func() { tokens.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not end the running command")
+	}
+	if _, err := tokens.Token(context.Background(), Implement, "acme"); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Token after Close = %v, want a refusal", err)
+	}
+}

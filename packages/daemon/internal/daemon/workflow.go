@@ -1193,11 +1193,17 @@ func (w *workflowRuntime) releaseReadied(ctx context.Context) {
 	}
 }
 
+// stop closes the workflow's connections and ends every token_command its token manager still runs
+// (appauth.Manager.Close), waiting for each to exit, so a command waiting on a person's approval
+// does not outlive the daemon.
 func (w *workflowRuntime) stop() {
 	if w == nil {
 		return
 	}
 	if w.conn != nil {
 		w.conn.Close()
+	}
+	if closer, ok := w.tokens.(interface{ Close() }); ok {
+		closer.Close()
 	}
 }

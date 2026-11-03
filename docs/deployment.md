@@ -110,9 +110,9 @@ With no key, the daemon reads each App's bot login from GraphQL's `viewer` under
 tokens, refuses a token whose `GET /apps/<slug>` names an id other than `app_id`, and reads whether
 the App is installed on a repository from that owner's installation's repository list.
 A read-only token holds what the command's read-only release gives: the broker's holds
-`contents: read` and `metadata: read` and not `pull_requests: read`, which the key forms' read-only
-token also holds, so on another owner's repository a role on `token_command` can clone and read
-files but not read pull requests.
+`contents: read` and `metadata: read` and not `pull_requests: read`, unlike the key forms'
+read-only token, which also holds `pull_requests: read`, so on another owner's repository a role
+on `token_command` can clone and read files but not read pull requests.
 The daemon passes the command's stderr through as it runs, with every GitHub token in it redacted,
 so `agent-secrets`' line naming the pending request appears in the daemon's log while the review
 App waits for its grant.

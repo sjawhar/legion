@@ -135,6 +135,11 @@ type Manager struct {
 	identities        map[string]GitIdentity
 	pendingIdentities map[string]*pendingIdentity
 	commands          map[string]*commandRun
+
+	// root ends every token_command run on Close (stop), and runs counts the runs still going.
+	root context.Context
+	stop context.CancelFunc
+	runs sync.WaitGroup
 }
 
 type pendingLease struct {
@@ -170,7 +175,10 @@ func New(apps config.GitHubApps, options Options) *Manager {
 	if stderr == nil {
 		stderr = os.Stderr
 	}
+	root, stop := context.WithCancel(context.Background())
 	return &Manager{
+		root:              root,
+		stop:              stop,
 		apps:              apps,
 		baseURL:           baseURL,
 		client:            client,
@@ -222,43 +230,55 @@ func leaseKey(prefix string, role AppRole, owner string) string {
 
 // lease serves the cached lease under prefix+role+owner while more than refreshWindow remains, and
 // otherwise mints one with permissions (nil: the installation's own), sharing one exchange among
-// concurrent callers.
+// concurrent callers. A caller that waited on another's mint, which ended only because that
+// caller's own deadline did (a context error, or ErrCommandPending), asks again under its own
+// context rather than take that caller's failure as its own.
 func (m *Manager) lease(ctx context.Context, role AppRole, owner, prefix string, permissions map[string]string) (Lease, error) {
 	owner = strings.TrimSpace(owner)
 	if owner == "" {
 		return Lease{}, fmt.Errorf("GitHub App owner must not be empty")
 	}
 	cacheKey := leaseKey(prefix, role, owner)
-	now := m.now()
-
-	m.mu.Lock()
-	if lease, ok := m.leases[cacheKey]; ok && lease.ExpiresAt.Sub(now) > refreshWindow {
-		m.mu.Unlock()
-		return lease, nil
-	}
-	if waiting, ok := m.pending[cacheKey]; ok {
-		m.mu.Unlock()
-		select {
-		case <-waiting.done:
-			return waiting.lease, waiting.err
-		case <-ctx.Done():
-			return Lease{}, ctx.Err()
+	for {
+		now := m.now()
+		m.mu.Lock()
+		if lease, ok := m.leases[cacheKey]; ok && lease.ExpiresAt.Sub(now) > refreshWindow {
+			m.mu.Unlock()
+			return lease, nil
 		}
-	}
-	waiting := &pendingLease{done: make(chan struct{})}
-	m.pending[cacheKey] = waiting
-	m.mu.Unlock()
+		if waiting, ok := m.pending[cacheKey]; ok {
+			m.mu.Unlock()
+			select {
+			case <-waiting.done:
+				if callerEnded(waiting.err) && ctx.Err() == nil {
+					continue
+				}
+				return waiting.lease, waiting.err
+			case <-ctx.Done():
+				return Lease{}, ctx.Err()
+			}
+		}
+		waiting := &pendingLease{done: make(chan struct{})}
+		m.pending[cacheKey] = waiting
+		m.mu.Unlock()
 
-	lease, err := m.mint(ctx, role, owner, permissions)
-	m.mu.Lock()
-	if err == nil {
-		m.leases[cacheKey] = lease
+		lease, err := m.mint(ctx, role, owner, permissions)
+		m.mu.Lock()
+		if err == nil {
+			m.leases[cacheKey] = lease
+		}
+		waiting.lease, waiting.err = lease, err
+		delete(m.pending, cacheKey)
+		close(waiting.done)
+		m.mu.Unlock()
+		return lease, err
 	}
-	waiting.lease, waiting.err = lease, err
-	delete(m.pending, cacheKey)
-	close(waiting.done)
-	m.mu.Unlock()
-	return lease, err
+}
+
+// callerEnded reports a failure that says only that the calling context ended: the context's own
+// errors, or a token_command still running past it (ErrCommandPending).
+func callerEnded(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrCommandPending)
 }
 
 // mint mints role's installation token for owner. An installation the daemon found that answers

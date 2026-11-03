@@ -170,13 +170,19 @@ app_token_mint() {
     done
   done
 }
-# app_token_mint_file FILE OWNER READ_ONLY SECRET writes one release atomically. It returns the
-# token command's non-zero status, or 125 when the command succeeded and printed nothing; either way
-# it leaves no temporary file and FILE as it was.
+# app_token_redact copies its stdin to its stdout with every GitHub token form replaced, as the
+# daemon redacts a token command's stderr (internal/appauth, tokenPattern).
+app_token_redact() {
+  LC_ALL=C sed -E 's/(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/[redacted]/g'
+}
+# app_token_mint_file FILE OWNER READ_ONLY SECRET writes one release atomically, the token
+# command's stderr reaching the run's through app_token_redact. It returns the token command's
+# non-zero status, or 125 when the command succeeded and printed nothing; either way it leaves no
+# temporary file and FILE as it was.
 app_token_mint_file() {
   local file=$1 owner=$2 ro=$3 secret=$4 tmp status=0
   tmp=$(umask 077 && mktemp "$(dirname -- "$file")/.mint.XXXXXXXX") || return 1
-  (umask 077 && LEGION_GITHUB_OWNER=$owner LEGION_GITHUB_READ_ONLY=$ro sh -c "$(app_token_command "$secret")" >"$tmp" </dev/null) || status=$?
+  (umask 077 && LEGION_GITHUB_OWNER=$owner LEGION_GITHUB_READ_ONLY=$ro sh -c "$(app_token_command "$secret")" >"$tmp" 2> >(app_token_redact >&2) </dev/null) || status=$?
   if [ "$status" != 0 ]; then
     rm -f -- "$tmp"
     return "$status"

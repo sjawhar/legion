@@ -86,6 +86,23 @@ const natsSeedVariables = ["NATS_NKEY_SEED", "NATS_DAEMON_NKEY_SEED"];
  * operator sees what `agent-secrets` prints while it waits for a person's grant (the request's
  * id). A failure is named as the daemon names it: its field and exit code, then the command's
  * stderr when it wrote any; its stdout is never quoted. */
+/** The most a token command may print on either stream: a release of a few installations is a
+ * few kilobytes, as the daemon bounds it (internal/appauth, releaseLimit). */
+const outputLimit = 1 << 20;
+/** How long one token command may run here: a review App's first grant waits on a person, and
+ * `agent-secrets` waits 30 minutes for a decision by default. */
+const commandLimitMs = 35 * 60 * 1000;
+/** The GitHub token forms, which a command's stderr may carry and no log or error may. */
+const tokenPattern = /(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g;
+/** A GitHub account login: what a release may name an installation by (internal/appauth,
+ * loginPattern). */
+const loginPattern = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+
+/** `text` with every GitHub token in it replaced. */
+export function redactTokens(text: string): string {
+  return text.replace(tokenPattern, "[redacted]");
+}
+
 async function runTokenCommand(field: string, command: string): Promise<string> {
   const env: Record<string, string | undefined> = { ...process.env };
   for (const name of natsSeedVariables) delete env[name];
@@ -93,35 +110,77 @@ async function runTokenCommand(field: string, command: string): Promise<string> 
   env.LEGION_GITHUB_READ_ONLY = "";
   let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
+    // detached: the command leads a process group of its own, which a kill ends whole.
     child = Bun.spawn(["sh", "-c", command], {
       env,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      detached: true,
     });
   } catch (error) {
     throw new Error(
       `${field} could not run: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-  let stderr = "";
+  let ended = "";
+  const end = (why: string) => {
+    if (ended !== "") return;
+    ended = why;
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  };
+  const deadline = setTimeout(
+    () => end(`did not finish within ${commandLimitMs / 60000} minutes`),
+    commandLimitMs
+  );
   const decoder = new TextDecoder();
+  let stderr = "";
+  let pendingLine = "";
+  const relayLine = (line: string) => {
+    const clean = redactTokens(line);
+    process.stderr.write(clean);
+    if (stderr.length < outputLimit) stderr += clean;
+  };
   const relay = (async () => {
     for await (const chunk of child.stderr) {
-      stderr += decoder.decode(chunk, { stream: true });
-      process.stderr.write(chunk);
+      pendingLine += decoder.decode(chunk, { stream: true });
+      let newline = pendingLine.indexOf("\n");
+      while (newline >= 0) {
+        relayLine(pendingLine.slice(0, newline + 1));
+        pendingLine = pendingLine.slice(newline + 1);
+        newline = pendingLine.indexOf("\n");
+      }
+      if (pendingLine.length > outputLimit) {
+        pendingLine = "";
+        end(`wrote more than ${outputLimit} bytes to stderr`);
+      }
+    }
+    if (pendingLine !== "") relayLine(pendingLine);
+  })();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const collect = (async () => {
+    for await (const chunk of child.stdout) {
+      size += chunk.length;
+      if (size > outputLimit) {
+        end(`printed more than ${outputLimit} bytes, which no release is`);
+        continue;
+      }
+      chunks.push(chunk);
     }
   })();
-  const [stdout, status] = await Promise.all([
-    new Response(child.stdout).text(),
-    child.exited,
-    relay,
-  ]);
+  const [status] = await Promise.all([child.exited, relay, collect]);
+  clearTimeout(deadline);
+  if (ended !== "") throw new Error(`${field} ${ended}`);
   if (status !== 0) {
     const failed = `${field} failed (exit ${status})`;
     throw new Error(stderr.trim() === "" ? failed : `${failed}: ${stderr.trim()}`);
   }
-  return stdout;
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 /** The token of the first installation, by account login, of the release `output`, as the daemon
@@ -145,6 +204,9 @@ export function firstInstallationToken(output: string, field: string, now: Date)
   );
   if (owners.length === 0) throw new Error(`${field} released no installation`);
   for (const owner of owners) {
+    if (!loginPattern.test(owner)) {
+      throw new Error(`${field} released an installation whose account is not a GitHub login`);
+    }
     const entry = member(installations, owner);
     const id = member(entry, "installation_id");
     if (typeof id !== "number" && typeof id !== "string") {
