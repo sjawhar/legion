@@ -681,6 +681,36 @@ describe("AskGate at the dispatch CLI", () => {
     expect((await run(MESSAGE)).code).toBe(0);
   });
 
+  // A box process on an earlier pi-envoy writes a record with no pid namespace. Here its pid reads
+  // gone, so the record reads off, but its store is still there: the prune keeps the session
+  // directory with it, so that process's own CLI never finds its record gone. Once the store sweep
+  // has taken the store (14 days with no marker), the next prune takes the directory.
+  test("pruning keeps an idle session whose record names no namespace while its store is there", async () => {
+    const child = Bun.spawn(["true"]);
+    await child.exited;
+    const oldStore = join(stateDir, "askgate", `${child.pid}-15039164`);
+    writeRecord("ses-1", { pid: child.pid, start: "15039164", store: oldStore });
+    const dir = join(stateDir, "sessions", "ses-1");
+    const minted = (Date.now() - 3 * 3_600_000) / 1000;
+    utimesSync(join(oldStore, "markers"), minted, minted);
+    utimesSync(oldStore, minted, minted);
+    const longIdle = (Date.now() - 15 * 86_400_000) / 1000;
+    utimesSync(dir, longIdle, longIdle);
+    pruneSessions(stateDir, Date.now());
+    expect(existsSync(oldStore)).toBe(true);
+    expect(existsSync(dir)).toBe(true);
+    utimesSync(join(oldStore, "markers"), longIdle, longIdle);
+    utimesSync(oldStore, longIdle, longIdle);
+    utimesSync(join(stateDir, ".pruned"), longIdle, longIdle);
+    utimesSync(dir, longIdle, longIdle);
+    pruneSessions(stateDir, Date.now());
+    expect(existsSync(oldStore)).toBe(false);
+    utimesSync(join(stateDir, ".pruned"), longIdle, longIdle);
+    utimesSync(dir, longIdle, longIdle);
+    pruneSessions(stateDir, Date.now());
+    expect(existsSync(dir)).toBe(false);
+  });
+
   // The owner remakes its store before each write of its own owner file, so a store another
   // process removed is back, empty, by the owner's next call: a write it never reviewed still finds
   // no marker.
