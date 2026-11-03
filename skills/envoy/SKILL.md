@@ -14,6 +14,7 @@ Envoy delivers external events and messages between sessions. Delivery is at-lea
 - Take the target id from the delivery's `reply_with`, or from `envoy_sessions` (filter by `machine`, `dir` or `title`). Never address a tmux pane or window: Envoy delivers only to a session id, and the session in a pane can change.
 - Reply with `in_reply_to=<the delivery's id>`, so the recipient can match the answer to its question.
 - Read the `recipient` in the send result, the session Envoy targeted: if it is not the one you meant, resend to the right id.
+- When `envoy_send` says the send is not confirmed delivered, send the same message again with the `idempotency_key` the error names, within 72 hours: Envoy drops it as a repeat if the first copy arrived, and the result says when an earlier attempt was already stored. A resend without that key can deliver the message twice. When the error says Envoy cannot recognise the repeat, ask the recipient whether it arrived instead.
 - Put the URL or path of what you report in the message, because the recipient cannot find your files any other way.
 - Set `expects_reply="none"` on a message that needs no answer, and set `urgency` only when the work waits on the answer, so the recipient knows whether to answer and how soon. `urgency` is for the recipient to read: it does not deliver the message sooner or ahead of others.
 
@@ -56,7 +57,7 @@ Every topic starts with `notifications.`.
 ## Wait for CI or a merge
 
 - Subscribe to `github.<owner>.<repo>.pr.<n>.>` and end the turn. Never start a `gh` poller: the event wakes you, and a poller burns turns.
-- One `pr.<n>.checks` event arrives per commit whose checks settle, the head or not. Compare its `sha` with the head you wait on, because an earlier commit's settlement can arrive first. A push with GitHub's `skip-checks` trailer runs no checks, and several can sit on top (a Legion handoff push is one): wait for the settlement of the nearest ancestor that is not such a push, the CI head `skill://legion-worker/references/merge-gate.md` reads.
+- One `pr.<n>.checks` event arrives per commit whose checks settle, the head or not. Compare its `sha` with the head you wait on, because an earlier commit's settlement can arrive first. A commit whose message carries one of GitHub's skip keywords (`[skip ci]` and its kin) starts no workflow, so no settlement of it may ever arrive.
 - Settlement waits until the commit has had no check event for 5 seconds (`ENVOY_CI_DEBOUNCE`) and every reported check run and check suite of it has finished. No event arrives before that. Envoy does not read GitHub's required-checks list, so a green settlement does not mean GitHub will merge the PR.
 - A `pr.<n>` event with `closed` and `merged: true` means the PR merged; it carries `merge_commit_sha`, `merged_by` and `head_sha`.
 - A later settlement of the same commit can carry `superseded_settlement: "true"`. Code that orders settlements follows `skill://envoy/references/check-settlement.md`.

@@ -15,13 +15,14 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 )
 
 // supersedingRoleDeleteKV answers every conditional Delete of a role claim with nats.ErrKeyExists,
 // the server's word for a revision that is no longer the stored one: a fresh claim landed first.
 // store.ReleaseExpiredRoleClaim reads that as ExpiredRoleClaimSuperseded, so each attempt
 // resolveRoleHolder makes loses its compare-and-swap while every bus read it makes answers --
-// the one state that spends all of roleHolderResolutionAttempts on supersessions. The claim's
+// the one state that spends every attempt of roles.ResolveHolder on supersessions. The claim's
 // stored bytes are left alone: every other call goes to the real bucket.
 type supersedingRoleDeleteKV struct {
 	nats.KeyValue
@@ -57,7 +58,7 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 	// gone and tries to release it -- and loses that release to the KV above, every time.
 	setRegistryRoleKV(t, registry, supersedingRoleDeleteKV{KeyValue: registryRoleKV(t, registry)})
 
-	if _, err := resolveRoleHolder(context.Background(), registry, sessions, role, registered); !errors.Is(err, errRoleHolderChanged) {
+	if _, err := resolveRoleHolder(context.Background(), registry, sessions, role, roles.Registered); !errors.Is(err, errRoleHolderChanged) {
 		t.Fatalf("resolving a claim superseded on every attempt = %v, want errRoleHolderChanged", err)
 	}
 

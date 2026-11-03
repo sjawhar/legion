@@ -76,7 +76,8 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatalf("random suffix: %v", err)
 	}
 	name := "legion_api_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -201,6 +202,9 @@ type harness struct {
 	// context was the agent's request's or one that outlives its connection.
 	reported           *[]capabilities.Report
 	reportedContextErr *[]error
+	// handoffs is the Dispatch a completion route's harness reads handoff records from
+	// (newHandoffHarness), which writeHandoff fills; nil for a harness serving no completion.
+	handoffs *statusRecorder
 }
 
 func newHarness(t *testing.T) *harness {

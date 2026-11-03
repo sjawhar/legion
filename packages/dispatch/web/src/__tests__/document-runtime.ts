@@ -177,7 +177,12 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     // The real `createEditor` installs Dispatch's node views once the editor library has
     // loaded (`features/doc/editor.ts`); the fake stands in for that call too, so a test reads
     // the same `viewProps.nodeViews` the host would.
-    installTypedBlocks(handle.view, options.blockSchema, options.onAskBlockHosts);
+    installTypedBlocks(
+      handle.view,
+      options.blockSchema,
+      options.onAskBlockHosts,
+      options.watchPicture
+    );
     editors.push(editor);
     return handle;
   };

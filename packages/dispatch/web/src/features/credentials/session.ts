@@ -20,11 +20,11 @@ export type CredentialSessionStatus =
   | { kind: "not-running" }
   | { kind: "unknown" };
 
-/** One line the Inbox row and the record page both render: one of a credential request's ids,
- *  where it came from, and whether its session runs. The renderer names the id through
- *  `AgentName` and says the status in words. `source` is null only when both ids agree (or only
- *  the enrollment's was ever set); every request-sourced line is `"request"`, except when it
- *  equals a present enrollment id, where the two collapse into one line. */
+/** One line the Inbox's pending-requests row renders: one of a credential request's ids, where
+ *  it came from, and whether its session runs. The renderer names the id through `AgentName` and
+ *  says the status in words. `source` is null only when both ids agree (or only the enrollment's
+ *  was ever set); every request-sourced line is `"request"`, except when it equals a present
+ *  enrollment id, where the two collapse into one line. */
 export interface CredentialSessionLine {
   id: string;
   status: CredentialSessionStatus;

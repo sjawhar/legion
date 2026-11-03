@@ -38,7 +38,7 @@ import {
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
 import { blockFragment } from "../refs/block-reference";
-import { fetchReferencePath, needsSpecSlug } from "../refs/reference-target";
+import { fetchReferencePath, needsSpecSlug, watchPicturePath } from "../refs/reference-target";
 import {
   buildDispatchReference,
   buildIssuePath,
@@ -753,6 +753,7 @@ export function ProofDocument({
                   name: userRef.current.login,
                 },
                 blockSchema,
+                watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
                 // The open document's own reference, never a version's: a pointer names a block
                 // of the document by it, so the editor refuses one to a block of a type the
                 // pointer's attribute does not allow.

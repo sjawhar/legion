@@ -868,8 +868,13 @@ type Ask struct {
 	CreatedAt     time.Time      `json:"created_at"`
 	// ReferencedByCount is batched with ask-list reads so a card can suppress an empty backlink
 	// disclosure without issuing one graph request per ask. It is absent from mutation responses.
-	ReferencedByCount *int    `json:"referenced_by_count,omitempty"`
-	EditedAt          *string `json:"edited_at"`
+	ReferencedByCount *int `json:"referenced_by_count,omitempty"`
+	// Revision is the current revision of the ask's parts, the number a reference to one of them
+	// pins (`dispatch://<key>/ask/<id>#b-<part>@v<N>`). Batched with the part ids of the options
+	// and the answer (api.attachAskPartIDs), so it is absent from mutation responses and zero
+	// while the ask's parts are not indexed yet, where no revision can be pinned.
+	Revision int     `json:"revision,omitempty"`
+	EditedAt *string `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
 	// ApprovalArtifact is the document Approval.ArtifactID names, hydrated the same way
@@ -1088,14 +1093,22 @@ type BlockInvalidEventPayload struct {
 	DisturbedBy Actor  `json:"disturbed_by"`
 }
 
-// AskOption is an answer choice.
+// AskOption is an answer choice. ID is the id of the block this option is stored as - the part
+// `dispatch://<key>/ask/<ask id>#b-<id>` names (refs.IndexAskParts) - which every read that shows
+// an ask's options carries (api.attachAskPartIDs) and no write accepts: a caller that sends an
+// option back as it read it has its id emptied (api.validateAskOptions). Absent on a write's own
+// response and while the ask's parts are not indexed yet.
 type AskOption struct {
+	ID          string `json:"id,omitempty"`
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
 }
 
-// AskAnswer is a human response to an ask.
+// AskAnswer is a human response to an ask. ID is the id of the block the ask's current answer is
+// stored as, read as an option's is and never written by a caller; a superseded answer, which no
+// part of the ask holds, carries none.
 type AskAnswer struct {
+	ID       string    `json:"id,omitempty"`
 	User     string    `json:"user"`
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
@@ -1654,6 +1667,34 @@ type MessageAcceptedEventPayload struct {
 	SessionID  string `json:"session_id"`
 	AcceptedAs string `json:"accepted_as"`
 	Target     string `json:"target"`
+}
+
+// HandoffSummary is one phase handoff without its body: what GET /api/v1/issues/{key}/handoffs
+// lists, newest first, and what POST /api/v1/issues/{key}/handoffs/{phase} answers. Phase is a
+// lowercase slug (Legion writes plan, implement, test and review), Version counts from 1 within
+// the issue and phase, and Author is the session that wrote it.
+type HandoffSummary struct {
+	ID        string    `json:"id"`
+	IssueKey  string    `json:"issue_key"`
+	Phase     string    `json:"phase"`
+	Version   int       `json:"version"`
+	Author    Actor     `json:"author"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Handoff is one phase handoff with its body: Body is the exact text the session sent, one JSON
+// object, stored as text so a read answers the bytes written.
+type Handoff struct {
+	HandoffSummary
+	Body string `json:"body"`
+}
+
+// HandoffRecordedEventPayload is `handoff.recorded`: a session recorded Version of the issue's
+// Phase handoff, the record HandoffID. It never carries the body; a reader fetches the record.
+type HandoffRecordedEventPayload struct {
+	HandoffID string `json:"handoff_id"`
+	Phase     string `json:"phase"`
+	Version   int    `json:"version"`
 }
 
 // ReferencedBy identifies a post or artifact that mentions an artifact.
