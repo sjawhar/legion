@@ -251,9 +251,10 @@ func TestTwoPodsSIGKILLHandsOverInOrderWithin15s(t *testing.T) {
 // hard take-over allows (README.md, "A repeat with the same event id is possible after a hard
 // take-over"): the killed pod had pushed it and died before its delivered record, which is what
 // would have told the pod taking over. In flight at the kill is read as published before it and
-// not taken by its session more than mpKillInFlight before it (requireOnceExceptInFlight); every
-// other message is prompted exactly once, a repeat of one the killed pod had time to record
-// being a fault of the take-over. The killed pod's worker dies with it, so what it held comes
+// first taken by its session within mpKillInFlight on either side of it
+// (requireOnceExceptInFlight); every other message is prompted exactly once, whether the killed
+// pod had time to record it or only the pod taking over ever pushed it, and a repeat of one is a
+// fault of the take-over. The killed pod's worker dies with it, so what it held comes
 // back at the durable's 6 s ack wait, and the new holder's hold, which runs to its 7 s cap here,
 // is what puts it back before the newer ones. With settleCap raised by 30 s, as the tester
 // raised it, that hold runs past the bound and this row fails.

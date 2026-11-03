@@ -67,13 +67,15 @@ const (
 	// mpQuiet is how long a row watches for a repeat after every message arrived: past the ack wait
 	// (6 s), so a message a pod held without acking and that came back would have arrived.
 	mpQuiet = 8 * time.Second
-	// mpKillInFlight is how long before a SIGKILL a message's push may have landed and still count
-	// as in flight at the kill (requireOnceExceptInFlight): a pod that pushed a message earlier
-	// than this had time to record it delivered, so the pod taking over skips it and a repeat of
-	// it is a fault, while one pushed inside the window may have died with its record unwritten.
-	// A delivered record is one KV write, milliseconds on the box the rows run on; a second is
-	// three orders of magnitude over that and still far under the 6 s ack wait that brings the
-	// message back.
+	// mpKillInFlight is how far on either side of a SIGKILL a message's first prompt may land and
+	// still count as the killed pod's push in flight at the kill (requireOnceExceptInFlight). A pod
+	// that pushed a message earlier than this had time to record it delivered, so the pod taking
+	// over skips it and a repeat of it is a fault, while one pushed inside the window may have died
+	// with its record unwritten; a first prompt later than this is the successor's push. A
+	// delivered record is one KV write, milliseconds on the box the rows run on; a second is three
+	// orders of magnitude over that and still far under the 6 s ack wait that brings the message
+	// back, and under the successor's first push after the kill, which the 6 s ack wait and the
+	// settle hold put seconds later.
 	mpKillInFlight = time.Second
 )
 
@@ -966,9 +968,17 @@ func (s *mpServingPort) requireOnce(t *testing.T, messages []mpMessage) {
 // hard take-over"), because the killed pod died between the push its session took and the
 // delivered record that would have told the pod taking over.
 //
-// A message counts as in flight at moment when it was published before it and its session had
-// not taken it, by its first prompt, more than window before it: an earlier prompt than that is
-// one the killed pod had time to record, and a repeat of it is a fault.
+// A message counts as in flight at moment when it was published before it and its session took it,
+// by its first prompt, within window on either side of it. Only such a first prompt can be the
+// killed pod's own push: one more than window before the kill is a push the killed pod had time to
+// record, and one more than window after it is a push of the pod taking over, since a message the
+// session never took before the kill (queued behind a held push, or not pulled yet) was pushed by
+// nothing but the successor, and a repeat of either is a fault of the take-over. The window
+// reaches past the kill too because the port records a prompt when its request arrives, and the
+// killed pod's last push can still be on its way, or in the port's handler, at the kill instant.
+// The serving port cannot tell which pod a prompt came from (every pod pushes to the one port, and
+// a prompt names no pod), so the window around the kill is what marks a first prompt as the
+// killed pod's.
 func (s *mpServingPort) requireOnceExceptInFlight(t *testing.T, messages []mpMessage, moment time.Time, window time.Duration) {
 	t.Helper()
 	counts := s.counts()
@@ -976,7 +986,7 @@ func (s *mpServingPort) requireOnceExceptInFlight(t *testing.T, messages []mpMes
 	for _, m := range messages {
 		count, limit, want := counts[m.event], 1, "once"
 		took, taken := s.first(m.session, m.event)
-		if m.published.Before(moment) && (!taken || took.After(moment.Add(-window))) {
+		if m.published.Before(moment) && taken && took.After(moment.Add(-window)) && took.Before(moment.Add(window)) {
 			limit, want = 2, "once, or twice as a push in flight at the kill"
 		}
 		if count >= 1 && count <= limit {
