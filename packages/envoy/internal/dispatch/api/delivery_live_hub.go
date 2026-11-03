@@ -287,18 +287,20 @@ type deliveryView struct {
 	subs map[*deliverySub]struct{}
 	// dirty is set when a change can have moved the view's answer; immediate when a sub waits for
 	// its first answer, which no quiet delays. firstDirty and lastDirty time the coalescing, and
-	// notBefore holds a failed read's retry back.
+	// notBefore holds a failed read's retry back. A recompute clears dirty and immediate once its
+	// read holds its change position (deliveryHub.read), not when it begins: whatever marked the
+	// view until then was committed before the reads that follow, which answer it.
 	dirty, immediate      bool
 	firstDirty, lastDirty time.Time
 	notBefore             time.Time
 	cause                 string
 	computing             bool
-	// reading is set while recompute's population read runs, outside the lock, and until it
-	// installs that read's answer. heardIssues and heardSessions record what the events applied
-	// meanwhile acted on (applyEventLocked): each issue with whether it was a P0 before or after
-	// one of them, and each writing session with its newest title. The read may have passed a row
-	// before its event committed, so recompute checks them against the answer it installs
-	// (recheckHeardLocked).
+	// reading is set once recompute's read holds its change position and takes the view's marks
+	// over, and until it installs that read's answer. heardIssues and heardSessions record what
+	// the events applied meanwhile acted on (applyEventLocked): each issue with whether it was a
+	// P0 before or after one of them, and each writing session with its newest title. The read
+	// may have passed a row before its event committed, so recompute checks them against the
+	// answer it installs (recheckHeardLocked).
 	reading       bool
 	heardIssues   map[string]bool
 	heardSessions map[string]string
@@ -309,7 +311,7 @@ type deliveryView struct {
 	pipe     pipelinePopulation
 	readFrom time.Time
 	// body is the last answer, nil until the first and while delivery is not configured; seq the
-	// change position it reflects and changedAt when that change was recorded; readingSeq the
+	// change position it reflects and changedAt when that change was recorded; and readingSeq the
 	// position a read under way reflects, so a change at or before it marks nothing.
 	body       *deliveryLiveEncoded
 	seq        int64
@@ -369,10 +371,13 @@ type deliveryFreshnessVerdict struct {
 
 // deliveryHubNote is one thing the hub did, for a test's observe.
 type deliveryHubNote struct {
-	what  string // "recompute begin", "recompute read", "recompute end", "connected", "events seeded", "event", "feed closed"
+	what  string // "recompute begin", "recompute position", "recompute read", "recompute end", "connected", "events seeded", "event", "feed closed"
 	view  string // the view's key
 	cause string
 	sent  int
+	// through is the newest change position a recompute's read took, which a "recompute position"
+	// note makes as the read takes it and a "recompute read" note carries on.
+	through int64
 	// eventID is the event an "event" note applied, or the head an "events seeded" note's feed
 	// began at.
 	eventID int64

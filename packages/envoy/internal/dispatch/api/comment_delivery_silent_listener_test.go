@@ -75,7 +75,7 @@ func publishedToSession(t *testing.T, deps Deps, issueKey, commentID, sessionID 
 		defer close(stopped)
 		outbox.New(outbox.Deps{
 			Store: deps.Store, Publisher: acceptingPublisher{}, Broker: events.NewBroker(),
-			Listen: deps.Store.Pool.Listener, Docs: deps.Docs,
+			Listen: deps.Store.Pool.Listener,
 		}).Run(ctx)
 	}()
 	defer func() {
@@ -282,7 +282,7 @@ func TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails
 		defer close(stopped)
 		outbox.New(outbox.Deps{
 			Store: deps.Store, Publisher: acceptingPublisher{}, Broker: events.NewBroker(),
-			Listen: deps.Store.Pool.Listener, Docs: deps.Docs,
+			Listen: deps.Store.Pool.Listener,
 		}).Run(ctx)
 	}()
 	defer func() {

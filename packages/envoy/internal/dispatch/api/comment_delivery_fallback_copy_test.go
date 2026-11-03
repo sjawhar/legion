@@ -78,7 +78,7 @@ func TestAFailedMentionOfASessionNothingSkippedLeavesTheCommentCreatedEventAlone
 	listener, state := newMentionListener(t)
 	// Never released: the send to s2 waits until its caller gives up, and the attempt fails.
 	_ = state.hold("s2")
-	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL, envoyTimeout: time.Second})
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL, envoyTimeout: time.Second})
 	issue := createInteractionIssue(t, handler, "TEST", "A failed mention", "before")
 	root := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{"body": "Where should this go?"}))
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
@@ -88,7 +88,7 @@ func TestAFailedMentionOfASessionNothingSkippedLeavesTheCommentCreatedEventAlone
 		t.Fatalf("the mention's send went to %s, want s2", session)
 	}
 	// The send is still held, so its attempt is pending while comment.created is published.
-	published := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	published := eventDeliveries(t, database, "comment.created", created.ID)
 	if len(published) != 1 || slices.Contains(published[0].Destinations, contracts.AgentSubject("s2")) {
 		t.Fatalf("comment.created deliveries = %#v, want the one event's, none of it to s2", published)
 	}
@@ -101,7 +101,7 @@ func TestAFailedMentionOfASessionNothingSkippedLeavesTheCommentCreatedEventAlone
 	if len(settled) != 1 || settled[0].State != "failed" {
 		t.Fatalf("the mention whose send never answered = %#v, want its one attempt failed", settled)
 	}
-	again := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	again := eventDeliveries(t, database, "comment.created", created.ID)
 	if len(again) != 1 || slices.Contains(again[0].Destinations, contracts.AgentSubject("s2")) {
 		t.Fatalf("comment.created deliveries after the mention failed = %#v, want none of them to s2", again)
 	}
@@ -160,7 +160,7 @@ func TestAClaimantWhoseResentMentionFailsStillHearsTheComment(t *testing.T) {
 	ageAttempts(t, database, claimed.ID)
 	_ = state.holdLookups("/v1/registry/s1")
 
-	published := eventDeliveries(t, database, deps.Docs, "comment.created", claimed.ID)
+	published := eventDeliveries(t, database, "comment.created", claimed.ID)
 	if len(published) != 1 || slices.Contains(published[0].Destinations, contracts.AgentSubject("s1")) {
 		t.Fatalf("comment.created deliveries = %#v, want the one event's, its claimant copy left to the resend", published)
 	}
@@ -239,7 +239,7 @@ func runOutboxUntilSettled(t *testing.T, deps Deps, publisher outbox.Publisher, 
 		defer close(stopped)
 		outbox.New(outbox.Deps{
 			Store: deps.Store, Publisher: publisher, Broker: events.NewBroker(),
-			Listen: deps.Store.Pool.Listener, Docs: deps.Docs,
+			Listen:     deps.Store.Pool.Listener,
 			RoleClaims: claimedRole{}, Sessions: claimedRole{},
 		}).Run(ctx)
 	}()
@@ -346,7 +346,7 @@ func TestAFailedRetryOfAMentionSendsTheCommentToNoNewDestination(t *testing.T) {
 	if settled := settledCommentDeliveries(t, database, created.ID); len(settled) != 1 || settled[0].State != "failed" {
 		t.Fatalf("the mention whose send never answered = %#v, want its one attempt failed", settled)
 	}
-	published := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	published := eventDeliveries(t, database, "comment.created", created.ID)
 	if len(published) != 1 || !slices.Contains(published[0].Destinations, contracts.RoleTopicPrefix+"planner") {
 		t.Fatalf("comment.created deliveries = %#v, want the one event's, the planner route among them", published)
 	}
@@ -372,7 +372,7 @@ func TestAFailedRetryOfAMentionSendsTheCommentToNoNewDestination(t *testing.T) {
 	if after.publishedAt == nil || !after.publishedAt.Equal(*before.publishedAt) || after.payload != before.payload {
 		t.Fatalf("comment.created after the failed retry = %+v, want it as its first publish left it: %+v", after, before)
 	}
-	again := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	again := eventDeliveries(t, database, "comment.created", created.ID)
 	if len(again) != 1 || !slices.Equal(again[0].Destinations, published[0].Destinations) {
 		t.Fatalf("comment.created deliveries after the failed retry = %#v, want them as they were: %#v", again, published)
 	}

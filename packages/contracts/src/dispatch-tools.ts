@@ -97,6 +97,47 @@ function documentOwnerValidation(
   };
 }
 
+const ARTIFACT_OWNER_AND_SOURCE_RULE =
+  "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.";
+
+const CONTENT_IS_MARKDOWN =
+  "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
+
+const PATH_KEEPS_BYTES =
+  "path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged";
+
+const ARTIFACT_CONTENT_NAME_RULE = `${CONTENT_IS_MARKDOWN}, so with content the name ends in .md or .markdown or has no extension; upload any other file (.jsonl, .tsv, .json, .txt) with ${PATH_KEEPS_BYTES}.`;
+
+/** A name's extension: what follows its last dot when that holds no blank. Digits count, so
+ *  "rows.jsonl.1" has one, and so does a title such as "plan v1.2", which takes content once it
+ *  ends in .md. */
+const NAME_EXTENSION = /\.([^\s.]+)$/u;
+
+const MARKDOWN_EXTENSION = /^(md|markdown)$/i;
+
+const artifactOwner = documentOwnerValidation(false);
+
+/** The refusal of the part of dispatch_artifact's rule `value` breaks, or undefined when it keeps
+ *  the rule. Inline content is always stored as Markdown, so it goes only under a name that says
+ *  Markdown or says nothing: a .jsonl stored that way reads back with its lines joined. */
+function artifactProblem(value: unknown): string | undefined {
+  const input = value as {
+    readonly name?: unknown;
+    readonly path?: unknown;
+    readonly content?: unknown;
+  };
+  if (
+    !artifactOwner.check(value) ||
+    (typeof input.path === "string") === (typeof input.content === "string")
+  ) {
+    return ARTIFACT_OWNER_AND_SOURCE_RULE;
+  }
+  if (typeof input.content !== "string" || typeof input.name !== "string") return undefined;
+  const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
+  if (extension === undefined || MARKDOWN_EXTENSION.test(extension)) return undefined;
+  return `${CONTENT_IS_MARKDOWN}, and ${JSON.stringify(input.name)} is not a Markdown name. Upload the file under the same name with ${PATH_KEEPS_BYTES}; content takes a name ending in .md or .markdown or with no extension.`;
+}
+
 const documentEditOwner = documentOwnerValidation(true);
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
@@ -194,11 +235,12 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
 };
 
 /**
- * dispatch_read: an issue, a project document, or a ref, exactly as every owned read - or a
- * `message` alone, which addresses a conversation by any message in it. A human's direct message
- * to this session and the replies to it belong to no issue or document, so the id is all there is.
+ * dispatch_read: an issue, a project (alone, its documents; with artifact, one of them), or a ref,
+ * exactly as every owned read - or a `message` alone, which addresses a conversation by any
+ * message in it. A human's direct message to this session and the replies to it belong to no
+ * issue or document, so the id is all there is.
  */
-const readOwner = documentOwnerValidation(true);
+const readOwner = documentOwnerValidation(false);
 const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
     const input = value as {
@@ -216,7 +258,9 @@ const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
       input.ref === undefined
     );
   },
-  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`,
+  message:
+    "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " +
+    "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.",
 };
 
 /** Component attachment modes an issue write accepts. */
@@ -897,7 +941,9 @@ export const dispatchToolSpecs = [
         .describe(
           "Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " +
             "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " +
-            "you need the human to act - the ask returns to 'Waiting on you'."
+            "you need the human to act - the ask returns to 'Waiting on you'. human does not " +
+            "apply to an approval request a newer version moved: it stays with you until dispatch " +
+            "request-approval hands it back at the current version."
         )
         .optional(),
       images: imagesArgument(
@@ -1002,7 +1048,7 @@ export const dispatchToolSpecs = [
     description:
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " +
-      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
+      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. A find that opens with a list marker ('- ', '5. ', with an optional '[ ] ' or '[x] ' after it) and matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and a box matching only a task item in that state. A find or quote anchor stays inside one block, and in a table inside one cell: ' | ' is the boundary markdown writes between two cells, not text a cell holds, so a quote that runs across cells is refused, naming the cells; change several cells with one operation per cell in the same batch, and anchor on one cell's text. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exceptions are an item a find's list marker selected (it matched no text as written): replace(find=\"5. Old\", with=\"5. New\") gives the item the text 'New' under its own number, and a with that is the marker alone is INVALID_OP; and a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', where a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block\'s id, type, opening words and token, and each table\'s rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ' +
@@ -1212,6 +1258,7 @@ export const dispatchToolSpecs = [
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
       "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
+      `${ARTIFACT_CONTENT_NAME_RULE} ` +
       "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
       "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
@@ -1224,26 +1271,15 @@ export const dispatchToolSpecs = [
       content: z
         .string()
         .describe(
-          "Inline text to store as a Markdown document; a CR LF or a lone carriage return in it is stored as a line feed."
+          "Inline text to store as a Markdown document, under a name ending in .md or .markdown or with no extension; a CR LF or a lone carriage return in it is stored as a line feed."
         )
         .optional(),
       summary: z.string().describe("Optional version summary.").optional(),
     }),
     validation: {
-      check: (value) => {
-        const input = value as {
-          readonly issue?: unknown;
-          readonly project?: unknown;
-          readonly path?: unknown;
-          readonly content?: unknown;
-        };
-        return (
-          documentOwnerValidation(false).check(value) &&
-          (typeof input.path === "string") !== (typeof input.content === "string")
-        );
-      },
-      message:
-        "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.",
+      check: (value) => artifactProblem(value) === undefined,
+      message: `${ARTIFACT_OWNER_AND_SOURCE_RULE} ${ARTIFACT_CONTENT_NAME_RULE}`,
+      refusal: (value) => artifactProblem(value) ?? ARTIFACT_OWNER_AND_SOURCE_RULE,
     },
   },
   {
@@ -1252,8 +1288,9 @@ export const dispatchToolSpecs = [
     description:
       "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " +
       "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " +
-      "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
+      "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " +
       "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " +
+      "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " +
       "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
       "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
       "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +

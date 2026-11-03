@@ -509,7 +509,7 @@ func commentWithAnUnansweredLookup(t *testing.T, lookup unansweredLookup) unansw
 	listener, state := newMentionListener(t)
 	letAnswer := state.holdLookups(lookup.hungPath)
 	defer letAnswer()
-	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "An unanswered lookup", "before")
 	if lookup.route != "" {
 		if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
@@ -575,7 +575,7 @@ func commentWithAnUnansweredLookup(t *testing.T, lookup unansweredLookup) unansw
 	if len(settled) != 1 || settled[0].State != "sent" || settled[0].SessionID == nil || *settled[0].SessionID != "s1" {
 		t.Fatalf("the mention once the listener answered = %#v, want it sent to s1", settled)
 	}
-	published := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	published := eventDeliveries(t, database, "comment.created", created.ID)
 	if len(published) != 1 {
 		t.Fatalf("comment.created deliveries = %#v, want the one event's", published)
 	}
@@ -915,7 +915,7 @@ func runOutboxBeside(t *testing.T, deps Deps, publisher outbox.Publisher) {
 		defer close(stopped)
 		outbox.New(outbox.Deps{
 			Store: deps.Store, Publisher: publisher, Broker: events.NewBroker(),
-			Listen: deps.Store.Pool.Listener, Docs: deps.Docs,
+			Listen: deps.Store.Pool.Listener,
 		}).Run(ctx)
 	}()
 	t.Cleanup(func() {

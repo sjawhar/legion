@@ -331,15 +331,13 @@ func checkGolden(t *testing.T, name string, manifest any) {
 // TestTheProbePodCarriesNoGKEExtendedDurationAnnotation): Karpenter's own, which protects a pod on
 // an AWS cluster, and the Cluster Autoscaler's, which GKE Autopilot honours; GKE ignores
 // Karpenter's, so a pod on Autopilot without the second can be evicted mid-turn by consolidation or
-// a node upgrade.
+// a node upgrade. Each carries, beside them and as the only other annotation of its template, the
+// configuration it was built from, its own kind's (podShapeAnnotation): the one record an update
+// round reads a pod's drift from (podShapeDrift), written here and nowhere else.
 func TestEveryIssueAndControllerPodIsProtectedFromAutoscalerEviction(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
-	}
-	want := map[string]string{
-		doNotDisruptAnnotation: "true",
-		safeToEvictAnnotation:  "false",
 	}
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
@@ -347,6 +345,11 @@ func TestEveryIssueAndControllerPodIsProtectedFromAutoscalerEviction(t *testing.
 			l, err := r.prepare(tc.spec)
 			if err != nil {
 				t.Fatal(err)
+			}
+			want := map[string]string{
+				doNotDisruptAnnotation: "true",
+				safeToEvictAnnotation:  "false",
+				podShapeAnnotation:     podShape(r, l.kind),
 			}
 			if got := r.podTemplate(l).Metadata.Annotations; !maps.Equal(got, want) {
 				t.Errorf("pod annotations = %v, want exactly %v", got, want)
@@ -1358,7 +1361,7 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 				}
 			}
 			handed := map[string]string{}
-			for _, a := range r.handedAddresses() {
+			for _, a := range r.handedAddresses(l.enrolls(r)) {
 				if a.value != "" {
 					handed[a.name] = a.value
 				}

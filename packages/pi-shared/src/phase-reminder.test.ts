@@ -7,6 +7,8 @@ import { DEFAULT_STALL_LIMITS } from "./stall-limits";
 
 const implementer = {
   sessionID: "ses_implementer",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 5,
   tree: "LEGION-208",
   issue: "LEGION-208",
   role: "implementer",
@@ -239,4 +241,38 @@ test("a failed delivery arms nothing once a turn has started meanwhile", async (
   await delivered;
 
   expect(timers).toHaveLength(1);
+});
+
+// The wait a `ready_for_update` answer creates is `awaiting-update`, and nothing is armed in it:
+// the daemon is what wakes the worker, with the task it held behind the round, once the round
+// has replaced the pod. A timer fired in that wait would steer a real turn into the worker
+// instead, and a new turn is exactly what the daemon reads as the answer retracted
+// (`takeBackSignal`), so the sweep would ask the worker to push again, the round would
+// restart at every `waitingMs`, and the late-round notice — measured from the latest answer —
+// would never name the `ReplacePod` error or the sibling turn that will not end. The WAITING
+// reply's own wait is untouched: it is the reminder's to time out.
+test("the wait an update answer creates arms no reminder, where a WAITING reply still arms one", async () => {
+  const { reminder, timers, sent, entries } = rig({});
+
+  reminder.apply({ kind: "update-answered" });
+  expect(await reminder.settle("Pushed and answered.")).toBeUndefined();
+
+  expect(timers).toEqual([]);
+  expect(sent).toEqual([]);
+  // The record holds the wait as the plain `waiting` it is a kind of: nothing restores a record
+  // without a relaunch, and that relaunch is this round over (`recordedPhaseStall`).
+  expect(entries.at(-1)).toMatchObject({ state: "waiting", count: 0 });
+
+  // A second turn in the same wait — a question answered while the pod waits to be replaced —
+  // arms none either.
+  expect(await reminder.settle("Still waiting for the pod.")).toBeUndefined();
+  expect(timers).toEqual([]);
+
+  // The daemon wakes the worker with the task it held behind the round: the phase is open again,
+  // and a WAITING reply buys the quiet wait the reminder itself ends.
+  reminder.apply({ kind: "inbound-event" });
+  expect(await reminder.settle("WAITING on the reviewer.")).toBeUndefined();
+
+  expect(timers).toHaveLength(1);
+  expect(timers[0]?.delayMs).toBe(DEFAULT_STALL_LIMITS.waitingMs);
 });

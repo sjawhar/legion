@@ -222,29 +222,36 @@ func (r *hubRig) settle(t *testing.T) {
 			t.Fatalf("the hub's change cursor did not reach %d within %s", latest, eventFeedWait)
 		}
 	}
-	r.waitEventsThrough(t, eventHead(t, r.database), "the log's head before the measurement")
+	r.waitForEventCursor(t, eventHead(t, r.database), "the log's head before the measurement")
 	r.waitNoRecompute(t, 2*viewQuiet)
 }
 
-// waitEventsThrough waits until the hub holds every event through want: either its feed began at
-// or above want, whose events its first read of the database already held, or it applied one at
-// or above want. The wait is generous: an open write anywhere on the test cluster holds back the
-// safe horizon the relay publishes up to.
-func (r *hubRig) waitEventsThrough(t *testing.T, want int64, what string) {
-	t.Helper()
-	through := func() int64 {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		var highest int64
-		for _, note := range r.notes {
-			if note.what == "events seeded" || note.what == "event" {
-				highest = max(highest, note.eventID)
-			}
+// eventsThrough is how far the hub's events have come: the highest event it has applied, or the
+// head its feed began at, whose events its first read of the database already held.
+func (r *hubRig) eventsThrough() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var highest int64
+	for _, note := range r.notes {
+		if note.what == "events seeded" || note.what == "event" {
+			highest = max(highest, note.eventID)
 		}
-		return highest
 	}
+	return highest
+}
+
+// cursors is where the hub stands in both logs: its generation's delivery change cursor, and how
+// far its events have come.
+func (r *hubRig) cursors() (changeSeq, eventCursor int64) {
+	return r.changeCursor(), r.eventsThrough()
+}
+
+// waitForEventCursor waits until the hub holds every event through want. The wait is generous: an
+// open write anywhere on the test cluster holds back the safe horizon the relay publishes up to.
+func (r *hubRig) waitForEventCursor(t *testing.T, want int64, what string) {
+	t.Helper()
 	for deadline := time.Now().Add(eventFeedWait); ; time.Sleep(10 * time.Millisecond) {
-		if got := through(); got >= want {
+		if got := r.eventsThrough(); got >= want {
 			return
 		} else if time.Now().After(deadline) {
 			t.Fatalf("the hub holds the event log through %d after %s, want %d (%s)", got, eventFeedWait, want, what)
@@ -1441,7 +1448,7 @@ func TestAHubActsOnAnEventOnlyOnceEveryLowerIDIsFinal(t *testing.T) {
 	if err := open.Commit(ctx); err != nil {
 		t.Fatalf("commit the lower id: %v", err)
 	}
-	rig.waitEventsThrough(t, high.ID, "both ids committed")
+	rig.waitForEventCursor(t, high.ID, "both ids committed")
 	if !rig.isP0(first) || !rig.isP0(second) {
 		t.Fatalf("after both commits: %s a P0 = %v, %s a P0 = %v; want both acted on", first, rig.isP0(first), second, rig.isP0(second))
 	}

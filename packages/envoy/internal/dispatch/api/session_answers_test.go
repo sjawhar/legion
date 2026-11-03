@@ -153,7 +153,7 @@ func (f *answersFixture) publishOutbox(t *testing.T) {
 		defer close(stopped)
 		outbox.New(outbox.Deps{
 			Store: f.database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(),
-			Listen: f.database.Pool.Listener, Docs: f.deps.Docs,
+			Listen:     f.database.Pool.Listener,
 			RoleClaims: unclaimedRoles{}, Sessions: unclaimedRoles{},
 		}).Run(ctx)
 	}()

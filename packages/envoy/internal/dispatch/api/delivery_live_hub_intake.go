@@ -246,9 +246,11 @@ func (h *deliveryHub) receive(g *hubGeneration, event model.Event) {
 // writer, PATCH /api/v1/issues/{key}, whose event is issue.updated or issue.closed). The event is
 // the relay's, shared with every other subscriber, and is only read.
 //
-// A view whose read is under way (reading) still holds its last answer's issues, ancestors and
-// sessions (none before its first), so an issue or session event also records on it what the
-// event touched, for recompute to check against the answer its read gives (recheckHeardLocked).
+// A mark judges a view by the issues, ancestors and sessions its last answer names (none before
+// its first), while a view whose read is under way (reading, set as that read took its change
+// position) names its own only once the read lands: an event about an issue or a session only
+// that read names marks nothing here. So an issue or session event also records on such a view
+// what it touched, for recompute to check against the answer its read gives (recheckHeardLocked).
 func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now time.Time) {
 	var issueKey string
 	if event.IssueKey != nil {
@@ -317,8 +319,9 @@ func (h *deliveryHub) dirtyIssueLocked(g *hubGeneration, key string, p0 bool, no
 	}
 }
 
-// recheckHeardLocked marks view dirty when an event heard during its read touches the answer
-// recompute has just installed, by the rules applyEventLocked marks with, and clears the record.
+// recheckHeardLocked marks view dirty when an event heard since its read took its change position
+// touches the answer recompute has just installed, by the rules applyEventLocked marks with, and
+// clears the record.
 func (h *deliveryHub) recheckHeardLocked(g *hubGeneration, view *deliveryView, now time.Time) {
 	for key, p0 := range view.heardIssues {
 		if view.showsIssue(key, p0) {

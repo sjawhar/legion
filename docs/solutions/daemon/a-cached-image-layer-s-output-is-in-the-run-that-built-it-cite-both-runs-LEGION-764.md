@@ -17,8 +17,9 @@ related_issues:
 
 # A cached image layer's output is in the run that built it: cite both runs
 
-Extends docs/solutions/daemon/omp-pin-bump-behavioral-proof.md (3c: a handoff-only commit re-runs the
-`Worker Image` workflow fully `CACHED`, so the first run is the evidence). The cache is per layer, not per run:
+Extends docs/solutions/daemon/omp-pin-bump-behavioral-proof.md (3c: a commit that touches nothing the image needs
+re-runs the `Worker Image` workflow fully `CACHED`, so the first run is the evidence; the handoff-only commit it
+was written about went with the handoff commit in sjawhar/legion#2354). The cache is per layer, not per run:
 a second code push that changes a later layer rebuilds from that layer down and prints `#<n> CACHED` for every
 step above it, so the proof of one step and the proof of another can live in two runs at two heads.
 

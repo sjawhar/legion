@@ -476,7 +476,6 @@ func (r *noRequiredChecksLive) publishPush(issue noRequiredChecksIssue, from, to
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
 		"kind": "push", "repo": liveRepo, "ref": "refs/heads/" + issue.branch(), "before": from, "after": to,
-		"changed_paths": "src/widget.go", "changed_paths_truncated": "false", "forced": "false",
 		"pusher": "legion-implement[bot]", "commit_count": "1", "head_subject": "fix the widget",
 	})
 	if err != nil {

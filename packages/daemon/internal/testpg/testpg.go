@@ -18,7 +18,7 @@ import (
 
 // Image is the Postgres server image a developer starts for the daemon's own tests: PostgreSQL 18
 // (tag 18, server 18.6-1.pgdg13+2), pinned by digest through the mirror. 18 is also the major
-// version of the Postgres service CI's daemon test job runs (pr-and-main.yaml's `test` job), and
+// version of the Postgres service CI's daemon test job runs (ci.yaml's `test` job), and
 // the version envoy-infra gives a new Cloud SQL instance.
 const Image = "mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4"
 
@@ -48,7 +48,9 @@ func Database(t testing.TB, prefix string) string {
 		t.Fatal(err)
 	}
 	name := prefix + "_" + hex.EncodeToString(suffix[:])
-	if _, err := conn.Exec(context.Background(), "create database "+name); err != nil {
+	// A copy of template1's files. Created the default way, from PostgreSQL 15, every page of
+	// template1 goes into the write-ahead log: 4.4 MB of log for each empty database.
+	if _, err := conn.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {

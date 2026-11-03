@@ -141,21 +141,21 @@ type deliveryViewRead struct {
 	unfetchable       int
 }
 
-// recompute answers one dirty view from a fresh read: the newest change position first, so a
-// change committed during the read lands past it and marks the view again; then the GET route's
-// population read, the ancestors of the issues it names, and the pure compute. It sends each sub
-// the delta against what it holds (a snapshot to a sub with none), or DELIVERY_NOT_CONFIGURED to
-// a sub not yet told.
+// recompute answers one dirty view from a fresh read: the newest change position first, which
+// takes over every mark made until then (read), so a change committed during the read lands past
+// it and marks the view again; then the GET route's population read, the ancestors of the issues
+// it names, and the pure compute. It sends each sub the delta against what it holds (a snapshot to
+// a sub with none), or DELIVERY_NOT_CONFIGURED to a sub not yet told.
 func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause string) {
 	started := time.Now()
 	h.mu.Lock()
-	view.dirty, view.immediate, view.computing, view.reading = false, false, true, true
+	view.computing = true
 	spec, epoch := view.spec, g.epoch
 	h.mu.Unlock()
 	h.note(deliveryHubNote{what: "recompute begin", view: spec.key, cause: cause})
 
-	read, err := h.read(g, view, spec)
-	h.note(deliveryHubNote{what: "recompute read", view: spec.key, cause: cause})
+	read, err := h.read(g, view, spec, epoch)
+	h.note(deliveryHubNote{what: "recompute read", view: spec.key, cause: cause, through: read.seq})
 
 	now := h.clock.Now()
 	h.mu.Lock()
@@ -178,6 +178,8 @@ func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause stri
 		if g.ctx.Err() == nil {
 			slog.Warn("dispatch: delivery live recompute failed; retrying", "view", spec.kind, "error", err)
 		}
+		// A read that failed past its position took the marks over and is marked again here; one
+		// that failed before it took over nothing, and the view is still dirty from them.
 		if !view.dirty {
 			view.dirty, view.firstDirty, view.cause = true, now, cause
 		}
@@ -205,24 +207,39 @@ func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause stri
 			h.judgeLocked(g, now)
 		}
 	}
-	// What the events applied during the read touched is checked against the answer it installed,
-	// or the last one when it installed none.
+	// What the events heard since the read took its position touched is checked against the
+	// answer it installed, or the last one when it installed none (recheckHeardLocked), and the
+	// record is cleared.
 	h.recheckHeardLocked(g, view, now)
 	subscribers := len(view.subs)
 	h.mu.Unlock()
 	h.finishRecompute(spec, cause, started, read.prs, read.runs, subscribers, sent)
 }
 
-// read is recompute's read and compute, outside the hub's lock, on g's context.
-func (h *deliveryHub) read(g *hubGeneration, view *deliveryView, spec deliveryLiveSpec) (deliveryViewRead, error) {
+// read is recompute's read and compute, outside the hub's lock, on g's context. Once it holds the
+// newest change position it takes over the view's marks, under the lock: every change, event and
+// subscribe that marked the view until then was committed before the reads that follow, which
+// answer it, so it clears dirty, and from there a change at or before the position marks nothing
+// (readingSeq) while what the intake hears about the view is kept for recompute to judge the
+// read's answer by (reading, recheckHeardLocked). A reset of the change log since the recompute
+// began leaves dirty set: the position may name the old log, so the marks are taken over only
+// while the generation stands at the epoch the recompute read.
+func (h *deliveryHub) read(g *hubGeneration, view *deliveryView, spec deliveryLiveSpec, epoch int64) (deliveryViewRead, error) {
 	ctx, pool := g.readContext(), h.server.deps.Store.Pool
 	var read deliveryViewRead
 	var err error
 	if read.seq, err = delivery.LatestChangeSeq(ctx, pool); err != nil {
 		return read, err
 	}
+	h.note(deliveryHubNote{what: "recompute position", view: spec.key, through: read.seq})
 	h.mu.Lock()
-	view.readingSeq = read.seq
+	view.readingSeq, view.reading = read.seq, true
+	if g.epoch == epoch {
+		// The log has not been reset since the recompute began, so the position names the log the
+		// marks were made against and the reads that follow answer them. A reset leaves them:
+		// the position may name the old log, and the reset's own mark recomputes the view again.
+		view.dirty, view.immediate = false, false
+	}
 	h.mu.Unlock()
 	if read.seq > 0 {
 		if read.changedAt, err = delivery.ChangeAt(ctx, pool, read.seq); err != nil {
