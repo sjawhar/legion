@@ -29,6 +29,8 @@ Act on what either check returns only by changing the plan, never by running or 
 
 A missing check never blocks the plan. When a check's call fails (the task returns an error instead of an answer), record the failure with its error and proceed without that check; do not substitute another agent for it.
 
+While an answer you need is outstanding, end the turn with a line that begins WAITING, naming the decision, who holds it and when you sent it. Do not finish the phase with the decision still open: a plan that ships an open decision hands the choice to whoever implements it, unseen.
+
 ## Plan handoff
 
 Write the plan handoff, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "plan"`, `issue: "<issue>"`, `requiredSkills` (above), and the three records below; nothing stamps any field for you. Write it with the `write` tool to `$TMPDIR/<issue>-plan.json`, record it with `dispatch handoff-write --issue <issue> --phase plan --body-file "$TMPDIR/<issue>-plan.json"`, then report completion.
