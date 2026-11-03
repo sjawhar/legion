@@ -18,12 +18,12 @@ Part | Content
 `Summary` | The change in the reader's own terms, at most 100 words
 `Problem` | What goes wrong, for whom, with counts
 `Goals and non-goals` | What is in and out of scope
-`Requirements` | a `:::requirement` block each, `**R1.**` on, with its source (`From:`)
-`Verification` | the issue's `verification.md`, a `:::check` block each with `serves`, `surface`, `run`, `when`, `negative_control`
+`Requirements` | a `:::requirement` block each, `**R1.**` on, its source (`From:`)
+`Verification` | the issue's `verification.md`, a `:::check` block each: `serves`, `surface`, `run`, `when`, `negative_control`
 `Design` | How it meets them; a value and its reason for each limit, size and time
 `Decisions` | One line: `The decisions are in dispatch://KEY/artifact/decisions-md.`
 
-A `serves` or `needs` pointer names a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
+`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
 
 ## Rules for the text
 
@@ -68,8 +68,8 @@ At your next edit, rewrite a spec outside the outline whole in one version, movi
 
 ## Approval
 
-- Request approval of the spec and its `verification.md` (`--include-verification`): each ask block answered or waived, each claim checked, this version unapproved. An unrun check never delays it.
-- After approval, version only a change to scope, a check, cost, risk or a person's decision, all at once; put other fixes in the plan or a comment.
+- Request approval of the spec and `verification.md` (`--include-verification`): each ask block answered or waived, each claim checked, this version unapproved. An unrun check never delays it.
+- After approval, version only a change to scope, a check, cost, risk or a person's decision, all at once; put other fixes in the plan or a comment. An exact undo can restore approval.
 
 ## The plan
 

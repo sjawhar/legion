@@ -1113,6 +1113,11 @@ const eventsByType: Record<EventType, Event> = {
   "comment.edited": event("comment.edited", { anchor: null, id: "comment-1" }),
   "comment.reopened": event("comment.reopened", { anchor: null, id: "comment-1" }),
   "comment.resolved": event("comment.resolved", { anchor: null, id: "comment-1" }),
+  "decision.kept": event("decision.kept", {
+    artifact_id: "artifact-3",
+    block_id: "b-1",
+    changed_version: 2,
+  }),
   "handoff.recorded": event("handoff.recorded", {
     handoff_id: "handoff-1",
     phase: "implement",

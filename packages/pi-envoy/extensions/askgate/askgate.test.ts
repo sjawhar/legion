@@ -3389,10 +3389,21 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         primary: { provider: "openai-codex", id: "gpt-5.5" },
       });
       await skipped.bash("s", ASK);
+      // The halt is three of the gate's own deadlines in a row, so nothing else of the call may
+      // race that deadline. The real dry run is a process, and it races half of these 20 ms: on a
+      // busy machine it loses, and the call is an `error` rather than a `timeout`. This dry run
+      // answers at once, with what the stub's own prints, and the model call runs until the
+      // deadline aborts it, so the deadline is the only clock the outcome reads.
       const halted = bind({
         env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "20" },
         cwd: work,
         complete: untilAborted,
+        dryRun: async () => ({
+          exitCode: 0,
+          stdout: JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2),
+          stderr: "",
+          timedOut: false,
+        }),
       });
       for (const id of ["a", "b", "c", "d"]) await halted.bash(id, ASK);
       expect(halted.entries.map((e) => e.outcome)).toEqual([

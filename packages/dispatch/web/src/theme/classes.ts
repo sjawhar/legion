@@ -337,6 +337,19 @@ registerText("finished progress bar on surface", PROGRESS_FILL_DONE, SURFACE, 3)
 registerText("trust warning outline on surface", TRUST_WARNING_BORDER, SURFACE, 3);
 registerText("trust warning outline on canvas", TRUST_WARNING_BORDER, CANVAS, 3);
 
+/** A decision its maker was unsure of: amber text and an amber rule on the leading edge, on the
+ * Decisions tab's `Unsure:` paragraph and on the margin card beside a spec block it shaped, so a
+ * reader sees which of the agent's choices it was not sure of. The text is a 4.5:1 pair on the
+ * panel's surface and the rule a 3:1 boundary against it. */
+export const DECISION_UNSURE_TEXT = pair(P.AMBER_800, P.AMBER_300);
+export const DECISION_UNSURE_BORDER = pair(P.AMBER_700, P.AMBER_400);
+export const decisionUnsureText = "text-amber-800 dark:text-amber-300";
+export const decisionUnsureBorder = "border-l-amber-700 dark:border-l-amber-400";
+export const decisionUnsureAccent = `${decisionUnsureBorder} ${decisionUnsureText}`;
+
+registerText("decision unsure text on surface", DECISION_UNSURE_TEXT, SURFACE);
+registerText("decision unsure rule on surface", DECISION_UNSURE_BORDER, SURFACE, 3);
+
 // ---------------------------------------------------------------------------------------------
 // Suggestion and version diffs
 // ---------------------------------------------------------------------------------------------
@@ -760,3 +773,24 @@ export const canvasText = "bg-slate-50 dark:bg-slate-950 text-slate-900 dark:tex
  */
 export const scrollFadeTrailing =
   "[mask-image:linear-gradient(to_right,#000_calc(100%-32px),#0000)]";
+
+// ---------------------------------------------------------------------------------------------
+// Spec block marks: editor decorations (`ProofEditorHandle.setBlockMarks`), never classes written
+// into the editor's DOM
+// ---------------------------------------------------------------------------------------------
+
+/** A spec block a decision shaped that the decision has changed since: a dashed amber rule down
+ *  its leading edge. The rule identifies the state, so it is registered as a UI boundary against
+ *  the document's surface and canvas; the block's `title` says what it means. */
+export const STALE_BLOCK_BORDER = pair(P.AMBER_700, P.AMBER_400);
+export const staleBlockMark =
+  "border-l-2 border-dashed border-l-amber-700 dark:border-l-amber-400 pl-2";
+registerText("stale block rule on surface", STALE_BLOCK_BORDER, SURFACE, 3);
+registerText("stale block rule on canvas", STALE_BLOCK_BORDER, CANVAS, 3);
+
+/** A spec block that changed since the version the person last read: a faint accent fill behind
+ *  the document's own text. */
+export const CHANGED_SINCE_READ_BG = pair(P.SKY_50, P.SKY_950);
+export const changedSinceReadMark = "bg-sky-50 dark:bg-sky-950";
+registerText("primary text on a changed-since-read block", TEXT_PRIMARY, CHANGED_SINCE_READ_BG);
+registerText("secondary text on a changed-since-read block", TEXT_SECONDARY, CHANGED_SINCE_READ_BG);

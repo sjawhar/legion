@@ -12,6 +12,7 @@ import type {
   Artifact,
   ArtifactBlock,
   ArtifactReview,
+  ArtifactReviewState,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -681,6 +682,21 @@ export function createPlanReview(
     `/api/v1/artifacts/${encodeURIComponent(id)}/plan-reviews`,
     "POST",
     { version },
+    options
+  );
+}
+
+/** Reviews the document's latest settled version as a person does from its header, with no
+ *  approval request needed: Approve, or Request changes with a reason. */
+export function reviewArtifact(
+  id: string,
+  input: { state: ArtifactReviewState; reason?: string },
+  options: ApiOptions = {}
+): Promise<ArtifactReview> {
+  return request<ArtifactReview>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/reviews`,
+    "POST",
+    input,
     options
   );
 }

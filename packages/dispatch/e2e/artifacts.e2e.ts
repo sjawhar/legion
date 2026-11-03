@@ -284,7 +284,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
   await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   const tablist = page.getByRole("tablist", { name: "Issue detail" });
   const tabs = tablist.getByRole("tab");
-  await expect(tabs).toHaveCount(7);
+  await expect(tabs).toHaveCount(8);
   const insideTablist = async (tab: Locator) => {
     const [listBox, box] = await Promise.all([tablist.boundingBox(), tab.boundingBox()]);
     expect(listBox).not.toBeNull();
@@ -295,7 +295,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
       (listBox?.x ?? 0) + (listBox?.width ?? 0) + 0.5
     );
   };
-  // Seven tabs, one of them counted, no longer fit a 390 px viewport: the tablist scrolls
+  // Eight tabs, one of them counted, no longer fit a 390 px viewport: the tablist scrolls
   // sideways there (as it already did at 360 px). No label is shortened to buy the room, every
   // tab is reachable from the keyboard, each is scrolled fully into view as it takes focus, and
   // each keeps its 44 px touch target.
@@ -309,6 +309,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
     "Children",
     "Artifacts2",
     "Activity",
+    "Decisions",
   ]);
   expect(await tablist.evaluate((node) => node.scrollWidth > node.clientWidth + 0.5)).toBe(true);
   await page.getByRole("tab", { name: "Spec" }).focus();
@@ -319,6 +320,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
     "Children",
     "Artifacts (2)",
     "Activity",
+    "Decisions",
   ] as const) {
     await page.keyboard.press("ArrowRight");
     const tab = page.getByRole("tab", { exact: true, name: label });

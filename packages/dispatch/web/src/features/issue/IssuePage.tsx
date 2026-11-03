@@ -32,6 +32,7 @@ import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { VerificationTab } from "../verification/VerificationTab";
 import { ChildrenTab } from "./ChildrenTab";
+import { DecisionsPanel } from "./DecisionsPanel";
 import { IssueHeader } from "./IssueHeader";
 import { IssueTabs } from "./IssueTabs";
 import { stateForIssue } from "./pins";
@@ -150,6 +151,7 @@ const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
   { keys: "t a", label: "Artifacts tab", tab: "artifacts" },
   // `t a` is Artifacts and `l` is the issue's label editor, so Activity takes `t v`.
   { keys: "t v", label: "Activity tab", tab: "activity" },
+  { keys: "t d", label: "Decisions tab", tab: "decisions" },
 ];
 
 /** One of the two role-document tab panels, Verification and Plan. They differ only in the tab
@@ -340,6 +342,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     artifacts: activeTab === "artifacts",
     children: activeTab === "children",
     conversation: activeTab === "conversation",
+    decisions: activeTab === "decisions",
     plan: activeTab === "plan",
     spec: activeTab === "spec",
     verification: activeTab === "verification",
@@ -563,6 +566,21 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         role="tabpanel"
       >
         {activatedTabs.activity ? <ActivityTab issueKey={issueKey} state={state.data} /> : null}
+      </div>
+      <div
+        aria-hidden={activeTab !== "decisions"}
+        aria-labelledby="issue-decisions-tab"
+        hidden={activeTab !== "decisions"}
+        id="issue-decisions-panel"
+        role="tabpanel"
+      >
+        {activatedTabs.decisions ? (
+          <DecisionsPanel
+            artifacts={issue.data?.artifacts ?? []}
+            isClosed={isClosed}
+            issueKey={issueKey}
+          />
+        ) : null}
       </div>
     </section>
   );

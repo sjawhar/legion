@@ -1,0 +1,154 @@
+# postgres.yaml: the copy's Postgres, one StatefulSet pod on one PVC, at the
+# size of a Cloud SQL tier. cluster.sh fills every placeholder from validated values; up fills
+# the tier db-custom-16-61440 (production's databaseTier: 16 CPU, 61440 MB), and
+# `cluster.sh db-size 4 15Gi` renders it again for db-custom-4-15360 and applies it, so the pod
+# restarts on the same PVC with the smaller tier's resources and settings.
+#
+# The settings are Cloud SQL's documented defaults for the tier, from
+# https://cloud.google.com/sql/docs/postgres/flags (read 2026-10-28):
+#   - max_connections: "depends on the amount of memory of the largest instance": from 15 GB 500,
+#     from 30 GB 600, from 60 GB 800, from 120 GB 1,000. db-custom-16-61440 (60 GB): 800;
+#     db-custom-4-15360 (15 GB): 500.
+#   - shared_buffers: "one-third of the instance's total VM memory (in MB)". 61440 MB: 20480MB;
+#     15360 MB: 5120MB.
+#   - effective_cache_size: "40% of VM memory". 61440 MB: 24576MB; 15360 MB: 6144MB.
+#   - work_mem: "The default is 4 MB."
+#   - maintenance_work_mem: "The default is 64 MB."
+#   - max_wal_size: "1504 MB if instance memory more than or equal to 3.75 GB".
+#   The page's own examples (45 GB: shared_buffers 15085 MB, effective_cache_size 18537160 kB)
+#   compute from 45255 MB, a little less than 45 × 1024; the copy computes from the tier's MB, so
+#   its shared_buffers and effective_cache_size can be up to about 2% above the instance's.
+# Every other setting is PostgreSQL's default, except two of the copy's own:
+#   - track_commit_timestamp=on: the delivery latency from commit (loadgen's commit rows);
+#     production runs with it off.
+#   - log_lock_waits=on: lock waits longer than deadlock_timeout go to the log.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: dispatch-loadtest
+    dispatch-loadtest/run: __RUN_ID__
+spec:
+  type: ClusterIP
+  selector:
+    dispatch-loadtest/run: __RUN_ID__
+    dispatch-loadtest/role: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: dispatch-loadtest
+    dispatch-loadtest/run: __RUN_ID__
+  annotations:
+    dispatch-loadtest/tier: __PG_TIER__
+spec:
+  serviceName: postgres
+  replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      dispatch-loadtest/run: __RUN_ID__
+      dispatch-loadtest/role: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: dispatch-loadtest
+        dispatch-loadtest/run: __RUN_ID__
+        dispatch-loadtest/role: postgres
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+        dispatch-loadtest/tier: __PG_TIER__
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: __PG_IMAGE__
+          # The image's entrypoint runs postgres with these arguments.
+          args:
+            - -c
+            - max_connections=__PG_MAX_CONNECTIONS__
+            - -c
+            - shared_buffers=__PG_SHARED_BUFFERS__
+            - -c
+            - effective_cache_size=__PG_EFFECTIVE_CACHE_SIZE__
+            - -c
+            - work_mem=__PG_WORK_MEM__
+            - -c
+            - maintenance_work_mem=__PG_MAINTENANCE_WORK_MEM__
+            - -c
+            - max_wal_size=__PG_MAX_WAL_SIZE__
+            - -c
+            - track_commit_timestamp=on
+            - -c
+            - log_lock_waits=on
+          env:
+            - name: POSTGRES_USER
+              value: dispatch
+            - name: POSTGRES_DB
+              value: dispatch
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            # A directory below the volume's root, which holds lost+found, and outside both the
+            # pg16 image's (/var/lib/postgresql/data) and the pg18 image's
+            # (/var/lib/postgresql/18/docker) own data directory.
+            - name: PGDATA
+              value: /var/lib/postgresql/copy/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, dispatch, -d, dispatch, -h, 127.0.0.1]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: "__PG_CPU__"
+              memory: __PG_MEMORY__
+              ephemeral-storage: 2Gi
+            limits:
+              cpu: "__PG_CPU__"
+              memory: __PG_MEMORY__
+              ephemeral-storage: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/copy
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        # Parallel queries' dynamic shared memory; a container's own /dev/shm holds 64 MB.
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/part-of: dispatch-loadtest
+          dispatch-loadtest/run: __RUN_ID__
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: __STORAGE_CLASS__
+        resources:
+          requests:
+            # cluster.sh up --pg-volume (default 100Gi): the data this copy's Postgres holds,
+            # its WAL among it. db-size renders this file again and keeps the claim it finds,
+            # since a StatefulSet's volumeClaimTemplates cannot be patched.
+            storage: __PG_VOLUME__

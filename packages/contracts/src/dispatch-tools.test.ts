@@ -318,6 +318,18 @@ describe("dispatchToolSpecs", () => {
     expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
   });
 
+  test("dispatch_project's description says to create a requested project without questions", () => {
+    const description = specFor("dispatch_project").description;
+    expect(description).toContain(
+      "When a person asks for a project, make the key from its name. Check the key with " +
+        "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use."
+    );
+    expect(description).toContain(
+      "When no person asked for a project and an existing project already covers the work, do not create a " +
+        "project. File an issue in that project with dispatch issue."
+    );
+  });
+
   test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {
     const schema = schemaFor("dispatch_architecture_sync");
 

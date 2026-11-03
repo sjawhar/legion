@@ -56,8 +56,11 @@ with the person. A root waiting on a person gets no `design-approved` notice: wh
 "this resume is your design-approved wake", act on it as on `design-approved`.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
-change since the version they approved: Dispatch records an `approved` review in their name at
-that version, the daemon reopens the gate and sends `design-approved`, and you request nothing.
+change since the version they approved, and a version whose text is exactly the text of the
+version they approved with no decision block in it decided since, such as an accidental edit
+undone exactly: Dispatch records an `approved` review in their name at that version, the daemon
+reopens the gate and sends `design-approved`, and you request nothing. When the spec does not
+read Approved at such a version, request approval as after any change.
 The gate records one document, the spec: a request naming the spec and the Verification document
 sends an approval event for each, and only the spec's opens the gate, so `register_gate` names
 the spec's id and version and never the Verification document's.
