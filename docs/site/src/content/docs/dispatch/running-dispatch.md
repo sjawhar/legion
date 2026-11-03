@@ -331,8 +331,9 @@ It answers in the Prometheus text format with two counters.
 `envoy_dispatch_outbox_publish_failures_total` counts each destination of an event publish that
 was not reached, labelled `reason`. `denied` is a publish NATS refused under the server's own
 grant, `refused` one NATS refuses however often it is retried, `unanswered` a forward NATS took
-whose answer never came - the role holder's receipt, or, for a holder that answers none, the
-stream's acknowledgement of the stored copy - and `failed` any other failure. A denied publish
+whose answer never came - the role holder's receipt, or, for a holder whose entry an earlier
+listener stored with a port, the stream's acknowledgement of the stored copy - and `failed` any
+other failure. A denied publish
 also logs `dispatch outbox: publish event` at ERROR, naming the subject.
 
 `envoy_dispatch_outbox_role_forwards_held_total` counts a role-routed event the outbox held

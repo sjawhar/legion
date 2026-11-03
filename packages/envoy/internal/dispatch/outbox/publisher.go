@@ -100,10 +100,10 @@ type Deps struct {
 
 // countPublishFailure counts one destination of a publish attempt that did not reach it, under
 // reason: "denied" for a send the server refused under this connection's own publish permissions,
-// "refused" for one NATS refuses however often it is retried, "holder" for a role forward its
-// holder's resolution held pending with nothing sent, "unanswered" for a forward NATS took whose
-// answer never came - the holder's receipt, or the stream's acknowledgement of the stored copy
-// for a holder that answers none (roleForward.send) - and "failed" for every other failure
+// "refused" for one NATS refuses however often it is retried, "unanswered" for a forward NATS
+// took whose answer never came - the holder's receipt, or the stream's acknowledgement of the
+// stored copy for a holder whose entry an earlier listener stored with a port (roleForward.send) -
+// and "failed" for every other failure
 // (sendChains). A role forward held pending is counted by countRoleForwardHeld and under none of
 // these. Every increment goes through here: a Deps built without a counter - the package's own
 // tests - then counts nothing instead of dereferencing nil.

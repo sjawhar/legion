@@ -465,7 +465,7 @@ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 // session consumer). What such a recipient is not asked for is a receipt - a session that answers
 // nothing answers no receipt either, and waiting for one would spend the rest of the send's
 // window - so its forward counts as made on the stream's acknowledgement alone (the storedOnly
-// forward of bus.Client.StartRequestStoredTo, which a serving-port role holder's forward takes),
+// forward of bus.Client.StartRequestStoredTo),
 // and it ends unresponsive: named in the answer as a recipient the message is kept for, and not
 // a delivery failure. A forward the stream did not store is no copy kept, so it is retried and
 // reported like any other, rather than passed off as a skip.

@@ -711,11 +711,11 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 // useKV rebuilds the registry's watcher over kv, a wrapper of its bucket handle that watches
 // through the handle's own jetstream one, so the registry writes through kv from here on.
 //
-// The watcher it replaces is ended rather than stopped, so the consume of the watcher it retires
-// is finished before this one takes its place: a stopped watcher's consume still reads the
-// registry's own watcher field through following(), which every scheduled deadline reaches
-// (armExpiryLocked). The field is then written under r.mu, which is the lock every reader of it
-// holds, since production assigns it once at open and a test is the only writer there is.
+// The watcher it replaces is ended rather than stopped before this one takes its place, and the
+// field is written under r.mu: the readers of it on other goroutines - a consume's delivery
+// through following(), which every scheduled deadline reaches (armExpiryLocked), the expiry
+// timers and the reaper - hold that lock. Production assigns the field once at open; a test is
+// the only writer there is.
 func useKV(t *testing.T, r *SessionRegistry, kv natsgo.KeyValue) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -779,11 +779,9 @@ func (r *SessionRegistry) PutWithin(ctx context.Context, sessionID string, entry
 //
 // It is the read for a caller that enriches what it already holds (a title, a last registration)
 // and asks nothing of the session's state. A caller that must tell an unresponsive session from
-// a gone one, that acts on a session being missing, or that pushes to a session's own serving
-// port, asks Lookup or Refresh, which judge the record itself (StateOf): the paths that push
-// read Lookup and push to a live session only, since a record this answers can be two hours old
-// (cmd/listener's servePortWorkers.target and sessionRelays.push). It takes only the shared lock
-// and changes nothing: the expiry timer, not a read, removes an expired entry.
+// a gone one, or that acts on a session being missing, asks Lookup or Refresh, which judge the
+// record itself (StateOf), since a record this answers can be two hours old. It takes only the
+// shared lock and changes nothing: the expiry timer, not a read, removes an expired entry.
 func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 	now := r.now()
 	r.mu.RLock()

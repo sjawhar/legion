@@ -1249,7 +1249,7 @@ check_stored_deliveries_arrive_once() {
   note "the mention and the direct message each arrived once after SIGCONT; the role publish was refused with the claim kept"
 }
 
-# ---- 3d. a Dispatch event routed to a role reaches its holder ------------------------------------------------
+# ---- 3c. a Dispatch event routed to a role reaches its holder ------------------------------------------------
 # The role arm of the same requirement, driven through Dispatch's own outbox rather than the
 # listener's publish route: an issue routed to `role:<role>`, a person's comment on it, and
 # Dispatch resolving the holder itself and forwarding the event to the holder's own agent subject
