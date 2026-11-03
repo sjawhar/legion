@@ -80,11 +80,13 @@ Each `legion-envoy-v*` release of this repository ships the client. The release 
 package, not `agent-secrets`, and the repository's newest release can be another package's, so
 look the tag up rather than reading `releases/latest`. These commands need `curl`, `tar`, `sort`
 and `sha256sum` (on Ubuntu: `apt-get install -y curl ca-certificates`), and install into
-`~/.local/bin`. They run in a subshell with `set -eu`, so a failed download or checksum stops
-them before anything is installed:
+`~/.local/bin`. On Linux arm64 run `asset=agent-secrets-arm64.tar.gz` first, and on macOS
+`asset=agent-secrets-darwin-arm64.tar.gz` (Apple silicon) or `asset=agent-secrets-darwin-amd64.tar.gz`
+(Intel); the block uses `agent-secrets-amd64.tar.gz` otherwise. The install steps run in a subshell
+with `set -eu`, so a failed download or checksum stops them before anything is installed:
 
 ```sh
-asset=agent-secrets-amd64.tar.gz
+asset=${asset:-agent-secrets-amd64.tar.gz}
 tag=legion-envoy-$(curl -fsSL 'https://github.com/sjawhar/legion.git/info/refs?service=git-upload-pack' \
   | grep -aoE 'refs/tags/legion-envoy-v[0-9]+\.[0-9]+\.[0-9]+([^-0-9]|$)' | grep -aoE 'v[0-9.]+[0-9]' \
   | sort -u -t . -k 1.2,1n -k 2,2n -k 3,3n | tail -n 1)
@@ -109,17 +111,16 @@ agent-secrets --version
 If `~/.local/bin` is not already on your `PATH`, add the `export PATH=...` line to your shell
 profile. The Linux archives hold `agent-secrets` and `agent-secrets-helper`; the macOS archives
 hold `agent-secrets` alone. `agent-secrets --version` prints the release tag, such as
-`agent-secrets legion-envoy-v28.1.1`. Set `asset` to the archive for your machine before you run
-the block: `agent-secrets-arm64.tar.gz` for Linux on arm64, `agent-secrets-darwin-arm64.tar.gz` or
-`agent-secrets-darwin-amd64.tar.gz` for macOS. To also check that this repository's release
+`agent-secrets legion-envoy-v28.1.1`. To also check that this repository's release
 workflow on `main` built the archive from the commit the tag names, run, in the same shell and with
 the GitHub CLI signed in:
 
 ```sh
-commit=$(gh api "repos/sjawhar/legion/commits/$tag" --jq .sha)
-gh attestation verify "$asset" --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
-  --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners
+commit=$(gh api "repos/sjawhar/legion/commits/$tag" --jq .sha) &&
+  test -n "$commit" &&
+  gh attestation verify "$asset" --repo sjawhar/legion \
+    --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+    --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners
 ```
 
 ## Give a new machine access
