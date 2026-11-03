@@ -2512,7 +2512,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_go == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
+    # prints the dump that names it. A timed-out step fails the job, so the bound is the steps
+    # before it at their measured times plus its own limit: about 1 minute of setup, then the unit
+    # step's two 20-minute runs, which is 41; after the unit step's measured 35 minutes, natslive's
+    # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
+    timeout-minutes: 60
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
