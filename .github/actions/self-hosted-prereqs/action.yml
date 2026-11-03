@@ -1,0 +1,41 @@
+name: Install what the self-hosted runner image lacks
+description: >-
+  The first step after checkout of every job whose runs-on can name the legion-ci self-hosted
+  pool through the LEGION_CI_RUNNER repository variable (ci.yaml's header says which). The pool
+  runs the stock ghcr.io/actions/actions-runner image: Ubuntu 24.04 with git, curl, jq, unzip,
+  python3, sudo and the docker CLI with buildx, and none of the rest of GitHub's ubuntu-24.04
+  image. This step installs, from Ubuntu's own archive, what those jobs use from the hosted image
+  without installing it themselves. On a GitHub-hosted runner it does nothing.
+
+  gh: ci-ok-report.sh, every job's last step, lists the run's artifacts and jobs and posts ci-ok
+  with it, and so do lint's check-pr-text.sh and post-check-run.sh; the daemon's gh-backed tests
+  skip without one.
+
+  yq: ci-ok-report.sh reads CI_OK_SELECTED_BY out of ci.yaml with it.
+
+  python3-yaml: lint's checks and the test job's script tests import yaml.
+
+  gcc and libc6-dev: `go test -race` needs cgo, and with a C compiler on PATH Go builds with cgo,
+  as it does on the hosted image.
+
+  zstd: actions/cache compresses with zstd when it is on PATH and keys each entry by its
+  compression, so without it a pool job restores no entry a hosted job saved, and the reverse.
+
+  postgresql-client: dispatch's Playwright suites run psql (packages/dispatch/e2e/psql.ts).
+
+  locales: envoy-go runs `sudo locale-gen en_US.UTF-8`, and the daemon's locale cases skip
+  without that locale, which this step generates, as the hosted image has it.
+
+  nodejs: the daemon's Claude Code install-script tests skip without node.
+runs:
+  using: composite
+  steps:
+    - name: Install what the self-hosted runner image lacks
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get -o Acquire::Retries=3 update -qq
+        sudo apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends \
+          gh yq python3-yaml gcc libc6-dev zstd postgresql-client locales nodejs
+        sudo locale-gen en_US.UTF-8

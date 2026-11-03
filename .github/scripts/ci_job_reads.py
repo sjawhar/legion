@@ -138,6 +138,12 @@ def setup_go(job, gomod, workflow=CI):
     return reads((gomod, f"{at(job, 'actions/setup-go', workflow)} go-version-file"))
 
 
+def self_hosted_prereqs(job, workflow=CI):
+    """.github/actions/self-hosted-prereqs, which every job that may run on the legion-ci pool
+    runs after its checkout (ci.yaml's header)."""
+    return reads((".github/actions/self-hosted-prereqs/**", at(job, "./.github/actions/self-hosted-prereqs", workflow)))
+
+
 CI_SELF = reads((CI, "a job reads its own definition"))
 # ci.yaml's docs job and docs-pages.yaml's build job both call docs-site.yaml, which holds the
 # steps. The gate stays on ci.yaml's docs job, whose if: the docs filter gates, and every step
@@ -438,7 +444,7 @@ GATES = [
         (f"{DAEMON}/internal/testnats/nats.go", f"{at('test', 'Pull the NATS test container images')} const Image"),
         (f"{ENVOY}/internal/testnats/nats.go", f"{at('test', 'Pull the NATS test container images')} const HubImage"),
     ) + install_jj("test") + install_omp("test") + setup_go("test", f"{DAEMON}/go.mod")
-      + biome(at("test", "Lint the Dispatch census script")) + bun_job("test") + CI_SELF),
+      + biome(at("test", "Lint the Dispatch census script")) + bun_job("test") + self_hosted_prereqs("test") + CI_SELF),
 
 
     # The job ci.yaml gates is docs, and the steps it runs are docs-site.yaml's (at_docs).
@@ -478,7 +484,7 @@ GATES = [
         (f"{ENVOY}/cmd/agent-secrets/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/pages.go:17, codes.go:68)"),
         (f"{ENVOY}/internal/broker/approval/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/routes.go:34,664)"),
     ) + setup_go(DOCS_JOB, f"{DAEMON}/go.mod", DOCS_SITE) + biome(at_docs("Lint the docs site"))
-      + bun_job(DOCS_JOB, DOCS_SITE) + CI_SELF + DOCS_SITE_SELF),
+      + bun_job(DOCS_JOB, DOCS_SITE) + self_hosted_prereqs(DOCS_JOB, DOCS_SITE) + CI_SELF + DOCS_SITE_SELF),
 
     gate("contracts", "contracts", reads=reads(
         ("packages/contracts/**", f"{at('contracts', 'Lint contracts')}, typecheck, test (src/, scripts/gen-go.test.ts) and build in packages/contracts"),
@@ -529,7 +535,7 @@ GATES = [
         ("scripts/third-party-notices.ts", "scripts/pi-plugin-prepack.sh:93 writes dist/THIRD_PARTY_NOTICES"),
         ("scripts/e2e/lib/pack-plugin.sh", "packages/pi-envoy/scripts/prepack.test.ts:92-102"),
         (f"{DAEMON}/internal/prompts/**", "packages/pi-envoy/src/skills-guard.test.ts:30-33 (skillAndPromptRoots)"),
-    ) + install_jj("pi-envoy") + install_omp("pi-envoy") + biome(at("pi-envoy", "Lint pi-envoy")) + bun_job("pi-envoy") + CI_SELF),
+    ) + install_jj("pi-envoy") + install_omp("pi-envoy") + biome(at("pi-envoy", "Lint pi-envoy")) + bun_job("pi-envoy") + self_hosted_prereqs("pi-envoy") + CI_SELF),
 
     gate("pi_legion", "pi-legion", runs=[
         script_run("packages/pi-legion/scripts/skill-scenarios/daemon-pane.ts",
@@ -562,7 +568,7 @@ GATES = [
         (".omp-pin", "packages/pi-legion/scripts/skill-scenarios/rig.test.ts:1004-1006 copies .omp-pin"),
         ("packages/pi-legion/scripts/skill-scenarios/daemon-pane.ts", "writes the overlay and runs go run (:27)"),
     ) + install_jj("pi-legion") + install_omp("pi-legion") + setup_go("pi-legion", f"{DAEMON}/go.mod")
-      + biome(at("pi-legion", "Lint pi-legion")) + bun_job("pi-legion") + CI_SELF),
+      + biome(at("pi-legion", "Lint pi-legion")) + bun_job("pi-legion") + self_hosted_prereqs("pi-legion") + CI_SELF),
 
     gate("dispatch", "dispatch", runs=[
         script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts's dispatchServer, which e2e/run.ts starts in "
@@ -585,7 +591,7 @@ GATES = [
         (".github/actions/pull-test-images/**", at("dispatch", "Pull the file store image")),
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:80 holds the server's port through it"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
-    ) + setup_go("dispatch", f"{ENVOY}/go.mod") + biome(at("dispatch", "Lint dispatch dashboard")) + bun_job("dispatch") + CI_SELF),
+    ) + setup_go("dispatch", f"{ENVOY}/go.mod") + biome(at("dispatch", "Lint dispatch dashboard")) + bun_job("dispatch") + self_hosted_prereqs("dispatch") + CI_SELF),
 
     # Its "Build the Dispatch server" step names an output (-o), which the simple form does not
     # reduce, so the step is pinned whole.
@@ -606,7 +612,7 @@ GATES = [
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/e2e/engine-reading.ts:10"),
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:80 holds the server's port through it"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
-    ) + setup_go(BROWSER_MP, f"{ENVOY}/go.mod") + bun_job(BROWSER_MP) + CI_SELF),
+    ) + setup_go(BROWSER_MP, f"{ENVOY}/go.mod") + bun_job(BROWSER_MP) + self_hosted_prereqs(BROWSER_MP) + CI_SELF),
 
     gate("claude_envoy", "claude-envoy", reads=CLAUDE_ENVOY_BUILD + biome(at("claude-envoy", "Lint Claude Envoy plugin")) + bun_job("claude-envoy") + CI_SELF),
 
@@ -647,7 +653,7 @@ GATES = [
         (f"{ENVOY}/loadtest/common.sh", "packages/envoy/loadtest/common.test.sh sources it; run-step.sh and run-series.sh source it"),
         (NOTICES, f"{at('envoy-go', 'Pack envoy binaries')} runs it"),
         (GO_TARGETS, f"{at('envoy-go', 'Pack envoy binaries')}: jq -r '.envoy[]'"),
-    ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + CI_SELF),
+    ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + self_hosted_prereqs("envoy-go") + CI_SELF),
 
 
     gate("envoy_infra_go", "envoy-infra-go", runs=[
@@ -661,14 +667,14 @@ GATES = [
         (".github/actions/pull-test-images/**", at("envoy-infra-go", "Pull the NATS and Postgres test container images")),
         (f"{ENVOY}/internal/testnats/nats.go", f"{at('envoy-infra-go', 'Pull the NATS and Postgres test container images')}: consts Image, HubImage"),
         (f"{ENVOY}/internal/testpg/testpg.go", f"{at('envoy-infra-go', 'Pull the NATS and Postgres test container images')}: const Image"),
-    ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
+    ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + self_hosted_prereqs("envoy-infra-go") + CI_SELF),
 
     gate("envoy_go_race", "envoy-go-race", runs=[
         step_run("envoy-go-race", "Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch",
                  "go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...",
                  ENVOY, ["./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/",
                          "./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
-    ], reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + self_hosted_prereqs("envoy-go-race") + CI_SELF),
 
     gate("envoy_go_race_pmdoc", "envoy-go-race-pmdoc", runs=[
         step_run("envoy-go-race-pmdoc", "Race-test pmdoc",
@@ -677,40 +683,40 @@ GATES = [
     ], reads=reads(
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:16, differential.ts:21, edit-blocks.ts:21"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:6, differential.ts:12-13, edit-blocks.ts:10 import @legion/proof-editor"),
-    ) + setup_go("envoy-go-race-pmdoc", f"{ENVOY}/go.mod") + bun_job("envoy-go-race-pmdoc") + CI_SELF),
+    ) + setup_go("envoy-go-race-pmdoc", f"{ENVOY}/go.mod") + bun_job("envoy-go-race-pmdoc") + self_hosted_prereqs("envoy-go-race-pmdoc") + CI_SELF),
 
     gate("envoy_go_race_api", "envoy-go-race-api", runs=[
         step_run("envoy-go-race-api", "Race-test the Dispatch API",
                  "go test -race -timeout 30m ./internal/dispatch/api/",
                  ENVOY, ["./internal/dispatch/api/"], race=True),
-    ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + self_hosted_prereqs("envoy-go-race-api") + CI_SELF),
 
     gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[
         step_run("envoy-go-race-docs", "Race-test the document service",
                  "go test -race -timeout 60m ./internal/dispatch/docs/", ENVOY,
                  ["./internal/dispatch/docs/"], race=True),
-    ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + self_hosted_prereqs("envoy-go-race-docs") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", runs=[
         step_run("dispatch-memory", "Memory tests of the Dispatch server", "go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch",
                  ENVOY, ["./cmd/dispatch"], tags="memory"),
-    ], reads=setup_go("dispatch-memory", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=setup_go("dispatch-memory", f"{ENVOY}/go.mod") + self_hosted_prereqs("dispatch-memory") + CI_SELF),
 
     gate("dispatch_multiprocess", "dispatch-multiprocess", runs=[
         step_run("dispatch-multiprocess", "Two-process tests of the Dispatch server",
                  "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch", ENVOY, ["./cmd/dispatch"], tags="multiprocess"),
-    ], reads=setup_go("dispatch-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=setup_go("dispatch-multiprocess", f"{ENVOY}/go.mod") + self_hosted_prereqs("dispatch-multiprocess") + CI_SELF),
 
     gate("listener_server_change", "listener-server-change", exact=[
         pinned_step("listener-server-change", SOAK_STEP, ENVOY, SOAK_SCRIPT, [
             (ENVOY, ["./cmd/listener"], "go test -tags serverchange ./cmd/listener", {"tags": "serverchange"}),
         ]),
-    ], reads=setup_go("listener-server-change", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=setup_go("listener-server-change", f"{ENVOY}/go.mod") + self_hosted_prereqs("listener-server-change") + CI_SELF),
 
     gate("broker_multiprocess", "broker-multiprocess", runs=[
         step_run("broker-multiprocess", "Two-process tests of the secrets broker",
                  "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker", ENVOY, ["./cmd/broker"], tags="multiprocess"),
-    ], reads=setup_go("broker-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
+    ], reads=setup_go("broker-multiprocess", f"{ENVOY}/go.mod") + self_hosted_prereqs("broker-multiprocess") + CI_SELF),
 
 
     # The listener image this job builds and smokes is left to check-image-trigger-paths.sh,
@@ -734,7 +740,7 @@ GATES = [
          f"{at('envoy-smoke', 'Download the docker provider plugin the live tests pin')}: sed reads const DockerPluginVersion"),
         (".github/scripts/repo-paths.sh",
          f"{at('envoy-smoke', SCHEMA_STEP)}: it derives the download URL the build stamps in"),
-    ) + setup_go("envoy-smoke", f"{ENVOY}/go.mod") + CI_SELF),
+    ) + setup_go("envoy-smoke", f"{ENVOY}/go.mod") + self_hosted_prereqs("envoy-smoke") + CI_SELF),
 
     gate("envoy_e2e_local", "envoy-e2e-local", runs=[
         script_run(f"{ENVOY}/scripts/e2e-local.sh", 'go build -o "$listener_binary" ./cmd/listener',
@@ -747,7 +753,7 @@ GATES = [
         (f"{ENVOY}/scripts/fixtures/github/**", "packages/envoy/scripts/e2e-local.sh:52,547-578 posts each fixture"),
         (ENVOY_CLIENT_SRC, "packages/envoy/scripts/e2e-local.sh:582-587 runs bun in packages/envoy-client importing @legion/envoy-client/delivery"),
         (CONTRACTS_SRC, "packages/envoy-client/src/delivery.ts imports @legion/contracts"),
-    ) + setup_go("envoy-e2e-local", f"{ENVOY}/go.mod") + bun_job("envoy-e2e-local") + CI_SELF),
+    ) + setup_go("envoy-e2e-local", f"{ENVOY}/go.mod") + bun_job("envoy-e2e-local") + self_hosted_prereqs("envoy-e2e-local") + CI_SELF),
 
     gate("envoy_session_stall", STALL, runs=[
         script_run("packages/envoy-client/test/envoy-stack.ts",
@@ -760,7 +766,7 @@ GATES = [
         ("packages/claude-envoy/**", f"{at(STALL, 'Stall test of claude-envoy')} (tests/envoy-channel-stall.test.ts runs bin/envoy-channel.ts)"),
         ("packages/pi-shared/src/**", "packages/pi-envoy and packages/claude-envoy import @legion/pi-shared/*"),
         ("packages/contracts/**", at(STALL, "Build contracts for the stall suites")),
-    ) + setup_go(STALL, f"{ENVOY}/go.mod") + bun_job(STALL) + CI_SELF),
+    ) + setup_go(STALL, f"{ENVOY}/go.mod") + bun_job(STALL) + self_hosted_prereqs(STALL) + CI_SELF),
 
     gate("go_notices", "lint", step=NOTICES_STEP, runs=go_notices_runs(), reads=reads(
         (NOTICES, f"{at('lint', NOTICES_STEP)} runs it"),

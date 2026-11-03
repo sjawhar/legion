@@ -65,6 +65,22 @@ workflows; this page covers this repository only.
 
 A Go job also restores its caches the way the section on caches below says.
 
+A job that runs longer than about two minutes and holds no credential beyond the job's own token
+also runs on the self-hosted pool when the repository variable `LEGION_CI_RUNNER` is set (ci.yaml's
+header comment says why and what the fork term does not protect). It takes the same `runs-on` as
+every other such job, so a grep for `LEGION_CI_RUNNER` finds them all:
+
+```yaml
+runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
+```
+
+Its first step after checkout is `- uses: ./.github/actions/self-hosted-prereqs`, which installs,
+on the pool alone, the tools of GitHub's ubuntu-24.04 image that the pool's stock
+`actions-runner` image lacks; the action's description names each package and the job that needs
+it. A tool a new job uses from the hosted image without installing it goes in that list. Its
+filter names `.github/actions/self-hosted-prereqs/**`, and its gate adds
+`self_hosted_prereqs("<job>")`. Delete the variable and every such job runs on ubuntu-24.04 again.
+
 ## ci-ok is posted by the run's last job, and fails a selected job that did not succeed
 
 A `ci-ok` job would wait for a runner of its own once every other job ended, behind every job the

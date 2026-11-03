@@ -83,6 +83,18 @@ permissions:
   actions: read
   checks: write
 
+# Runners: each job that runs longer than about two minutes, and worker-image.yaml's build, runs
+# on the self-hosted runner scale set the repository variable LEGION_CI_RUNNER names (legion-ci),
+# through one runs-on expression written the same way in every such job, so a grep for
+# LEGION_CI_RUNNER finds them all. With the variable unset they run on ubuntu-24.04, so deleting
+# it is the rollback. Each such job's first step after checkout is
+# .github/actions/self-hosted-prereqs, which installs what the pool's runner image lacks. The
+# short jobs stay on ubuntu-24.04, and so does every job that holds a credential beyond the job's
+# own token (worker-image.yaml's attest). The expression keeps a fork's pull request on
+# ubuntu-24.04, but that is no security boundary: such a run uses the fork's copy of this file,
+# which can name any runner. The boundary is the repository setting that requires approval before
+# a workflow from an outside collaborator runs.
+
 # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
 # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
 # proxy.golang.org reset a download mid-stream and turned envoy-infra-go red on a module whose
@@ -539,6 +551,7 @@ jobs:
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *bun_install
               - *biome
               - *daemon_go_tests
@@ -581,6 +594,7 @@ jobs:
             # names all three workflow files.
             docs:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - '.github/workflows/docs-pages.yaml'
               - '.github/workflows/docs-site.yaml'
               - *bun_install
@@ -708,6 +722,7 @@ jobs:
             # skills guard reads (src/skills-guard.test.ts:29-33).
             pi_envoy:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *bun_install
               - *biome
               - 'packages/pi-envoy/**'
@@ -735,6 +750,7 @@ jobs:
             # the package.
             pi_legion:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *bun_install
               - *biome
               - 'packages/pi-legion/**'
@@ -775,6 +791,7 @@ jobs:
               - *omp_install
             dispatch: &dispatch
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *bun_install
               - *biome
               - 'packages/dispatch/**'
@@ -837,6 +854,7 @@ jobs:
               - *dispatch
             envoy_go:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *bun_install
               - *go_workspace
               # gofmt -l . walks every .go file under packages/envoy, and its tests walk it too
@@ -873,6 +891,7 @@ jobs:
             # listener infra/core/permissions_live_test.go:298-299 builds in the root workspace.
             envoy_infra_go:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *go_workspace
               - 'packages/envoy/infra/**'
               - *dispatch_server
@@ -895,6 +914,7 @@ jobs:
             # the pmdoc race job with the package that needs it.
             envoy_go_race:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *go_workspace
               - 'packages/envoy/**'
               # The fixture cmd/listener/api_test.go:191,436,480 reads.
@@ -907,6 +927,7 @@ jobs:
             # (contracts.DispatchBodyMax), so the contracts package is too.
             envoy_go_race_pmdoc:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *bun_install
               - *go_workspace
               - 'packages/envoy/internal/contracts/**'
@@ -930,6 +951,7 @@ jobs:
             # rather than the package list its closure would give.
             envoy_go_race_api:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *go_workspace
               - 'packages/envoy/**'
               # internal/dispatch/api/delivery_live_diff_test.go:982,1011.
@@ -941,6 +963,7 @@ jobs:
             # one and what those packages embed.
             envoy_go_race_docs:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *go_workspace
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/contracts/testdata/**'
@@ -985,12 +1008,14 @@ jobs:
             # in-process NATS (its line 47).
             dispatch_memory:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
             # `go test -tags multiprocess ./cmd/dispatch`, the same closure as dispatch_memory.
             dispatch_multiprocess:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
@@ -1001,6 +1026,7 @@ jobs:
             # testdata included.
             listener_server_change:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *go_workspace
               - *listener_command
               - 'packages/envoy/internal/broker/oauthwire/*'
@@ -1055,6 +1081,7 @@ jobs:
             # cmd/broker/outage_test.go:317-318 builds.
             broker_multiprocess:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *go_workspace
               - 'packages/envoy/cmd/broker/*'
               - 'packages/envoy/cmd/agent-secrets/*'
@@ -1100,6 +1127,7 @@ jobs:
             # steps' reads.
             envoy_smoke:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               # The image: the Dockerfile, its context's .dockerignore, the web stage's frozen
               # install (every workspace manifest) and the Bun pin that stage holds its own Bun
               # to, the packages it builds the SPA and the Go binaries from, and the notices
@@ -1160,6 +1188,7 @@ jobs:
             # read, runs it.
             envoy_e2e_local:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *bun_install
               - *go_workspace
               - 'packages/envoy/scripts/e2e-local.sh'
@@ -1177,6 +1206,7 @@ jobs:
             # run each plugin's NATS client through them; the plugins inline pi-shared.
             envoy_session_stall:
               - '.github/workflows/ci.yaml'
+              - '.github/actions/self-hosted-prereqs/**'
               - *bun_install
               - *go_workspace
               - 'packages/envoy/**'
@@ -1342,7 +1372,7 @@ jobs:
   lint:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 30
     # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
     # its reviews and review comments (`pull-requests: read`) and its issue comments
@@ -1358,6 +1388,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/self-hosted-prereqs
 
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
@@ -1660,7 +1692,7 @@ jobs:
   test:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 45
     services:
       postgres:
@@ -1691,6 +1723,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/self-hosted-prereqs
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
@@ -2058,7 +2092,7 @@ jobs:
   pi-envoy:
     needs: changes
     if: needs.changes.outputs.pi_envoy == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
     # The NATS server extensions/card-delivery-omp.test.ts delivers Envoy cards and a person's Send
     # through (LEGION_TEST_NATS_URL on the test step): the 2.10 image the envoy-client job pulls,
@@ -2072,6 +2106,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: ./.github/actions/setup-bun
       # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
       # nothing in this package drives jj.
@@ -2134,7 +2169,7 @@ jobs:
   pi-legion:
     needs: changes
     if: needs.changes.outputs.pi_legion == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
     # The NATS server the Envoy role claim of extensions/controller-start-omp.test.ts's controller
     # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
@@ -2147,6 +2182,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: ./.github/actions/setup-bun
       - uses: ./.github/actions/install-jj
       # extensions/legion-phase-stall-omp.test.ts and controller-start-omp.test.ts run the pinned
@@ -2233,7 +2269,7 @@ jobs:
   dispatch:
     needs: changes
     if: needs.changes.outputs.dispatch == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 155
     services:
       postgres:
@@ -2253,6 +2289,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -2369,7 +2406,7 @@ jobs:
   dispatch-browser-multiprocess:
     needs: changes
     if: needs.changes.outputs.dispatch_browser_multiprocess == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
     services:
       postgres:
@@ -2389,6 +2426,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -2500,7 +2538,7 @@ jobs:
   envoy-go:
     needs: changes
     if: needs.changes.outputs.envoy_go == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 45
     services:
       postgres:
@@ -2525,6 +2563,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -2650,7 +2689,7 @@ jobs:
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy_infra_go == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 15
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
@@ -2658,6 +2697,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -2759,7 +2799,7 @@ jobs:
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy_go_race == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
     # binaries, then the step's own 30 minutes, which is 36.
@@ -2782,6 +2822,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -2806,7 +2847,7 @@ jobs:
   envoy-go-race-pmdoc:
     needs: changes
     if: needs.changes.outputs.envoy_go_race_pmdoc == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     # The step's -timeout 40m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
     # binaries, then the step's own 40 minutes, which is 46.
@@ -2815,6 +2856,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -2837,7 +2879,7 @@ jobs:
   envoy-go-race-api:
     needs: changes
     if: needs.changes.outputs.envoy_go_race_api == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
     # binaries, then the step's own 30 minutes, which is 36.
@@ -2860,6 +2902,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -2888,7 +2931,7 @@ jobs:
   envoy-go-race-docs:
     needs: changes
     if: needs.changes.outputs.envoy_go_race_docs == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     # The step's -timeout 60m must fire before the runner cancels the job, so a hung test prints
     # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race binary,
     # then the step's own 60 minutes, which is 66 under this limit of 70.
@@ -2916,6 +2959,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -2951,7 +2995,7 @@ jobs:
   dispatch-memory:
     needs: changes
     if: needs.changes.outputs.dispatch_memory == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 75
     services:
       postgres:
@@ -2971,6 +3015,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -2998,7 +3043,7 @@ jobs:
   dispatch-multiprocess:
     needs: changes
     if: needs.changes.outputs.dispatch_multiprocess == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 30
     services:
       postgres:
@@ -3018,6 +3063,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -3047,12 +3093,13 @@ jobs:
   listener-server-change:
     needs: changes
     if: needs.changes.outputs.listener_server_change == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -3105,7 +3152,7 @@ jobs:
   broker-multiprocess:
     needs: changes
     if: needs.changes.outputs.broker_multiprocess == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 30
     services:
       postgres:
@@ -3125,6 +3172,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -3150,7 +3198,7 @@ jobs:
   envoy-smoke:
     needs: changes
     if: needs.changes.outputs.envoy_smoke == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
@@ -3165,6 +3213,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -3313,12 +3362,13 @@ jobs:
   envoy-e2e-local:
     needs: changes
     if: needs.changes.outputs.envoy_e2e_local == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - id: setup-go
@@ -3378,7 +3428,7 @@ jobs:
   envoy-session-stall:
     needs: changes
     if: needs.changes.outputs.envoy_session_stall == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.LEGION_CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 15
     env:
       LEGION_E2E_ENVOY_STACK: "1"
@@ -3386,6 +3436,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/self-hosted-prereqs
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - id: setup-go

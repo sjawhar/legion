@@ -30,6 +30,7 @@ on:
       - '.github/workflows/ci.yaml'
       - '.github/workflows/docs-pages.yaml'
       - '.github/workflows/docs-site.yaml'
+      - '.github/actions/self-hosted-prereqs/**'
       # ci.yaml's *bun_install, 15 patterns:
       - 'package.json'
       - 'bun.lock'
