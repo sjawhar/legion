@@ -1,6 +1,6 @@
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
-import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isNoIdentity, isUnauthorized } from "./api/client";
 import { useEventFeed } from "./api/event-feed";
@@ -133,9 +133,12 @@ const BroadcastPage = lazy(() =>
 const DeliveryPage = lazy(() =>
   import("./features/delivery/DeliveryPage").then((module) => ({ default: module.DeliveryPage }))
 );
-const PipelinePage = lazy(() =>
-  import("./features/delivery/PipelinePage").then((module) => ({ default: module.PipelinePage }))
-);
+/** `/pipeline` was Dispatch's Pipeline page until INFRA-1077 folded it into the Delivery page as
+ *  that page's Pipeline section; the address a reader bookmarked lands them on it. Named, as
+ *  every other row's element is, because the router's rows are a roster
+ *  (`e2e/two-builds-routes.ts`) that `e2e/__tests__/two-builds-routes.test.ts` reads from this
+ *  file by each row's element name. */
+const PipelineRedirect = () => <Navigate replace to="/delivery#pipeline" />;
 const MachineLoginPage = lazy(() =>
   import("./features/credentials/MachineLoginPage").then((module) => ({
     default: module.MachineLoginPage,
@@ -809,7 +812,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<MachineLoginPage />} path="/credentials/machine" />
                 <Route element={<SettingsPage />} path="/settings" />
                 <Route element={<DeliveryPage />} path="/delivery" />
-                <Route element={<PipelinePage />} path="/pipeline" />
+                <Route element={<PipelineRedirect />} path="/pipeline" />
                 <Route element={<NotFoundPage />} path="*" />
               </Routes>
             </Suspense>

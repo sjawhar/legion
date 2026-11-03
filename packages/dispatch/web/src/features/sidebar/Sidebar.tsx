@@ -208,7 +208,7 @@ export function Sidebar({
               detail="Deploys, merges, and pipeline failures"
               label="Delivery"
               onNavigate={onNavigate}
-              selected={location.pathname === "/delivery"}
+              selected={location.pathname === "/delivery" && location.hash !== "#pipeline"}
               to="/delivery"
             />
             <RailRow
@@ -216,8 +216,8 @@ export function Sidebar({
               detail="CI and deploy step timings"
               label="Pipeline"
               onNavigate={onNavigate}
-              selected={location.pathname === "/pipeline"}
-              to="/pipeline"
+              selected={location.pathname === "/delivery" && location.hash === "#pipeline"}
+              to="/delivery#pipeline"
             />
           </ul>
         </section>

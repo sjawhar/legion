@@ -1,5 +1,5 @@
 import { expect, type Page, type TestInfo, test, type WebSocketRoute } from "@playwright/test";
-import { PIPELINE_AT, seedDeliveryFixture, seedPipelineFixture } from "./delivery-seed";
+import { PIPELINE_SECTION_URL, seedDeliveryFixture, seedPipelineFixture } from "./delivery-seed";
 import { seedDeliveryReconcileGithub } from "./fake-github-helpers";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
@@ -397,15 +397,17 @@ test("an issue title change reaches the page", async ({ browser }) => {
   }
 });
 
-test("the Pipeline page updates live", async ({ browser }) => {
+test("the Pipeline section updates live", async ({ browser }) => {
   await seedPipelineFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
   try {
     const live = watchDeliverySocket(page);
-    await page.goto(`/pipeline?at=${PIPELINE_AT}`);
-    await expect(page.getByRole("heading", { name: "Pipeline" })).toBeVisible();
+    await page.goto(PIPELINE_SECTION_URL);
+    await expect(
+      page.getByRole("heading", { level: 2, name: "Pipeline: CI and deploy" })
+    ).toBeVisible();
     await live.opened;
     await waitForFrame(live.frames, (frame) => frame.type === "snapshot");
     const production = page.locator('[data-metric="production_apply"]');

@@ -176,6 +176,12 @@ function subscription(
   return waitFor(() => socket.subscribed(kind));
 }
 
+/** The timeline's own subscribe frames: the page's other sections subscribe views of their own
+ *  (INFRA-1077), so a count of what the timeline did leaves theirs out. */
+function timelineSubscribes(socket: FakeLiveSocket): LiveSubscribe[] {
+  return socket.subscribes().filter((frame) => frame.view.kind === "timeline");
+}
+
 /** The newest subscribe frame of `view`'s kind, once it subscribes `view`. */
 function subscriptionTo(socket: FakeLiveSocket, view: DeliveryLiveView): Promise<LiveSubscribe> {
   return waitFor(() => {
@@ -197,6 +203,29 @@ async function answered(body: DeliveryTimelineResponse): Promise<FakeLiveSocket>
   serve(socket, snapshotFrame(sub, body));
   return socket;
 }
+
+test("the page's three sections render in the spec's order under one window control", async () => {
+  renderPage();
+  await openSocket();
+  expect(
+    await screen.findByRole("heading", { level: 2, name: "Legion: issue to merge" })
+  ).toBeDefined();
+  expect(
+    screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
+  ).toEqual(["Legion: issue to merge", "Pipeline: CI and deploy", "Delivery: merge to production"]);
+  expect(screen.getAllByLabelText("Window")).toHaveLength(1);
+});
+
+test("the page's window control moves the Pipeline section's view with the timeline's", async () => {
+  renderPage("/delivery?mode=list&window=7d");
+  const socket = await openSocket();
+  await subscriptionTo(socket, { kind: "pipeline", window: { preset: 7 } });
+
+  fireEvent.change(await screen.findByLabelText("Window"), { target: { value: "28d" } });
+
+  await subscriptionTo(socket, { kind: "pipeline", window: { preset: 28 } });
+  await subscriptionTo(socket, { kind: "timeline", window: { preset: 28 }, query: "" });
+});
 
 test("an unconfigured timeline shows the setup form in its place, reading no settings, and once a save configures it the page's own subscription brings the timeline", async () => {
   const saved: DeliverySettings = {
@@ -255,8 +284,9 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     await waitFor(() => expect(queryClient.isMutating()).toBe(0));
 
     // The save reads nothing again: the page stays subscribed, and Dispatch answers that same
-    // subscription once a configuration exists.
-    expect(socket.subscribes()).toHaveLength(1);
+    // subscription once a configuration exists. The Pipeline section subscribes its own view
+    // (INFRA-1077), so the count here is the timeline's alone.
+    expect(timelineSubscribes(socket)).toHaveLength(1);
     expect(queryClient.isFetching()).toBe(0);
     serve(socket, snapshotFrame(sub, emptyTimeline));
 
@@ -284,7 +314,7 @@ test("a reconnect while the timeline is unconfigured keeps the setup form and it
   act(() => {
     window.dispatchEvent(new Event("visibilitychange"));
   });
-  expect(socket.subscribes()).toHaveLength(1);
+  expect(timelineSubscribes(socket)).toHaveLength(1);
 
   // Dispatch restarts: the page opens a new socket within the first attempt's spread (its draw
   // pinned to the start of the window here) and subscribes again. Any render of the timeline's
@@ -342,7 +372,7 @@ test("a configured timeline renders with no setup form, subscribing the window a
     expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
     expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
-    expect(socket.subscribes()).toHaveLength(1);
+    expect(timelineSubscribes(socket)).toHaveLength(1);
     expect(getDeliverySettings).not.toHaveBeenCalled();
   } finally {
     getDeliverySettings.mockRestore();
@@ -609,9 +639,10 @@ test("a brush window narrows the measures to it with a view of its own, leaves t
 
   fireEvent.click(await screen.findByRole("button", { name: "clear brush window" }));
   expect(await screen.findByRole("link", { name: "ACME-1" })).toBeDefined();
-  // The brush's view ends with it, and the timeline's never moved.
+  // The brush's view ends with it, and the timeline's never moved. The Pipeline section's own
+  // view is left out: it is no part of what the brush changed.
   expect(socket.sent).toContainEqual({ type: "unsubscribe", sub: brushed.sub });
-  expect(socket.subscribes()).toHaveLength(2);
+  expect(socket.subscribes().filter((frame) => frame.view.kind !== "pipeline")).toHaveLength(2);
 });
 
 test("a brushed measures failure keeps the timeline and offers its own Retry", async () => {
@@ -733,7 +764,7 @@ test("a malformed custom window falls back to the 28-day preset and removes its 
   });
   const socket = await openSocket();
   await subscription(socket, "timeline");
-  for (const frame of socket.subscribes()) {
+  for (const frame of timelineSubscribes(socket)) {
     expect(frame.view).toEqual({ kind: "timeline", window: { preset: 28 }, query: "" });
   }
 });

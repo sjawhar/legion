@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { mintAgentToken } from "./api";
-import { PIPELINE_AT, seedPipelineFixture } from "./delivery-seed";
+import { PIPELINE_AT, PIPELINE_SECTION_URL, seedPipelineFixture } from "./delivery-seed";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -9,7 +9,9 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the Pipeline rail entry opens the page @phone", async ({ browser }) => {
+test("the Pipeline rail entry opens the Delivery page's Pipeline section @phone", async ({
+  browser,
+}) => {
   await seedPipelineFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -30,20 +32,23 @@ test("the Pipeline rail entry opens the page @phone", async ({ browser }) => {
   await expect(pipelineLink).toBeVisible();
   await pipelineLink.click();
 
-  await expect(page).toHaveURL(/\/pipeline$/);
-  await expect(page.getByRole("heading", { level: 1, name: "Pipeline" })).toBeVisible();
-  await expect(page).toHaveTitle("Pipeline · Dispatch");
+  await expect(page).toHaveURL(/\/delivery#pipeline$/);
+  await expect(page.getByRole("heading", { level: 1, name: "Delivery timeline" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Pipeline: CI and deploy" })
+  ).toBeVisible();
+  await expect(page).toHaveTitle("Delivery · Dispatch");
 
   await context.close();
 });
 
-test("the Pipeline page shows each stage's timing and the failing jobs @phone", async ({
+test("the Pipeline section shows each stage's timing and the failing jobs @phone", async ({
   browser,
 }, testInfo) => {
   await seedPipelineFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  await page.goto(`/pipeline?at=${PIPELINE_AT}`);
+  await page.goto(PIPELINE_SECTION_URL);
 
   await expect(page.getByText("Last 7 days, Sep 26 to Oct 2 (UTC)")).toBeVisible();
   // Today's two timed PR-checks runs; the merge_group run is not one of them.
@@ -102,7 +107,7 @@ test("a pipeline with no staging end-to-end gate omits its card", async ({ brows
   await sql("UPDATE delivery_settings SET staging_e2e_job_name = null WHERE singleton");
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  await page.goto(`/pipeline?at=${PIPELINE_AT}`);
+  await page.goto(PIPELINE_SECTION_URL);
 
   await expect(page.locator('[data-metric="pr_ci"]')).toBeVisible();
   await expect(page.locator('[data-metric="staging_e2e"]')).toHaveCount(0);

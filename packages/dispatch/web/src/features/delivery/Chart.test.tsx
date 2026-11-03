@@ -254,21 +254,3 @@ test("the reader names a compare range of their own, and an overlong one is refu
     to: "2026-01-29T00:00:00.000Z",
   });
 });
-
-test("a view whose route answers one length offers the preceding range alone", () => {
-  render(
-    <Chart
-      compare={{ onRange: mock(), pickable: false, range: null, series: undefined }}
-      label="PR CI"
-      range={{ kind: "custom", from: "2026-09-26T00:00:00.000Z", to: "2026-10-03T00:00:00.000Z" }}
-      series={[runTime]}
-    />
-  );
-
-  expect(
-    Array.from(
-      screen.getByLabelText("PR CI comparison").querySelectorAll("option"),
-      (option) => option.textContent
-    )
-  ).toEqual(["No comparison", "Previous 7 days"]);
-});

@@ -892,9 +892,9 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
   }
 });
 
-/** The shell at `/`, signed in as alice, its event feed subscribed on the page's live socket;
+/** The shell at `path`, signed in as alice, its event feed subscribed on the page's live socket;
  *  returns the teardown. */
-async function renderSignedIn(whoAmI: () => Promise<AuthenticatedUser>) {
+async function renderSignedIn(whoAmI: () => Promise<AuthenticatedUser>, path = "/") {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -915,7 +915,7 @@ async function renderSignedIn(whoAmI: () => Promise<AuthenticatedUser>) {
   ];
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
-    <MemoryRouter initialEntries={["/"]}>
+    <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <AuthGate />
       </QueryClientProvider>
@@ -999,6 +999,38 @@ test("a live socket refused once the person is signed out takes the page to sign
     await screen.findByRole("link", { name: "Sign in with Google" });
   } finally {
     teardown();
+    sockets.restore();
+  }
+});
+
+test("/pipeline lands the reader on the Delivery page's Pipeline section", async () => {
+  // React.lazy loads the page module on its first render; loading it first keeps its cold
+  // compile out of findBy's window, as the project-routes test above does.
+  await import("./features/delivery/DeliveryPage");
+  const sockets = installFakeLiveSockets();
+  // What the page brought into view: the hash's own section, which is how the reader lands on it.
+  const scrolledTo: string[] = [];
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = function scrollIntoView(this: HTMLElement) {
+    scrolledTo.push(this.id);
+  };
+  const teardown = await renderSignedIn(
+    async () => ({ event_head: "0", kind: "user", login: "alice" }),
+    "/pipeline"
+  );
+  try {
+    // `/pipeline` is the Delivery page's Pipeline section since INFRA-1077, and the address a
+    // reader bookmarked redirects there, hash and all.
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Delivery timeline" })
+    ).toBeDefined();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Pipeline: CI and deploy" })
+    ).toBeDefined();
+    await waitFor(() => expect(scrolledTo).toEqual(["pipeline"]));
+  } finally {
+    teardown();
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
     sockets.restore();
   }
 });

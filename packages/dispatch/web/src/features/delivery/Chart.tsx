@@ -15,9 +15,7 @@
 // The compare range belongs to the page, not to the chart: the chart names it and the page reads
 // it as a second request, one for the window and one for the comparison, each inside the server's
 // 84-day cap, which `customRange` holds a reader's own range to. A page that reads no second
-// range passes no `compare` and the chart shows the graph-or-table control alone. A host whose
-// route answers one fixed length - the Pipeline page's seven days - passes `pickable: false`, and
-// the reader compares the preceding range or nothing.
+// range passes no `compare` and the chart shows the graph-or-table control alone.
 //
 // `Timeline.tsx` is not one of these charts: it draws individual pull requests as points, keeps
 // its own `ModeToggle` (Timeline <-> PRList) and its brush, and two overlaid ranges of a scatter
@@ -79,9 +77,6 @@ export interface ChartCompare {
   readonly onRange: (next: ChartRange | null) => void;
   /** The compare range's series, in the chart's own order; undefined while its read is out. */
   readonly series: readonly ChartSeries[] | undefined;
-  /** Whether the reader may name a range of their own, true by default. A view whose route
-   *  answers one fixed length offers the preceding range alone. */
-  readonly pickable?: boolean;
 }
 
 export interface ChartProps {
@@ -481,7 +476,7 @@ function CompareControl({
       >
         <option value="none">No comparison</option>
         <option value="preceding">{`Previous ${spanLabel(range)}`}</option>
-        {compare.pickable === false ? null : <option value="custom">Custom range…</option>}
+        <option value="custom">Custom range…</option>
       </select>
       {chosen === "custom" ? (
         <>
