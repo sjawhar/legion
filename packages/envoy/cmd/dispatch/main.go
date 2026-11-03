@@ -123,8 +123,9 @@ type bootConfig struct {
 	// by the broker client on each call, never here: a projected token rotates.
 	AgentSecretsURL       string
 	AgentSecretsTokenFile string
-	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
-	// Empty keeps them in Postgres.
+	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in,
+	// gs://<bucket> for Cloud Storage or an S3 bucket's name (files.Open). Empty keeps them in
+	// Postgres.
 	FileStoreBucket string
 	// ListenAddr is the address the server serves on: the inherited socket's own address with
 	// DISPATCH_LISTEN_FD, else the one main binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
@@ -417,7 +418,7 @@ func main() {
 	// whose loops would each run everywhere, so it ends here.
 	//
 	// The loops come in these shapes, so that a database nobody writes costs them nothing except
-	// where GitHub gives them nothing to wake on, and the four timers of the last shape:
+	// where GitHub gives them nothing to wake on, and the five timers of the last shape:
 	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
 	//     shared listener below says their work may have changed, or when a due time their last
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
@@ -449,9 +450,10 @@ func main() {
 	//     batch is full), the repair of closed and reopened issues' asks (api.RunIssueAskRepair,
 	//     every 10 minutes on a plain ticker, after the boot's own unleased pass), the prune of
 	//     the server process registry (processes.RunPrune, every minute, which joinRegistry starts
-	//     below) and the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute),
-	//     each recording its passes in duty_passes like the timers above; each tick sends its
-	//     statements whether or not anything is owed.
+	//     below), the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute) and
+	//     the document compaction sweep (docs.Service.RunCompactionSweep, every hour from a tick at
+	//     start, with or without NATS), each recording its passes in duty_passes like the timers
+	//     above; each tick sends its statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
 	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
@@ -463,7 +465,7 @@ func main() {
 	// The events outbox publishes under a hold of its own rather than such a lease
 	// (outbox.Outbox): it renews duty.Hold "dispatch-outbox" on its own pool every two seconds, so
 	// one process publishes at a time and the other takes over within seconds of a holder that
-	// stops, dies or loses NATS. Its daily document compaction is leased like the loops above.
+	// stops, dies or loses NATS.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
@@ -475,9 +477,12 @@ func main() {
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
 	//     shared wake listener (each process's loops wait on their own), the delivery live hub
 	//     and its listener (migration 0107_events_notify.up.sql states that purpose), the event
-	//     stream relay, the document rooms' timers, and the stale-room evictor (it closes the
-	//     rooms resident in this process that the other process's writes left behind the
-	//     durable head, so it has to run wherever a room is resident).
+	//     stream relay, the document rooms' timers, the document compaction queue (docs.New starts
+	//     it; it compacts the documents this process's own appends and loads noted, and the hourly
+	//     compaction sweep below is the leased pass over the documents doc_compaction_owed names,
+	//     those with rows to fold), and the stale-room evictor (it closes the rooms resident in
+	//     this process that the other process's writes left behind the durable head, so it has to
+	//     run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
 	//     above, and the embedding coverage pass (two processes' passes at once leave what one
@@ -516,8 +521,6 @@ func main() {
 			Publisher:       natsClient,
 			Broker:          broker,
 			Listen:          database.Pool.Listener,
-			Docs:            documentService,
-			Leases:          leases,
 			RoleClaims:      holders,
 			Sessions:        holders,
 			PublishFailures: outboxPublishFailures,
@@ -581,6 +584,10 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531), woken by the refs trigger that announces each mention left owed.
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases, excerptsWake)
+	// Documents the compaction queues let go - every room a restart, a Shutdown or a Quiesce
+	// dropped from one - fold within an hour of coming due, whether or not NATS is configured
+	// (INFRA-593).
+	go documentService.RunCompactionSweep(ctx, leases)
 	// Each document's edit notice goes once its quiet window after a person's last
 	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
 	// still pending when this process stops is sent by the next sweep of either process. The sweep
@@ -701,7 +708,14 @@ func main() {
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, background.Wait, waitIntakes,
+	// The importer's flights outlive the ticker's context, so they are closed inside the
+	// background wait: shutdown runs it before waitUntilIdle and pool.Close, and a sync still
+	// fetching then would write into a closing pool.
+	waitBackground := func() {
+		background.Wait()
+		appCtx.Architecture().Close()
+	}
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitBackground, waitIntakes,
 		deregisterAfterDrain(registration), registration.Lost(), outboxStopped); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
@@ -1324,18 +1338,15 @@ func parsePort(name, raw string) (int, error) {
 	return port, nil
 }
 
-// openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is
-// unset, which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's
-// nil check reads the setting: NewS3's (*S3)(nil) on failure is not passed through as a Store.
+// openFileStore is the uploaded-file store boot names (files.Open: gs://<bucket> is a Cloud
+// Storage bucket, a bare name an S3 bucket), or nil when DISPATCH_FILE_STORE_BUCKET is unset,
+// which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's nil
+// check reads the setting.
 func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	if boot.FileStoreBucket == "" {
 		return nil, nil
 	}
-	bucketStore, err := files.NewS3(ctx, boot.FileStoreBucket)
-	if err != nil {
-		return nil, err
-	}
-	return bucketStore, nil
+	return files.Open(ctx, boot.FileStoreBucket)
 }
 
 // serverBus is the options every NATS connection of the server is made with: it connects in the

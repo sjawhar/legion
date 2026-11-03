@@ -342,6 +342,18 @@ describe("dispatchToolSpecs", () => {
     expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
   });
 
+  test("dispatch_project's description says to create a requested project without questions", () => {
+    const description = specFor("dispatch_project").description;
+    expect(description).toContain(
+      "When a person asks for a project, make the key from its name. Check the key with " +
+        "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use."
+    );
+    expect(description).toContain(
+      "When no person asked for a project and an existing project already covers the work, do not create a " +
+        "project. File an issue in that project with dispatch issue."
+    );
+  });
+
   test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {
     const schema = schemaFor("dispatch_architecture_sync");
 
@@ -1010,7 +1022,7 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
-  test("requires artifact with project on document tools but not dispatch_artifact", () => {
+  test("requires artifact with project on document tools but not dispatch_artifact or dispatch_read", () => {
     const cases = [
       [
         "dispatch_ask",
@@ -1023,7 +1035,6 @@ describe("dispatchToolSpecs", () => {
         { project: "CORE", ops: [{ op: "replace", find: "draft", with: "final" }] },
       ],
       ["dispatch_doc_read", { project: "CORE" }],
-      ["dispatch_read", { project: "CORE" }],
     ] as const;
 
     for (const [name, args] of cases) {
@@ -1036,6 +1047,8 @@ describe("dispatchToolSpecs", () => {
         content: "# Runbook",
       }).success
     ).toBe(true);
+    // A project alone is the read of its documents' list.
+    expect(schemaFor("dispatch_read").safeParse({ project: "CORE" }).success).toBe(true);
   });
 
   test("accepts a project-document ref in place of issue/project on every ref-aware tool", () => {

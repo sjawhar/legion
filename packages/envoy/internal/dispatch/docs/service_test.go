@@ -235,9 +235,10 @@ func TestAnAskWhoseTextHoldsWebAddressesSettlesAsWritten(t *testing.T) {
 // A spec's decisions are ask blocks, and the write that adds one already carries its words into
 // a version: indexing it afterwards is bookkeeping over the same document. Settlement recording
 // that bookkeeping as a version of its own wrote a byte-identical version credited to nobody,
-// which stales the approval pinned to the version the agent wrote - and Legion's design gate,
-// open exactly while the approved version is the latest, closes with nothing in the event log
-// to explain it (LEGION-273).
+// which staled the approval pinned to the version the agent wrote and closed Legion's design gate
+// with nothing in the event log to explain it (LEGION-273). The approval carry now carries that
+// approval to such a version instead, which is a version and an artifact.approved event nothing in
+// the log explains, so settlement still writes none.
 func TestSettlementIndexingAnAskBlockTheEditVersionedWritesNoVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -3789,7 +3790,7 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 // (syncListOrderPlugin). The server parses headings with an empty id and every list item as a
 // bullet. A version records the rendered markdown alone, so such an update changes nothing a
 // version records: it credits no connected reader and settles without a version, which would
-// otherwise stale an approval.
+// otherwise be a version and, over an approved document, a carried approval no change explains.
 func TestAttributesTheEditorDerivesSettleWithoutAVersion(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -5103,7 +5104,7 @@ type shutdownCompactStore struct {
 	compactionAfterClose chan struct{}
 }
 
-func (s *shutdownCompactStore) Compact(ctx context.Context, room string, keep int) (int, error) {
+func (s *shutdownCompactStore) compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error) {
 	if s.closed.Load() {
 		select {
 		case s.compactionAfterClose <- struct{}{}:
@@ -5111,9 +5112,12 @@ func (s *shutdownCompactStore) Compact(ctx context.Context, room string, keep in
 		}
 	}
 	s.compactions.Add(1)
-	return s.VersionedStore.Compact(ctx, room, keep)
+	return s.VersionedStore.compactRoom(ctx, room, rule, wait)
 }
 
+// Shutdown closes its resident rooms, and each close compacts the document under the tail rule
+// before the store closes: a document whose rows are all older than the tail is one row once
+// Shutdown returns, and no compaction runs after.
 func TestShutdownCompletesCompactionBeforeTestStoreCloses(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
@@ -5128,12 +5132,19 @@ func TestShutdownCompletesCompactionBeforeTestStoreCloses(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	waitForDocumentVersion(t, database, artifactID, 2)
+	if rows := storedUpdateCount(t, database, artifactID); rows < 2 {
+		t.Fatalf("stored updates before shutdown = %d, want the seed and the edit", rows)
+	}
+	ageUpdatesThrough(t, database, artifactID, everyVersion, time.Hour)
 
 	if err := service.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown document service: %v", err)
 	}
 	if persistence.compactions.Load() == 0 {
 		t.Fatal("shutdown did not run document compaction")
+	}
+	if rows := storedUpdateCount(t, database, artifactID); rows != 1 {
+		t.Fatalf("stored updates after shutdown = %d, want the one row the close compacted them into", rows)
 	}
 
 	persistence.closed.Store(true)

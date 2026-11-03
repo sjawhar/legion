@@ -107,8 +107,8 @@
 # a ground that holds nothing any more is a ground nobody reads again. An entry naming a file
 # the tree does not hold admits nothing, and is left alone. The sweep walks the tree with
 # workflow_paths.walk, which skips .git, .jj, node_modules, .venv and vendor. This sweep skips
-# two more things itself: .legion (Legion's per-issue run data, which a retro removes) and this
-# check's own two files, whose text names the registry to find it.
+# two more things itself: .legion (Legion's per-issue run data, which a working tree may still
+# carry) and this check's own two files, whose text names the registry to find it.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
 # read green locally.
@@ -270,7 +270,10 @@ FETCHES_NOTHING = "a CI job runs it, and it fetches nothing"
 # walkthrough recorder, the corpus copy a developer restores on a devbox, and documentation.
 # `a CI job runs it, and it fetches nothing`: a script a CI job runs whose mirror.gcr.io text no
 # job ever hands to a registry — dev-postgres.test.sh, which the envoy-go job runs, installs a
-# fake `docker` on PATH.
+# fake `docker` on PATH; the load test's cluster copy (packages/envoy/loadtest/cluster/), whose
+# cluster.test.sh the envoy-go job runs with a fake `kubectl` on PATH, sources cluster.sh,
+# templates nats.yaml and runs render-nats.sh --pin-from, which takes each digest from the
+# committed nats.yaml; the images are pulled only by a cluster an operator points cluster.sh at.
 EXCEPTIONS = {
     "AGENTS.md": NO_CI_JOB,
     "docs/kubernetes.md": NO_CI_JOB,
@@ -300,6 +303,10 @@ EXCEPTIONS = {
     "packages/daemon/internal/testpg/testpg.go": FETCHES_NOTHING,
     "packages/envoy/scripts/dev-postgres.sh": FETCHES_NOTHING,
     "packages/envoy/scripts/dev-postgres.test.sh": FETCHES_NOTHING,
+    "packages/envoy/loadtest/cluster/cluster.sh": FETCHES_NOTHING,
+    "packages/envoy/loadtest/cluster/cluster.test.sh": FETCHES_NOTHING,
+    "packages/envoy/loadtest/cluster/manifests/nats.yaml": FETCHES_NOTHING,
+    "packages/envoy/loadtest/cluster/render-nats.sh": FETCHES_NOTHING,
 }
 
 # ---------------------------------------------------------------- reference grammar

@@ -84,7 +84,7 @@ Each item below names a task and where its code is, then notes on it.
   `ENVOY_STREAM_MAX_BYTES`: a positive whole number of bytes, the stream's byte limit, past which a full stream refuses new publishes (`DiscardNew`;
   the retryable `bus.ErrStreamFull`) and keeps every stored message until it is 72 hours old.
   A GitHub webhook a full stream refuses is answered 503, and Dispatch's redelivery sweep (`internal/dispatch/redeliver`) asks GitHub to resend it, so it comes back once the stream has room;
-  INFRA-493 extends that sweep to GitHub's 3-day redelivery window.
+  the sweep asks until GitHub records the delivery or 72 hours after its first failed attempt, GitHub's redelivery window.
   Unset, the stream is created with no limit and a start keeps a deployed one.
   Set, a start and the keeper raise a smaller deployed limit, or none, to it and never lower one, as for the copies, so an operator's raise of a full stream stands;
   lowering a limit is an operator step once every program's setting is lowered.
@@ -221,12 +221,14 @@ Each item below names a task and where its code is, then notes on it.
 - **Load test**: `loadtest/`
 
   the 2-core reproduction of the 2026-10-26 outage load:
-  `stack.sh` (a local Postgres, latency proxy, NATS, listener and Dispatch built from the checkout), `run-step.sh` (one named step, on a fresh reset to the seed), `run-series.sh` (0.25x to 10x), and the `loadgen` binary (seed, sessions, event and request generators, samplers, `TABLES.md`).
+  `stack.sh` (a local Postgres, latency proxy, NATS, listener and Dispatch built from the checkout), `run-step.sh` (one named step, on a fresh reset to the seed), `run-series.sh` (0.25x to 10x), and the `loadgen` binary (seed, sessions, event and request generators, samplers, `TABLES.md`, and for the cluster `cgroup-merge`, `curves` and `codepaths`).
   Every endpoint comes from the stack's `stack.json` (`guard.go`).
   The replay of LINUX's write log of 2026-10-26 22:55-23:34Z is its second request source (`replay_*.go`, `loadgen run -source replay`):
   the bundle and the seed dump are the file artifacts `loadtest/replay-2026-10-26.json` names by sha256, and one command gets them, prepares the build's template and runs a step (`loadtest/run-step.sh <name> --replay [--rate F] [--dispatch-commit REV]`);
   one bundle, inputs and rng seed send the same requests in every run, which the merge rule's three base and three head runs rest on.
-  How to run it, every column and the differences from production: `loadtest/README.md`
+  `loadtest/cluster/` runs the same load on a full-size copy of Dispatch in a Kubernetes namespace with one command, `cluster.sh all --namespace <ns> --storage-class <class> --dispatch-commit <sha> --pg-major <n> --production-repo <owner/repo> --profile quick|full`:
+  it stands the copy up, seeds it, runs the steps, collects the tables, curves and profiles, and tears it down.
+  How to run both, every column and the differences from production: `loadtest/README.md`
 
 - **Deploy/runtime**: `deploy/`
 
@@ -291,10 +293,11 @@ a repair never waits for a close and gives the write up as for a replaced room (
 `roomServer` says why a close retiring the room's worker under a repair's commit hung (LEGION-498).
 A room's close gate lives only while a close or a repair holds or waits on it.
 A repair's suppression slot that its settlement discarded is consumed by that repair's own update alone, since another writer's update can reach the room's worker first.
-The gate removes the repair-close cycle, but `compactIfIdle` remains for non-repair worker exits:
+The gate removes the repair-close cycle, but not every worker exit passes it:
 a published live write is already durable and intentionally does not take the gate, so its room can still retire under its Apply.
-Its exit compaction is housekeeping and leaves a busy document lock to the next pass;
-a failed room's eviction is the exception and compacts under the lock before recovery.
+The worker's exit compaction (`servicePersistenceAdapter.Compact`), which runs the tail rule inline on the worker and folds with no document lock held, therefore does not wait for a busy document lock at its short write:
+it is housekeeping and leaves the room to a later compaction.
+A failed room's eviction is the exception and always waits for the document's lock before recovery, writing a compaction when rows stand older than the tail and otherwise taking the lock and letting it go, so a repair written into the failed room commits before the room reloads.
 `envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every document.
 Every write path that changes a document queues that closer once its transaction commits:
 a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation, so ask blocks written by any of them become asks without waiting for a later live change.
@@ -398,7 +401,12 @@ any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and ans
 A tree a browser edit makes is not checked, so its rendering can still fail to read back when it is uploaded again.
 
 A document's `doc_updates` rows are its Yjs updates in the order they were stored, and nothing reads one back alone:
-`PgVersioned.Load` and `MaterializeAt` apply them one at a time, oldest first, to one document that collects garbage and return that document's encoding (`stateThrough`), so a deleted item keeps its id and length and none of its content, and a load holds the live document and the one update it is applying, however much the stored updates inserted and later deleted (LEGION-496).
+`PgVersioned.Load` and `MaterializeAt` apply them one at a time, oldest first, to one document that collects garbage and return that document's encoding (`stateThrough`), so a deleted item keeps its id and length and none of its content, and a fold holds the live document and the one update it is applying, however much the stored updates inserted and later deleted (LEGION-496), beside whatever rows its load read into memory.
+A room load or a cold read (`Load`, `LoadDocument`) reads, in one repeatable-read transaction on the rooms pool, the head and the rows at or below it - the compacted row and the rows written since - and when they total at most 32 MiB (`foldBufferBytes`) reads them into memory, ends the transaction and folds them with no connection held;
+a larger log it folds one row at a time as it streams it inside the transaction (`foldRead`).
+At most `bufferedFolds` buffered folds - loads and compactions together, `store.RoomsPoolSize` (four), the pool whose connections bounded folds when they ran inside its transactions - hold their rows at once in a process (`PgVersioned.foldSlots`), so a process holds at most four times 32 MiB of buffered rows;
+a fifth waits within its context.
+Either way it notes the room for compaction once its transaction ends (`noteStoredUpdates`).
 Nothing reads deleted content back from the store:
 every document built from it is a `crdt.New`, which drops an item's content in the transaction that deletes it, the one that applies a load included;
 a version stores its own markdown in `artifact_versions`; and no route reads an update or a state before the head.
@@ -407,19 +415,38 @@ A state is kept only when it reads back as the document that made it: decoded in
 That catches a re-encoding that renumbers or drops a client's clocks, as a decoder that integrated the items after a skipped clock range would;
 ygo parks them (upstream since v1.51.0, reearth/ygo#257).
 It does not catch a re-encoding that keeps every clock and moves text, such as a lost right origin, which `TestACompactedDocumentKeepsItsOrderThroughLaterUpdates` guards on each ygo bump.
-A state that reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that
-reads back as them`): the load serves the stored updates merged whole, which for a log the fold cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the rebuild, and compaction leaves them as stored without building that merge.
-Compaction (`Compact`, which ygo runs as a room closes and as the server shuts down, and the outbox runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest version's cursor changed content.
-A compacted `doc_updates`, and any backup of it taken later, therefore holds no text a write deleted:
+A state that reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that reads back as them`):
+the load serves the stored updates merged whole, which for a log the fold cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the rebuild, and compaction leaves them as stored without building that merge;
+the process's later compactions of the same rows skip them until they change.
+A room's load decodes the stored state once:
+`servicePersistenceAdapter.LoadDoc` hands ygo no bytes and puts the state it read (or the socket's preload) on the load's record (`roomLoad`), and the room's own load hook (`onLoadDocument`, through `bootstrapLoadedState`) decodes it into the room's document under the server's pending cap, `maxUpdateItems`, before anything reads or observes it.
+A single stored row, which `Load` returns as stored, is decoded there alone; a folded log is also decoded by the fold, which applies its rows, and by the fold's read-back.
+A history that does not decode there, a log served merged among them, fails the room (`failRoom`) with that decode's error, which ygo returns to the caller:
+the room is not published, and its next access loads it afresh.
+Compaction (`compactRoom`) folds a document's rows at or below its fold point into that row, which then holds their state, and deletes the rows below it.
+The fold point is the newest row at or below the head older than two minutes on the database's clock (`compactTail`), so a row younger than that is left as written, byte for byte.
+It reads on its own two-connection pool (`store.Pool.Compaction`, `dispatch-compaction`) in one repeatable-read transaction, folds with no document lock held - from memory once that transaction ends when the rows total at most 32 MiB, streaming inside it otherwise - and then takes the document's lock on a connection of the same pool (`lockRoom`) for a short write.
+That write checks the rows at or below the fold point are the ones it folded, version for version and xmin for xmin, and drops the fold when a prune, a rebuild, a delete or another compaction changed them, or when it had to finish a stranded prune first.
+The folded row's `content_changed` says whether any row it folded past the latest version's cursor, read inside that write, changed content.
+Three paths compact, all under that tail rule and none on a request goroutine:
+ygo's room close (`servicePersistenceAdapter.Compact`, on the room's worker as it exits, the server's shutdown included);
+the per-process compaction queue (`compactionQueue`), which every committed append and every load notes and whose one worker compacts a document once it has 16 rows older than two minutes after its first row (`compactMinRows`) or one row after its first older than 15 minutes (`compactMaxTailAge`), retrying a compaction that found the lock busy, was dropped or failed after 1 s, doubling to 1 min;
+and the hourly sweep (`RunCompactionSweep`, lease `document-compaction`, a `duty.RunLeased` ticker of one hour whose first tick is at start), which compacts every document due by the same rule whether or not NATS is configured, and so catches what a restart, `Shutdown` or `Quiesce` dropped from a queue.
+The sweep reads only the documents `doc_compaction_owed` (migration `20261028195714`) names, never a scan of `doc_updates`:
+every append names its document there in the statement that inserts its row once that row is not the document's first, a compaction that leaves no row above its fold point removes it in its write's transaction, as do a rebuild and `Delete`, and the sweep removes an entry whose document holds no row after its first (a prune's or an artifact deletion's), each under the document's lock.
+`PgVersioned.Compact`, ygo's interface, folds under a keep-N rule instead and is scheduled by nothing in Dispatch.
+A compacted `doc_updates`, and any backup of it taken later, therefore holds no text a write deleted once that write is about 75 minutes old - the two-minute tail, the 15-minute age rule and the hourly sweep:
 text deleted before a version captured it is gone (the operator's decision, LEGION-496).
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and after;
 the one measure the room's update observer, `updateChangesMarkdown`, a transactional live write in `applyLive`, and a settlement's or the block-id backfill's repair, `repairClass`, all apply) - and settlement writes a version only when a content-class row lies past the latest version's `doc_update_version` cursor and the settled document renders differently from that version.
 It stays one measure where a rendering is reused rather than made again:
-a write takes the rendering of its fork before the operation from the room's replica or from its own previous operation, and the observer takes a published write's own rendering, only where each is the rendering of the very state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is deterministic over one state;
+a write takes the rendering of its fork before the operation from the room's replica or from its own previous operation, the observer takes a published write's own rendering, and the replica's first run takes the room load's rendering of the state it starts from, only where each is the rendering of the very state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`, `renderedReplica.start`), since rendering is deterministic over one state;
 a margin write (`applyMargin`) renders nothing before it writes.
+It stays one measure where the observer renders less than the whole document, too:
+for an update that changed something inside some top-level blocks, `pmdoc.Layout.Splice` renders only those blocks into the markdown the replica keeps and answers exactly what a whole render of the new document writes or declines, and where it declines the observer renders the whole document (`renderedReplica.updateChangesMarkdown`).
 Indexing an ask block fails the second half:
-it writes an `asks` row and an `ask.opened` event over words the edit that wrote the block already versioned, and a settlement that versioned the document for that event alone would write a byte-identical version credited to nobody, staling an approval pinned to what an agent had just written and closing Legion's design gate with nothing in the event log to explain it (LEGION-273).
+it writes an `asks` row and an `ask.opened` event over words the edit that wrote the block already versioned, and a settlement that versioned the document for that event alone would write a byte-identical version credited to nobody, with nothing in the event log to explain it (LEGION-273, where such a version staled an approval pinned to what an agent had just written and closed Legion's design gate; the carry now carries that approval to such a version instead, `docs.carryApproval`).
 Settlement's tree writes - stamping block ids, restoring an ask block's server-owned attributes - move the stored Proof state and usually render the same markdown, so a version for one of those would repeat the version before it too (LEGION-229 requirement 2);
 their `doc_updates` row records what they rendered rather than `true`, so a repair that changed no text leaves nothing past the cursor for a later settlement to version.
 The version a settlement that writes none leaves the document at is the one it found, and that is the number its `block.repaired`, `block.invalid` and retraction events name (`settlementReconciliation.nameVersion`).
@@ -427,7 +454,7 @@ An update that changes only what no rendering carries therefore versions no docu
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's `id` when it opens the document, and each ordered list item's `label` and `listType` on the first keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits the text it covers.
 A margin record changes the marks map alone, never the text, so its transactional write (`applyMargin`) records `false` without rendering the document again, and the room's update observer keeps its rendering for the publish of one whose fork was built from that same room (`liveWriteOrigin.marginOnly`).
 One forked from the store (`coldFork`) can carry deletes the room never took, since ygo encodes an update with its document's whole delete set, so its publish is rendered as any other update is.
-Routes that write a version on request do so whatever changed, so each can write a version whose markdown equals the previous one's and stale an approval pinned to it:
+Routes that write a version on request do so whatever changed, so each can write a version whose markdown equals the previous one's, which carries an approval pinned to that one to it (`docs.carryApproval`, while its decision blocks are as their rows have them) rather than staling it:
 an upload to an existing document (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`) always inserts one;
 `POST /artifacts/{id}/versions` and accepting a suggestion always name one through `NamedVersion`;
 and `POST /edits` names one through `NamedVersion` when it is sent with a `summary` and its `changed` is true.
@@ -439,6 +466,8 @@ an anchored comment's or ask's `SnapshotVersion` compares that same rendering wi
 The next snapshot of such a document writes today's rendering of that text, and when the stored version was approved it leaves the approval stale until a human approves the new one.
 A browser is credited as a version's author only for browser edits made while it is connected (`creditContentChange`), another browser's as well as its own, since a browser edit cannot be pinned on one connected peer;
 opening a document or an agent's edit credits it nothing, so a reader whose editor changes nothing the rendering carries causes no version and cannot stale an approval.
+A commit the room logs with no origin at all is ygo's own cleanup of formatting markers a remote delete left covering no text (reearth/ygo#284), which no browser typed, so it is credited to no one on either path (`originCreditsNoOne`, INFRA-644):
+not as a content change (`creditContentChange`), and not for the shadow of an open live write, which is the credit a commit measured as no change carries in case that write's shadow measures it a change as it is stored (`unchangedCredit`, `storedClasses`).
 A handler joins its document operations to its transaction with `Docs.Join`, which returns the transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
 every document write takes its transaction from the ledger and refuses a context that was not joined (`errUnjoined`):
 `SeedText`, a rebuild (`RebuildDocument`), the version writes, every write that runs through `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch, an accepted or rejected suggestion, an ask's edited text and its answer or resolution, a comment's anchor mark - and a comment's or suggestion's margin record, which runs through `applyMargin` on the same steps that open and record an `applyLive` write (`openLiveOperation`, `recordLiveOperation`).
@@ -467,7 +496,7 @@ While a transaction's write to a document is open it holds that room's writer sl
 The docs layer takes a document's locks in one order, wherever a handler starts:
 the owner row (`lockArtifactOwner`), then the writer slot, then the advisory lock; a joined read takes the owner row before it waits for the slot.
 The slot is in memory, where Postgres cannot see a wait for it, so no transaction may wait for it while holding a lock its holder still needs.
-A failed room's eviction flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover either:
+A failed room's eviction flushes under the advisory lock and always waits for it, writing a compaction only when rows stand older than the tail and otherwise letting the lock go, so a repair written into the failed room commits before the room reloads and no transaction waits for a failed room to recover either:
 a document operation inside a transaction (a handler's, or settlement's own) that meets one fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the transaction rolls back, and the caller retries once the room has reloaded;
 so does a write whose room fails before its first append, since the reloaded room may lack it.
 A room's own load never waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready barrier, so the two would hold each other - and refuses instead, which ends the eviction;
@@ -589,19 +618,9 @@ The replica's lock is the one a room's browsers wait on.
 The update observer takes it for every peer update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only once the observer has returned (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go`), so a read holding the replica for its walk holds every other browser's copy of the keystroke.
 A read therefore only tries the lock, and reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads never queue behind each other or ahead of a waiting observer.
 `BenchmarkKeystrokeBesideReads` measures the wait:
-a keystroke's transaction and the observer's whole turn with the replica - the drain of the room's update log, the update applied to the replica and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads.
-One run of each - the render's own cost, hundreds of ms a keystroke regardless of which read mechanism races beside it, put repeated sampling out of this pass's time budget - keystroke latency p50 / p90 / p99 in ms, on the development machine (32 cores, load 75 to 80) and on half a processor (`GOMAXPROCS=1` under a 50% CPU quota, production's allotment):
-
-| Reads beside the keystrokes | 32 cores, one every 250 ms | 32 cores, back to back | Half a processor, one every 250 ms | Half a processor, back to back |
-| --- | --- | --- | --- | --- |
-| none | 551.8 / 849.1 / 1120 | | 635.5 / 810.9 / 881.5 | |
-| copies | 634.5 / 940.3 / 1264 | 663.2 / 823.7 / 974.4 | 1205 / 1478 / 1676 | 1337 / 1547 / 1691 |
-| the replica, tried (this design) | 685.8 / 990.7 / 1469 | 705.7 / 1107 / 2015 | 1137 / 1437 / 1606 | 1368 / 1558 / 1692 |
-
-The render dominates every row now, on both designs:
-at half a processor the three keystroke counts are within one run's noise of each other, matching round 2's real-browser, end-to-end measurement of the same three modes (PR comment, not reproduced here).
-On 32 cores the replica still costs more at the tail than a copy does - about 50 ms at its median and 200 ms at p99 reading every 250 ms, growing to about 1 s at p99 reading back to back - the same direction this design's trade-off has shown since round 1, now measured on top of the render's own cost rather than in isolation from it.
-A replica of the reads' own would remove that tail (measured early in this PR's history, before this benchmark counted the render, at `93a77af2`) and was rejected for its memory:
+a keystroke's transaction and the observer's whole turn with the replica - the drain of the room's update log, the update applied to the replica, and the render the observer runs for it (`renderedReplica.observe`) - 120 keystrokes 20 ms apart on a 524 KiB document, beside no reads, beside reads that take copies, and beside reads that try the replica, which is this design.
+Run it for the three modes' keystroke latencies on the machine in question, on all its cores and on half a processor (`GOMAXPROCS=1` under a 50% CPU quota, production's allotment).
+A replica of the reads' own, which no observer would ever hold, would leave a read waiting for nothing, and was rejected for its memory:
 a room read while resident would hold a second whole copy of its document until eviction, about 6.6 MiB of heap at 51 KiB, 63 MiB at 524 KiB and 123 MiB at 1 MiB, with nothing bounding how many rooms hold one.
 Copying the observer's rendered tree under the lock instead of walking the replica would hold it about 45 ms rather than about 105 ms at 524 KiB, but would keep that tree resident (about 22 MiB) and still need the replica for the loss check, which walks the document itself.
 A read's own cost (`BenchmarkLiveDocumentRead`, the development machine at load about 40):
@@ -623,9 +642,10 @@ the room has one writer slot (`openLiveWrite`); and a committed write reaches th
 A helper that walks the room inside `Server.Apply` outside a transaction, as an unjoined write once did, races every peer's update; no production path does.
 `TestThreeBrowsersAndTheAPIEditOneRoomAtOnce` has three websocket peers type while the API edits the document, until 50 of its edits have overlapped their typing.
 
-Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason:
-whether the service builds the decoder (`newDocumentCopy`:
-the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's decode of an update it appends: a browser's, which no document here encoded (`appendUpdate`), and one whose header names no single client's item count (`refuseUpdateItemCap`)) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
+Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason, and every copy that replays stored or room updates is built by one constructor, `newCappedDocumentCopy`, at the cap of the instance it decodes for, with ygo's format cleanup off (below).
+`newCappedDocumentCopy` takes the cap of the instance the decode runs for - `PgVersioned.maxPendingItems` or `Service.maxPendingItems`, both `maxUpdateItems` in production and lowered only by a test (`shrinkPendingItems`) - while `newDocumentCopy` is that constructor at `maxUpdateItems` itself, for a decode that runs for no instance with a cap below it.
+Which decode uses which is in the code (`internal/dispatch/docs/tree.go`), not listed here.
+ygo builds the decoder for the service's rooms (`Server.MaxPendingItems`, set in `New` from `Service.maxPendingItems`).
 ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.
 `TestTheStoreTakesOneBrowserUpdateItsRoomTook` is a browser's update the store decodes itself, which a check at ygo's default queue refuses, failing the room;
@@ -633,10 +653,10 @@ In a room, which keeps what it parks across updates, the queue is also the most 
 `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`, `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
 Every copy that replays the room's commits makes no commit of its own:
-ygo follows a remote apply that changes formatted text with a format cleanup committed with a nil origin, as Yjs does, while the room's own repairs and sweeps are local commits, which never clean up, so `newDocumentCopy` builds every copy with `crdt.WithFormatCleanup(false)` (reearth/ygo#369, in the pinned fork), and a room's load applies its stored history itself, with the cleanup off, then turns the cleanup back on for the updates that follow (`applyLoadedState`, from `onLoadDocument`;
+ygo follows a remote apply that changes formatted text with a format cleanup committed with a nil origin, as Yjs does, while the room's own repairs and sweeps are local commits, which never clean up, so every copy is built with `crdt.WithFormatCleanup(false)` (`newCappedDocumentCopy`, which `newDocumentCopy` calls: the replica, a fork, and every fold of the stored history, a compaction's included; reearth/ygo#369, in the pinned fork), and a room's load decodes its stored history itself, under the server's pending cap and with the cleanup off, then turns the cleanup back on for the updates that follow (`bootstrapLoadedState`, from `onLoadDocument`;
 ygo's `LoadDoc` is handed no bytes).
 A browser's update and a write's publish (`publishLiveUpdate`) reach the room as remote applies, and any cleanup either makes is stored with the rest of the room's history, so every copy replays it.
-Without this a replica and a fold of the stored history each ran cleanups the room never ran, and `*x*y` read back as `*xy*` (`TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown`), and a room loaded from a history holding repeated markers at a text's start held a state the room before it never held (`TestARoomLoadsItsStoredHistoryAsItWasStored`).
+Without this a replica and a fold of the stored history each ran cleanups the room never ran, and `*x*y` read back as `*xy*` (`TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown`), a room loaded from a history holding repeated markers at a text's start held a state the room before it never held (`TestARoomLoadsItsStoredHistoryAsItWasStored`), and a compaction stored that formatting in the row every later load reads (`TestACompactionStoresTheRoomsFormattedStateAsTheRoomHoldsIt`).
 
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's edit, a read outside any transaction - stays resident until it has been idle for a minute (`roomIdleTimeout`), when ygo's idle sweeper evicts it.
 ygo's default, eager eviction, evicts a room the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go` checks only the peers):
@@ -662,7 +682,7 @@ Its append moves an unconsumed credit to R under the document lock; a joined wri
 A version reads R under that lock and F from its own room, deletes the R rows it listed and consumes its local F only after its commit.
 `Ledger.commit` holds `state.mu` from before that commit through consumption, so an append that gets the document lock next cannot restore an author the version listed.
 A version on another task sees and removes R but never that task's F.
-Thus a room can disappear or the process can restart after every pending author has reached R, without losing or duplicating a later version's authors; a service repair is credited to no one.
+Thus a room can disappear or the process can restart after every pending author has reached R, without losing or duplicating a later version's authors; a service repair is credited to no one, and so is a commit with no origin, whether it is stored as a content change or as a no-change update an open write's shadow measures as a change (`originCreditsNoOne`, which `creditContentChange` and `unchangedCredit` both follow; the rule above).
 An in-flight credit holds its state until its append lands (`unusedLocked`).
 A close the service forces - a failed room's eviction, `Evict`, `Quiesce`, and the close of a room behind the durable head (`closeReservedRoom`) - settles that state itself rather than leaving it to `OnUnloadDocument`, and ygo takes the closed room out of its map before the close returns, so a browser that opens the document meanwhile (`authorize` registers it before its room is loaded or joined), the room that browser's connect loads, and an edit typed in that room all reach the state the close has yet to settle.
 The close therefore keeps that state while anything holds it and forgets it when nothing does, as every other end of a room does (`releaseIfUnusedLocked`), so the browser, what the new room's load read - its issue's closed flag, its ask blocks, its latest edit source and the settlement it armed - and the new room's own credits and unstored updates stay where they were recorded, and so does what the closed room left for its own late callbacks to come back for (INFRA-352).
@@ -705,7 +725,7 @@ ygo returns a read-write peer's awareness update to every peer, including its se
 A read-only peer receives ygo's bounded empty awareness response and cannot change shared awareness.
 Dispatch writes no document-socket keep-alive frames.
 
-The room's update observer renders a replica of the room, the one its reads walk, not the live tree, since ygo fires it after the transaction has released the document's lock and another write can be integrating meanwhile (`renderedReplica`).
+The room's update observer measures each update on a replica of the room, the one its reads walk, not the live tree, since ygo fires it after the transaction has released the document's lock and another write can be integrating meanwhile (`renderedReplica`).
 The replica moves only through the room's commits, one at a time and in commit order:
 ygo appends each committed transaction's update to the room's update log under the document's lock, before any observer of that transaction runs (`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains the log, applying each update in turn and comparing the rendering it leaves with the one before it (`renderedReplica.changedBy`).
 It renders the replica for that only when it cannot know the rendering otherwise, and three cases it knows exactly.
@@ -722,12 +742,28 @@ Catching the replica up to the room instead took in every commit since the last 
 when a published write's observer ran first, it counted a browser's edit in its own change, which credits no one, and the browser's own observer then found nothing changed, so the browser was on no version and in no pending row.
 The update an observer is handed cannot stand in for the log:
 two transactions' observers run concurrently in either order, and each update carries the room's whole delete set.
-The log records the room's state as of just before its first transaction since the load, which the replica starts from, so a room that is only read holds no replica;
-a replica that cannot apply an update starts again from a fresh base at the room's next commit (`UpdateLog.Reset`), and counts the updates it could not place as content changes.
-A repair's update is applied and rendered like any other, so the update after it is measured against the room it left, but its class is recorded by its own observer.
+The log records the room's state as of just before its first transaction since the load, which the replica starts from, so a room that is only read holds no replica.
+The load rendered that very state already (`onLoadDocument`, before it opens the log), and hands that rendering, markdown and layout in one value (`keepReplica`, `replicaRendering`), which holds it only through a weak pointer:
+the replica's first run takes it in place of rendering its base again while no collection has taken it (`renderedReplica.start`, `catchUpFromLoad`), and renders the base otherwise (`catchUpRendered`), so the handover keeps nothing resident.
+A replica that cannot apply an update starts again from a fresh base at the room's next commit (`UpdateLog.Reset`), which it always renders, and counts the updates it could not place as content changes.
+A repair's update is applied and measured like any other, so the update after it is measured against the room it left, but its class is recorded by its own observer.
 The test hooks around the observer (`beforeObserveUpdate`, `afterCreditUpdate`) hold an observer, not an update:
 another transaction's observer classifies a held one's update if it reaches the log first.
-On a 1 MiB document the render took about 160 ms and a whole copy about 420 ms, and the replica holds a whole copy's heap (above) while its room is resident.
+On a 1 MiB document the whole render took about 160 ms and a whole copy about 420 ms, and the replica holds a whole copy's heap (above), and a layout of its markdown (below), while its room is resident.
+
+Where the observer cannot know an update's rendering otherwise (above), it renders no more of the replica than the update can have changed (`renderedReplica.updateChangesMarkdown`), on one of three paths, each counted (`renderPathCounts`).
+On a replica that holds a rendering, an update that touched nothing under the document's fragment changed no rendering, and nothing is read or rendered (`observerUntouched`);
+one that changed something inside some top-level blocks, and added, deleted or moved none, renders just those blocks, each read alone (`pmdoc.ReadBlockForRendering`), into the markdown the replica keeps (`pmdoc.Layout.Splice`, `observerIncremental`).
+Anything else renders the whole replica and records a fresh layout from the same render (`renderDocumentForUpdate`, `observerRendered`):
+an update that changed the fragment itself, one that touched more than 64 blocks (`maxTouchedBlocks`), one on a replica that holds no rendering, one `renderedReplica.spliceTouched` declines before it calls `Splice` - the fragment holds a different number of children than the layout records, it holds a child that is not an element, or a touched block is no longer among those children - and one `Splice` declines.
+`Splice` answers exactly what the whole render of the new document writes, and declines wherever the rest of the document could read a changed block differently (its guards, G0 to G8):
+a document of one block or whose first block is a rule, a changed block that held or holds a footnote definition, one whose list kind or empty-paragraph status changed, which moves the list markers after it, one whose tables charged the render's span budget or would exhaust it, a document or changed block that writes a blank empty code block, and a block that does not read, validate or render alone.
+The replica learns which blocks an update touched from the transactions of its own document:
+`renderedReplica.start` subscribes `noteChangedTypes` to them as it makes the document, and after each transaction that applies an update to the replica it reads the shared types ygo says the transaction changed (`crdt.Transaction.ChangedTypes`) and walks each up its `Parent` chain to the top-level block it sits in, marking the update for a whole render when one is the fragment itself or sits deeper than any document in the schema nests.
+Both accessors are the sjawhar/ygo fork's (reearth/ygo#336), whose v1.54 line also logs what each commit parked.
+The markdown the replica keeps and that markdown's `pmdoc.Layout`, 5 bytes per top-level block (each block's end offset and flags), are one value (`replicaRendering`), so a replica holding a rendering holds that rendering's layout;
+a published live write's rendering is one value too (`publishedRendering`), which the replica takes whole when it takes it.
+The ask blocks an update left are walked only when its classification asks for them, and on the incremental path only in the blocks the layout says hold one.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`.
 Inside a code block a `replace`, like an accepted suggestion, writes `with` as the code's literal text (`codeReplacement`), and none of the rules below apply.
@@ -788,8 +824,9 @@ Everywhere else `replace` is inline: `with` parses through `pmdoc.ParseInline` (
 — an empty `with` deletes the match on purpose, and a container left holding only the emptied paragraph reads back holding it;
 refusing the rest is LEGION-280, since splicing nothing over the match silently deleted the caller's text), and a leading marker of a *different* kind from the matched block's own is literal escaped text.
 A `with` opening with a marker of the *same* kind as that block's own would render it twice and is `INVALID_OP` on `with` (`replacementMarkdown`), naming the marker the block renders and, in backticks the caller can paste back, their own text with the marker's significant character escaped;
-the exception is a heading rename whose `find` carried a heading marker, where the repeated marker is dropped, and `with` may change the level only when `find` named the block's actual level
-— `# ` is the level-blind selector, so a generic `find` renames the text and keeps the level.
+the exceptions are a heading rename whose `find` carried a heading marker, where the repeated marker is dropped, and `with` may change the level only when `find` named the block's actual level
+— `# ` is the level-blind selector, so a generic `find` renames the text and keeps the level —
+and a list item the `find`'s own list marker selected, having matched no text as written (`resolveEditQuote`'s `byMarker`), where the repeated marker is dropped and the item keeps its number, and a `with` that is the marker alone, which would empty the item, is `INVALID_OP`.
 A hard line break inside `with` — two trailing spaces or a backslash before the newline
 — puts what follows it at a true line start, where a heading, bullet, `1.`/`1)` ordered or `>` blockquote marker is `INVALID_OP` on `with` as well (`blockMarkerAfterHardBreak`), since replace is inline and that marker can only be written as escaped literal text continuing the matched block, never as the block it names.
 A hard break is itself `INVALID_OP` when the matched textblock is a heading or a table cell (`pmdoc.TextblockAt.OneLine`), which are written on one line, so the break would end the block;
@@ -956,7 +993,8 @@ one that deletes such a row or changes a key column, which is what the weaker le
 Nothing does either today; the check refuses it if something starts to, and that red is the prompt to revisit this rule, not to reach for a weaker level that would not hold.
 **Order:** a transaction that takes both an owner row and the room lock takes the owner row first.
 The durable writers take no owner row at all
-— `appendUpdate`, `CaptureSnapshot`, `PruneAfter`, `Compact` and `Delete` reach the room through `withRoomLock`, which holds a session-level `pg_advisory_lock` on its own connection before it opens a transaction, so no row lock can precede it there
+— `appendUpdate`, `CaptureSnapshot`, `PruneAfter` and `Delete` reach the room through `withRoomLock`, and a compaction's write through `lockRoom` on a connection of the compaction pool;
+each holds a session-level advisory lock on its own connection before it opens a transaction, so no row lock can precede it there
 — which is why order alone could not be the whole rule;
 but a transaction that does take both, such as an upload appending its event after writing the document, deadlocks against a settlement if it takes them the other way round.
 
@@ -977,7 +1015,7 @@ Nothing holding a connection of the shared pool (`store.Pool`)
 The rule enforces itself.
 `store.Pool` keeps the pgx pool private and every way it hands out a connection - `Query`, `QueryRow`, `Exec`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`, `CopyFrom`, `SendBatch`, `Begin`, `BeginTx` - refuses one taken while the caller already holds one, with `store.ErrNestedAcquire`, so a second acquisition fails a test instead of wedging production.
 Every entry point that opens one of this pool's transactions marks its context with `store.WithTransactionTracking`:
-`api.Register` marks every route and the document websocket, and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`, `MaterializeAt`, the three CLI backfills (`BackfillBlockIDs`, `BackfillAnchorBlocks`, `CompactAll`), `rebuild-refs`, the startup seeds and each migration mark their own.
+`api.Register` marks every route and the document websocket, and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`, `MaterializeAt`, the two CLI backfills (`BackfillBlockIDs`, `BackfillAnchorBlocks`), `rebuild-refs`, the startup seeds and each migration mark their own.
 There is no exception: `docs.SetIssueClosed` takes its caller's context so the pool sees it even though it runs after that caller has committed.
 A durable append holds its connection directly rather than through a transaction, so `withRoomLock` marks its context with `store.HoldsConnection` for as long as it holds that connection and the room's advisory lock, and `Query` marks the caller for as long as its rows are open, so a cursor counts as the held connection it is.
 A refusal logs its stack once per call site, so a caller that trips it in a loop cannot flood the log; the error itself is returned every time.
@@ -1219,6 +1257,24 @@ An unpinned reference to a block no current version holds is `404 NOT_FOUND` `no
 Versions are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 2147483647 without a query as a version the document lacks:
 `404 NOT_FOUND` `no version <N> of <document ref>`.
 `GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from blocks of one document to blocks of another, or of the same one, while both blocks are current, and a typed block's pointer only while its target has a type the pointer allows (`block_ref_listed`, below the typed block rules).
+
+An issue's decision records are its document `decisions.md` read over that block graph (`internal/dispatch/api/decisions.go`, migration `20261101162254`).
+Each decision is one `##` section of it: its heading block and every block after it up to the next heading of its level or higher, the heading naming the choice, the blocks giving the reason and the options weighed, and each spec block it shaped linked `dispatch://KEY/spec#b-<id>`, which the block index records as a link from the decision's own block to that spec block.
+The section headed exactly `## Replaced` holds replaced decisions as `###` sections, a paragraph that starts `Unsure:` marks a decision unsure, and a person's decision links its answered ask, which is what makes it theirs rather than the agent's.
+A decision's changed version and time are the greatest of its blocks' (`refs.BlockChanges`), and a spec block X linked from decision D by link L is out of date exactly when D's own text changed after it first linked X and X has not changed since D did, both read from the document's text at a version rather than from that changed version:
+D's text at L's `created_version` differs from its text now, and D's text at the version of this document that stood when X last changed differs from it too.
+The changed version cannot answer either, since it is the greatest of the blocks D holds now and so does not move when a block is removed from D or moved into or out of it, where the text changes and every remaining block keeps its version;
+a stored version holds no block id, so each version is cut into its decisions by the rule the block walk cuts the document that stands by (`decisionSums` beside `decisionSections`: a `##` heading outside `## Replaced` and a `###` under it opens a decision, a heading of its own level or higher closes it, `#` included, which opens none, and a deeper heading is text of the decision it stands in), and each decision is named across versions by its heading and how many decisions before it carry that heading, so a document that carries one heading twice - a decision made again beside the replaced one of its name - names each of them, while a renamed heading, and a version that carried fewer decisions of that heading, give that decision no sum there and read as text that differs from the text now, which it is.
+A new decision marks nothing, and neither does the block index's first pass over a document, which gives every block and every pair one version;
+a version this document does not hold and a spec block Dispatch records no change for leave a link as it is, and a spec block whose last change is older than the document's first version is out of date by the first half alone, since every change of the decision came after it.
+`GET /api/v1/issues/{key}/decisions` serves that view - the document's `dispatch://` address (null, with no decisions, when the issue has no `decisions.md`), the issue's open asks whose block is in its spec in the shape every ask read has, and each decision in document order with its links read through `refs.BlockLinks`, the read `GET /api/v1/block-links` already serves.
+`POST /api/v1/artifacts/{id}/blocks/{block_id}/keep` `{text_sha256}` (a person's) records that the caller agrees with the decision that heading block opens, as the text they read it at, as one `decision_keeps` row keyed on the block rather than on the person:
+the sum is the decision's own `text_sha256`, which the view serves beside its `text`, and a decision whose text changed since is `409 DECISION_CHANGED` with nothing written, as an answer to an ask reworded since is `409 ASK_EDITED` - a Keep over text nobody read is what Keep exists to prevent - while a body with no sum is `400 INVALID_KEEP`.
+Keep records that the decision has been reviewed and not who reviewed it, so a second person's Keep moves the row, and the row holds that sum beside the version the decision then stood at.
+The sum, not the version, is what the view's `waiting_review` compares - an agent's decision, not replaced, whose text no Keep holds as it stands - since a decision's changed version is the greatest of the blocks it holds now and so does not move when a block is removed from the decision or moved into or out of it, where the text changes and every remaining block keeps its version.
+The document Keep takes is its issue's `decisions.md` resolved as the view resolves it, by slug and then by filename; any other document, and any other block - one that is no decision heading, or a decision under `## Replaced` - is `404 TARGET_NOT_FOUND`.
+It appends `decision.kept` (`{artifact_id, block_id, changed_version}`) on the decision's issue, which wakes nobody (`events.Quiet`): a Keep asks its agent for nothing.
+`GET` and `PUT /api/v1/me/documents/{id}/read` `{version}` are one person's last read version of a document (`user_document_reads`, keyed on `model.CanonicalLogin` as `user_ask_snooze` is), which the Spec tab marks each block changed since; they serve per-person state as `GET /api/v1/me/state` and `PUT /api/v1/me/issues/{key}/state` do, and announce nothing.
 
 A comment and a message are collections of blocks too (migrations 0142-0144, `itemblocks`, `refs/item_blocks.go`).
 `itemblocks.Split` reads a body as the document parser reads a document (`pmdoc.ParseWithSourceStarts`) and cuts it at its top-level blocks, each block the body's own text from the start of the line where it starts to where the next one starts, less the spaces, tabs and line endings that end it, so its stored text, its excerpt and its identity are what its author wrote, never the canonical rendering.
@@ -2133,10 +2189,19 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - Two candidates' verdicts can both hold, their approved versions straddling a block's absence; should two pass, nothing is carried rather than one guessed.
   The carry writes an `approved` review pinned to N in the approval's own actor, `reason` `Carried forward from the approval of version <A>: the answer to a decision block was the whole change since it.`, and `artifact.approved`, ahead of the version's own `artifact.version`;
   an approval request open at the carry is answered first, `Approve` in H's name with that reason as its text (`update asks`, `ask.answered` with H's actor), and the review's `ask_id` names it, null otherwise.
-  A version holding no ask block carries nothing and reads nothing more;
-  one holding no answered block, or holding every block as A held it - an answered block the agent deleted and inserted again, whose row stayed answered, is no change of his - carries nothing, whatever a comparison would say.
-  An edit outside the blocks before the answer, an approval by someone else only, H's latest review requesting changes, a newer `changes_requested` by another person, a block added since A left open or resolved, a block A held open that another person answered since (or that was resolved since), a block A held that the agent removed, an agent's reword of a decided block or a selection forged onto one landing in the version his answer writes (the version settlement then writes the row back into is compared on its own), an approved version that showed a decided block other than its row (a reword or a selection the human approved inside the settle window, before settlement wrote the row back), a block he answered deleted and inserted again, whether A held it or not, two people's answers in one version, a copy's document when its source is answered, and a copy planted in the document since A (answered in H's name through its source, but no row of this document's) all carry nothing, and the approval reads `stale` or `changes_requested` as before;
+  A version holding no ask block carries nothing by the answer and reads no row;
+  one holding no answered block, or holding every block as A held it - an answered block the agent deleted and inserted again, whose row stayed answered, is no change of his - carries nothing by the answer, whatever a comparison would say.
+  An edit outside the blocks before the answer, an approval by someone else only, H's latest review requesting changes, a newer `changes_requested` by another person, a block added since A left open or resolved, a block A held open that another person answered since (or that was resolved since), a block A held that the agent removed, an agent's reword of a decided block or a selection forged onto one landing in the version his answer writes (the version settlement then writes the row back into is compared on its own), an approved version that showed a decided block other than its row (a reword or a selection the human approved inside the settle window, before settlement wrote the row back), a block he answered deleted and inserted again, whether A held it or not, two people's answers in one version, a copy's document when its source is answered, and a copy planted in the document since A (answered in H's name through its source, but no row of this document's) all carry nothing by the answer, and the approval reads `stale` or `changes_requested` as before unless the version's text is the approved text (the restore, below);
   a stored version this release's parser or renderer refuses (`pmdoc.ErrSchema`) is logged at WARN and carries nothing rather than failing the version write.
+
+- The carry's second rule is the restore (`restoresApprovedText`), which runs when the answer carries nothing, and alone on the one route that writes a later document version outside `writeVersionTx`, an upload replacing a document (`storeArtifact` calls `docs.CarryRestoredApproval` after `MoveApprovalAsk`; an upload writes no answer, since the server takes a block's server-owned attributes off it):
+  a version whose stored markdown is byte for byte that of the version the document's newest review approved, A - an accidental edit undone exactly, or a version a route wrote over a document that changed nothing - and whose every ask block is as its row has it (`askNodes` and `rowBackedBlocks` over the version's own tree, the upload's read-back on that route, read only once the bytes match) carries that approval, since it holds nothing its reviewer has not agreed to.
+  The row test is what the bytes cannot say: a block A showed open that someone answered since comes back in A's bytes, showing open, while its row holds that answer, which settlement writes into the next version, so it carries nothing, and an approval request open then stays open.
+  Only the newest review carries so: a newest `changes_requested` leaves no approval standing, and an older approval was superseded by the newest one.
+  Only a stored A of N's size is read (`octet_length`, which reads a stored text's size without decompressing it), so the write of any other text reads no document.
+  A's markdown is compared as it was stored, so a renderer change between A and N leaves N a change, as N's diff against A shows, and a version whose decision blocks differ from A's is the answer carry's alone to judge.
+  The restore writes the review, the event and the request's answer the answer carry writes, with `reason` `Carried forward from the approval of version <A>: this version's text is that version's, unchanged.`, whose opening is the daemon's `intake.CarriedApprovalReasonPrefix`, so the restored approval queues no parked root and reopens a design gate as a carried approval does;
+  the write that restores supersedes no approval, so its advice carries no `superseded_approval`.
 
 - Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id` and `seq`, and `requested_by` and `waiting_on` while awaiting, the request's turn by `waitingOnExpression`, so an agent whose own revision moved its request, which sends it no event, reads that the request waits on it);
   `at` is the review's `created_at`, which its event shares, and `seq` that event's sequence on the document's owner, absent for a review recorded before migration 0120 and on every read the release before it serves during a rollout or a rollback, so a missing `seq` does not prove an older review:
@@ -2147,7 +2212,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Legion's design gate consumes the approval events; it is the exception path, not an every-issue step.
 
 - Every read that picks a document's newest review orders by the order the reviews' events committed, `docs.ReviewOrder` (`event_seq desc nulls last, created_at desc, artifact_reviews.id desc`, the table's `id` rather than the `id::text` output column a bare `id` would name):
-  the document read's `approval` (`attachApprovals`, one `distinct on (artifact_id)` over the set), its `reviews` list (`loadReviews`), `docs.LatestApprovedReview` (the approval an approval request names as the one it follows), `latestReviewBy` (a carry candidate's latest review) and `docs.NewestReview` (the review a document write's `superseded_approval` advice reads).
+  the document read's `approval` (`attachApprovals`, one `distinct on (artifact_id)` over the set), its `reviews` list (`loadReviews`), `docs.LatestApprovedReview` (the approval an approval request names as the one it follows), `latestReviewBy` (a carry candidate's latest review) and `docs.NewestReview` (the review a document write's `superseded_approval` advice reads, and the one whose approval the carry must find standing and the restore carries).
   The last three take the first entry of the document's range in `artifact_reviews_by_artifact_event_seq` (migration 0120, that order per document) rather than sort its reviews, which `docs/review_order_plan_test.go` holds:
   it explains each query of `newestReviewQueries` and refuses a query constant of `docs/approval_review.go` that reads one row of the table and is not in that list.
   `created_at` is the review's transaction start, so two reviews written at once can carry it in the other order than they committed in, and the owner's row lock their events take is what orders them;
@@ -2348,7 +2413,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the source's previous projection, and every other source's, stays up.
   `graph_edges` gains the `part_of`/`depends_on` arms over node kind `component` (`<project>/<id>`), never rows in `refs`.
 
-- Every sync runs under a two-minute deadline.
+- Every sync runs under a two-minute deadline of its own, counted from when its flight began rather than from when a caller arrived.
+  A flight runs on a context detached from whichever caller started it (`context.WithoutCancel`), so one caller hanging up fails none of the others.
+  Only the process stopping ends a flight early:
+  `Importer.Close`, which `cmd/dispatch/main.go` runs inside the shutdown's background wait, before `waitUntilIdle` and `pool.Close`, cancels every flight and waits for it.
   `project()` opens with `select … for update` on every source row of the project in id order and `recordFailure()` on its own source row alone, so two server processes never deadlock inside delete+reinsert nor both claim one component id, and a sync whose branch changed or whose source was deleted while it was fetching writes nothing.
   What orders writes across processes is the source row's version, PostgreSQL's `xmin`, which a sync loads (as text) with the row before its fetch:
   every write of the row by any build changes it
@@ -2358,7 +2426,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A re-resolved installation id is written only on the row as loaded (`xmin` unchanged), and the sync carries that write's `xmin` on.
   Writes are thus ordered by when each sync read the branch head, never by commit date:
   a process held mid-fetch never records an older head, or a failure it met, over another process's newer import, and a force-push back to an older commit still imports.
-  The per-project mutex only saves duplicate GitHub fetches inside one process.
+  The callers of one source, one project's one repository, share one flight (`singleflight` keyed on both), so two Refresh clicks cost one set of GitHub calls.
+  No lock is held across a GitHub call, so a slow source holds up no other source, of its project or of any other.
+  A caller takes a flight's answer only when that flight issued its branch-head lookup no earlier than the moment the caller asked.
+  Otherwise it joins the next flight, which necessarily began after it asked (`singleflight` deletes the key before it sends a result), so a push followed by a Refresh is never answered the pre-push commit.
+  Every import failure is recorded on the source row whatever its callers did, the sync's own deadline included, which is written on a cancel-free context;
+  only the process stopping suppresses that record.
   A healthy source whose head is the recorded commit only refreshes `last_sync_at` (no fetch, no event);
   a moved head whose subtree sha equals `last_tree_sha` records the commit without re-fetching or re-projecting
   — so a caller looping a sync route is bounded to the head lookups.
@@ -2375,8 +2448,6 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   404 without a source); and the `dispatch architecture-sync` command of this release riding the every-source route, or the one-source route with `--repo`.
   `DELETE /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` deletes that source's `components` by the foreign key's cascade, and their `component_depends` by theirs, in the same transaction (the graph loses those component arms), then the `component_facts` rows whose component no source of the project projects any more (`architecture.DeleteOrphanComponentFacts`);
   every other source's components stay, and snapshots remain as history.
-  A sync that hits its own two-minute deadline while the caller is still alive is recorded on the row like any other failure (the record write runs on a cancel-free context);
-  a caller that has gone away records nothing.
   The state-change decision behind both events is made from the source's row as read under its lock, so the second of two server processes that fetched the same head (or hit the same failure) stays silent;
   a sync held by a recorded GitHub rate limit fails with text that names the limit by when it was recorded, never by its remaining wait, so one limit is one `sync_failed`.
   A `PUT` that re-saves a source (changing its branch) resets `last_tree_sha` with the other sync columns, so a byte-identical architecture directory on the new branch still re-projects once.
@@ -2521,7 +2592,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 
 - Dispatch caps (`CAP_EXCEEDED` 400) read `<field> is N characters over the M-character limit (L/M)` (`capExceededError`, UTF-16 units) or `<field> is N over the M-item limit (C/M)` for counts;
   `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` answer a non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`);
-  a document-edit quote miss (`TARGET_NOT_FOUND`) names the three nearest blocks and a `# Title` quote selects a heading.
+  a document-edit quote miss (`TARGET_NOT_FOUND`) names the three nearest blocks, a `# Title` quote selects a heading, and a quote opening with a list marker (`- x`, `5. x`, a task box `[ ]` or `[x]` allowed after it) that matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and its box matching only a task item in that state (`pmdoc.ParseListItemQuote`, `listItemQuoteMatches`), a miss saying what the marker means and quoting the text without it;
+  a quote written as a table row's cells, its ` | ` the boundary between cells rather than text a cell holds, names instead the run of one row's cells its parts match (`tableRowQuoted`), and a quote reaching from one table cell into another names both cells, a move anchor included, which is refused as an insert anchor is.
   The outbox `payload_summary` of `ask.answered` is the answer rendering (`<selected> - <text>`), not the question.
 
 - Every timestamp Dispatch marshals is UTC, whatever zone its process runs in:
@@ -3159,7 +3231,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   nats-server answers the refused publish with API error 10077 (`JSStreamStoreFailedF`) `maximum bytes exceeded`, which nats.go returns as `nats: maximum bytes exceeded` and the bus wraps as `bus.ErrStreamFull` (`stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`;
   `publishJetStream` and a window's send, `streamFull`).
   It is not a `bus.ErrRefused`, so every publisher treats it as a failure to retry:
-  the webhook listener answers GitHub 503 and logs `github publish failed`, and Dispatch's redelivery sweep has GitHub redeliver it (five times, over about half an hour);
+  the webhook listener answers GitHub 503 and logs `github publish failed`, and Dispatch's redelivery sweep has GitHub redeliver it (on a doubling backoff, until GitHub records the delivery or 72 hours after its first failed attempt);
   Dispatch's outbox backs the event off and retries it with no attempt limit;
   the CI store releases its claim and settles again on a later tick;
   `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` under `streamFullPrefix` (`envoy: the message bus refused the message because its stream is full: …`), recorded with the outcome `stream_full` rather than `bus_unavailable`, which `@legion/envoy-client` retries once before the session's tool reports it, Dispatch records as a failed delivery attempt its dashboard offers to Retry, and the Legion daemon's notice outbox retries on its backoff.
@@ -3344,7 +3416,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   — both of `roles.ResolveHolder`'s attempts spent on a supersession (`roles.Churned`), `errRoleHolderChanged` — keeps that 503 and its `Retry-After: 1`, since a fresh read wins the race as soon as the replacement claim settles, but answers `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}` (`writeRoleHolderChanged`).
 
 - A role topic answers `200` with the envelope and `holder`, the session that took it, once the holder's receipt arrived, and also, forwarding nothing, when `source_session` holds the role or the holder already confirmed this dedupe key through the route.
-  It answers `404 {"error":…,"reason":"unclaimed"}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the listener still keeps the holder's final heartbeat (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache), whether the first resolution or a later attempt's finds it so.
+  It answers `404 {"error":…,"reason":"unclaimed","claim_revision":0}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, a `last_seen` timestamp when the listener still keeps the holder's final heartbeat (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache), and the same `claim_revision` a lookup reports (`0` for a claim the resolution released), whether the first resolution or a later attempt's finds it so.
   It answers `403 {"error":…,"reason":"capability","holder":…}`, forwarding nothing, when the holder does not advertise the payload's delivery mode or the mode cannot be read unambiguously, as `/v1/messages/send` refuses it.
   It answers `504 {"error":…,"reason":…,"event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` when the window ended without a receipt:
   `reason` is `receipt_timeout` when the last forward reached the server and drew no receipt (a holder that stopped running while its registration lives gives it), else `delivery_failed` (no live holder to forward to, a later attempt's read that failed or ran out of time, a forward not shown to have reached the server);
@@ -3411,6 +3483,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   a role store call that did not answer within its cap or that budget (the claim read, the holder's session read or the conditional release) is, as on the publish route, `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`, naming the call that did not answer (`writeBusUnavailable`;
   a key NATS refuses keeps the 413 or 400 `writeNATSError` gives);
   and a claim record no read can decode is, as on the publish route, `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no `Retry-After`.
+  Every holder answer, the 200 and the 404 alike, carries `claim_revision`: the `envoy_roles` revision of the role's claim record as this lookup leaves it, which `/v1/roles/set` takes back as `if_claim_revision` (the 503s and the unreadable-record 500 above carry an error alone, as they always did).
+  It is the revision the live holder's claim was read at, the revision of a lapsed claim this lookup kept (a restored claim still inside its restart grace), and `0` for a role no record claims — an unclaimed one, and a lapsed holder whose claim this lookup released.
 
 - `/v1/roles/set` (POST)
 
@@ -3422,6 +3496,12 @@ Each item below names an endpoint and its method, then its contract, and an item
   A predecessor still live under another client instance keeps the role, and the claim answers `409 {error, role, holder}` naming it, as any other live holder does.
   The predecessor's entry is read from the `envoy_sessions` bucket itself, never from this listener's trailing cache of it, and a predecessor read that did not answer is the bus-unavailable 503 with nothing changed.
   The claimant's own entry is read from the bucket too, and a claimant read that does not answer falls back to the cached entry, so a cache that trails without the claimant's id decides that claim as the third case.
+  A claim carrying `if_claim_revision` is conditional: it lands only while the role's claim record is still at that revision, the one a `/v1/roles/<role>` lookup reported as `claim_revision`, and `0` names a role with no claim record at all, so such a claim lands only while none exists.
+  Any other revision in the bucket, a record where the claim names none, or none where it names one is `409 {error, role, holder, claim_revision}`, where `claim_revision` is the revision the bucket does hold (`0` for no record) and `holder` the session its claim names (empty for none), and so is a claim that passed that check and then lost its conditional write to a claim that landed in between.
+  **No claim record is written**, so the role keeps the holder the standing claim gave it: the precondition is weighed before the claimant's interest record is touched, and a claim that lost the conditional write rolls that record's topic back unless the winning claim names that same session, whose record then keeps the lane topic of the role it now holds (`store.Registry.SetRoleWithPrevious`, `store.ErrRoleClaimRevisionMismatch`).
+  The claimant's own session registration is refreshed before any of this, as it is on every claim this route takes, conditional or not.
+  A claim with no `if_claim_revision` is weighed by the soft and last-claim-wins rules alone, exactly as before the field.
+  It is how a scheduler turns a lookup of a role and the claim that follows into one decision, which neither last-claim-wins nor a soft claim can do: a claim that landed in between refuses this one rather than being overwritten by it.
   A write route (below the list).
 
 - `/v1/interests/subscribe` (POST)
@@ -3781,7 +3861,8 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
   While it runs it renews its key's lease (`IDEMPOTENCY_LEASE_MS`, 60 s) every `keyedLeaseRenewal` (20 s, `renewRequestKeyLease`), each renewal a statement of its own, and only until `keyedHandlerLimit`, so a handler that runs past its limit holds its key one lease longer at most.
   A client that gave up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run lives and then its stored answer, and only a run whose process died is taken over.
   A handler cut off with its client would roll its transactions back and leave every retry to start over, so a write that takes the server longer than the client waits could never land.
-  Every handler that reads `r.Context()` for its work gets this detached context, the architecture importer's `Sync` among them.
+  Every handler that reads `r.Context()` for its work gets this detached context.
+  The architecture importer's `Sync` detaches one of its own from it (the importer section above), so the flight it shares outlives the caller that started it and ends only when the process stops.
 
 - The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it.
   A 2xx or a 4xx is stored and the row finished in one statement;
@@ -4017,11 +4098,9 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   `workflow.<file>.<action>` carries only runs without an associated pull request.
 
 - A branch or tag push publishes `push.branch.<ref>` / `push.tag.<ref>` (a ref that would take the subject past 4,032 bytes, the longest the bus publishes, is cut to fit and ends in `~` and the first 16 hex digits of the whole ref name's SHA-256:
-  `contracts.GithubPushSubject`) with the payload fields `kind: "push"`, `repo`, `ref`, `after`, `before`, `pusher`, `head_subject` (the head commit's first non-empty message line, capped at 2,048 runes with a trailing `…` so the envelope stays under NATS's max payload), `commit_count`, `compare_url`, `changed_paths` (the unique paths across every pushed commit's `added`, `removed`, and `modified` lists, in first-seen order, newline-separated, at most 100 of them and 32,768 runes of text, each path listed whole or not at all;
-  omitted when no commit is listed, since the payload drops empty strings), and `changed_paths_truncated` (`"true"` when the list stopped at either cap with a unique path left, else `"false"` — present on every push, so its absence alone tells a consumer the listener predates the field), and `forced` (`"true"` or `"false"`, GitHub's own flag, present on every push the same way).
-  A forced push's commits are listed from the merge base, so its `changed_paths` do not describe what it did to the head it replaced.
+  `contracts.GithubPushSubject`) with the payload fields `kind: "push"`, `repo`, `ref`, `after`, `before`, `pusher`, `sender`, `head_subject` (the head commit's first non-empty message line, capped at 2,048 runes with a trailing `…` so the envelope stays under NATS's max payload), `commit_count` and `compare_url`.
   Envoy forwards what GitHub sent.
-  The Legion daemon reads no `changed_paths`, `changed_paths_truncated` or `forced` since sjawhar/legion#2354, when its handoffs moved from committed files to Dispatch records and no push is told apart by its paths; the listener still sends them.
+  The payload carried `changed_paths`, `changed_paths_truncated` and `forced` until sjawhar/legion#2354 moved Legion's handoffs from committed files to Dispatch records, after which no consumer told one push from another by its paths; they are no longer sent.
 
 - A workflow run with no pull request publishes `workflow.<file>.<action>`.
   A finished Actions job on the default branch, of a run with no pull request, publishes `job.<run_id>.completed`:
@@ -4826,7 +4905,7 @@ A bad credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `account
 — the credential is good and it is the broker's list that refuses
 — and `ACCOUNT_LACKS_POWER`, for a listed caller reaching a route its name does not carry, naming that caller and that route.
 No refusal repeats the token.
-Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`) or `relaysDecisions` (the ten routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through, the two decide rows among them), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on an `accountAuth` row that declares none).
+Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`) or `relaysDecisions` (the nine routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through, the two decide rows among them), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on an `accountAuth` row that declares none).
 The two `accountAuthAfterRecordKind` rows declare `relaysDecisions` as well, and `decideRecord` checks it against that same table once it has read the record's kind and authenticated its own caller, since `authenticate` reads no credential for them; that test passes over them, being no `accountAuth` rows, and `cmd/broker/account_powers_test.go` is what pins them, driving each as the `listener` caller and reading `403 ACCOUNT_LACKS_POWER`.
 `accountCaller` is the check a daemon's token login makes (`machine.Service.VerifyKubernetesServiceToken`, the Kubernetes half of `VerifyServiceToken`), against the same verifier and with the same taxonomy);
 `serviceAuth` is that same check, taken as the whole of a route's authentication:
@@ -5038,7 +5117,7 @@ a denial releases nothing, so the record's approver may still deny either), re-v
 a non-pending record, and one past its expiry that the sweeper has not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes nothing)
 — but a record past its expiry, whether the sweeper has recorded it expired or not, answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never that it was decided.
 An `agent_secret` record is pending while its request is:
-`GET /v1/pending` (`PendingForApprover`, which lists `anyone` records for every approver) lists it only then, and `GET /v1/credential-requests/{id}` (`ReadRecord`) reads it as pending only then;
+`GET /v1/pending` (`PendingForApprover`, which lists `anyone` records for every approver) lists it only then, and `ReadRecord`, which the broker's own approval page and `POST /v1/machine-logins/lookup` read a record through, reads it as pending only then;
 a decided record's terminal event names the decision, and a request cancelled with no cancelled event on its record, the shape an ended enrollment's requests had before `endEnrollment` wrote one, reads as `cancelled` from its request row.
 A machine login is pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver `anyone`) for every approver.
 `Values` releases a live grant's values, each read from the secret its request froze (its source: the ARN, or the Secret Manager resource name).

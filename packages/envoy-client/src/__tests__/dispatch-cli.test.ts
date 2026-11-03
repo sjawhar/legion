@@ -702,6 +702,21 @@ describe("the dispatch CLI", () => {
     expect(requests).toEqual([]);
   });
 
+  // --content and --content-file store their text as a Markdown document, so under a .jsonl name
+  // the call is refused before any request, dry run included, naming --path.
+  test("artifact refuses --content-file under a name that is not Markdown, naming --path", async () => {
+    const argv = ["artifact", "--issue", "DSP-1", "--name", "rows.jsonl", "--content-file", "-"];
+    for (const call of [[...argv, "--dry-run"], argv]) {
+      const { code, stdout } = await run(call, omp, '{"row_id": 1}\n{"row_id": 2}\n');
+      expect(code, call.join(" ")).toBe(1);
+      expect(stdout.split("\n").slice(0, 2)).toEqual([
+        "dispatch artifact was not called: 1 problem",
+        `- content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph), and "rows.jsonl" is not a Markdown name. Upload the file under the same name with path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged; content takes a name ending in .md or .markdown or with no extension.`,
+      ]);
+    }
+    expect(requests).toEqual([]);
+  });
+
   // A dry run runs the call's own pre-send check, so a call it refuses is refused alike, before
   // any request: the owner resolved from LEGION_ISSUE or left missing, a ref naming another
   // owner, a picture file that is not there.

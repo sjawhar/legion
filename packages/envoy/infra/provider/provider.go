@@ -11,8 +11,13 @@ import (
 )
 
 // downloadURL is where Pulumi fetches the plugin: it fills in ${VERSION} and requests the asset
-// pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz from the release of that tag.
-const downloadURL = "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"
+// pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz from the release of that tag. The
+// release build overwrites it with the download URL of the repository the run is in, which
+// .github/scripts/repo-paths.sh plugin_download_url derives, through
+// `-ldflags -X 'github.com/sjawhar/envoy/infra/provider.downloadURL=<that URL>'`; that is why it
+// is a var, since -X writes a variable and never a constant. A build with no such flag - a
+// developer's, and provider_test.go's - serves the address below, this repository's own today.
+var downloadURL = "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"
 
 // New returns the envoy-infra provider serving every component the plugin registers, refusing a
 // fractional number in any integer input before a component decodes it (refuseFractionalIntegers).

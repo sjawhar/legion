@@ -15,7 +15,7 @@ import type {
 } from "@legion/contracts";
 import { SESSION_ID_PATTERN } from "@legion/contracts";
 import { bodyWasCut, carriedItem, wholeCarriedBody } from "./delivery";
-import type { DispatchClient } from "./dispatch-http";
+import { type DispatchClient, DispatchGatewayError, DispatchServiceError } from "./dispatch-http";
 import { parseDispatchRef } from "./dispatch-owner";
 import {
   type DatedText,
@@ -123,8 +123,17 @@ export async function textWithPictures(
         addresses.length === 0
           ? ""
           : `; the pictures before it are uploaded (${addresses.join(", ")})`;
+      // Only a refusal that says the upload never took effect is "not uploaded": a gateway's page
+      // or Dispatch's own 5xx may come after Dispatch stored it, and a transport failure or an
+      // unsettled write may still land. The write's own message already ends its sentence.
+      const refused =
+        error instanceof DispatchGatewayError
+          ? !error.mayHaveReachedDispatch
+          : error instanceof DispatchServiceError && error.status < 500;
+      const outcome = refused ? "was not uploaded" : "may or may not have been uploaded";
       throw new Error(
-        `images: ${picture.path} was not uploaded: ${messageFor(error)}. Nothing was posted${earlier}.`
+        `images: ${picture.path} ${outcome}: ${messageFor(error).replace(/\.$/, "")}. Nothing ` +
+          `was posted${earlier}.`
       );
     }
     const address = `dispatch://${owner}/artifact/${uploaded.artifact.slug}@v${uploaded.version.number}`;

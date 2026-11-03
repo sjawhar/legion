@@ -257,11 +257,14 @@ export interface WriteAdvice {
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
    * The approval a document write superseded: the version it stored replaced the one a person
-   * had approved, so that approval is stale until someone approves the new version. A Legion
-   * design gate is such an approval, so this write closed it. Set by a document edit and by an
-   * upload that replaced an existing document, and only on the write that superseded the
-   * approval: a write on a document nobody approved, one whose approval was already stale, and
-   * one whose version carried that approval forward (the approval carry) each omit it.
+   * had approved, so that approval is stale until someone approves the new version or a later
+   * write stores the approved version's text again exactly with no decision block in it decided
+   * since, which carries the approval to that write's version. A Legion design gate is such an
+   * approval, so this write closed it. Set by a document edit and by an upload that replaced an
+   * existing document, and only on the write that superseded the approval: a write on a document
+   * nobody approved, one whose approval was already stale, and one whose version carried that
+   * approval forward (the approval carry: an answer to a decision block, or the approved version's
+   * text stored again) each omit it.
    */
   readonly superseded_approval?: {
     /** The version a person approved, the one this write superseded. */
@@ -638,11 +641,15 @@ export type ArtifactReviewState = "approved" | "changes_requested";
 /** One human review of a document, pinned to the version it was given on. A review is given one
  *  of three ways: by answering an approval request (`ask_id` names the request), from the
  *  document header (`ask_id` null unless a request was open, which the header answers), or
- *  carried by Dispatch to the version a human's answer to a decision block writes, when that
- *  answer is the whole change since the version he approved. A carried review is `approved` in
- *  his name, its `reason` names the carry (`Carried forward from the approval of version <N>: the
- *  answer to a decision block was the whole change since it.`), and its `ask_id` is null unless
- *  a request was open at the carry, which it answers `Approve` in his name. */
+ *  carried by Dispatch to a later version. A carry follows a human's answer to a decision block,
+ *  when that answer is the whole change since the version he approved (`reason`: `Carried forward
+ *  from the approval of version <N>: the answer to a decision block was the whole change since
+ *  it.`), or a version whose text is byte for byte that of the version the document's newest
+ *  review approved and whose every decision block is as its stored row has it (nobody decided one
+ *  since), such as an accidental edit undone (`reason`: `Carried forward from the
+ *  approval of version <N>: this version's text is that version's, unchanged.`). A carried review
+ *  is `approved` in the approver's name, and its `ask_id` is null unless a request was open at the
+ *  carry, which it answers `Approve` in his name. */
 export interface ArtifactReview {
   readonly id: string;
   readonly artifact_id: string;
@@ -656,7 +663,9 @@ export interface ArtifactReview {
 
 /** The document's approval as of its latest version: `draft` has never been reviewed or
  *  requested; `awaiting` has an open approval ask; `approved` is approved at the latest version;
- *  `stale` is approved at an older version; `changes_requested` carries the reviewer's reason. */
+ *  `stale` is approved at an older version: a later version leaves the approval there unless
+ *  Dispatch carries it to that version (`ArtifactReview`); `changes_requested` carries the
+ *  reviewer's reason. */
 export interface ArtifactApproval {
   readonly state: "draft" | "awaiting" | "approved" | "stale" | "changes_requested";
   readonly latest_version: number;
@@ -2349,6 +2358,83 @@ export interface BlockLinks {
   readonly links: BlockLink[];
 }
 
+// DecisionKeep is one person's agreement with a decision: the decision's heading block, the
+// version its text stood at when they pressed Keep, and who did when. What tells a kept decision
+// from one waiting for review again is the sum of its text, which the server records beside the
+// row and serves as `waiting_review`: a decision's `changed_version` is the greatest of the
+// blocks it holds now, so it does not move when a block is removed from the decision or moved
+// into or out of it.
+export interface DecisionKeep {
+  readonly artifact_id: string;
+  readonly block_id: string;
+  readonly changed_version: number;
+  readonly kept_by: string;
+  readonly kept_at: string;
+}
+
+// DecisionLink is one link from a block of a decision to a block of the issue's spec: the
+// decision's own block that holds it, the spec block it names, when and in which version of
+// decisions.md the link was first written, and whether that spec block is out of date - the
+// decision changed after it first linked the block, and the block has not changed since.
+export interface DecisionLink {
+  readonly from_block: string;
+  readonly to: GraphNode;
+  readonly created_version: number;
+  readonly created_at: string;
+  readonly stale: boolean;
+}
+
+// Decision is one decision of an issue's `decisions.md`: its heading block and every block after
+// it up to the next heading of its level or higher. `kind` is "person" when its blocks mention an
+// ask (a person's decision links the answered ask) and "agent" otherwise; `unsure` is set by a
+// paragraph that starts `Unsure:`; `replaced` by sitting under the section headed exactly
+// `## Replaced`. `changed_version` and `changed_at` are the greatest of its blocks'.
+// `text_sha256` is the sum of `text`, which Keep carries back to say which text it agreed with.
+// `waiting_review` is an agent's decision, not replaced, whose text nobody has kept as it
+// stands.
+export interface Decision {
+  readonly block_id: string;
+  readonly heading: string;
+  readonly ref: string;
+  readonly text: string;
+  readonly text_sha256: string;
+  readonly kind: "agent" | "person";
+  readonly unsure: boolean;
+  readonly replaced: boolean;
+  readonly asks: string[];
+  readonly links: DecisionLink[];
+  readonly changed_version: number;
+  readonly changed_at: string | null;
+  readonly kept: DecisionKeep | null;
+  readonly waiting_review: boolean;
+}
+
+// IssueDecisions is GET /api/v1/issues/{key}/decisions: the issue's decisions document, the open
+// questions its spec still holds (oldest first) and each decision of that document in document
+// order. `document` is null, with no decisions, when the issue has no `decisions.md`.
+export interface IssueDecisions {
+  readonly document: string | null;
+  readonly open_questions: IssueAskRow[];
+  readonly decisions: Decision[];
+}
+
+// DocumentRead is GET and PUT /api/v1/me/documents/{id}/read: one person's last read version of a
+// document, `version` and `read_at` null when they have read none.
+export interface DocumentRead {
+  readonly artifact_id: string;
+  readonly version: number | null;
+  readonly read_at: string | null;
+}
+
+// DecisionKeptEventPayload is the payload of `decision.kept`, which a person's Keep appends on
+// the decision's issue: the document, the decision's heading block and the version its text stood
+// at. It wakes nobody - a Keep records that a person agreed, which asks its agent for nothing.
+export interface DecisionKeptEventPayload {
+  readonly artifact_id: string;
+  readonly block_id: string;
+  readonly changed_version: number;
+}
+
 export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {
   readonly artifact: Artifact;
 }
@@ -2382,9 +2468,10 @@ export interface ArtifactHumanEditedEventPayload {
  *  approval ask the review answered, null when given from the document header with no
  *  approval ask open at that version. A third provenance is the carry: Dispatch records an
  *  `artifact.approved` in a human's name at the version his answer to a decision block writes,
- *  when that answer is the whole change since the version he approved; its `reason` names the
- *  carry and the version it follows, and its `ask_id` is null unless a request was open at the
- *  carry, which it answers (see `ArtifactReview`). */
+ *  when that answer is the whole change since the version he approved, and at a version whose
+ *  text is byte for byte the approved version's with no decision block in it decided since; its
+ *  `reason` names the carry and the version it follows, and its `ask_id` is null unless a request
+ *  was open at the carry, which it answers (see `ArtifactReview`). */
 export interface ArtifactReviewEventPayload {
   readonly artifact_id: string;
   readonly name: string;
@@ -2673,6 +2760,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "user_thread_state.updated";
       readonly payload: UserThreadStateUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "decision.kept";
+      readonly payload: DecisionKeptEventPayload;
     })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })

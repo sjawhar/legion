@@ -239,6 +239,8 @@ RULES = {
         Read(f"{DAEMON}/cmd/legion/testdata/gh-help/**", "internal/runtime/tmux/tmux_real_test.go:1822")],
     f"{DAEMON}/internal/stream/integration_test.go": [legion_build("internal/stream/integration_test.go:130 go build .../daemon/cmd/legion")],
     f"{DAEMON}/internal/runtime/workerbin/workerbin_test.go": reads((f"{DAEMON}/docker/gh", "internal/runtime/workerbin/workerbin_test.go:58")),
+    f"{DAEMON}/internal/testpg/file_copy_test.go": reads(
+        (f"{DAEMON}/**", "internal/testpg/file_copy_test.go:22 walks every .go file under packages/daemon (../..)")),
     # --- envoy
     f"{ENVOY}/cmd/broker-refgen/auth_test.go": [
         Read(f"{ENVOY}/{d}/*", "cmd/broker-refgen/auth_test.go:14 readAPI(repo root) parses it") for d in BROKER_REFGEN_DIRS],
@@ -291,6 +293,8 @@ RULES = {
         run(ENVOY, ["./..."], "internal/testnats/nats_test.go:708-709 go list -f ... ./... in packages/envoy", mode="build"),
         *[Read(g, "internal/testnats/nats_test.go:741-747 walks every .go file under packages/envoy but infra, node_modules, testdata")
           for g in envoy_top_level_but_infra()]],
+    f"{ENVOY}/internal/testpg/file_copy_test.go": reads(
+        (f"{ENVOY}/**", "internal/testpg/file_copy_test.go:22 walks every .go file under packages/envoy (../.., infra included)")),
     # --- envoy-infra
     f"{INFRA}/core/permissions_live_test.go": [
         run(ENVOY, ["./cmd/dispatch", "./cmd/listener"], "infra/core/permissions_live_test.go's buildEnvoyCommand go build . in ../../cmd/<dispatch|listener> (root go.work)", mode="build")],
@@ -345,9 +349,13 @@ for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
   tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
   tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
 done"""
-SCHEMA_STEP = "The envoy-infra plugin's schema carries the version it was built with"
-SCHEMA_SCRIPT = ('go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra && '
-                 """pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'""")
+SCHEMA_STEP = "The envoy-infra plugin's schema carries the version and the download URL it was built with"
+SCHEMA_SCRIPT = (
+    'url=$(GITHUB_REPOSITORY=cybermonklabs/legion ../../../.github/scripts/repo-paths.sh plugin_download_url)\n'
+    """go build -ldflags "-X main.version=1.2.3 -X 'github.com/sjawhar/envoy/infra/provider.downloadURL=$url'" -o "$RUNNER_TEMP/pr" ./cmd/pulumi-resource-envoy-infra\n"""
+    "# shellcheck disable=SC2016 # ${VERSION} is Pulumi's placeholder, not a shell expansion\n"
+    """pulumi package get-schema "$RUNNER_TEMP/pr" | jq -e '.version == "1.2.3" and .pluginDownloadURL == "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}"'"""
+)
 # The soak's `-run` is not a flag the simple form reduces, and it moves no closure: the whole
 # cmd/listener package compiles under the serverchange tag, whichever test the run selects.
 SOAK_STEP = "Server-change soak of the listener"
@@ -386,7 +394,7 @@ GATES = [
     gate("test", "test", runs=[
         step_run("test", "Test the Go daemon", "go test -count=1 -timeout 20m ./...", DAEMON, ["./..."]),
         step_run("test", "Test the concurrent packages under the race detector",
-                 "go test -count=1 -race ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/",
+                 "go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/",
                  DAEMON, ["./internal/daemon/", "./internal/record/", "./internal/sessionproxy/", "./internal/launcher/"], race=True),
         script_run("scripts/e2e/stage1-skeleton.sh", 'go build -o "$work/legion" ./cmd/legion', at("test", "Stage 1 live proof"),
                    DAEMON, ["./cmd/legion"], mode="build"),
@@ -724,6 +732,8 @@ GATES = [
         (".github/actions/install-pulumi/**", at("envoy-smoke", "./.github/actions/install-pulumi")),
         (f"{INFRA}/internal/pulumitest/pulumitest.go",
          f"{at('envoy-smoke', 'Download the docker provider plugin the live tests pin')}: sed reads const DockerPluginVersion"),
+        (".github/scripts/repo-paths.sh",
+         f"{at('envoy-smoke', SCHEMA_STEP)}: it derives the download URL the build stamps in"),
     ) + setup_go("envoy-smoke", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_e2e_local", "envoy-e2e-local", runs=[

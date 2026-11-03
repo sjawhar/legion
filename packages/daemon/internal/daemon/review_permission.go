@@ -92,14 +92,20 @@ func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.Pu
 }
 
 // reviewedRepository reads the record of the pull request review is on and parses its repository,
-// the one lookup reviewerCanWrite and reviewBody both need before either reads GitHub. A review on
-// a pull request the daemon does not record answers recorded=false, which both callers take as
-// nothing left to do: the workflow drops such a review unread, so no check of it is ever read.
+// the one lookup reviewerCanWrite and reviewBody both need before either reads GitHub. The record
+// is read under the name the review carries and then, when that finds nothing, under the other
+// name of the pair that names it (ghrepo.Under, repositories.renames): a pull request already
+// open when its repository was transferred is recorded under the name it moved from, while the
+// review names the one it moved to. A review on a pull request neither name finds answers
+// recorded=false, which both callers take as nothing left to do: the workflow drops such a review
+// unread, so no check of it is ever read.
 func (w *workflowRuntime) reviewedRepository(ctx context.Context, review intake.PullRequestReview) (repository ghrepo.Repository, recorded bool, err error) {
 	var pr *record.PullRequest
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		var err error
-		pr, err = w.records.PullRequestByNumber(ctx, tx, review.Repo, review.Number)
+		pr, err = ghrepo.Under(w.repositories.renames, review.Repo, func(name string) (*record.PullRequest, error) {
+			return w.records.PullRequestByNumber(ctx, tx, name, review.Number)
+		})
 		return err
 	}); err != nil {
 		return ghrepo.Repository{}, false, fmt.Errorf("read the record of pull request %s#%d: %w", review.Repo, review.Number, err)
@@ -147,31 +153,48 @@ const tokenAcceptWindow = 5 * time.Second
 // tried with a fresh one.
 const tokenRefusedWait = 5 * time.Second
 
-// reviewAppClient mints the review App's installation token for repository and returns a
-// githubrest.Client using it, as reviewerCanWrite and reviewBody both need: a mint that fails as
-// GitHub's trouble rather than an answer (appauth.TransientError) is returned as an
-// intake.RetryLater naming a minute's wait, since minting on through the App's own rate limit
-// risks the same ban GitHub warns a repeated call does. A mint that fails for any other reason is
-// returned as is.
-func (w *workflowRuntime) reviewAppClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, appauth.Lease, error) {
-	lease, err := w.tokens.Token(ctx, appauth.Review, repository.Owner())
+// reviewAppClient mints the review App's installation token for the repository GitHub holds
+// repository under now (repositories.serving) and returns a githubrest.Client addressing that
+// repository, as reviewerCanWrite and reviewBody both need. It answers that repository too, even
+// when the mint failed, since it is the one the mint was made for and so the one its caller's log
+// lines and refusals name.
+//
+// The mapping is needed because the daemon hears both names of a configured pair
+// (heardRepositories): a review GitHub published before a transfer and processed after it — the
+// daemon down or behind across the transfer, or its delivery redelivered across it — arrives
+// under the name the repository moved away from, whose owner's installation no longer covers it.
+// A token minted for that owner reaches the repository under neither name, and GitHub answers
+// the read 404, which reviewerCanWrite would take as the author having no write access and
+// reviewBody would nak and have redelivered without bound. A repository GitHub already serves is
+// its own serving repository, so a review published after the transfer is read exactly as it is
+// today.
+//
+// A mint that fails as GitHub's trouble rather than an answer (appauth.TransientError) is
+// returned as an intake.RetryLater naming a minute's wait, since minting on through the App's own
+// rate limit risks the same ban GitHub warns a repeated call does. A mint that fails for any
+// other reason is returned as is.
+func (w *workflowRuntime) reviewAppClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, appauth.Lease, ghrepo.Repository, error) {
+	serving := w.repositories.serving(repository)
+	lease, err := w.tokens.Token(ctx, appauth.Review, serving.Owner())
 	if err != nil {
 		var transient *appauth.TransientError
 		if errors.As(err, &transient) {
 			w.holdRateLimit(time.Minute)
-			return githubrest.Client{}, appauth.Lease{}, &intake.RetryLater{After: time.Minute,
-				Err: fmt.Errorf("mint the review App token for %s: a transient failure minting it, retry in %s: %w", repository.Owner(), time.Minute, err)}
+			return githubrest.Client{}, appauth.Lease{}, serving, &intake.RetryLater{After: time.Minute,
+				Err: fmt.Errorf("mint the review App token for %s: a transient failure minting it, retry in %s: %w", serving.Owner(), time.Minute, err)}
 		}
-		return githubrest.Client{}, appauth.Lease{}, fmt.Errorf("mint the review App token for %s: %w", repository.Owner(), err)
+		return githubrest.Client{}, appauth.Lease{}, serving, fmt.Errorf("mint the review App token for %s: %w", serving.Owner(), err)
 	}
-	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, repository)}, lease, nil
+	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, serving)}, lease, serving, nil
 }
 
 // readPermission reads login's permission on repository from GitHub, as reviewerCanWrite says.
 func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.Repository, login string) (bool, error) {
-	client, lease, err := w.reviewAppClient(ctx, repository)
+	// The mint and every call below are made on the repository GitHub holds this one under now,
+	// so repository is that one from here on and each log line and refusal names what was read.
+	client, lease, repository, err := w.reviewAppClient(ctx, repository)
 	if errors.Is(err, appauth.ErrNotInstalled) {
-		w.log.Error("workflow: the review App is not installed on the owner of the review's repository, so the review decides nothing; install the review App there for its reviews to decide a round",
+		w.log.Error("workflow: the review App is not installed on the owner GitHub holds the review's repository under, so the review decides nothing; install the review App there for its reviews to decide a round",
 			"app", appauth.Review, "installation_owner", repository.Owner(), "repo", repository.String(), "login", login, "error", err)
 		return false, nil
 	}

@@ -15,6 +15,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -598,6 +599,17 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
+		// It carries the document's newest approval when its text is the approved text again and
+		// its decision blocks are as their rows have them, as every version the document service
+		// writes does (docs.carryApproval): an exact undo uploaded is the approved document.
+		carried, err := docs.CarryRestoredApproval(
+			r.Context(), tx, s.deps.Events, artifact.ID, version.Number, documentMarkdown, documentReadBack, s.deps.ServerURL,
+		)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		movedEvents = append(movedEvents, carried...)
 		diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -630,8 +642,8 @@ func (s *server) storeArtifact(
 	}
 	// The approval this upload's own version superseded, read in its transaction as the edit
 	// route reads it: an upload to an existing document always writes a version, so a
-	// replacement of an approved spec closes its design gate as an edit does. A new document
-	// has no review of its own to supersede.
+	// replacement of an approved spec closes its design gate as an edit does, unless the restore
+	// above carried the approval to it. A new document has no review of its own to supersede.
 	var superseded *supersededApproval
 	if kind == "doc" && !created {
 		superseded = s.supersededApprovalAdvice(
@@ -1303,19 +1315,142 @@ func (s *server) loadDocumentReferences(ctx context.Context, q queryer, target a
 	return documents, nil
 }
 
+// documentReferenceError refuses a reference that names none of the owner's documents. An owner
+// with more documents than the hint lists (documentHintLimit) is named with its count, the
+// documents nearest the reference first (documentsNearest), and the route that lists them all.
 func documentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {
 	scope := "this project's"
+	everyDocument := "/api/v1/projects/" + target.Project + "/artifacts?unlinked=true"
 	if target.IssueKey != nil {
 		scope = "this issue's"
+		everyDocument = "/api/v1/issues/" + *target.IssueKey + "/artifacts"
+	}
+	if len(documents) <= documentHintLimit {
+		return errorf(
+			http.StatusNotFound,
+			"ARTIFACT_NOT_FOUND",
+			`document %q not found by slug; %s documents: %s`,
+			reference,
+			scope,
+			documentReferenceLabels(documents),
+		)
 	}
 	return errorf(
 		http.StatusNotFound,
 		"ARTIFACT_NOT_FOUND",
-		`document %q not found by slug; %s documents: %s`,
+		`document %q not found by slug; %s %d documents include: %s; GET %s lists them all`,
 		reference,
 		scope,
-		documentReferenceLabels(documents),
+		len(documents),
+		documentReferenceLabels(documentsNearest(reference, documents)),
+		everyDocument,
 	)
+}
+
+// documentsNearest orders documents, given oldest first, for a hint about reference: those whose
+// slug or filename is close to it (documentCloseness) first, nearest first, then every other one,
+// each group newest first. envoy-client's documentsNearest orders an issue's documents by the
+// same rule for the hint the dispatch command gives.
+func documentsNearest(reference string, documents []model.Artifact) []model.Artifact {
+	type ranked struct {
+		document model.Artifact
+		index    int
+		distance int
+		near     bool
+	}
+	rankedDocuments := make([]ranked, len(documents))
+	for index, document := range documents {
+		distance, near := documentCloseness(reference, document.Slug, document.Name)
+		rankedDocuments[index] = ranked{document: document, index: index, distance: distance, near: near}
+	}
+	slices.SortStableFunc(rankedDocuments, func(a, b ranked) int {
+		if a.near != b.near {
+			if a.near {
+				return -1
+			}
+			return 1
+		}
+		if a.near && a.distance != b.distance {
+			return a.distance - b.distance
+		}
+		return b.index - a.index
+	})
+	ordered := make([]model.Artifact, len(rankedDocuments))
+	for index, document := range rankedDocuments {
+		ordered[index] = document.document
+	}
+	return ordered
+}
+
+// documentCloseness compares a reference with a document's slug and filename, ASCII letter case
+// ignored: the smaller edit distance of the two, and whether the document is close to it - within
+// a third of the reference's length (at least 2 edits), or one holding the other where the one held
+// is at least 4 characters long, whose distance is then exactly their difference in length. A
+// spelling more than limit edits away gives no distance (boundedEditDistance knows only that it is
+// past limit), so it never ties a document that is close through its other spelling. Only ASCII
+// letters are folded because Go and JavaScript lowercase other letters differently, and
+// envoy-client's documentCloseness must rank alike.
+func documentCloseness(reference, slug, name string) (int, bool) {
+	wanted := []rune(asciiLower(reference))
+	limit := max(2, len(wanted)/3)
+	distance := -1
+	for _, candidate := range []string{slug, name} {
+		label := []rune(asciiLower(candidate))
+		edits := boundedEditDistance(wanted, label, limit)
+		if (len(wanted) >= 4 && strings.Contains(string(label), string(wanted))) ||
+			(len(label) >= 4 && strings.Contains(string(wanted), string(label))) {
+			edits = max(len(label)-len(wanted), len(wanted)-len(label))
+		} else if edits > limit {
+			continue
+		}
+		if distance < 0 || edits < distance {
+			distance = edits
+		}
+	}
+	if distance < 0 {
+		return limit + 1, false
+	}
+	return distance, true
+}
+
+// asciiLower lowercases the ASCII letters of text and leaves every other character as it is.
+func asciiLower(text string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, text)
+}
+
+// boundedEditDistance is the Levenshtein distance between a and b in characters, or limit+1 once
+// it is known to be more than limit.
+func boundedEditDistance(a, b []rune, limit int) int {
+	if len(a)-len(b) > limit || len(b)-len(a) > limit {
+		return limit + 1
+	}
+	previous := make([]int, len(b)+1)
+	current := make([]int, len(b)+1)
+	for j := range previous {
+		previous[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		current[0] = i
+		smallest := current[0]
+		for j := 1; j <= len(b); j++ {
+			substitution := previous[j-1]
+			if a[i-1] != b[j-1] {
+				substitution++
+			}
+			current[j] = min(previous[j]+1, current[j-1]+1, substitution)
+			smallest = min(smallest, current[j])
+		}
+		if smallest > limit {
+			return limit + 1
+		}
+		previous, current = current, previous
+	}
+	return min(previous[len(b)], limit+1)
 }
 
 func ambiguousDocumentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {

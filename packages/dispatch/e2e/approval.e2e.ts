@@ -1,3 +1,4 @@
+import type { WriteAdvice } from "@legion/contracts";
 import { DISPATCH_EVENT_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { Artifact } from "../web/src/api/types";
@@ -14,9 +15,12 @@ import {
   editArtifact,
   getArtifact,
   getArtifactText,
+  getArtifactVersion,
   getIssueEvents,
+  listIssueAsks,
   rejectSuggestion,
   requestApproval,
+  reviewArtifact,
 } from "./api";
 import { bodyOf } from "./bodies";
 import { documentEditor, needsYouCards, openSpecAndAwaitHeadingIds } from "./editor";
@@ -194,6 +198,177 @@ test("a reason longer than the server takes shows the server's own refusal in th
     // The draft stays in the field, and no review was written.
     await expect(field).toHaveValue(reason);
     expect((await getArtifact(artifactID, { login: "alice" })).approval?.state).toBe("awaiting");
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A document write's response as the restore tests read it: the advice beside its result. */
+interface AdvisedWrite {
+  readonly advice?: WriteAdvice;
+}
+
+/** The decision block the restore tests hold open in a spec. */
+const waveAsk =
+  ':::ask{#wave urgency="med" multiple="false"}\nHow many regions take the first wave?\n\n- Two: The two with the fewest tenants.\n- Five: Half of them.\n:::\n';
+
+/**
+ * Creates a spec holding `spec`, waits for each of its decision blocks to be an ask, has alice
+ * approve version 1 from its header, then has the agent change "The plan." by accident. The edit
+ * stales the approval and its advice says so. Returns the spec's issue.
+ */
+async function approveThenChange(
+  spec: string,
+  blocks: number
+): Promise<{ key: string; id: string }> {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue({ project: "GATE", spec, title: "Design gate" });
+  const id = issue.primary_artifact_id;
+  await expect
+    .poll(async () => (await listIssueAsks(issue.key)).filter((ask) => ask.block_artifact).length)
+    .toBe(blocks);
+  expect((await reviewArtifact(id, { state: "approved" }, { login: "alice" })).version).toBe(1);
+  const edited = (await editArtifact(
+    id,
+    { ops: [{ op: "replace", find: "The plan.", with: "The revised plan." }] },
+    session
+  )) as AdvisedWrite;
+  expect(edited.advice?.superseded_approval).toEqual({
+    approved_by: "alice",
+    approved_version: 1,
+    version: 2,
+  });
+  expect((await getArtifact(id, { login: "alice" })).approval).toMatchObject({
+    latest_version: 2,
+    state: "stale",
+    version: 1,
+  });
+  return { id, key: issue.key };
+}
+
+test("the agent's undo of an accidental edit to an approved spec makes that approval current at the undo's version, so no approval request is needed", async ({
+  browser,
+}) => {
+  const issue = await approveThenChange("The plan.", 0);
+
+  // The undo's text is version 1's again: version 3 carries alice's approval of version 1, and
+  // the undo superseded no approval.
+  const undone = (await editArtifact(
+    issue.id,
+    { ops: [{ op: "replace", find: "The revised plan.", with: "The plan." }] },
+    session
+  )) as AdvisedWrite;
+  expect(undone.advice?.superseded_approval).toBeUndefined();
+  expect((await getArtifact(issue.id, { login: "alice" })).approval).toMatchObject({
+    by: { id: "alice", kind: "user" },
+    latest_version: 3,
+    state: "approved",
+    version: 3,
+  });
+  expect((await getArtifactVersion(issue.id, 3, { login: "alice" })).markdown).toBe(
+    (await getArtifactVersion(issue.id, 1, { login: "alice" })).markdown
+  );
+  const events = (await getIssueEvents(issue.key, {}, { login: "alice" })) as unknown as Array<{
+    type: string;
+    payload: Record<string, unknown>;
+  }>;
+  expect(
+    events.find((event) => event.type === "artifact.approved" && event.payload.version === 3)
+      ?.payload
+  ).toMatchObject({
+    artifact_id: issue.id,
+    reason:
+      "Carried forward from the approval of version 1: this version's text is that version's, unchanged.",
+  });
+
+  // A request for approval finds the approval at the latest version and opens nothing.
+  expect((await requestApproval(issue.id, {}, session)).ask).toBeNull();
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByRole("button", { name: "Approved v3" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an undo one character away from the approved spec leaves its approval stale", async ({
+  browser,
+}) => {
+  const issue = await approveThenChange("The plan.", 0);
+
+  await editArtifact(
+    issue.id,
+    { ops: [{ op: "replace", find: "The revised plan.", with: "The plan!" }] },
+    session
+  );
+  expect((await getArtifactVersion(issue.id, 3, { login: "alice" })).markdown).toBe(
+    (await getArtifactVersion(issue.id, 1, { login: "alice" })).markdown.replace("plan.", "plan!")
+  );
+  expect((await getArtifact(issue.id, { login: "alice" })).approval).toMatchObject({
+    latest_version: 3,
+    state: "stale",
+    version: 1,
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByRole("button", { name: "Approved v1 · changed since" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Approve v3" })).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+// Today's rule for a version whose decision blocks changed is the answer carry: it carries an
+// approval only when every block it changed is the approver's own answer, given since. A version
+// holding the approved text around a block the agent reworded holds no answer of hers, so its
+// approval stays stale, as it did before restored text carried an approval.
+test("an undo that restores the approved text around a decision block the agent reworded leaves the approval stale", async ({
+  browser,
+}) => {
+  const issue = await approveThenChange(`The plan.\n\n${waveAsk}`, 1);
+
+  await editArtifact(
+    issue.id,
+    {
+      ops: [
+        { op: "replace", find: "The revised plan.", with: "The plan." },
+        {
+          op: "replace",
+          find: "How many regions take the first wave?",
+          with: "How many regions go in the first wave?",
+        },
+      ],
+    },
+    session
+  );
+  const restored = (await getArtifactVersion(issue.id, 3, { login: "alice" })).markdown;
+  expect(restored).toBe(
+    (await getArtifactVersion(issue.id, 1, { login: "alice" })).markdown.replace(
+      "take the first wave?",
+      "go in the first wave?"
+    )
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // Settlement runs two seconds after the room's last update; a version it wrote would be
+    // judged by the same rule, so the approval is read once it has had the chance.
+    await page.waitForTimeout(3000);
+    expect((await getArtifact(issue.id, { login: "alice" })).approval).toMatchObject({
+      latest_version: 3,
+      state: "stale",
+      version: 1,
+    });
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByRole("button", { name: "Approved v1 · changed since" })).toBeVisible();
   } finally {
     await alice.close();
   }
