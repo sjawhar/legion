@@ -19,12 +19,13 @@ import (
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
-// unitVariables is every AGENT_SECRETS_* variable besides the broker URL that install copies
-// from its own environment into the unit, in the order the unit lists them. path marks the ones
-// whose value is a filesystem path, which must be absolute because the unit's helper runs in
-// another working directory than install does; the rest are an identity's own words — a kind, an
-// audience, a pool, an account, an issuer, a client, a person, a session name — which have no
-// directory to be resolved from.
+// unitVariables is every AGENT_SECRETS_* variable besides the broker URL that install writes
+// into the unit, in the order the unit lists them. path marks the ones whose value is a
+// filesystem path, which must be absolute because the unit's helper runs in another working
+// directory than install does; the rest are an identity's own words — a kind, an audience, a
+// pool, an account, an issuer, a client, a person, a session name — which have no directory to
+// be resolved from. Each is copied from install's own environment, except the sign-in directory,
+// which is resolved there (unitValue).
 //
 // The identity and sign-in half is not optional decoration: a helper started without
 // AGENT_SECRETS_MACHINE_IDENTITY proves no identity of its own and falls back to the
@@ -52,11 +53,26 @@ var unitVariables = []struct {
 	{name: brokerclient.SessionVar},
 }
 
+// unitValue is what the unit says `name` is: this process's own value for it, and for the
+// sign-in directory the directory this process's `agent-secrets login` would write to, resolved
+// here (brokerclient.SignIns) rather than copied. The store falls back to
+// $XDG_STATE_HOME/agent-secrets, and the unit carries neither this shell's
+// AGENT_SECRETS_SIGNIN_DIR nor its XDG_STATE_HOME, so a box whose XDG_STATE_HOME is not the
+// default would have `login` write one directory and the unit's helper read another — and every
+// session on it would silently enrol as the machine rather than as the person signed in.
+func unitValue(name string, getenv func(string) string) string {
+	if name == brokerclient.SignInDirVar {
+		return brokerclient.SignIns(getenv).Dir
+	}
+	return getenv(name)
+}
+
 // install writes the helper's systemd user unit for the binary at exe (symlinks resolved), the
 // broker URL from --url or AGENT_SECRETS_URL, and every other AGENT_SECRETS_* variable of its
 // environment the unit's helper needs (unitVariables): the socket install probes, the operator
-// and machine files the caller named, the key directory whose sign-ins say whose authority a
-// session enrols under, and this machine's own identity at the broker's token exchange with
+// and machine files the caller named, the key directory, the sign-in directory whose records
+// say whose authority a session enrols under — always written, and resolved rather than copied
+// (unitValue) — and this machine's own identity at the broker's token exchange with
 // the sign-in client a person logs in with. Without those last the installed helper falls back
 // to the device-grant machine login, which a broker with BROKER_MACHINE_LOGIN_URL unset does
 // not serve, and ignores every `agent-secrets login` on the box. It works in
@@ -94,7 +110,7 @@ func install(args []string, getenv func(string) string, exe string, stdout io.Wr
 	}
 	environment := "Environment=AGENT_SECRETS_URL=" + *url + "\n"
 	for _, v := range unitVariables {
-		value := strings.TrimSpace(getenv(v.name))
+		value := strings.TrimSpace(unitValue(v.name, getenv))
 		if value == "" {
 			continue
 		}

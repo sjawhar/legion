@@ -220,16 +220,11 @@ func isVerified(claim any) bool {
 // is rebuilt, trades a new subject and leaves the old credential to lapse, and the sessions it
 // enrolled are gone with the processes that held them.
 func MachineSubject(identity GoogleIdentity, thumbprint string) string {
-	return machineName(identity) + "#" + thumbprint
-}
-
-// machineName is the machine half of a MachineSubject, which is also what ReadSubject reads the
-// account back out of.
-func machineName(identity GoogleIdentity) string {
+	name := identity.Account
 	if identity.Compute.Whole() {
-		return identity.Account + "@" + identity.Compute.Project + "/" + identity.Compute.Zone + "/" + identity.Compute.InstanceID
+		name += "@" + identity.Compute.Project + "/" + identity.Compute.Zone + "/" + identity.Compute.InstanceID
 	}
-	return identity.Account
+	return name + "#" + thumbprint
 }
 
 // signInSubjectPrefix opens the subject of a person's sign-in on a machine, so that no subject
@@ -272,17 +267,16 @@ const (
 	SubjectSignIn SubjectKind = "signin"
 )
 
-// Subject is a launcher credential's subject read back into the parts a reader acts on.
+// Subject is a launcher credential's subject read back into the parts a reader acts on. The
+// thumbprint the subject is keyed by, and the person a sign-in acts for, are checked here and
+// kept by nothing: every reader of a subject acts on its kind and its account, and the broker
+// keeps the person and the thumbprint in columns of their own.
 type Subject struct {
 	Kind SubjectKind
 	// Account is the machine's Google account, which is what says the credential's fleet is
 	// still listed (enroll.Service.AuthenticateLauncher). A sign-in carries the account of the
 	// box it was made on, so one test holds both to the same listed fleet.
 	Account string
-	// Person is the person a sign-in acts for, and "" for a machine, which acts for none.
-	Person string
-	// Thumbprint is the RFC 7638 thumbprint of the key the subject is keyed by.
-	Thumbprint string
 }
 
 // ReadSubject reads a launcher credential's subject back into its parts. It is the one reading
@@ -295,23 +289,23 @@ func ReadSubject(subject string) Subject {
 		if !split {
 			return Subject{}
 		}
-		account, thumbprint, keyed := strings.Cut(box, "#")
+		account, _, keyed := strings.Cut(box, "#")
 		if !keyed || person == "" || account == "" {
 			return Subject{}
 		}
-		return Subject{Kind: SubjectSignIn, Account: account, Person: person, Thumbprint: thumbprint}
+		return Subject{Kind: SubjectSignIn, Account: account}
 	}
-	machine, thumbprint, keyed := strings.Cut(subject, "#")
+	machine, _, keyed := strings.Cut(subject, "#")
 	if !keyed {
 		return Subject{}
 	}
 	if at := strings.LastIndex(machine, "@"); at > 0 && strings.Contains(machine[at+1:], "/") {
-		return Subject{Kind: SubjectMachine, Account: machine[:at], Thumbprint: thumbprint}
+		return Subject{Kind: SubjectMachine, Account: machine[:at]}
 	}
 	if machine == "" {
 		return Subject{}
 	}
-	return Subject{Kind: SubjectMachine, Account: machine, Thumbprint: thumbprint}
+	return Subject{Kind: SubjectMachine, Account: machine}
 }
 
 // String names the scope as a refusal or a log line spells it, the zero value included, so a

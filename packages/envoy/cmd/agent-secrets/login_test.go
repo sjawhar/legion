@@ -182,7 +182,7 @@ func TestLoginTradesUnderThePersonsOwnSessionName(t *testing.T) {
 				t.Fatalf("login: %v", err)
 			}
 
-			records, err := signInStore().List()
+			records, err := brokerclient.SignIns(os.Getenv).List()
 			if err != nil || len(records) != 1 {
 				t.Fatalf("the sign-ins login kept = %+v, %v; want the one it just made", records, err)
 			}
@@ -220,7 +220,7 @@ func TestASignInWhoseLeaseLapsedRegistersItselfAgain(t *testing.T) {
 	if err := login(context.Background(), io.Discard, &approvingWriter{t: t, issuer: issuer}); err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	store := signInStore()
+	store := brokerclient.SignIns(os.Getenv)
 	first, err := store.Choose("")
 	if err != nil {
 		t.Fatalf("the sign-in login kept: %v", err)

@@ -656,9 +656,9 @@ func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, er
 // live — ErrMachineLoginEnded otherwise — which is the one thing a session proof cannot say:
 // the key and the enrollment id a machine's helper holds are files on its disk, and a copy of
 // the pair taken off the box would otherwise renew for ever, long after the box was deleted or
-// its fleet dropped from BROKER_VM_SERVICES. "Live" is what AuthenticateLauncher means by it
-// (machineLoginLive, read in this transaction): not revoked, not past its expiry — which is the
-// machine's Google identity token's, so a machine that stops being able to prove its identity
+// its fleet dropped from BROKER_VM_SERVICES. "Live" is what AuthenticateLauncher means by it,
+// read in this transaction: not revoked, not past its expiry — which is the machine's Google
+// identity token's, so a machine that stops being able to prove its identity
 // stops renewing within the hour, as requiring a fresh identity token on every renewal once
 // did — and its account still listed for its service. A revoke ends such a session outright
 // (RevokeCredential), so what this adds is the two endings a revoke is not: the expiry, and the
@@ -728,7 +728,11 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 	if err != nil {
 		return Renewal{}, err
 	}
-	if kind == "session" && machineCredential(cred) && !s.machineLoginLive(cred, credLive) {
+	// The row's own half of "live" is credLive, read above; what is left is the configuration's
+	// half, the account still listed for the credential's service, which no column holds. cred
+	// is one machineCredential has answered for, so its subject and its service are both set.
+	if kind == "session" && machineCredential(cred) &&
+		!(credLive && s.tokenLoginListed(*cred.Subject, *cred.Service)) {
 		return Renewal{}, ErrMachineLoginEnded
 	}
 	switch {
@@ -813,16 +817,6 @@ func machineCredential(cred Credential) bool {
 		return false
 	}
 	return exchange.ReadSubject(*cred.Subject).Kind == exchange.SubjectMachine
-}
-
-// machineLoginLive reports whether a machine's launcher credential is still one a launcher
-// proof would authenticate under (AuthenticateLauncher), which is what Renew holds a machine's
-// own session to. unended is the row's own half of that question, read in the caller's
-// transaction: not revoked and not past its expiry. What is left is the configuration's half,
-// the account still listed for the credential's service, which no column holds. cred is one
-// machineCredential has already answered for, so its service and its subject are both set.
-func (s *Service) machineLoginLive(cred Credential, unended bool) bool {
-	return unended && s.tokenLoginListed(*cred.Subject, *cred.Service)
 }
 
 // Revoke ends the enrollment — revoking every live grant and cancelling every pending request

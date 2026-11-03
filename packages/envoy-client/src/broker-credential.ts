@@ -11,6 +11,7 @@
 // behaves exactly as it did before this module existed.
 
 import {
+  BROKER_URL_VAR,
   type BrokerEnvironment,
   brokerTokenClient,
   IDENTITY_POOL,
@@ -40,8 +41,10 @@ function sessionName(naming: BrokerSessionName | undefined): string {
 }
 
 /**
- * Whether this machine can trade for one of the broker's access tokens: a broker to trade at and
- * an identity this client can prove. An identity named with its own variables missing throws
+ * Whether this machine can trade for one of the broker's access tokens — a broker to trade at
+ * and an identity this client can prove — and, where it cannot, the phrase that says which of
+ * the three is missing, as a refusal ends with. One pass answers both, so no caller decides the
+ * question a second time to say why. An identity named with its own variables missing throws
  * here, naming them, rather than reading as a machine that has none.
  *
  * `AGENT_SECRETS_MACHINE_IDENTITY=pool` is a machine with no TypeScript route rather than a
@@ -49,23 +52,38 @@ function sessionName(naming: BrokerSessionName | undefined): string {
  * Go side of such a machine works. Reading it as an error here would turn Dispatch and Envoy off
  * on a machine whose listener asks for no credential at all.
  */
-export function brokerRouteConfigured(env: BrokerEnvironment): boolean {
-  if ((env.AGENT_SECRETS_URL ?? "").trim() === "") return false;
-  if ((env[IDENTITY_VAR] ?? "").trim() === IDENTITY_POOL) return false;
-  return machineIdentity(env) !== undefined;
+export type BrokerRoute =
+  | { readonly traded: true }
+  | { readonly traded: false; readonly gap: string };
+
+export function brokerRouteConfigured(env: BrokerEnvironment): BrokerRoute {
+  if ((env[BROKER_URL_VAR] ?? "").trim() === "") {
+    return { traded: false, gap: `${BROKER_URL_VAR} names no secrets broker to trade it at` };
+  }
+  if ((env[IDENTITY_VAR] ?? "").trim() === IDENTITY_POOL) {
+    return {
+      traded: false,
+      gap: `${IDENTITY_VAR}=${IDENTITY_POOL} is traded by the Go client alone (agent-secrets), never by this process`,
+    };
+  }
+  if (machineIdentity(env) === undefined) {
+    return { traded: false, gap: `${IDENTITY_VAR} names no identity this machine proves` };
+  }
+  return { traded: true };
 }
 
 /**
- * The clients this process has made, by the variables that describe them and the session they
- * trade under. One process makes one key per broker, identity and session, and keeps one token
- * live under it, which both Dispatch and the listener of that session present: two keys would be
- * two credentials for one session, and the broker records the key the token is bound to. The
- * session is part of the identity, not of the process: a token names one session, and the
- * listener answers 403 to a session presenting another's, so two sessions of one process hold
- * two clients. An entry is one key pair and one token, made only for a session this process
- * actually traded for.
+ * The clients this process has made, by the session they trade under and, under it, by the
+ * variables that describe them. One process makes one key per broker, identity and session, and
+ * keeps one token live under it, which both Dispatch and the listener of that session present:
+ * two keys would be two credentials for one session, and the broker records the key the token is
+ * bound to. The session is part of the identity, not of the process: a token names one session,
+ * and the listener answers 403 to a session presenting another's, so two sessions of one process
+ * hold two clients. An entry is one key pair and one token, made only for a session this process
+ * actually traded for, and dropped when the host leaves that session
+ * (`forgetBrokerSession`).
  */
-const CLIENTS = new Map<string, Promise<BrokerTokenClient | undefined>>();
+const CLIENTS = new Map<string, Map<string, Promise<BrokerTokenClient | undefined>>>();
 
 /** Drops what this process made, so a test drives a broker of its own from nothing. */
 export function forgetBrokerClients(): void {
@@ -73,9 +91,23 @@ export function forgetBrokerClients(): void {
 }
 
 /**
+ * Drops what this process traded for `session`: its key pair, and the token renewing under it.
+ *
+ * For the host that has left that session, once it has made its last call for it — Oh My Pi's
+ * pass once the role of the session it left is handed back, Claude Code's handoff once the old
+ * id is deregistered. One long-lived process binds many session ids over its life (`/clear`, a
+ * session switch), and without this each one it ever traded under keeps a key pair and a token
+ * that trades again at every renewal, for the life of the process. A session that comes back
+ * trades afresh, as one this process never traded for does.
+ */
+export function forgetBrokerSession(session: string): void {
+  CLIENTS.delete(session.trim());
+}
+
+/**
  * The client `env` describes for a caller acting as the session `own`, made once per process.
- * The entry is keyed by the name the trade writes under rather than by `own`, since that is the
- * name the token carries: a caller that acts as no session and one that acts as the session
+ * The entry is held under the name the trade writes under rather than under `own`, since that is
+ * the name the token carries: a caller that acts as no session and one that acts as the session
  * `AGENT_SECRETS_SESSION` names are one client, and two environments naming two sessions are two.
  */
 function clientFor(env: BrokerEnvironment, own: string): Promise<BrokerTokenClient | undefined> {
@@ -85,10 +117,11 @@ function clientFor(env: BrokerEnvironment, own: string): Promise<BrokerTokenClie
     env.AGENT_SECRETS_MACHINE_IDENTITY,
     env.AGENT_SECRETS_MACHINE_TOKEN_FILE,
     env.AGENT_SECRETS_MACHINE_AUDIENCE,
-    session,
   ]);
-  const made = CLIENTS.get(key) ?? brokerTokenClient(env, session);
-  CLIENTS.set(key, made);
+  const held = CLIENTS.get(session) ?? new Map<string, Promise<BrokerTokenClient | undefined>>();
+  CLIENTS.set(session, held);
+  const made = held.get(key) ?? brokerTokenClient(env, session);
+  held.set(key, made);
   return made;
 }
 

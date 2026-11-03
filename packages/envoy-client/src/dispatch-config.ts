@@ -1,5 +1,3 @@
-import { BROKER_URL_VAR, IDENTITY_VAR } from "@legion/broker-client/environment";
-
 import {
   type BearerSource,
   bearerCredential,
@@ -9,6 +7,7 @@ import {
   type RequestCredential,
 } from "./bearer";
 import {
+  type BrokerRoute,
   type BrokerSessionName,
   brokerCredential,
   brokerRouteConfigured,
@@ -250,18 +249,6 @@ function brokerRouteForced(env: DispatchEnvironment): boolean | SectionOff {
   );
 }
 
-/** Why this machine trades nothing at the broker, as the phrase a forced refusal ends with: the
- * three ways `brokerRouteConfigured` answers false. A named identity missing its own variables
- * throws there instead, and that throw says which variable. */
-function brokerRouteGap(env: DispatchEnvironment): string {
-  if ((env[BROKER_URL_VAR] ?? "").trim() === "") {
-    return `${BROKER_URL_VAR} names no secrets broker to trade it at`;
-  }
-  const identity = (env[IDENTITY_VAR] ?? "").trim();
-  if (identity === "") return `${IDENTITY_VAR} names no identity this machine proves`;
-  return `${IDENTITY_VAR}=${identity} is traded by the Go client alone (agent-secrets), never by this process`;
-}
-
 /** Dispatch as `dispatchSettings` resolves it up to its token: its URL and the token's source, or
  * off saying why. Reads a `DISPATCH_TOKEN_FILE`, never runs a `!` command. */
 function dispatchTarget(
@@ -320,19 +307,19 @@ function dispatchTarget(
   }
   if (source.kind === "none") {
     // No bearer at all: this machine may still have an identity of its own to trade.
-    let traded: boolean;
+    let route: BrokerRoute;
     try {
-      traded = brokerRouteConfigured(env);
+      route = brokerRouteConfigured(env);
     } catch (error) {
       return offWithError(messageFor(error));
     }
-    if (traded) {
+    if (route.traded) {
       const brokered = (explicitUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL).replace(/\/+$/, "");
       return { enabled: true, url: brokered, source: { kind: "broker" } };
     }
     if (forced) {
       return offWithError(
-        `DISPATCH_TOKEN_BROKER is set, so this session's Dispatch credential is this machine's own identity traded at the secrets broker, and ${brokerRouteGap(env)}: Dispatch is off rather than written with whatever bearer this box holds`
+        `DISPATCH_TOKEN_BROKER is set, so this session's Dispatch credential is this machine's own identity traded at the secrets broker, and ${route.gap}: Dispatch is off rather than written with whatever bearer this box holds`
       );
     }
     return offWithError(

@@ -25,6 +25,7 @@ import {
   selfOwner,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
+import { forgetBrokerSession } from "@legion/envoy-client/broker-credential";
 import {
   type ConsumerDelivery,
   type ConsumerFrame,
@@ -114,6 +115,7 @@ import {
   mergeInterestSources,
   type SubscribeResult,
 } from "@legion/envoy-client/transport";
+import { currentSessionID } from "@legion/pi-shared/dispatch-session-id";
 import {
   dropInjectedUserTurn,
   endInjectedUserTurns,
@@ -561,15 +563,6 @@ process.env.DISPATCH_HOST = "omp";
 // nothing on and turns both sections off.
 const CONFIG_FILE = sessionConfigFile("omp", process.env);
 if (CONFIG_FILE.path !== null) process.env.ENVOY_CONFIG_FILE = CONFIG_FILE.path;
-/**
- * The session this process is acting as now: the id this instance last bound
- * (`bindDispatchSession`, which writes it for the session's shell commands too). Every caller
- * that trades at the secrets broker passes this rather than a name fixed when a configuration
- * resolved, because one Oh My Pi process moves between sessions over its life and a token names
- * one session: the listener answers 403 to a session presenting another's.
- */
-const currentSessionID = (): string => process.env.DISPATCH_SESSION_ID ?? "";
-
 /**
  * The session's Dispatch for one request of this extension's own, which has `ms` to answer: the
  * one builder (`sessionDispatchClient`), resolved again per call, so a Dispatch that moved takes
@@ -2729,12 +2722,22 @@ export default function envoyExtension(pi: PiApi): void {
         continues.set(host, from);
       }
       knownSessions.add(from);
+      leftSessions.add(from);
     }
     knownSessions.add(host);
   };
 
   // Every session id this process has been on: a move with no word back to one is a rollback.
   const knownSessions = new Set<string>();
+
+  // The sessions this process has left and still holds a broker client for: a key pair and a
+  // renewing token each (`CLIENTS`, @legion/envoy-client/broker-credential). A session goes in
+  // when the host leaves it (`noteMove`, and the pass that closes its agent subject) and out
+  // when the pass has made its last call for it — the hand-back of its role (`settleRole`),
+  // which presents that session's own credential — so a process that moves between sessions all
+  // day renews one token rather than one per session it ever bound. A pass that decided nothing
+  // leaves its entries here for the next.
+  const leftSessions = new Set<string>();
 
   interface PassCause {
     // A heartbeat tick, which also checks the listener still resolves a held role.
@@ -2781,6 +2784,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
     for (const other of handle.forgetOtherAgentSessions(host)) {
       closeIntentionally(agentSubject(other));
+      leftSessions.add(other);
     }
     // Another session's relay: its unsettled frames go back to the listener (`nak`).
     if (relay !== undefined && relay.sessionID !== host) closeRelay();
@@ -2843,6 +2847,13 @@ export default function envoyExtension(pi: PiApi): void {
         settleRole(context, host, cause, registration === undefined, move)
       )) ?? false;
     handle.check();
+    // The role move above was the last call for every session this process has left, so each
+    // one's key pair and renewing token at the broker go now (`leftSessions`). The session
+    // running now is never one of them: a rollback to a session this pass left behind keeps
+    // trading under it.
+    leftSessions.delete(host);
+    for (const other of leftSessions) forgetBrokerSession(other);
+    leftSessions.clear();
     if (registration !== undefined) {
       throw new RegistrationError(messageFor(registration.error), { cause: registration.error });
     }

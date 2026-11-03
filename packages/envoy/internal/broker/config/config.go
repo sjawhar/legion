@@ -234,23 +234,6 @@ type Config struct {
 	// by account, each answering its service. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, no VM service
 	// is listed.
 	VMServicesByAccount map[string]string
-	// BROKER_VM_PROJECTS: the Google Cloud project each pinned account's machines run in,
-	// whitespace-separated <service account email>=<project id> entries, at most one per account
-	// BROKER_VM_SERVICES lists and none for any other account. An account named here is named in
-	// BROKER_VM_INSTANCES too, or the boot is refused: half a pin says nothing clear about which
-	// machines an entry means. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is
-	// empty, so every listed account takes a machine wherever it runs — including one whose token
-	// carries no Compute Engine claims at all, which is what a token minted through a workload
-	// identity pool and a token from a Kubernetes pod's metadata server both carry.
-	vmProjects map[string]string
-	// BROKER_VM_INSTANCES: the names each pinned account's machines may have,
-	// whitespace-separated <service account email>=<instance-name glob> entries, at most one per
-	// account BROKER_VM_SERVICES lists and none for any other account. The glob is Go's path.Match
-	// syntax (*, ?, and [...] classes, negated with ^) over the characters of an instance name, such
-	// as example-vm-*. An account named here is named in BROKER_VM_PROJECTS too, or the boot is
-	// refused. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty, so no
-	// account is pinned.
-	vmInstancePatterns map[string]string
 	// BROKER_VM_EXCHANGE_ACCOUNTS: the person and the Dispatch project each fleet writes for,
 	// whitespace-separated <service account email>=<project>=<person>[=<session>] entries, the
 	// grammar BROKER_EXCHANGE_ACCOUNTS uses for a pod, such as
@@ -992,12 +975,31 @@ func Load(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	// Both pins are unexported fields: the entry each one pins (ExchangeGoogleAccounts'
-	// CloudProject and Instance, built below) is the only thing that reads them.
-	if cfg.vmProjects, err = vmAccountMap("BROKER_VM_PROJECTS", projects, cfg.VMServicesByAccount); err != nil {
+	// BROKER_VM_PROJECTS: the Google Cloud project each pinned account's machines run in,
+	// whitespace-separated <service account email>=<project id> entries, at most one per account
+	// BROKER_VM_SERVICES lists and none for any other account. An account named here is named in
+	// BROKER_VM_INSTANCES too, or the boot is refused: half a pin says nothing clear about which
+	// machines an entry means. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is
+	// empty, so every listed account takes a machine wherever it runs — including one whose token
+	// carries no Compute Engine claims at all, which is what a token minted through a workload
+	// identity pool and a token from a Kubernetes pod's metadata server both carry.
+	//
+	// BROKER_VM_INSTANCES: the names each pinned account's machines may have,
+	// whitespace-separated <service account email>=<instance-name glob> entries, at most one per
+	// account BROKER_VM_SERVICES lists and none for any other account. The glob is Go's path.Match
+	// syntax (*, ?, and [...] classes, negated with ^) over the characters of an instance name, such
+	// as example-vm-*. An account named here is named in BROKER_VM_PROJECTS too, or the boot is
+	// refused. Keyed by account. Needs BROKER_GOOGLE_OIDC_AUDIENCE. Unset, it is empty, so no
+	// account is pinned.
+	//
+	// Both are locals of Load: the entry each one pins (ExchangeGoogleAccounts' CloudProject and
+	// Instance, built below) is the only thing that reads them, and no field of Config holds them.
+	vmProjects, err := vmAccountMap("BROKER_VM_PROJECTS", projects, cfg.VMServicesByAccount)
+	if err != nil {
 		return Config{}, err
 	}
-	if cfg.vmInstancePatterns, err = vmAccountMap("BROKER_VM_INSTANCES", instances, cfg.VMServicesByAccount); err != nil {
+	vmInstancePatterns, err := vmAccountMap("BROKER_VM_INSTANCES", instances, cfg.VMServicesByAccount)
+	if err != nil {
 		return Config{}, err
 	}
 	grants, err := parseVMExchangeGrants("BROKER_VM_EXCHANGE_ACCOUNTS", getenv("BROKER_VM_EXCHANGE_ACCOUNTS"))
@@ -1016,8 +1018,8 @@ func Load(getenv func(string) string) (Config, error) {
 		// instance name, or the other way round, says nothing clear about which machines it
 		// means, so it is refused here rather than read as either "every instance of that
 		// project" or "that name in any project".
-		project, pinnedProject := cfg.vmProjects[entry.account]
-		instance, pinnedInstance := cfg.vmInstancePatterns[entry.account]
+		project, pinnedProject := vmProjects[entry.account]
+		instance, pinnedInstance := vmInstancePatterns[entry.account]
 		if pinnedProject != pinnedInstance {
 			named, missing := "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"
 			if pinnedInstance {

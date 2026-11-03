@@ -201,7 +201,8 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 	if err := bare.run("--url", "https://secrets.example"); err != nil {
 		t.Fatal(err)
 	}
-	if data, _ := os.ReadFile(bare.unit); strings.Count(string(data), "Environment=") != 1 {
+	// Two lines: the URL, and the sign-in directory, which install always writes (unitValue).
+	if data, _ := os.ReadFile(bare.unit); strings.Count(string(data), "Environment=") != 2 {
 		t.Fatalf("with only the URL set the unit has other Environment= lines:\n%s", data)
 	}
 
@@ -212,6 +213,45 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 	}
 	if _, err := os.Stat(spaced.unit); !os.IsNotExist(err) {
 		t.Fatalf("a refused install wrote the unit: %v", err)
+	}
+}
+
+// TestInstallWritesTheResolvedSignInDirectoryIntoTheUnit: the sign-in store falls back to
+// $XDG_STATE_HOME/agent-secrets (brokerclient.SignIns), and the unit carries neither this
+// shell's AGENT_SECRETS_SIGNIN_DIR nor its XDG_STATE_HOME. So install resolves the directory
+// and writes it, set or not: copied only when set, a box with a non-default XDG_STATE_HOME has
+// `agent-secrets login` write one directory while the unit's helper reads ~/.local/state, and
+// every session on it enrols as the machine rather than as the person signed in.
+func TestInstallWritesTheResolvedSignInDirectoryIntoTheUnit(t *testing.T) {
+	for _, c := range []struct{ name, stateHome, named string }{
+		{name: "a state home of its own", stateHome: "state"},
+		{name: "no state home at all"},
+		{name: "the directory named outright", stateHome: "state", named: "signins"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newInstallRig(t)
+			home := r.env["HOME"]
+			want := filepath.Join(home, ".local", "state", "agent-secrets", brokerclient.SignInsDir)
+			if c.stateHome != "" {
+				r.env["XDG_STATE_HOME"] = filepath.Join(home, c.stateHome)
+				want = filepath.Join(home, c.stateHome, "agent-secrets", brokerclient.SignInsDir)
+			}
+			if c.named != "" {
+				r.env[brokerclient.SignInDirVar] = filepath.Join(home, c.named)
+				want = filepath.Join(home, c.named)
+			}
+			if err := r.run("--url", "https://secrets.example"); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(r.unit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			line := "\nEnvironment=" + brokerclient.SignInDirVar + "=" + want + "\n"
+			if !strings.Contains(string(data), line) {
+				t.Errorf("unit lacks %q, so its helper reads another directory than `agent-secrets login` writes:\n%s", line, data)
+			}
+		})
 	}
 }
 

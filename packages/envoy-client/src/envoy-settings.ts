@@ -269,7 +269,9 @@ export function envoySettings(
       // checks at the broker's introspection route. A listener that asks for no credential is
       // unaffected — it reads the request's identity, or none, the same way, and a trade that
       // fails leaves its calls standing (`createEnvoyClient`, transport.ts).
-      credential = brokerRouteConfigured(env) ? brokerCredential(env, options.session) : undefined;
+      credential = brokerRouteConfigured(env).traded
+        ? brokerCredential(env, options.session)
+        : undefined;
     } else {
       credential = bearerCredential(
         source.kind === "variable" ? source.token : fileBearer(source, url, "ENVOY", env)

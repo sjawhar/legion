@@ -471,7 +471,7 @@ func loadKey(path string) (*ecdsa.PrivateKey, error) {
 }
 
 // parseKeyPEM is a session key as its PKCS#8 PEM bytes hold it, named for the refusal: a key dir's
-// key.pem, or the box key inside a person's sign-in record (signin.go).
+// key.pem, or the box key inside a person's sign-in record (brokerclient.SignInRecord).
 func parseKeyPEM(data []byte, name string) (*ecdsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
@@ -491,7 +491,7 @@ func parseKeyPEM(data []byte, name string) (*ecdsa.PrivateKey, error) {
 // buildSigner selects and builds this process's Signer: an agent box or pod signs with the key
 // and enrollment id it keeps in its key dir (file mode); a person who ran `agent-secrets login`
 // on this machine signs with the box key and enrollment in their own sign-in record (sign-in
-// mode, signin.go); a machine session has no key of its own and
+// mode, brokerclient.SignIns); a machine session has no key of its own and
 // asks agent-secrets-helper over its socket, which signs only for processes descending from a
 // session `agent-secrets register` registered (helper mode). The key dir and socket are
 // AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, or their defaults where those are unset
@@ -660,7 +660,7 @@ func writeMachineSession(dir string, key *ecdsa.PrivateKey, enrollmentID string)
 // answer nothing but a dead id until somebody ran `agent-secrets login` again — which would
 // make a second box key and a second sign-in on that person's list (client.reenroller).
 func signInSigner() (*fileSigner, error) {
-	store := signInStore()
+	store := brokerclient.SignIns(os.Getenv)
 	records, err := store.List()
 	if err != nil || len(records) == 0 {
 		return nil, err

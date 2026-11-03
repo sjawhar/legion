@@ -886,8 +886,8 @@ func TestMachineSubjectNamesOneMachineAndTheKeyItHolds(t *testing.T) {
 		subject string
 		want    exchange.Subject
 	}{
-		{subject: instanceSubject, want: exchange.Subject{Kind: exchange.SubjectMachine, Account: pinnedAccount, Thumbprint: "thumbprint-one"}},
-		{subject: first, want: exchange.Subject{Kind: exchange.SubjectMachine, Account: poolAccount, Thumbprint: "thumbprint-one"}},
+		{subject: instanceSubject, want: exchange.Subject{Kind: exchange.SubjectMachine, Account: pinnedAccount}},
+		{subject: first, want: exchange.Subject{Kind: exchange.SubjectMachine, Account: poolAccount}},
 		{subject: "system:serviceaccount:legion-system:legion-daemon"},
 		{subject: pinnedAccount},
 		{subject: "#thumbprint-one"},
@@ -910,12 +910,12 @@ func TestPersonSubjectNamesOneSignInAndReadsItsMachineBack(t *testing.T) {
 		boxTwo = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 	)
 	subjects := map[string]struct {
-		subject, account, person, thumbprint string
+		subject, account string
 	}{
-		"one person on one box":                  {exchange.PersonSubject(person, pinnedAccount, boxOne), pinnedAccount, person, boxOne},
-		"the same person on another box":         {exchange.PersonSubject(person, pinnedAccount, boxTwo), pinnedAccount, person, boxTwo},
-		"the same person on another fleet's box": {exchange.PersonSubject(person, poolAccount, boxOne), poolAccount, person, boxOne},
-		"another person on the first box":        {exchange.PersonSubject(stranger, pinnedAccount, boxOne), pinnedAccount, stranger, boxOne},
+		"one person on one box":                  {exchange.PersonSubject(person, pinnedAccount, boxOne), pinnedAccount},
+		"the same person on another box":         {exchange.PersonSubject(person, pinnedAccount, boxTwo), pinnedAccount},
+		"the same person on another fleet's box": {exchange.PersonSubject(person, poolAccount, boxOne), poolAccount},
+		"another person on the first box":        {exchange.PersonSubject(stranger, pinnedAccount, boxOne), pinnedAccount},
 	}
 	seen := map[string]string{}
 	for name, c := range subjects {
@@ -923,9 +923,9 @@ func TestPersonSubjectNamesOneSignInAndReadsItsMachineBack(t *testing.T) {
 			t.Errorf("%s and %s spell one subject, %q: each sign-in holds a credential of its own", name, other, c.subject)
 		}
 		seen[c.subject] = name
-		want := exchange.Subject{Kind: exchange.SubjectSignIn, Account: c.account, Person: c.person, Thumbprint: c.thumbprint}
+		want := exchange.Subject{Kind: exchange.SubjectSignIn, Account: c.account}
 		if got := exchange.ReadSubject(c.subject); got != want {
-			t.Errorf("ReadSubject(%q) = %+v, want %+v: it is what holds the sign-in to a listed fleet and to its person", c.subject, got, want)
+			t.Errorf("ReadSubject(%q) = %+v, want %+v: it is what holds the sign-in to a listed fleet", c.subject, got, want)
 		}
 	}
 	onInstance := exchange.ReadGoogleIdentity(googleToken(pinnedAccount, true, cloudProject, instanceName))

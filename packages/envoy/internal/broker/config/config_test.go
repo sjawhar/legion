@@ -580,7 +580,7 @@ func TestTheVMSettingsLeaveEveryOtherFieldAlone(t *testing.T) {
 	if got.VMServicesByAccount == nil {
 		t.Fatal("the VM settings were not read")
 	}
-	got.GoogleOIDCAudience, got.VMServicesByAccount, got.vmProjects, got.vmInstancePatterns = "", nil, nil, nil
+	got.GoogleOIDCAudience, got.VMServicesByAccount = "", nil
 	got.ExchangeGoogleAccounts = nil
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Config with the VM settings, VM fields cleared = %+v, want it equal to the Config without them, %+v", got, want)

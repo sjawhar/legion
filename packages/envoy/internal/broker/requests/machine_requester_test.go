@@ -81,7 +81,7 @@ func TestAMachinesSessionIsItsFleetsAndNoPersons(t *testing.T) {
 // TestAMachineSubjectReadsBackAsItsAccount guards the one reading the authority above turns on:
 // the credential subject the exchange writes is what names the fleet's account.
 func TestAMachineSubjectReadsBackAsItsAccount(t *testing.T) {
-	want := exchange.Subject{Kind: exchange.SubjectMachine, Account: fixtureMachineAccount, Thumbprint: fixtureMachineKey}
+	want := exchange.Subject{Kind: exchange.SubjectMachine, Account: fixtureMachineAccount}
 	if got := exchange.ReadSubject(fixtureMachineSubject); got != want {
 		t.Fatalf("ReadSubject(%q) = %+v, want %+v", fixtureMachineSubject, got, want)
 	}

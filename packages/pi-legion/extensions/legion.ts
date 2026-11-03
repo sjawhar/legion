@@ -13,6 +13,7 @@ import {
 } from "@legion/envoy-client/session-settings";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import { currentSessionID } from "@legion/pi-shared/dispatch-session-id";
 import { findPushedBranchHead, paneHandoffReport } from "@legion/pi-shared/handoff-record";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -61,14 +62,6 @@ let exitProcess: (code: number) => never = (code) => process.exit(code) as never
 export function setLegionBootstrapExitForTests(hook: (code: number) => never): void {
   exitProcess = hook;
 }
-
-/**
- * The session this pane is acting as now: the id pi-envoy's plugin bound for this process
- * (`DISPATCH_SESSION_ID`, `currentSessionID` in packages/pi-envoy/extensions/envoy.ts), which
- * this plugin shares. A broker trade writes under it, so the token a Legion read presents names
- * the session making it rather than the one this process started on.
- */
-const currentSessionID = (): string => process.env.DISPATCH_SESSION_ID ?? "";
 
 // The host the claim session's capability report measures through: Oh My Pi's own modules and
 // the pane's `dispatch` and `gh`. A test substitutes a fake, since the production host reaches

@@ -11,7 +11,7 @@
 //
 // Nothing of the person's travels beyond the broker: the key is made here and only its public
 // half is ever sent, and the refresh token is kept beside it in that person's own record, mode
-// 0600 in a 0700 directory (signin.go).
+// 0600 in a 0700 directory (brokerclient.SignIns).
 package main
 
 import (
@@ -121,7 +121,7 @@ func login(ctx context.Context, stdout, stderr io.Writer) error {
 	if record.EnrollmentID, err = enrollUnderCredential(ctx, base, boxKey, thumbprint, token.CredentialID, signedIn.Person); err != nil {
 		return err
 	}
-	if err := signInStore().Write(record); err != nil {
+	if err := brokerclient.SignIns(os.Getenv).Write(record); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "%s is signed in on this machine (enrollment %s)\n", record.Person, record.EnrollmentID)
@@ -239,5 +239,5 @@ func registerSignInSession(ctx context.Context, record brokerclient.SignInRecord
 	if record.EnrollmentID, err = enrollUnderCredential(ctx, base, boxKey, record.Thumbprint, token.CredentialID, record.Person); err != nil {
 		return record, err
 	}
-	return record, signInStore().Write(record)
+	return record, brokerclient.SignIns(os.Getenv).Write(record)
 }

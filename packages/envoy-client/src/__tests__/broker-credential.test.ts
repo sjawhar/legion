@@ -8,7 +8,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { forgetBrokerClients } from "../broker-credential";
+import { forgetBrokerClients, forgetBrokerSession } from "../broker-credential";
 import { type DispatchEnvironment, dispatchSettings } from "../dispatch-config";
 import { DispatchClient } from "../dispatch-http";
 import { readEnvoyConfig } from "../envoy-config";
@@ -405,6 +405,52 @@ test("a role handed back for the session this process left presents that session
   // One trade per session, and the session this process left answered out of the token it
   // already held rather than trading again.
   expect(broker.sessions).toEqual(["session-one", "session-two"]);
+});
+
+test("a session the host has left keeps no key and no renewing token", async () => {
+  // One Oh My Pi or Claude Code process binds a new session id on `/clear` and on every switch,
+  // and each one it traded under is a key pair and a token that trades again at every renewal.
+  // The host says when it has made its last call for a session it left — Oh My Pi's pass once
+  // that session's role is handed back, Claude Code's handoff once the old id is deregistered —
+  // and that session's client goes, while the session running now keeps the token it holds.
+  const broker = sessionBroker();
+  const listener = sessionBoundListener();
+  const env = podEnvironment(broker.url, listener.url);
+  let current = "session-one";
+  const resolution = envoySettings(env, noFile(env), { nats: false, session: () => current });
+  if (!resolution.enabled)
+    throw new Error(`Envoy is off: ${resolution.error ?? resolution.notice}`);
+  const client = createEnvoyClient({
+    baseUrl: resolution.url,
+    fetch,
+    ...(resolution.credential === undefined ? {} : { credential: resolution.credential }),
+  });
+  const subscribeAs = (sessionID: string) =>
+    client.subscribe({
+      sessionID,
+      directory: "/work",
+      topics: [],
+      port: 0,
+      title: "",
+      driving: false,
+      plugin: { name: "@sjawhar/pi-envoy", version: "0.0.0" },
+    });
+
+  await client.setRole({ sessionID: "session-one", role: "controller" });
+  current = "session-two";
+  await subscribeAs("session-two");
+  expect(broker.sessions).toEqual(["session-one", "session-two"]);
+
+  forgetBrokerSession("session-one");
+  // The session left has nothing to present any more, so a call for it trades afresh, as one
+  // this process had never traded for does.
+  await client.unsubscribe({
+    sessionID: "session-one",
+    topics: ["notifications.role.controller"],
+  });
+  // The session running now was untouched by the drop: it still answers out of its own token.
+  await subscribeAs("session-two");
+  expect(broker.sessions).toEqual(["session-one", "session-two", "session-one"]);
 });
 
 test("a pool identity is a machine with no TypeScript route, not an error", () => {

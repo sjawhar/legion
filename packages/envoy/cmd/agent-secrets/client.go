@@ -60,10 +60,14 @@ var terminalRenewal = struct {
 	Codes                     []string
 	LegacyCode, LegacyMessage string
 }{
-	Codes:         []string{"POD_TOKEN_REQUIRED", "ENROLLMENT_NOT_LIVE"},
+	Codes:         []string{"POD_TOKEN_REQUIRED", enrollmentEndedCode},
 	LegacyCode:    "PROOF_INVALID",
 	LegacyMessage: "not live",
 }
+
+// enrollmentEndedCode is the renew route's own answer to a proof naming an enrollment the broker
+// no longer holds, written once here and read by terminalRenewal and by enrollmentEnded.
+const enrollmentEndedCode = "ENROLLMENT_NOT_LIVE"
 
 func newClient(baseURL string) *client {
 	return &client{baseURL: baseURL, http: &http.Client{Timeout: 30 * time.Second}}
@@ -84,13 +88,19 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("%s (%s)", e.Message, e.Code)
 }
 
-// Permanent reports whether this refusal is one of terminalRenewal's: a code it lists, or its
-// legacy code with a message naming the ended enrollment.
+// enrollmentEnded reports whether this refusal is the broker's answer to a proof naming an
+// enrollment it no longer holds: the lease lapsed, or it was revoked. Only the renew route
+// answers ENROLLMENT_NOT_LIVE; every other session route says PROOF_INVALID with "not live" in
+// its message, which no recoverable proof failure (iat skew, key, URL) says.
+func (e *apiError) enrollmentEnded() bool {
+	return e.Code == enrollmentEndedCode ||
+		(e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage))
+}
+
+// Permanent reports whether this refusal is one of terminalRenewal's: a code it lists, or the
+// ended enrollment its legacy code spells (enrollmentEnded).
 func (e *apiError) Permanent() bool {
-	if slices.Contains(terminalRenewal.Codes, e.Code) {
-		return true
-	}
-	return e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage)
+	return slices.Contains(terminalRenewal.Codes, e.Code) || e.enrollmentEnded()
 }
 
 // unreachableError is a broker call that did not complete. Its host might not resolve, nothing
@@ -235,17 +245,11 @@ type reenroller interface {
 	Reenroll(ctx context.Context) error
 }
 
-// enrollmentNotLive reports whether err is the broker's answer to a proof naming an enrollment
-// it no longer holds: the lease lapsed, or it was revoked. Only the renew route answers
-// ENROLLMENT_NOT_LIVE; every other session route says PROOF_INVALID with "not live" in its
-// message, which no recoverable proof failure (iat skew, key, URL) says.
+// enrollmentNotLive reports whether err is a refusal (*apiError) naming an enrollment the broker
+// no longer holds, which is enrollmentEnded's question asked of an error.
 func enrollmentNotLive(err error) bool {
 	var refusal *apiError
-	if !errors.As(err, &refusal) {
-		return false
-	}
-	return refusal.Code == "ENROLLMENT_NOT_LIVE" ||
-		(refusal.Code == terminalRenewal.LegacyCode && strings.Contains(refusal.Message, terminalRenewal.LegacyMessage))
+	return errors.As(err, &refusal) && refusal.enrollmentEnded()
 }
 
 // doProof signs the request with signer.Sign against exactly this method and URL (no query

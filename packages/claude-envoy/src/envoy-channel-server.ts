@@ -6,6 +6,7 @@ import {
   ROLE_TOPIC_PREFIX,
   zodSchemaApi,
 } from "@legion/contracts"
+import { forgetBrokerSession } from "@legion/envoy-client/broker-credential"
 import {
   type ConsumerDelivery,
   type ConsumerDeliverySnapshot,
@@ -1212,6 +1213,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       throw error
     }
     identity.set(next)
+    // The last call for the old id has been made (its deregistration above; the role moves to
+    // the new id under the new id's own credential, `restoreRole`), so the key pair and
+    // renewing token it traded under go with it rather than renewing for the life of this
+    // process, which `/clear` would otherwise add one of per session.
+    forgetBrokerSession(previous)
     directSubject = nextSubject
     // `unfollow` removes the subject from the topic list before it first awaits.
     // What it then awaits is the drain of deliveries already in flight, and the
