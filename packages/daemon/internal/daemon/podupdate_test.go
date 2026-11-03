@@ -2008,6 +2008,12 @@ func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	// registers there, holds a session from that moment, and has answered nothing.
 	rig.startInPod(claim.RoleTester, podUpdatePod)
 
+	// The call below is the one sweep the test makes, over a group it built by hand, so nothing
+	// may still be deciding when it reads the claims: a machine mid-decision reads as not having
+	// answered (roundGroup's mask), and the sweep would then decide nothing at all rather than
+	// refuse the replacement — under the race detector, 4 runs in 30 on the base this change sits
+	// on.
+	rig.settleAll()
 	rig.s.reconcilePodUpdates(rig.ctx, group)
 
 	if calls := rig.replacements(); len(calls) != 0 {
