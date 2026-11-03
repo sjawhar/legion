@@ -33,7 +33,7 @@ func startRelayingReceiverRig(t *testing.T, uri, machineID, instance string, han
 	leaseTiming := testLeaseTiming()
 	leaseTiming.standbyPoll = 3 * time.Second
 	rig := newReceiverRig(t, uri, machineID, instance, handle, testReceiveTiming(), leaseTiming)
-	relays := &sessionRelays{cfg: listenerDeliveryHandlerConfig{logger: logging.New("relay-ownership " + instance)}}
+	relays := &sessionRelays{logger: logging.New("relay-ownership " + instance)}
 	rig.receiver.relays = relays
 	rig.lease.Start(context.Background())
 	rig.receiver.Start()

@@ -216,7 +216,7 @@ func TestAHeartbeatAndARoleSetKeepFieldsThisBuildDoesNotKnow(t *testing.T) {
 		kv         nats.KeyValue
 		key, value string
 	}{
-		{sessionKV, sessionID, `{"port":4242,"machine_id":"test-machine","dir":"/work","future_field":"session"}`},
+		{sessionKV, sessionID, `{"port":0,"machine_id":"test-machine","dir":"/work","future_field":"session"}`},
 		{interestKV, sessionID, `{"session_id":"ses_newer_build","machine_id":"test-machine","dir":"/work","topics":["notifications.agent.ses_newer_build"],"future_field":"interest"}`},
 		{roleKV, "keeper", `{"holder_session_id":"ses_before","claimed_at":1,"future_field":"claim"}`},
 	} {
@@ -254,7 +254,7 @@ func TestAHeartbeatAndARoleSetKeepFieldsThisBuildDoesNotKnow(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	subscribeHandler(d, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe",
-		strings.NewReader(`{"session_id":"ses_newer_build","topics":["notifications.team.example"],"port":4242,"dir":"/work"}`)))
+		strings.NewReader(`{"session_id":"ses_newer_build","topics":["notifications.team.example"],"dir":"/work"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("heartbeat: status %d %s, want 200", recorder.Code, recorder.Body.String())
 	}

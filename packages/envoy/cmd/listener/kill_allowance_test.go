@@ -1,8 +1,8 @@
-// The prompts a row's serving port answered, and the kill allowance the SIGKILL rows of the
+// The frames a row's sessions answered, and the kill allowance the SIGKILL rows of the
 // two-pod suite end on. They are outside the multiprocess tag, so envoy-go's untagged unit run
 // exercises the check: the only CI lane of that tag runs the two-pod rows alone, and a guard no
-// lane runs guards nothing. The serving port that fills the log in, and the row helpers that read
-// it, are the tagged harness's (multiprocess_harness_test.go).
+// lane runs guards nothing. The session stand-in that fills the log in, and the row helpers that
+// read it, are the tagged harness's (multiprocess_harness_test.go).
 
 package main
 
@@ -32,16 +32,16 @@ type mpMessage struct {
 	published time.Time
 }
 
-// mpPrompt is one prompt a session took: the event id it carried, and when the serving port
-// answered it.
+// mpPrompt is one frame a session took: the event id it carried, and when the session answered
+// it.
 type mpPrompt struct {
 	event string
 	at    time.Time
 }
 
-// mpPromptLog is the prompts a serving port answered, by session id, in the order it answered
-// them: the part of the harness's serving port (mpServingPort, which embeds it) that the row
-// checks read. A prompt held or refused is no entry here: the session never took it.
+// mpPromptLog is the frames the row's sessions answered, by session id, in the order they
+// answered them: the part of the harness's session stand-in (mpNATSSession, which embeds it)
+// that the row checks read. A frame held or naked is no entry here: the session never took it.
 type mpPromptLog struct {
 	mu      sync.Mutex
 	prompts map[string][]mpPrompt
@@ -57,7 +57,7 @@ func (l *mpPromptLog) took(sessionID, event string, at time.Time) {
 	l.prompts[sessionID] = append(l.prompts[sessionID], mpPrompt{event: event, at: at})
 }
 
-// counts is how many prompts the serving port answered for each event id.
+// counts is how many frames were answered for each event id.
 func (l *mpPromptLog) counts() map[string]int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -70,7 +70,7 @@ func (l *mpPromptLog) counts() map[string]int {
 	return counts
 }
 
-// promptsTo is how many prompts the serving port answered for sessionID.
+// promptsTo is how many frames sessionID answered.
 func (l *mpPromptLog) promptsTo(sessionID string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -87,6 +87,20 @@ func (l *mpPromptLog) first(sessionID, event string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// last is when event's last prompt was answered, and whether any was.
+func (l *mpPromptLog) last(sessionID, event string) (time.Time, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var at time.Time
+	var took bool
+	for _, prompt := range l.prompts[sessionID] {
+		if prompt.event == event {
+			at, took = prompt.at, true
+		}
+	}
+	return at, took
 }
 
 // order is the event ids sessionID took, each at its first prompt, in the order it took them.
@@ -137,6 +151,42 @@ func (l *mpPromptLog) killAllowanceViolations(messages []mpMessage, moment time.
 		wrong = append(wrong, fmt.Sprintf("%s to %s prompted %d times, want %s", m.event, m.session, count, want))
 	}
 	return wrong
+}
+
+// notOnce reports, one line each, the messages a session did not take exactly once: what
+// requireOnce fails on. A frame whose reply reached its relay, and whose acknowledgement
+// reached the server, is one of these wherever the row puts it - the pod taking over restarts
+// the session's consumer at an ack floor past it - so a repeat of such a frame is a fault
+// however the links behaved around it.
+func (l *mpPromptLog) notOnce(messages []mpMessage) []string {
+	counts := l.counts()
+	var wrong []string
+	for _, m := range messages {
+		if counts[m.event] != 1 {
+			wrong = append(wrong, fmt.Sprintf("%s to %s prompted %d times", m.event, m.session, counts[m.event]))
+		}
+	}
+	return wrong
+}
+
+// The check the links-dropped row ends on for the frames around the drop (mpPromptLog.notOnce,
+// which requireOnce fails on) refuses a repeat of a frame the session answered before its links
+// dropped: its reply reached the relay and its acknowledgement the server, so the pod that
+// restarts the consumer at the ack floor passes over it. Only the frame whose reply the drop
+// lost may come again, under its own event id
+// (TestTwoPodsARelayedFrameTheLinksDroppedUnderIsRepeatedAtMostOnceWithItsId).
+func TestTheExactlyOnceCheckRefusesARepeatOfAFrameAnsweredBeforeTheDrop(t *testing.T) {
+	dropped := time.Now()
+	justBefore := mpMessage{event: "evt-mp-just-before", session: "ses_mp_relay_drop_once", published: dropped.Add(-time.Second)}
+	log := &mpPromptLog{prompts: map[string][]mpPrompt{
+		justBefore.session: {
+			{event: justBefore.event, at: dropped.Add(-900 * time.Millisecond)},
+			{event: justBefore.event, at: dropped.Add(2 * time.Second)},
+		},
+	}}
+	if wrong := log.notOnce([]mpMessage{justBefore}); len(wrong) == 0 {
+		t.Fatal("a frame the session answered a moment before the drop was taken twice and the check passed it; only the frame whose reply the drop lost may come again")
+	}
 }
 
 // The check the SIGKILL rows end on (mpPromptLog.killAllowanceViolations, which

@@ -28,7 +28,7 @@ var cutRewatchCaches = []string{
 //
 // The test asserts four things over the real binary, each read from the output the freeze and the
 // thaw wrote:
-//   - both of the listener's clients report the cut, so the run is in the rewatch path;
+//   - the listener's client reports the cut, so the run is in the rewatch path;
 //   - each of the three caches logs a warm-up line after the thaw, so a rewatch replaced each
 //     watcher;
 //   - an interest another listener writes after the thaw reaches this listener's cache;
@@ -43,13 +43,10 @@ var cutRewatchCaches = []string{
 func TestASilentCutRewatchesTheCachesWithNoErrorLine(t *testing.T) {
 	const instance = "cut-rewatch-pod"
 	server, uri := testnats.Start(t)
-	// The live topics lane opens only under ENVOY_SUBSCRIBE_ALL_TOPICS (liveLaneEnv), and both
-	// clients connect before the listener reports itself healthy.
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "cut-rewatch",
-		append([]string{"ENVOY_INSTANCE_ID=" + instance}, liveLaneEnv...)...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "cut-rewatch", "ENVOY_INSTANCE_ID="+instance)
 	listener.waitHealthy(t)
 
-	thaw, output := freezeUntilBothClientsReportTheCut(t, server, listener, instance)
+	thaw, output := freezeUntilTheClientReportsTheCut(t, server, listener, instance)
 	thaw()
 
 	// Every cache is rewatched on the reconnect, and each replacement's warm-up line says so.

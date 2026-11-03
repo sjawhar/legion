@@ -16,9 +16,9 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 )
 
 // The headers of a relay frame, the core message the listener publishes on a session's relay
@@ -79,42 +79,40 @@ const (
 	// failed restarts at the ack floor; it doubles from the first to the max.
 	relayRetryFirst = time.Second
 	relayRetryMax   = 30 * time.Second
-	// pushRetryFirst and pushRetryMax bound the wait before a serving-port relay pushes its head
-	// message again after the port refused it, failed or timed out; it doubles from the first to
-	// the max.
-	pushRetryFirst = time.Second
-	pushRetryMax   = 30 * time.Second
-	// relaySettleGrace is how long a relay stopped with a push in hand lets that push, and the
-	// delivery record of it, finish before it gives up: the term's end cancels the relay, but a
-	// push the session's port may already have taken must not be left as an attempt record no one
-	// settles. Inside it the relay writes the push's delivered record, or gives the attempt up
-	// when the port refused it, so the pod that takes the lease over reads an answer rather than
-	// a record it would have to guess at; a push the grace cuts with the port's answer still out
-	// is marked in doubt (markPushInDoubt), which is an answer too - nobody will settle it.
-	//
-	// 750 ms is a round trip to a port that is answering and the ledger write after it, with
-	// room for a loaded box, and the grace is a cost as well as a cover: the message of a push
-	// nothing answers waits it out on the successor. Measured over a full two-pod suite run
-	// (2,394 pushes a port answered): 0.79 ms at the median, 3.4 ms at the 99th percentile,
-	// 102 ms at the slowest - the only push over half a second was one a row holds at the port
-	// on purpose. The term end itself costs more than the answer does: in the row that cuts a
-	// pod's receive connection with a push in flight
-	// (TestTwoPodsARelayedPushInFlightWhenTheTermEndsIsNotPushedAgainByTheSuccessor) the port
-	// answered 120, 134 and 149 ms after the stopping pod logged its release over three runs, so
-	// this is five times the gap that row needs covered and seven times the slowest push
-	// measured. It sits inside both take-over bounds: the stopping pod's own hand-back runs
-	// longer than this (inflightGrace alone is 3 s), so no graceful stop waits on it, and the
-	// pod taking over holds such an attempt for leaseFormerSettle, which is longer, so the
-	// record - delivered, cleared or in doubt - is there before the successor pushes again.
-	relaySettleGrace = 750 * time.Millisecond
-	// relayHeldRecheck is how often the relay judges a message it holds again: one another path is
-	// already pushing (holdWhilePushedElsewhere), which it neither pushes nor acks until that push
-	// lands or the attempt record naming it is gone.
-	relayHeldRecheck = time.Second
 	// relayPruneInterval is how often the relay drops lapsed session entries from the cache
 	// (session.SessionRegistry.PruneLapsed), so a session that stopped registering stops being
 	// relayed: a lapse has no watch event.
 	relayPruneInterval = 30 * time.Second
+	// relaySettleGrace is how long a relay the term's end stopped lets the frames it has
+	// unanswered be answered before it gives up on them. The term's end cancels the relay, but a
+	// frame the session may already have taken must not be left unacked for the pod taking over
+	// to publish again: inside this grace the stopped relay goes on hearing the session's
+	// replies and acks each frame the session answers done, so the successor's restart at the
+	// ack floor passes over it. A frame still unanswered when the grace ends is in doubt
+	// (relayFrameInDoubtLine): only the session's reply would say whether it took the message
+	// and none is coming, so the successor publishes that one again, which is the one repeat
+	// this path allows, under the same event id.
+	//
+	// The pod taking a released holder's lease over waits relayFormerSettle, this grace and a
+	// margin, before it restarts a session's consumer at its ack floor (sessionRelays.relay),
+	// so the grace always ends before the successor can publish anything. A holder taken over
+	// by force - killed, its node lost, its record expired - settles nothing and is not waited
+	// for.
+	//
+	// 750 ms is that round trip with room for a loaded box. Measured on the test host over 200
+	// frames sent one at a time, from the frame reaching the session to the consumer's ack floor
+	// passing it: p50 2.44 ms, p99 11.8 ms, slowest 37.2 ms on a quiet box, and p50 2.58 ms,
+	// p99 8.26 ms, slowest 111 ms with the rest of this package running beside it
+	// (TestAFramesRoundTripIsFarInsideTheRelaysSettleGrace), so the grace is between six and
+	// twenty times the slowest of them. The grace is a cost as well as a cover: a frame nothing answers delays
+	// nothing but its own session, whose later messages the successor sends only after
+	// relayFormerSettle anyway, and it is paid on the shutdown path too, where
+	// sessionRelays.stop waits for it out of what the receive stop left of the shutdown's 10 s
+	// budget, and is cut short with a warning when that budget is already spent.
+	relaySettleGrace = 750 * time.Millisecond
+	// relaySettlePoll is how often a settling relay reads whether the frames it waits for have
+	// been answered.
+	relaySettlePoll = 10 * time.Millisecond
 	// relayRestartLimit is how many relays of one listener may restart their consumer at once
 	// (sessionRelays.restart); the others wait their turn. A listener that starts relays every
 	// session it owns at once, and a thousand restarts sent together made the server answer none
@@ -145,8 +143,7 @@ const (
 	relayRestart
 )
 
-// relayOutcome is how one pull of a session's consumer ended (sessionRelays.relayNATS,
-// sessionRelays.relayServingPort).
+// relayOutcome is how one pull of a session's consumer ended (sessionRelays.relayNATS).
 type relayOutcome uint8
 
 const (
@@ -169,9 +166,8 @@ const (
 
 // sessionRelays relays the session consumers this listener owns (sessionRelays.wanted): one relay
 // per session, which restarts the session's consumer at its ack floor whenever it starts, then pulls
-// it and hands each message on in stream order. A session on NATS (port 0) gets each message as a
-// core frame on its relay subject, answered on a reply subject under the listener's one reply
-// inbox; a session on a serving port gets each as the prompt_async push, one at a time.
+// it and hands each message on in stream order, as a core frame on the session's relay subject,
+// answered on a reply subject under the listener's one reply inbox.
 //
 // Among the tasks of one machine id, only the one serving the machine's receive term relays
 // (setOwned), so a rolling deploy's second task relays nothing until the first lets go. The relay
@@ -183,14 +179,12 @@ const (
 // each relay runs on a goroutine of its own.
 type sessionRelays struct {
 	delivery *sessionDelivery
-	// cfg is the delivery configuration every path of this listener delivers and reports
-	// through: the relay's own refusal of a message goes through its bookkeeping
-	// (applyDeliveryOutcome, refuseUnreachableAddress), under the rules the durable path
-	// applies. It holds everything else this relay reads of the listener too - its registry,
-	// deliverer, client, machine id and logger, and the rules a message on a topic the session
-	// follows is judged by (followedTopicRules, judgeFollowedTopic) - so the relay reads one
-	// copy of each rather than its own.
-	cfg listenerDeliveryHandlerConfig
+	registry *store.Registry
+	// sessions is the session cache this relay reads its entries from; it is the same registry
+	// the durable path's fan-out judges a followed topic against (judgeFollowedTopic).
+	sessions  *session.SessionRegistry
+	machineID string
+	logger    *logging.Logger
 	// replyPrefix is the listener's reply inbox and a dot: a frame's reply subject is
 	// replyPrefix<token>, and one subscription to the inbox's wildcard hears every reply.
 	replyPrefix string
@@ -198,6 +192,12 @@ type sessionRelays struct {
 	// relayPauseMax; a test shortens them. Set before the first relay starts and read-only after.
 	pauseFirst time.Duration
 	pauseMax   time.Duration
+	// formerSettle is how long a former holder that released the lease may still be settling the
+	// frames it had unanswered, counted from this pod's acquisition (lease.FormerSettleWait): a
+	// relay waits it out before it restarts a session's consumer at its ack floor, so a frame
+	// the stopping pod is still acking is not published a second time. Nil for a listener
+	// without a lease, and in a rig that takes nothing over, which wait for nothing.
+	formerSettle func() time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -216,8 +216,8 @@ type sessionRelays struct {
 
 	// relays is each session's current relay; only the loop reads or writes it.
 	relays map[string]*relayRun
-	// listed holds, by session id, the consumers listed for the relays that gaining the receive
-	// term starts together (listConsumers), until each relay's start takes its own; nil
+	// listed holds, by session id, the consumers listed for the relays that gaining the durable
+	// binding starts together (listConsumers), until each relay's start takes its own; nil
 	// otherwise. listRefusedLogged is set once a list refused for want of the grant is logged.
 	// Only the loop reads or writes them.
 	listed            map[string]*jetstream.ConsumerInfo
@@ -233,12 +233,11 @@ type sessionRelays struct {
 	nextToken atomic.Uint64
 }
 
-// relayRun is one start of a session's relay: it runs until it is stopped or replaced. A run of a
-// NATS session that the session stops answering pauses (relayPaused) and goes on probing it.
+// relayRun is one start of a session's relay: it runs until it is stopped or replaced. A run whose
+// session stops answering pauses (relayPaused) and goes on probing it.
 type relayRun struct {
-	sessionID   string
-	servingPort bool
-	cancel      context.CancelFunc
+	sessionID string
+	cancel    context.CancelFunc
 	// done is closed once the run's goroutine has returned.
 	done chan struct{}
 	// restarted is set once the run has restarted the consumer at its ack floor, so a new epoch
@@ -305,18 +304,34 @@ type relayFrame struct {
 	run    *relayRun
 	acker  bus.SessionAcker
 	sentAt time.Time
+	// subject, streamSeq and data are the stored message the frame carries, kept for the one
+	// line a frame the settle grace cut earns (settleStoppedFrames). data is the message's own
+	// bytes, which the frame was published from; nothing on the relay's hot path reads it back.
+	subject   string
+	streamSeq uint64
+	data      []byte
 	// answered is set once the session sent any reply for the frame, under framesMu.
 	answered bool
 }
 
+// envelope is the stored message a frame carries, decoded for the one line a frame in doubt
+// earns; an envelope that will not decode is the zero one, which names no event.
+func (f *relayFrame) envelope() contracts.Envelope {
+	var item contracts.Envelope
+	_ = decodeStoredEnvelope(f.data, &item)
+	return item
+}
+
 // startSessionRelays starts the relay of delivery's session consumers and makes it delivery's
-// relay, serving-port sessions included (sessionDelivery.relay). It relays nothing until
-// setOwned(true).
+// relay (sessionDelivery.relay). It relays nothing until setOwned(true).
 func startSessionRelays(delivery *sessionDelivery, cfg listenerDeliveryHandlerConfig) (*sessionRelays, error) {
 	inbox := nats.NewInbox()
 	m := &sessionRelays{
 		delivery:    delivery,
-		cfg:         cfg,
+		registry:    cfg.registry,
+		sessions:    cfg.sessions,
+		machineID:   cfg.machineID,
+		logger:      cfg.logger,
 		replyPrefix: inbox + ".",
 		pauseFirst:  relayPauseFirst,
 		pauseMax:    relayPauseMax,
@@ -344,7 +359,7 @@ func (m *sessionRelays) setOwned(owned bool) {
 	if m == nil || m.owned.Swap(owned) == owned {
 		return
 	}
-	m.cfg.logger.Info("session relays follow the receive term", slog.Bool("relaying", owned))
+	m.logger.Info("session relays follow the receive term", slog.Bool("relaying", owned))
 	m.eventsMu.Lock()
 	m.ownershipChanged = true
 	m.eventsMu.Unlock()
@@ -400,11 +415,11 @@ func (m *sessionRelays) stop(ctx context.Context) {
 	select {
 	case <-m.loopDone:
 	case <-ctx.Done():
-		m.cfg.logger.Warn("session relay loop still running at shutdown")
+		m.logger.Warn("session relay loop still running at shutdown")
 		return
 	}
 	if !waitWithin(ctx, &m.runs) {
-		m.cfg.logger.Warn("session relays still running at shutdown")
+		m.logger.Warn("session relays still running at shutdown")
 	}
 }
 
@@ -421,7 +436,7 @@ func (m *sessionRelays) loop() {
 			return
 		case <-prune.C:
 			// Each lapse it finds is a change, which onChange hears.
-			m.cfg.sessions.PruneLapsed()
+			m.sessions.PruneLapsed()
 			continue
 		case <-m.wake:
 		}
@@ -440,9 +455,9 @@ func (m *sessionRelays) loop() {
 				m.stopAll()
 				continue
 			}
-			entries, err := m.cfg.sessions.List()
+			entries, err := m.sessions.List()
 			if err != nil {
-				m.cfg.logger.Warn("session relays could not list the session cache", slog.String("error", err.Error()))
+				m.logger.Warn("session relays could not list the session cache", slog.String("error", err.Error()))
 			}
 			// A session whose entry is not on consumer delivery and that has no relay to stop needs
 			// nothing (wanted).
@@ -461,14 +476,12 @@ func (m *sessionRelays) loop() {
 }
 
 // apply makes sessionID's relay match its entry and event: started when the session is this
-// listener's to relay, stopped when it is not, started again when it registered and the run ended
-// (or, for a serving port, when its entry changed: such a session may register through a listener
-// other than its owner), restarted at the ack floor on a new epoch, and, for a run waiting out a
-// pause, woken by the registration so it probes the session at once.
+// listener's to relay, stopped when it is not, started again when it registered and the run
+// ended, restarted at the ack floor on a new epoch, and, for a run waiting out a pause, woken by
+// the registration so it probes the session at once.
 func (m *sessionRelays) apply(sessionID string, event relayEvent) {
-	want, servingPort := m.wanted(sessionID)
 	run := m.relays[sessionID]
-	if !want {
+	if !m.wanted(sessionID) {
 		if run != nil {
 			run.cancel()
 			delete(m.relays, sessionID)
@@ -477,17 +490,14 @@ func (m *sessionRelays) apply(sessionID string, event relayEvent) {
 	}
 	switch {
 	case run == nil:
-		m.start(sessionID, servingPort, nil)
-	case run.servingPort != servingPort:
-		run.cancel()
-		m.start(sessionID, servingPort, run.done)
+		m.start(sessionID, nil)
 	case run.ended():
-		if event&relayResume != 0 || servingPort {
-			m.start(sessionID, servingPort, run.done)
+		if event&relayResume != 0 {
+			m.start(sessionID, run.done)
 		}
 	case event&relayRestart != 0 && run.restarted.Load():
 		run.cancel()
-		m.start(sessionID, servingPort, run.done)
+		m.start(sessionID, run.done)
 	case event&relayResume != 0:
 		run.wake()
 	}
@@ -501,27 +511,17 @@ func (m *sessionRelays) stopAll() {
 	}
 }
 
-// wanted reports whether this listener relays sessionID, and whether the session is on a serving
-// port: it serves its machine's receive term, and the session's entry records consumer delivery
-// and names this machine. A serving-port session is the machine's on its stored interest row, else
-// on its entry, as the durable path's push decides (session.Deliverer), since only that machine
-// reaches its port.
-func (m *sessionRelays) wanted(sessionID string) (want, servingPort bool) {
+// wanted reports whether this listener relays sessionID: it serves its machine's receive term,
+// and the session's entry records consumer delivery and names this machine.
+func (m *sessionRelays) wanted(sessionID string) bool {
 	if !m.owned.Load() {
-		return false, false
+		return false
 	}
-	entry, err := m.cfg.sessions.Get(sessionID)
+	entry, err := m.sessions.Get(sessionID)
 	if err != nil || entry.Delivery != session.DeliveryConsumer {
-		return false, false
+		return false
 	}
-	if entry.Port <= 0 {
-		return entry.MachineID == m.cfg.machineID, false
-	}
-	owner := entry.MachineID
-	if interest, err := m.cfg.registry.Get(m.ctx, sessionID); err == nil && interest.MachineID != "" {
-		owner = interest.MachineID
-	}
-	return owner == m.cfg.machineID, true
+	return entry.MachineID == m.machineID
 }
 
 // listConsumers reads every session consumer at once (bus.SessionConsumers.ListSessionConsumers)
@@ -539,19 +539,19 @@ func (m *sessionRelays) listConsumers() map[string]*jetstream.ConsumerInfo {
 	case consumerGrantRefused(err):
 		if !m.listRefusedLogged {
 			m.listRefusedLogged = true
-			m.cfg.logger.Warn("the NATS user may not list session consumers; each relay reads its own consumer at the listener's start", slog.String("error", err.Error()))
+			m.logger.Warn("the NATS user may not list session consumers; each relay reads its own consumer at the listener's start", slog.String("error", err.Error()))
 		}
 	default:
-		m.cfg.logger.Warn("session relays could not list the session consumers; each relay reads its own", slog.String("error", err.Error()))
+		m.logger.Warn("session relays could not list the session consumers; each relay reads its own", slog.String("error", err.Error()))
 	}
 	return nil
 }
 
 // start starts a run of sessionID's relay, once the run it replaces, previous, has returned. A run
 // started by the burst of gaining the receive term takes the session's listed consumer.
-func (m *sessionRelays) start(sessionID string, servingPort bool, previous <-chan struct{}) {
+func (m *sessionRelays) start(sessionID string, previous <-chan struct{}) {
 	ctx, cancel := context.WithCancel(m.ctx)
-	run := &relayRun{sessionID: sessionID, servingPort: servingPort, cancel: cancel, done: make(chan struct{}), resume: make(chan struct{}, 1), listed: m.listed[sessionID]}
+	run := &relayRun{sessionID: sessionID, cancel: cancel, done: make(chan struct{}), resume: make(chan struct{}, 1), listed: m.listed[sessionID]}
 	delete(m.listed, sessionID)
 	m.relays[sessionID] = run
 	m.runs.Go(func() {
@@ -574,20 +574,24 @@ func (m *sessionRelays) start(sessionID string, servingPort bool, previous <-cha
 // restarts at the session's ack floor at once, and the wait a run's earlier failures had raised
 // starts again from relayRetryFirst, since a lost pull request says nothing about the session or
 // its consumer. Without that, a run that had met a handful of failures would cost its session
-// relayRetryMax, 30 s, at every later reconnect: a serving-port registration keeps its epoch, so
-// the run is never replaced and its wait was only ever doubled.
+// relayRetryMax, 30 s, at every later reconnect.
 //
 // The pause is logged once an episode: the line is written for the first pause since the session
 // last answered a frame, not for each probe that found it silent again.
 func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
+	if wait := m.formerSettleWait(); wait > 0 {
+		// A pod that released this machine's lease has its stopped relays settling the frames
+		// they had unanswered (settleStoppedFrames); restarting the session's consumer at its
+		// ack floor before that is over would publish a frame it is still acking a second time.
+		m.logger.LogEvent(slog.LevelDebug, "session relay waits out the former holder's settle bound before it restarts the session's consumer",
+			slog.String("session_id", run.sessionID), slog.String("wait", wait.String()))
+		if waitUnlessDone(ctx, wait) != nil {
+			return
+		}
+	}
 	retry, pause, paused := relayRetryFirst, m.pauseFirst, false
 	for {
-		var outcome relayOutcome
-		if run.servingPort {
-			outcome = m.relayServingPort(ctx, run)
-		} else {
-			outcome = m.relayNATS(ctx, run)
-		}
+		outcome := m.relayNATS(ctx, run)
 		switch outcome {
 		case relayEnded:
 			return
@@ -600,7 +604,7 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 			}
 			if !paused {
 				paused = true
-				m.cfg.logger.Info("session relay paused: the session answered no frame within the receipt wait; it sends again after the pause backoff, or at the session's next registration",
+				m.logger.Info("session relay paused: the session answered no frame within the receipt wait; it sends again after the pause backoff, or at the session's next registration",
 					slog.String("session_id", run.sessionID),
 					slog.String("receipt_wait", relayReceiptWait.String()),
 					slog.String("backoff", pause.String()))
@@ -615,10 +619,20 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 			}
 			retry = min(retry*2, relayRetryMax)
 		}
-		if want, servingPort := m.wanted(run.sessionID); !want || servingPort != run.servingPort {
+		if !m.wanted(run.sessionID) {
 			return
 		}
 	}
+}
+
+// formerSettleWait is how long a former holder that released this machine's lease may still be
+// settling the frames it had unanswered (lease.FormerSettleWait), zero for a listener with no
+// lease and once the wait has passed.
+func (m *sessionRelays) formerSettleWait() time.Duration {
+	if m.formerSettle == nil {
+		return 0
+	}
+	return m.formerSettle()
 }
 
 // restart restarts the session's consumer at its ack floor with its current filter and starts
@@ -637,9 +651,9 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 // (bus.SessionConsumers.KeepListed), the relay takes no turn and sends no call before it pulls.
 func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.SessionConsumerStart, *bus.SessionPull, relayOutcome) {
 	sessionID := run.sessionID
-	topics, err := storedInterestTopics(ctx, m.cfg.registry, sessionID)
+	topics, err := storedInterestTopics(ctx, m.registry, sessionID)
 	if err != nil {
-		m.cfg.logger.Warn("session relay could not read the session's interests; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		m.logger.Warn("session relay could not read the session's interests; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return bus.SessionConsumerStart{}, nil, relayRetry
 	}
 	filter := sessionConsumerFilter(sessionID, topics)
@@ -693,13 +707,13 @@ func (m *sessionRelays) restartFailed(ctx context.Context, sessionID string, err
 	case ctx.Err() != nil:
 		return bus.SessionConsumerStart{}, nil, relayEnded
 	case errors.Is(err, bus.ErrSessionConsumerNotFound) || errors.Is(err, bus.ErrNoSessionConsumerName):
-		m.cfg.logger.Info("session relay paused: the session has no consumer; its next registration creates one", slog.String("session_id", sessionID))
+		m.logger.Info("session relay paused: the session has no consumer; its next registration creates one", slog.String("session_id", sessionID))
 		return bus.SessionConsumerStart{}, nil, relayEnded
 	case consumerGrantRefused(err):
 		m.delivery.refused(sessionID, err)
 		return bus.SessionConsumerStart{}, nil, relayEnded
 	default:
-		m.cfg.logger.Warn("session relay could not restart the session's consumer; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		m.logger.Warn("session relay could not restart the session's consumer; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return bus.SessionConsumerStart{}, nil, relayRetry
 	}
 }
@@ -719,10 +733,10 @@ func (m *sessionRelays) relayNATS(ctx context.Context, run *relayRun) relayOutco
 	}
 	defer pull.Stop()
 	if start.StreamID == "" {
-		m.cfg.logger.Warn("session relay could not read the stream's identity; retrying", slog.String("session_id", sessionID), slog.String("error", bus.ErrNoStreamID.Error()))
+		m.logger.Warn("session relay could not read the stream's identity; retrying", slog.String("session_id", sessionID), slog.String("error", bus.ErrNoStreamID.Error()))
 		return relayRetry
 	}
-	defer m.forget(run)
+	defer m.endFrames(ctx, run)
 	streamID, gap := start.StreamID, start.Gap
 	for {
 		next := ctx
@@ -748,7 +762,7 @@ func (m *sessionRelays) relayNATS(ctx context.Context, run *relayRun) relayOutco
 			if ctx.Err() != nil {
 				return relayEnded
 			}
-			m.cfg.logger.Warn("session relay could not publish a frame; restarting at the ack floor", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+			m.logger.Warn("session relay could not publish a frame; restarting at the ack floor", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 			return relayRetry
 		}
 		gap = false
@@ -758,15 +772,13 @@ func (m *sessionRelays) relayNATS(ctx context.Context, run *relayRun) relayOutco
 // pullEnded is what a relay does when its pull ended with err while the relay itself goes on: a
 // pull lost with its connection starts again at the ack floor at once (relayReconnected), since
 // the failures before the reconnect say nothing about the pull the new connection makes, and any
-// other end is retried after the relay's backoff (relayRetry). It logs the line that matches, and
-// is the end of both relays' pulls, the NATS session's (relayNATS) and the serving port's
-// (relayServingPort).
+// other end is retried after the relay's backoff (relayRetry). It logs the line that matches.
 func (m *sessionRelays) pullEnded(sessionID string, err error) relayOutcome {
 	if errors.Is(err, bus.ErrSessionPullReconnected) {
-		m.cfg.logger.Info("session relay pull lost with its connection; restarting at the ack floor at once", slog.String("session_id", sessionID))
+		m.logger.Info("session relay pull lost with its connection; restarting at the ack floor at once", slog.String("session_id", sessionID))
 		return relayReconnected
 	}
-	m.cfg.logger.Warn("session relay pull ended; restarting at the ack floor", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	m.logger.Warn("session relay pull ended; restarting at the ack floor", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	return relayRetry
 }
 
@@ -774,7 +786,7 @@ func (m *sessionRelays) pullEnded(sessionID string, err error) relayOutcome {
 // of its own under the listener's reply inbox.
 func (m *sessionRelays) publishFrame(ctx context.Context, run *relayRun, msg bus.SessionMessage, streamID string, gap bool) error {
 	token := strconv.FormatUint(m.nextToken.Add(1), 36)
-	frame := &relayFrame{run: run, acker: msg.SessionAcker, sentAt: time.Now()}
+	frame := &relayFrame{run: run, acker: msg.SessionAcker, sentAt: time.Now(), subject: msg.Subject, streamSeq: msg.StreamSeq, data: msg.Data}
 	m.framesMu.Lock()
 	if run.outstanding == nil {
 		run.outstanding = map[string]*relayFrame{}
@@ -815,17 +827,63 @@ func (m *sessionRelays) receiptDeadline(run *relayRun) (time.Time, bool) {
 	return run.unanswered[0].sentAt.Add(relayReceiptWait), true
 }
 
-// forget drops every frame of run still awaiting an answer: a reply to one is ignored, and its
-// message waits out its ack wait or the next restart at the ack floor.
-func (m *sessionRelays) forget(run *relayRun) {
+// forget drops every frame of run still awaiting an answer and returns them: a reply to one is
+// ignored from here on, and its message waits out its ack wait or the next restart at the ack
+// floor.
+func (m *sessionRelays) forget(run *relayRun) []*relayFrame {
 	m.framesMu.Lock()
 	defer m.framesMu.Unlock()
-	for token := range run.outstanding {
+	dropped := make([]*relayFrame, 0, len(run.outstanding))
+	for token, frame := range run.outstanding {
 		delete(m.frames, token)
+		dropped = append(dropped, frame)
 	}
 	run.outstanding = nil
 	run.unanswered = nil
+	return dropped
 }
+
+// outstanding is how many frames of run the session has not answered done or nak.
+func (m *sessionRelays) outstanding(run *relayRun) int {
+	m.framesMu.Lock()
+	defer m.framesMu.Unlock()
+	return len(run.outstanding)
+}
+
+// endFrames ends the frames one pull left outstanding. A relay the term's end stopped settles
+// them first (settleStoppedFrames); any other end - a retry, a pause, a reconnect - forgets them
+// at once, since the relay itself goes on and restarts at the session's ack floor.
+func (m *sessionRelays) endFrames(ctx context.Context, run *relayRun) {
+	if ctx.Err() != nil && !m.owned.Load() {
+		m.settleStoppedFrames(run)
+		return
+	}
+	m.forget(run)
+}
+
+// settleStoppedFrames gives the frames a stopped relay has unanswered relaySettleGrace to be
+// answered: the reply subscription and the session-consumer connection are both still up, so a
+// session that answers done inside it has its message acked here and the pod taking over, which
+// waits relayFormerSettle before it restarts the consumer, never sees that message again. A
+// frame still unanswered when the grace ends is in doubt: nothing says whether the session took
+// it, so one line names it and the successor publishes it once more, under the same event id.
+func (m *sessionRelays) settleStoppedFrames(run *relayRun) {
+	deadline := time.Now().Add(relaySettleGrace)
+	for m.outstanding(run) > 0 && time.Now().Before(deadline) {
+		time.Sleep(relaySettlePoll)
+	}
+	for _, frame := range m.forget(run) {
+		item := frame.envelope()
+		m.logger.DeliveryLog(slog.LevelWarn, relayFrameInDoubtLine, run.sessionID, item.Topic, item.EventID, "retrying",
+			slog.String("subject", frame.subject), slog.Uint64("stream_seq", frame.streamSeq))
+	}
+}
+
+// relayFrameInDoubtLine is the line settleStoppedFrames logs for the one frame a term's end can
+// leave unanswered; the row
+// TestTwoPodsARelayedFrameHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMostOnceWithItsId
+// reads it.
+const relayFrameInDoubtLine = "session relay left a frame in doubt: its settle bound ended with the session's reply still out"
 
 // onReply hears a session's reply to a frame: received marks the frame answered, progress restarts
 // its ack wait, done acks it and nak has the server deliver it again after relayNakDelay; done and
@@ -866,440 +924,7 @@ func (m *sessionRelays) onReply(msg *nats.Msg) {
 		err = frame.acker.NakWithDelay(relayNakDelay)
 	}
 	if err != nil {
-		m.cfg.logger.Warn("session relay could not answer the consumer for a frame", slog.String("session_id", frame.run.sessionID), slog.String("reply", reply), slog.String("error", err.Error()))
-	}
-}
-
-// relayServingPort restarts a serving-port session's consumer at its ack floor and pushes each
-// message it pulls to the session's port, one at a time, in stream order (pushUntilAccepted).
-func (m *sessionRelays) relayServingPort(ctx context.Context, run *relayRun) relayOutcome {
-	_, pull, outcome := m.restart(ctx, run)
-	if pull == nil {
-		return outcome
-	}
-	defer pull.Stop()
-	var pushedThrough uint64
-	for {
-		msg, err := pull.Next(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return relayEnded
-			}
-			return m.pullEnded(run.sessionID, err)
-		}
-		if msg.StreamSeq <= pushedThrough {
-			// A copy of a message this pull already pushed and acked: the server delivered it again
-			// once its ack wait ran out while it waited in the pull behind a head message the port
-			// kept refusing.
-			_ = msg.Ack()
-			continue
-		}
-		if !m.pushUntilAccepted(ctx, run.sessionID, msg) {
-			return relayEnded
-		}
-		pushedThrough = msg.StreamSeq
-	}
-}
-
-// pushUntilAccepted pushes msg to the session's serving port until the port answers 204, then
-// records the dedupe key and acks it. Any other answer, a transport error or a timeout keeps it at
-// the head of the session's messages: it is pushed again after a wait that doubles from
-// pushRetryFirst to pushRetryMax (pushWithBackoff, the durable path's worker pushing likewise),
-// kept in progress so its ack wait never runs out. It returns false when the relay was stopped
-// first.
-//
-// An address no attempt of this pod can reach (session.ErrAddressNotReachable) is refused for
-// good instead, as the durable path refuses it (refuseUnreachableAddress).
-//
-// A message on a topic a session follows (not its own agent subject or a role) is judged as the
-// durable path's fan-out judges it (followedTopicVerdict): one the session already has is acked
-// unpushed, and one another path is already pushing is held until that push lands or ends
-// (holdWhilePushedElsewhere).
-//
-// The push in hand, and the ledger record of it, run under a context of their own that outlives
-// the relay's by relaySettleGrace (settleContext): a term's end stops the relay from pushing
-// anything more at once, but a push the session's port may already have taken is left to finish,
-// so the pod taking the lease over reads the ledger's answer for it rather than an attempt
-// nobody will ever settle. A push that ends unlanded inside the grace gives its attempt up
-// (releaseStoppedPush); one the grace cuts with the port's answer still out is marked in doubt
-// (markPushInDoubt), since only that answer would say whether the session took the message and
-// none is coming: the successor pushes the message again as soon as it reads the mark, which is
-// the one repeat this path allows, under the same event id.
-func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string, msg bus.SessionMessage) bool {
-	var item contracts.Envelope
-	if err := decodeStoredEnvelope(msg.Data, &item); err != nil {
-		m.cfg.logger.Error("session relay dropped a stored message that is no valid envelope", slog.String("session_id", sessionID), slog.String("subject", msg.Subject), slog.String("error", err.Error()))
-		_ = msg.Ack()
-		return true
-	}
-	verdict, claim := m.holdWhilePushedElsewhere(ctx, sessionID, item, msg)
-	switch verdict {
-	case relayAcksIt:
-		_ = msg.Ack()
-		return true
-	case relayStopped:
-		// The relay was stopped while it held the message, which stays unacked: whichever relay
-		// starts next pulls it again.
-		return false
-	}
-	settle, endSettle := settleContext(ctx, relaySettleGrace)
-	defer endSettle()
-	return pushWithBackoff(ctx, m.cfg.logger, sessionID, item, func(attempt int) (bool, error) {
-		if err := m.push(settle, sessionID, item, msg); err != nil {
-			if errors.Is(err, session.ErrAddressNotReachable) {
-				m.refuseUnreachableAddress(sessionID, item, msg, claim, err)
-				return true, nil
-			}
-			if ctx.Err() != nil && settle.Err() == nil {
-				m.releaseStoppedPush(sessionID, item, claim, err)
-				return false, err
-			}
-			if settle.Err() != nil {
-				// The settle grace ran out with the push still at the port: nothing says whether
-				// the session took the message, so the attempt is marked in doubt rather than
-				// left standing for the successor to wait out (markPushInDoubt).
-				m.markPushInDoubt(sessionID, item, claim, err)
-				return false, err
-			}
-			_ = msg.InProgress()
-			return false, err
-		}
-		// The port took it, so the pair is recorded delivered in the machine's shared ledger as
-		// the durable path records it (applyDeliveryOutcome's settleRecord): another copy of the
-		// same event, stored on another topic this session follows, is refused rather than pushed
-		// again, by this pod or the one that takes delivery over. The relay waits for that record
-		// (recordDelivered) rather than moving on without it: the ack below shares the ledger's
-		// trouble often enough -- one dropped connection fails both -- and the copy the server
-		// then gives back is pushed again by whichever relay asks a ledger that holds only the
-		// attempt.
-		if !m.recordDelivered(settle, sessionID, item, msg, claim) {
-			// The grace ran out before the ledger took the record: the message stays unacked for
-			// the relay that pulls it next, which the attempt still standing holds until the
-			// ledger can answer for it.
-			return false, ctx.Err()
-		}
-		if ackErr := msg.Ack(); ackErr != nil {
-			m.cfg.logger.Warn("session relay could not ack a pushed message", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", ackErr.Error()))
-		}
-		m.cfg.logger.DeliveryLog(slog.LevelInfo, "session relay pushed", sessionID, item.Topic, item.EventID, "delivered", slog.Int("attempts", attempt))
-		return true, nil
-	})
-}
-
-// settleContext returns a context that follows parent while parent lasts and stays live for
-// grace after it ends, and the func that releases it. It costs no goroutine while parent is
-// live: the timer that ends the grace is armed only once parent is done, and arming it again
-// after the returned func ran cancels an already-cancelled context, which is a no-op.
-func settleContext(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
-	stop := context.AfterFunc(parent, func() { time.AfterFunc(grace, cancel) })
-	return ctx, func() {
-		stop()
-		cancel()
-	}
-}
-
-// releaseStoppedPush gives up the ledger attempt of a push the relay's stop ended unlanded: the
-// port refused it, or the transport failed, inside the settle grace, so nothing of this message
-// is on its way to the session and the pod taking the lease over pushes it itself with no wait
-// (lease.FormerHolder would otherwise hold it for leaseFormerSettle). The message stays unacked,
-// as it does after any refused push, so that pod's relay pulls it again.
-func (m *sessionRelays) releaseStoppedPush(sessionID string, item contracts.Envelope, claim dedupe.Attempt, err error) {
-	if clearErr := m.cfg.ledger.Clear(claim); clearErr != nil {
-		m.cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "clear"), slog.String("session_id", sessionID),
-			slog.String("event_id", item.EventID), slog.Bool("retry", false), slog.String("error", clearErr.Error()))
-	}
-	m.cfg.logger.DeliveryLog(slog.LevelInfo, "session relay gave up a push its stop ended unlanded", sessionID, item.Topic, item.EventID, "retrying",
-		slog.String("dedupe_key", item.DedupeKey), slog.String("error", err.Error()))
-}
-
-// markPushInDoubt marks the ledger attempt of a push the settle grace cut in doubt: the port had
-// the push and answered neither way, so whether the session took the message is unknown and no
-// answer for it is coming. The record says so (dedupe.Ledger.InDoubt), so the pod that takes the
-// lease over pushes the message again as soon as it reads the record rather than waiting the
-// attempt out, and the session takes at most one repeat of it, under the same event id
-// (cmd/listener/README.md, "State the pods share"). The message stays unacked, so that pod's
-// relay pulls it again.
-//
-// One line names the session, the event and the dedupe key, so an operator reading a session
-// that was prompted twice finds the push the doubt came from.
-func (m *sessionRelays) markPushInDoubt(sessionID string, item contracts.Envelope, claim dedupe.Attempt, err error) {
-	if markErr := m.cfg.ledger.InDoubt(claim); markErr != nil {
-		m.cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "in_doubt"), slog.String("session_id", sessionID),
-			slog.String("event_id", item.EventID), slog.Bool("retry", false), slog.String("error", markErr.Error()))
-	}
-	m.cfg.logger.DeliveryLog(slog.LevelWarn, relayPushInDoubtLine, sessionID, item.Topic, item.EventID, "retrying",
-		slog.String("dedupe_key", item.DedupeKey), slog.String("error", err.Error()))
-}
-
-// relayPushInDoubtLine is the line markPushInDoubt logs for the one push a term's end can leave
-// unanswered; the row TestTwoPodsARelayedPushHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMostOnceWithItsId
-// reads it.
-const relayPushInDoubtLine = "session relay left a push in doubt: its settle bound ended with the port's answer still out"
-
-// ledgerEpisode logs one path's trouble with the delivery ledger once per episode rather than
-// once per try: a relay that asks the ledger again every relayHeldRecheck for as long as it fails
-// would otherwise WARN once a second, for every held session, for the whole of an outage. The
-// first failure WARNs, the failures after it are silent, and the answer that ends the episode
-// logs one INFO naming how long the ledger was unavailable.
-type ledgerEpisode struct {
-	logger    *logging.Logger
-	operation string
-	sessionID string
-	eventID   string
-	// since is when the episode's first failure was logged, zero while the ledger is answering.
-	since time.Time
-}
-
-// failed reports one failed ledger call of the episode.
-func (e *ledgerEpisode) failed(err error) {
-	if !e.since.IsZero() {
-		return
-	}
-	e.since = time.Now()
-	e.logger.Warn(ledgerUnavailableLine, slog.String("operation", e.operation), slog.String("session_id", e.sessionID),
-		slog.String("event_id", e.eventID), slog.Bool("retry", true), slog.String("error", err.Error()))
-}
-
-// answered reports a ledger call of the episode that came back: it ends an episode that had
-// logged a failure, and is silent for a ledger that never failed.
-func (e *ledgerEpisode) answered() {
-	if e.since.IsZero() {
-		return
-	}
-	e.logger.Info("delivery ledger answered again", slog.String("operation", e.operation), slog.String("session_id", e.sessionID),
-		slog.String("event_id", e.eventID), slog.String("unavailable", time.Since(e.since).String()))
-	e.since = time.Time{}
-}
-
-// recordDelivered records the pair delivered in the machine's shared ledger, asking again for as
-// long as the ledger cannot take the record: a pair left attempted is one a later pull of this
-// consumer, here or on the pod that takes delivery over, cannot tell from a push in flight, and
-// the message the port has already taken would be pushed again once that attempt lapsed. Each ask
-// waits out ledgerReconnectWait for the ledger's connection first, as the durable lane's does
-// (ledgerAttempt), and then relayHeldRecheck, so a ledger that fails with its connection up is
-// asked once a second rather than in a spin. The failures are one episode, logged once
-// (ledgerEpisode), however many asks it takes.
-//
-// msg is kept in progress and unacked throughout, so its ack wait never runs out under the wait;
-// the session's later messages wait behind it, as they wait behind a push the port keeps refusing
-// (pushUntilAccepted). It returns false when the relay was stopped before the record landed.
-func (m *sessionRelays) recordDelivered(ctx context.Context, sessionID string, item contracts.Envelope, msg bus.SessionMessage, claim dedupe.Attempt) bool {
-	episode := ledgerEpisode{logger: m.cfg.logger, operation: "record", sessionID: sessionID, eventID: item.EventID}
-	for {
-		recordErr := m.cfg.ledger.Record(claim)
-		if recordErr == nil {
-			episode.answered()
-			return true
-		}
-		episode.failed(recordErr)
-		_ = msg.InProgress()
-		if m.cfg.ledgerReconnected != nil {
-			m.cfg.ledgerReconnected(ctx)
-		}
-		if waitUnlessDone(ctx, relayHeldRecheck) != nil {
-			return false
-		}
-	}
-}
-
-// refuseUnreachableAddress gives up a push the session's address refuses before any request is
-// made: that address is local to another pod of the machine, the one that accepted the session's
-// registration, so no attempt of this pod reaches it and a retry loop would hold the session's
-// messages behind this one for as long as the registration stands. The durable path reports such
-// a refusal as a terminal delivery_failed and retries nothing (delivery.go, both the agent
-// subject's branch and the fan-out's), and this is that refusal on the relay: it goes through
-// the durable path's own bookkeeping (applyDeliveryOutcome), so the exception is published, or
-// withheld, by exactly the rules that path applies - a message on an exceptions topic earns no
-// exception about an exception - the ledger attempt is given up so a resend after the session
-// registers through this pod is pushed rather than skipped as one in flight, and the message is
-// acked here, since no later pull of this consumer would reach the session either.
-//
-// The exception is a fan-out refusal unless the message is on a control topic, as the fan-out's
-// own refusal of an unreachable address is, and it names the stored message it is about
-// (exceptionOrigin), so two pods that refuse the same stored message raise one stored exception.
-func (m *sessionRelays) refuseUnreachableAddress(sessionID string, item contracts.Envelope, msg bus.SessionMessage, claim dedupe.Attempt, err error) {
-	applyDeliveryOutcome(m.cfg, item, deliveryOutcome{
-		sessionID: sessionID,
-		attempt:   claim,
-		log: func(logger *logging.Logger) {
-			logger.DeliveryLog(slog.LevelError, "session relay refused a message the session's address does not accept", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
-		},
-		exceptionReason: "delivery_failed",
-		fanoutRefusal:   !isControlTopic(item.Topic),
-		origin:          exceptionOrigin(msg.Header, msg.StreamSeq),
-		settle:          settleClear,
-	})
-	if ackErr := msg.Ack(); ackErr != nil {
-		m.cfg.logger.Warn("session relay could not ack a refused message", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", ackErr.Error()))
-	}
-}
-
-// push makes one prompt_async push of item to the session's port at the address its current entry
-// gives, keeping msg in progress first.
-func (m *sessionRelays) push(ctx context.Context, sessionID string, item contracts.Envelope, msg bus.SessionMessage) error {
-	entry, err := m.cfg.sessions.Get(sessionID)
-	if err != nil {
-		return err
-	}
-	_ = msg.InProgress()
-	return m.cfg.deliverer.Push(ctx, item, sessionID, entry)
-}
-
-// relayVerdict is what the relay of a serving-port session's consumer does with a message on a
-// topic the session follows (sessionRelays.followedTopicVerdict).
-type relayVerdict uint8
-
-const (
-	// relayPushesIt: the relay pushes the message to the session's port.
-	relayPushesIt relayVerdict = iota
-	// relayAcksIt: the message is refused, and acked unpushed.
-	relayAcksIt
-	// relayHoldsIt: another path is already pushing this message (an attempt record), so the relay
-	// neither pushes nor acks it yet (holdWhilePushedElsewhere).
-	relayHoldsIt
-	// relayDefersIt: the delivery ledger could not be read, so what the session already has and
-	// what is already on its way to it are both unknown; the relay neither pushes nor acks the
-	// message and asks the ledger again (holdWhilePushedElsewhere).
-	relayDefersIt
-	// relayStopped: the relay was stopped while it held the message, which stays unacked.
-	relayStopped
-)
-
-// followedTopicVerdict applies the durable path's judgement to item, a message on a topic the
-// session follows, as if no attempt record of it stood (judgeFollowedTopicWithoutAttempt), and
-// says what the relay does with it: a copy the session already took, an echo of its own message,
-// and a delivery mode it does not advertise or that cannot be read are acked unpushed.
-//
-// A mode refusal is reported as a delivery_failed exception, as the fan-out reports it, unless an
-// attempt record of the message stands: the fan-out records a refusal only together with the
-// exception that reports it (fanoutRefusalOutcome), so that refusal has been reported already and
-// the message is acked without a second report of it. A record therefore holds the relay only
-// where the relay would otherwise push the message, which is the push in flight a hold is for
-// (holdWhilePushedElsewhere), and no refusal record can hold it, whatever the session's entry
-// said when the fan-out wrote it.
-//
-// A message on the session's agent subject, a role forward included, is addressed to this session
-// alone and is never refused here.
-func (m *sessionRelays) followedTopicVerdict(ctx context.Context, sessionID string, item contracts.Envelope, episode *ledgerEpisode) (relayVerdict, dedupe.Attempt) {
-	verdict, judgeErr := takeFollowedTopic, error(nil)
-	if !isControlTopic(item.Topic) {
-		mode, modeErr := envelopeDeliveryMode(item)
-		verdict, _, judgeErr = judgeFollowedTopic(m.cfg.followedTopicRules(), sessionID, item, mode, modeErr)
-		if verdict == followedTopicEcho {
-			m.cfg.logger.DeliveryLog(slog.LevelInfo, "session relay skipped an echo", sessionID, item.Topic, item.EventID, "skipped")
-			return relayAcksIt, dedupe.Attempt{}
-		}
-	}
-	// The machine's shared delivery ledger says what the session already took and what is already
-	// on its way to it, from this pod or another of the machine's, and claims the pair for this
-	// relay when neither holds (dedupe.Proceed). A call that failed while the ledger's connection
-	// was reconnecting is made once more, as the durable lane's first call is
-	// (attemptOnceReconnected).
-	claim, ledgerErr := attemptOnceReconnected(ctx, m.cfg.logger, m.cfg.ledger, m.cfg.ledgerReconnected, item, sessionID)
-	if ledgerErr != nil {
-		// A ledger that cannot be read refuses nothing, and a relay that pushed under its silence
-		// would push a copy of a message this pod had already delivered -- the one whose record or
-		// ack was lost with the same connection. The durable lane NAKs such a message for a retry
-		// (ledgerAttempt), and the relay defers it likewise: it pushes nothing until the ledger
-		// answers, whichever of the session's consumer connection and the ledger's connection
-		// comes back first. The hold asks again every relayHeldRecheck, so the failures are
-		// logged as one episode rather than one line a second.
-		episode.failed(ledgerErr)
-		return relayDefersIt, dedupe.Attempt{}
-	}
-	episode.answered()
-	switch claim.Verdict {
-	case dedupe.Delivered:
-		m.cfg.logger.DeliveryLog(slog.LevelInfo, "session relay skipped a copy the session already has", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
-		return relayAcksIt, dedupe.Attempt{}
-	case dedupe.InFlight, dedupe.Deferred:
-		if verdict == takeFollowedTopic {
-			return relayHoldsIt, dedupe.Attempt{}
-		}
-		m.cfg.logger.DeliveryLog(slog.LevelInfo, "session relay skipped a refusal the fan-out reported", sessionID, item.Topic, item.EventID, "skipped", slog.String("error", judgeErr.Error()))
-		return relayAcksIt, dedupe.Attempt{}
-	}
-	if verdict == takeFollowedTopic {
-		return relayPushesIt, claim
-	}
-	m.cfg.logger.DeliveryLog(slog.LevelWarn, "session relay refused a message the session cannot take", sessionID, item.Topic, item.EventID, "failed", slog.String("error", judgeErr.Error()))
-	if publishErr := publishDeliveryException(m.cfg.client, item, "delivery_failed", sessionID, true, ""); publishErr != nil {
-		m.cfg.logger.Warn("session relay could not publish a delivery exception", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", publishErr.Error()))
-	}
-	// The refusal is reported together with the attempt it keeps, as the fan-out keeps one
-	// (fanoutRefusalOutcome), so a repeat of the message inside dedupe.AttemptedAge is skipped
-	// rather than reported a second time, on this pod or the other.
-	m.cfg.ledger.Keep(claim)
-	return relayAcksIt, dedupe.Attempt{}
-}
-
-// holdWhilePushedElsewhere judges item for the relay and holds msg while another path's push of it
-// is in flight, or while the delivery ledger cannot say whether one is, judging it again every
-// relayHeldRecheck and keeping it in progress meanwhile. It returns the verdict the hold ended on,
-// relayStopped when the relay was stopped first.
-//
-// Only a message the relay would otherwise push is held: followedTopicVerdict judges as if no
-// record stood, and acks a refusal the fan-out recorded as it reported it, so no refusal record
-// reaches this hold.
-//
-// An attempt record is a push in flight, not a delivery: the path that wrote it pushed the
-// message to the session's port itself, or is a serving-port worker handed that push before the
-// session's entry moved to consumer delivery under it (serve_port_workers.go). Acking the message
-// on that record would rest the session's only copy on a ledger record that expires and on
-// a worker that may yet drop or hand back its push, so the message is held unacked instead, and
-// judged again:
-//   - the worker's 204 records the dedupe key: the session has the message, so it is acked;
-//   - the worker drops its push (its session is relayed now) or hands it back, either of which
-//     clears the attempt: the relay pushes the message itself;
-//   - neither happens and the record expires (dedupe.AttemptedAge, 5 minutes from when it was
-//     written): the relay pushes the message itself. A copy that lands from both pushes is one the
-//     session drops by its dedupe key, so an expiry race costs a duplicate, never the message.
-//
-// The hold is therefore bounded by dedupe.AttemptedAge plus one relayHeldRecheck, and it stalls
-// nothing beyond the session's own later messages, which wait behind it in stream order as they
-// wait behind a head message the port keeps refusing (pushUntilAccepted) -- a wait with no bound at
-// all. The message is kept in progress, so the consumer's ack wait (bus.SessionConsumerAckWait)
-// never runs out under it; the messages the server delivers behind it are bounded by the
-// consumer's MaxAckPending (bus.SessionConsumerMaxAckPending) and are redelivered without limit
-// (MaxDeliver -1) until the relay takes each in turn, the redelivered copies of the ones it has
-// pushed by then acked and skipped (relayServingPort's pushedThrough).
-//
-// A ledger that cannot be read holds the message likewise (relayDefersIt), for as long as it
-// cannot: a push under its silence is the one way this relay sends a message twice, since the
-// record of the copy it has already delivered is exactly what the ledger holds. The durable lane
-// NAKs such a message for durableRetryDelay and meets the same ledger on the retry, so neither
-// lane pushes without the ledger's answer and neither gives up on it; each ask first waits out
-// ledgerReconnectWait for the ledger's connection, so a relay whose session-consumer connection
-// came back first sends nothing until the ledger's does. The asks of one hold are one episode of
-// the ledger's trouble, logged once however many of them fail (ledgerEpisode).
-func (m *sessionRelays) holdWhilePushedElsewhere(ctx context.Context, sessionID string, item contracts.Envelope, msg bus.SessionMessage) (relayVerdict, dedupe.Attempt) {
-	var since time.Time
-	var resumed string
-	episode := ledgerEpisode{logger: m.cfg.logger, operation: "attempt", sessionID: sessionID, eventID: item.EventID}
-	for {
-		verdict, claim := m.followedTopicVerdict(ctx, sessionID, item, &episode)
-		if verdict != relayHoldsIt && verdict != relayDefersIt {
-			if !since.IsZero() && verdict == relayPushesIt {
-				m.cfg.logger.DeliveryLog(slog.LevelInfo, resumed, sessionID, item.Topic, item.EventID, "retrying",
-					slog.String("dedupe_key", item.DedupeKey), slog.String("held", time.Since(since).String()))
-			}
-			return verdict, claim
-		}
-		if since.IsZero() {
-			since = time.Now()
-			held := "session relay holds a message another path is pushing"
-			resumed = "session relay pushes a message whose other push ended unlanded"
-			if verdict == relayDefersIt {
-				held = "session relay holds a message the delivery ledger cannot answer for"
-				resumed = "session relay pushes a message the delivery ledger answered for"
-			}
-			m.cfg.logger.DeliveryLog(slog.LevelInfo, held, sessionID, item.Topic, item.EventID, "retrying", slog.String("dedupe_key", item.DedupeKey))
-		}
-		_ = msg.InProgress()
-		if waitUnlessDone(ctx, relayHeldRecheck) != nil {
-			return relayStopped, dedupe.Attempt{}
-		}
+		m.logger.Warn("session relay could not answer the consumer for a frame", slog.String("session_id", frame.run.sessionID), slog.String("reply", reply), slog.String("error", err.Error()))
 	}
 }
 

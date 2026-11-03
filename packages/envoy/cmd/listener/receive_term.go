@@ -21,12 +21,9 @@ type receiveTerm struct {
 	conn    *nats.Conn
 
 	queue chan *nats.Msg
-	// handling is the context every message of the term is handled under; cancel ends it. It
-	// carries term, the handle of this term the workers key its pushes by (withServePortTerm), so
-	// a handler that wraps the context does not cut its pushes loose from the term.
+	// handling is the context every message of the term is handled under; cancel ends it.
 	handling context.Context
 	cancel   context.CancelFunc
-	term     *servePortTermHandle
 	// closing is closed once the handler takes no more messages (stopHandling), handled once the
 	// handler has returned, and stopped once the term is over, which ends the InProgress ticker.
 	closing     chan struct{}
@@ -97,14 +94,12 @@ func (t *receiveTerm) close() {
 	t.stopHandling()
 }
 
-// handBack NAKs with delay every message the term holds or has queued, parked among them, as one
-// batch in stream order, and from then on has intake hand back each message that arrives
-// (handBackLocked). parked are the messages of this term the serving-port workers gave up when
-// the stop took their pushes back (servePortWorkers.endTerm), which nothing settles any more.
-func (t *receiveTerm) handBack(delay time.Duration, parked []*nats.Msg) {
+// handBack NAKs with delay every message the term holds or has queued, as one batch in stream
+// order, and from then on has intake hand back each message that arrives (handBackLocked).
+func (t *receiveTerm) handBack(delay time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	batch := append(t.takeQueuedLocked(), parked...)
+	batch := t.takeQueuedLocked()
 	sortByStreamSequence(batch)
 	t.handedBack, t.handBackDelay = map[uint64]int{}, delay
 	for _, m := range batch {

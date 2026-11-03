@@ -10,9 +10,10 @@ import (
 
 // A lease record names the boots that held the lease before its holder (former_boots), so the
 // delivery ledger takes a former holder's unresolved attempt over without waiting out the
-// ledger's takeover age (the 30 s prompt limit and ledgerTakeoverMargin): at once for a holder
-// taken over by force, and once it has had leaseFormerSettle to settle for one that released the
-// record and is still alive (FormerHolder).
+// ledger's takeover age (deliveryHandlingLimit and ledgerTakeoverMargin): at once for a holder
+// taken over by force, and once it has had ledgerFormerSettle to settle for one that released
+// the record and is still alive (FormerHolder). A relay reads the same record for its own,
+// shorter wait (relayFormerSettle, lease.FormerSettleWait).
 // An acquisition keeps the ones that stopped less than leaseFormerBootAge, twice that age, before
 // it, and the newest leaseFormerBootsMax of those.
 const (
@@ -84,11 +85,11 @@ type leaseFields struct {
 
 // formerBoot is one entry of a lease record's former_boots: a boot that held the lease, the
 // server time it stopped, and whether the record it stopped on was released rather than taken
-// over expired. A released holder is alive: its relays are finishing the pushes they had in hand
-// and writing, giving up or marking in doubt their ledger attempts (relaySettleGrace), so the
-// ledger defers those attempts for leaseFormerSettle rather than taking them over at once, while
-// a holder that was killed or lost its node writes nothing more and is taken over at once. An
-// attempt a former holder marked in doubt is taken over at once too: that mark is its answer.
+// over expired. A released holder is alive: its role lane is finishing the forward it had in
+// flight and recording, giving up or reporting its ledger attempt (roleReceiptTimeout), so the
+// ledger defers those attempts for ledgerFormerSettle rather than taking them over at once,
+// while a holder that was killed or lost its node writes nothing more and is taken over at once.
+// An attempt a former holder marked in doubt is taken over at once too: that mark is its answer.
 type formerBoot struct {
 	Boot     string    `json:"boot"`
 	Stopped  time.Time `json:"stopped"`

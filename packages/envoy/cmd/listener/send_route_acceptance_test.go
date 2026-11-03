@@ -88,7 +88,7 @@ func TestSendReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	const target = "ses_cold_cache_target"
 	registrar, cold := trailingListeners(t)
 	if err := registrar.sessions.Put(target, session.SessionEntry{
-		Port: 1, MachineID: "test-machine", Dir: "/test/" + target, Title: "cold target",
+		SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + target, Title: "cold target",
 	}); err != nil {
 		t.Fatalf("register %s through the other listener: %v", target, err)
 	}
@@ -168,7 +168,7 @@ func TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable(t *testing.T) {
 		t.Fatalf("open the session registry: %v", err)
 	}
 	if err := sessions.Put(target, session.SessionEntry{
-		Port: 1, MachineID: "test-machine", Dir: "/test/" + target, Title: "cut target",
+		SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + target, Title: "cut target",
 	}); err != nil {
 		t.Fatalf("register %s: %v", target, err)
 	}
@@ -281,7 +281,7 @@ func TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget(t *testin
 				t.Fatalf("open the session registry: %v", err)
 			}
 			if err := sessions.Put(target, session.SessionEntry{
-				Port: 1, MachineID: "test-machine", Dir: "/test/" + target, Title: "frozen target",
+				SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + target, Title: "frozen target",
 			}); err != nil {
 				t.Fatalf("register %s: %v", target, err)
 			}
@@ -342,7 +342,7 @@ func TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget(t *testin
 func TestSendAnswersServiceUnavailableWhenTheBusRefusesThePublish(t *testing.T) {
 	const target = "ses_refused_publish_target"
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{target})
 	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	// The stream goes after every store is open: opening one reconciles the stream back.
 	if err := client.JS().DeleteStream(bus.Stream); err != nil {
@@ -441,7 +441,7 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 	const target = "ses_recorded_target"
 	const sender = "ses_recorded_sender"
 	client := setupPublishTestClient(t)
-	registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1, sender: 1})
+	registry, sessions := setupSessionsTest(t, nil, []string{target, sender})
 	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	send := func(body string) (*httptest.ResponseRecorder, map[string]any) {
 		t.Helper()

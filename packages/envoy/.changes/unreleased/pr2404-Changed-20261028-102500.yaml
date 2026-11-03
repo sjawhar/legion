@@ -6,9 +6,7 @@ body: |-
     subject the stream stores, instead of the build's own list of stream subjects, so two builds whose
     stream subjects differ share one durable during a roll; `>` rather than an empty filter, since
     nats-server 2.10 accepts an update that clears a push durable's filter and then delivers nothing.
-    Only the lease holder writes the policy. The live topics lane leaves to the durable every subject
-    the deployed stream's current subject list captures, read from the server at start, every 5 s and
-    after each reconnect, not the list the build compiles in.
+    Only the lease holder writes the policy.
 time: 2026-10-28T10:25:00.493684292Z
 custom:
     Issue: pr2404

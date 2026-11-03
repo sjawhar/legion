@@ -1,48 +1,24 @@
 package session
 
-import (
-	"errors"
-	"time"
+import "time"
 
-	"github.com/nats-io/nats.go"
-)
-
-// ClaimStaleAfter is how long a claim may go unrefreshed before another holder
-// may take the route. The plugin heartbeats every 90 seconds
-// (DEFAULT_HEARTBEAT_MS, packages/envoy-client/src/envoy-settings.ts), so this
-// allows three missed heartbeats before assuming the claiming process is gone.
+// ClaimStaleAfter is how long a session's claim may go unrefreshed before a reader treats the
+// process that wrote it as gone. The plugin heartbeats every 90 seconds (DEFAULT_HEARTBEAT_MS,
+// packages/envoy-client/src/envoy-settings.ts), so this allows three missed heartbeats before
+// assuming it is. Role resolution reads it (roles.Fresh, and with it the role lane's stale-holder
+// check and Dispatch's outbox); a session route's own write weighs no claim's freshness, since
+// the route follows whichever process heartbeated last (SessionRegistry.PutWithin).
 const ClaimStaleAfter = 5 * time.Minute
 
-// mergeForClaim decides which of two competing claims on a session route wins.
-//
-// Precedence, in order:
-//   - a transient KV error is returned so the caller refuses to write
-//   - no incumbent, or the same process re-claiming: accept
-//   - a portless claim cannot displace a live portful route
-//   - a driving claim always wins (beats a non-driving incumbent; a newer
-//     driving claim beats an older one, which is a genuine re-home)
-//   - a non-driving claim cannot displace a live driving incumbent; it may take
-//     over only once that claim goes stale (process presumed gone)
-//
-// An accepted claim keeps the incumbent's fields this build does not know (SessionEntry.unknown): a
-// newer build's field is the session's, not the claiming process's, and survives its heartbeat.
-func mergeForClaim(cur SessionEntry, curErr error, next SessionEntry, now int64) (SessionEntry, error) {
-	if curErr != nil && !errors.Is(curErr, nats.ErrKeyNotFound) {
-		return SessionEntry{}, curErr
-	}
-	if curErr == nil && next.Port == 0 && cur.Port > 0 && !claimStale(cur, now) {
-		return cur, nil
-	}
-	if curErr == nil && next.Port != cur.Port && !next.Driving && cur.Driving && !claimStale(cur, now) {
-		return cur, nil
-	}
+// stampClaim is the registration a claim writes: next, stamped with the moment of the write, so a
+// reader weighing the route's freshness reads the latest heartbeat (ClaimStaleAfter). It keeps the
+// fields of the stored registration cur, if there is one (found), that this build does not know
+// (SessionEntry.unknown): a newer build's field is the session's, not the claiming process's, and
+// survives its heartbeat.
+func stampClaim(cur SessionEntry, found bool, next SessionEntry, now int64) SessionEntry {
 	next.UpdatedAt = now
-	if curErr == nil {
+	if found {
 		next.unknown = cur.unknown
 	}
-	return next, nil
-}
-
-func claimStale(entry SessionEntry, now int64) bool {
-	return now-entry.UpdatedAt >= int64(ClaimStaleAfter/time.Millisecond)
+	return next
 }

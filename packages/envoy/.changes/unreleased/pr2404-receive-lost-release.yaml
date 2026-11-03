@@ -9,10 +9,10 @@ body: |-
     releases the record with the WARN "listener lease released: the receive connection is down",
     naming how long it was down; the standby takes the released record at its next poll and
     settles for the full ack wait beside the lost connection's subscription, so every message
-    reaches its session in publish order, about fourteen and a half seconds after the cut at
-    worst - up to three seconds before the cut is declared, up to a second before the holder's
-    next round reads the signal, the three-second bound, the standby's half-second poll and its
-    seven-second settle hold, plus the subscribe and the delivery - inside the fifteen seconds a
+    reaches its session in publish order. A session's own messages ride its own consumer,
+    relayed by whichever pod holds the term, so one published as the cut lands reaches it in
+    milliseconds and one published in the gap between the cut pod's term and the standby's
+    waits 1.257 seconds at worst, measured over twenty runs - well inside the fifteen seconds a
     hard take-over is bounded at. A connection back
     inside the three seconds keeps the lease and its term, and no pod takes the lease, at a
     standby poll or after a lapse, while its own receive connection is down. That holds whatever

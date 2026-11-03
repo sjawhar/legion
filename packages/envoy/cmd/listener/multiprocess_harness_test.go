@@ -7,8 +7,8 @@
 // in-process NATS server, each behind a listenerRelay of its own, and drives them over their real
 // HTTP API and the real bus, because each thing it checks is a property of whole processes: which
 // of two processes delivers from the machine's durable, what happens to the messages one process
-// holds when it is stopped, killed or cut off, and what the other answers meanwhile. Port sessions
-// are one fake serving port (mpServingPort) that counts each completed prompt_async by event id;
+// holds when it is stopped, killed or cut off, and what the other answers meanwhile. A row's
+// sessions are one NATS stand-in (mpNATSSession) that counts each frame it answered by event id;
 // the machine id is arbitrary (box-a). Every pod connects as the machine's nkey user, holding
 // exactly the grant envoy-infra renders for it (mpStartNATS), so a permissions gap fails the row;
 // the row's own clients connect as the server's admin.
@@ -34,7 +34,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -45,6 +44,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
@@ -503,21 +504,6 @@ func mpNATS(t *testing.T) string {
 	return uri
 }
 
-// mpCorePathNATS starts a row's NATS server under the host's grant, which carries no session
-// consumer's call (core.HostPermissions, infra/core/permissions.go), so every registration the
-// row's pods answer is answered core with the reason no_grant and every serving-port session of
-// the row is on the core path: its stored messages reach it through the machine's durable and the
-// receiver of whichever pod holds the delivery lease, as production's no_grant and
-// consumer_error sessions do, rather than through a consumer of its own whose relay pushes them
-// in milliseconds. A row that bounds the durable path's take-over needs that; the rows on
-// mpNATS, whose sessions each get a consumer, read the relay instead. It returns the URL the
-// row's own clients use.
-func mpCorePathNATS(t *testing.T) string {
-	t.Helper()
-	_, uri := mpStartNATS(t, testnats.HostGrant)
-	return uri
-}
-
 // mpStartNATS starts a row's NATS server, where every pod the row starts connects as mpMachine's
 // nkey user holding exactly the grant grant reads for mpMachine: testnats.ListenerGrant, the grant
 // envoy-infra renders for a listener, unless the row's pods need another role's (testnats.HostGrant
@@ -649,39 +635,24 @@ func (p *mpPod) kill(t *testing.T) time.Time {
 	return killed
 }
 
-// registerPort registers sessionID through the pod as the OpenCode plugin does, served on the
-// serving port at 127.0.0.1 and subscribed to topics besides its own inbox, and requires a 200.
-func (p *mpPod) registerPort(t *testing.T, serving *mpServingPort, sessionID string, topics ...string) {
+// registerNATS registers sessionID through the pod as a plugin on consumer delivery does,
+// subscribed to topics besides its own inbox, and requires a 200. Its frames reach the row's
+// NATS stand-in (mpNATSSession) on bus.DeliverSubject(sessionID).
+func (p *mpPod) registerNATS(t *testing.T, serving *mpNATSSession, sessionID string, topics ...string) {
 	t.Helper()
-	p.subscribe(t, mpPortRegistration(t, serving, sessionID, topics...))
+	p.subscribe(t, mpNATSRegistration(t, serving, sessionID, topics...))
 }
 
-// registerCorePath registers sessionID as registerPort does and requires the answer to leave it
-// on the core path: delivery core with the reason no_grant, which the host's grant earns
-// (mpCorePathNATS). A row that bounds the durable path's take-over of a serving-port session
-// rests on that answer, and would otherwise measure the milliseconds of a session consumer's
-// relay without saying so.
-func (p *mpPod) registerCorePath(t *testing.T, serving *mpServingPort, sessionID string, topics ...string) {
-	t.Helper()
-	body := mpPortRegistration(t, serving, sessionID, topics...)
-	answer := p.call(http.MethodPost, "/v1/interests/subscribe", body)
-	if answer.status != http.StatusOK {
-		t.Fatalf("subscribe %s through %s: status %d %s %v", body, p.instance, answer.status, answer.body, answer.err)
-	}
-	if !strings.Contains(answer.body, `"mode":"core"`) || !strings.Contains(answer.body, `"reason":"no_grant"`) {
-		t.Fatalf("%s's registration through %s answered %s, want delivery core with the reason no_grant: this row is about a serving-port session the durable path delivers to", sessionID, p.instance, answer.body)
-	}
-}
-
-// mpPortRegistration is the registration body of sessionID on serving's port, following topics
-// besides its own inbox.
-func mpPortRegistration(t *testing.T, serving *mpServingPort, sessionID string, topics ...string) string {
+// mpNATSRegistration is the registration body of sessionID on consumer delivery, following
+// topics besides its own inbox.
+func mpNATSRegistration(t *testing.T, _ *mpNATSSession, sessionID string, topics ...string) string {
 	t.Helper()
 	topicsJSON, err := json.Marshal(append([]string{}, topics...))
 	if err != nil {
 		t.Fatalf("encode %s's topics: %v", sessionID, err)
 	}
-	return fmt.Sprintf(`{"session_id":%q,"topics":%s,"port":%d,"host":"127.0.0.1"}`, sessionID, topicsJSON, serving.port)
+	return fmt.Sprintf(`{"session_id":%q,"topics":%s,"self_subscribed":true,"host":"127.0.0.1","delivery":{"consumer":true,"epoch":%q}}`,
+		sessionID, topicsJSON, "mp-"+sessionID)
 }
 
 // subscribe posts body to the pod's /v1/interests/subscribe, a registration or its heartbeat, and
@@ -696,72 +667,69 @@ func (p *mpPod) subscribe(t *testing.T, body string) {
 // mpEventMark carries a message's event id in the text of the prompt its session receives.
 var mpEventMark = regexp.MustCompile(`mp-event=([A-Za-z0-9_-]+)`)
 
-// mpServingPort is the fake serve process every port session of a row lives on. It answers each
-// POST /session/<id>/prompt_async 204 and records it, under the session, once the answer is
-// written. A prompt held (hold) is not answered until the listener gives up on it, and is not
-// recorded: the session never took it. A prompt to a failing session (fail) is answered 500 and
-// counted apart: the session never took it either. Every prompt it sees, whichever of those it
-// is, is recorded in the row's delivery journal (mpJournal), which a failing row prints. The
-// prompts it answered, and the checks a row reads them through, are mpPromptLog's
-// (kill_allowance_test.go), which it embeds.
-type mpServingPort struct {
+// mpNATSSession is the stand-in every session of a row receives through: one NATS subscription
+// on notifications.envoy.deliver.* (bus.DeliverSubject), the subject the owning listener relays
+// a session's consumer on. It answers each frame `received` and `done` and records it, under the
+// session, once the reply is sent. A frame held (hold) is never answered and is not recorded:
+// the session never took it. A frame to a failing session (fail) is answered `nak` and counted
+// apart: the session never took it either. Every frame it sees, whichever of those it is, is
+// recorded in the row's delivery journal (mpJournal), which a failing row prints. The frames it
+// answered, and the checks a row reads them through, are mpPromptLog's (kill_allowance_test.go),
+// which it embeds.
+type mpNATSSession struct {
 	mpPromptLog
-	port    int
+	conn    *natsgo.Conn
 	journal *mpJournal
 
 	mu    sync.Mutex
 	holds map[string]chan struct{}
-	// gates holds, per session, the next prompt until its release closes, then answers it 204
-	// (gate).
-	gates      map[string]mpPortGate
+	// gates holds, per session, the next frame's reply until its release closes, then answers it
+	// done (gate).
+	gates      map[string]mpFrameGate
 	failing    map[string]bool
 	failed     map[string]int
 	unexpected []string
 	stopping   chan struct{}
 }
 
-func mpStartServingPort(t *testing.T) *mpServingPort {
+func mpStartNATSSessions(t *testing.T, uri string) *mpNATSSession {
 	t.Helper()
-	serving := &mpServingPort{journal: mpJournalOf(t), holds: map[string]chan struct{}{}, gates: map[string]mpPortGate{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
-	server := httptest.NewServer(http.HandlerFunc(serving.serve))
-	t.Cleanup(server.Close)
-	// Runs before server.Close, which waits for every held prompt to return.
+	serving := &mpNATSSession{journal: mpJournalOf(t), holds: map[string]chan struct{}{}, gates: map[string]mpFrameGate{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
+	conn, err := natsgo.Connect(uri, natsgo.Name("mp-sessions"))
+	if err != nil {
+		t.Fatalf("connect the row's sessions to NATS: %v", err)
+	}
+	serving.conn = conn
+	t.Cleanup(conn.Close)
+	// Runs before the connection closes, which a gated frame's handler waits on.
 	t.Cleanup(func() { close(serving.stopping) })
+	if _, err := conn.Subscribe(bus.DeliverSubject("*"), serving.receive); err != nil {
+		t.Fatalf("subscribe the row's sessions to their relay subjects: %v", err)
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush the sessions' subscription: %v", err)
+	}
 	t.Cleanup(func() {
 		serving.mu.Lock()
 		defer serving.mu.Unlock()
 		if len(serving.unexpected) > 0 {
-			t.Errorf("the serving port was sent what no session expects: %q", serving.unexpected)
+			t.Errorf("a session was sent what none expects: %q", serving.unexpected)
 		}
 	})
-	port, err := strconv.Atoi(server.URL[strings.LastIndex(server.URL, ":")+1:])
-	if err != nil {
-		t.Fatalf("serving port of %s: %v", server.URL, err)
-	}
-	serving.port = port
 	return serving
 }
 
-func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
-	sessionID, ok := strings.CutPrefix(r.URL.Path, "/session/")
-	sessionID, isPrompt := strings.CutSuffix(sessionID, "/prompt_async")
-	var body struct {
-		Parts []struct {
-			Text string `json:"text"`
-		} `json:"parts"`
-	}
-	decodeErr := json.NewDecoder(r.Body).Decode(&body)
-	var text strings.Builder
-	for _, part := range body.Parts {
-		text.WriteString(part.Text)
-	}
-	mark := mpEventMark.FindStringSubmatch(text.String())
-	if r.Method != http.MethodPost || !ok || !isPrompt || decodeErr != nil || mark == nil {
+// receive answers one relayed frame as its session's plugin would.
+func (s *mpNATSSession) receive(msg *natsgo.Msg) {
+	sessionID, ok := strings.CutPrefix(msg.Subject, bus.DeliverSubject(""))
+	var item contracts.Envelope
+	decodeErr := json.Unmarshal(msg.Data, &item)
+	mark := mpEventMark.FindStringSubmatch(item.PayloadSummary)
+	if !ok || msg.Reply == "" || decodeErr != nil || mark == nil {
 		s.mu.Lock()
-		s.unexpected = append(s.unexpected, r.Method+" "+r.URL.Path+" "+text.String())
+		s.unexpected = append(s.unexpected, msg.Subject+" "+string(msg.Data))
 		s.mu.Unlock()
 		s.journal.receipt(mpReceipt{session: sessionID, at: time.Now(), answer: mpPromptUnexpected})
-		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	event := mark[1]
@@ -786,44 +754,49 @@ func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
 	if hold {
 		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: time.Now(), answer: mpPromptHeld})
 		close(held)
-		select {
-		case <-r.Context().Done():
-		case <-s.stopping:
-		}
 		return
 	}
 	if failing {
 		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: time.Now(), answer: mpPromptRefused})
-		w.WriteHeader(http.StatusInternalServerError)
+		s.reply(msg, relayReplyNak)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	s.reply(msg, relayReplyReceived)
+	s.reply(msg, relayReplyDone)
 	taken := time.Now()
 	s.took(sessionID, event, taken)
 	s.journal.receipt(mpReceipt{session: sessionID, event: event, at: taken, answer: mpPromptTaken})
 }
 
-// mpPortGate is one gated prompt: arrived closes when it reaches the port, and the port answers it
-// once release closes.
-type mpPortGate struct {
+// reply answers a frame with one word, as a session's plugin does.
+func (s *mpNATSSession) reply(msg *natsgo.Msg, word string) {
+	if err := s.conn.Publish(msg.Reply, []byte(word)); err == nil {
+		_ = s.conn.Flush()
+	}
+}
+
+// mpFrameGate is one gated frame: arrived closes when it reaches its session, and the session
+// answers it once release closes.
+type mpFrameGate struct {
 	arrived chan struct{}
 	release chan struct{}
 }
 
-// gate holds the next prompt to sessionID until release runs, then answers it 204 and records it
+// gate holds the next frame to sessionID until release runs, then answers it done and records it
 // taken, as a session that took a moment to accept it. The returned channel closes when that
-// prompt arrives.
-func (s *mpServingPort) gate(sessionID string) (arrived <-chan struct{}, release func()) {
+// frame arrives.
+func (s *mpNATSSession) gate(sessionID string) (arrived <-chan struct{}, release func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	g := mpPortGate{arrived: make(chan struct{}), release: make(chan struct{})}
+	g := mpFrameGate{arrived: make(chan struct{}), release: make(chan struct{})}
 	s.gates[sessionID] = g
 	return g.arrived, sync.OnceFunc(func() { close(g.release) })
 }
 
-// hold holds the next prompt to sessionID: the serving port never answers it, until the listener
-// that sent it gives up or goes away. The returned channel closes when that prompt arrives.
-func (s *mpServingPort) hold(sessionID string) <-chan struct{} {
+// hold holds the next frame to sessionID: the session never answers it, so the relay that
+// published it waits out its receipt wait and pauses. The returned channel closes when that
+// frame arrives.
+func (s *mpNATSSession) hold(sessionID string) <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	arrived := make(chan struct{})
@@ -831,31 +804,30 @@ func (s *mpServingPort) hold(sessionID string) <-chan struct{} {
 	return arrived
 }
 
-// fail answers every prompt to sessionID 500 from now on, so the push that sent it is refused:
-// the serving-port worker of the durable path, and the relay of the session's consumer, each keep
-// the message at the head of that session's queue and push it again (pushWithBackoff).
-func (s *mpServingPort) fail(sessionID string) {
+// fail answers every frame to sessionID `nak` from now on, so the relay that published it has
+// the server deliver that message again after relayNakDelay.
+func (s *mpNATSSession) fail(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failing[sessionID] = true
 }
 
-// accept takes sessionID's prompts again after fail, so the push waiting at the head of its queue
-// lands on its next try.
-func (s *mpServingPort) accept(sessionID string) {
+// accept takes sessionID's frames again after fail, so the message at the head of its consumer
+// lands on its next delivery.
+func (s *mpNATSSession) accept(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.failing, sessionID)
 }
 
-// failures is how many prompts to sessionID the serving port answered 500.
-func (s *mpServingPort) failures(sessionID string) int {
+// failures is how many frames to sessionID the session answered nak.
+func (s *mpNATSSession) failures(sessionID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.failed[sessionID]
 }
 
-func (s *mpServingPort) tookAll(messages []mpMessage) bool {
+func (s *mpNATSSession) tookAll(messages []mpMessage) bool {
 	counts := s.counts()
 	for _, m := range messages {
 		if counts[m.event] == 0 {
@@ -866,7 +838,7 @@ func (s *mpServingPort) tookAll(messages []mpMessage) bool {
 }
 
 // awaitAll waits until every message was prompted to its session at least once.
-func (s *mpServingPort) awaitAll(t *testing.T, messages []mpMessage, within time.Duration) {
+func (s *mpNATSSession) awaitAll(t *testing.T, messages []mpMessage, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for !s.tookAll(messages) {
@@ -885,23 +857,16 @@ func (s *mpServingPort) awaitAll(t *testing.T, messages []mpMessage, within time
 }
 
 // requireOnce fails the test unless every message was prompted exactly once.
-func (s *mpServingPort) requireOnce(t *testing.T, messages []mpMessage) {
+func (s *mpNATSSession) requireOnce(t *testing.T, messages []mpMessage) {
 	t.Helper()
-	counts := s.counts()
-	var wrong []string
-	for _, m := range messages {
-		if counts[m.event] != 1 {
-			wrong = append(wrong, fmt.Sprintf("%s to %s prompted %d times", m.event, m.session, counts[m.event]))
-		}
-	}
-	if len(wrong) > 0 {
+	if wrong := s.notOnce(messages); len(wrong) > 0 {
 		t.Fatalf("%d of %d messages were not prompted exactly once: %v", len(wrong), len(messages), wrong)
 	}
 }
 
 // requireOnceExceptInFlight fails the test on any violation of the kill allowance
 // (killAllowanceViolations).
-func (s *mpServingPort) requireOnceExceptInFlight(t *testing.T, messages []mpMessage, moment time.Time, window time.Duration) {
+func (s *mpNATSSession) requireOnceExceptInFlight(t *testing.T, messages []mpMessage, moment time.Time, window time.Duration) {
 	t.Helper()
 	if wrong := s.killAllowanceViolations(messages, moment, window); len(wrong) > 0 {
 		t.Fatalf("%d of %d messages were prompted neither once nor, in flight at the kill, twice: %v", len(wrong), len(messages), wrong)
@@ -910,7 +875,7 @@ func (s *mpServingPort) requireOnceExceptInFlight(t *testing.T, messages []mpMes
 
 // requireKnown fails the test when a session was prompted with an event id no message carried: a
 // repeat is only ever of a message, with its own event id.
-func (s *mpServingPort) requireKnown(t *testing.T, messages []mpMessage) {
+func (s *mpNATSSession) requireKnown(t *testing.T, messages []mpMessage) {
 	t.Helper()
 	known := map[string]bool{}
 	for _, m := range messages {
@@ -925,7 +890,7 @@ func (s *mpServingPort) requireKnown(t *testing.T, messages []mpMessage) {
 
 // requireOrder fails the test unless each session took its messages, each at its first prompt,
 // in the order they were published.
-func (s *mpServingPort) requireOrder(t *testing.T, messages []mpMessage) {
+func (s *mpNATSSession) requireOrder(t *testing.T, messages []mpMessage) {
 	t.Helper()
 	want := map[string][]mpMessage{}
 	for _, m := range messages {
@@ -964,7 +929,7 @@ func (s *mpServingPort) requireOrder(t *testing.T, messages []mpMessage) {
 
 // requireWithin fails the test unless every message's first prompt came within bound of its
 // publish or of since, whichever is later.
-func (s *mpServingPort) requireWithin(t *testing.T, messages []mpMessage, bound time.Duration, since time.Time) {
+func (s *mpNATSSession) requireWithin(t *testing.T, messages []mpMessage, bound time.Duration, since time.Time) {
 	t.Helper()
 	var late []string
 	var slowest time.Duration
@@ -1117,7 +1082,7 @@ func (p *mpPublisher) all() []mpMessage {
 // quiesce runs fault between two publishes, once every message published so far has reached its
 // session and the machine's durable holds none unacknowledged: a fault then cuts no delivery in
 // flight, whose outcome the row would otherwise have to allow for.
-func (p *mpPublisher) quiesce(t *testing.T, serving *mpServingPort, fault func()) time.Time {
+func (p *mpPublisher) quiesce(t *testing.T, serving *mpNATSSession, fault func()) time.Time {
 	t.Helper()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1303,12 +1268,12 @@ func mpTail(text string, n int) string {
 //
 // It is printed when the row fails, and only then: a row that passes is as quiet as before.
 
-// mpPromptTaken and the three beside it are what the serving port answered one prompt, as the
-// journal records it (mpServingPort.serve).
+// mpPromptTaken and the three beside it are what a session answered one frame, as the
+// journal records it (mpNATSSession.receive).
 const (
-	mpPromptTaken      = "204"
+	mpPromptTaken      = "done"
 	mpPromptHeld       = "held"
-	mpPromptRefused    = "500"
+	mpPromptRefused    = "nak"
 	mpPromptUnexpected = "unexpected"
 )
 
@@ -1330,7 +1295,7 @@ type mpPublication struct {
 	topic   string
 }
 
-// mpReceipt is one prompt the serving port saw and what it answered (mpPromptTaken and the three
+// mpReceipt is one frame a session saw and what it answered (mpPromptTaken and the three
 // beside it). event is empty for a request no session expects, which carries no event id.
 type mpReceipt struct {
 	session string
@@ -1355,7 +1320,7 @@ type mpJournal struct {
 }
 
 // mpJournals is each row's journal, keyed on its *testing.T: the harness's pieces are made one at
-// a time by the row - its pods, its serving port, its publisher - and share no object but the
+// a time by the row - its pods, its session stand-in, its publisher - and share no object but the
 // test itself. A row whose pods live in a t.Run keeps the subtest's journal, with the subtest.
 var mpJournals sync.Map
 
@@ -1438,7 +1403,7 @@ func (j *mpJournal) dump(t *testing.T) {
 	}
 	stored, durable := mpStreamReads(natsURL)
 	var report strings.Builder
-	fmt.Fprintf(&report, "the row's delivery journal: %d messages published, %d prompts at the serving port, %d messages the port did not take exactly once\n  the machine's durable: %s",
+	fmt.Fprintf(&report, "the row's delivery journal: %d messages published, %d frames at their sessions, %d messages a session did not take exactly once\n  the machine's durable: %s",
 		len(published), len(receipts), len(inQuestion), durable)
 	for _, publication := range published {
 		event := publication.message.event
@@ -1477,10 +1442,10 @@ func (j *mpJournal) dump(t *testing.T) {
 	t.Log(report.String())
 }
 
-// prompts is what the serving port answered for one message, in the order it answered.
+// prompts is what a session answered for one message, in the order it answered.
 func (j *mpJournal) prompts(receipts []mpReceipt) string {
 	if len(receipts) == 0 {
-		return "the serving port saw no prompt for it"
+		return "no session saw a frame for it"
 	}
 	answers := make([]string, len(receipts))
 	for index, receipt := range receipts {
@@ -1520,7 +1485,7 @@ func mpLinesNaming(output, event string) []string {
 
 // mpStreamReads is what the stream and the machine's durable hold at the end of a failing row:
 // the stream sequence of every event the stream still holds, by event id, and one line describing
-// the durable. A message the serving port never took that the stream holds, that the durable
+// the durable. A message no session ever took that the stream holds, that the durable
 // counts neither unacknowledged nor waiting, and that no pod ever logged, was dropped between the
 // two rather than delayed. It connects a client of its own, since a cleanup runs after the
 // publisher's was closed.

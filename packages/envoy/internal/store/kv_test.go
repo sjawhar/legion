@@ -336,6 +336,74 @@ func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testin
 	}
 }
 
+// A session that registers again through another listener moves its row: the machine id and the
+// directory the second registration carries are the ones the row keeps, so every reader of the row
+// - the fan-out index, the durable path's ownership and the sender stamp of a message the session
+// sends (cmd/listener/api.go's senderStamp) - names the listener the session is registered through
+// now, not the one it registered through first.
+func TestMergeForUpsertMovesTheRowToTheMachineAndDirectoryOfASecondRegistration(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_moved",
+		MachineID: "machine-first",
+		Dir:       "/work/first",
+		Topics:    []string{"notifications.agent.ses_moved"},
+	}
+	// The listener's subscribe handler's call shape: its own machine id and the body's directory.
+	item := Interest{SessionID: "ses_moved", MachineID: "machine-second", Dir: "/work/second"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_moved"}, 300)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	if result.MachineID != "machine-second" {
+		t.Errorf("MachineID = %q, want the second registration's machine-second", result.MachineID)
+	}
+	if result.Dir != "/work/second" {
+		t.Errorf("Dir = %q, want the second registration's /work/second", result.Dir)
+	}
+}
+
+// A role claim carries the claiming listener's machine id and no directory (SetRoleWithPrevious),
+// so the row keeps the directory the session's registration stored: claiming a role never clears
+// the Cwd of the sender stamp.
+func TestMergeForUpsertKeepsTheStoredDirectoryForARoleClaimThatCarriesNone(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_claimant",
+		MachineID: "machine-first",
+		Dir:       "/work/first",
+		Topics:    []string{"notifications.agent.ses_claimant"},
+	}
+	item := Interest{SessionID: "ses_claimant", MachineID: "machine-first"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.role.reviewer"}, 301)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	if result.Dir != "/work/first" {
+		t.Errorf("Dir = %q, want the stored /work/first: the claim carries no directory", result.Dir)
+	}
+}
+
+// A request that carries no machine id keeps the stored one: a caller that names no machine says
+// nothing about where the session runs, so the row is left naming the listener it has.
+func TestMergeForUpsertKeepsTheStoredMachineIDForARequestThatCarriesNone(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_machineless",
+		MachineID: "machine-first",
+		Dir:       "/work/first",
+		Topics:    []string{"notifications.agent.ses_machineless"},
+	}
+	item := Interest{SessionID: "ses_machineless", Dir: "/work/first"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_machineless"}, 302)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	if result.MachineID != "machine-first" {
+		t.Errorf("MachineID = %q, want the stored machine-first", result.MachineID)
+	}
+}
+
 // --- Integration Tests (a real NATS server) ---
 
 // connectNATS connects to the package's shared NATS server, in the JetStream account

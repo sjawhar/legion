@@ -11,16 +11,17 @@ body: |-
     role-claim reapers, the interest marker collector and the CI summary loop run on the holder
     alone. A standby waits for as long as the active pod runs and never exits for it. A graceful
     stop now ends receiving first and then stops HTTP: the holder-only loops stop, the handler
-    takes no more messages, the message in hand gets 3 s before its prompt is cancelled, every
+    takes no more messages, the message in hand gets 3 s before its handling is cancelled, every
     message not handled is NAKed with a 2 s delay in stream order, and the lease is marked released
     and `unsettled`, so a standby takes it at its next poll and settles (below), delivering about 2
     to 3 s after the stop and keeping each session's order. The stopping pod keeps its subscription
     until the lease record says the next holder is `receiving` (3 s at most after the NAKs, and
     1.25 s after its release at least, the floor that holds the deliver subject while a standby
     subscribes: a stop whose
-    flush and release both run to their bounds takes 12.75 s rather than the 11.5 s a stop takes
+    flush and release both run to their bounds takes 11.75 s rather than the 10.5 s a stop takes
     otherwise, and its 10 s budget bounds none of that: it is how long the shutdown waits for the
-    stop. Past it the shutdown goes on to the HTTP stop with no time left, then to the NATS drains
+    stop. Past it the shutdown goes on to the relays' settle and the HTTP stop with no time left,
+    then to the NATS drains
     and the listener's own exit: the drain of its NATS connection ends a hand-back still lingering
     or draining, and the exit ends a mark write still in flight; the next holder then settles at its
     7 s cap),

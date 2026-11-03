@@ -191,38 +191,39 @@ func mpNextException(t *testing.T, subscription *natsgo.Subscription, within tim
 	return mpDecodeException(t, msg.Data)
 }
 
-// The machine's pods share one delivery ledger. The active pod prompts session S, the prompt
-// lands, and the pod is SIGKILLed before the acknowledgement of the message it pushed reaches the
-// server (the relay swallows it). The standby takes over, restarts S's consumer at its ack floor
-// and is handed that message again, and it finds the delivery in the ledger: S is not prompted a
-// second time, so the serving port takes the message exactly once in all. Before INFRA-557 each
-// pod remembers only its own deliveries, so the standby prompts S again with the message it takes
-// back. The copy comes back on S's own consumer, whose relay pushed it (main's per-session
-// consumers), not on the machine's durable, which acked it as relayed.
-func TestTwoPodsDoNotPromptAgainWhatAKilledPodDelivered(t *testing.T) {
+// A frame a pod delivered and was killed before it could acknowledge reaches its session at most
+// twice, under its own event id, and the repeat comes inside the hard take-over bound. The
+// active pod relays a message to session S, S answers it, and the pod is SIGKILLed before the
+// acknowledgement reaches the server (the relay swallows it). The standby takes over, restarts
+// S's consumer at its ack floor and is handed that message again: nothing says S took it, since
+// the reply and the acknowledgement rode the one connection that died with the pod, so it is
+// sent once more under the same event id. That is the one repeat a hard take-over allows
+// (cmd/listener/README.md), and what this row refuses is a second one and a repeat of anything
+// else.
+func TestTwoPodsRepeatAtMostOnceWhatAKilledPodDelivered(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	const sessionID = "ses_mp_ledger"
-	a.registerPort(t, serving, sessionID)
+	a.registerNATS(t, serving, sessionID)
 	publisher := mpConnectPublisher(t, uri)
 
 	swallowed := a.swallowNextAck(t)
 	m := publisher.mustPublish(t, sessionID)
 	swallowed()
-	mpEventually(t, time.Second, a.instance+"'s prompt to "+sessionID+" to have landed", func() bool { return serving.promptsTo(sessionID) == 1 })
+	mpEventually(t, 10*time.Second, a.instance+"'s frame to "+sessionID+" to have landed", func() bool { return serving.promptsTo(sessionID) == 1 })
 	killed := a.kill(t)
 
-	// Long enough for a build before INFRA-557 to take the message back, after its 60 s ack wait.
-	skipped := b.awaitEventLine(t, 90*time.Second, "session relay skipped a copy the session already has", m.event)
-	tookBack := time.Since(killed)
-	time.Sleep(2 * time.Second) // a prompt goes out the moment the message is pushed
-	serving.requireOnce(t, []mpMessage{m})
-	if prompts := serving.promptsTo(sessionID); prompts != 1 {
-		t.Fatalf("%s took %d prompts for %s in all, want the one %s made before it was killed", sessionID, prompts, m.event, a.instance)
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+	serving.requireWithin(t, []mpMessage{m}, mpHardBound, killed)
+	time.Sleep(mpQuiet)
+	took := serving.promptsTo(sessionID)
+	if took < 1 || took > 2 {
+		t.Fatalf("%s took %s %d times, want once, or twice as the frame whose acknowledgement died with %s", sessionID, m.event, took, a.instance)
 	}
-	t.Logf("%s took %s back %s after the kill and skipped it as delivered: %s", b.instance, m.event, tookBack.Round(time.Millisecond), skipped)
+	serving.requireKnown(t, []mpMessage{m})
+	t.Logf("%s took %s %d times across the kill", sessionID, m.event, took)
 }
 
 // An attempt, then a crash: the active pod records in the shared ledger that it is prompting
@@ -236,9 +237,9 @@ func TestTwoPodsPromptWhatAKilledPodOnlyAttempted(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	const sessionID = "ses_mp_attempt"
-	a.registerPort(t, serving, sessionID)
+	a.registerNATS(t, serving, sessionID)
 	publisher := mpConnectPublisher(t, uri)
 
 	inHand := serving.hold(sessionID)
@@ -348,31 +349,6 @@ func TestTwoPodsWritesOnThePodWhoseCacheTrailsKeepTheNewerWrite(t *testing.T) {
 	b.relay.delay(300 * time.Millisecond)
 	publisher := mpConnectPublisher(t, uri)
 
-	t.Run("a driving claim", func(t *testing.T) {
-		const sessionID = "ses_mp_cas_driving"
-		bystander := fmt.Sprintf(`{"session_id":%q,"topics":[],"port":34751,"host":"127.0.0.1","dir":"/work/bystander"}`, sessionID)
-		a.subscribe(t, bystander)
-		mpEventually(t, 10*time.Second, b.instance+" to hold the bystander's registration", func() bool {
-			row := b.cachedSession(sessionID)
-			return row != nil && row["port"] == float64(34751)
-		})
-		// The heartbeat on the standby writes the session's interest first, and its reply comes over
-		// the slow link 300 ms later; only then does it write the registration. The driving
-		// claim lands on the active pod inside those 300 ms, so the standby's cache has not seen
-		// it when the registration is written. (A claim written before the heartbeat began would have
-		// reached the standby's cache by then, ahead of that reply.)
-		heartbeat := make(chan mpAnswer, 1)
-		go func() { heartbeat <- b.call(http.MethodPost, "/v1/interests/subscribe", bystander) }()
-		time.Sleep(150 * time.Millisecond)
-		a.subscribe(t, fmt.Sprintf(`{"session_id":%q,"topics":[],"port":42145,"host":"127.0.0.1","dir":"/work/driver","driving":true}`, sessionID))
-		if answer := <-heartbeat; answer.status != http.StatusOK {
-			t.Fatalf("the bystander's heartbeat on %s: status %d %s %v", b.instance, answer.status, answer.body, answer.err)
-		}
-		if stored := publisher.stored(t, bus.SessionBucket, sessionID); stored["port"] != float64(42145) || stored["driving"] != true {
-			t.Fatalf("%s's registration after the bystander's heartbeat on %s: %v, want the driving claim on port 42145", sessionID, b.instance, stored)
-		}
-	})
-
 	t.Run("a topic", func(t *testing.T) {
 		const sessionID, first, added = "ses_mp_cas_topic", "notifications.team.mp-first", "notifications.team.mp-added"
 		heartbeat := fmt.Sprintf(`{"session_id":%q,"topics":[%q],"self_subscribed":true}`, sessionID, first)
@@ -406,76 +382,6 @@ func TestTwoPodsWritesOnThePodWhoseCacheTrailsKeepTheNewerWrite(t *testing.T) {
 			t.Fatalf("%s's registration after a role set on %s: %v, want host example-host-b, self-subscribed", sessionID, b.instance, stored)
 		}
 	})
-}
-
-// A delivery address local to a pod: both pods reach their machine's sessions through a loopback
-// host bridge, and each names its own host. A session registers on its port through the active
-// pod; once the standby has taken over, it does not prompt that session on its own loopback, which
-// is not the accepting pod's: it reports delivery_failed, address not reachable from this listener
-// pod, and the session is sent nothing. Two pods that share a host share its loopback, and the
-// standby of such a pair delivers. Before INFRA-557 the standby prompts its own loopback.
-func TestTwoPodsRefuseAPodLocalAddressAnotherPodAccepted(t *testing.T) {
-	binary := cmdtest.Build(t, "envoy-listener")
-	for _, pair := range []struct {
-		name         string
-		hostA, hostB string
-	}{
-		{"pods on two hosts", "node-a", "node-b"},
-		{"pods on one host", "node-a", "node-a"},
-	} {
-		t.Run(pair.name, func(t *testing.T) {
-			uri := mpNATS(t)
-			a := mpStartPod(t, binary, uri, "pod-a", "ENVOY_HOST_BRIDGE=127.0.0.1", "ENVOY_POD_HOSTNAME="+pair.hostA)
-			mpWaitActive(t, a, 30*time.Second)
-			b := mpStartPod(t, binary, uri, "pod-b", "ENVOY_HOST_BRIDGE=127.0.0.1", "ENVOY_POD_HOSTNAME="+pair.hostB)
-			mpWaitStandby(t, b, 30*time.Second)
-			serving := mpStartServingPort(t)
-			const sessionID = "ses_mp_pod_local"
-			a.registerPort(t, serving, sessionID)
-			publisher := mpConnectPublisher(t, uri)
-			exceptions := publisher.watchExceptions(t, sessionID)
-
-			a.Terminate(t)
-			a.WaitExit(t, "SIGTERM")
-			// A build before INFRA-557 keeps the durable through its shutdown, and the standby binds
-			// only after it.
-			mpWaitActive(t, b, 30*time.Second)
-			m := publisher.mustPublish(t, sessionID)
-
-			if pair.hostA == pair.hostB {
-				serving.awaitAll(t, []mpMessage{m}, mpGracefulBound)
-				time.Sleep(time.Second)
-				serving.requireOnce(t, []mpMessage{m})
-				if msg, err := exceptions.NextMsg(time.Second); err == nil {
-					t.Fatalf("%s delivered %s and reported it too: %+v", b.instance, m.event, mpDecodeException(t, msg.Data))
-				}
-				return
-			}
-			var exception mpException
-			for deadline := time.Now().Add(mpGracefulBound); ; {
-				if prompts := serving.promptsTo(sessionID); prompts > 0 {
-					t.Fatalf("%s prompted %s %d times on its own loopback, which %s accepted the registration for", b.instance, sessionID, prompts, a.instance)
-				}
-				if msg, err := exceptions.NextMsg(100 * time.Millisecond); err == nil {
-					exception = mpDecodeException(t, msg.Data)
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatalf("%s neither delivered %s nor reported it within %s", b.instance, m.event, mpGracefulBound)
-				}
-			}
-			if exception.event != m.event || exception.recipient != sessionID || exception.reason != "delivery_failed" {
-				t.Fatalf("exception %+v, want delivery_failed for %s to %s", exception, m.event, sessionID)
-			}
-			if line := mpLineWith(b.Output.String(), `"event_id":"`+m.event+`"`, "address not reachable from this listener pod"); line == "" {
-				t.Fatalf("%s logged no line about %s naming the address not reachable from this listener pod", b.instance, m.event)
-			}
-			time.Sleep(time.Second)
-			if prompts := serving.promptsTo(sessionID); prompts > 0 {
-				t.Fatalf("%s prompted %s %d times after it reported the address unreachable", b.instance, sessionID, prompts)
-			}
-		})
-	}
 }
 
 // A role claim whose holder is gone is answered alike by every pod, whenever each started: the
@@ -544,37 +450,34 @@ func TestTwoPodsReportALapsedHoldersLastSeenAlike(t *testing.T) {
 	requireSameLapsedAnswer(t, a, b, onA, onB, "holder", "last_seen", "claim_released")
 }
 
-// Both sides of this merge in one row: the machine's shared delivery ledger, which records what a
-// session has already taken, and the delivery lease released by a holder whose receive connection
-// is down.
+// Both sides of this merge in one row: the relay of a session's own consumer, and the delivery
+// lease released by a holder whose receive connection is down.
 //
-// A serving-port session's first messages are delivered by the active pod, from the relay of the
-// session's own consumer, and the acknowledgements that relay sends never reach that consumer:
-// the lane relay drops every `$JS.ACK.` the pod's session-consumer connection carries. So the
-// consumer still holds all three, above its ack floor. The pod's receive connection is then cut:
-// it releases the lease, its relays stop with the receive term, the standby takes the lease and
+// A session's first messages are delivered by the active pod, from the relay of the session's
+// own consumer, and the acknowledgements that relay sends never reach that consumer: the lane
+// relay drops every `$JS.ACK.` the pod's session-consumer connection carries. So the consumer
+// still holds all three, above its ack floor. The pod's receive connection is then cut: it
+// releases the lease, its relays stop with the receive term, the standby takes the lease and
 // starts the session's relay, which restarts the consumer at that floor and is given the three
 // messages again. The messages published after the take-over reach the machine through that
 // standby alone.
 //
-// Every message reaches the session exactly once. None twice, because the standby reads the three
-// in the shared ledger as delivered and acknowledges them unpushed: without that record it pushes
-// all three again, which is a repeat of a push that landed, not the duplicate the design allows
-// ("The worst case, relay and worker pushing at once, is a duplicate the session drops by its
-// dedupe key, never a lost message", packages/envoy/AGENTS.md, "Session consumers" - a push whose
-// outcome is unknown, where these three are recorded as taken). And none lost, because the lease
-// the cut pod cannot deliver on is released to a pod that can: without that release the cut pod
-// holds it and the standby never serves the machine at all.
-func TestTwoPodsEveryQueuedMessageReachesTheSessionOnceAcrossAReceiveLostTakeOver(t *testing.T) {
+// Nothing is lost, because the lease the cut pod cannot deliver on is released to a pod that
+// can: without that release the cut pod holds it and the standby never serves the machine at
+// all. The three the drop left unacknowledged reach the session a second time, under their own
+// event ids and no other: a frame's reply and its acknowledgement ride the one connection, so a
+// drop that loses the acknowledgement leaves no pod able to say the session took it. Everything
+// published after the take-over arrives exactly once.
+func TestTwoPodsEveryQueuedMessageReachesTheSessionAtMostTwiceAcrossAReceiveLostTakeOver(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
 	mpWaitActive(t, a, 30*time.Second)
 	b := mpStartPod(t, binary, uri, "pod-b")
 	mpWaitStandby(t, b, 30*time.Second)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	const sessionID = "ses_mp_queued_once"
-	a.registerPort(t, serving, sessionID)
+	a.registerNATS(t, serving, sessionID)
 	publisher := mpConnectPublisher(t, uri)
 
 	// Every acknowledgement the active pod's relays send is dropped, so the messages it delivers
@@ -603,16 +506,18 @@ func TestTwoPodsEveryQueuedMessageReachesTheSessionOnceAcrossAReceiveLostTakeOve
 	}
 	serving.awaitAll(t, afterTheTakeOver, mpHardBound+5*time.Second)
 	serving.requireWithin(t, afterTheTakeOver, mpHardBound, cut)
-	for _, m := range delivered {
-		b.awaitEventLine(t, 30*time.Second, "session relay skipped a copy the session already has", m.event)
-	}
 
 	messages := append(slices.Clone(delivered), afterTheTakeOver...)
 	// Past the durable's ack wait, so a message a pod took and held back would have come again.
 	time.Sleep(mpQuiet)
-	serving.requireOnce(t, messages)
+	serving.requireOnce(t, afterTheTakeOver)
+	for _, m := range delivered {
+		if took := serving.counts()[m.event]; took < 1 || took > 2 {
+			t.Fatalf("%s reached %s %d times, want once, or twice as a frame whose acknowledgement the drop lost", m.event, sessionID, took)
+		}
+	}
 	serving.requireKnown(t, messages)
 	serving.requireOrder(t, messages)
-	t.Logf("%s took the lease %s after the cut of %s's receive connection; the %d messages %s had delivered were given back and skipped, the %d published after the take-over arrived, each of the %d exactly once",
-		b.instance, taken.Round(time.Millisecond), a.instance, len(delivered), a.instance, len(afterTheTakeOver), len(messages))
+	t.Logf("%s took the lease %s after the cut of %s's receive connection; the %d messages %s had delivered were given back, the %d published after the take-over arrived, and nothing came back under an id no message carried",
+		b.instance, taken.Round(time.Millisecond), a.instance, len(delivered), a.instance, len(afterTheTakeOver))
 }

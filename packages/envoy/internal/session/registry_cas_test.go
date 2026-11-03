@@ -46,33 +46,29 @@ func storedSession(t *testing.T, reg *SessionRegistry, sessionID string) map[str
 	return stored
 }
 
-// A heartbeat on a pod whose cache trails the bucket must not undo a newer write from another pod:
-// pod B saw the session as a bystander's, pod A then recorded the driving process's claim, and B's
-// next bystander heartbeat, merged onto B's stale copy, would hand the route back to the bystander.
-// The write is a compare-and-set on the revision B read, so it lands on what A wrote instead, and
-// mergeForClaim keeps the live driving claim.
-func TestADrivingClaimFromOnePodSurvivesAHeartbeatOnAPodWhoseCacheTrails(t *testing.T) {
+// A heartbeat on a pod whose cache trails the bucket must not write onto its stale copy: pod B read
+// the session, a pod of a newer build then stored a field this build does not know, and B's next
+// heartbeat, merged onto B's stale copy, would drop it. The write is a compare-and-set on the
+// revision the bucket holds, so it merges onto what that pod wrote instead.
+func TestAStoredFieldThisBuildDoesNotKnowSurvivesAHeartbeatOnAPodWhoseCacheTrails(t *testing.T) {
 	a, b := podRegistries(t)
 	const sessionID = "ses_contended"
-	bystander := SessionEntry{Port: 34751, MachineID: "box-a", Dir: "/work/bystander"}
-	if err := b.Put(sessionID, bystander); err != nil {
-		t.Fatalf("bystander registers through pod B: %v", err)
+	if err := b.Put(sessionID, SessionEntry{MachineID: "box-a", Dir: "/work"}); err != nil {
+		t.Fatalf("the session registers through pod B: %v", err)
 	}
 	b.StopWatch()
-	if err := a.Put(sessionID, SessionEntry{Port: 42145, MachineID: "box-a", Dir: "/work/driver", Driving: true}); err != nil {
-		t.Fatalf("driver claims through pod A: %v", err)
+	if _, err := a.watcher.KV().Put(sessionID, []byte(`{"machine_id":"box-a","dir":"/work","future_field":{"kept":true}}`)); err != nil {
+		t.Fatalf("a newer build's pod stores the registration: %v", err)
 	}
-	if err := b.Put(sessionID, bystander); err != nil {
-		t.Fatalf("bystander heartbeats through pod B: %v", err)
+	if err := b.Put(sessionID, SessionEntry{MachineID: "box-a", Dir: "/work", Title: "planner"}); err != nil {
+		t.Fatalf("heartbeat through pod B: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	got, err := a.Refresh(ctx, sessionID)
-	if err != nil {
-		t.Fatalf("read the session back: %v", err)
+	stored := storedSession(t, a, sessionID)
+	if got := string(stored["future_field"]); got != `{"kept":true}` {
+		t.Fatalf("future_field after pod B's stale heartbeat = %q, want {\"kept\":true}; stored %v", got, stored)
 	}
-	if got.Port != 42145 || !got.Driving {
-		t.Fatalf("stored registration after pod B's stale heartbeat = %+v, want the driving claim on port 42145", got)
+	if got := string(stored["title"]); got != `"planner"` {
+		t.Fatalf("title after pod B's stale heartbeat = %s, want the heartbeat's", got)
 	}
 }
 

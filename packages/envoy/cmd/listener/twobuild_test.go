@@ -11,8 +11,6 @@
 package main
 
 import (
-	"net/http"
-	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -20,35 +18,33 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 const (
 	// tbExtraSubject is the stream subject internal/bus/stream_extra_twobuild.go adds to a binary
 	// built with the envoy_twobuild tag, and no plain build compiles in.
 	tbExtraSubject = "notifications.twobuild.>"
-	// tbLiveTopic is a topic no build's stream stores, which only a listener's live lane delivers.
-	tbLiveTopic = "notifications.team.mp-twobuild"
 	// tbEvery is how often a row publishes, each time on the next of its topics in turn.
 	tbEvery = 40 * time.Millisecond
-	// tbLive turns every pod's live lane on, so the topics the stream does not store are delivered
-	// and the live lane's split of the topics from the durable's is under test. Only a host's grant
-	// allows the subscription to every topic it makes, so the rows' pods hold testnats.HostGrant.
-	tbLive = "ENVOY_SUBSCRIBE_ALL_TOPICS=1"
 )
 
-// tbTargets is a topic on every subject the stream stores, the plain build's (bus.StreamSubjects)
-// and, with extra, tbExtraSubject, and tbLiveTopic, each with its own port session, named for the
-// subject so a report names the subject that lost or doubled a message. A subject no session may
-// follow is left out: /v1/interests/subscribe drops a topic reaching a private stream subject other
-// than the session's own agent subject (bus.ReachesPrivateStreamSubject: the Legion controller lane
-// and the failed-delivery lanes), so a port session on one would never be prompted.
-func tbTargets(extra bool) []mpTarget {
+// tbTargets is a topic on every subject the plain build's stream stores (bus.StreamSubjects),
+// each with its own session, named for the subject so a report names the subject that lost or
+// doubled a message. A subject no session may follow is left out: /v1/interests/subscribe drops
+// a topic reaching a private stream subject other than the session's own agent subject
+// (bus.ReachesPrivateStreamSubject: the Legion controller lane and the failed-delivery lanes),
+// so a session on one would never be relayed.
+//
+// tbExtraSubject, the subject only the other build's stream carries, gets no session: a session
+// consumer's filter is this build's own list of the subjects the stream stores
+// (bus.StreamCaptures, through the registration's followed topics), so a pod of the plain build
+// cannot relay a topic on a subject it does not compile in, whatever the durable's filter takes.
+// A session following such a topic is served only while a pod of the build that knows the
+// subject holds the term; that is a property of per-session consumers, not of this merge, and it
+// is recorded in the pull request rather than measured here.
+func tbTargets() []mpTarget {
 	subjects := bus.StreamSubjects()
-	if extra {
-		subjects = append(subjects, tbExtraSubject)
-	}
-	targets := []mpTarget{{topic: tbLiveTopic, session: "ses_tb_team"}}
+	var targets []mpTarget
 	for _, subject := range subjects {
 		prefix := strings.TrimSuffix(subject, ">")
 		name := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(prefix, bus.NotificationTopicPrefix), "."), ".", "_")
@@ -68,14 +64,14 @@ func tbTargets(extra bool) []mpTarget {
 
 // tbRegister registers every target's session through the pod, on the serving port, subscribed to
 // its topic unless the topic is its own inbox.
-func tbRegister(t *testing.T, pod *mpPod, serving *mpServingPort, targets []mpTarget) {
+func tbRegister(t *testing.T, pod *mpPod, serving *mpNATSSession, targets []mpTarget) {
 	t.Helper()
 	for _, target := range targets {
 		if target == mpInbox(target.session) {
-			pod.registerPort(t, serving, target.session)
+			pod.registerNATS(t, serving, target.session)
 			continue
 		}
-		pod.registerPort(t, serving, target.session, target.topic)
+		pod.registerNATS(t, serving, target.session, target.topic)
 	}
 }
 
@@ -87,7 +83,7 @@ func tbRegister(t *testing.T, pod *mpPod, serving *mpServingPort, targets []mpTa
 // at most once on a kill (dispatch://INFRA-14), and the second after the exit is the server's to
 // drop the dead pod's queue subscription. A message the previous steps skipped is named here, by
 // awaitAll, before the kill.
-func tbKill(t *testing.T, publisher *mpPublisher, serving *mpServingPort, pod *mpPod) time.Time {
+func tbKill(t *testing.T, publisher *mpPublisher, serving *mpNATSSession, pod *mpPod) time.Time {
 	t.Helper()
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
@@ -105,7 +101,7 @@ func tbKill(t *testing.T, publisher *mpPublisher, serving *mpServingPort, pod *m
 
 // tbRequireEachOnce waits for every message to reach its session, then past the ack wait for any
 // repeat, and fails the test unless each reached it exactly once.
-func tbRequireEachOnce(t *testing.T, publisher *mpPublisher, serving *mpServingPort) {
+func tbRequireEachOnce(t *testing.T, publisher *mpPublisher, serving *mpNATSSession) {
 	t.Helper()
 	messages := publisher.all()
 	serving.awaitAll(t, messages, 30*time.Second)
@@ -125,36 +121,27 @@ func tbRequireEachOnce(t *testing.T, publisher *mpPublisher, serving *mpServingP
 // active and the other build standby; a SIGTERM of the plain pod makes the other build active; a
 // plain pod starts as its standby; a SIGKILL of the other build makes the plain build active again.
 // A message is published every 40 ms throughout, on each subject the stream stores, the added one
-// included, and on a topic it does not store, which only the live lane delivers, each to a port
-// session of its own: each session takes each of its messages exactly once. Before INFRA-557 the
-// plain build's durable filter lacks the added subject, so a message on it the stream stores is
-// skipped, and the plain build's live lane, splitting the topics by the subjects it compiles in,
-// delivers that subject beside the other build's durable, so it is doubled.
-//
-// With ENVOY_LISTENER_OLD_BINARY naming a build from before the delivery lease (819dc283 built by
-// hand, as the plan's recorded proof), the first roll onto the lease runs too: the old build active,
-// this build standby, waiting on the old build's binding, then a SIGTERM of the old build hands the
-// machine's delivery to this build with no message skipped or doubled.
+// included, each to a session of its own: each session takes each of its messages exactly once.
+// Before INFRA-557 the plain build's durable filter lacks the added subject, so a message on it
+// the stream stores is skipped.
 func TestTwoBuildsSkipOrDoubleNoMessage(t *testing.T) {
 	plain := cmdtest.Build(t, "envoy-listener")
 
 	t.Run("a build with a stream subject more", func(t *testing.T) {
 		extra := cmdtest.Build(t, "envoy-listener-twobuild", "envoy_twobuild")
-		_, uri := mpStartNATS(t, testnats.HostGrant)
-		serving := mpStartServingPort(t)
-		targets := tbTargets(true)
-		plainA := mpStartPod(t, plain, uri, "pod-a", tbLive)
+		uri := mpNATS(t)
+		serving := mpStartNATSSessions(t, uri)
+		targets := tbTargets()
+		plainA := mpStartPod(t, plain, uri, "pod-a")
 		mpWaitActive(t, plainA, 30*time.Second)
 		tbRegister(t, plainA, serving, targets)
 		publisher := mpConnectPublisher(t, uri)
 		stop := publisher.everyOn(tbEvery, targets...)
 		time.Sleep(3 * time.Second)
 
-		extraB := mpStartPod(t, extra, uri, "pod-b", tbLive)
+		extraB := mpStartPod(t, extra, uri, "pod-b")
 		mpWaitStandby(t, extraB, 30*time.Second)
-		// Past the 5 s after which the plain pod's live lane reads the subject the other build added
-		// to the stream.
-		time.Sleep(8 * time.Second)
+		time.Sleep(3 * time.Second)
 
 		signalled := plainA.Terminate(t)
 		// A build before INFRA-557 keeps the durable through its shutdown, and the standby binds
@@ -164,46 +151,13 @@ func TestTwoBuildsSkipOrDoubleNoMessage(t *testing.T) {
 		plainA.WaitExit(t, "SIGTERM")
 		time.Sleep(3 * time.Second)
 
-		plainC := mpStartPod(t, plain, uri, "pod-c", tbLive)
+		plainC := mpStartPod(t, plain, uri, "pod-c")
 		mpWaitStandby(t, plainC, 30*time.Second)
 		time.Sleep(3 * time.Second)
 
 		killed := tbKill(t, publisher, serving, extraB)
 		mpWaitActive(t, plainC, 30*time.Second)
 		t.Logf("%s (plain) took over %s after %s's SIGKILL", plainC.instance, time.Since(killed).Round(time.Millisecond), extraB.instance)
-		time.Sleep(3 * time.Second)
-		stop()
-
-		tbRequireEachOnce(t, publisher, serving)
-	})
-
-	t.Run("a build from before the lease, then this build", func(t *testing.T) {
-		old := os.Getenv("ENVOY_LISTENER_OLD_BINARY")
-		if old == "" {
-			t.Skip("ENVOY_LISTENER_OLD_BINARY names no listener built from before INFRA-557")
-		}
-		_, uri := mpStartNATS(t, testnats.HostGrant)
-		serving := mpStartServingPort(t)
-		targets := tbTargets(false)
-		oldA := mpStartPod(t, old, uri, "pod-old", tbLive)
-		mpWaitActive(t, oldA, 30*time.Second)
-		tbRegister(t, oldA, serving, targets)
-		publisher := mpConnectPublisher(t, uri)
-		stop := publisher.everyOn(tbEvery, targets...)
-		time.Sleep(3 * time.Second)
-
-		newB := mpStartPod(t, plain, uri, "pod-new", tbLive)
-		mpEventually(t, 30*time.Second, newB.instance+" to wait on "+oldA.instance+"'s binding of the durable", func() bool {
-			status, body := newB.health()
-			return status == http.StatusOK && body["role"] == "standby" && body["receive"] == "waiting for another subscriber's push binding to end"
-		})
-		time.Sleep(5 * time.Second)
-
-		signalled := oldA.Terminate(t)
-		// The old build keeps its binding through its HTTP shutdown and its NATS drain.
-		mpWaitActive(t, newB, 60*time.Second)
-		t.Logf("%s took over %s after %s's SIGTERM", newB.instance, time.Since(signalled).Round(time.Millisecond), oldA.instance)
-		oldA.WaitExit(t, "SIGTERM")
 		time.Sleep(3 * time.Second)
 		stop()
 

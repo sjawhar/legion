@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
+	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -262,7 +263,6 @@ func TestAListenerWithoutTheLeaseGrantDeliversWithoutALease(t *testing.T) {
 		"NATS_URLS=" + uri,
 		"NATS_NKEY_SEED=" + seed,
 		"ENVOY_API_TOKEN=" + listenerTestToken,
-		"ENVOY_HOST_BRIDGE=127.0.0.1",
 	}
 	held.Pass(cmd, "ENVOY_LISTEN_FD")
 	listener.Process = cmdtest.Start(t, "the listener box-ungranted", cmd)
@@ -280,8 +280,6 @@ func TestAListenerWithoutTheLeaseGrantDeliversWithoutALease(t *testing.T) {
 	}
 
 	topic := "notifications.github.acme.ungranted.pr.1"
-	serving := startServingPort(t, "ses_ungranted", http.StatusNoContent)
-	registerServingSession(t, listener, serving, "127.0.0.1", topic)
 	publisher, err := bus.Connect([]string{uri}, bus.WithEnvironment(func(name string) (string, bool) {
 		if name == "NATS_NKEY_SEED" {
 			return seed, true
@@ -292,9 +290,17 @@ func TestAListenerWithoutTheLeaseGrantDeliversWithoutALease(t *testing.T) {
 		t.Fatalf("connect the publisher: %v", err)
 	}
 	t.Cleanup(publisher.Close)
+	standIn := startSessionStandInOn(t, publisher.Conn, "ses_ungranted", answerDone)
+	registerThroughListener(t, listener, subscribeBody{
+		SessionID: "ses_ungranted", Topics: []string{topic}, Title: "ungranted", Dir: "/test/ses_ungranted",
+		SelfSubscribed: true, Host: "box-ungranted",
+		Delivery: &subscribeDelivery{Consumer: true, Epoch: "ungranted-" + id.New()},
+	})
 	item := newEnvelope("github", topic, "pull request 1 was opened")
 	publish(t, publisher, item)
-	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), item)
+	if frame := standIn.collect(t, 1, 15*time.Second)[0]; frame.item.EventID != item.EventID {
+		t.Fatalf("the frame relayed to ses_ungranted carries event %s, want %s", frame.item.EventID, item.EventID)
+	}
 	if listener.Cmd.ProcessState != nil {
 		t.Fatalf("the listener exited:\n%s", listener.Output.String())
 	}

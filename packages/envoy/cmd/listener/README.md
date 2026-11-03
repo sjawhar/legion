@@ -13,9 +13,8 @@ machine id.
 Every pod of a machine id, active or standby:
 
 - serves `/v1`, `/healthz`, `/metrics` and the webhook routes;
-- is a member of the role lane's core-NATS queue group `envoy-listener-<machine id>`, and of the
-  live topics lane's `envoy-listener-live-<machine id>` when `ENVOY_SUBSCRIBE_ALL_TOPICS=1`; NATS
-  hands each message of a queue group to one member, so no role or live message is delivered by
+- is a member of the role lane's core-NATS queue group `envoy-listener-<machine id>`; NATS
+  hands each message of a queue group to one member, so no role message is delivered by
   two pods;
 - runs the self-health monitor over its caches.
 
@@ -279,20 +278,24 @@ On SIGTERM or SIGINT, once `/v1` serves (`shutdownListener`):
 1. the self-health monitor stops;
 2. receiving stops, inside a 10 s budget the HTTP stop shares: the holder-only loops are told to
    stop, the handler takes no more messages, the message in hand gets 3 s (`inflightGrace`)
-   before its prompt is cancelled (a cancelled prompt is a retryable failure: its ledger attempt
-   is cleared and the message NAKed) and a second more (`inflightCancelWait`) for its handler to
-   return, the serving-port workers are given 0.5 s (`servePortTermStopWait`) to leave the term's
-   pushes, every message not handled (queued, held by a settle hold, or taken back from a worker)
-   is NAKed with the 2 s hand-back delay in stream order, the lease is marked released and
+   before its handling is cancelled (a cancelled handling is a retryable failure: its ledger
+   attempt is cleared and the message NAKed) and a second more (`inflightCancelWait`) for its
+   handler to
+   return, every message not handled (queued, or held by a settle hold) is NAKed with the 2 s
+   hand-back delay in stream order, the lease is marked released and
    `unsettled`, the subscription stays until the next holder receives, 3 s after the NAKs at
    most and 1.25 s after the release at least (the floor that holds the deliver subject while a
    standby subscribes), then
    drains (2 s at most) and, when all of that went through, the clean-hand-back mark is written
-   (one bucket call, 2 s at most): 11.5 s in all, and 12.75 s when the flush (1 s) and the release
+   (one bucket call, 2 s at most): 10.5 s in all, and 11.75 s when the flush (1 s) and the release
    (2 s) both
-   run to their bounds and leave that floor past the cap. The budget bounds none of those waits:
+   run to their bounds and leave that floor past the cap. The session relays are not in that sum:
+   the term's end only cancels them, and the shutdown's next step waits up to 750 ms
+   (`relaySettleGrace`) for each stopped relay to settle the frame it had unanswered. The budget
+   bounds none of those waits:
    it is how long the shutdown waits for the receive stop. Past it the shutdown goes on to the
-   HTTP stop with no time left, then to the NATS drains and `os.Exit(1)`, while the hand-back may
+   relays and the HTTP stop with no time left, then to the NATS drains and `os.Exit(1)`, while the
+   hand-back may
    still be running. The listener's own shutdown, not the runtime's kill, cuts that hand-back off:
    `client.Drain` ends the subscription of a hand-back still lingering or draining, and `os.Exit(1)`
    ends only a mark write still in flight on the lease's own connection. So a longer grace period in
@@ -300,10 +303,12 @@ On SIGTERM or SIGINT, once `/v1` serves (`shutdownListener`):
    stop that wrote none. A
    listener without a lease drains its subscription and NAKs what it has not handled at once, in
    stream order;
-3. the HTTP server shuts down within what is left of the budget;
-4. the live topics lane drains (3 s), the cache watchers stop, and the NATS client drains (13 s).
+3. each relay the term's end stopped settles the frame it had unanswered, up to 750 ms
+   (`relaySettleGrace`), out of what the receive stop left of the budget;
+4. the HTTP server shuts down within what is left of the budget;
+5. the role lane drains (5 s), the cache watchers stop, and the NATS client drains (13 s).
 
-The process exits 1. A runtime must allow about 26 s after SIGTERM; give it 30 s. A lease left
+The process exits 1. A runtime must allow about 28 s after SIGTERM; give it 30 s. A lease left
 unreleased (the budget ran out) is taken by a standby once it expires, as after a hard stop.
 
 ## Readiness: `/healthz`
@@ -340,34 +345,39 @@ standby answering `/v1`, answers as the active pod would:
   in `envoy_listener`): before it prompts a session or forwards a role-lane message, a pod records
   the pair attempted, and once it lands, delivered. A pair another pod delivered is not prompted
   again. A pod skips a pair as `listener attempt-dedupe skip` only for an attempt it holds itself:
-  one whose prompt may still be running (less than 35 s old and not settled), or one a delivery kept
-  (`dedupe.Ledger.Keep`: a give-up, a fanout refusal) for 5 minutes. An attempted record of its own
-  boot that it holds no such attempt for (a clear that could not be written, a write whose reply
-  was lost) is taken over and the session prompted. An attempt by a boot that held this machine's
-  lease before the current holder (the lease record's `former_boots`) is taken over without that
-  wait, so the settle hold delivers that message in stream order: at once for a holder taken over
-  by force (killed, its node lost, its record left to expire), which writes nothing more, and
-  only after 1 s (`leaseFormerSettle`) for one that released the record, which is alive. A
-  release is a soft hand-over, and a repeat over one is allowed only where no pod can know the
-  outcome: the relay of the pod letting go has 750 ms (`relaySettleGrace`) past the end of its
-  term to finish the push it had at a session's port and write that push's delivered record, or
-  to give its attempt up when the port refused it, and the pod taking over reads that answer
-  rather than pushing a message the session may already have taken. A push whose port answered
-  neither way inside that grace is marked in doubt (`in_doubt` on the attempted record, logged as
-  `session relay left a push in doubt`): the answer that would say whether the session took it is
-  not coming, so the successor pushes the message again as soon as it reads the mark, which is
-  one repeat under the same event id. A record a build that does not read the mark finds is the
-  unresolved attempt it always was.
-  An attempt by a pod that still holds or renews a lease, or by a live pod's role or
-  live lane, less than 35 s old (the 30 s prompt limit and 5 s) is retried later on the durable
-  lane; an older one is taken over, since its writer died. A repeat with the same event id is
-  possible after a hard take-over, and after a push whose answer had not come back when its pod
-  lost the receive term. A ledger that cannot be read NAKs the durable message for a
-  retry; the role and live lanes then deliver without it and log `delivery ledger unavailable`.
-  The relay of a session's consumer defers likewise and pushes nothing until the ledger answers,
-  whichever order its own connection and the ledger's reconnect in, and it waits for the pair's
-  delivered record before it moves on: a pod that pushed under the ledger's silence would send
-  the session the copy its own lost record stands for.
+  one whose forward may still be running (less than 35 s old and not settled), or one a delivery
+  kept (`dedupe.Ledger.Keep`: a give-up, a fanout refusal) for 5 minutes. An attempted record of
+  its own boot that it holds no such attempt for (a clear that could not be written, a write
+  whose reply was lost) is taken over and the pair delivered. An attempt by a boot that held this
+  machine's lease before the current holder (the lease record's `former_boots`) is taken over
+  without that wait, so the settle hold delivers that message in stream order: at once for a
+  holder taken over by force (killed, its node lost, its record left to expire), which writes
+  nothing more, and only after 2.25 s (`ledgerFormerSettle`) for one that released the record,
+  which is alive and whose role lane is finishing the forward it had in flight
+  (`roleReceiptTimeout`).
+  An attempt by a pod that still holds or renews a lease, or by a live pod's role lane, less than
+  35 s old (`deliveryHandlingLimit` and `ledgerTakeoverMargin`) is retried later on the durable
+  lane; an older one is taken over, since its writer died. A ledger that cannot be read NAKs the
+  durable message for a retry; the role lane then delivers without it and logs
+  `delivery ledger unavailable`.
+
+  **When a session can see a message twice.** The listener delivers a stored message to a session
+  through that session's own consumer, relayed as a frame, and the consumer's ack floor — not the
+  ledger — is what says the session has it. There are exactly three cases, and each repeats the
+  message once, under the same event id:
+  - a frame whose reply the pod's receive term ended before it heard. The stopping relay waits
+    `relaySettleGrace` (750 ms) for that reply and acks the message when it comes, and the pod
+    taking over waits `relayFormerSettle` (1 s) before it restarts the session's consumer at its
+    ack floor, so a reply that arrives inside the grace costs nothing. One that does not is in
+    doubt (`session relay left a frame in doubt`): nothing says whether the session took it, so
+    the successor publishes it once more.
+  - a frame whose reply was lost when the pod's session-consumer links dropped, which carries
+    the reply and the message's acknowledgement alike. Nothing on this pod recorded the
+    delivery — there is no second channel it could have been recorded on — so the relay
+    restarts at the ack floor when the links come back and publishes that frame again. A frame
+    the session answered before the drop was acked on those links and is passed over.
+  - a hard take-over (a killed pod, a lost node): the pod that had a frame in flight wrote
+    nothing and is waited for by nobody, so the successor publishes it again.
 - **Delivery exceptions** carry an id derived from the event id, the recipient session and the
   reason, so a redelivery that fails the same way publishes an exception with the same id and
   dedupe key, which the stream stores once.
@@ -408,11 +418,10 @@ During a roll two builds run for one machine id, and each must deliver what the 
   not know still has it delivered. It is `>` and not empty because nats-server 2.10 accepts an
   update that clears a push durable's filter and then delivers nothing published after it. The
   holder writes the policy only once nothing but it receives.
-- **The live lane splits by the deployed stream.** It leaves to the durable every subject the
-  stream's current subject list captures, read from the server at start, every 5 s and after each
-  reconnect, not the list this build compiles in. Before its first read succeeds it uses the
-  compiled-in list. A stale list can only lack a subject added since, and the ledger keeps the
-  session from a second prompt for it.
+- **A session's consumer takes what its filter captures.** A relay's restart writes the filter
+  this build compiles for the session's followed topics, and a consumer keeps its position when
+  its filter changes, so a topic either build knows is delivered from the sequence the session
+  had reached.
 - **Fields a build does not know are kept.** Session registrations, interests, role claims and
   the lease record keep every JSON field they carry across every read-modify-write.
 
@@ -462,22 +471,6 @@ Deploy prerequisite: render and apply the NATS grant carrying `envoy_listener` (
 `gcp:NatsHub`, its users; for a host, its NATS authorization) before running a second pod of a
 machine id.
 
-## Port-session delivery addresses
-
-Every pod of a machine computes a session's address the same way (`session.Deliverer.hostFor`,
-from the registration and `ENVOY_HOST_BRIDGE`), and every answer reaches the session from any pod
-but two, which are local to the pod that dials them: a loopback bridge (`ENVOY_HOST_BRIDGE` such as
-`127.0.0.1`) and the `host.docker.internal` fallback. The subscribe handler stamps a port
-registration with `accepted_host`, the accepting pod's host name. A pod that would dial a
-pod-local address for a session another pod accepted sends nothing: it reports the delivery as
-`delivery_failed` (the log names `address not reachable from this listener pod`) and does not
-retry. Every route to the port refuses it alike -- the durable path, the live and core lanes, and
-the relay of the session's consumer, which acks the message rather than pushing it again, since
-no later pull of that consumer would reach the session either. A registration without
-`accepted_host` (written by an earlier build) is delivered as before, and pods that share a host
-name (host networking) deliver normally. A session on a serve port that needs every pod to reach
-it registers a host every pod reaches.
-
 ## Environment
 
 The settings every listener reads are listed on the docs site's Envoy page ("Running the
@@ -486,8 +479,7 @@ listener"). These concern the pods of one machine id:
 | Variable | What it is |
 | --- | --- |
 | `ENVOY_MACHINE_ID` | The machine id. Every pod with the same id shares one durable, one lease and one queue group; two machines whose ids collide silently become each other's standby. |
-| `ENVOY_INSTANCE_ID` | The pod's instance name: the lease record's `holder`, `/healthz`'s `active_instance`, the `instance` field of every JSON log line, and the NATS client names (`envoy-listener <instance>`, `envoy-live-topics <instance>`, `envoy-listener-lease <instance>`). Default: the host name, the pod's name in Kubernetes. Go's text log lines carry no instance prefix, since the deployed text metric filters match by position. |
-| `ENVOY_POD_HOSTNAME` | The host name stamped as `accepted_host` and compared against it. Default: the host name. Two processes on one host set it to stand for two pods (the tests). |
+| `ENVOY_INSTANCE_ID` | The pod's instance name: the lease record's `holder`, `/healthz`'s `active_instance`, the `instance` field of every JSON log line, and the NATS client names (`envoy-listener <instance>`, `envoy-listener-lease <instance>`). Default: the host name, the pod's name in Kubernetes. Go's text log lines carry no instance prefix, since the deployed text metric filters match by position. |
 | `ENVOY_NATS_REPLICAS` | Replicas of every bucket the listener creates, `envoy_listener` included. |
 
 ## Recreating the durable

@@ -99,17 +99,19 @@ import (
 // nothing and leaves the next holder the 7 s
 // hold. handBackReleaseWait bounds the wait for the lease's loop to stop before the release, and
 // listenerStateRequestWait the mark's write.
-// The 3 s grace, its cancel's 1 s, servePortTermStopWait's 0.5 s for the workers to leave the
-// term's pushes before the batch, lingerMax (the flush and the release inside it), the 2 s drain
-// and the mark's 2 s write come to 11.5 s at most besides a lease call that hangs; a flush and a
+// The 3 s grace, its cancel's 1 s, lingerMax (the flush and the release inside it), the 2 s drain
+// and the mark's 2 s write come to 10.5 s at most besides a lease call that hangs; a flush and a
 // release that both run to their bounds (1 s and 2 s) leave the linger holding its floor past
-// that cap, 1.25 s after the release, and 12.75 s in all. The 10 s the shutdown gives the receive
-// stop and the HTTP stop together bounds none of that: it is how long the shutdown waits for the
-// receive stop. Past it the shutdown goes on to the HTTP stop with no time left, then to the NATS
-// drains and os.Exit(1), while the hand-back may still be running; client.Drain ends the
-// subscription of a hand-back still lingering or draining, and os.Exit(1) ends only a mark write
-// still in flight, and the next holder then settles at its 7 s cap, as it does after any stop that
-// wrote no mark. The record a stop releases
+// that cap, 1.25 s after the release, and 11.75 s in all. The receive stop does not wait for
+// this pod's session relays: the term's end only cancels them (sessionRelays.setOwned), and the
+// shutdown waits for their stopped frames to settle afterwards, up to relaySettleGrace (0.75 s),
+// in its own step (shutdownListener). The 10 s the shutdown gives the receive stop, the relays
+// and the HTTP stop together bounds none of that: it is how long the shutdown waits for the
+// receive stop. Past it the shutdown goes on to the relays and the HTTP stop with no time left,
+// then to the NATS drains and os.Exit(1), while the hand-back may still be running; client.Drain
+// ends the subscription of a hand-back still lingering or draining, and os.Exit(1) ends only a
+// mark write still in flight, and the next holder then settles at its 7 s cap, as it does after
+// any stop that wrote no mark. The record a stop releases
 // carries the ack wait its term still owes (lease.ackWaitOwed): a term that must settle owes one
 // until its settle hold ends, so a stop before that leaves the next holder's hold to wait an ack
 // wait. A release the lease's loop outlasts records that debt before it gives up (lease.Release),
@@ -123,12 +125,6 @@ const (
 	inProgressEvery           = 2 * time.Second
 	inflightGrace             = 3 * time.Second
 	inflightCancelWait        = time.Second
-	// servePortTermStopWait bounds the end of a term's wait for the serving-port workers to leave
-	// its pushes once it has cancelled them (servePortWorkers.endTerm): a cancel reaches a push
-	// in flight as it reaches a prompt the handler is making, so this is a round trip's worth and
-	// no more. A worker still inside a push when it runs out holds a message of the term, which
-	// its graceful stop writes no clean-hand-back mark for (durableReceiver.markHandBack).
-	servePortTermStopWait = 500 * time.Millisecond
 	// holderLoopsStopWait bounds how long the end of a term waits for a pass of the holder-only
 	// loops in flight, measured from when they were told to stop.
 	holderLoopsStopWait = 5 * time.Second
@@ -283,11 +279,6 @@ type durableReceiverOptions struct {
 	// so this is the one writer of that flag. Nil for a listener that relays nothing, and in a
 	// rig that has no relays.
 	relays *sessionRelays
-	// workers are the serving-port workers the durable's handler hands its pushes to
-	// (servePortWorkers, wireDeliveryWorkers). The pushes of a term's messages end with the term:
-	// a graceful stop takes them back and hands their messages to the next holder, and a lost
-	// lease drops them (receive_stop.go). Nil in a rig whose handler hands no push over.
-	workers *servePortWorkers
 	// refused is called once the durable is refused (errListenerDurableRefused); the receive loop
 	// ends after it.
 	refused func(error)
@@ -784,11 +775,7 @@ func (r *durableReceiver) begin(subject string, hold time.Duration, term uint64)
 		holding:   hold > 0,
 	}
 	handling, cancel := context.WithCancel(context.Background())
-	// Every message of the term is handled under a context carrying the term's handle, so a push
-	// made under a context the handler wrapped still belongs to this term and ends with it
-	// (servePortWorkers.endTerm).
-	t.term = &servePortTermHandle{handling: handling}
-	t.handling, t.cancel = withServePortTerm(handling, t.term), cancel
+	t.handling, t.cancel = handling, cancel
 	r.mu.Lock()
 	conn := r.clientConn.Load()
 	sub, err := conn.Subscribe(subject, t.intake)

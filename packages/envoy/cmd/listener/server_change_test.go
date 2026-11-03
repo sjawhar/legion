@@ -177,12 +177,10 @@ type serverChangeSoak struct {
 	heartbeatFailures  []string
 }
 
-// serverChangeRun is one way TestServerChange runs: what both listeners start with beyond the
-// cluster, and whether the senders publish through the holder's listener H rather than the
-// sender's S.
+// serverChangeRun is one way TestServerChange runs: whether the senders publish through the
+// holder's listener H rather than the sender's S.
 type serverChangeRun struct {
 	name              string
-	env               []string
 	sendThroughHolder bool
 }
 
@@ -194,16 +192,13 @@ type serverChangeRun struct {
 // without its sender's error, that each repeat carried its first copy's id, that the run did the
 // moves it claims, and that the route stays live when nothing moves.
 //
-// It runs twice. With the live topics lane off, the senders publish through the sender's listener
-// S, so every message crosses the hub. With the lane on in both listeners (liveLaneEnv), the
-// senders publish through H, so the publish route runs on the machine whose live lane receives
-// each ad-hoc publish and skips the stand-in's push without hearing from it; a route that counted
-// a delivery-ledger record of that skip as the stand-in's receipt would answer 200 for an ad-hoc
-// message sent while the stand-in is held off, and fail assertion 1.
+// It runs twice, once through each listener: through the sender's listener S, so every message
+// crosses the hub, and through the holder's listener H, so the publish route runs on the machine
+// the stand-in registered through.
 func TestServerChange(t *testing.T) {
 	runs := []serverChangeRun{
-		{name: "live lane off, senders through S"},
-		{name: "live lane on, senders through H", env: liveLaneEnv, sendThroughHolder: true},
+		{name: "senders through S"},
+		{name: "senders through H", sendThroughHolder: true},
 	}
 	for _, run := range runs {
 		t.Run(run.name, func(t *testing.T) { runServerChange(t, run) })
@@ -217,7 +212,7 @@ func runServerChange(t *testing.T, run serverChangeRun) {
 	cluster := testnats.StartCluster(t, 3)
 	binary := cmdtest.Build(t, "envoy-listener")
 	urls := cluster.URLs()
-	env := append([]string{"ENVOY_NATS_REPLICAS=" + strconv.Itoa(serverChangeReplicas)}, run.env...)
+	env := []string{"ENVOY_NATS_REPLICAS=" + strconv.Itoa(serverChangeReplicas)}
 	// Each listener lists the members in another order, so the two do not start on one member.
 	holder := startListenerProcess(t, binary, strings.Join([]string{urls[0], urls[1], urls[2]}, ","), "holder-host", env...)
 	holder.waitHealthy(t)

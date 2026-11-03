@@ -595,7 +595,7 @@ func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	useKV(t, reg, &interleavingSessionWriteKeyValue{
 		KeyValue: raw,
 		afterFirstWrite: func() {
-			remote := SessionEntry{Port: 13382, MachineID: "remote-host", Dir: "/remote", Driving: true}
+			remote := SessionEntry{Port: 13382, MachineID: "remote-host", Dir: "/remote"}
 			buf, err := json.Marshal(remote)
 			if err != nil {
 				t.Fatalf("marshal remote entry: %v", err)
@@ -609,7 +609,7 @@ func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 			})
 		},
 	})
-	if err := reg.Put(sessionID, SessionEntry{Port: 13381, MachineID: "local-host", Dir: "/local", Driving: true}); err != nil {
+	if err := reg.Put(sessionID, SessionEntry{Port: 13381, MachineID: "local-host", Dir: "/local"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 

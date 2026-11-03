@@ -120,16 +120,16 @@ func TestLeaseFormerBootsAreWrittenOnEveryTakeOverAndCarriedAlongAChain(t *testi
 	if !formerHolder(c, a.boot) || !formerHolder(c, b.boot) || formerHolder(c, c.boot) {
 		t.Fatal("pod-c's FormerHolder does not name pod-a and pod-b alone")
 	}
-	if _, settling := c.FormerHolder(b.boot); settling != leaseFormerSettle {
-		t.Fatalf("pod-b, whose record pod-c took released, is given %s to settle, want the whole %s: it is alive and its relays are finishing their pushes",
-			settling, leaseFormerSettle)
+	if _, settling := c.FormerHolder(b.boot); settling != ledgerFormerSettle {
+		t.Fatalf("pod-b, whose record pod-c took released, is given %s to settle, want the whole %s: it is alive and its role lane is finishing the forward it had in flight",
+			settling, ledgerFormerSettle)
 	}
 	if _, settling := c.FormerHolder(a.boot); settling != 0 {
 		t.Fatalf("pod-a, carried along the chain from an expired record, is given %s to settle, want none", settling)
 	}
-	clock.advance(leaseFormerSettle)
+	clock.advance(ledgerFormerSettle)
 	if _, settling := c.FormerHolder(b.boot); settling != 0 {
-		t.Fatal("pod-b is still settling once leaseFormerSettle has passed since pod-c's term began")
+		t.Fatal("pod-b is still settling once ledgerFormerSettle has passed since pod-c's term began")
 	}
 }
 

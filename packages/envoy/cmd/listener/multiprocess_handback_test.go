@@ -51,10 +51,10 @@ func TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s(t *testing.T) {
 	a, b := mpStartPair(t, binary, uri)
 	c := mpStartPod(t, binary, uri, "pod-c")
 	mpWaitStandby(t, c, 30*time.Second)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_lossstop_one", "ses_mp_lossstop_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	publisher := mpConnectPublisher(t, uri)
 
@@ -90,10 +90,10 @@ func TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder(t *testing.T) 
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_alone_one", "ses_mp_alone_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	publisher := mpConnectPublisher(t, uri)
 
@@ -147,10 +147,10 @@ func TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder(t *testing.T) {
 	a, b := mpStartPair(t, binary, uri)
 	c := mpStartPod(t, binary, uri, "pod-c")
 	mpWaitStandby(t, c, 30*time.Second)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_holdstop_one", "ses_mp_holdstop_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	publisher := mpConnectPublisher(t, uri)
 
@@ -186,10 +186,10 @@ func TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_wirestop_one", "ses_mp_wirestop_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	a.relay.delay(300 * time.Millisecond)
 	publisher := mpConnectPublisher(t, uri)
@@ -221,9 +221,9 @@ func TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	const blocked = "ses_mp_midprompt"
-	a.registerPort(t, serving, blocked)
+	a.registerNATS(t, serving, blocked)
 	publisher := mpConnectPublisher(t, uri)
 
 	inHand := serving.hold(blocked)
@@ -245,72 +245,44 @@ func TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s(t *testing.T) {
 	mpWaitActive(t, b, time.Second)
 }
 
-// mpParkedMessages is how many messages mpRetryOutstanding parks on one session whose serving
-// port refuses them: servePortQueueLimit of them fill that session's worker queue, where each is
-// kept in progress and acknowledged by nobody, and the four over that limit are handed back to
-// the durable (handOverOrRetry), which redelivers each durableRetryDelay (30 s) later.
-const mpParkedMessages = servePortQueueLimit + 4
+// mpParkedMessages is how many messages mpRetryOutstanding leaves outstanding on the machine's
+// durable, each NAKed for durableRetryDelay (30 s), far past every hold these rows measure.
+const mpParkedMessages = 4
 
 // mpRetryOutstanding registers on pod a two healthy sessions, named after row, and leaves the
-// machine's durable holding messages no pod of it can settle. A parked session whose serving port
-// refuses every prompt is registered only after its messages are stored, so they lie below its
-// consumer's start and are no consumer's to relay (session.SessionEntry.ConsumerHoldsStored): the
-// durable path hands each to that session's serving-port worker, which keeps servePortQueueLimit
-// of them in progress while the port refuses them, and hands the rest back to the durable with
-// the 30 s retry delay. Neither kind is in the hands of the pod that takes delivery over next,
-// and both are outstanding on the durable, so that pod's settle hold never finds every
-// outstanding message in hand, however long the hand-over takes:
-//   - what a worker holds is settled by nobody while the port refuses it, and reaches the next
-//     pod only once the durable's ack wait runs out, a second after that pod's hand-back hold;
-//   - what the durable took back waits out its 30 s there, in nobody's hands at all.
+// machine's durable holding messages no pod of it can settle. The parked session follows a
+// stored topic and registers with an entry that records no way of receiving - no consumer of
+// its own and no subscription of its own - so the fan-out's resolution of it fails for a
+// session that is live, which the durable path NAKs for durableRetryDelay (30 s). Those
+// messages are in no pod's hands over a hand-over and come back only after those 30 s, so the
+// pod taking delivery over never finds every outstanding message in hand, however long the
+// hand-over takes.
 //
-// Before main's per-session consumers this was one message to a session whose prompts failed,
-// which the durable path NAKed for the same 30 s. A serving-port session's refused push is its
-// relay's now, repeated until the port accepts and never NAKed back to the shared durable
-// (TestTwoPodsAPortRetryReachesItsSessionAcrossAStopAndAKill), so the messages a hand-over must
-// not lose are parked where the merge still defers them. A session with no record at all, which
-// the unplaceable branch defers too (unplaceable_delivery.go), is no use here: its NAK comes back
-// after unplaceableRetryDelay (5 s), inside the holds these rows measure, and a redelivery that
-// lands during a hold is in that pod's hands and ends the hold early.
+// A session with no record at all, which the unplaceable branch defers too
+// (unplaceable_delivery.go), is no use here: its NAK comes back after unplaceableRetryDelay
+// (5 s), inside the holds these rows measure, and a redelivery that lands during a hold is in
+// that pod's hands and ends the hold early.
 //
-// It returns the serving port, the publisher and the healthy sessions.
-func mpRetryOutstanding(t *testing.T, uri string, a *mpPod, row string) (serving *mpServingPort, publisher *mpPublisher, healthy []string) {
+// It returns the row's sessions, the publisher and the healthy session ids.
+func mpRetryOutstanding(t *testing.T, uri string, a *mpPod, row string) (serving *mpNATSSession, publisher *mpPublisher, healthy []string) {
 	t.Helper()
-	serving = mpStartServingPort(t)
+	serving = mpStartNATSSessions(t, uri)
 	healthy = []string{"ses_mp_" + row + "_one", "ses_mp_" + row + "_two"}
 	for _, sessionID := range healthy {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	publisher = mpConnectPublisher(t, uri)
 	parked := "ses_mp_" + row + "_parked"
-	serving.fail(parked)
+	parkedTopic := "notifications.github.acme.mp-parked." + row
+	a.subscribe(t, fmt.Sprintf(`{"session_id":%q,"topics":[%q],"host":"127.0.0.1"}`, parked, parkedTopic))
 	for range mpParkedMessages {
-		publisher.mustPublish(t, parked)
+		if _, err := publisher.publishOn(mpTarget{topic: parkedTopic, session: parked}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	a.registerPort(t, serving, parked)
-	// The worker takes its queue's worth in whatever order the durable delivers them, so the
-	// message handed back is any of the parked ones, not the last published.
-	mpEventually(t, 30*time.Second, a.instance+" to hand a parked message back to the durable", func() bool {
-		return mpLineWith(a.Output.String(), `"msg":"listener serving-port workers cannot take the push`, `"session_id":"`+parked+`"`) != ""
+	mpEventually(t, 30*time.Second, a.instance+" to defer every parked message for its retry delay", func() bool {
+		return strings.Count(a.Output.String(), `"session_id":"`+parked+`"`) >= mpParkedMessages
 	})
-	if pending := publisher.ackPending(); pending < mpParkedMessages {
-		t.Fatalf("the durable has %d messages outstanding with %d parked at a port that refuses them, want them all", pending, mpParkedMessages)
-	}
-	return serving, publisher, healthy
-}
-
-// mpCorePathRetryOutstanding is mpRetryOutstanding for a row whose pods run under the host's
-// grant (mpCorePathNATS): it registers each healthy session again through the same pod, as the
-// plugin's heartbeat does, and requires the answer to leave it on the core path. A row that
-// bounds the durable's own take-over needs that of every session it measures, since a session
-// with a consumer of its own is relayed from the moment a term begins and waits for no settle
-// hold.
-func mpCorePathRetryOutstanding(t *testing.T, uri string, a *mpPod, row string) (serving *mpServingPort, publisher *mpPublisher, healthy []string) {
-	t.Helper()
-	serving, publisher, healthy = mpRetryOutstanding(t, uri, a, row)
-	for _, sessionID := range healthy {
-		a.registerCorePath(t, serving, sessionID)
-	}
 	return serving, publisher, healthy
 }
 
@@ -358,8 +330,11 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 	if line := mpLineWith(a.Output.String(), "handed the durable's messages back", `"hand_back_marked":true`); line == "" {
 		t.Fatalf("%s did not mark its hand-back clean:\n%s", a.instance, mpTail(mpLinesWithout(a.Output.String()), 40))
 	}
-	if line := mpLineWith(b.Output.String(), "settle hold ended", `"outcome":"handed back"`); line == "" {
-		t.Fatalf("%s did not end its settle hold on %s's mark:\n%s", b.instance, a.instance, mpTail(mpLinesWithout(b.Output.String()), 40))
+	// The hold ends on the mark, or sooner because every message the stopping pod can still
+	// have outstanding is already in this pod's hands; what it must not do is run to its 7 s
+	// cap, which is the outcome the line leaves empty.
+	if line := mpLineWith(b.Output.String(), "settle hold ended", `"hand_back_marked":true`); line == "" || strings.Contains(line, `"outcome":""`) {
+		t.Fatalf("%s did not end its settle hold inside the hand-back cap on %s's mark: %s\n%s", b.instance, a.instance, line, mpTail(mpLinesWithout(b.Output.String()), 40))
 	}
 }
 
@@ -446,11 +421,11 @@ func TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstan
 // healthy published so far, past its own settle hold, and a second into a prompt that the serving
 // port never answers, to a session of row's registered for it, with healthy's messages queued
 // behind it. It returns once the last stop's standby is active.
-func mpGracefulStopsInTurn(t *testing.T, binary, uri string, serving *mpServingPort, publisher *mpPublisher, healthy []string, row string, stopping, next *mpPod, standbys ...string) {
+func mpGracefulStopsInTurn(t *testing.T, binary, uri string, serving *mpNATSSession, publisher *mpPublisher, healthy []string, row string, stopping, next *mpPod, standbys ...string) {
 	t.Helper()
 	for handOver := range len(standbys) + 1 {
 		sessionID := fmt.Sprintf("ses_mp_%s_slow_%d", row, handOver+1)
-		stopping.registerPort(t, serving, sessionID)
+		stopping.registerNATS(t, serving, sessionID)
 		sent := mpTo(publisher.all(), healthy...)
 		mpEventually(t, mpGracefulBound, stopping.instance+" to deliver what was published before its prompt in hand", func() bool {
 			return serving.tookAll(sent)

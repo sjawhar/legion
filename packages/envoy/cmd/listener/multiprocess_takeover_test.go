@@ -32,10 +32,10 @@ func TestTwoPodsReconnectInPlaceDeliversEachMessageOnce(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_reconnect_one", "ses_mp_reconnect_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	watch := mpWatchSessions(t, b, sessions...)
 	publisher := mpConnectPublisher(t, uri)
@@ -78,10 +78,10 @@ func TestTwoPodsShortDropKeepsTheActivePod(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_drop_one", "ses_mp_drop_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	publisher := mpConnectPublisher(t, uri)
 
@@ -164,9 +164,9 @@ func TestTwoPodsStartedTogetherElectOneActivePod(t *testing.T) {
 				}
 				time.Sleep(mpPoll)
 			}
-			serving := mpStartServingPort(t)
+			serving := mpStartNATSSessions(t, uri)
 			const sessionID = "ses_mp_together"
-			pods[1].registerPort(t, serving, sessionID)
+			pods[1].registerNATS(t, serving, sessionID)
 			publisher := mpConnectPublisher(t, uri)
 			for range 5 {
 				publisher.mustPublish(t, sessionID)
@@ -196,21 +196,21 @@ func TestTwoPodsSIGKILLHandsOverInOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	const blocked, queued, other = "ses_mp_kill_t", "ses_mp_kill_s", "ses_mp_kill_u"
 	for _, sessionID := range []string{blocked, queued, other} {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	watch := mpWatchSessions(t, b, blocked, queued, other)
 	publisher := mpConnectPublisher(t, uri)
 
-	inHand := serving.hold(blocked)
+	// The blocked session answers every frame `nak` until the kill, so the killed pod's relay
+	// took nothing to it and the successor must deliver both, in stream order.
+	serving.fail(blocked)
 	first := publisher.mustPublish(t, blocked)
-	select {
-	case <-inHand:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("%s never prompted %s", a.instance, blocked)
-	}
+	mpEventually(t, 10*time.Second, a.instance+" to relay "+first.event+" to "+blocked, func() bool {
+		return serving.failures(blocked) >= 1
+	})
 	behind := publisher.mustPublish(t, blocked)
 	mpEventually(t, 10*time.Second, a.instance+" to hold the queued message too", func() bool {
 		return publisher.sessionAckPending(blocked) >= 2
@@ -218,6 +218,8 @@ func TestTwoPodsSIGKILLHandsOverInOrderWithin15s(t *testing.T) {
 
 	killed := a.kill(t)
 	stop := publisher.every(100*time.Millisecond, queued, other)
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+	serving.accept(blocked)     // the successor's frames are taken; the killed pod's never were
 	time.Sleep(3 * time.Second) // publish for a while after the kill
 	stop()
 
@@ -243,9 +245,9 @@ func TestTwoPodsAPortRetryReachesItsSessionAcrossAStopAndAKill(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	const sessionID = "ses_mp_port_retry"
-	a.registerPort(t, serving, sessionID)
+	a.registerNATS(t, serving, sessionID)
 	publisher := mpConnectPublisher(t, uri)
 
 	serving.fail(sessionID)
@@ -284,10 +286,10 @@ func TestTwoPodsNodeLossHandsOverInOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_loss_one", "ses_mp_loss_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	watch := mpWatchSessions(t, b, sessions...)
 	publisher := mpConnectPublisher(t, uri)
@@ -331,10 +333,10 @@ func TestTwoPodsReceiveConnectionLostHandsOverWithin15s(t *testing.T) {
 	mpWaitActive(t, a, 30*time.Second)
 	b := mpStartPod(t, binary, uri, "pod-b")
 	mpWaitStandby(t, b, 30*time.Second)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_recvlost_one", "ses_mp_recvlost_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	watch := mpWatchSessions(t, b, sessions...)
 	publisher := mpConnectPublisher(t, uri)
@@ -398,10 +400,10 @@ func TestTwoPodsReceiveConnectionBackInsideTheBoundKeepsTheLease(t *testing.T) {
 	mpWaitActive(t, a, 30*time.Second)
 	b := mpStartPod(t, binary, uri, "pod-b")
 	mpWaitStandby(t, b, 30*time.Second)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_recvback_one", "ses_mp_recvback_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	publisher := mpConnectPublisher(t, uri)
 	acquisitions := strings.Count(a.Output.String(), `"msg":"listener lease acquired"`)
@@ -457,11 +459,11 @@ func TestTwoPodsGracefulStopDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	const slow = "ses_mp_graceful_slow"
 	sessions := []string{"ses_mp_graceful_one", "ses_mp_graceful_two"}
 	for _, sessionID := range append([]string{slow}, sessions...) {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	watch := mpWatchSessions(t, b, append([]string{slow}, sessions...)...)
 	publisher := mpConnectPublisher(t, uri)
@@ -496,9 +498,9 @@ func TestTwoPodsStandbyWaitsPast140s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	const sessionID = "ses_mp_standby_waits"
-	a.registerPort(t, serving, sessionID)
+	a.registerNATS(t, serving, sessionID)
 	watch := mpWatchSessions(t, b, sessionID)
 	started := time.Now()
 
@@ -754,10 +756,10 @@ func TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s(t
 	mpWaitActive(t, a, 30*time.Second)
 	b := mpStartPod(t, binary, uri, "pod-b")
 	mpWaitStandby(t, b, 30*time.Second)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_recvhole_one", "ses_mp_recvhole_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	publisher := mpConnectPublisher(t, uri)
 
@@ -815,10 +817,10 @@ func TestTwoPodsReceiveConnectionLostWhileItsReconnectHooksHangHandsOverWithin15
 	mpWaitActive(t, a, 30*time.Second)
 	b := mpStartPod(t, binary, uri, "pod-b")
 	mpWaitStandby(t, b, 30*time.Second)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	sessions := []string{"ses_mp_hookhang_one", "ses_mp_hookhang_two"}
 	for _, sessionID := range sessions {
-		a.registerPort(t, serving, sessionID)
+		a.registerNATS(t, serving, sessionID)
 	}
 	publisher := mpConnectPublisher(t, uri)
 	receive := mpReceiveConnection(a.instance)
@@ -878,34 +880,42 @@ func TestTwoPodsReceiveConnectionLostWhileItsReconnectHooksHangHandsOverWithin15
 		taken.Round(time.Millisecond), a.instance, len(messages))
 }
 
-// A message the active pod's relay pushed as its links dropped is not pushed again when the links
-// come back. The relay's push of the message is in flight to the session's port when the pod's
-// session-consumer connection and the lease connection, which carries the delivery ledger, both
-// drop; the port then takes the push (204), but neither the ledger's record of it nor the
-// consumer's acknowledgement can reach the server. The session-consumer connection comes back
-// first, as one of a pod's connections always does after an outage that took them all, and the
-// relay restarts its consumer at the ack floor at once, so the server gives it the message again;
-// the lease connection follows a moment later, well inside the lease's validity, so the pod keeps
-// the lease and the relay throughout. The session must take the message exactly once: the pod
-// knows it delivered it, and the ledger answers again within a second. At 7db8d09c the restart
-// meets the ledger before the lease connection is back, the ledger call fails at once
-// (`nats: outbound buffer limit exceeded`), and the relay pushes the message a second time. That
-// is TestTwoPodsShortDropKeepsTheActivePod's occasional "evt-mp-0020 ... prompted 2 times" (4 of
-// 100 runs at 7db8d09c, 0 of 50 at bd369c08 and 0 of 50 with the relay's restart waiting its
-// first retry), forced into one order (INFRA-557 tester's round 24).
-func TestTwoPodsARelayedPushTheLinksDroppedUnderIsNotPushedAgainWhenTheyComeBack(t *testing.T) {
+// A frame the active pod's relay sent as its session-consumer link dropped reaches the session
+// again as soon as the link is back, not half a minute later. The frame is at the session when
+// the pod's session-consumer connection drops; the session answers it, but neither that reply
+// nor the consumer's acknowledgement can reach the server, so the message stands unacked. The
+// link comes back and the relay restarts at the ack floor at once (relayReconnected, the pull
+// ending on its connection's event), so the session is given that one message a second time,
+// under the same event id, and nothing else repeats.
+//
+// That repeat is what the merge of #2674 costs here. A frame's reply and the consumer's ack ride
+// the one connection, so a drop loses both together and the relay has no second channel it could
+// have recorded the delivery on - which is what the delivery ledger on the lease connection was
+// for a push to a serving port. The guarantee is therefore at most one repeat under the same
+// event id, the same shape as the settle bound's, and what this row holds is that it is at most
+// one and that it comes back at once rather than after the pull's 30 s silence (INFRA-557
+// tester's round 24).
+func TestTwoPodsARelayedFrameTheLinksDroppedUnderIsRepeatedAtMostOnceWithItsId(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
 	mpWaitActive(t, a, 30*time.Second)
 	b := mpStartPod(t, binary, uri, "pod-b")
 	mpWaitStandby(t, b, 30*time.Second)
-	serving := mpStartServingPort(t)
+	serving := mpStartNATSSessions(t, uri)
 	const sessionID = "ses_mp_relay_drop_once"
-	a.registerPort(t, serving, sessionID)
+	a.registerNATS(t, serving, sessionID)
 	publisher := mpConnectPublisher(t, uri)
 	warm := publisher.mustPublish(t, sessionID)
 	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
+	// A frame the session answered, and whose acknowledgement reached the server, in the moment
+	// before the drop: the successor's restart at the ack floor passes over it, so the one
+	// repeat this row allows is the frame whose reply the drop lost and no other.
+	justBefore := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{justBefore}, 20*time.Second)
+	mpEventually(t, 10*time.Second, "the session's consumer to hold nothing unacknowledged", func() bool {
+		return publisher.sessionAckPending(sessionID) == 0
+	})
 
 	arrived, release := serving.gate(sessionID)
 	t.Cleanup(release)
@@ -913,31 +923,25 @@ func TestTwoPodsARelayedPushTheLinksDroppedUnderIsNotPushedAgainWhenTheyComeBack
 	select {
 	case <-arrived:
 	case <-time.After(20 * time.Second):
-		t.Fatalf("%s never pushed %s to the session's port", a.instance, m.event)
+		t.Fatalf("%s never relayed %s to the session", a.instance, m.event)
 	}
 
-	leaseConnection := "envoy-listener-lease " + a.instance
 	healSessions := a.lanes.drop(mpSessionConsumerConnection)
-	healLease := a.lanes.drop(leaseConnection)
-	t.Cleanup(func() { healSessions(); healLease() })
+	t.Cleanup(healSessions)
 	disconnected := func(name string) bool {
 		return mpLineWith(a.Output.String(), "envoy nats disconnected", `name=`+name) != "" ||
 			mpLineWith(a.Output.String(), "envoy nats disconnected", `name="`+name+`"`) != ""
 	}
-	mpEventually(t, 5*time.Second, a.instance+" to read both connections dropped", func() bool {
-		return disconnected(mpSessionConsumerConnection) && disconnected(leaseConnection)
+	mpEventually(t, 10*time.Second, a.instance+" to read its session-consumer connection dropped", func() bool {
+		return disconnected(mpSessionConsumerConnection)
 	})
 	release()
-	time.Sleep(200 * time.Millisecond) // the push answered 204; its record and ack fail
+	time.Sleep(200 * time.Millisecond) // the session answered; the reply and the ack are lost
 	reconnects := strings.Count(a.Output.String(), "envoy nats reconnected name="+mpSessionConsumerConnection)
+	healed := time.Now()
 	healSessions()
-	mpEventually(t, 5*time.Second, a.instance+"'s session-consumer connection to reconnect", func() bool {
+	mpEventually(t, 10*time.Second, a.instance+"'s session-consumer connection to reconnect", func() bool {
 		return strings.Count(a.Output.String(), "envoy nats reconnected name="+mpSessionConsumerConnection) > reconnects
-	})
-	time.Sleep(300 * time.Millisecond)
-	healLease()
-	mpEventually(t, 5*time.Second, a.instance+"'s lease connection to reconnect", func() bool {
-		return mpLineWith(a.Output.String(), "envoy nats reconnected", `name="`+leaseConnection+`"`) != ""
 	})
 
 	after := publisher.mustPublish(t, sessionID)
@@ -947,33 +951,40 @@ func TestTwoPodsARelayedPushTheLinksDroppedUnderIsNotPushedAgainWhenTheyComeBack
 		_, body := a.health()
 		t.Fatalf("%s lost the lease over the drop, so the row did not keep one relayer: %v", a.instance, body)
 	}
-	serving.requireOnce(t, []mpMessage{warm, m, after})
-	serving.requireOrder(t, []mpMessage{warm, m, after})
+	serving.requireOnce(t, []mpMessage{warm, justBefore, after})
+	took := serving.counts()[m.event]
+	if took > 2 {
+		t.Fatalf("%s to %s reached it %d times, want once, or twice as the frame the drop cut the reply of", m.event, sessionID, took)
+	}
+	serving.requireKnown(t, []mpMessage{warm, justBefore, m, after})
+	serving.requireOrder(t, []mpMessage{warm, justBefore, m, after})
+	if took == 2 {
+		at, _ := serving.last(sessionID, m.event)
+		if since := at.Sub(healed); since > 10*time.Second {
+			t.Fatalf("the repeat of %s reached %s %s after the link was healed, want the relay's restart at once, not the pull's 30 s silence", m.event, sessionID, since.Round(time.Millisecond))
+		}
+		t.Logf("%s reached %s twice, the repeat %s after the link was healed", m.event, sessionID, at.Sub(healed).Round(time.Millisecond))
+	}
 }
 
-// A push the active pod's relay has in flight when its receive term ends is not made again by the
-// pod that takes over. The relay's push of a message is at the session's port, not yet answered,
-// when the pod's receive connection alone is cut; the pod releases the lease 3 s later
-// (leaseReceiveLost) and its relays stop with the term, while its session-consumer and lease
-// connections - and so the delivery ledger - stay up. The port then takes the push (204). The
-// standby takes the lease over and restarts the session's consumer at its ack floor, so it is given
-// that message again. The session must take it exactly once: the pod that pushed it is alive, its
-// ledger was reachable throughout, and nothing was killed. At 892d93a5 the stopping relay records
-// nothing for the push it cut short, the pod taking over takes the former holder's attempt over at
-// once, and the message is pushed a second time. CI met this as
+// A frame the active pod's relay has unanswered when its term ends is not sent again by the pod
+// that takes over. The session's reply is held when the pod is stopped; the term's end cancels
+// the relay, which goes on hearing the session for relaySettleGrace (settleStoppedFrames), the
+// session answers inside it, and the stopping relay acks the message. The successor waits
+// relayFormerSettle (lease.FormerSettleWait) before it restarts the session's consumer, so it
+// restarts at an ack floor past that message and never sends it again. The session must take it
+// exactly once. Before the settle the stopping relay forgot the frame unacked, the successor was
+// given it again, and the session took it twice: CI met that as
 // TestTwoPodsReceiveConnectionLostHandsOverWithin15s's "evt-mp-0079 to ses_mp_recvlost_one
 // prompted 2 times" (run 41589787158, job 125769769345); this row forces that order (INFRA-557
 // tester's round 27).
-func TestTwoPodsARelayedPushInFlightWhenTheTermEndsIsNotPushedAgainByTheSuccessor(t *testing.T) {
+func TestTwoPodsARelayedFrameInFlightWhenTheTermEndsIsNotSentAgainByTheSuccessor(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
-	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
-	mpWaitActive(t, a, 30*time.Second)
-	b := mpStartPod(t, binary, uri, "pod-b")
-	mpWaitStandby(t, b, 30*time.Second)
-	serving := mpStartServingPort(t)
+	a, b := mpStartPair(t, binary, uri)
+	serving := mpStartNATSSessions(t, uri)
 	const sessionID = "ses_mp_relay_term_end_once"
-	a.registerPort(t, serving, sessionID)
+	a.registerNATS(t, serving, sessionID)
 	publisher := mpConnectPublisher(t, uri)
 	warm := publisher.mustPublish(t, sessionID)
 	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
@@ -984,16 +995,16 @@ func TestTwoPodsARelayedPushInFlightWhenTheTermEndsIsNotPushedAgainByTheSuccesso
 	select {
 	case <-arrived:
 	case <-time.After(20 * time.Second):
-		t.Fatalf("%s never pushed %s to the session's port", a.instance, m.event)
+		t.Fatalf("%s never relayed %s to the session", a.instance, m.event)
 	}
 
-	heal := a.lanes.cut(mpReceiveConnection(a.instance))
-	t.Cleanup(heal)
-	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
-	if mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`) == "" {
-		t.Fatalf("%s took no receive-lost release, so the row did not end its term that way", a.instance)
-	}
-	release() // the port takes the push the stopped relay made
+	a.Terminate(t)
+	// Inside relaySettleGrace of the term's end, which the stop reaches in milliseconds: the
+	// stopped relay is still listening for this reply and acks the message on it.
+	time.Sleep(200 * time.Millisecond)
+	release()
+	a.WaitExit(t, "SIGTERM")
+	mpWaitActive(t, b, mpHardBound)
 
 	after := publisher.mustPublish(t, sessionID)
 	serving.awaitAll(t, []mpMessage{m, after}, 30*time.Second)
@@ -1002,30 +1013,25 @@ func TestTwoPodsARelayedPushInFlightWhenTheTermEndsIsNotPushedAgainByTheSuccesso
 	serving.requireOrder(t, []mpMessage{warm, m, after})
 }
 
-// A push the active pod's relay still has at the session's port when the stopping relay's settle
-// bound ends reaches the session at most twice, under its own event id, and no other message
-// repeats. The relay's push is held, unanswered, when the pod's receive connection alone is cut;
-// the pod releases the lease and its relays stop, and the port goes on holding the push past the
-// grace the stopping relay settles it for (relaySettleGrace), then takes it (204) well past the
-// deferral the pod taking over holds the released holder's attempt for (leaseFormerSettle).
-// Only the port's answer says whether the session took that push, and it comes after the bound,
-// so no pod can know: the stopping relay marks the attempt in doubt (markPushInDoubt) and the
-// successor pushes the message again, which is the one repeat the root's at-least-once contract
-// allows for a push whose answer had not come back when its pod lost the receive term
-// (cmd/listener/README.md, "State the pods share"). What the row refuses is a second repeat of
-// it, a repeat of any other message, an event id no message carried, and a pod that leaves the
-// cut push unrecorded. At bcdf6369 the settle bound cancelled the push with nothing recorded and
-// the attempt standing (INFRA-557 tester's round 28, the architect's edge (2)).
-func TestTwoPodsARelayedPushHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMostOnceWithItsId(t *testing.T) {
+// A frame the active pod's relay still has unanswered when the stopping relay's settle bound ends
+// reaches the session at most twice, under its own event id, and no other message repeats. The
+// session's reply is held when the pod is stopped; the stopping relay waits relaySettleGrace for
+// it, the session answers only well past that, and the successor restarts the session's consumer
+// at an ack floor below that message and publishes it again. Only the session's reply says
+// whether it took that frame, and it came after the bound, so no pod can know: the stopping pod
+// logs the frame in doubt (relayFrameInDoubtLine) and the successor sends it once more, which is
+// the one repeat the root's at-least-once contract allows for a frame whose reply had not come
+// back when its pod's term ended (cmd/listener/README.md, "State the pods share"). What the row
+// refuses is a second repeat of it, a repeat of any other message, an event id no message
+// carried, and a stopping pod that says nothing about the frame it cut (INFRA-557 tester's
+// round 28, the architect's edge (2)).
+func TestTwoPodsARelayedFrameHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMostOnceWithItsId(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
-	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
-	mpWaitActive(t, a, 30*time.Second)
-	b := mpStartPod(t, binary, uri, "pod-b")
-	mpWaitStandby(t, b, 30*time.Second)
-	serving := mpStartServingPort(t)
+	a, b := mpStartPair(t, binary, uri)
+	serving := mpStartNATSSessions(t, uri)
 	const sessionID = "ses_mp_relay_past_settle_once"
-	a.registerPort(t, serving, sessionID)
+	a.registerNATS(t, serving, sessionID)
 	publisher := mpConnectPublisher(t, uri)
 	warm := publisher.mustPublish(t, sessionID)
 	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
@@ -1036,25 +1042,85 @@ func TestTwoPodsARelayedPushHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMost
 	select {
 	case <-arrived:
 	case <-time.After(20 * time.Second):
-		t.Fatalf("%s never pushed %s to the session's port", a.instance, m.event)
+		t.Fatalf("%s never relayed %s to the session", a.instance, m.event)
 	}
 
-	heal := a.lanes.cut(mpReceiveConnection(a.instance))
-	t.Cleanup(heal)
-	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
-	time.Sleep(relaySettleGrace + 3*time.Second) // past the stopping relay's settle and the successor's deferral
-	release()                                    // the port takes the held push
+	a.Terminate(t)
+	time.Sleep(relaySettleGrace + 2*time.Second) // past the stopping relay's settle bound
+	release()                                    // the session answers the frame nobody waits for
+	a.WaitExit(t, "SIGTERM")
+	mpWaitActive(t, b, mpHardBound)
 
 	after := publisher.mustPublish(t, sessionID)
 	serving.awaitAll(t, []mpMessage{m, after}, 30*time.Second)
 	time.Sleep(mpQuiet)
 	serving.requireOnce(t, []mpMessage{warm, after})
 	if took := serving.counts()[m.event]; took > 2 {
-		t.Fatalf("%s to %s prompted %d times, want once, or twice as the push whose answer the settle bound cut off", m.event, sessionID, took)
+		t.Fatalf("%s to %s reached it %d times, want once, or twice as the frame whose reply the settle bound cut off", m.event, sessionID, took)
 	}
 	serving.requireKnown(t, []mpMessage{warm, m, after})
 	serving.requireOrder(t, []mpMessage{warm, m, after})
-	if mpLineWith(a.Output.String(), `"msg":"`+relayPushInDoubtLine+`"`, m.event) == "" {
-		t.Fatalf("%s logged no in-doubt line naming %s, so the push its settle bound cut was left unrecorded", a.instance, m.event)
+	if mpLineWith(a.Output.String(), `"msg":"`+relayFrameInDoubtLine+`"`, m.event) == "" {
+		t.Fatalf("%s logged no in-doubt line naming %s, so the frame its settle bound cut was left unsaid", a.instance, m.event)
 	}
+}
+
+// The hard take-over of the one delivery path that still runs through the listener: the relay
+// over NATS. The active pod relays a frame to a session that never answers it - its `received`
+// reply is still out - and the pod is SIGKILLed with that frame in flight. Nothing settled it:
+// the killed pod wrote no ack, so the message stands unacked in the session's consumer, and the
+// standby that takes the lease over restarts that consumer at its ack floor and sends it again.
+// The session must have it within the 15 s a hard take-over is bounded at, every other message
+// exactly once, and that one frame at most twice, under its own event id.
+//
+// The bound is the lease's, not the durable's. A session on its own consumer is relayed from
+// the moment a term begins, so nothing of this delivery waits out the successor's settle hold:
+// raising receiveTiming.settleCap by 30 s leaves the row passing (measured: the session had the
+// frame 4.849 s after the kill either way). What the 15 s pays for is reading the dead holder's
+// record unchanged for a full leaseTTL, taking it at the next leaseStandbyPoll, and restarting
+// the session's consumer at its ack floor. Raise leaseTTL by 30 s and the row fails on the
+// 15 s bound, which is what makes the bound the row's subject rather than a side effect of how
+// fast the box is.
+//
+// settleCap keeps its own guard on the durable lane, where a take-over's delivery does wait for
+// the hold: TestASettleHoldEndsAtItsCap (cmd/listener/receive_settle_test.go) pins the
+// production cap at the durable's ack wait and a second, and holds a take-over's first delivery
+// behind a cap of its own. Raise settleCap by 30 s and that row fails.
+func TestTwoPodsSIGKILLWithAFrameUnansweredReachesTheSessionWithin15s(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	serving := mpStartNATSSessions(t, uri)
+	const sessionID = "ses_mp_kill_frame_once"
+	a.registerNATS(t, serving, sessionID)
+	publisher := mpConnectPublisher(t, uri)
+	warm := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
+
+	arrived := serving.hold(sessionID)
+	m := publisher.mustPublish(t, sessionID)
+	select {
+	case <-arrived:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("%s never relayed %s to the session", a.instance, m.event)
+	}
+
+	killed := a.kill(t)
+	select {
+	case <-a.Exited:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s was still running 10 s after SIGKILL", a.instance)
+	}
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+
+	after := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{m, after}, mpHardBound+15*time.Second)
+	serving.requireWithin(t, []mpMessage{m}, mpHardBound, killed)
+	time.Sleep(mpQuiet)
+	serving.requireOnce(t, []mpMessage{warm, after})
+	if took := serving.counts()[m.event]; took > 2 {
+		t.Fatalf("%s to %s reached it %d times, want once, or twice as the frame in flight at the kill", m.event, sessionID, took)
+	}
+	serving.requireKnown(t, []mpMessage{warm, m, after})
+	serving.requireOrder(t, []mpMessage{warm, m, after})
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -34,7 +37,7 @@ func TestAListenerUnderItsMachinesGrantHoldsTheLeaseAndRecordsLastSeen(t *testin
 	seed, public := testnats.User(t)
 	granted := testnats.StartGranted(t, testnats.GrantedUser{Public: public, Grant: testnats.ListenerGrant(t, machineID)})
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), granted.URL(), machineID,
-		"NATS_NKEY_SEED="+seed, "ENVOY_INSTANCE_ID="+instance, "ENVOY_HOST_BRIDGE=127.0.0.1")
+		"NATS_NKEY_SEED="+seed, "ENVOY_INSTANCE_ID="+instance)
 	listener.waitHealthy(t)
 
 	admin, err := bus.Connect([]string{granted.AdminURL}, bus.WithName("grant-test-admin"))
@@ -68,20 +71,45 @@ func TestAListenerUnderItsMachinesGrantHoldsTheLeaseAndRecordsLastSeen(t *testin
 		return record.Holder == instance && entry.Revision() > taken.Revision()
 	})
 
-	serving := startServingPort(t, sessionID, http.StatusNoContent)
-	registerServingSession(t, listener, serving, "127.0.0.1", topic)
+	standIn := startSessionStandIn(t, granted.AdminURL, sessionID, answerDone)
+	registerThroughListener(t, listener, subscribeBody{
+		SessionID: sessionID, Topics: []string{topic}, Title: "granted", Dir: "/test/" + sessionID,
+		Capabilities: []string{"btw"}, SelfSubscribed: true, Host: machineID,
+		Delivery: &subscribeDelivery{Consumer: true, Epoch: "grant-" + id.New()},
+	})
 	publisher := connectPublisher(t, granted.AdminURL)
 	item := newEnvelope("github", topic, "pull request 1 was opened")
 	publish(t, publisher, item)
-	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), item)
-	keys, err := state.Keys()
+	if frame := standIn.collect(t, 1, 15*time.Second)[0]; frame.item.EventID != item.EventID {
+		t.Fatalf("the frame relayed to %s carries event %s, want %s", sessionID, frame.item.EventID, item.EventID)
+	}
+	// Neither the relay of a session's own consumer nor a session that reads its own
+	// subscription costs a ledger write: this listener hands them nothing. The one delivery it
+	// makes itself is the role-lane forward, which records the pair delivered, so that is the
+	// `delivery.` key this grant must allow.
+	const role = "granted-keeper"
+	if status, answer := callListener(t, listener.port, http.MethodPost, "/v1/roles/set",
+		fmt.Sprintf(`{"session_id":%q,"role":%q}`, sessionID, role)); status != http.StatusOK {
+		t.Fatalf("claim %s for %s: status %d %s", role, sessionID, status, answer)
+	}
+	receipts, err := publisher.Conn.Subscribe(contracts.AgentSubject(sessionID), func(message *natsgo.Msg) {
+		if message.Reply != "" {
+			_ = message.Respond(nil)
+		}
+	})
 	if err != nil {
-		t.Fatalf("list the listener state bucket's keys: %v", err)
+		t.Fatalf("subscribe the holder's receipt: %v", err)
 	}
+	t.Cleanup(func() { _ = receipts.Unsubscribe() })
+	if err := publisher.Conn.Flush(); err != nil {
+		t.Fatalf("flush the holder's subscription: %v", err)
+	}
+	publish(t, publisher, newEnvelope("dispatch", contracts.RoleTopicPrefix+role, "a role message for its holder"))
 	ledger := "delivery." + bus.ListenerDurable(machineID) + "."
-	if !hasKeyWithPrefix(keys, ledger) {
-		t.Fatalf("the listener state bucket holds no %s key after a delivery: %q", ledger, keys)
-	}
+	waitFor(t, 15*time.Second, "the role forward to record its delivery in the ledger", func() bool {
+		keys, err := state.Keys()
+		return err == nil && hasKeyWithPrefix(keys, ledger)
+	})
 	if _, err := state.Get("seen." + sessionID); err != nil {
 		t.Fatalf("read %s's last-seen record: %v\n%s", sessionID, err, listener.Output.String())
 	}
@@ -93,6 +121,20 @@ func TestAListenerUnderItsMachinesGrantHoldsTheLeaseAndRecordsLastSeen(t *testin
 	}
 	if log := granted.Log(); strings.Contains(log, "Violation") {
 		t.Fatalf("the server refused the listener what its grant should allow:\n%s", log)
+	}
+}
+
+// registerThroughListener registers body against a started listener process, as a session's
+// plugin does: one POST of /v1/interests/subscribe, which must be answered 200.
+func registerThroughListener(t *testing.T, listener *listenerProcess, body subscribeBody) {
+	t.Helper()
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal %s's registration: %v", body.SessionID, err)
+	}
+	status, answer := callListener(t, listener.port, http.MethodPost, "/v1/interests/subscribe", string(encoded))
+	if status != http.StatusOK {
+		t.Fatalf("register %s: status %d %s", body.SessionID, status, answer)
 	}
 }
 
