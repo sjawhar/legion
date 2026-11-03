@@ -27,6 +27,7 @@ import {
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
+  textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import {
@@ -73,6 +74,7 @@ import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
+import { readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionView } from "./VersionView";
 
@@ -356,6 +358,21 @@ export function ProofDocument({
     () => versionsNewestFirst(artifactQuery.data?.versions ?? artifact.versions),
     [artifactQuery.data?.versions, artifact.versions]
   );
+  // An issue's live spec on its own page marks the blocks its decisions and the person's last
+  // read call out, and records what it shows as read.
+  const specMarks = useSpecMarks({
+    artifact,
+    enabled: page && version === undefined && artifact.primary && owner.kind === "issue",
+    issueKey: owner.kind === "issue" ? owner.key : "",
+    shownVersion: versions[0]?.number,
+  });
+  // The editor takes the marks when it binds, and every set after that, through its handle:
+  // a class Dispatch wrote into the editor's DOM would be read back as an edit.
+  const blockMarksRef = useRef(specMarks.marks);
+  blockMarksRef.current = specMarks.marks;
+  useEffect(() => {
+    editorRef.current?.setBlockMarks(specMarks.marks);
+  }, [specMarks.marks]);
   isClosedRef.current = isClosed;
   const blockSchema: BlockSchema | undefined = runtimeBlockSchema ?? blockSchemaQuery.data;
   userRef.current = user;
@@ -534,6 +551,7 @@ export function ProofDocument({
       installTypedBlocks(handle.view, blockSchema, setAskBlockHosts, (route, onPicture) =>
         watchPicturePath(queryClient, route, onPicture)
       );
+      handle.setBlockMarks(blockMarksRef.current);
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
       let bound = true;
@@ -928,6 +946,11 @@ export function ProofDocument({
           ) : null}
         </nav>
       ) : null}
+      {specMarks.changed === undefined ? null : (
+        <p className={`text-sm ${textSecondaryOnCanvas}`} role="status">
+          {readLineText(specMarks.changed)}
+        </p>
+      )}
       {shownLoadError === undefined ||
       repairError !== undefined ||
       rebuildError !== undefined ? null : (

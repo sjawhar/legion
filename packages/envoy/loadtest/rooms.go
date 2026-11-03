@@ -153,7 +153,7 @@ func readWindow(ctx context.Context, ep endpoints) windowReading {
 
 // getJSON decodes the body of a GET of url (getOK) into v.
 func getJSON(url string, v any) error {
-	body, err := getOK(shortClient, url)
+	body, err := getOK(context.Background(), shortClient, url)
 	if err != nil {
 		return err
 	}

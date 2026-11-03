@@ -26,7 +26,7 @@ step is what makes the next one mean something. If you skip any of them, a clean
 coverage when it is none.
 
 1. **Put the packages that gain goroutines into the race lane.** CI's step
-   (`.github/workflows/pr-and-main.yaml`, "Test the concurrent packages under the race detector")
+   (`.github/workflows/ci.yaml`, the test job's "Test the concurrent packages under the race detector")
    runs only the packages it names. A clean result there says nothing about a package it does not
    name. When a change adds goroutines to a package, add that package to the step in the same
    pull request.

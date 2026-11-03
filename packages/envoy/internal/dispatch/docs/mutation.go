@@ -1992,7 +1992,8 @@ type renderedTree struct {
 
 // writeVersionTx is the only path that changes the durable version protocol:
 // version writes index references and blocks, move open approval asks to the new version, carry a
-// human's approval to the version his answer to a decision block writes (carryApproval), refresh
+// human's approval to the version his answer to a decision block writes or to a version holding
+// the text he approved with its decision blocks as their rows have them (carryApproval), refresh
 // anchors, and retain their author capture until the enclosing transaction commits. A nil write
 // records no version but keeps a transactional tree mutation's anchors in the same path.
 func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID string, rendered renderedTree, actor model.Actor, write *versionWrite) (versionWriteResult, error) {
@@ -2043,8 +2044,9 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 		collectEvent(ctx, event)
 	}
 	// A human's answer to a decision block carries his approval to the version it writes, when
-	// that answer is the whole change since the version he approved. It runs after the move, so
-	// an open request already names this version when the carry answers it in his name.
+	// that answer is the whole change since the version he approved, and a version holding the
+	// approved text again, its blocks as their rows have them, carries that approval. It runs after
+	// the move, so an open request already names this version when the carry answers it in his name.
 	carried, err := s.carryApproval(ctx, tx, artifactID, version, rendered)
 	if err != nil {
 		return versionWriteResult{}, err
