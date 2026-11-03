@@ -86,13 +86,10 @@ test("the injected dispatch-first context holds the blocker and accepted-request
 // each one. Every file of the three staged skills counts, frontmatter included, as `wc -w` counts:
 // whitespace-separated tokens.
 //
-// The budget was 2,000 words until 2026-11-03, when the skills stood at 1,999 and the person asked
-// for the rule that spec writing is a conversation: research, then findings and questions, then
-// each part of the spec after the answers it rests on. Fitting that rule under 2,000 would have
-// meant deleting rules the same person asked for, so the budget moved instead. It moves the same
-// way: a rule a person asked for, the words it costs, and this note saying so - never to make room
-// for text nobody asked for.
-test("the three Dispatch skills total fewer than 2,150 words", () => {
+// The budget does not move: a rule that must go in is paid for by cutting the lines that duplicate
+// another skill or say what the new rule says (2026-11-03, "The conversation", which the three
+// skills made room for at 1,998 words).
+test("the three Dispatch skills total fewer than 2,000 words", () => {
   const words = ["dispatch", "dispatch-first", "dispatch-writing-specs"]
     .flatMap((skill) => files(path.join(staged, skill)))
     .map(
@@ -102,7 +99,7 @@ test("the three Dispatch skills total fewer than 2,150 words", () => {
           .filter((token) => token !== "").length
     )
     .reduce((total, count) => total + count, 0);
-  expect(words).toBeLessThan(2_150);
+  expect(words).toBeLessThan(2_000);
 });
 
 // Agents reach Dispatch through the `dispatch` command, so no skill or daemon prompt may tell one
