@@ -7,8 +7,9 @@ import { baseUrl, e2eAgentToken } from "./api";
 // so a row spawns that entry rather than calling the library behind it.
 const dispatchEntry = fileURLToPath(new URL("../../envoy-client/bin/dispatch.ts", import.meta.url));
 
-/** The session the command acts as: the server records it as each write's actor. */
-const cliSession = "e2e-dispatch-cli";
+/** The session the command acts as: the server records it as each write's actor, and a personal
+ *  token's act names it (`requireScope` in `packages/envoy/internal/dispatch/api/server.go`). */
+export const cliSession = "e2e-dispatch-cli";
 
 export interface CliRun {
   readonly code: number;
@@ -25,8 +26,16 @@ export interface CliRun {
  * command at another Dispatch entirely through its own `DISPATCH_URL` or `ENVOY_CONFIG_FILE`.
  * `HOME` and `DISPATCH_STATE_DIR` are the row's own temporary directory, so the command reads no
  * developer's `envoy.json` and writes its session state nowhere but there.
+ *
+ * `token` is the bearer the command presents: the harness's shared agent token unless a row hands
+ * it one of its own, which is how a row runs the command under a person's own personal token, as
+ * an agent acting for its person runs it.
  */
-export function runDispatch(args: readonly string[], home: string): Promise<CliRun> {
+export function runDispatch(
+  args: readonly string[],
+  home: string,
+  token: string = e2eAgentToken
+): Promise<CliRun> {
   const child = spawn("bun", [dispatchEntry, ...args], {
     cwd: home,
     env: {
@@ -36,7 +45,7 @@ export function runDispatch(args: readonly string[], home: string): Promise<CliR
       DISPATCH_HOST: "omp",
       DISPATCH_SESSION_ID: cliSession,
       DISPATCH_URL: baseUrl,
-      DISPATCH_TOKEN: e2eAgentToken,
+      DISPATCH_TOKEN: token,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
