@@ -847,7 +847,8 @@ func BundleDigest(body []byte) string {
 // newlines, so the header line is one line. The body it builds is the whole of what the sequence
 // carries — the header, the newline and the bundle's own bytes — so that whole is what
 // MaxWorkspaceBundleBodyBytes bounds, and the two parts are never measured apart: each under the
-// bound and the body over it is the shape this refuses.
+// bound and the body over it is the shape this refuses, which TestABundleUnderTheBoundWhoseBodyIsOverItIsRefused
+// is.
 func marshalWorkspaceBundle(b WorkspaceBundle) ([]byte, error) {
 	if b.Head == "" {
 		return nil, fmt.Errorf("%w: a workspace bundle carries no head", ErrMalformedFrame)
@@ -859,12 +860,18 @@ func marshalWorkspaceBundle(b WorkspaceBundle) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Written as a subtraction rather than a sum, so the measurement itself cannot overflow.
-	if len(b.Bundle) > MaxWorkspaceBundleBodyBytes-1-len(head) {
+	// The body's own size is measured once, as one value, and the allocation below takes that
+	// value and no arithmetic of its own: a reader of this function, and the analysis CI runs
+	// over it, sees the number the buffer is made from bounded by the constant on the line
+	// before. The subtraction keeps the measurement itself under the bound, and a size that is
+	// not positive is a sum that wrapped, which no caller can produce and which is refused here
+	// rather than passed to make.
+	size := len(head) + 1 + len(b.Bundle)
+	if size <= 0 || size > MaxWorkspaceBundleBodyBytes {
 		return nil, fmt.Errorf("%w: a workspace bundle of %d bytes and a header of %d are over the %d a launcher_bundle sequence carries",
 			ErrMalformedFrame, len(b.Bundle), len(head), MaxWorkspaceBundleBodyBytes)
 	}
-	body := make([]byte, 0, len(head)+1+len(b.Bundle))
+	body := make([]byte, 0, size)
 	body = append(body, head...)
 	body = append(body, '\n')
 	return append(body, b.Bundle...), nil
