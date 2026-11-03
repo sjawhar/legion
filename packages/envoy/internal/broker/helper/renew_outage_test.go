@@ -31,17 +31,18 @@ import (
 const outageUnit = 10 * time.Millisecond
 
 // outageBroker is a broker that stops serving between gapStart and gapEnd, counted from the
-// renewal that granted the lease. It holds the renewals holds names to the whole client
-// timeout, the cost the lease bound counts, and refuses the rest at once: one outage can do
-// both, refusing while its pods are gone and hanging while one starts, and which renewals it
-// holds is part of the worst case the model searches. Once a broker serves again it answers
-// either a new lease or, if the enrollment's own lease ran out while nothing served,
-// ENROLLMENT_NOT_LIVE — the answer the broker's first sweep leaves behind, since a gap this
-// short counts as a broker serving and is given back to nobody.
+// renewal that granted the lease. Each renewal it refuses takes the delay at that renewal's
+// own place in delays to fail: nothing when the connection is refused, the whole client
+// timeout when the outage black-holes it, and anything between when a proxy gives up on it or
+// a terminating pod resets it. Which delay each renewal meets is part of the worst case the
+// model searches, and both renewers wait from the instant the failure comes back. Once a
+// broker serves again it answers either a new lease or, if the enrollment's own lease ran out
+// while nothing served, ENROLLMENT_NOT_LIVE — the answer the broker's first sweep leaves
+// behind, since a gap this short counts as a broker serving and is given back to nobody.
 type outageBroker struct {
 	start            time.Time
 	gapStart, gapEnd time.Duration
-	holds            []bool
+	delays           []time.Duration
 	timeout          time.Duration
 	lease            time.Duration
 
@@ -65,8 +66,14 @@ func (b *outageBroker) RoundTrip(*http.Request) (*http.Response, error) {
 	b.mu.Unlock()
 	switch {
 	case at >= b.gapStart && at < b.gapEnd:
-		if i < len(b.holds) && b.holds[i] {
-			time.Sleep(b.timeout)
+		var delay time.Duration
+		if i < len(b.delays) {
+			delay = min(max(b.delays[i], 0), b.timeout)
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		if delay >= b.timeout {
 			return nil, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
 		}
 		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
@@ -123,25 +130,21 @@ func TestRenewLoopOutlivesAnOutageOnlyAboveTheLeaseBound(t *testing.T) {
 			if margin := want.Lease - want.Renewed; margin < minMargin && -margin < minMargin {
 				t.Fatalf("a lease of %v renews %v from its end, closer to the boundary than the %v this row needs to decide in real time", c.lease, margin, minMargin)
 			}
-			holds := make([]bool, len(want.Attempts))
-			for i, a := range want.Attempts {
-				holds[i] = a.Held
+			var delays []time.Duration
+			for _, a := range want.Attempts {
+				if a.Refused() {
+					delays = append(delays, a.Delay())
+				}
 			}
-			// The model's worst outage ends one nanosecond after the renewal it refuses last,
-			// which no real-time rig can reproduce: the loop's own renewal lands some
-			// milliseconds late and finds the broker already back. The rig moves the whole
-			// gap, its length unchanged, shift later, so that renewal is inside it by a margin
-			// no loaded machine crosses while the renewal after it is still well outside. The
-			// two guards below are that margin, measured against this phase rather than
-			// assumed: the gap still begins at or before the first renewal, and it still ends
-			// far short of the renewal that gets through.
-			const shift = 10 * outageUnit
-			lastRefused := want.Attempts[len(want.Attempts)-2].At
-			if want.GapStart+shift > want.Attempts[0].At {
-				t.Fatalf("a gap moved %v later would begin at %v, after the first renewal at %v", shift, want.GapStart+shift, want.Attempts[0].At)
-			}
-			if slack := want.Renewed - lastRefused; shift > slack/2 {
-				t.Fatalf("a gap moved %v later leaves %v between the renewal it refuses last (%v) and the one that gets through (%v); this row needs the shift well inside that", shift, slack, lastRefused, want.Renewed)
+			// The model's worst outage ends on the very instant the renewal it refuses last
+			// goes out, which no real-time rig can reproduce: the loop's own renewal lands
+			// some milliseconds late and finds the broker already back. The rig holds the gap
+			// open margin longer, so that renewal is inside it by more than any loaded machine
+			// adds, while the renewal after it is still well outside. The guard below measures
+			// that against this phase rather than assuming it.
+			const margin = 10 * outageUnit
+			if slack := want.Renewed - want.GapEnd; slack < 4*margin {
+				t.Fatalf("a gap held open %v longer leaves %v before the renewal that gets through (%v); this row needs the margin well inside that", margin, slack, want.Renewed)
 			}
 			sess, err := newSession(os.Getpid(), 0, "runtime-1", nil)
 			if err != nil {
@@ -149,7 +152,7 @@ func TestRenewLoopOutlivesAnOutageOnlyAboveTheLeaseBound(t *testing.T) {
 			}
 			sess.setEnrolled("enrollment-1")
 			start := time.Now()
-			broker := &outageBroker{start: start, gapStart: want.GapStart + shift, gapEnd: want.GapEnd + shift, holds: holds, timeout: model.ClientTimeout, lease: c.lease}
+			broker := &outageBroker{start: start, gapStart: want.GapStart, gapEnd: want.GapEnd + margin, delays: delays, timeout: model.ClientTimeout, lease: c.lease}
 			srv := &Server{
 				Broker:   &Broker{URL: "http://broker.invalid", HTTP: &http.Client{Transport: broker}},
 				Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),

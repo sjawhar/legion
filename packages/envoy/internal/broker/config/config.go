@@ -241,9 +241,10 @@ type Config struct {
 	// serving is not counted against it: a lease that ran out then stays live until a broker serves
 	// again, which gives it that time back. A gap of up to three BROKER_SWEEP_SECONDS still counts
 	// as a broker serving and is not given back, so a lease must outlive such a gap and the retries
-	// its renewer then takes to renew, counting a renewal the outage holds to its client timeout:
-	// 91 s at a sweep of 1 or 5 seconds, 97 s at 10, 203 s at 30 and 351 s at 60. The broker
-	// refuses a shorter pair at boot and names the shortest lease that survives that sweep.
+	// its renewer then takes to renew, counting each renewal the outage refuses as failing at
+	// whatever instant costs the renewer most, up to the 30-second client timeout: 91 s at a
+	// sweep of 1 or 5 seconds, 105 s at 10, 225 s at 30 and 360 s at 60. The broker refuses a
+	// shorter pair at boot and names the shortest lease that survives that sweep.
 	LeaseSeconds int
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.

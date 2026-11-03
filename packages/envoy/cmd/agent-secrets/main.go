@@ -533,12 +533,12 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-// nextBackoff advances the backoff every poll loop in this package uses. The step itself is
-// leasetime.NextBackoff, because the broker's lease bound walks this renewer's waits by it:
-// config.Load refuses a lease that cannot outlive an outage and this schedule, so the two read
-// one definition rather than two that can drift.
+// nextBackoff advances the backoff the poll loops of this package keep: two seconds, doubling
+// to a ten-second cap. The renewer's own step is leasetime.NextBackoff, which the broker's
+// lease bound walks it by; these polls are nobody's lease, and a change made to move that
+// floor is not a change to how often `agent-secrets request --wait` asks.
 func nextBackoff(cur time.Duration) time.Duration {
-	return leasetime.NextBackoff(cur)
+	return min(2*cur, 10*time.Second)
 }
 
 // ---------------------------------------------------------------------------
@@ -709,7 +709,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				return 0
 			case <-after(backoff):
 			}
-			backoff = nextBackoff(backoff)
+			backoff = leasetime.NextBackoff(backoff)
 			continue
 		}
 		backoff = leasetime.RenewBackoffInitial
