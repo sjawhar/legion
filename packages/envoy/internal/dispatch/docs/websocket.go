@@ -84,9 +84,10 @@ type servicePersistenceAdapter struct {
 // only way a load fails with nothing of this service still to run on its goroutine is a panic out
 // of this read. Every way the read ends short is therefore failed here, on the load's own
 // goroutine and before ygo closes the room's barrier: the store's refusal, a stored history whose
-// header declares more items than one update may hold or whose bytes this load's own decode
-// refuses (loadDecoded, loadableHistory), and a panic out of any of it, recovered here as the
-// hook recovers its own (bootstrapLoadedState, foldDocument). ygo
+// header declares more items than one update may hold (loadDecoded, loadableHistory), and a panic
+// out of any of it, recovered here as the hook recovers its own (bootstrapLoadedState,
+// foldDocument). A history ygo refuses the bytes of is not one of them: the room's own decode
+// fails the room for it (onLoadDocument). ygo
 // recovers such a panic too and hands every waiter the load's error (server.go:1904-1923), but it
 // does so with the record this load began still standing under the room's name and the room
 // healthy, which left the failure to whichever caller's Apply met it - a caller that cannot tell
@@ -1074,11 +1075,16 @@ func (s *Service) settleLastPeer(_ context.Context, room string) {
 //
 // A history too large for one update is refused from its header, before the grant is covered and
 // before anything is decoded (loadableHistory): no room could take it, and the refusal names the
-// item count the header declares rather than whatever a decode of those bytes would say.
+// item count the header declares rather than whatever a decode of those bytes would say. A
+// history ygo refuses the bytes of is not refused here: the state goes on the record with no copy
+// decoded from it, and the room's own decode of the same bytes fails the room (onLoadDocument,
+// bootstrapLoadedState), so a history that does not decode fails where the room decodes it and
+// not one step earlier. The replica of such a room is never made, so its missing copy costs
+// nothing.
 func (a *servicePersistenceAdapter) loadDecoded(room string, grant *heapGrant) (persistence.LoadResult, decodedState, error) {
 	history, err := loadDecodedHistory(grant.carriedBy(context.Background()), a.store, room, 1, a.service.maxPendingItems, loadableHistory)
 	if err != nil {
 		return persistence.LoadResult{}, decodedState{}, err
 	}
-	return history.loaded, history.decoded, history.refused
+	return history.loaded, history.decoded, nil
 }
