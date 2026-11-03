@@ -102,16 +102,24 @@ func TestOnChangeReportsWritesDeletesAndAnotherListenersWrites(t *testing.T) {
 	}
 }
 
+// A lapse is reported to a callback that was already listening when it happened. The row is
+// seeded with a deadline the registry's own expiry timer cannot reach while the test runs -- the
+// timer is armed on real time, for half a minute away -- and the registry's clock is moved past
+// that deadline afterwards, so PruneLapsed is what finds the lapse and nothing can have swept it
+// before OnChange was registered.
 func TestOnChangeReportsALapseOncePruneLapsedFindsIt(t *testing.T) {
-	now := time.Now()
+	moved := &clock{}
 	r := newTestRegistry(5 * time.Minute)
+	r.now = moved.Now
+	now := moved.Now()
 	// ses_live's heartbeat is now, since a row's state is read from its own UpdatedAt and List
 	// answers the live rows alone.
 	hold(t, r, map[string]cachedSession{
-		"ses_live":   {entry: SessionEntry{MachineID: "m1", Delivery: DeliveryConsumer, UpdatedAt: now.UnixMilli()}, expiresAt: now.Add(time.Minute)},
-		"ses_lapsed": {entry: SessionEntry{MachineID: "m1", Delivery: DeliveryConsumer, UpdatedAt: now.Add(-6 * time.Minute).UnixMilli()}, expiresAt: now.Add(-time.Second)},
+		"ses_live":   {entry: SessionEntry{MachineID: "m1", Delivery: DeliveryConsumer, UpdatedAt: now.UnixMilli()}, expiresAt: now.Add(10 * time.Minute)},
+		"ses_lapsed": {entry: SessionEntry{MachineID: "m1", Delivery: DeliveryConsumer, UpdatedAt: now.Add(-6 * time.Minute).UnixMilli()}, expiresAt: now.Add(30 * time.Second)},
 	})
 	changes, _ := watchSessionChanges(t, r)
+	moved.advance(time.Minute)
 
 	r.PruneLapsed()
 
