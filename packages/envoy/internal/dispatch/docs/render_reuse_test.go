@@ -732,6 +732,43 @@ func TestRenderReuseAWarmAskKeepsItsAuthor(t *testing.T) {
 	sh.check(t)
 }
 
+// A write whose rendering the room's observer reuses is the room's measurement too: the reuse
+// takes the operation's rendering as the replica's and publishes its size, as keep publishes a
+// changed rendering's (renderedReplica.changedBy, publishSize), so the bytes the peer update hook
+// weighs the room's next browser update against (roomWeighing.size, which the hook reads through
+// roomWeighingOf) are the rendering the write left rather than the one before it. The write here
+// adds an ask block, which is the one reuse that changes the markdown (E3): the reuse of a
+// rendering equal to the replica's changes nothing, and leaves the measurement where it stands.
+func TestRenderReuseAWritesReusedRenderingIsTheRoomsMeasurement(t *testing.T) {
+	service, artifactID, sh := newWarmRenderReuseRoom(t)
+	weighing := service.roomWeighingOf(service.srv.GetDoc(artifactID))
+	if weighing == nil {
+		t.Fatal("the warm room's document is not listed, so the hook reads no weighing of it")
+	}
+	before, _, measured := weighing.size()
+	if !measured {
+		t.Fatal("the warm room published no measurement before the write")
+	}
+	m := sh.measure()
+	write := sh.write(t, applyOps(service, artifactID, reuseAgent, model.EditOp{
+		Op: "insert", After: "end", Markdown: ":::ask{#measured-ask urgency=\"high\" multiple=\"false\"}\nWhich store backs the cache?\n:::",
+	}))
+	sh.check(t)
+	m.expect(t, renderPaths{beforeFromReplica: 1, observerReused: 1}, 0)
+	if stored := sh.versions(t, write); len(stored) != 1 || !stored[0] {
+		t.Errorf("content_changed = %v, want [true]", stored)
+	}
+	rendering := renderedLive(t, service, artifactID)
+	if int64(len(rendering)) == before {
+		t.Fatalf("the write left the room rendering %d bytes, the measurement it already had: this case cannot tell the write's measurement from the one before it", before)
+	}
+	published, _, measured := weighing.size()
+	if !measured || published != int64(len(rendering)) {
+		t.Fatalf("the room measures %d bytes (measured %t) after the write, want its rendering's %d; it measured %d before the write",
+			published, measured, len(rendering), before)
+	}
+}
+
 // E4, E5. A browser edit committed into the room once the write's fork has read it moves the
 // replica past that read: the write's update is measured by the observer, and so is the browser's.
 // The browser's adds or drops a top-level block, which changes the document's fragment, so it is

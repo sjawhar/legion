@@ -571,8 +571,12 @@ func (r *renderedReplica) changedBy(room string, published *liveWriteOrigin, ren
 				}
 				if askBlocks := rendering.askBlocks; askBlocks != nil {
 					// The operation's rendering is its own value, which the replica takes
-					// whole: it holds nothing of the ask block ids beside it.
+					// whole: it holds nothing of the ask block ids beside it. It changed the
+					// markdown, so it is published as the room's measurement, as keep
+					// publishes a changed rendering: otherwise the hook would weigh the
+					// room's next peer updates against the rendering before this write.
 					r.rendering = rendered
+					r.publishSize(&r.rendering.markdown)
 					r.paths.observerReused.Add(1)
 					return true, func() map[string]struct{} { return askBlocks }
 				}
