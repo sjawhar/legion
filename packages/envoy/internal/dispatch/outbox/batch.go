@@ -516,8 +516,7 @@ func planChains(events []*batchEvent) []*chain {
 //
 // The keeps this batch makes share one record of what their own handovers delivered to a role's
 // holder (keptHandovers, handOverKept), made here because it is this batch's: a handover writes
-// no cursor, so without it the batch's second keep of one role would find the first in front of
-// itself on the lane and decline.
+// no cursor, and keptHandovers' doc holds what the record is for.
 func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*chain, settled func(owner string)) {
 	handed := newKeptHandovers()
 	stopped := false

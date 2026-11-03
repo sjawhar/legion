@@ -623,8 +623,8 @@ func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
 	}()
 	<-started
 	// The second listener's handover reads the claim the first is holding and leaves the lane to
-	// it, which it would wait roleKeepClaimWindow out to walk again; this context ends it there,
-	// since what the test is about has happened by then.
+	// it, which it would wait bus.KeptRoleClaimWindow out to walk again; this context ends it
+	// there, since what the test is about has happened by then.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := drainKeptRole(ctx, second, role, time.Now); err != nil {

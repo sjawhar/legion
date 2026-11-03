@@ -101,7 +101,7 @@ func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testi
 // The drain's own context is ended inside its forward, after the stream has stored the copy: the
 // confirm it would write next reaches nothing, which is the same point in the drain as a listener
 // killed there and is deterministic. Nothing released that claim, so the role's next drain takes
-// it over once it is past roleKeepClaimWindow.
+// it over once it is past bus.KeptRoleClaimWindow.
 func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCopy(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const (
@@ -152,9 +152,9 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 	// The listener that drains the role next, with guards and caches of its own, which is what a
 	// second process has: the first listener recorded the copy it forwarded in its dedupe cache
 	// (finishRoleForward), and inside one process that record is what stops a copy already handed
-	// over from being handed over again. It drains on a clock past roleKeepClaimWindow - which is
-	// roleKeepDrainWindow, the whole of a drain's life - so the claim the drain above left behind
-	// is one no drain can still be forwarding.
+	// over from being handed over again. It drains on a clock past bus.KeptRoleClaimWindow -
+	// which is roleKeepDrainWindow, the whole of a drain's life - so the claim the drain above
+	// left behind is one no drain can still be forwarding.
 	past := func() time.Time { return time.Now().Add(roleKeepDrainWindow + time.Minute) }
 	next := harness.config
 	next.roleKeepDrains = newRoleKeepGuards()
@@ -184,10 +184,10 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 }
 
 // A claim no drain released - what a listener killed between its claim and its forward leaves -
-// holds the role's lane until it is past roleKeepClaimWindow, and after that the copy it claimed
-// is forwarded. Those are the two halves of what the claim is for: while the drain that wrote it
-// can still be forwarding that copy, no other drain forwards it a second time, and once it cannot
-// be, the copy reaches the role's holder rather than nobody.
+// holds the role's lane until it is past bus.KeptRoleClaimWindow, and after that the copy it
+// claimed is forwarded. Those are the two halves of what the claim is for: while the drain that
+// wrote it can still be forwarding that copy, no other drain forwards it a second time, and once
+// it cannot be, the copy reaches the role's holder rather than nobody.
 func TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const (
@@ -221,8 +221,9 @@ func TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed(t *testing.T) 
 		handed = append(handed, forwarded.DedupeKey)
 		return nil
 	})
-	// The handover leaves the lane to the drain holding the claim and waits roleKeepClaimWindow
-	// to walk it again; this context ends it there, since the lane it left alone is the point.
+	// The handover leaves the lane to the drain holding the claim and waits
+	// bus.KeptRoleClaimWindow to walk it again; this context ends it there, since the lane it
+	// left alone is the point.
 	heldCtx, cancelHeld := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelHeld()
 	if err := drainKeptRole(heldCtx, cfg, role, time.Now); err != nil {
@@ -232,8 +233,8 @@ func TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed(t *testing.T) 
 		t.Fatalf("a drain forwarded %v while another drain's claim of that copy could still be forwarding it; a kept copy reaches exactly one holder", handed)
 	}
 
-	// Past roleKeepClaimWindow - which is roleKeepDrainWindow, the whole of a drain's life - the
-	// claim belongs to a drain that has ended, and the copy is the next drain's to forward.
+	// Past bus.KeptRoleClaimWindow - which is roleKeepDrainWindow, the whole of a drain's life -
+	// the claim belongs to a drain that has ended, and the copy is the next drain's to forward.
 	past := func() time.Time { return time.Now().Add(roleKeepDrainWindow + time.Minute) }
 	if err := drainKeptRole(ctx, cfg, role, past); err != nil {
 		t.Fatalf("the drain that took the abandoned claim over: %v", err)

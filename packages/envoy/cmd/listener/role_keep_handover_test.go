@@ -334,10 +334,10 @@ func TestAHandoverRetriesMoreFailedWalksThanItsIdleWalksAllow(t *testing.T) {
 
 // Each walk of a handover forwards to the holder the pass that started it resolved, and that
 // resolution is made after the pause before the walk rather than before it. A handover that
-// resolved the holder and then waited forwarded to a session read up to roleKeepClaimWindow ago,
-// which the walk's own check cannot catch: a role nobody claims reads as no evidence that this
-// walk's session lost it (roleKeepDrainHolds), so the copies went to a session that had released
-// the role and the cursor moved past them.
+// resolved the holder and then waited forwarded to a session read up to bus.KeptRoleClaimWindow
+// ago, which the walk's own check cannot catch: a role nobody claims reads as no evidence that
+// this walk's session lost it (roleKeepDrainHolds), so the copies went to a session that had
+// released the role and the cursor moved past them.
 func TestAHandoverResolvesTheHolderOfAWalkAfterThePauseBeforeIt(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const (

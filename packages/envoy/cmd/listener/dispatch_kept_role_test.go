@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -207,6 +208,33 @@ func answeredForwards(t *testing.T, harness listenerDeliveryHarness, sessionID s
 	return taken
 }
 
+// keptRoleCopies is every copy the stream holds on role's kept lane, in the order a drain of
+// that lane walks them: from the lane's first sequence on, one NextStoredMessage per copy, which
+// is the read the walk itself makes (walkKeptRole). A lane's order is the order its copies reach
+// the role's next holder in, so a test about what the two writers of a lane leave on it reads
+// the whole of it rather than its last copy (readKeptRoleMessage).
+func keptRoleCopies(t *testing.T, client *bus.Client, role string) []contracts.Envelope {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var copies []contracts.Envelope
+	for seq := uint64(1); ; {
+		stored, err := client.NextStoredMessage(ctx, bus.KeptRoleSubject(role), seq)
+		if errors.Is(err, natsgo.ErrMsgNotFound) {
+			return copies
+		}
+		if err != nil {
+			t.Fatalf("read role %s's kept lane after %d: %v", role, seq, err)
+		}
+		var item contracts.Envelope
+		if err := json.Unmarshal(stored.Data, &item); err != nil {
+			t.Fatalf("decode role %s's kept copy at %d: %v", role, stored.Sequence, err)
+		}
+		copies = append(copies, item)
+		seq = stored.Sequence + 1
+	}
+}
+
 // A copy Dispatch's outbox keeps on a lane the listener's drain has already walked is handed over
 // past the cursor that drain wrote. The two writers of a role's kept lane read one cursor body
 // (bus.KeptRoleCursor, bus.Client.ReadKeptRoleCursor), and this is where the agreement is
@@ -296,8 +324,17 @@ func TestTheOutboxHandsACopyOverPastTheCursorTheListenersDrainWrote(t *testing.T
 		t.Fatalf("role %s's drain cursor is %+v after the handover, want the %+v the drain left: the cursor is the listener's to write",
 			role, after, drained)
 	}
-	if kept := waitForKeptRoleMessage(t, harness.client, role, secondKey); kept.DedupeKey != firstKept.DedupeKey && kept.EventID != secondKey {
-		t.Fatalf("role %s's kept lane holds %+v at its head, want the copy the outbox kept for %s", role, kept, secondKey)
+	// The lane itself: the copy the drain walked, and behind it the one the handover forwarded,
+	// each the envelope as its sender sent it and neither carrying the time of its keep, which
+	// the handover stamps on the forward alone. The order is what a session claiming the role
+	// after this one would be handed them in.
+	waitForKeptRoleMessage(t, harness.client, role, secondKey)
+	onTheLane := keptRoleCopies(t, harness.client, role)
+	if len(onTheLane) != 2 ||
+		onTheLane[0].EventID != firstKept.EventID || onTheLane[0].DedupeKey != firstKept.DedupeKey || onTheLane[0].KeptAt != nil ||
+		onTheLane[1].EventID != secondKey || onTheLane[1].DedupeKey != secondKey || onTheLane[1].KeptAt != nil {
+		t.Fatalf("role %s's kept lane holds %+v, want the copy the drain walked (%s) and then the copy the outbox kept for %s, each as its sender sent it with no kept_at of its own",
+			role, onTheLane, firstKept.EventID, secondKey)
 	}
 	// Only the first copy went through the listener's drain: nothing walked the lane for the
 	// second, so the handover is the one path it took.

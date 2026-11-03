@@ -64,19 +64,6 @@ type Publisher interface {
 	ConnectionChanged() <-chan struct{}
 }
 
-// KeptLaneReader reads a role's kept lane and its drain cursor: the one capability beyond
-// publishing that the handover behind a keep needs (handOverKept, keptCopyLeadsTheLane), and the
-// pair of reads the listener's own pass over a lane makes (cmd/listener/role_keep.go,
-// readKeptLaneHead). bus.Client answers both over the stored-message API the outbox's own grant
-// covers (infra/core/permissions.go, DispatchPermissions), and is what cmd/dispatch passes.
-type KeptLaneReader interface {
-	// NextStoredMessage is the first message the stream holds at or after seq on subject.
-	NextStoredMessage(ctx context.Context, subject string, seq uint64) (bus.StoredMessage, error)
-	// ReadKeptRoleCursor is role's drain cursor as the stream holds it, the zero cursor for a
-	// lane no walk has written one for (bus.Client.ReadKeptRoleCursor).
-	ReadKeptRoleCursor(ctx context.Context, role string) (bus.StoredKeptRoleCursor, error)
-}
-
 // Deps are the durable state and delivery dependencies for the outbox.
 type Deps struct {
 	// Store is what the outbox reads and records events through, and its pool is the one the

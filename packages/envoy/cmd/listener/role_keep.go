@@ -62,19 +62,16 @@ const roleKeepPublishWindow = 2 * time.Second
 // (handOverKeptRole, readKeptLaneHead), the one read of that lane a pass makes, which it hands
 // to the walk it starts (walkKeptRole).
 //
-// It is roleKeepClaimWindow, the window a walk's claim holds a lane for, because a walk's life
-// and its claim's are the same span seen from two sides: a walk must not outlive its own claim,
-// and a claim must not outlive the walk that wrote it. Being one duration, it is written once, in
-// the package both writers of a kept lane read it from (bus.KeptRoleClaimWindow).
-const roleKeepDrainWindow = roleKeepClaimWindow
-
-// roleKeepClaimWindow is how long one walk's claim of a kept copy holds that role's lane against
-// the walks of the other listeners of the deployment, and against the handover Dispatch's outbox
-// makes behind a keep of its own: both judge a claim by the one rule
-// (bus.KeptRoleCursor.ClaimOutstanding). It is this package's name for bus.KeptRoleClaimWindow,
-// whose doc says what the window buys, what it assumes of the two clocks it compares, and why it
-// is the whole of a walk's life (roleKeepDrainWindow).
-const roleKeepClaimWindow = bus.KeptRoleClaimWindow
+// It is bus.KeptRoleClaimWindow, the window a walk's claim holds a lane for against the walks of
+// the other listeners of the deployment and against the handover Dispatch's outbox makes behind
+// a keep of its own, because a walk's life and its claim's hold are the same span seen from two
+// sides: a walk must not outlive its own claim, or a second walk would take the copy it claimed
+// over while it is still forwarding it, and a claim must not outlive the walk that wrote it, or
+// a lane would stay held longer than the work behind the claim. Being one duration, it is
+// written once, in the package both writers of a kept lane read it from, whose doc says what the
+// window buys and what it assumes of the two clocks it compares (bus.KeptRoleClaimWindow, whose
+// rule both judge a claim by is bus.KeptRoleCursor.ClaimOutstanding).
+const roleKeepDrainWindow = bus.KeptRoleClaimWindow
 
 // roleKeepDrainRetryPause is how long a handover waits before its next walk when the one before it
 // failed: a read, a cursor write or a forward that did not answer. It is short because the copies
@@ -170,7 +167,8 @@ func (c *roleKeepLaneCursor) write(ctx context.Context, cursor bus.KeptRoleCurso
 // again at once: it writes the cursor the claim replaced, kept where the lane was finished and
 // nothing claimed. It is the end of a walk that claimed a copy it will not forward after all, and
 // answers nobody: a release the cursor refused or failed leaves a claim the next walk takes over
-// once roleKeepClaimWindow has passed, so it is logged at debug and changes nothing the walk says.
+// once bus.KeptRoleClaimWindow has passed, so it is logged at debug and changes nothing the walk
+// says.
 func (c *roleKeepLaneCursor) release(ctx context.Context, kept uint64) {
 	if err := c.write(ctx, bus.KeptRoleCursor{Kept: kept}); err != nil {
 		c.cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain could not release its claim",
@@ -377,7 +375,7 @@ const (
 	// roleKeepScanMax copies read), with copies behind them.
 	roleKeepWorkLeft
 	// roleKeepLaneBusy: another listener's walk has the lane - its claim of a copy is younger
-	// than roleKeepClaimWindow, or it took the cursor from under this one.
+	// than bus.KeptRoleClaimWindow, or it took the cursor from under this one.
 	roleKeepLaneBusy
 	// roleKeepHolderMoved: the role's holder is no longer the session this walk forwards to.
 	roleKeepHolderMoved
@@ -576,7 +574,7 @@ func handOverKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, ro
 			waitOut()
 			continue
 		case roleKeepLaneBusy:
-			pause = roleKeepClaimWindow
+			pause = bus.KeptRoleClaimWindow
 		case roleKeepWorkLeft, roleKeepHolderMoved:
 			pause = 0
 		}
@@ -659,7 +657,7 @@ func readKeptLaneHead(ctx context.Context, client *bus.Client, role string) (kep
 // It bounds itself at roleKeepDrainWindow, taken when the walk starts rather than when the
 // handover around it was: the handover holds the role's guard, so no part of a walk's window is
 // spent waiting for the walks of another handover of the same role, which would leave a claim of
-// a copy behind for roleKeepClaimWindow by failing mid-walk.
+// a copy behind for bus.KeptRoleClaimWindow by failing mid-walk.
 //
 // Every step the walk takes with a copy it writes the role's cursor for, under the
 // compare-and-swap of the cursor's own last sequence (roleKeepLaneCursor.write), and that write is
@@ -675,16 +673,16 @@ func readKeptLaneHead(ctx context.Context, client *bus.Client, role string) (kep
 // A copy that will be forwarded takes three: the cursor is written to {kept: unchanged, claiming:
 // its sequence}, the copy is forwarded, and the cursor is written to {kept: its sequence,
 // claiming: 0}. What the claim buys is that a copy still reaches exactly one holder
-// (roleKeepClaimWindow), and a walk whose own claim the cursor refused stops where it is. What the
-// unmoved kept buys is that no copy is lost whatever ends the walk - a process killed, a forward
-// that failed, a context that ran out - because the walk starts at kept + 1, so a copy claimed
-// and never confirmed is simply the next copy a walk reads: the next one of all, where the walk
-// released its claim on its way out (roleKeepLaneCursor.release), and the next one past
-// roleKeepClaimWindow where nothing was left to release it. What that costs is one more copy when
-// a walk ends between its forward and its confirm, which the walk reports (roleKeepDrainResult):
-// the repeat carries the same stable id (bus.ForwardMsgID of the forward's dedupe key and the
-// agent subject), so for the same holder the stream's duplicate window keeps one stored copy and
-// the holder's own dedupe_key drops the second.
+// (bus.KeptRoleClaimWindow), and a walk whose own claim the cursor refused stops where it is.
+// What the unmoved kept buys is that no copy is lost whatever ends the walk - a process killed,
+// a forward that failed, a context that ran out - because the walk starts at kept + 1, so a copy
+// claimed and never confirmed is simply the next copy a walk reads: the next one of all, where
+// the walk released its claim on its way out (roleKeepLaneCursor.release), and the next one past
+// bus.KeptRoleClaimWindow where nothing was left to release it. What that costs is one more copy
+// when a walk ends between its forward and its confirm, which the walk reports
+// (roleKeepDrainResult): the repeat carries the same stable id (bus.ForwardMsgID of the
+// forward's dedupe key and the agent subject), so for the same holder the stream's duplicate
+// window keeps one stored copy and the holder's own dedupe_key drops the second.
 //
 // Before each copy it reads the role's holder from the registry's watched copy of the role
 // bucket, which costs no round trip, and stops when the role has moved to another session
@@ -787,7 +785,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 			// claim: the cursor goes back to what it was before the claim, and the role's next
 			// walk reads this copy again at once rather than waiting the claim out. A release
 			// that cannot be written leaves the claim, which the next walk takes over once it
-			// is older than roleKeepClaimWindow; either way the copy is not lost.
+			// is older than bus.KeptRoleClaimWindow; either way the copy is not lost.
 			cfg.attemptCache.Clear(item.DedupeKey, holder)
 			lane.release(ctx, kept)
 			result.end = roleKeepDrainFailed

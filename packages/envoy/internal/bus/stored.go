@@ -66,17 +66,17 @@ func (c *Client) LastStoredMessage(ctx context.Context, subject string) (StoredM
 // KeptRoleClaimWindow is how long one walk's claim of a kept copy holds that role's kept lane
 // against every other writer of the lane (KeptRoleCursor.Claiming, KeptRoleCursor.ClaimOutstanding):
 // the walks of the other listeners of the deployment, and the handover Dispatch's outbox makes
-// behind a keep of its own (internal/dispatch/outbox/role.go, keptCopyLeadsTheLane). A claim
-// younger than it may still belong to a walk that is forwarding that copy right now, which
-// nothing else must forward a second time, and a claim older than it belongs to a walk whose
-// context has ended, so the copy it claimed is free for the next walk to forward.
+// behind a keep of its own. A claim younger than it may still belong to a walk that is
+// forwarding that copy right now, which nothing else must forward a second time, and a claim
+// older than it belongs to a walk whose context has ended, so the copy it claimed is free for
+// the next walk to forward.
 //
 // It lives here, in the one package both writers of a kept lane import, because two durations
 // meant to be equal are how two writers of a lane drift apart. The listener bounds one walk of a
-// lane by it too (cmd/listener/role_keep.go, roleKeepDrainWindow): a walk must not outlive its
-// own claim, or a second walk would take a copy over while this one is still forwarding it, and a
-// claim must not outlive the walk that wrote it, or a lane would stay held longer than the work
-// behind the claim.
+// lane by it too (cmd/listener/role_keep.go): a walk must not outlive its own claim, or a second
+// walk would take a copy over while this one is still forwarding it, and a claim must not
+// outlive the walk that wrote it, or a lane would stay held longer than the work behind the
+// claim.
 //
 // The age is one process's clock against the time the stream stored the cursor, which is the
 // server's: this window assumes the two are within a minute of each other, which a deployment
@@ -96,11 +96,12 @@ const KeptRoleClaimWindow = 60 * time.Second
 // copy again. A claim is also the lane's lock while it is outstanding (ClaimOutstanding).
 //
 // The listener's drain is its only writer, which writes it with Client.PublishCursorAt as this
-// small body rather than an envelope (cmd/listener/role_keep.go, roleKeepLaneCursor). It lives
-// here because Dispatch's outbox reads it as well, to tell whether the copy it has just kept is
-// the one that lane's drain would hand over next (internal/dispatch/outbox/role.go,
-// keptCopyLeadsTheLane): a body each package spelled out for itself would decode a drifted tag as
-// zero, which reads as a lane drained to its start and leads every handover astray.
+// small body rather than an envelope (cmd/listener/role_keep.go). It lives here because
+// Dispatch's outbox reads it as well, to tell whether the copy it has just kept is the one that
+// lane's drain would hand over next (internal/dispatch/outbox): a body each package spelled out
+// for itself would decode a drifted tag as zero, which reads as a lane drained to its start and
+// leads every handover astray. A writer of this body writes both numbers at once, since a reader
+// of either takes the pair as one answer.
 type KeptRoleCursor struct {
 	Kept     uint64 `json:"kept"`
 	Claiming uint64 `json:"claiming"`
@@ -111,8 +112,9 @@ type KeptRoleCursor struct {
 // the time the stream stored the cursor, which is how old the claim it carries is.
 //
 // now is the reader's clock rather than a time already read, and it is called only while a claim
-// is named at all: the listener's walk reads its clock once per copy it judges and once more for
-// the claim it found, which a lane nothing claims must not be charged for (walkKeptRole).
+// is named at all, so a lane nothing claims costs no read of the clock: a caller that judges
+// many copies against one cursor reads its clock once per copy it judges and once more for the
+// claim it found.
 func (c KeptRoleCursor) ClaimOutstanding(written time.Time, now func() time.Time) bool {
 	return c.Claiming != 0 && now().Sub(written) < KeptRoleClaimWindow
 }
@@ -131,11 +133,12 @@ type StoredKeptRoleCursor struct {
 }
 
 // ReadKeptRoleCursor reads role's drain cursor: the one read of it both writers of that role's
-// kept lane make - the listener's pass over the lane (cmd/listener/role_keep.go,
-// readKeptLaneHead) and the handover behind Dispatch's outbox's own keep
-// (internal/dispatch/outbox/role.go, keptCopyLeadsTheLane) - so that the two decode one body one
-// way. A lane no walk has written a cursor for is no error but the zero StoredKeptRoleCursor its
-// fields describe: every copy on such a lane is past its cursor.
+// kept lane make - the listener's own pass over the lane (cmd/listener/role_keep.go) and the
+// handover behind Dispatch's outbox's own keep (internal/dispatch/outbox) - so that the two
+// decode one body one way. A lane no walk has written a cursor for is no error but the zero
+// StoredKeptRoleCursor its fields describe: every copy on such a lane is past its cursor, so a
+// reader must take the zero cursor as a lane to be read from its first copy rather than as a
+// lane with nothing to read.
 //
 // Its errors are LastStoredMessage's, named with the role and wrapped, and a cursor body no read
 // can decode is one of them.

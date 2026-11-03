@@ -194,14 +194,25 @@ func keptOrSkipped(role, skipped string) *roleForward {
 	return &roleForward{keptFor: role}
 }
 
-// send sends item, routed to a role destination, as forward names, within ctx. handed is the
-// record of what this batch's own handovers have already delivered, which a keep's handover
-// reads and writes (keptHandovers, sendChains).
+// send is the router of a role destination: it sends item, routed to that destination, as forward
+// names, within ctx. handed is this batch's record of what its own handovers have already
+// delivered to a role's holder, which a keep's handover reads and writes (keptHandovers,
+// sendChains).
 //
 // A keep stores it on the role's kept lane and hands it on to a holder that claimed the role
-// under the keep (keep, handOverKept).
+// under the keep (keep, handOverKept). Everything else is forwarded to the holder (forward).
+func (f *roleForward) send(ctx context.Context, deps Deps, sender bus.Sender, item contracts.Envelope, handed *keptHandovers) <-chan error {
+	if f.keptFor != "" {
+		return f.keep(ctx, deps, sender, item, handed)
+	}
+	return f.forward(sender, item)
+}
+
+// forward is the one request a role destination makes of its holder's agent subject, which the
+// route's own send makes and the handover behind a keep makes again for the copy it hands over
+// (send, handOverKeptCopy).
 //
-// A forward goes to the holder as a listener's role forward carries it: its topic the role's, its
+// It goes to the holder as a listener's role forward carries it: its topic the role's, its
 // dedupe key contracts.RoleForwardDedupePrefix and the original's, its event id unchanged, so the
 // holder's receipt and dedupe apply as to any role forward. It goes to the holder's agent subject
 // with a Request under the forward's MsgId (bus.ForwardMsgID), so the stream, which captures agent
@@ -211,10 +222,7 @@ func keptOrSkipped(role, skipped string) *roleForward {
 // acknowledgement of the stored copy, since a holder delivered by its listener from the stream
 // never answers the request itself; that is true once the listener delivers to such holders from
 // the stream and acknowledges each stored copy.
-func (f *roleForward) send(ctx context.Context, deps Deps, sender bus.Sender, item contracts.Envelope, handed *keptHandovers) <-chan error {
-	if f.keptFor != "" {
-		return f.keep(ctx, deps, sender, item, handed)
-	}
+func (f *roleForward) forward(sender bus.Sender, item contracts.Envelope) <-chan error {
 	item.DedupeKey = contracts.RoleForwardDedupePrefix + item.DedupeKey
 	subject := contracts.AgentSubject(f.holder)
 	return sender.Request(subject, item, bus.RequestOptions{
@@ -267,7 +275,7 @@ func (f *roleForward) keep(ctx context.Context, deps Deps, sender bus.Sender, it
 // event resolves that holder live and is forwarded straight to its agent subject. The holder
 // would be handed event N + 1 minutes before event N. The listener closes the same race at its
 // own keep, by starting a handover after every one of them (keepForNextHolder); the outbox is
-// that lane's second writer and has no drain of its own, so it reads that lane and the claim
+// that lane's second writer and has no drain of its own, so it reads the claim and that lane
 // again - it holds the role readers already - and forwards the copy itself, under the id the
 // drain's forward of it would carry (bus.ForwardMsgID of the role-forward dedupe key and the
 // holder's agent subject, roleForward.msgID in cmd/listener/role_lane.go). Whichever of the two
@@ -279,8 +287,17 @@ func (f *roleForward) keep(ctx context.Context, deps Deps, sender bus.Sender, it
 // handover at all, and its kept copy waits for the role's next claim, keep or sweep, as a Deps
 // with no role reader resolves no holder (errNoRoleReaders).
 //
+// The resolution is made first and is the route's own (resolveRole, forwardOf), so a holder that
+// is the event's actor, one that has stopped heartbeating, a claim that lapsed again and a role
+// still unclaimed are each read here as they are read there, and none of them is forwarded to:
+// the copy waits on the lane for the role's next claim, keep or sweep, as it did before the
+// handover, nothing is logged for it, and nothing is recorded as handed over, so the batch's next
+// copy of that role finds this one in front of it and declines, as it should. A copy is kept only
+// for a role no live holder can take, so most keeps end on that one claim read, and a claim whose
+// holder is gone is released here as the route's own resolution releases it.
+//
 // The copy is handed over only when it is the first on the lane past the role's drain cursor and
-// past what this batch has handed over itself, with no walk's claim outstanding there
+// past what this batch has handed to that same holder, with no walk's claim outstanding there
 // (keptCopyLeadsTheLane), because a drain sends a lane strictly in order from its cursor on: a
 // handover made while older copies of the role are still on the lane would overtake them, and
 // since a role token names one tree role of one issue those copies are that issue's own, so its
@@ -294,29 +311,18 @@ func (f *roleForward) keep(ctx context.Context, deps Deps, sender bus.Sender, it
 // them are how the two would drift apart.
 //
 // The copy stays on the lane as it is and no cursor is written for it: the cursor and the drain
-// stay the authority for a holder that claims later. That is why the copies this batch handed
-// over itself are recorded (handed, keptHandovers): a copy a handover delivered is still the
-// first on the lane past the cursor, and without that record the batch's next keep of the same
-// role - the second event of one issue, sent in turn on the role topic's own chain - would find
-// it in front of itself and decline, and wait for the sweep behind a copy this batch had already
-// delivered to that holder.
+// stay the authority for a holder that claims later, which is why what this batch's own handovers
+// delivered, and to which holder, is recorded (handed, keptHandovers, whose doc holds why).
 //
 // The handover is made before the keep's answer rather than beside it, so that the holder's later
 // events - which the batch after this one forwards to its agent subject, once this owner is
 // settled and given back (publishBatch, lanes) - follow it, which a handover of its own would
-// race. What it costs every acknowledged keep is the lane's two reads; a claim read, a session
-// read and a forward follow only for a keep whose copy leads the lane and whose role is claimed.
+// race. What it costs every acknowledged keep is the role's claim read; a session read, the
+// lane's two reads and a forward follow only for a keep whose role a session claimed meanwhile.
 // A keep is keyed on its role topic, no holder being known when the batch planned its chains
 // (destination.key), so an event of the same owner that this batch sends to that session on a key
 // of its own - an author or follower route among them - races the handover as any two keys of one
 // owner do; before it, the kept copy waited for the sweep and lost to every such event.
-//
-// The resolution is the route's own (resolveRole, forwardOf), so a holder that is the event's
-// actor, one that has stopped heartbeating, a claim that lapsed again and a role still unclaimed
-// are each read here as they are read there, and none of them is forwarded to: the copy waits on
-// the lane for the role's next claim, keep or sweep, as it did before the handover, nothing is
-// logged for it, and nothing is recorded as handed over, so the batch's next copy of that role
-// finds this one in front of it and declines, as it should.
 //
 // A read that failed - the lane, its cursor, the claim or the holder's session - ends the
 // handover at Warn on the one line this writes, and so does a forward that failed; a read this
@@ -344,16 +350,17 @@ func handOverKept(ctx context.Context, deps Deps, sender bus.Sender, role string
 
 // handOverKeptCopy is the handover's reads and its forward, whose failure handOverKept logs: one
 // line for all of them, since what each costs the copy is the same and the batch's own stop
-// quiets them alike (lostToContextEnd). Nothing to hand over is no failure: a lane another copy
-// leads, a role no live holder can take and a Deps with no lane reader each come back nil with
+// quiets them alike (lostToContextEnd). Nothing to hand over is no failure: a role no live holder
+// can take, a lane another copy leads and a Deps with no lane reader each come back nil with
 // nothing sent.
+//
+// The holder is resolved before the lane is read, because what this batch has already handed over
+// counts only for the holder it reached (keptHandovers.handedTo), and because a keep is made for
+// a role no live holder can take: the resolution that still finds none ends the handover on one
+// claim read rather than on the lane's two.
 func handOverKeptCopy(ctx context.Context, deps Deps, sender bus.Sender, role string, item contracts.Envelope, keptAt time.Time, handed *keptHandovers) error {
 	if deps.KeptLanes == nil {
 		return nil
-	}
-	leads, seq, err := keptCopyLeadsTheLane(ctx, deps.KeptLanes, role, item, handed.handedOver(role))
-	if err != nil || !leads {
-		return err
 	}
 	resolution, err := resolveRole(ctx, deps, role)
 	if err != nil {
@@ -363,20 +370,35 @@ func handOverKeptCopy(ctx context.Context, deps Deps, sender bus.Sender, role st
 	if handover.keptFor != "" || handover.skip != "" || handover.err != nil {
 		return nil
 	}
+	leads, seq, err := keptCopyLeadsTheLane(ctx, deps.KeptLanes, role, item, handed.handedTo(role, handover.holder))
+	if err != nil || !leads {
+		return err
+	}
 	stamped := keptAt.UnixMilli()
 	item.KeptAt = &stamped
-	if err := <-handover.send(ctx, deps, sender, item, handed); err != nil {
+	if err := <-handover.forward(sender, item); err != nil {
 		return fmt.Errorf("forward role %s's kept copy of %s to %s: %w", role, item.EventID, handover.holder, err)
 	}
-	handed.handed(role, seq)
+	handed.handed(role, handover.holder, seq)
 	return nil
 }
 
 // keptHandovers is what one batch's own handovers have taken off the kept lanes it writes: per
-// role, the stream sequence of the last copy of that role this batch forwarded to the role's
-// holder itself (handOverKept). A handover writes no cursor and leaves its copy on the lane, so
-// without this record that copy still leads the lane and the batch's next copy of the same role
-// finds it in front of itself and declines (keptCopyLeadsTheLane).
+// role, the holder this batch last forwarded a copy of that role to with a handover of its own,
+// and that copy's stream sequence (handOverKept). A handover writes no cursor and leaves its
+// copy on the lane, so without this record that copy still leads the lane and the batch's next
+// copy of the same role - the second event of one issue, sent in turn on the role topic's own
+// chain - would find it in front of itself and decline, and wait for the listener's sweep
+// behind a copy this batch had already delivered to that holder (keptCopyLeadsTheLane).
+//
+// The holder is part of the record because the record stands for "this holder already has
+// everything up to here", which is false for any other: a role whose claim changed hands between
+// two of this batch's keeps resolves a holder that was handed none of those copies, and reading
+// the lane from past them would hand it the later copy while the earlier ones are still on the
+// lane for its own drain to send - the holder would take the issue's later event first. Only the
+// record of the holder a handover resolves now is read (handedTo); for any other it is the drain
+// cursor alone that says what leads the lane, which is what the lane said before this record
+// existed.
 //
 // It is the batch's own, made in sendChains and dropped with it, because what it records is what
 // this batch delivered with no cursor behind it: the batch after this one resolves the role's
@@ -388,37 +410,65 @@ func handOverKeptCopy(ctx context.Context, deps Deps, sender bus.Sender, role st
 // side, so every read and write of the map takes the mutex.
 type keptHandovers struct {
 	mu    sync.Mutex
-	after map[string]uint64
+	after map[string]keptHandover
+}
+
+// keptHandover is the last copy of one role this batch handed over itself: the holder it reached
+// and the stream sequence it was found at on that role's kept lane.
+type keptHandover struct {
+	holder   string
+	sequence uint64
 }
 
 // newKeptHandovers is the record one batch keeps (sendChains).
 func newKeptHandovers() *keptHandovers {
-	return &keptHandovers{after: map[string]uint64{}}
+	return &keptHandovers{after: map[string]keptHandover{}}
 }
 
-// handedOver is the lane sequence of the last copy of role this batch handed over itself, 0 while
-// it has handed over none, which is where keptCopyLeadsTheLane reads the lane from when the
-// role's drain cursor stands no further on.
-func (h *keptHandovers) handedOver(role string) uint64 {
+// handedTo is the lane sequence of the last copy of role this batch handed to holder itself, 0
+// while it has handed that holder none, which is where keptCopyLeadsTheLane reads the lane from
+// when the role's drain cursor stands no further on. A record of another holder answers 0: the
+// copies it covers are ones this holder has not been sent, and they lead the lane for it.
+func (h *keptHandovers) handedTo(role, holder string) uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.after[role]
+	if record := h.after[role]; record.holder == holder {
+		return record.sequence
+	}
+	return 0
 }
 
-// handed records that the copy of role stored at seq reached the role's holder, so the batch's
-// next copy of that role reads the lane from past it.
+// handed records that the copy of role stored at seq reached holder, so the batch's next copy of
+// that role reads the lane from past it while holder is still the role's. A record of another
+// holder is replaced rather than merged, the new one standing for what this holder has.
 //
 // Only a copy a forward reached the holder with is recorded. A copy the resolution held pending -
 // the role unclaimed again, its holder the event's own actor, its claim lapsed, its heartbeat
 // stale - and one whose forward failed are still on the lane for a drain to send, so a later copy
 // must find them in front of it and decline: recording a copy nobody took would let that later
 // copy overtake it at the holder.
-func (h *keptHandovers) handed(role string, seq uint64) {
+func (h *keptHandovers) handed(role, holder string, seq uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if seq > h.after[role] {
-		h.after[role] = seq
+	if record := h.after[role]; record.holder == holder && record.sequence >= seq {
+		return
 	}
+	h.after[role] = keptHandover{holder: holder, sequence: seq}
+}
+
+// KeptLaneReader reads a role's kept lane and its drain cursor: the one capability beyond
+// publishing that the handover behind a keep needs (handOverKept, keptCopyLeadsTheLane). The
+// cursor read is the one the listener's own pass over a lane makes as well
+// (cmd/listener/role_keep.go, readKeptLaneHead), so the two writers of a lane decode one body one
+// way; the lane read differs, a pass reading the lane's last copy and this the first past the
+// cursor. bus.Client answers both over the stored-message API the outbox's own grant covers
+// (infra/core/permissions.go, DispatchPermissions), and is what cmd/dispatch passes.
+type KeptLaneReader interface {
+	// NextStoredMessage is the first message the stream holds at or after seq on subject.
+	NextStoredMessage(ctx context.Context, subject string, seq uint64) (bus.StoredMessage, error)
+	// ReadKeptRoleCursor is role's drain cursor as the stream holds it, the zero cursor for a
+	// lane no walk has written one for (bus.Client.ReadKeptRoleCursor).
+	ReadKeptRoleCursor(ctx context.Context, role string) (bus.StoredKeptRoleCursor, error)
 }
 
 // keptCopyLeadsTheLane reports whether the copy of item just kept on role's kept lane is the one
@@ -426,12 +476,13 @@ func (h *keptHandovers) handed(role string, seq uint64) {
 // caller records once that copy has reached the holder (handOverKept, keptHandovers.handed).
 //
 // The lane is read from past both the role's drain cursor and handed, the last copy of this role
-// the batch handed over itself: a handover moves no cursor, so the copies this batch has already
-// delivered are still on the lane in front of this one and would otherwise hold it back. The
-// cursor is read first - a lane no walk has written one for has none, and its first copy is the
-// first past it (bus.Client.ReadKeptRoleCursor) - and then the first copy stored after the
-// further of the two, which is this one when the lane holds nothing else unreached. The copies
-// carry no header of their own here, so the one found is this copy when its dedupe key is item's:
+// the batch handed to the holder this handover resolved (keptHandovers.handedTo): a handover
+// moves no cursor, so the copies this batch has already delivered to that holder are still on
+// the lane in front of this one and would otherwise hold it back. The cursor is read first - a
+// lane no walk has written one for has none, and its first copy is the first past it
+// (bus.Client.ReadKeptRoleCursor) - and then the first copy stored after the further of the two,
+// which is this one when the lane holds nothing else unreached. The copies carry no header of
+// their own here, so the one found is this copy when its dedupe key is item's:
 // every writer of the lane stores the envelope as its sender sent it, under that key (keep,
 // keepRoleMessage). A copy no read can decode is not this one either - the lane takes the raw
 // role publishes the listener kept as well, and this copy was decoded to be sent - so it is a

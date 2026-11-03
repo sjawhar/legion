@@ -59,62 +59,74 @@ func (r *roleRig) publisherOn(publisher Publisher) Deps {
 	return deps
 }
 
-// firstKeep is a client whose first kept publish is the test's own and whose every later send is
-// the client's: first is handed the publish the outbox made, to make or to leave unmade, and
-// answers the outbox in its place, which is how one wrapper drives each of the ways a keep can
-// go. keeps counts the kept publishes the outbox has made.
-type firstKeep struct {
+// takenKeeps is a client whose first kept publishes are the test's own and whose every other
+// send is the client's: the nth kept publish the outbox makes is handed to the nth taker, to
+// make or to leave unmade, and that taker answers the outbox in its place, which is how one
+// wrapper drives each of the ways a keep can go. A keep past the takers is made as the client
+// makes it. keeps counts the kept publishes the outbox has made.
+type takenKeeps struct {
 	*bus.Client
-	keeps atomic.Int32
-	first func(publish func() <-chan error) <-chan error
+	keeps  atomic.Int32
+	takers []func(publish func() <-chan error) <-chan error
 }
 
-func (p *firstKeep) WindowUntil(deadline func() time.Time) bus.Sender {
-	return firstKeepWindow{Sender: p.Client.WindowUntil(deadline), publisher: p}
+func (p *takenKeeps) WindowUntil(deadline func() time.Time) bus.Sender {
+	return takenKeepsWindow{Sender: p.Client.WindowUntil(deadline), publisher: p}
 }
 
-type firstKeepWindow struct {
+type takenKeepsWindow struct {
 	bus.Sender
-	publisher *firstKeep
+	publisher *takenKeeps
 }
 
-func (w firstKeepWindow) PublishStoredAsync(subject string, item contracts.Envelope, msgID string) <-chan error {
+func (w takenKeepsWindow) PublishStoredAsync(subject string, item contracts.Envelope, msgID string) <-chan error {
 	publish := func() <-chan error { return w.Sender.PublishStoredAsync(subject, item, msgID) }
-	if w.publisher.keeps.Add(1) > 1 {
+	nth := int(w.publisher.keeps.Add(1))
+	if nth > len(w.publisher.takers) {
 		return publish()
 	}
-	return w.publisher.first(publish)
+	return w.publisher.takers[nth-1](publish)
 }
 
 // lostKeepAck is a client whose first kept publish is made and then answered as a lost
 // acknowledgement: the stream stores the copy and the outbox is told nothing came back, which is
 // what a connection lost between the publish and its acknowledgement leaves behind
 // (bus.ErrNotAcknowledged).
-func lostKeepAck(client *bus.Client) *firstKeep {
-	return &firstKeep{Client: client, first: func(publish func() <-chan error) <-chan error {
-		// The publish is made and its answer dropped, as a lost connection drops it.
-		answer := publish()
-		go func() { <-answer }()
-		return answered(fmt.Errorf("the acknowledgement of the kept copy was lost: %w", bus.ErrNotAcknowledged))
+func lostKeepAck(client *bus.Client) *takenKeeps {
+	return &takenKeeps{Client: client, takers: []func(func() <-chan error) <-chan error{
+		func(publish func() <-chan error) <-chan error {
+			// The publish is made and its answer dropped, as a lost connection drops it.
+			answer := publish()
+			go func() { <-answer }()
+			return answered(fmt.Errorf("the acknowledgement of the kept copy was lost: %w", bus.ErrNotAcknowledged))
+		},
 	}}
 }
 
 // failedKeep is a client whose first kept publish sends nothing and fails: the keep that failed
 // left the stream holding nothing of the copy.
-func failedKeep(client *bus.Client) *firstKeep {
-	return &firstKeep{Client: client, first: func(func() <-chan error) <-chan error {
-		return answered(fmt.Errorf("the kept copy was not stored: %w", bus.ErrNotAcknowledged))
+func failedKeep(client *bus.Client) *takenKeeps {
+	return &takenKeeps{Client: client, takers: []func(func() <-chan error) <-chan error{
+		func(func() <-chan error) <-chan error {
+			return answered(fmt.Errorf("the kept copy was not stored: %w", bus.ErrNotAcknowledged))
+		},
 	}}
 }
 
-// claimedUnderTheKeep is a client that runs claim before its first kept publish, so the claim
-// lands inside the window the keep's own race leaves open: after the batch resolved the role
-// unheld and before the copy is on its lane (handOverKept).
-func claimedUnderTheKeep(client *bus.Client, claim func()) *firstKeep {
-	return &firstKeep{Client: client, first: func(publish func() <-chan error) <-chan error {
-		claim()
-		return publish()
-	}}
+// claimedUnderTheKeep is a client that runs the nth of claims before its nth kept publish, so
+// each claim lands inside the window that keep's own race leaves open: after the batch resolved
+// the role unheld and before the copy is on its lane (handOverKept). A batch whose keeps of one
+// role sit on one chain makes them in turn, each after the handover behind the one before it, so
+// a second claim named here is one that lands between two handovers.
+func claimedUnderTheKeep(client *bus.Client, claims ...func()) *takenKeeps {
+	takers := make([]func(func() <-chan error) <-chan error, 0, len(claims))
+	for _, claim := range claims {
+		takers = append(takers, func(publish func() <-chan error) <-chan error {
+			claim()
+			return publish()
+		})
+	}
+	return &takenKeeps{Client: client, takers: takers}
 }
 
 // keptPublish is one stored publish a test publisher took, with the subject and the Nats-Msg-Id it
@@ -653,6 +665,75 @@ func TestTwoCopiesKeptForOneRoleClaimedUnderTheFirstKeepReachTheHolderInOrder(t 
 			stored, subject, forwards)
 	}
 	t.Logf("the holder had both copies of the issue when the scan that kept them returned, %s after it began; nothing drained the lane and nothing swept it.", scanned)
+}
+
+// Two events of one issue kept in one batch, with the role claimed by one session under the
+// first keep and by another under the second: the second copy is left where it is, because the
+// holder that claims the role now was handed none of the copies in front of it. The batch's
+// record of its own handovers is what the second handover would otherwise read the lane from
+// past (keptHandovers), and it stands for "this holder already has everything up to here", which
+// the session that claimed the role meanwhile does not. Forwarding the second copy to it would
+// hand it the issue's later event while the earlier one is still on the lane for its own drain
+// to send.
+//
+// The claims land where the batch leaves room for them: the keeps of one role sit on one chain
+// and are sent in turn, each after the handover behind the one before it, so a claim made under
+// the second keep is one that landed after the first copy had reached the first holder.
+//
+// Nothing drains the lane here - no listener runs in this test - so what the second handover
+// left is read on the lane itself: both copies in the order a drain hands them over, and nothing
+// taken by the holder that claimed the role second.
+func TestASecondCopyKeptForARoleIsNotHandedToAHolderTheFirstDidNotReach(t *testing.T) {
+	rig := newRoleRig(t)
+	const role = "kept-twice-across-two-claims"
+	const firstHolder, secondHolder = "ses_claimed_under_the_first_keep", "ses_claimed_under_the_second_keep"
+	const key = "T-1"
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	toFirstHolder := rig.receiver(t, firstHolder, true)
+	toSecondHolder := rig.receiver(t, secondHolder, true)
+	first := rig.routedEvent(t, key, role, model.Actor{Kind: "user", ID: "alice"})
+	second := appendEvent(t, rig.database, rig.broker, model.Event{
+		IssueKey: new(key), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: "d41f8a93-2b6e-4c18-9f05-7ae3061b24cd", IssueKey: new(key), Body: "the issue's second event"},
+	})
+	claimed := make(chan error, 2)
+	publisher := claimedUnderTheKeep(rig.client,
+		func() { claimed <- rig.claimUnder(role, firstHolder, session.SessionEntry{SelfSubscribed: true}) },
+		func() { claimed <- rig.claimUnder(role, secondHolder, session.SessionEntry{SelfSubscribed: true}) })
+
+	holding(t, rig.publisherOn(publisher)).scan(context.Background(), unfenced{})
+
+	for range 2 {
+		if err := <-claimed; err != nil {
+			t.Fatalf("a claim made under one of the keeps: %v", err)
+		}
+	}
+	firstKey, secondKey := fmt.Sprintf("dispatch-%d", first.ID), fmt.Sprintf("dispatch-%d", second.ID)
+	for _, event := range []struct {
+		id  int64
+		key string
+	}{{first.ID, firstKey}, {second.ID, secondKey}} {
+		if publishedAt(t, rig.database, event.id) == nil {
+			attempts, failure, _ := eventState(t, rig.database, event.id)
+			t.Fatalf("%s was not published: attempt_count %d, publish_error %v", event.key, attempts, failure)
+		}
+	}
+	if taken := toFirstHolder.received(); len(taken) != 1 || taken[0].EventID != firstKey {
+		t.Fatalf("the session that claimed the role under the first keep received %v, want %s alone: the handover behind that keep is the one that reached it",
+			eventIDs(taken), firstKey)
+	}
+	if taken := toSecondHolder.received(); len(taken) != 0 {
+		t.Fatalf("the session that claimed the role under the second keep received %v, want nothing: %s is still on the lane in front of %s for its own drain to send",
+			eventIDs(taken), firstKey, secondKey)
+	}
+	if copies := storedCopies(t, rig.client, contracts.AgentSubject(secondHolder)); copies != 0 {
+		t.Fatalf("the stream holds %d copies on %s, want none: nothing was forwarded to the holder that claimed the role second",
+			copies, contracts.AgentSubject(secondHolder))
+	}
+	if copies := keptCopies(t, rig.client, role); len(copies) != 2 || copies[0].EventID != firstKey || copies[1].EventID != secondKey {
+		t.Fatalf("role %s's kept lane holds %v, want %s before %s: the order the role's own drain hands the issue's events to the holder that claimed it last",
+			role, eventIDs(copies), firstKey, secondKey)
+	}
 }
 
 // eventIDs is the event id of each envelope, for a failure that reports what a holder received.
