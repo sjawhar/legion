@@ -1253,6 +1253,28 @@ function withSelfCheck(context: SessionContext): SessionContext {
   return { ...context, runEphemeralTurn: async () => ({ replyText: "PROCEEDING" }) };
 }
 
+// Lets every promise and I/O callback queued so far run: the mocked NATS and listener paths settle
+// within a few turns, since nothing in them waits on a clock.
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 25; turn += 1) {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setImmediate(resolve);
+    await promise;
+  }
+}
+
+// Polls `condition` between event-loop turns. Only the resubscribe path waits on a real timer
+// (`ENVOY_RESUBSCRIBE_DELAY_MS`, 10 ms in these tests), which no fake clock reaches, and a busy
+// machine runs it later than any fixed sleep allows; the deadline is measured on the monotonic
+// clock, which `setSystemTime` leaves alone.
+async function until(condition: () => boolean, what: string): Promise<void> {
+  const deadline = performance.now() + 2_000;
+  while (!condition()) {
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await settle();
+  }
+}
+
 describe("envoy OMP extension", () => {
   test("discovers the bundled envoy skill from the repository root", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?resources-discover");
@@ -14977,7 +14999,10 @@ console.log(JSON.stringify(args));
     // Now kill it the way a dropped connection does. The close marker from the
     // first switch must have been consumed, so recovery still happens.
     reopened?.end();
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await until(
+      () => natsState.controls.get("notifications.agent.ses_home") !== reopened,
+      "the topic to be subscribed again after its genuine death"
+    );
 
     const recovered = natsState.controls.get("notifications.agent.ses_home");
     expect(recovered).toBeDefined();
@@ -14990,11 +15015,10 @@ console.log(JSON.stringify(args));
         "genuine-death"
       )
     );
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    expect(
-      fixture.messages.some((m) => m.includes("delivered after a genuine iterator death"))
-    ).toBe(true);
+    await until(
+      () => fixture.messages.some((m) => m.includes("delivered after a genuine iterator death")),
+      "the message sent on the recovered subscription"
+    );
   });
 
   test("permits redelivery after a failed injection and warns with the envelope id", async () => {
@@ -15317,15 +15341,20 @@ console.log(JSON.stringify(args));
 
     // Kill the iterator the way a closed/errored connection does.
     first?.end();
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await until(
+      () => natsState.controls.get("notifications.agent.ses_deaf") !== first,
+      "the topic to be subscribed again after its iterator ended"
+    );
 
     const second = natsState.controls.get("notifications.agent.ses_deaf");
     expect(second).toBeDefined();
     expect(second).not.toBe(first);
 
     second?.push(forwardedRoleEnvelope("legion-controller", "post-recovery message", "recovery"));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(fixture.messages.some((m) => m.includes("post-recovery message"))).toBe(true);
+    await until(
+      () => fixture.messages.some((m) => m.includes("post-recovery message")),
+      "the message sent on the recovered subscription"
+    );
   });
 
   test("a heartbeat tick during a registry outage warns once instead of rejecting unhandled", async () => {
@@ -15708,27 +15737,6 @@ describe("messages missed while the subscription was down", () => {
   interface ReplayRequest {
     readonly session_id: string;
     readonly subjects: readonly { readonly subject: string; readonly after?: number }[];
-  }
-
-  // Lets every promise and I/O callback queued so far run: a sweep's listener call and its
-  // deliveries settle within a few turns, since nothing in the mocked path waits on a clock.
-  async function settle(): Promise<void> {
-    for (let turn = 0; turn < 25; turn += 1) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setImmediate(resolve);
-      await promise;
-    }
-  }
-
-  // Polls `condition` between event-loop turns. Only the resubscribe path waits on a real timer
-  // (`ENVOY_RESUBSCRIBE_DELAY_MS`, 10 ms here), which no fake clock reaches; the deadline is
-  // measured on the monotonic clock, which `setSystemTime` leaves alone.
-  async function until(condition: () => boolean, what: string): Promise<void> {
-    const deadline = performance.now() + 2_000;
-    while (!condition()) {
-      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await settle();
-    }
   }
 
   // NATS subject matching: `*` is one token, `>` one or more trailing tokens.
@@ -17703,23 +17711,6 @@ describe("consumer delivery", () => {
   const AGENT = `notifications.agent.${SESSION}`;
   const RELAY = `notifications.envoy.deliver.${SESSION}`;
   const STREAM = "stream-1";
-
-  // Lets every promise and I/O callback queued so far run.
-  async function settle(): Promise<void> {
-    for (let turn = 0; turn < 25; turn += 1) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setImmediate(resolve);
-      await promise;
-    }
-  }
-
-  async function until(condition: () => boolean, what: string): Promise<void> {
-    const deadline = performance.now() + 2_000;
-    while (!condition()) {
-      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await settle();
-    }
-  }
 
   /** A peer session's message to the session under test. */
   function peer(label: string): string {

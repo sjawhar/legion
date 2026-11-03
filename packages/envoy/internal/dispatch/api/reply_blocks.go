@@ -76,6 +76,12 @@ func (s *server) ownerAddress(ctx context.Context, tx pgx.Tx, owner owner) (issu
 // by the same transaction (refs.PlanItemIfOwed), so the block named is one the item holds now:
 // the repaired index is read from its plan, the stored one from the block rows. A block the item
 // does not hold now answers 400 with code, naming field and the block.
+//
+// The live write of this request is the reply, which its own route stamps; the item indexed here
+// is the parent, whose text an earlier write already carried an event for, so a block mention
+// this records takes the source_seq of the parent's own refs row for its target at the item's
+// first indexing (refs.PlanItemIndex) and none after it, and either way it is no new fact of this
+// request.
 func (s *server) planReplyBlock(
 	ctx context.Context, tx pgx.Tx, kind refs.ItemKind, itemID, blockID, field, code string,
 ) (refs.ItemRepair, *namedBlock, error) {

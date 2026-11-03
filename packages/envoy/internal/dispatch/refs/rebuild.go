@@ -312,11 +312,13 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // enqueued_at item was listed with: an edit that lands meanwhile moves it, and the item stays
 // owed for the next pass, which reads the edited text under the same lock. A new edge takes the
 // time the text was written and no source_seq, since no event introduced it, as a rebuild's does;
-// a re-index of text no one rewrote appends no event, as rebuild-refs appends none. An item whose
-// source is gone has its edges deleted with its owed row. A comment or a message has its blocks
-// indexed too, and an ask its parts (PlanItemIndex, PlanAskParts, whose first queued statement
-// takes the item's state row), each read from the row the owner lock guards, so the mentions its
-// blocks hold are read with the same grammar as its own.
+// a re-index of text no one rewrote appends no event, as rebuild-refs appends none. So no
+// ?since= read lists such an edge until a later write of the item stamps it with that write's
+// event (Stamp), and then it is listed as that write's. An item whose source is gone has its
+// edges deleted with its owed row. A comment or a message has its blocks indexed too, and an ask
+// its parts (PlanItemIndex, PlanAskParts, whose first queued statement takes the item's state
+// row), each read from the row the owner lock guards, so the mentions its blocks hold are read
+// with the same grammar as its own.
 func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL string) error {
 	read, err := sourceRead(item.Kind, item.ID)
 	if err != nil {
