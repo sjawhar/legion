@@ -17,7 +17,7 @@ type MintRequest struct {
 // it, to named repositories of that account, to read access, or to both: GitHub's
 // POST /app/installations/{id}/access_tokens body. It can only narrow what the release would give
 // without it: Owner must be an account the secret's github-owners lists, and the only permissions
-// it names are contents: read and metadata: read, which GitHub refuses past what the installation
+// it names are contents: read, metadata: read and pull_requests: read, which GitHub refuses past what the installation
 // holds. policy.ParseGitHubNarrowing builds it from a caller's input.
 type GitHubNarrowing struct {
 	// Owner is the lowercase login of the one account whose installation the release mints for.
@@ -28,7 +28,7 @@ type GitHubNarrowing struct {
 	// whose body names no permissions all of the App's. Empty leaves the token every repository
 	// the installation reaches.
 	Repositories []string
-	// ReadOnly limits the token to contents: read and metadata: read. A machine that must only read
+	// ReadOnly limits the token to contents: read, metadata: read and pull_requests: read. A machine that must only read
 	// needs it, with or without Repositories.
 	ReadOnly bool
 }

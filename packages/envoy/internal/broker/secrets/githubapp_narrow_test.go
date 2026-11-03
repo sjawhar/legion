@@ -155,7 +155,7 @@ func (g *narrowingGitHub) take() (int, []tokenRequest) {
 
 // TestGitHubAppMintSendsTheNarrowingAsTheAccessTokensBody: a narrowed release asks GitHub for one
 // token, for the installation of the narrowing's owner alone, with GitHub's access_tokens body
-// naming the repositories and, for read-only, contents: read and metadata: read; every other listed
+// naming the repositories and, for read-only, contents: read, metadata: read and pull_requests: read; every other listed
 // owner gets no token request. A release with no narrowing is today's: every listed owner's token,
 // each asked for with no body.
 func TestGitHubAppMintSendsTheNarrowingAsTheAccessTokensBody(t *testing.T) {
@@ -367,7 +367,7 @@ func TestGitHubAppMintKeepsARateLimited422Upstream(t *testing.T) {
 
 // TestGitHubAppMintRefusesATokenWiderThanTheNarrowing: Mint releases a narrowed token only when
 // GitHub's own answer describes no more than the narrowing asked: for read-only, no permission
-// past contents: read and metadata: read and not none named; for repositories, a selection of
+// past contents: read, metadata: read and pull_requests: read and not none named; for repositories, a selection of
 // those alone, named. Anything else (a body something between dropped or widened) is refused as
 // GitHub's fault (class upstream), and the token GitHub minted is revoked at GitHub with
 // DELETE /installation/token, as its own bearer, before Mint returns. The error names which rule

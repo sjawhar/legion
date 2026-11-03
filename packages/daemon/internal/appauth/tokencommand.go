@@ -14,8 +14,8 @@ package appauth
 // (ReadToken) and "" otherwise; an operator's command passes them on (`agent-secrets <NAME>
 // ${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"}
 // ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s "$<NAME>"'`). A read-only
-// token holds what the command's read-only release gives: the broker's holds contents and
-// metadata read and no pull requests read, where key mode's ReadToken also reads pull requests.
+// token holds what the command's read-only release gives: the broker's holds contents,
+// metadata and pull requests read, as key mode's ReadToken does.
 //
 // No token reaches a log or an error: the command's stdout is never quoted, and its stderr, which
 // `agent-secrets` uses for the names and the request it waits on, goes to the daemon's stderr and
