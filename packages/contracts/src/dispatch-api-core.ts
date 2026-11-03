@@ -6,6 +6,18 @@ import type { ASK_URGENCIES, DOC_EDIT_OPS } from "./dispatch-tools";
  * other area of the Dispatch API is built from.
  */
 
+/**
+ * A stored text read as the ProseMirror document a reader is shown (`pmdoc.ReadForDisplay`),
+ * carried beside the markdown itself so a page renders what the server read rather than parsing
+ * the markdown again. A response carries one only for a request that sent `Dispatch-Trees: 1`,
+ * and every `<field>_tree` is absent otherwise; a `/ws/live` event frame carries its trees
+ * always, since a browser can set no header on a socket.
+ */
+export type DisplayTree = {
+  readonly type: string;
+  readonly [key: string]: unknown;
+};
+
 export type AskUrgency = (typeof ASK_URGENCIES)[number];
 export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
 

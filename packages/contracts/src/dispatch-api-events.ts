@@ -12,6 +12,7 @@ import type {
   ArchitectureSourceUpdatedEventPayload,
   ArchitectureSyncedEventPayload,
   ArchitectureSyncFailedEventPayload,
+  DisplayTree,
   Project,
   ProjectDefaultAssigneeUpdatedEventPayload,
   RepoProjectUpdatedEventPayload,
@@ -115,6 +116,11 @@ interface DispatchEventBase {
    *  published copy's `quiet` instead (`PublishedDispatchEvent`). */
   readonly notify: boolean;
   readonly created_at: string;
+  /** The display tree of every stored text the payload carries, keyed by that text's path in
+   *  this envelope (`payload.body`, `payload.options.0.label`). It rides beside the payload, so
+   *  each payload keeps the shape its readers know. Absent unless the request sent
+   *  `Dispatch-Trees: 1`; present on every `/ws/live` event frame. */
+  readonly trees?: Readonly<Record<string, DisplayTree>>;
 }
 
 export type DispatchEvent =

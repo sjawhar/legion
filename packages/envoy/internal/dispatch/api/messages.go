@@ -30,9 +30,12 @@ type createMessageInput struct {
 	Actor          *model.Actor `json:"actor"`
 }
 
-type messageRead struct {
-	Message model.Message   `json:"message"`
-	Replies []model.Message `json:"replies"`
+// messageThread is one conversation as a route answers it: its root message and every message
+// replying to it, each shaped for the dashboard (messageRead) so a caller that asked for the
+// display trees is given them beside every body.
+type messageThread struct {
+	Message messageRead   `json:"message"`
+	Replies []messageRead `json:"replies"`
 	// Unread is this conversation's own unread verdict for the caller, from the shared
 	// unreadDirectRepliesCTE: the one definition the count reads too, so a client never
 	// re-derives it from timestamps. Only the agent-conversation list sets it.
@@ -67,7 +70,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, withAdvice(message, advice))
+	WriteJSON(w, http.StatusCreated, withAdvice(newMessageRead(message, wantsDisplayTrees(r)), advice))
 }
 
 // createAgentMessage is POST /api/v1/agents/{session_id}/messages: a person's send to one session.
@@ -102,7 +105,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, message)
+	WriteJSON(w, http.StatusCreated, newMessageRead(message, wantsDisplayTrees(r)))
 }
 
 // messageRecovery is the recovery point a keyed message write commits with its message
@@ -149,7 +152,7 @@ func (s *server) replayAgentMessage(w http.ResponseWriter, r *http.Request, poin
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, message)
+	WriteJSON(w, http.StatusCreated, newMessageRead(message, wantsDisplayTrees(r)))
 }
 
 // replayIssueMessage answers a repeat of a keyed issue message whose message committed: the
@@ -647,7 +650,7 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "message") {
 		return
 	}
-	read, err := s.readMessage(r.Context(), r.PathValue("key"), r.PathValue("id"))
+	read, err := s.readMessage(r.Context(), r.PathValue("key"), r.PathValue("id"), wantsDisplayTrees(r))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -678,38 +681,38 @@ func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 // under getMessageThread's rule: a human reads any, a bearer an issue thread and only a direct
 // conversation its ?session= is in. Every route that reads a message by its id alone (the
 // conversation, the message's blocks) asks it. ok is false once it has written the refusal.
-func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (messageRead, bool) {
+func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (messageThread, bool) {
 	_, human, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
-		return messageRead{}, false
+		return messageThread{}, false
 	}
 	if !requireUUIDPath(w, r, "message") {
-		return messageRead{}, false
+		return messageThread{}, false
 	}
 	var rootID string
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), messageThreadCTE+`
 		select id::text from thread where in_reply_to is null
 	`, r.PathValue("id")).Scan(&rootID); err != nil {
 		s.writeHandlerError(w, err)
-		return messageRead{}, false
+		return messageThread{}, false
 	}
-	read, err := s.readMessage(r.Context(), "", rootID)
+	read, err := s.readMessage(r.Context(), "", rootID, wantsDisplayTrees(r))
 	if err != nil {
 		s.writeHandlerError(w, err)
-		return messageRead{}, false
+		return messageThread{}, false
 	}
 	if !human && read.Message.IssueKey == nil {
 		session := strings.TrimSpace(r.URL.Query().Get("session"))
 		if session == "" {
 			writeError(w, "SESSION_REQUIRED", http.StatusBadRequest,
 				"a direct conversation is read as a session in it: name yours in ?session=")
-			return messageRead{}, false
+			return messageThread{}, false
 		}
 		if !read.hasSession(session) {
 			writeError(w, "THREAD_FORBIDDEN", http.StatusForbidden,
 				"session "+session+" is not in this direct conversation: its root targets another session and it has not replied in it")
-			return messageRead{}, false
+			return messageThread{}, false
 		}
 	}
 	return read, true
@@ -717,7 +720,7 @@ func (s *server) readableMessageThread(w http.ResponseWriter, r *http.Request) (
 
 // hasSession reports whether session is in this conversation: the root targets it, or it
 // authored a reply.
-func (read messageRead) hasSession(session string) bool {
+func (read messageThread) hasSession(session string) bool {
 	if messageTarget(read.Message.Target) == "session:"+session {
 		return true
 	}
@@ -731,14 +734,14 @@ func (read messageRead) hasSession(session string) bool {
 
 // readMessage is one message, on issueKey when it is not empty, with its deliveries and every
 // message transitively replying to it.
-func (s *server) readMessage(ctx context.Context, issueKey, id string) (messageRead, error) {
+func (s *server) readMessage(ctx context.Context, issueKey, id string, trees bool) (messageThread, error) {
 	message, err := s.loadMessage(ctx, s.deps.Store.Pool, issueKey, id)
 	if err != nil {
-		return messageRead{}, err
+		return messageThread{}, err
 	}
-	reads, err := s.hydrateMessageThreads(ctx, []model.Message{message})
+	reads, err := s.hydrateMessageThreads(ctx, []model.Message{message}, trees)
 	if err != nil {
-		return messageRead{}, err
+		return messageThread{}, err
 	}
 	return reads[0], nil
 }
@@ -746,7 +749,8 @@ func (s *server) readMessage(ctx context.Context, issueKey, id string) (messageR
 // hydrateMessageThreads is each root as a thread: its own deliveries, every message transitively
 // replying to it, and the block each of those messages answers. Each side table is read once over
 // every root, never once per root, so a list of threads costs the same three queries one does.
-func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Message) ([]messageRead, error) {
+// trees is whether the caller asked for the display trees (wantsDisplayTrees).
+func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Message, trees bool) ([]messageThread, error) {
 	rootIDs := make([]string, len(roots))
 	for index, root := range roots {
 		rootIDs[index] = root.ID
@@ -762,10 +766,13 @@ func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Messag
 	if err := hydrateThreadReplyBlocks(ctx, s.deps.Store.Pool, roots, replies); err != nil {
 		return nil, err
 	}
-	reads := make([]messageRead, 0, len(roots))
+	reads := make([]messageThread, 0, len(roots))
 	for _, root := range roots {
 		root.Deliveries = deliveries[root.ID]
-		reads = append(reads, messageRead{Message: root, Replies: replies[root.ID]})
+		reads = append(reads, messageThread{
+			Message: newMessageRead(root, trees),
+			Replies: messageReads(replies[root.ID], trees),
+		})
 	}
 	return reads, nil
 }
@@ -804,7 +811,7 @@ func (s *server) listIssueMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	result, err := s.hydrateMessageThreads(r.Context(), roots)
+	result, err := s.hydrateMessageThreads(r.Context(), roots, wantsDisplayTrees(r))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -900,7 +907,7 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	result, err := s.hydrateMessageThreads(r.Context(), roots)
+	result, err := s.hydrateMessageThreads(r.Context(), roots, wantsDisplayTrees(r))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

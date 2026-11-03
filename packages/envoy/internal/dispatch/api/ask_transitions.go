@@ -257,7 +257,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, ask)
+	WriteJSON(w, http.StatusOK, newAskRead(ask, wantsDisplayTrees(r)))
 }
 
 func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +326,7 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, ask)
+	WriteJSON(w, http.StatusOK, newAskRead(ask, wantsDisplayTrees(r)))
 }
 
 func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, transition askTransition) (model.Ask, error) {

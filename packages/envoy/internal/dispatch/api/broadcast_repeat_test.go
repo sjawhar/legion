@@ -227,7 +227,7 @@ func TestBroadcastRepeatResumesEveryOwedRecipientAndDeliversEachOnce(t *testing.
 		t.Helper()
 		for _, sent := range written.Recipients {
 			if sent.SessionID == sessionID {
-				return sent.Message
+				return sent.Message.Message
 			}
 		}
 		t.Fatalf("the broadcast has no recipient %q", sessionID)

@@ -335,7 +335,8 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	openAsks, err := s.loadOpenAsks(r.Context(), s.deps.Store.Pool, issue.Key)
+	attachApprovalTrees(wantsDisplayTrees(r), artifacts)
+	openAsks, err := s.loadOpenAsks(r.Context(), s.deps.Store.Pool, issue.Key, wantsDisplayTrees(r))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -380,7 +381,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 // comment in its thread — the same last_reply the inbox row carries — so the
 // issue header can show who spoke last beside the ask's waiting_on.
 type issueOpenAsk struct {
-	model.Ask
+	askRead
 	LastReply *model.AskLastReply `json:"last_reply"`
 }
 
@@ -388,14 +389,14 @@ type issueOpenAsk struct {
 // newest reply in its thread (null when nobody has replied). The issue listing
 // carries only a count; the detail response carries the asks themselves so
 // agents, which cannot read the human inbox, can see what is waiting.
-func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]issueOpenAsk, error) {
+func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string, trees bool) ([]issueOpenAsk, error) {
 	asks, replies, err := s.queryOwnerAsks(ctx, q, issueOwner(key), "open")
 	if err != nil {
 		return nil, err
 	}
 	openAsks := make([]issueOpenAsk, len(asks))
 	for index, ask := range asks {
-		openAsks[index] = issueOpenAsk{Ask: ask}
+		openAsks[index] = issueOpenAsk{askRead: newAskRead(ask, trees)}
 		if reply, ok := replies[ask.ID]; ok {
 			openAsks[index].LastReply = &reply
 		}

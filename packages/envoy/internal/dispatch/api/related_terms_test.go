@@ -399,7 +399,7 @@ func TestRelatedTermsQueryCastsAndMatchesTheItemsHoldingTheChosenWords(t *testin
 	if err != nil {
 		t.Fatalf("run the keyword body under the related q: %v", err)
 	}
-	response, err := scanSearchRows(rows, "", searchMaxLimit, 0)
+	response, err := scanSearchRows(rows, "", searchMaxLimit, 0, false)
 	rows.Close()
 	if err != nil {
 		t.Fatalf("scan the keyword results: %v", err)

@@ -640,7 +640,9 @@ func (s *server) relatedSearch(
 	}
 	defer rows.Close()
 	// A document hit's link opens the document with these words highlighted.
-	return scanSearchRows(rows, relatedSearchQuery(picked.Terms), suggestionSearchDepth, 0)
+	// A write's related-item check shows no snippet tree: nothing reads one, and the trees are
+	// the dashboard's to ask for.
+	return scanSearchRows(rows, relatedSearchQuery(picked.Terms), suggestionSearchDepth, 0, false)
 }
 
 // relatedSearchQuery is Suggestions.SearchQuery: the best relatedSearchQueryTerms chosen terms,

@@ -220,7 +220,7 @@ func (s *server) listArtifactReviews(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, reviews)
+	WriteJSON(w, http.StatusOK, artifactReviewReads(reviews, wantsDisplayTrees(r)))
 }
 
 // POST /api/v1/artifacts/{id}/reviews  {state, reason?}  (humans only)
@@ -373,17 +373,19 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	type response struct {
-		Ask        *model.Ask             `json:"ask"`
+		Ask        *askRead               `json:"ask"`
 		ArtifactID string                 `json:"artifact_id"`
 		Version    int                    `json:"version"`
 		Approval   model.ArtifactApproval `json:"approval"`
 	}
+	trees := wantsDisplayTrees(r)
 	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	// An approval at the current version needs no request: return it as it stands.
 	if artifact.Approval != nil && artifact.Approval.State == "approved" {
+		attachApprovalTrees(trees, []model.Artifact{artifact})
 		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
 	}
@@ -423,7 +425,13 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	if len(events) > 0 {
 		status = http.StatusCreated
 	}
-	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
+	attachApprovalTrees(trees, []model.Artifact{artifact})
+	var askAnswer *askRead
+	if ask != nil {
+		read := newAskRead(*ask, trees)
+		askAnswer = &read
+	}
+	WriteJSON(w, status, response{Ask: askAnswer, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 }
 
 // openApprovalAsk inserts the document's approval request at version, asking question, and appends

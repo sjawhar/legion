@@ -92,7 +92,7 @@ func TestSessionFollowUpToADirectMessageThreadsUnderItsFirstReply(t *testing.T) 
 		t.Fatalf("a session's own replies were delivered: %#v", (*sent)[sendsAfterRoot:])
 	}
 
-	conversation := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	conversation := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	if len(conversation) != 1 || conversation[0].Message.ID != root.ID {
 		t.Fatalf("conversation = %#v, want the one direct message", conversation)
 	}
@@ -148,7 +148,7 @@ func TestAnsweredDeliveryPostsAFollowUpOnlyWhenAskedAndSaysWhenItPostedNothing(t
 		}
 	}
 
-	conversation := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	conversation := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	if replies := conversation[0].Replies; len(replies) != 2 || replies[0].ID != first.ID || replies[1].ID != followUp.ID {
 		t.Fatalf("replies = %#v, want only the first answer and the one follow-up", replies)
 	}
@@ -194,7 +194,7 @@ func TestGetMessageReadsTheConversationAMessageBelongsTo(t *testing.T) {
 		if read.Code != http.StatusOK {
 			t.Fatalf("GET /api/v1/messages/%s: status=%d body=%s", id, read.Code, read.Body.String())
 		}
-		thread := decodeBody[messageRead](t, read)
+		thread := decodeBody[messageThread](t, read)
 		if thread.Message.ID != root.ID || thread.Message.IssueKey != nil || len(thread.Message.Deliveries) != 1 {
 			t.Fatalf("thread of %s starts at %#v, want the direct message %s with its delivery", id, thread.Message, root.ID)
 		}
@@ -207,7 +207,7 @@ func TestGetMessageReadsTheConversationAMessageBelongsTo(t *testing.T) {
 	issue := createInteractionIssue(t, handler, "TEST", "Issue thread", "before")
 	onIssue := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "On the issue"}, "alice")
 	if read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/messages/"+onIssue.ID, nil, "alice"); read.Code != http.StatusOK ||
-		decodeBody[messageRead](t, read).Message.ID != onIssue.ID {
+		decodeBody[messageThread](t, read).Message.ID != onIssue.ID {
 		t.Fatalf("issue message by id: status=%d body=%s", read.Code, read.Body.String())
 	}
 	if missing := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/5a660655-04ad-4ce0-8a9b-93dd03c412b7?session=s1", nil); missing.Code != http.StatusNotFound {
@@ -240,7 +240,7 @@ func TestBearerReadsADirectConversationOnlyAsItsSessionAndAnIssueThreadAsTheIssu
 		t.Fatalf("bearer read naming no session: status=%d body=%s, want 400 SESSION_REQUIRED", unnamed.Code, unnamed.Body.String())
 	}
 	if human := dispatchRequest(t, handler, http.MethodGet, "/api/v1/messages/"+first.ID, nil, "bob"); human.Code != http.StatusOK ||
-		decodeBody[messageRead](t, human).Message.ID != root.ID {
+		decodeBody[messageThread](t, human).Message.ID != root.ID {
 		t.Fatalf("a human reading the conversation: status=%d body=%s, want 200", human.Code, human.Body.String())
 	}
 
@@ -262,7 +262,7 @@ func TestBearerReadsADirectConversationOnlyAsItsSessionAndAnIssueThreadAsTheIssu
 		if read.Code != http.StatusOK {
 			t.Fatalf("bearer reading the issue thread by id with %q: status=%d body=%s, want 200 as the issue route answers", query, read.Code, read.Body.String())
 		}
-		if thread := decodeBody[messageRead](t, read); thread.Message.ID != onIssue.ID || len(thread.Replies) != 1 {
+		if thread := decodeBody[messageThread](t, read); thread.Message.ID != onIssue.ID || len(thread.Replies) != 1 {
 			t.Fatalf("bearer reading the issue thread by id with %q = %#v, want the issue thread with s2's reply", query, thread)
 		}
 	}
@@ -473,7 +473,7 @@ func TestAgentConversationsListByLatestActivity(t *testing.T) {
 	newer := decodeBody[model.Message](t, later)
 	reply("An answer to the older question.")
 
-	conversation := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	conversation := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	if len(conversation) != 2 || conversation[0].Message.ID != root.ID || conversation[1].Message.ID != newer.ID {
 		ids := []string{}
 		for _, read := range conversation {
@@ -524,7 +524,7 @@ func seedAnsweredConversations(t *testing.T, database *store.Store, count int, i
 // windowHolds reports whether the conversation list a viewer reads holds rootID.
 func windowHolds(t *testing.T, handler http.Handler, rootID string) (bool, int) {
 	t.Helper()
-	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	window := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	for _, read := range window {
 		if read.Message.ID == rootID {
 			return true, len(window)
@@ -614,7 +614,7 @@ func TestTheWindowReturnsEveryUnreadConversationBesideTheFiftyMostActive(t *test
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 60 {
 		t.Fatalf("before opening the view: %#v, want 60 unread replies", got)
 	}
-	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	window := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	seen := map[string]bool{}
 	unread, busier := 0, 0
 	var newestReply string
@@ -730,7 +730,7 @@ func unreadRepliesShownInWindow(t *testing.T, handler http.Handler, sessionID st
 	}
 	// Read as the identity source spells the login, as the state above is: a call site that
 	// passed the raw form to the shared fragment would read a window over no roots at all.
-	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+sessionID+"/messages", nil, "ALICE"))
+	window := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+sessionID+"/messages", nil, "ALICE"))
 	shown := 0
 	for _, read := range window {
 		// The conversation's own verdict, as the server sends it - no client-side re-derivation.
@@ -770,7 +770,7 @@ func TestAnOldConversationAnsweredNowIsInsideTheWindow(t *testing.T) {
 		t.Fatalf("%#v, want the reply read, so only the activity order can keep its conversation in the window", got)
 	}
 
-	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	window := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	if len(window) != 50 {
 		t.Fatalf("window = %d conversations, want the 50 that moved last", len(window))
 	}
@@ -810,7 +810,7 @@ func TestAConversationMovesOnActivityDeepInItsChain(t *testing.T) {
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
 		t.Fatalf("%#v, want everything read, so only the activity order can rank these", got)
 	}
-	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	window := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	if len(window) != 2 || window[0].Message.ID != root.ID || window[1].Message.ID != newer.ID {
 		ids := []string{}
 		for _, read := range window {
@@ -852,7 +852,7 @@ func TestADeliveredOnlyConversationIsListedAndCountsNothingUnread(t *testing.T) 
 	if got := states["s1"].UnreadReplies; got != 0 {
 		t.Fatalf("unread_replies = %d, want 0: a delivered-only root is not a direct message this viewer sent", got)
 	}
-	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "ALICE"))
+	window := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "ALICE"))
 	listed := false
 	for _, read := range window {
 		if read.Message.ID == rootID {
@@ -954,7 +954,7 @@ func TestTheWindowsUnreadFlagIsReadAgainstTheMarkNotThePresenceOfAReply(t *testi
 	if state.UnreadReplies != 1 {
 		t.Fatalf("unread_replies = %d, want 1: the follow-up alone", state.UnreadReplies)
 	}
-	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	window := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	flags := map[string]bool{}
 	for _, read := range window {
 		flags[read.Message.ID] = read.Unread
@@ -971,16 +971,16 @@ func TestTheWindowsUnreadFlagIsReadAgainstTheMarkNotThePresenceOfAReply(t *testi
 }
 
 // windowEntry is one conversation as the viewer's own conversation list answers it.
-func windowEntry(t *testing.T, handler http.Handler, login, sessionID, rootID string) messageRead {
+func windowEntry(t *testing.T, handler http.Handler, login, sessionID, rootID string) messageThread {
 	t.Helper()
-	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+sessionID+"/messages", nil, login))
+	window := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+sessionID+"/messages", nil, login))
 	for _, read := range window {
 		if read.Message.ID == rootID {
 			return read
 		}
 	}
 	t.Fatalf("window of %d conversations does not hold %s", len(window), rootID)
-	return messageRead{}
+	return messageThread{}
 }
 
 // The flag a conversation comes back with is the read mark's verdict, not "this session has ever
@@ -1390,7 +1390,7 @@ func TestARootInBothCandidateBranchesIsListedOnce(t *testing.T) {
 			root.ID, targeted, delivered)
 	}
 
-	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	window := decodeBody[[]messageThread](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	seen := 0
 	for _, read := range window {
 		if read.Message.ID == root.ID {

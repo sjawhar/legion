@@ -948,10 +948,7 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 	}
 	snapshotAt := heldTo.Add(-time.Minute)
 	delta.Sub, delta.Seq, delta.ChangedAt = "timeline-1", "42", &deployedAt
-	event, err := liveEventFrame("events-1", liveFixtureEvent())
-	if err != nil {
-		t.Fatalf("build the event frame fixture: %v", err)
-	}
+	event := liveFixtureEventFrame(t)
 	frames := map[string]any{
 		"snapshot.json":  held.snapshot("timeline-1", 41, &snapshotAt),
 		"delta.json":     delta,

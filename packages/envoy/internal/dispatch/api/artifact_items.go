@@ -29,7 +29,7 @@ func (s *server) listArtifactAsks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, asks)
+	WriteJSON(w, http.StatusOK, askReads(asks, wantsDisplayTrees(r)))
 }
 
 func (s *server) createArtifactAsk(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +56,7 @@ func (s *server) listArtifactComments(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, comments)
+	WriteJSON(w, http.StatusOK, commentReads(comments, wantsDisplayTrees(r)))
 }
 
 func (s *server) createArtifactComment(w http.ResponseWriter, r *http.Request) {
@@ -88,5 +88,6 @@ func (s *server) listArtifactEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	attachEventTrees(events, wantsDisplayTrees(r))
 	WriteJSON(w, http.StatusOK, events)
 }

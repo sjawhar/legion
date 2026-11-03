@@ -302,7 +302,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		source.artifactID = *owner.ArtifactID
 	}
 	suggestions := s.relatedCheck(r.Context(), relatedInput{text: ask.Question, title: ask.Question, source: source, record: true})
-	WriteJSON(w, http.StatusCreated, withSuggestions(ask, advice, suggestions))
+	WriteJSON(w, http.StatusCreated, withSuggestions(newAskRead(ask, wantsDisplayTrees(r)), advice, suggestions))
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
@@ -507,7 +507,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	WriteJSON(w, http.StatusOK, ask)
+	WriteJSON(w, http.StatusOK, newAskRead(ask, wantsDisplayTrees(r)))
 }
 
 // blockArtifactOf is the document an indexed ask's block lives in. Every write that touches the
@@ -674,7 +674,7 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 // thread and, when the caller asked for it, the thread a card renders. Embedding model.Ask keeps
 // every field a reader already has exactly where it was, so the row stays a superset of the ask.
 type issueAskRow struct {
-	model.Ask
+	askRead
 	LastReply *model.AskLastReply `json:"last_reply"`
 	Thread    *askThread          `json:"thread,omitempty"`
 }
@@ -705,15 +705,16 @@ func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	trees := wantsDisplayTrees(r)
 	rows := make([]issueAskRow, len(asks))
 	for index := range asks {
-		rows[index] = issueAskRow{Ask: asks[index]}
+		rows[index] = issueAskRow{askRead: newAskRead(asks[index], trees)}
 		if reply, ok := lastReplies[asks[index].ID]; ok {
 			rows[index].LastReply = &reply
 		}
 	}
 	if withThread {
-		if err := s.attachIssueAskThreads(r.Context(), rows); err != nil {
+		if err := s.attachIssueAskThreads(r.Context(), rows, trees); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -724,12 +725,12 @@ func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
 // attachIssueAskThreads hangs each row's thread off it. loadAskThreads leaves `answers` empty -
 // an Inbox row, its other caller, is an open ask and can have none - so this list, which does
 // carry answered asks, merges them over the same ask ids itself.
-func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow) error {
+func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow, trees bool) error {
 	askIDs := make([]string, len(rows))
 	for index := range rows {
 		askIDs[index] = rows[index].ID
 	}
-	threads, err := s.loadAskThreads(ctx, askIDs)
+	threads, err := s.loadAskThreads(ctx, askIDs, trees)
 	if err != nil {
 		return err
 	}
@@ -739,7 +740,7 @@ func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow) 
 	}
 	for index := range rows {
 		thread := threads[rows[index].ID]
-		thread.Answers = answers[rows[index].ID]
+		thread.Answers = askAnswerReads(answers[rows[index].ID], trees)
 		rows[index].Thread = &thread
 	}
 	return nil
@@ -818,11 +819,16 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	// The single-ask read is a thread with the ask beside it, so it and every Inbox or ask-list
 	// thread serialise through one definition and carry the same keys.
+	trees := wantsDisplayTrees(r)
 	WriteJSON(w, http.StatusOK, struct {
-		Ask model.Ask `json:"ask"`
+		Ask askRead `json:"ask"`
 		askThread
-	}{Ask: ask, askThread: askThread{
-		Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reaches[ask.ID],
+	}{Ask: newAskRead(ask, trees), askThread: askThread{
+		Replies:   commentReads(replies, trees),
+		Edits:     askEditReads(edits, trees),
+		Answers:   askAnswerReads(answers, trees),
+		Followers: followers,
+		askReach:  reaches[ask.ID],
 	}})
 }
 

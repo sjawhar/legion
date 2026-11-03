@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -418,7 +419,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		offset = parsed
 	}
 
-	response, err := s.runSearch(r.Context(), searchText, project, limit, offset)
+	response, err := s.runSearch(r.Context(), searchText, project, limit, offset, wantsDisplayTrees(r))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -441,7 +442,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 // (runFusedSearchQuery) only when the query's own embedding could not be had - never when the
 // meaning query itself then fails, which is a real error the caller should see as a 500, not
 // something to paper over as a degraded answer.
-func (s *server) runSearch(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
+func (s *server) runSearch(ctx context.Context, q, project string, limit, offset int, trees bool) (model.SearchResponse, error) {
 	var nodes int
 	if err := s.deps.Store.Pool.QueryRow(ctx, "select numnode(websearch_to_tsquery('english', $1))", q).Scan(&nodes); err != nil {
 		return model.SearchResponse{}, err
@@ -450,22 +451,22 @@ func (s *server) runSearch(ctx context.Context, q, project string, limit, offset
 		return model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}, nil
 	}
 	if s.deps.Embedder == nil {
-		return s.runKeywordOnlyDegraded(ctx, q, project, limit, offset)
+		return s.runKeywordOnlyDegraded(ctx, q, project, limit, offset, trees)
 	}
 	vector, err := s.embedQuery(ctx, q)
 	if err != nil {
 		slog.Warn("dispatch search: query embedding unavailable, answering keyword-only", "error", err)
-		return s.runKeywordOnlyDegraded(ctx, q, project, limit, offset)
+		return s.runKeywordOnlyDegraded(ctx, q, project, limit, offset, trees)
 	}
-	return s.runMeaningSearch(ctx, q, project, limit, offset, vector)
+	return s.runMeaningSearch(ctx, q, project, limit, offset, vector, trees)
 }
 
 // runKeywordOnlyDegraded runs the keyword-only fallback and stamps the response Degraded on
 // success: the one thing both of runSearch's fallback branches (no embedder configured, or the
 // query's own embedding failing) do identically. runSearch has already run the numnode check
 // before ever reaching here.
-func (s *server) runKeywordOnlyDegraded(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
-	response, err := s.runFusedSearchQuery(ctx, q, project, limit, offset)
+func (s *server) runKeywordOnlyDegraded(ctx context.Context, q, project string, limit, offset int, trees bool) (model.SearchResponse, error) {
+	response, err := s.runFusedSearchQuery(ctx, q, project, limit, offset, trees)
 	if err == nil {
 		response.Degraded = contracts.SearchDegradedEmbedderUnavailable
 	}
@@ -475,7 +476,7 @@ func (s *server) runKeywordOnlyDegraded(ctx context.Context, q, project string, 
 // runFusedSearchQuery runs searchQuery, assuming nodes > 0 already, which its caller
 // (runKeywordOnlyDegraded, after runSearch's check) must have established first. q is assumed
 // already validated (length, non-empty after trimming); project empty searches every project.
-func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, limit, offset int) (model.SearchResponse, error) {
+func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, limit, offset int, trees bool) (model.SearchResponse, error) {
 	started := time.Now()
 	rows, err := s.deps.Store.Pool.Query(ctx, searchQuery, q, project, limit, firstTerm(q), headlineOptions,
 		offset, contracts.SearchKindDepth, searchFusionK)
@@ -484,7 +485,7 @@ func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, lim
 	}
 	defer rows.Close()
 
-	response, err := scanSearchRows(rows, q, limit, offset)
+	response, err := scanSearchRows(rows, q, limit, offset, trees)
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
@@ -496,7 +497,7 @@ func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, lim
 // shape, searchQueryMeaning in place of searchQuery. Its only caller, runSearch, has already run
 // the numnode check before ever reaching here (so it never pays for an embedding it would throw
 // away); this function assumes nodes > 0.
-func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit, offset int, vector []float32) (model.SearchResponse, error) {
+func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit, offset int, vector []float32, trees bool) (model.SearchResponse, error) {
 
 	started := time.Now()
 	rows, err := s.deps.Store.Pool.Query(ctx, searchQueryMeaning, q, project, limit, firstTerm(q), headlineOptions,
@@ -506,7 +507,7 @@ func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit,
 	}
 	defer rows.Close()
 
-	response, err := scanSearchRows(rows, q, limit, offset)
+	response, err := scanSearchRows(rows, q, limit, offset, trees)
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
@@ -517,7 +518,7 @@ func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit,
 // scanSearchRows reads searchQuery's and searchQueryMeaning's shared column shape - every column
 // through the headline - into a SearchResponse. q is the original query text, for each result's
 // href (searchHref's own query-string echo).
-func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchResponse, error) {
+func scanSearchRows(rows pgx.Rows, q string, limit, offset int, trees bool) (model.SearchResponse, error) {
 	response := model.SearchResponse{Results: []model.SearchResult{}, Limit: limit, Offset: offset}
 	for rows.Next() {
 		var result model.SearchResult
@@ -569,6 +570,9 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 			result.Artifact = &model.SearchArtifact{Slug: *slug, Name: *name}
 		}
 		result.Snippet = markSnippet(*headline)
+		if trees {
+			result.SnippetTree = pmdoc.DisplaySnippetJSON(*headline, markStart, markEnd)
+		}
 		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, q)
 		response.Results = append(response.Results, result)
 	}

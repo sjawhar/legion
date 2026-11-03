@@ -76,6 +76,7 @@ func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	trees := wantsDisplayTrees(r)
 	response := model.MyAnswersResponse{Rows: []model.MyAnswerRow{}, Limit: limit, Offset: offset}
 	for rows.Next() {
 		var row model.MyAnswerRow
@@ -123,6 +124,12 @@ func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			row.Reply = &model.MyAnswerReply{ID: *replyID, Body: *body}
+		}
+		if trees {
+			row.QuestionTree = displayTree(row.Question)
+			if row.Reply != nil {
+				row.Reply.BodyTree = displayTree(row.Reply.Body)
+			}
 		}
 		response.Total = int(total)
 		response.Rows = append(response.Rows, row)

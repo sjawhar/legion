@@ -121,7 +121,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	WriteJSON(w, http.StatusOK, comment)
+	WriteJSON(w, http.StatusOK, newCommentRead(comment, wantsDisplayTrees(r)))
 }
 
 func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +240,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	WriteJSON(w, http.StatusOK, comment)
+	WriteJSON(w, http.StatusOK, newCommentRead(comment, wantsDisplayTrees(r)))
 }
 
 func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action string) {
@@ -453,7 +453,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		// change after this write's version was rendered and before it reached the room, which is
 		// past undoing (LEGION-269). The accept stands and says so.
 		lost, known := ledger.LostOps(comment.Anchor.ArtifactID)
-		accepted := acceptedComment{Comment: comment}
+		accepted := acceptedComment{commentRead: newCommentRead(comment, wantsDisplayTrees(r))}
 		if known {
 			gone := len(lost) > 0
 			accepted.Lost = &gone
@@ -461,7 +461,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		WriteJSON(w, http.StatusOK, accepted)
 		return
 	}
-	WriteJSON(w, http.StatusOK, comment)
+	WriteJSON(w, http.StatusOK, newCommentRead(comment, wantsDisplayTrees(r)))
 }
 
 // acceptedComment is the accept route's response: the comment, plus whether the live document
@@ -469,6 +469,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 // publish failed and the room is reloading, or the room holds a tree too deep to read - which is
 // not the same statement as false, exactly as an edit's lost_ops distinguishes them.
 type acceptedComment struct {
-	model.Comment
+	commentRead
 	Lost *bool `json:"lost"`
 }

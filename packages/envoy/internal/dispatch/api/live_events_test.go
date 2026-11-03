@@ -15,6 +15,7 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -798,29 +799,80 @@ func TestTheEventsRouteIsGone(t *testing.T) {
 	}
 }
 
-// liveFixtureEvent is the event fixtures/live/event.json's frame carries: a child's status move on
-// its parent, as the event log reads it back.
+// liveFixtureEventBody is the markdown liveFixtureEvent's comment stores, and the text its
+// frame's one tree is read from.
+const liveFixtureEventBody = "**Ship it** on Friday."
+
+// liveFixtureEvent is the event fixtures/live/event.json's frame carries: a comment written on an
+// issue, as the event log reads it back. Its payload stores markdown, so the frame carries the
+// tree of that body as every live event frame carries the trees of the texts it holds.
 func liveFixtureEvent() model.Event {
 	return model.Event{
 		ID:        42,
 		IssueKey:  new("ACME-1"),
 		Project:   "ACME",
 		Seq:       7,
-		Type:      "child.status",
+		Type:      "comment.created",
 		Actor:     model.Actor{Kind: "user", ID: "octocat@example.com"},
 		Notify:    true,
 		CreatedAt: time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC),
-		Payload:   json.RawMessage(`{"child_key":"ACME-2","from":"todo","to":"in_progress"}`),
+		Payload:   json.RawMessage(`{"id":"3f2b1c8e-5a44-4a1e-9c6f-0a1b2c3d4e5f","body":"` + liveFixtureEventBody + `"}`),
+	}
+}
+
+// liveFixtureBlockID is the block id the fixture event's body reads with: the display read mints
+// one for the paragraph it makes, and a fixture a test compares byte for byte cannot hold a new
+// one each run (pmdoc.SetBlockIDGenerator, which exists for exactly this).
+const liveFixtureBlockID = "1f1d4c7a-0b4e-4f1f-9f2b-6d0f0c0a0b01"
+
+// liveFixtureEventFrame is the frame fixtures/live/event.json holds, built with that one id. The
+// tree is read once per process and kept by its text (pmdoc.DisplayJSON), so every test that
+// builds this frame has to build it this way or the kept tree would carry a minted id.
+func liveFixtureEventFrame(t *testing.T) LiveEventFrame {
+	t.Helper()
+	pmdoc.SetBlockIDGenerator(func() string { return liveFixtureBlockID })
+	defer pmdoc.SetBlockIDGenerator(nil)
+	frame, err := liveEventFrame("events-1", liveFixtureEvent())
+	if err != nil {
+		t.Fatalf("build the event frame: %v", err)
+	}
+	return frame
+}
+
+// Every /ws/live event frame carries the display trees of the stored text its payload holds, in
+// the envelope's own `trees` map keyed by the payload field's path: a browser can set no header
+// on a socket, so the frame never waits to be asked. The tree is the one ReadForDisplay makes of
+// that text.
+func TestALiveEventFrameCarriesItsTrees(t *testing.T) {
+	frame := liveFixtureEventFrame(t)
+	var carried struct {
+		Trees map[string]json.RawMessage `json:"trees"`
+	}
+	if err := json.Unmarshal(frame.Event, &carried); err != nil {
+		t.Fatalf("decode the frame's event: %v", err)
+	}
+	tree, held := carried.Trees["payload.body"]
+	if !held {
+		t.Fatalf("the frame carries trees %v, want one at payload.body", carried.Trees)
+	}
+	want := pmdoc.DisplayJSON(liveFixtureEventBody, pmdoc.DisplayLatest)
+	if !bytes.Equal(tree, want) {
+		t.Errorf("payload.body tree\n\t%s\nwant ReadForDisplay's\n\t%s", tree, want)
+	}
+	if len(carried.Trees) != 1 {
+		t.Errorf("the frame carries %d trees, want only the body's", len(carried.Trees))
 	}
 }
 
 // An event frame's event is byte for byte the event's own encoding (json.Marshal of the event the
-// log reads back), so a page reads every event as it always has; the socket's writer keeps those
-// bytes; and fixtures/live/event.json, which the contracts' and the dashboard's tests read, is that
-// frame.
+// log reads back, its display trees among them), so a page reads every event as it always has;
+// the socket's writer keeps those bytes; and fixtures/live/event.json, which the contracts' and
+// the dashboard's tests read, is that frame.
 func TestAnEventFrameCarriesTheEventsOwnBytes(t *testing.T) {
 	event := liveFixtureEvent()
-	encoded, err := json.Marshal(event)
+	sent := event
+	sent.Trees = eventDisplayTrees(event)
+	encoded, err := json.Marshal(sent)
 	if err != nil {
 		t.Fatalf("encode the event: %v", err)
 	}

@@ -369,8 +369,11 @@ type SearchResult struct {
 	Artifact *SearchArtifact `json:"artifact,omitempty"`
 	ID       string          `json:"id"`
 	Snippet  string          `json:"snippet"`
-	Rank     float64         `json:"rank"`
-	Href     string          `json:"href"`
+	// SnippetTree is the ProseMirror tree the snippet is shown as, with the match marked
+	// (pmdoc.DisplaySnippetJSON): present only for a caller that sent `Dispatch-Trees: 1`.
+	SnippetTree json.RawMessage `json:"snippet_tree,omitempty"`
+	Rank        float64         `json:"rank"`
+	Href        string          `json:"href"`
 	// Ask is set on ask hits and nil on every other kind; an ask removed between the search and
 	// the read of its state keeps it nil too.
 	Ask *SearchAsk `json:"ask,omitempty"`
@@ -574,14 +577,17 @@ type ArchitectureTreeTotals struct {
 // counted, each saying how it qualified. Source is the repository of the
 // source whose files define it.
 type ArchitectureTreeComponent struct {
-	ID        string                  `json:"id"`
-	Source    string                  `json:"source"`
-	Title     string                  `json:"title"`
-	Parent    *string                 `json:"parent"`
-	DependsOn []string                `json:"depends_on"`
-	Paths     []string                `json:"paths"`
-	External  bool                    `json:"external"`
-	Prose     string                  `json:"prose"`
+	ID        string   `json:"id"`
+	Source    string   `json:"source"`
+	Title     string   `json:"title"`
+	Parent    *string  `json:"parent"`
+	DependsOn []string `json:"depends_on"`
+	Paths     []string `json:"paths"`
+	External  bool     `json:"external"`
+	Prose     string   `json:"prose"`
+	// ProseTree is the ProseMirror tree Prose is shown as, present only for a caller that sent
+	// `Dispatch-Trees: 1`.
+	ProseTree json.RawMessage         `json:"prose_tree,omitempty"`
 	Done      int                     `json:"done"`
 	Total     int                     `json:"total"`
 	OwnDone   int                     `json:"own_done"`
@@ -690,9 +696,12 @@ type ArtifactApproval struct {
 	At            *string `json:"at,omitempty"`
 	Seq           *int64  `json:"seq,omitempty"`
 	Reason        *string `json:"reason,omitempty"`
-	AskID         *string `json:"ask_id,omitempty"`
-	RequestedBy   *Actor  `json:"requested_by,omitempty"`
-	WaitingOn     string  `json:"waiting_on,omitempty"`
+	// ReasonTree is the ProseMirror tree Reason is shown as, present only for a caller that sent
+	// `Dispatch-Trees: 1`.
+	ReasonTree  json.RawMessage `json:"reason_tree,omitempty"`
+	AskID       *string         `json:"ask_id,omitempty"`
+	RequestedBy *Actor          `json:"requested_by,omitempty"`
+	WaitingOn   string          `json:"waiting_on,omitempty"`
 }
 
 // ArtifactReviewEventPayload is the payload of artifact.approved and
@@ -1157,22 +1166,28 @@ type OpenAskDocument struct {
 type MyAnswerReply struct {
 	ID   string `json:"id"`
 	Body string `json:"body"`
+	// BodyTree is the ProseMirror tree Body is shown as, present only for a caller that sent
+	// `Dispatch-Trees: 1`.
+	BodyTree json.RawMessage `json:"body_tree,omitempty"`
 }
 
 // MyAnswerRow is one answer or reply written by the caller, newest first.
 type MyAnswerRow struct {
-	Kind     string         `json:"kind"`
-	At       time.Time      `json:"at"`
-	AskID    string         `json:"ask_id"`
-	Ref      string         `json:"ref"`
-	Question string         `json:"question"`
-	AskKind  string         `json:"ask_kind"`
-	AskState string         `json:"ask_state"`
-	EditedAt *string        `json:"edited_at"`
-	Owner    OpenAskOwner   `json:"owner"`
-	Answer   *AskAnswer     `json:"answer,omitempty"`
-	Current  bool           `json:"current"`
-	Reply    *MyAnswerReply `json:"reply,omitempty"`
+	Kind     string    `json:"kind"`
+	At       time.Time `json:"at"`
+	AskID    string    `json:"ask_id"`
+	Ref      string    `json:"ref"`
+	Question string    `json:"question"`
+	// QuestionTree is the ProseMirror tree Question is shown as, present only for a caller that
+	// sent `Dispatch-Trees: 1`.
+	QuestionTree json.RawMessage `json:"question_tree,omitempty"`
+	AskKind      string          `json:"ask_kind"`
+	AskState     string          `json:"ask_state"`
+	EditedAt     *string         `json:"edited_at"`
+	Owner        OpenAskOwner    `json:"owner"`
+	Answer       *AskAnswer      `json:"answer,omitempty"`
+	Current      bool            `json:"current"`
+	Reply        *MyAnswerReply  `json:"reply,omitempty"`
 }
 
 // MyAnswersResponse is a page of the caller's answers and ask replies.
@@ -1187,11 +1202,14 @@ type MyAnswersResponse struct {
 // comment or a message), or the ask's answer, whose ID is the ask's, whose author is the answerer
 // and whose first line is the answer's options and text.
 type MyReplyReply struct {
-	ID        string    `json:"id"`
-	Kind      string    `json:"kind"`
-	Author    Actor     `json:"author"`
-	FirstLine string    `json:"first_line"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Author    Actor  `json:"author"`
+	FirstLine string `json:"first_line"`
+	// FirstLineTree is the ProseMirror tree FirstLine is shown as, present only for a caller
+	// that sent `Dispatch-Trees: 1`.
+	FirstLineTree json.RawMessage `json:"first_line_tree,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
 }
 
 // MyReplyRow is one thread the caller wrote in where someone else has written since the caller
@@ -1204,7 +1222,10 @@ type MyReplyRow struct {
 	Issue    *OpenAskIssue    `json:"issue,omitempty"`
 	Document *OpenAskDocument `json:"document,omitempty"`
 	Subject  string           `json:"subject"`
-	Reply    MyReplyReply     `json:"reply"`
+	// SubjectTree is the ProseMirror tree Subject is shown as, present only for a caller that
+	// sent `Dispatch-Trees: 1`.
+	SubjectTree json.RawMessage `json:"subject_tree,omitempty"`
+	Reply       MyReplyReply    `json:"reply"`
 }
 
 // MyRepliesResponse is a page of the caller's unread threads, newest reply first, and how many
@@ -1861,6 +1882,12 @@ type Event struct {
 	Notify     bool      `json:"notify"`
 	CreatedAt  time.Time `json:"created_at"`
 	Payload    any       `json:"payload"`
+	// Trees is the ProseMirror tree of every stored text the payload carries, keyed by that
+	// text's path in the envelope ("payload.body", "payload.options.0.label"). It rides beside
+	// the payload rather than in it so each payload keeps the type its readers know, and it is
+	// filled only for a caller that sent `Dispatch-Trees: 1` and on every /ws/live event frame,
+	// where a browser can set no header.
+	Trees map[string]json.RawMessage `json:"trees,omitempty"`
 }
 
 // EditPrecondition asks Dispatch to apply document operations only against the

@@ -72,11 +72,21 @@ func (s *server) broadcastResolveAllowance() time.Duration {
 // broadcast is what a send's recipients share: who sent it, the body they were all sent, the
 // mode it was sent in, and when.
 type broadcast struct {
-	ID        string      `json:"id"`
-	Author    model.Actor `json:"author"`
-	Body      string      `json:"body"`
-	Delivery  string      `json:"delivery"`
-	CreatedAt time.Time   `json:"created_at"`
+	ID     string      `json:"id"`
+	Author model.Actor `json:"author"`
+	Body   string      `json:"body"`
+	// BodyTree is the ProseMirror tree Body is shown as, present only for a caller that sent
+	// `Dispatch-Trees: 1`.
+	BodyTree  json.RawMessage `json:"body_tree,omitempty"`
+	Delivery  string          `json:"delivery"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+// attachTrees reads the broadcast's body for display when the caller asked for the trees.
+func (b *broadcast) attachTrees(trees bool) {
+	if trees {
+		b.BodyTree = displayTree(b.Body)
+	}
 }
 
 // broadcastSummary is one row of the broadcast list: the send, how many sessions it reached,
@@ -90,9 +100,9 @@ type broadcastSummary struct {
 // broadcastRecipient is one session's copy of a broadcast: the message it was sent, with its
 // delivery attempts, and the replies threaded under it.
 type broadcastRecipient struct {
-	SessionID string          `json:"session_id"`
-	Message   model.Message   `json:"message"`
-	Replies   []model.Message `json:"replies"`
+	SessionID string        `json:"session_id"`
+	Message   messageRead   `json:"message"`
+	Replies   []messageRead `json:"replies"`
 }
 
 // broadcastRead is a broadcast with every recipient's state.
@@ -217,10 +227,11 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 	for _, recipient := range created.Recipients {
 		// The write opened each recipient's first attempt, unclaimed, so every worker is bound
 		// to that attempt rather than opening one of its own.
-		sends = append(sends, broadcastSend{message: recipient.Message, attempt: 1})
+		sends = append(sends, broadcastSend{message: recipient.Message.Message, attempt: 1})
 	}
 	sending := context.WithoutCancel(r.Context())
 	s.detached.goDetached(func() { s.deliverBroadcast(sending, sends, input.Delivery, actor) })
+	created.attachTrees(wantsDisplayTrees(r))
 	WriteJSON(w, http.StatusCreated, broadcastCreated{broadcastRead: created, Excluded: excluded})
 }
 
@@ -276,7 +287,7 @@ type broadcastRecovery struct {
 // sendOwedBroadcastRecipients puts every recipient it still owes on its way behind the answer.
 func (s *server) replayBroadcast(w http.ResponseWriter, r *http.Request, point broadcastRecovery, _ []byte) {
 	ctx := r.Context()
-	read, err := s.readBroadcast(ctx, point.BroadcastID)
+	read, err := s.readBroadcast(ctx, point.BroadcastID, wantsDisplayTrees(r))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -474,7 +485,7 @@ func (s *server) writeBroadcast(
 		}
 		message.Deliveries = []model.MessageDelivery{attempt}
 		sent.Recipients = append(sent.Recipients, broadcastRecipient{
-			SessionID: recipient.sessionID, Message: message, Replies: []model.Message{},
+			SessionID: recipient.sessionID, Message: newMessageRead(message, false), Replies: []messageRead{},
 		})
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -554,7 +565,7 @@ func (s *server) sendOwedBroadcastRecipients(ctx context.Context, read broadcast
 	sends := make([]broadcastSend, 0, len(owed))
 	for _, recipient := range read.Recipients {
 		if attempt, ok := owed[recipient.Message.ID]; ok {
-			sends = append(sends, broadcastSend{message: recipient.Message, attempt: attempt})
+			sends = append(sends, broadcastSend{message: recipient.Message.Message, attempt: attempt})
 		}
 	}
 	// Detached from the request and counted in the server's background wait, as the original
@@ -587,6 +598,7 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
+	trees := wantsDisplayTrees(r)
 	summaries := []broadcastSummary{}
 	for rows.Next() {
 		var summary broadcastSummary
@@ -602,6 +614,7 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
+		summary.attachTrees(trees)
 		summaries = append(summaries, summary)
 	}
 	if err := rows.Err(); err != nil {
@@ -621,7 +634,7 @@ func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "BROADCAST_NOT_FOUND", http.StatusNotFound, "broadcast not found")
 		return
 	}
-	read, err := s.readBroadcast(r.Context(), id)
+	read, err := s.readBroadcast(r.Context(), id, wantsDisplayTrees(r))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, "BROADCAST_NOT_FOUND", http.StatusNotFound, "broadcast not found")
 		return
@@ -635,7 +648,7 @@ func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
 
 // readBroadcast reads one broadcast with every recipient's state, as GET /api/v1/broadcasts/{id}
 // answers it; an unknown id is pgx.ErrNoRows.
-func (s *server) readBroadcast(ctx context.Context, id string) (broadcastRead, error) {
+func (s *server) readBroadcast(ctx context.Context, id string, trees bool) (broadcastRead, error) {
 	var read broadcastRead
 	var author []byte
 	if err := s.deps.Store.Pool.QueryRow(ctx, `
@@ -646,7 +659,8 @@ func (s *server) readBroadcast(ctx context.Context, id string) (broadcastRead, e
 	if err := json.Unmarshal(author, &read.Author); err != nil {
 		return broadcastRead{}, err
 	}
-	recipients, err := s.loadBroadcastRecipients(ctx, read.ID)
+	read.attachTrees(trees)
+	recipients, err := s.loadBroadcastRecipients(ctx, read.ID, trees)
 	if err != nil {
 		return broadcastRead{}, err
 	}
@@ -659,7 +673,7 @@ func (s *server) readBroadcast(ctx context.Context, id string) (broadcastRead, e
 // have no position; their request order was never stored, so they retain the created_at and id
 // fallback order. created_at cannot order one current broadcast because all of its rows share
 // the one transaction's now().
-func (s *server) loadBroadcastRecipients(ctx context.Context, broadcastID string) ([]broadcastRecipient, error) {
+func (s *server) loadBroadcastRecipients(ctx context.Context, broadcastID string, trees bool) ([]broadcastRecipient, error) {
 	rows, err := s.deps.Store.Pool.Query(ctx, `
 		select `+messageColumns+`
 		from messages
@@ -702,8 +716,8 @@ func (s *server) loadBroadcastRecipients(ctx context.Context, broadcastID string
 		message.Deliveries = deliveries[message.ID]
 		recipients = append(recipients, broadcastRecipient{
 			SessionID: strings.TrimPrefix(messageTarget(message.Target), "session:"),
-			Message:   message,
-			Replies:   replies[message.ID],
+			Message:   newMessageRead(message, trees),
+			Replies:   messageReads(replies[message.ID], trees),
 		})
 	}
 	return recipients, nil

@@ -698,7 +698,10 @@ export class DispatchApiClient {
     arrived?: () => void,
     uploaded?: (loaded: number, total: number) => void
   ): Promise<Response> {
-    const sent = { credentials: "same-origin", ...init } satisfies RequestInit;
+    // Every read and write of the page funnels through here, so this one line asks Dispatch for
+    // the display tree of every stored text it answers with (`Dispatch-Trees`); no other client
+    // sends it, and no other client's bytes change.
+    const sent = { credentials: "same-origin", ...init, headers: [...new Headers(init.headers), ["Dispatch-Trees", "1"]] } satisfies RequestInit;
     const progress = (part?: UploadProgress) => {
       arrived?.();
       if (part !== undefined) uploaded?.(part.loaded, part.total);

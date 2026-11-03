@@ -251,7 +251,11 @@ func liveEventsStart(sub string, since int64, replayComplete bool) LiveEventsSta
 
 // liveEventFrame is event's frame on sub: its decimal id and its own JSON encoding, byte for byte,
 // which is what a page reads every event as.
+// Its trees ride in the envelope's own `trees` map, always: a browser cannot set
+// Dispatch-Trees on a socket, and a page reads every event it is handed the same way whether it
+// arrived here or through a REST read.
 func liveEventFrame(sub string, event model.Event) (LiveEventFrame, error) {
+	event.Trees = eventDisplayTrees(event)
 	data, err := json.Marshal(event)
 	if err != nil {
 		return LiveEventFrame{}, err

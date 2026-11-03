@@ -55,6 +55,7 @@ func (s *server) listProjectArtifacts(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	attachApprovalTrees(wantsDisplayTrees(r), artifacts)
 	WriteJSON(w, http.StatusOK, artifacts)
 }
 

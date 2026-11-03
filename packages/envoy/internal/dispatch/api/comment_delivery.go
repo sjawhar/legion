@@ -941,5 +941,5 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	WriteJSON(w, http.StatusCreated, commentWriteResponse{Comment: reply, AskWaitingOn: waitingOn})
+	WriteJSON(w, http.StatusCreated, commentWriteResponse{commentRead: newCommentRead(reply, wantsDisplayTrees(r)), AskWaitingOn: waitingOn})
 }

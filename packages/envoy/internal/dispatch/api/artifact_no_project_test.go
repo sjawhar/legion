@@ -132,7 +132,7 @@ func TestArtifactReadsServeARowWithNoProject(t *testing.T) {
 				t.Errorf("search over a comment on the conversation's file panicked: %v", recovered)
 			}
 		}()
-		found, err := s.runFusedSearchQuery(ctx, "zebraquill", "", 10, 0)
+		found, err := s.runFusedSearchQuery(ctx, "zebraquill", "", 10, 0, false)
 		if err != nil {
 			t.Errorf("search over a comment on the conversation's file: %v", err)
 			return

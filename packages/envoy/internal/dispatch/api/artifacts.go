@@ -61,6 +61,7 @@ func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	attachApprovalTrees(wantsDisplayTrees(r), artifacts)
 	WriteJSON(w, http.StatusOK, artifacts)
 }
 
@@ -692,6 +693,7 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	// The artifact detail is the artifact. Its inbound edges are the graph's to read
 	// (`GET /api/v1/references?to=`, and `GET /api/v1/artifacts/{id}/references` for agents),
 	// so this read does not pay for them.
+	attachApprovalTrees(wantsDisplayTrees(r), []model.Artifact{artifact})
 	WriteJSON(w, http.StatusOK, artifact)
 }
 
@@ -722,7 +724,11 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": version, "token": token})
+	answer := map[string]any{"markdown": markdown, "version": version, "token": token}
+	if tree := displayTree(markdown); wantsDisplayTrees(r) && tree != nil {
+		answer["markdown_tree"] = tree
+	}
+	WriteJSON(w, http.StatusOK, answer)
 }
 
 func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
@@ -843,10 +849,17 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		WriteJSON(w, http.StatusOK, struct {
-			Markdown string `json:"markdown"`
+		// A past version's text is read in the version mode: the attributes the server wrote
+		// into that text are part of what that version said (pmdoc.DisplayVersion).
+		answer := struct {
+			Markdown     string          `json:"markdown"`
+			MarkdownTree json.RawMessage `json:"markdown_tree,omitempty"`
 			model.Version
-		}{Markdown: markdown, Version: version})
+		}{Markdown: markdown, Version: version}
+		if wantsDisplayTrees(r) {
+			answer.MarkdownTree = pmdoc.DisplayJSON(markdown, pmdoc.DisplayVersion)
+		}
+		WriteJSON(w, http.StatusOK, answer)
 		return
 	}
 	var content []byte

@@ -605,6 +605,10 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 			handler = s.refuseChangedLogin(handler)
 		}
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)
+		// One place for the whole table: every answer says its body depends on Dispatch-Trees
+		// (varyOnDisplayTrees), so no cache between a browser and Dispatch hands a reader with
+		// trees an answer written for a reader without them.
+		handler = varyOnDisplayTrees(handler)
 		if route.Method != http.MethodGet {
 			// Every layer above may answer before the body is read; the answer waits for the body.
 			//

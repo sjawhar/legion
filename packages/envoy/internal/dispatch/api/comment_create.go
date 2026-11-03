@@ -921,5 +921,5 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 		comment.Deliveries = append(comment.Deliveries, attempts[index])
 	}
-	WriteJSON(w, http.StatusCreated, withAdvice(commentWriteResponse{Comment: comment, AskWaitingOn: waitingOn}, advice))
+	WriteJSON(w, http.StatusCreated, withAdvice(commentWriteResponse{commentRead: newCommentRead(comment, wantsDisplayTrees(r)), AskWaitingOn: waitingOn}, advice))
 }

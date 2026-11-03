@@ -896,7 +896,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		read, posted, err := s.replyAfterAnswer(r.Context(), tx, answer, actor, input.Body, followUp)
+		read, posted, err := s.replyAfterAnswer(r.Context(), tx, answer, actor, input.Body, followUp, wantsDisplayTrees(r))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -907,6 +907,9 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 				s.writeHandlerError(w, err)
 				return
 			}
+			// The hydration wrote the block into the row the shape stands in front of, so the
+			// shape is taken again over it (display_trees.go).
+			read.shape(wantsDisplayTrees(r))
 		}
 		response = read
 		if posted != nil {
@@ -954,7 +957,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		response, events, status = replyRead{Message: reply}, append(events, answered), http.StatusCreated
+		response, events, status = replyRead{messageRead: newMessageRead(reply, wantsDisplayTrees(r))}, append(events, answered), http.StatusCreated
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
@@ -971,10 +974,10 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 // session already posted in this conversation (its first reply, or an earlier follow-up) is a
 // resend and posts nothing; any other is posted under the first reply, and its event is returned.
 func (s *server) replyAfterAnswer(
-	ctx context.Context, tx pgx.Tx, answer model.Message, actor model.Actor, body *string, followUp bool,
+	ctx context.Context, tx pgx.Tx, answer model.Message, actor model.Actor, body *string, followUp, trees bool,
 ) (replyRead, *model.Event, error) {
 	if body == nil || !followUp {
-		return replyRead{Message: answer, Duplicate: true}, nil, nil
+		return replyRead{messageRead: newMessageRead(answer, trees), Duplicate: true}, nil, nil
 	}
 	posted, err := scanMessage(tx.QueryRow(ctx, `
 		select `+messageColumns+`
@@ -984,7 +987,7 @@ func (s *server) replyAfterAnswer(
 		order by created_at desc limit 1
 	`, answer.ID, *body, actor.ID))
 	if err == nil {
-		return replyRead{Message: posted, Duplicate: true}, nil, nil
+		return replyRead{messageRead: newMessageRead(posted, trees), Duplicate: true}, nil, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return replyRead{}, nil, err
@@ -993,7 +996,7 @@ func (s *server) replyAfterAnswer(
 	if err != nil {
 		return replyRead{}, nil, err
 	}
-	return replyRead{Message: followUpReply}, &event, nil
+	return replyRead{messageRead: newMessageRead(followUpReply, trees)}, &event, nil
 }
 
 // replyRead is what the reply route answers with a message: the message, and `duplicate` when
@@ -1001,7 +1004,7 @@ func (s *server) replyAfterAnswer(
 // attempt's stored reply, or a follow-up whose text the session already posted). A caller cannot
 // otherwise tell a resend from a send, since both carry the message it asked for.
 type replyRead struct {
-	model.Message
+	messageRead
 	Duplicate bool `json:"duplicate,omitempty"`
 }
 

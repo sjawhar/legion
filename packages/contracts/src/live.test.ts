@@ -123,6 +123,7 @@ const EVENT_KEYS = allOf<keyof DispatchEvent>()([
   "notify",
   "created_at",
   "payload",
+  "trees",
 ]);
 /** The frames that are not one subscription's: freshness goes to every subscriber of the socket,
  *  heartbeat to the socket itself. */

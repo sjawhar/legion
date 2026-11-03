@@ -132,6 +132,7 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	login := model.CanonicalLogin(caller.ID)
+	trees := wantsDisplayTrees(r)
 	response := model.MyRepliesResponse{Rows: []model.MyReplyRow{}, Limit: limit, Offset: offset}
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), myRepliesCountQuery, login, issue, artifact).Scan(&response.Total); err != nil {
 		s.writeHandlerError(w, fmt.Errorf("count my replies: %w", err))
@@ -177,6 +178,10 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		row.Reply.FirstLine = contracts.OneLineSummary(body)
+		if trees {
+			row.SubjectTree = displayTree(row.Subject)
+			row.Reply.FirstLineTree = displayTree(row.Reply.FirstLine)
+		}
 		response.Rows = append(response.Rows, row)
 	}
 	if err := rows.Err(); err != nil {

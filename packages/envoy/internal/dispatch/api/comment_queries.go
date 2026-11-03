@@ -28,7 +28,7 @@ func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, comments)
+	WriteJSON(w, http.StatusOK, commentReads(comments, wantsDisplayTrees(r)))
 }
 
 func (s *server) loadOwnerComments(ctx context.Context, q queryer, owner owner, artifactFilter string) ([]model.Comment, error) {
@@ -96,10 +96,11 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	trees := wantsDisplayTrees(r)
 	WriteJSON(w, http.StatusOK, struct {
-		Comment model.Comment   `json:"comment"`
-		Replies []model.Comment `json:"replies"`
-	}{Comment: comments[0], Replies: replies})
+		Comment commentRead   `json:"comment"`
+		Replies []commentRead `json:"replies"`
+	}{Comment: newCommentRead(comments[0], trees), Replies: commentReads(replies, trees)})
 }
 
 // replyChainQuery is every comment transitively replying to the row(s) matching
