@@ -52,9 +52,10 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    runs as a job of its own, so `wait` for its result and read it before you act on it:
 
    1. `task(agent="plan-gap-analyst")` finds gaps in the current root spec. Resolve every finding.
-   2. `task(agent="plan-reviewer")`, told the document is a spec, checks every factual claim against
-      the code, the docs or a read-only command. Resolve every finding; check each claim it marks
-      unverified, fixing it when false or taking it out.
+   2. `task(agent="plan-reviewer")`, told the document is a spec and that the best-practice and
+      world-class reviews have not run yet, checks every factual claim against the code, the docs
+      or a read-only command. Resolve every finding; check each claim it marks unverified, fixing
+      it when false or taking it out.
    3. Run the two reviews in step 2 of `skill://following-best-practices`. In each first-round
       reviewer's first message, send only the problem; send the root spec only as that skill's
       follow-up. Fix or record each finding in the spec's `### Best practice and world-class` entry

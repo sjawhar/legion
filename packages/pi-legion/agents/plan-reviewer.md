@@ -84,12 +84,15 @@ factual claim in it, one at a time, and you do not judge the design.
      with its cost.
 
    Reject the spec if the entry lacks any of these. You check that record; the two reviews judge
-   the design.
+   the design. When your brief says the best-practice and world-class reviews have not run yet,
+   skip this check and say so: the design gate runs you once before those reviews, for the claims,
+   and again after them, for the whole record.
 
 ### Output
 
 The first line is the verdict alone: `approved` when you verified every claim and the spec passes
-check 2, `rejected` otherwise. Then one row for each claim, in the spec's order:
+check 2 (or check 2 was skipped as above), `rejected` otherwise. Then one row for each claim, in the
+spec's order:
 
 - **The claim**, quoted.
 - **Verified**, **false** or **unverified**.

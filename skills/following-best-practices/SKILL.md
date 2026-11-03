@@ -23,7 +23,7 @@ From this problem alone, research and answer three questions. Do not ask for or 
 3. Which fact of this setup, if any, rules out a practice or the world-class answer? A cost in time, money or effort is not such a fact.
 ```
 
-Wait for its answers in the same turn: in Claude Code, start it without `run_in_background`; in omp, `wait` for its task. Never end your turn while it runs: in a headless session, the end of your turn stops every subagent still running, and its answers never arrive. Record its answers in a file or a Dispatch comment before any text that states or leans to a design. Recording them does not end your turn: go on with the work.
+Wait for its answers in the same turn: in Claude Code, start it with `run_in_background: false`; in omp, `wait` for its task. Never end your turn while it runs: in a headless session, the end of your turn stops every subagent still running, and its answers never arrive. Record its answers in a file or a Dispatch comment before any text that states or leans to a design. Recording them does not end your turn: go on with the work.
 
 Then:
 
@@ -34,7 +34,7 @@ Then:
 
 ## 2. Before each approval request
 
-Start two fresh subagents, one per brief, and wait for each answer in the same turn, as in step 1. A fresh subagent starts with no history and gets only the text you send it. In each first-round reviewer's first message, give only the problem: what must work, for whom, the constraints and numbers, the person's words that describe the problem, and the setup. Do not include the proposal's title, design, options, decisions, recommendation or conclusion, or a person's words that state a proposal: a reviewer that reads the design first tends to accept it. After it answers, paste the whole proposal's text into your next message to that same subagent and ask it to compare. A path or a file name is not the proposal, even when the reviewer can read files. If your harness cannot message a finished subagent, give a second fresh subagent the first reviewer's answer and the whole proposal's text, and ask it only to make that comparison. Where your harness offers a subagent on a different model family, use it for these reviews, because a reviewer on the author's model shares its blind spots.
+Start two fresh subagents, one per brief, and wait for each answer in the same turn, as in step 1. A fresh subagent starts with no history and gets only the text you send it. In each first-round reviewer's first message, give only the problem: what must work, for whom, the constraints and numbers, the person's words that describe the problem, and the setup. Do not include the proposal's title, design, options, decisions, recommendation or conclusion, or a person's words that state a proposal: a reviewer that reads the design first tends to accept it. After it answers, paste the whole proposal's text into your next message to that same subagent and ask it to compare. A path or a file name is not the proposal, even when the reviewer can read files. If your harness cannot message a finished subagent and wait for its answer, give a second fresh subagent the first reviewer's answer and the whole proposal's text, and ask it only to make that comparison; in Claude Code, a message to a finished subagent resumes it in the background, so start that second subagent with `run_in_background: false` instead. Where your harness offers a subagent on a different model family, use it for these reviews, because a reviewer on the author's model shares its blind spots.
 
 Best practice:
 
