@@ -570,56 +570,38 @@ select l.lexeme, l.tf, quote_literal(l.lexeme),
   left join own_counts o on o.lexeme = l.lexeme
   left join surfaces sf on sf.lexeme = l.lexeme`
 
-// relatedProbeTSQuery is the document arm's tsquery, the probe's lexemes ORed, written exactly as
-// `string_agg(quote_literal(lexeme), ' | ')` writes it: each lexeme in single quotes, an embedded
-// quote doubled. relatedNoise leaves out a lexeme holding a backslash, which quote_literal writes
-// as E'...', a form tsquery input does not read, so no lexeme that reaches here needs that
-// escape.
-func relatedProbeTSQuery(lexemes []string) string {
-	quoted := make([]string, len(lexemes))
-	for index, lexeme := range lexemes {
-		quoted[index] = "'" + strings.ReplaceAll(lexeme, "'", "''") + "'"
-	}
-	return strings.Join(quoted, " | ")
-}
-
 // relatedProbeSQL answers which of the given lexemes some item of the project holds, leaving out
-// the excluded owner's items. Issues, comments, asks and messages each probe their search index
-// with an exists; documents probe document_search (migration 20261101182447), the GIN-indexed
-// vector of each document's latest version, which they are read through once for all the
-// lexemes: the vector is tested against the lexemes ORed and only a document that matches is
-// unnested.
+// the excluded owner's items. Each kind probes its own search index with an exists: issues, then
+// documents through document_search (migration 20261101182447), the GIN-indexed vector of each
+// document's latest version, then comments, asks and messages.
 //
-// That tsquery is bound as $5 rather than built in a CTE of the statement. A tsquery a subquery
-// produces is no constant at plan time, so the test of it is a join qual, which no GIN index can
-// serve: the planner reads every project's documents and detoasts each vector before the project
-// filter applies. Bound, the test is an index condition on document_search_vector, and $5 carries
-// no cast here so that the parameter is a tsquery itself and the condition needs no expression
-// around it. On the measurement database the arm costs 2.97-3.20 s at twenty lexemes where the
-// release before this one costs 3.42-3.66 s, and the CTE form costs 5.61-5.76 s.
+// The document arm's lexeme test is a subquery of its own, which `offset 0` keeps the planner
+// from folding into the exists around it. Folded in, the arm is costed as the search for a
+// single row, for which a scan of the whole table starts cheapest, and that scan then detoasts
+// one document vector after another until it meets a match - a cost paid again for every lexeme
+// the arms before it leave unanswered, which is what made a probe of twenty rare words cost
+// seconds. Planned on its own the arm is costed for every document it matches, and there the
+// GIN index is cheapest, so each lexeme is answered from the index: on the measurement database
+// the probe reads tens of milliseconds at twenty rare lexemes where the release before this
+// change reads about ten seconds.
 //
 // An item on no document (an issue's comment or ask) is never the excluded document's, so the
 // document test applies only when $4 names one: `is distinct from` a null $4 would leave out
 // every such item.
 //
 // Parameters: $1 project, $2 lexemes, $3 excluded issue key (empty for none), $4 excluded document
-// artifact id (null for none), $5 the lexemes ORed as one tsquery.
+// artifact id (null for none).
 const relatedProbeSQL = `
 with probe as (
   select l.lexeme, quote_literal(l.lexeme)::tsquery as tq from unnest($2::text[]) l(lexeme)
-),
-document_hits as (
-  select distinct u.lexeme
-    from document_search v
-    join artifacts a on a.id = v.artifact_id
-    cross join lateral unnest(v.search) u
-   where a.kind = 'doc' and a.project_key = $1
-     and a.issue_key is distinct from $3 and a.id is distinct from $4::uuid
-     and v.search @@ $5 and u.lexeme = any($2::text[])
 )
 select p.lexeme from probe p
  where exists (select 1 from issues i where i.search @@ p.tq and i.project_key = $1 and i.key <> $3)
-    or exists (select 1 from document_hits d where d.lexeme = p.lexeme)
+    or exists (select 1
+                 from (select v.artifact_id from document_search v where v.search @@ p.tq offset 0) v
+                 join artifacts a on a.id = v.artifact_id
+                where a.kind = 'doc' and a.project_key = $1
+                  and a.issue_key is distinct from $3 and a.id is distinct from $4::uuid)
     or exists (select 1 from comments c
                  left join issues i on i.key = c.issue_key
                  left join artifacts a on a.id = c.artifact_id
@@ -778,8 +760,7 @@ func probeRelatedCandidates(
 		byLexeme[candidate.Lexeme] = candidate
 		candidate.known = true
 	}
-	rows, err := q.Query(ctx, relatedProbeSQL, project, lexemes, excludeIssue, excludeArtifact,
-		relatedProbeTSQuery(lexemes))
+	rows, err := q.Query(ctx, relatedProbeSQL, project, lexemes, excludeIssue, excludeArtifact)
 	if err != nil {
 		return err
 	}

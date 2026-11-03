@@ -141,27 +141,29 @@ func TestStatementTimings(t *testing.T) {
 	// which the runner fails when the after median is not below the before. On the before side
 	// there is no after text to run, so the before text is measured alone there.
 	//
-	// The pair's subject is subjects.ProbeLexemes, the project's twenty commonest words, not
-	// the three the other statements are measured on. On three words the arm looks a handful
-	// of candidate documents up by id, both texts cost the same to within a percent either
-	// way, and a committed "lower after" there decides nothing: measured four times on the
-	// 13 GB fixture that pair came out red three times and green once. Twenty common words
-	// are the list a question of a paragraph or two hands the picker, and they put the cost in
-	// the document arm, where the two texts' plans differ: four runs there read 20.533 ms to
-	// 19.581 ms, 20.685 to 19.506, 20.648 to 19.484 and 20.626 to 19.774.
+	// The pair's subject is subjects.ProbeLexemes, the project's twenty rarest words, not the
+	// three the other statements are measured on. Twenty is the list a question of a paragraph
+	// or two hands the picker, and rare is what it hands it: of the text's words the picker
+	// probes live only those its statistics do not hold, the noise and the too-common already
+	// dropped (pickRelatedTerms). On three words, and on the project's commonest, every arm
+	// matches its first row at once, both texts read tens of milliseconds whatever their plans
+	// are, and a committed "lower after" there decides nothing. On twenty rare words the
+	// document arm is the statement's whole cost, which is where the two texts differ: six runs
+	// of the pair on the 15 GB database spanned 8.8 s to 10.4 s before and 19 ms to 31 ms
+	// after.
 	//
-	// The after text binds the lexemes ORed as $5; the before text builds that tsquery in a CTE
-	// of its own and takes four arguments.
-	mainProbeArguments := []any{subjects.Project, lexemes, "", (*string)(nil)}
+	// Every write that runs the check excludes its own owner (relatedExclusion), so the probe is
+	// measured with the subject issue excluded: with nothing excluded each arm's exists stops at
+	// the first row it meets, which is not the statement production runs.
+	mainProbeArguments := []any{subjects.Project, lexemes, subjects.Issue, (*string)(nil)}
 	if side.relatedProbeSQL != relatedProbeSQL {
 		runner.Head(t, "relatedProbeSQL"+label, benchtime.Statement{SQL: side.relatedProbeSQL, Args: mainProbeArguments})
 		return
 	}
-	pairLexemes := subjects.ProbeLexemes
-	pairArguments := []any{subjects.Project, pairLexemes, "", (*string)(nil)}
+	pairArguments := []any{subjects.Project, subjects.ProbeLexemes, subjects.Issue, (*string)(nil)}
 	runner.Pair(t, "relatedProbeSQL",
 		benchtime.Statement{SQL: mainRelatedProbeSQL, Args: pairArguments},
-		benchtime.Statement{SQL: relatedProbeSQL, Args: append(slices.Clone(pairArguments), relatedProbeTSQuery(pairLexemes))})
+		benchtime.Statement{SQL: relatedProbeSQL, Args: pairArguments})
 }
 
 // documentArmStatements are the five statements whose document arm this change moved onto

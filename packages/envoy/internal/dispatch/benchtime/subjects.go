@@ -44,20 +44,22 @@ type Subjects struct {
 	RareWord   string
 	MediumWord string
 	CommonWord string
-	// ProbeLexemes are the project's probeLexemeCount commonest words, the subject the
-	// related-terms probe is measured on: a question of a paragraph or two hands its picker a
-	// list that long, and words most of the project's documents hold are what put the cost in
-	// the probe's document arm, where the two texts' plans differ. On three words that arm
-	// looks a handful of candidate documents up by id and both texts cost the same to within a
-	// percent either way, so a pair on that subject decides nothing; on these twenty the after
-	// text is 4 to 6 per cent lower, against a spread between runs under one.
+	// ProbeLexemes are the project's probeLexemeCount rarest words at or above rareWordFloor,
+	// the subject the related-terms probe is measured on. That is the class production probes:
+	// the picker hands the probe the words of an item's own text that its statistics do not
+	// hold, after dropping the noise and the words in more than a tenth of the project
+	// (pickRelatedTerms), so a probed word is one a few hundred items hold, never one of the
+	// project's commonest. On the commonest the measurement says nothing: every arm matches
+	// its first row at once, the probe reads tens of milliseconds whatever its plan is, and a
+	// document arm that reads the whole table once per lexeme is invisible.
 	ProbeLexemes []string
 }
 
-// rareWordFloor and mediumWordFloor are the item counts the two scarcer words are taken above. A
-// word in one or two items measures an arm that returns almost nothing, and a search's cost is
-// in the rows it ranks; the floors keep each word in the class the measurement is about.
-// probeLexemeCount is how many of the commonest words the probe's own subject holds.
+// rareWordFloor and mediumWordFloor are the item counts the two scarcer words, and rareWordFloor
+// the probe's subject too, are taken above. A word in one or two items measures an arm that
+// returns almost nothing, and a search's cost is in the rows it ranks; the floors keep each word
+// in the class the measurement is about.
+// probeLexemeCount is how many of the rarest words the probe's own subject holds.
 const (
 	rareWordFloor    = 100
 	mediumWordFloor  = 1000
@@ -132,18 +134,18 @@ func bindSubjects(t *testing.T, conn *pgx.Conn) Subjects {
 		where s.project_key = $1 and s.ndoc >= $2 order by s.ndoc desc, s.lexeme limit 1`, 0)
 	probeRows, err := conn.Query(ctx, `
 		select s.lexeme from search_term_stats s
-		where s.project_key = $1 and s.ndoc >= $2 order by s.ndoc desc, s.lexeme limit $3`,
-		subjects.Project, mediumWordFloor, probeLexemeCount)
+		where s.project_key = $1 and s.ndoc >= $2 order by s.ndoc, s.lexeme limit $3`,
+		subjects.Project, rareWordFloor, probeLexemeCount)
 	if err != nil {
-		t.Fatalf("read %s's middling words: %v", subjects.Project, err)
+		t.Fatalf("read %s's rarest words: %v", subjects.Project, err)
 	}
 	subjects.ProbeLexemes, err = pgx.CollectRows(probeRows, pgx.RowTo[string])
 	if err != nil {
-		t.Fatalf("read %s's middling words: %v", subjects.Project, err)
+		t.Fatalf("read %s's rarest words: %v", subjects.Project, err)
 	}
 	if len(subjects.ProbeLexemes) < probeLexemeCount {
 		t.Fatalf("%s holds %d words in at least %d of its items, and the probe's subject is %d: the term statistics of this database are not the seed's",
-			subjects.Project, len(subjects.ProbeLexemes), mediumWordFloor, probeLexemeCount)
+			subjects.Project, len(subjects.ProbeLexemes), rareWordFloor, probeLexemeCount)
 	}
 	return subjects
 }

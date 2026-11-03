@@ -44,22 +44,9 @@ type documentSearchStatement struct {
 	statement string
 	oracle    string
 	arguments []any
-	// oracleArguments are the oracle's own where it takes another list: the probe binds its
-	// tsquery as a parameter and the released text builds that tsquery in a CTE, so the two
-	// take five arguments and four. Empty means the statement's own list.
-	oracleArguments []any
-	sorted          bool
-	holds           []string
-	lacks           []string
-}
-
-// oracleArgs are the arguments the oracle runs with: its own where it declares them, else the
-// statement's.
-func (s documentSearchStatement) oracleArgs() []any {
-	if s.oracleArguments != nil {
-		return s.oracleArguments
-	}
-	return s.arguments
+	sorted    bool
+	holds     []string
+	lacks     []string
 }
 
 // documentSearchFixture is the corpus of R1's plan and equality tests: one project whose
@@ -211,9 +198,7 @@ func (f documentSearchFixture) statements() []documentSearchStatement {
 			name:      "the related-terms probe",
 			statement: relatedProbeSQL,
 			oracle:    mainRelatedProbeSQL,
-			arguments: []any{f.project, probeLexemes, "", (*string)(nil), relatedProbeTSQuery(probeLexemes)},
-			// The released text builds that tsquery in a CTE of its own, so it takes four.
-			oracleArguments: []any{f.project, probeLexemes, "", (*string)(nil)},
+			arguments: []any{f.project, probeLexemes, "", (*string)(nil)},
 			// The probe declares no order, so its answer is a set.
 			sorted: true,
 			// Only documents hold documentSearchDocumentWord, so answering it is the document
@@ -253,7 +238,7 @@ func TestEveryDocumentArmSearchesTheDocumentSearchIndex(t *testing.T) {
 func TestMainsDocumentArmSearchesNoDocumentSearchIndex(t *testing.T) {
 	fixture := newDocumentSearchFixture(t)
 	statement := fixture.statements()[0]
-	plan := planWithoutSeqScans(t, fixture.database, statement.oracle, statement.oracleArgs()...)
+	plan := planWithoutSeqScans(t, fixture.database, statement.oracle, statement.arguments...)
 	for _, scan := range explaintest.IndexScans(t, plan) {
 		if scan.Index == documentSearchIndex {
 			t.Fatalf("main's keyword search reads %s, a table it does not know:\n%s", documentSearchIndex, plan)
@@ -273,7 +258,7 @@ func TestEveryDocumentArmAnswersWhatMainsStatementDoes(t *testing.T) {
 	ctx := context.Background()
 	for _, statement := range fixture.statements() {
 		t.Run(statement.name, func(t *testing.T) {
-			want := documentSearchRows(t, ctx, fixture.database, statement.oracle, statement.oracleArgs(), nil)
+			want := documentSearchRows(t, ctx, fixture.database, statement.oracle, statement.arguments, nil)
 			got := documentSearchRows(t, ctx, fixture.database, statement.statement, statement.arguments,
 				[]string{"set local enable_seqscan = off"})
 			if statement.sorted {
