@@ -69,8 +69,15 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner str
 // lib's output. The token manager runs it in token mode (appauth's TokenCommand) for each of the
 // run's two repositories' owners, and with those tokens reads each repository's default branch as
 // GitHub names it, the base every launch on it provisions at. No key reaches the harness.
-func (r *liveRig) resolveApp() error {
+func (r *liveRig) resolveApp() (err error) {
 	apps := appauth.New(config.GitHubApps{Implement: config.GitHubApp{AppID: r.env.appID, TokenCommand: r.env.appTokenCommand}}, appauth.Options{})
+	// The rig owns the manager once it is stored in r.tokens, and closes it in close; until then a
+	// failure closes it here, so a token command still running never outlives the harness.
+	defer func() {
+		if err != nil {
+			apps.Close()
+		}
+	}()
 	branches := make([]string, 2)
 	var identity runtime.GitIdentity
 	for i, repo := range []ghrepo.Repository{r.env.repo, r.env.repoSecondOwner} {

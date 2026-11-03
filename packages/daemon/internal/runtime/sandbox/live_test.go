@@ -925,6 +925,9 @@ func (r *liveRig) claim(name string) *liveClaim {
 func (r *liveRig) close() {
 	r.stopRuntime()
 	r.cancel()
+	if r.tokens.apps != nil {
+		r.tokens.apps.Close()
+	}
 }
 
 // sameLocator compares two locators by what they name; the struct holds pointers.
