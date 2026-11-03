@@ -247,7 +247,10 @@ against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, uploaded files' bytes live in that bucket under
 `files/sha256/<hash>` (`internal/dispatch/files`; `main.go`'s `openFileStore` builds the store
-and hands it down as `api.Deps.Files`), one object however often the file is uploaded; a
+with `files.Open`, the one place a value becomes a store, which `backfill-files` calls too:
+`gs://<bucket>` is `files.GCS`, a Cloud Storage bucket under Application Default Credentials
+needing only `storage.objects.create` and `storage.objects.get`, and a bare name is `files.S3`;
+it hands the store down as `api.Deps.Files`), one object however often the file is uploaded; a
 document's markdown stays in Postgres. `storeArtifact` writes the object before it opens its
 transaction, so no issue lock or pooled connection waits on the bucket, and the row holds no
 bytes; `getArtifactVersion` serves a row still holding bytes from the row and any other from the
@@ -256,9 +259,11 @@ aborting the response (`http.ErrAbortHandler`) on a body that fails or hashes wr
 Unset, `Deps.Files` is a nil interface and every upload stays in its row, as the test harness
 and a laptop run. The API tests inject `filestest.NewMemory()`
 (`internal/dispatch/files/filestest`); the store's own tests and `backfill-files`'s exit-code
-test open the store with `files.NewS3` against `filestest.ServeS3`, a loopback bucket the AWS
+test open the S3 store with `files.NewS3` against `filestest.ServeS3`, a loopback bucket the AWS
 SDK reaches through its own `AWS_*` environment, and once against an S3-compatible server in a
-container (`internal/tests3`, SeaweedFS, which CI pre-pulls as it does the NATS image).
+container (`internal/tests3`, SeaweedFS, which CI pre-pulls as it does the NATS image); the GCS
+store's tests open it with `files.NewGCS` against `filestest.ServeGCS`, a loopback JSON API
+bucket that refuses an upload without `ifGenerationMatch=0` or the body's CRC32C and MD5.
 `envoy-dispatch backfill-files [--verify-only | --restore]` moves the rows uploaded before the
 bucket, checks them, or writes them back (the rollback); the README's "Moving uploaded files to
 the bucket" has its rules and the task role's grant. `/healthz` reports the bucket as `files`
