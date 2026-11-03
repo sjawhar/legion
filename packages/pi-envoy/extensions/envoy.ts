@@ -1793,6 +1793,12 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
+  // How long a round trip the connection answers nowhere is left to run in the background before
+  // it is asked again, and the ceiling on that waiting: a session that has been away this long
+  // has had many heartbeats, each of which registers again, so there is nothing left for the
+  // confirmation to be first to.
+  const BACKGROUND_CONFIRM_CAP_MS = 10 * 60_000;
+
   // The round trip that makes a subject this session asked for live rather than merely written:
   // `subscribe()` only writes SUB into the connection's out buffer, and core NATS drops a publish
   // no subscription matches yet, so without it the caller can register this session's interest —
@@ -1801,25 +1807,45 @@ export default function envoyExtension(pi: PiApi): void {
   // `notifications.legion.<project>.controller` lost a triage notice in. claude-envoy's channel
   // flushes before every registration for the same reason.
   //
-  // A round trip that is rejected or unanswered is transient, and is waited out rather than
-  // failed: nats.js rejects every pending flush when the connection drops (`resetOutbound`,
-  // `nats/lib/nats-base-client/protocol.js`) and a reconnecting connection answers nothing until
-  // it is back, while on every connect it sends every live subscription again
-  // (`sendSubscriptions`, before `flushPending`), so an open subject needs no reopen — only a
-  // confirmation that the server has it. Before this file took a round trip at all, an open made
-  // during a blip simply succeeded and its notices arrived once NATS was back; this must not take
-  // that away, since a `subscribeNotice` that throws ends a controller's claim and nothing
-  // reopens a notice subject. What it may do instead is delay the registration that follows it.
-  // It gives up only on a connection that is closed for good, or a session that is shutting down:
-  // either way this connection carries nothing more, and the caller dials again.
+  // It is bounded, and it never holds the caller past that bound. A connection that is
+  // reconnecting rejects every pending round trip (`resetOutbound`,
+  // `nats/lib/nats-base-client/protocol.js`) and answers none until it is back, and with
+  // `maxReconnectAttempts: -1` it is never closed, so a confirmation that waited such a rejection
+  // out would wait for the whole outage — and the reconcile pass's own contract (above its
+  // `handle.subscribe` call) is that only opening the agent subject needs NATS, while the
+  // registration and the role go over HTTP and an outage stops neither. So one bound is awaited:
+  // answered, the caller registers a subject the server has, which is the ordering this file
+  // exists for; unanswered, the subjects stay open — nats.js sends every live subscription again
+  // on each connect (`sendSubscriptions`, before `flushPending`) — the caller goes on exactly as
+  // it did before this file took a round trip at all, and the confirmation runs on in the
+  // background so the server's answer is still asked for, with nothing waiting on it. A notice
+  // published during the outage is lost, as it is without this file's round trip at all.
+  //
+  // It throws only on a connection closed for good, or a session shutting down: either way this
+  // connection carries nothing more, and the subjects it opened are the caller's to close.
   const confirmSubscribed = async (connection: NatsConnection, what: string): Promise<void> => {
-    for (;;) {
+    try {
+      await within(connection.flush(), SUBSCRIBE_FLUSH_TIMEOUT_MS, `confirming ${what}`);
+    } catch (error) {
+      if (shuttingDown || connection.isClosed()) throw error;
+      void confirmInBackground(connection, what);
+    }
+  };
+
+  // Asks for the server's answer again, on a connection that has not given one, until it answers,
+  // the connection is closed for good, the session shuts down, or BACKGROUND_CONFIRM_CAP_MS pass.
+  // Nothing waits on it: it exists so a subject whose round trip the connection could not answer
+  // is still confirmed once it can, without the open that wrote it holding its caller.
+  const confirmInBackground = async (connection: NatsConnection, what: string): Promise<void> => {
+    const until = Date.now() + BACKGROUND_CONFIRM_CAP_MS;
+    while (!shuttingDown && !connection.isClosed() && Date.now() < until) {
+      await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_DELAY_MS));
+      if (shuttingDown || connection.isClosed()) return;
       try {
         await within(connection.flush(), SUBSCRIBE_FLUSH_TIMEOUT_MS, `confirming ${what}`);
         return;
-      } catch (error) {
-        if (shuttingDown || connection.isClosed()) throw error;
-        await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_DELAY_MS));
+      } catch {
+        // Still no answer: ask again, until this connection is gone or the cap is reached.
       }
     }
   };
@@ -1848,9 +1874,9 @@ export default function envoyExtension(pi: PiApi): void {
     // map. So a subject this call opened and could not confirm is closed before the throw, or a
     // role-bound notice subject outlives its role: registered as a plain interest at the next
     // registration and never closed by `endRole`, it would keep taking a replaced holder's wakes.
-    // Only a connection closed for good reaches it, since the confirmation waits out everything
-    // else, and only this call's own subscriptions are closed: a newer open may already own the
-    // map entry.
+    // Only a connection closed for good reaches it, since a round trip the connection can still
+    // answer later does not fail the open, and only this call's own subscriptions are closed: a
+    // newer open may already own the map entry.
     const opened: [string, Subscription][] = [];
     const closeOpened = () => {
       for (const [subject, subscription] of opened) {
@@ -2114,8 +2140,9 @@ export default function envoyExtension(pi: PiApi): void {
     void pumpRelay(owner, subscription);
     // The relay's own registration names this session's delivery subject the moment this returns,
     // and the listener publishes to it at once, so a SUB still in the out buffer costs the first
-    // frames. The confirmation waits out a disconnect, so only a connection closed for good gets
-    // past it, and then this subject goes with it: `retryRelay` bails while `owner.subscription`
+    // frames. A round trip this connection can still answer later does not fail the open, so only
+    // a connection closed for good gets past the confirmation, and then this subject goes with it:
+    // `retryRelay` bails while `owner.subscription`
     // is set, and `pumpRelay` starts no retry of its own for a subscription whose owner no longer
     // names it, so the caller - the reconcile pass, or `retryRelay` behind a later pump end -
     // opens the relay again only because this throws with the field cleared.
@@ -2388,8 +2415,9 @@ export default function envoyExtension(pi: PiApi): void {
     agentStreamControl = subscription;
     void pumpAgentStreamControl(subscription, session);
     // A viewer's first ping is published as soon as the registration names this session, and one
-    // sent before the server took this SUB would be dropped, leaving the viewer to retry. The
-    // confirmation waits out a disconnect, so only a connection closed for good gets past it, and
+    // sent before the server took this SUB would be dropped, leaving the viewer to retry. A round
+    // trip this connection can still answer later does not fail the open, so only a connection
+    // closed for good gets past the confirmation, and
     // then this subject goes with it: this function returns at once while `agentStreamControl`
     // names the session, so clearing the field is what lets the next pass - or
     // `pumpAgentStreamControl`'s own end path, one resubscribe delay later - open it again.
