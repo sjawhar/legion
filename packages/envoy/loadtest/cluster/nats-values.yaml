@@ -1,0 +1,127 @@
+# nats-values.yaml: the values render-nats.sh gives chart nats/nats 2.15.1 to render
+# manifests/nats.yaml, the cluster copy's three-pod JetStream hub.
+#
+# They follow INFRA-549's section 2.1 (INFRA-14's shape): a three-server cluster with
+# noAdvertise, JetStream on a 20Gi PVC per server with an 18Gi file store and no memory store, the
+# monitor on 8222, 2 CPU / 4Gi per server (request = limit), and a zone spread of maxSkew 1,
+# DoNotSchedule, minDomains 3. Differences from INFRA-549, each for the copy alone:
+#   - podDisruptionBudget off: the load-test Role writes no PodDisruptionBudget, and a budget at
+#     zero would hold up the drain of any node a copy pod runs on ("Running a copy");
+#   - no tailnet and no priority class: the namespace's quota refuses any pod naming one;
+#   - natsBox on: cluster.sh purges the stream and the KV buckets through it before every step;
+#   - no auth: production's users and nkeys stay production's, and the namespace's NetworkPolicy
+#     fences the copy;
+#   - no ServiceAccount (the Role writes none), and no service-account token in any pod.
+#
+# The images are not set here: render-nats.sh resolves each one's tag to its digest and passes
+# it with --set, so every image in nats.yaml is pinned by digest. __NAMESPACE__, __STORAGE_CLASS__
+# and __RUN_ID__ stay in nats.yaml as placeholders; cluster.sh fills them from validated values.
+# The quota counts ephemeral-storage requests, so every container requests it explicitly.
+# The chart puts global.labels on every object and pod it renders, but not on the PVC template,
+# which gets the same two labels below so that down finds the claims by the run label.
+namespaceOverride: __NAMESPACE__
+global:
+  labels:
+    app.kubernetes.io/part-of: dispatch-loadtest
+    dispatch-loadtest/run: __RUN_ID__
+
+config:
+  cluster:
+    enabled: true
+    replicas: 3
+    noAdvertise: true
+  jetstream:
+    enabled: true
+    fileStore:
+      pvc:
+        size: 20Gi
+        storageClassName: __STORAGE_CLASS__
+        merge:
+          metadata:
+            labels:
+              app.kubernetes.io/part-of: dispatch-loadtest
+              dispatch-loadtest/run: __RUN_ID__
+      maxSize: 18Gi
+    memoryStore:
+      enabled: false
+  monitor:
+    enabled: true
+    port: 8222
+
+container:
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+      ephemeral-storage: 1Gi
+
+reloader:
+  merge:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+        ephemeral-storage: 256Mi
+      limits:
+        cpu: 50m
+        memory: 64Mi
+        ephemeral-storage: 256Mi
+
+statefulSet:
+  merge:
+    spec:
+      # down deletes the PVCs by the run label too; this deletes them with the StatefulSet.
+      persistentVolumeClaimRetentionPolicy:
+        whenDeleted: Delete
+        whenScaled: Retain
+
+podTemplate:
+  topologySpreadConstraints:
+    topology.kubernetes.io/zone:
+      maxSkew: 1
+      whenUnsatisfiable: DoNotSchedule
+      minDomains: 3
+  merge:
+    metadata:
+      labels:
+        dispatch-loadtest/role: nats
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      automountServiceAccountToken: false
+
+podDisruptionBudget:
+  enabled: false
+
+serviceAccount:
+  enabled: false
+
+natsBox:
+  enabled: true
+  container:
+    merge:
+      # Autopilot raises a safe-to-evict "false" pod to at least 500m and 512Mi.
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+          ephemeral-storage: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+          ephemeral-storage: 256Mi
+  podTemplate:
+    merge:
+      metadata:
+        labels:
+          dispatch-loadtest/role: nats-box
+        annotations:
+          cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+      spec:
+        automountServiceAccountToken: false
+  serviceAccount:
+    enabled: false

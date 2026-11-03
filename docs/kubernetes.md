@@ -3904,8 +3904,12 @@ nothing recorded what that pod was built from, and a guess would replace pods th
 What the sweep then opens is one round per issue, since every role of an issue shares its one pod (`reconcilePodUpdates`, `packages/daemon/internal/daemon/podupdate.go`).
 Every claim of the issue that has a session and has not retired holds the round back, since its agent has run and may hold unpushed work,
 and each one is given a task naming the drift, the round's own id and asking it to push its work to the issue branch and answer `ready_for_update` with that id.
+A `failed` claim is the exception: it runs no turn on the pod, so the round asks it nothing and does not wait for it (`askedClaims`); what it left unpushed goes with the pod, and a retry brings it back into the round as any other claim.
 No claim is left out of a round for the contract its plugin records:
 a worker whose plugin has no such op is asked all the same, and its task tells it to push and end its turn, which the daemon reads as its answer (`answerByTurnEnd`).
+A turn after an answer takes the answer back and the worker is asked again, since that turn can move the branch (`takeBackSignal`), unless it is the turn of the round's own ask, or the claim's plugin has no such op and the daemon sent nothing for the turn:
+that plugin's own phase-stall reminder starts such turns after the WAITING line the task asks for, while a plugin with the op holds its reminder until the round ends.
+The daemon cannot tell that reminder from an Envoy notice, a background job's result or a person's steer, so in such a claim none of them takes the answer back, and nothing checks the branch before the pod goes: work such a turn commits and does not push goes with the pod.
 The id is what makes the answer that round's:
 the daemon takes an answer only for the round the claim is in now and refuses any other, naming both ids, so an answer given to a task the worker read before the round changed counts for nothing and the worker is asked again.
 A suspended claim is revived for the task, unless the operator's own suspension holds it, which takes the task on the operator's resume.
@@ -3916,7 +3920,7 @@ the daemon reads the issue's claims from the store again — which is how a clai
 A claim that has not answered, or a turn that started while the replacement waited for the pod's launch turn, aborts it:
 nothing is suspended, the round stays open, and the next sweep decides again.
 Nothing the round decides is held in memory:
-it is all claim columns, so a daemon restart resumes a round where it stood, and each claim shows it as `updateRound` and `updateHead` on every claim view.
+it is all claim columns, so a daemon restart resumes a round where it stood, and each claim shows it as `updateRound` and `updateHead` on every claim view, except to a caller in a pod whose claims record a plugin contract below 46, whose strict reader knows neither field: `GET /legion/v1/state` serves that caller, known by the pod that holds its address, the claim views without them.
 A round, once opened, ends only by replacing its pod, or because that pod is gone.
 The drift returning to nothing — an operator rolled the release back — ends no round:
 every worker in it has already been told to push its work and to start no new work, so the pod is replaced all the same, and the task and the notice keep naming the reasons the round was opened for, which the round records (`roundReasons`).
@@ -3929,8 +3933,8 @@ naming the issue, the round, the pod, the drift and every claim it waits on with
 One round is told once, however many sweeps find it open.
 A round whose workers have all answered is told the same way when it still cannot replace the pod:
 a turn that never ends, or a `ReplacePod` the cluster keeps refusing, each holds every answered worker's next task, and the notice names what it waits on.
-What such a round waits on that only a person can clear is a claim no task reaches — a `failed` one, or one an operator's own suspension holds
-— and the notice marks which claims have answered, so the controller prompts the workers it can and leaves the rest to the operator's own resume.
+What such a round waits on that only a person can clear is a claim an operator's own suspension holds, which takes the task only on the operator's resume,
+and the notice marks which claims have answered, so the controller prompts the workers it can and leaves the rest to the operator's own resume.
 A pod that goes before its round is over, replaced where it stood for a failure of its own, has the daemon write on the issue which roles had not answered and that the work they did not push went with the disk.
 Two readings say the pod went:
 the runtime answering that the pod the claims record is not there, and the claims recording another pod in its place.

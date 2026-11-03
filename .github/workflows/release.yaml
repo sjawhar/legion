@@ -922,12 +922,15 @@ jobs:
     # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
     # PR-authored Dockerfile. This job's permissions must cover every scope worker-image.yaml's
     # `permissions:` blocks declare, even for the `attest` job this call skips: its workflow-level
-    # block (the build) and its `attest` job's (id-token and attestations: write, for the image's
-    # GitHub attestation). The legion version tag and the release note, which need contents: write,
-    # are worker_image_release below.
+    # block (the build, with actions: read and checks: write for the ci-ok report its build runs
+    # only on ci.yaml's pull_request call) and its `attest` job's (id-token and attestations:
+    # write, for the image's GitHub attestation). The legion version tag and the release note,
+    # which need contents: write, are worker_image_release below.
     permissions:
       contents: read
       packages: write
+      actions: read
+      checks: write
       id-token: write
       attestations: write
     with:
@@ -956,6 +959,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: read
+      checks: write
       id-token: write
       attestations: write
     with:
