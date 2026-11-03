@@ -592,7 +592,7 @@ describe("the AskGate decision record", () => {
   test("a call that is neither rules-checked nor an override writes nothing", async () => {
     const dispatch = fakeDispatch();
     const g = harness({ client: dispatch.client });
-    for (const outcome of ["verdict", "halted", "skipped"] as const)
+    for (const outcome of ["verdict", "halted", "timeout"] as const)
       expect(
         await g.write({
           ...REFUSAL,

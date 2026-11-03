@@ -1,0 +1,1 @@
+This call sends a message to other agents, not to the person: `to` names who gets it (`agent://all` and a team topic reach every agent there), and `message` is its text. Judge this message against content failure 15 alone. Every other failure is about a write the person reads, and is a non-finding for it. A revise gives the message to send instead, or says to send none.
