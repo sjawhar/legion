@@ -166,6 +166,14 @@ type Config struct {
 	// Session is the session name the minted token writes under, which an entry that fixes one
 	// refuses to be told and an entry that fixes none requires.
 	Session string
+	// NoLauncherCredential declines the launcher credential this identity holds
+	// (oauthwire.FormLauncherCredential), for a caller that wants a Dispatch access token and
+	// nothing else: a trade that asks writes a launcher_credentials row and a token_login
+	// audit row, both of which an operator reads through, and nothing removes either. The zero
+	// value asks, because every caller of this package that trades a machine's or a person's
+	// Google identity — `agent-secrets`, `agent-secrets-helper`, a sign-in — goes on to enrol a
+	// session under the credential and could do nothing without it.
+	NoLauncherCredential bool
 	// HTTP is the client every call goes through; nil is http.DefaultClient. The DPoP proof is
 	// signed by a transport this client wraps around it, so a caller passing its own client
 	// keeps its timeout and its dialler.
@@ -182,16 +190,18 @@ type Config struct {
 
 // Client trades Config's identity for the broker's access tokens and keeps one live.
 type Client struct {
-	brokerURL   string
-	key         *ecdsa.PrivateKey
-	subject     Source
-	actor       Source
-	session     string
-	http        *http.Client
-	log         *slog.Logger
-	renewBefore time.Duration
-	now         func() time.Time
-	after       func(time.Duration) <-chan time.Time
+	brokerURL string
+	key       *ecdsa.PrivateKey
+	subject   Source
+	actor     Source
+	session   string
+	// noLauncherCredential is Config.NoLauncherCredential: this trade declines the credential.
+	noLauncherCredential bool
+	http                 *http.Client
+	log                  *slog.Logger
+	renewBefore          time.Duration
+	now                  func() time.Time
+	after                func(time.Duration) <-chan time.Time
 	// wake carries a Wake to the renewal loop's sleep, one slot deep: the instruction is "trade
 	// now", which two of are one.
 	wake chan struct{}
@@ -212,17 +222,18 @@ func New(cfg Config) (*Client, error) {
 		return nil, errors.New("brokerclient: no subject token source: nothing names the identity to trade")
 	}
 	client := &Client{
-		wake:        make(chan struct{}, 1),
-		brokerURL:   strings.TrimSuffix(strings.TrimSpace(cfg.BrokerURL), "/"),
-		key:         cfg.Key,
-		subject:     cfg.Subject,
-		actor:       cfg.Actor,
-		session:     cfg.Session,
-		http:        cfg.HTTP,
-		log:         cfg.Log,
-		renewBefore: cfg.RenewBefore,
-		now:         cfg.Now,
-		after:       cfg.After,
+		wake:                 make(chan struct{}, 1),
+		brokerURL:            strings.TrimSuffix(strings.TrimSpace(cfg.BrokerURL), "/"),
+		key:                  cfg.Key,
+		subject:              cfg.Subject,
+		actor:                cfg.Actor,
+		session:              cfg.Session,
+		noLauncherCredential: cfg.NoLauncherCredential,
+		http:                 cfg.HTTP,
+		log:                  cfg.Log,
+		renewBefore:          cfg.RenewBefore,
+		now:                  cfg.Now,
+		after:                cfg.After,
 	}
 	if client.http == nil {
 		client.http = http.DefaultClient
@@ -369,7 +380,8 @@ func (c *Client) logf(ctx context.Context, message string, args ...any) {
 }
 
 // trade is one RFC 8693 exchange: the subject token this moment's Source answers, the actor
-// token where a person is signing in, the session name, and a DPoP proof of this client's key.
+// token where a person is signing in, the session name, whether this trade declines the launcher
+// credential its identity holds, and a DPoP proof of this client's key.
 func (c *Client) trade(ctx context.Context) (*Token, error) {
 	subject, subjectType, err := c.subject.Token(ctx)
 	if err != nil {
@@ -383,6 +395,11 @@ func (c *Client) trade(ctx context.Context) (*Token, error) {
 	}
 	if c.session != "" {
 		form.Set(oauthwire.FormSession, c.session)
+	}
+	if c.noLauncherCredential {
+		// Sent only to decline: an absent parameter asks, so a broker that has never heard of
+		// this parameter answers a client that does ask exactly as it always has.
+		form.Set(oauthwire.FormLauncherCredential, oauthwire.FormLauncherCredentialDeclined)
 	}
 	if c.actor != nil {
 		actor, actorType, err := c.actor.Token(ctx)

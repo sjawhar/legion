@@ -13,6 +13,7 @@ import { type DispatchEnvironment, dispatchSettings } from "../dispatch-config";
 import { DispatchClient } from "../dispatch-http";
 import { readEnvoyConfig } from "../envoy-config";
 import { envoySettings } from "../envoy-settings";
+import { createEnvoyClient } from "../transport";
 
 afterEach(forgetBrokerClients);
 
@@ -298,6 +299,112 @@ test("the listener takes the same credential, and a configured bearer still wins
   if (!written.enabled) throw new Error("Envoy is off");
   expect(written.credential?.scheme).toBe("Bearer");
   expect(written.credential?.secret()).toBe("listener-token");
+});
+
+/** A broker whose tokens name the session the trade asked to write under, as the real one's do
+ *  (the broker records the minted token against that session and the listener reads it back at
+ *  the introspection route). */
+function sessionBroker(): { url: string; sessions: string[] } {
+  const sessions: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: async (request) => {
+      const session = new URLSearchParams(await request.text()).get("session") ?? "";
+      sessions.push(session);
+      return Response.json({
+        access_token: `token-for-${session}`,
+        issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+        token_type: "DPoP",
+        expires_in: 600,
+      });
+    },
+  });
+  servers.push(server);
+  return { url: `http://127.0.0.1:${server.port}`, sessions };
+}
+
+/** One call the stub listener was sent: the session its body acts as, and the session the token
+ *  it presented names. */
+interface Acted {
+  readonly path: string;
+  readonly body: string;
+  readonly token: string;
+}
+
+/** A listener that binds the session a broker token names, as the real one does
+ *  (`sessionNotBound`, packages/envoy/cmd/listener/brokerauth.go): a body naming another session
+ *  is 403, and nothing else about the call is judged. */
+function sessionBoundListener(): { url: string; acted: Acted[] } {
+  const acted: Acted[] = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: async (request) => {
+      const token = (request.headers.get("Authorization") ?? "").replace(/^DPoP /, "");
+      const sent: unknown = JSON.parse(await request.text());
+      const named =
+        typeof sent === "object" && sent !== null && "session_id" in sent ? sent.session_id : "";
+      const body = typeof named === "string" ? named : "";
+      acted.push({ path: new URL(request.url).pathname, body, token });
+      if (token !== `token-for-${body}`) {
+        return Response.json(
+          { error: `this request acts as session ${body}, and its credential names another` },
+          { status: 403 }
+        );
+      }
+      return Response.json({ session_id: body, machine_id: "box", dir: "/work", topics: [] });
+    },
+  });
+  servers.push(server);
+  return { url: `http://127.0.0.1:${server.port}`, acted };
+}
+
+test("a role handed back for the session this process left presents that session's credential", async () => {
+  // One Oh My Pi process switches sessions, and the session it leaves may still hold a role at
+  // the listener. The hand-back acts as that old session, so it must present the old session's
+  // own token: under the token of the session running now the listener answers 403, the
+  // hand-back fails, and the role stays with a session whose subject this process has closed
+  // until the registration's TTL lapses.
+  const broker = sessionBroker();
+  const listener = sessionBoundListener();
+  const env = podEnvironment(broker.url, listener.url);
+  let current = "session-one";
+  const resolution = envoySettings(env, noFile(env), { nats: false, session: () => current });
+  if (!resolution.enabled)
+    throw new Error(`Envoy is off: ${resolution.error ?? resolution.notice}`);
+  const client = createEnvoyClient({
+    baseUrl: resolution.url,
+    fetch,
+    ...(resolution.credential === undefined ? {} : { credential: resolution.credential }),
+  });
+
+  await client.setRole({ sessionID: "session-one", role: "controller" });
+  // The switch: `bindDispatchSession` has moved this process to the new session, and the pass
+  // that follows hands the old session's role back.
+  current = "session-two";
+  await client.unsubscribe({
+    sessionID: "session-one",
+    topics: ["notifications.role.controller"],
+  });
+  await client.subscribe({
+    sessionID: "session-two",
+    directory: "/work",
+    topics: [],
+    port: 0,
+    title: "",
+    driving: false,
+    plugin: { name: "@sjawhar/pi-envoy", version: "0.0.0" },
+  });
+
+  expect(listener.acted.map((one) => [one.path, one.body, one.token])).toEqual([
+    ["/v1/roles/set", "session-one", "token-for-session-one"],
+    ["/v1/interests/unsubscribe", "session-one", "token-for-session-one"],
+    ["/v1/interests/subscribe", "session-two", "token-for-session-two"],
+  ]);
+  // One trade per session, and the session this process left answered out of the token it
+  // already held rather than trading again.
+  expect(broker.sessions).toEqual(["session-one", "session-two"]);
 });
 
 test("a pool identity is a machine with no TypeScript route, not an error", () => {

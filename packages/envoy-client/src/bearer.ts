@@ -55,6 +55,17 @@ export interface RequestCredential {
    * is about to lapse, and throws rather than answering headers it cannot make, so a caller that
    * writes only with what this gave it never writes with no identity.
    *
+   * `session` is the session this one call acts for, where it acts for a session that is not
+   * whichever one the caller holds now: the Envoy listener binds the session a broker token
+   * names and answers 403 to a body naming another (`sessionNotBound`,
+   * packages/envoy/cmd/listener/brokerauth.go), so a call that acts for a session must present
+   * that session's own credential. A hand-back of the role a session this process has left still
+   * holds is the call that needs it, and the listener binds the token's session on eight routes,
+   * so every call whose body names the session it acts for passes that name (`transport.ts`). A
+   * call that acts for no session in particular, and every read of another session's record,
+   * passes nothing and is answered the credential the caller was built with. A bearer ignores it:
+   * its holder is whoever has a copy of it.
+   *
    * A bearer answers at once rather than with a promise, so a caller that must issue its request
    * before it does anything else still can: the Oh My Pi plugin's shutdown sends a session's
    * deregistration before its NATS connection starts draining, and one awaited microtask between
@@ -63,7 +74,8 @@ export interface RequestCredential {
    */
   headers(
     method: string,
-    url: string
+    url: string,
+    session?: string
   ): Readonly<Record<string, string>> | Promise<Readonly<Record<string, string>>>;
   /**
    * The secret this credential is presenting, which an excerpt of someone else's answer must

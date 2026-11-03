@@ -13,9 +13,10 @@
 // trade rather than once.
 //
 // What it refuses to do: hand out a token it could not renew. `token()` answers the token in hand
-// while that token is live and the broker is merely unreachable or busy (its 429), and throws once
-// the broker has refused the identity in a way no retry can cure or the token in hand has run out,
-// so a caller that writes only with what `token()` gave it never writes with no identity.
+// while that token is live and the broker is merely unreachable, busy (its 429) or refusing this
+// moment's proof (`invalid_dpop_proof`, `use_dpop_nonce`), and throws once the broker has refused
+// the identity in a way no retry can cure or the token in hand has run out, so a caller that
+// writes only with what `token()` gave it never writes with no identity.
 
 import {
   allowInsecureRequests,
@@ -32,6 +33,8 @@ import type { SubjectToken, TokenSource } from "./source";
 import {
   ACTOR_TOKEN_TYPE_MACHINE,
   EXCHANGE_CLIENT_ID,
+  FORM_LAUNCHER_CREDENTIAL,
+  FORM_LAUNCHER_CREDENTIAL_DECLINED,
   FORM_SESSION,
   GRANT_TYPE_TOKEN_EXCHANGE,
   SUBJECT_TOKEN_TYPE_GOOGLE,
@@ -63,14 +66,22 @@ export interface BrokerToken {
   readonly credentialExpiresAt: Date | null;
 }
 
-/** The broker's rate limit, the one refusal a later trade may be answered differently. */
+/** The broker's rate limit: the first of the three refusals a later trade may be answered
+ *  differently. */
 const TOO_MANY_REQUESTS = 429;
+
+/** What the broker answers a proof whose `iat` is outside its 60 s skew window. */
+const INVALID_DPOP_PROOF = "invalid_dpop_proof";
+
+/** What the broker answers a proof it wants a nonce in (RFC 9449 Section 8), which `#send`
+ *  already retries once with the nonce the answer carried. */
+const USE_DPOP_NONCE = "use_dpop_nonce";
 
 /**
  * A trade the broker refused: a plain error naming what it said. Almost every refusal is one no
  * retry can cure — an identity no entry lists, a sign-in a person revoked, a token of the wrong
- * audience — and a renewal stops on it rather than asking again. The one exception is the
- * broker's 429 (`permanent`).
+ * audience — and a renewal stops on it rather than asking again. The three exceptions are the
+ * broker's 429 and its two DPoP refusals (`permanent`).
  */
 export class BrokerRefusedError extends Error {
   constructor(
@@ -87,15 +98,31 @@ export class BrokerRefusedError extends Error {
   }
 
   /**
-   * Whether this refusal is one no retry can cure, which every refusal is but the broker's 429:
-   * its token endpoint spends a bucket per source address, and a bucket refills. A client that
-   * dropped the token in hand on a 429 would write with no identity through a burst — its own, or
-   * another process's on the same machine — while the token it already held was still good. The
-   * Go client reads it the same way (`RefusedError.Permanent`,
-   * packages/envoy/internal/brokerclient/brokerclient.go).
+   * Whether this refusal is one no retry can cure, which every refusal is but three. The Go
+   * client reads it the same way, out of the same three cases (`RefusedError.Permanent`,
+   * packages/envoy/internal/brokerclient/brokerclient.go), and
+   * `packages/envoy/internal/brokerclient/testdata/wire.json` holds the two to that one reading.
+   *
+   * The broker's 429: its token endpoint spends a bucket per source address, and a bucket
+   * refills. A client that dropped the token in hand on a 429 would write with no identity
+   * through a burst — its own, or another process's on the same machine — while the token it
+   * already held was still good.
+   *
+   * `invalid_dpop_proof`, which is what the broker answers a proof whose `iat` is outside its
+   * 60 s skew window. A process started before NTP has corrected the host's clock would
+   * otherwise drop a live token and fail every Dispatch and listener call until something
+   * restarted it; the next trade after the correction succeeds.
+   *
+   * `use_dpop_nonce`, which `#send` already retries once with the nonce the answer carried. One
+   * that reaches here is an answer that carried no nonce, or a nonce the broker then refused in
+   * turn — a server state the next trade can find changed.
    */
   get permanent(): boolean {
-    return this.status !== TOO_MANY_REQUESTS;
+    return (
+      this.status !== TOO_MANY_REQUESTS &&
+      this.code !== INVALID_DPOP_PROOF &&
+      this.code !== USE_DPOP_NONCE
+    );
   }
 }
 
@@ -113,6 +140,20 @@ export interface BrokerTokenClientOptions {
   /** The session name the minted token writes under, which an entry that fixes one refuses to be
    *  told and an entry that fixes none requires. */
   readonly session?: string | undefined;
+  /**
+   * Whether this trade wants the launcher credential its identity holds minted or moved onto
+   * the key it proved ({@link FORM_LAUNCHER_CREDENTIAL}); true by default, as an absent
+   * parameter is on the wire.
+   *
+   * Every caller in this repository passes `false` (`brokerTokenClient`, ./environment.ts): the
+   * TypeScript clients want a Dispatch access token and nothing else, and none of them reads
+   * `credentialId`. Each trade that asks writes a `launcher_credentials` row keyed by the
+   * machine and the key it proved and a `launcher_credential.token_login` audit row, and this
+   * client makes a key per process and per session, so asking would put a row on an operator's
+   * machine-logins list for every `dispatch` call, every hook run and every session of a
+   * long-lived process — rows nothing removes.
+   */
+  readonly launcherCredential?: boolean | undefined;
   /** Overrides {@link DEFAULT_RENEW_BEFORE_MS}. Only a test shortens it. */
   readonly renewBeforeMs?: number | undefined;
   /** `Date.now` unless a test replaces it. */
@@ -143,6 +184,7 @@ export class BrokerTokenClient {
   readonly #subject: TokenSource;
   readonly #actor: TokenSource | undefined;
   readonly #session: string;
+  readonly #launcherCredential: boolean;
   readonly #renewBeforeMs: number;
   readonly #now: () => number;
   readonly #fetch: typeof fetch;
@@ -160,6 +202,7 @@ export class BrokerTokenClient {
     this.#subject = options.subject;
     this.#actor = options.actor;
     this.#session = options.session ?? "";
+    this.#launcherCredential = options.launcherCredential ?? true;
     this.#renewBeforeMs = options.renewBeforeMs ?? DEFAULT_RENEW_BEFORE_MS;
     this.#now = options.now ?? Date.now;
     this.#fetch = options.fetch ?? fetch;
@@ -177,11 +220,12 @@ export class BrokerTokenClient {
 
   /**
    * A live access token: the one in hand while it is good for longer than the renewal window, and
-   * otherwise a fresh trade. A trade the broker did not answer, or answered 429, while the token
-   * in hand is still live answers that token, since a client that already holds an identity need
-   * not stop for a broker that is merely down or busy; a refusal no retry can cure
-   * (`BrokerRefusedError.permanent`), and a failure with nothing live left, throw, so no caller
-   * writes with no identity.
+   * otherwise a fresh trade. A trade the broker did not answer, or answered with one of the three
+   * refusals a later trade may be answered differently (`BrokerRefusedError.permanent`), while the
+   * token in hand is still live answers that token, since a client that already holds an identity
+   * need not stop for a broker that is merely down, busy, or refusing this moment's proof; a
+   * refusal no retry can cure, and a failure with nothing live left, throw, so no caller writes
+   * with no identity.
    */
   async token(signal?: AbortSignal): Promise<BrokerToken> {
     const held = this.#held;
@@ -218,7 +262,8 @@ export class BrokerTokenClient {
 
   /**
    * One RFC 8693 exchange: the subject token this moment's source answers, the actor token where a
-   * person is signing in, the session name, and a DPoP proof of this client's key.
+   * person is signing in, the session name, whether this trade declines the launcher credential
+   * its identity holds, and a DPoP proof of this client's key.
    *
    * `openid-client` makes the request and reads the answer — the grant type, the client id, the
    * form encoding, the endpoint and the shape of what came back — and the proof is signed by the
@@ -232,6 +277,11 @@ export class BrokerTokenClient {
       subject_token_type: subject.tokenType,
     };
     if (this.#session !== "") form[FORM_SESSION] = this.#session;
+    if (!this.#launcherCredential) {
+      // Sent only to decline: an absent parameter asks, so a broker that has never heard of this
+      // parameter answers a client that does ask exactly as it always has.
+      form[FORM_LAUNCHER_CREDENTIAL] = FORM_LAUNCHER_CREDENTIAL_DECLINED;
+    }
     if (this.#actor !== undefined) {
       let actor: SubjectToken;
       try {

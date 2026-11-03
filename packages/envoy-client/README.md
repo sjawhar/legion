@@ -217,6 +217,16 @@ refused with a 4xx on every attempt stays an `EnvoyApiError`. Listener error res
 `error` and optional `expected` fields. The listener's bearer is the `token` the client is given
 (`envoySettings`); without one it sends no `Authorization` header.
 
+Every call whose body names the session it acts for — `subscribe`, `unsubscribe`,
+`unregisterSession`, `setRole`, `replay`, and a `send` or `publish` with a `sourceSessionID` —
+presents that session's own credential, since the listener holds such a write to the session its
+broker token names and answers 403 to any other. That is what lets a process that has switched
+sessions hand back a role the session it left still holds: the old session's credential is a
+client of its own and answers out of the token it already has. A read of another session's
+record (`getInterest`, `getRole`, `listSessions`) names no session and is answered the
+credential the client was built with. A bearer is the same header whichever session a call acts
+for.
+
 `subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
 `plugin_version` on every registration, and exposes listener warnings, including a topic that has
 no event in the configured stream. It sends the client instance driving the session

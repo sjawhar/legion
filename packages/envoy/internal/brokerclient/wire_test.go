@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 )
 
 // corpusPath is the one file both clients read. It lives in this package's testdata because the
@@ -112,6 +114,9 @@ func TestTheWireCorpusHoldsThisClient(t *testing.T) {
 				Subject:   corpusSource(t, exchange.Subject),
 				Actor:     corpusActor(t, exchange.Actor),
 				Session:   exchange.Session,
+				// The entry's own form says whether this trade declines the launcher
+				// credential, so the one place the corpus states it is the form it asserts.
+				NoLauncherCredential: exchange.Form[oauthwire.FormLauncherCredential] == oauthwire.FormLauncherCredentialDeclined,
 			})
 			if err != nil {
 				t.Fatalf("New: %v", err)

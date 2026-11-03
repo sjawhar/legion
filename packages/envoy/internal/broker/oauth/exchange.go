@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"time"
 
@@ -28,8 +29,9 @@ import (
 const tokenTypeAccessToken = oauthwire.SubjectTokenTypeAccessToken
 
 // The form parameter of an exchange request the broker reads itself; the library reads the rest
-// (RFC 8693 Section 2.1). The session name a caller asks to write under is oauthwire.FormSession,
-// the broker's own parameter, which the clients that send it read from that same declaration.
+// (RFC 8693 Section 2.1). The session name a caller asks to write under is oauthwire.FormSession
+// and whether the trade wants a launcher credential is oauthwire.FormLauncherCredential, the
+// broker's own two parameters, which the clients that send them read from that same declaration.
 const (
 	// FormSubjectTokenType is the request's subject_token_type, which says which kind of
 	// identity the caller is presenting and so which decision the exchange makes.
@@ -402,7 +404,10 @@ func keyFunc(keys KeySource) jwt.Keyfunc {
 // in the same transaction: the answer names it, and a machine whose token committed without it
 // could enroll nothing. The person subject type records the sign-in its box key belongs to here
 // (personSignIn), for the same reason again: a revoke that commits first refuses the trade, and
-// one that commits after it ends the token the trade minted. Beside those, and for every
+// one that commits after it ends the token the trade minted, and then takes the credential that
+// sign-in holds (personCredential). Either credential is minted only for a trade that asked for
+// one (launcherCredentialAsked): a caller that wants a Dispatch access token and nothing else
+// leaves no launcher login behind for an operator to read through. Beside those, and for every
 // type, the registration a pod's session name needs is read before the library builds anything
 // (registeredPodSession). The claim on the session name is made
 // for every type once the library has built the answer, because that is when the issued token's
@@ -444,9 +449,14 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	asked, err := launcherCredentialAsked(request.GetRequestForm())
+	if err != nil {
+		p.writeError(ctx, w, request, err)
+		return
+	}
 	var credential MachineCredential
 	var credentialID string
-	if request.GetRequestForm().Get(FormSubjectTokenType) == oauthwire.SubjectTokenTypeGoogle {
+	if asked && request.GetRequestForm().Get(FormSubjectTokenType) == oauthwire.SubjectTokenTypeGoogle {
 		credentialID, credential, err = p.machineCredential(txCtx, r, session)
 		if err != nil {
 			p.writeError(ctx, w, request, err)
@@ -460,10 +470,12 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 			p.writeError(ctx, w, request, err)
 			return
 		}
-		credentialID, credential, err = p.personCredential(txCtx, r, session)
-		if err != nil {
-			p.writeError(ctx, w, request, err)
-			return
+		if asked {
+			credentialID, credential, err = p.personCredential(txCtx, r, session)
+			if err != nil {
+				p.writeError(ctx, w, request, err)
+				return
+			}
 		}
 	}
 	if err := p.registeredPodSession(txCtx, session); err != nil {
@@ -683,6 +695,28 @@ func (p *Provider) liveCredential(ctx context.Context, subjectToken map[string]a
 		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
 	}
 	return nil
+}
+
+// launcherCredentialAsked reports whether this trade wants the launcher credential its identity
+// holds minted or moved onto the key it proved (oauthwire.FormLauncherCredential).
+//
+// An absent parameter is yes, because that is what every client written before the parameter
+// sends and those clients — `agent-secrets`, the helper, a person's sign-in — exist to hold that
+// credential: a trade of theirs answered without one could enroll nothing and read no secret.
+// Only the one spelling oauthwire.FormLauncherCredentialDeclined declines; every other value is
+// invalid_request rather than a guess, since a caller that misspelled "false" and was read as
+// asking would go on filling an operator's machine-logins list, and one misspelled the other way
+// would lose its secrets with nothing naming the cause.
+func launcherCredentialAsked(form url.Values) (bool, error) {
+	switch asked := form.Get(oauthwire.FormLauncherCredential); asked {
+	case "", "true":
+		return true, nil
+	case oauthwire.FormLauncherCredentialDeclined:
+		return false, nil
+	default:
+		return false, oauth2.ErrInvalidRequest.WithHintf("The %s parameter takes 'true' or 'false', and this request sent '%s'. A request that sends none is asking for the launcher credential its identity holds.",
+			oauthwire.FormLauncherCredential, asked)
+	}
 }
 
 // machineCredential creates or re-uses the launcher credential the machine presenting a Google

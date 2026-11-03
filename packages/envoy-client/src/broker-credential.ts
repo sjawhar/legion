@@ -103,6 +103,14 @@ function clientFor(env: BrokerEnvironment, own: string): Promise<BrokerTokenClie
  * that moves from one session to another trades afresh under the new name rather than
  * presenting the old one.
  *
+ * A call that names a session of its own (`headers`' third argument) is answered that session's
+ * credential rather than this one: the listener holds a write that acts as a session to the
+ * session its token names, and a process that has moved on still has calls to make for the
+ * session it left — the hand-back of a role that session holds, its deregistration — which under
+ * the credential of the session running now are answered 403. Each such session is one client of
+ * its own and one trade of its own (`CLIENTS`), so the session this process left answers out of
+ * the token it already holds.
+ *
  * The trade happens at the first request that needs it and at every renewal after, both inside
  * `headers`, so nothing of the caller's restarts when a token lapses. Dispatch and the listener
  * mint no DPoP nonce (`packages/envoy/internal/brokertoken/brokertoken.go`, `withoutNonces`), so
@@ -117,8 +125,12 @@ export function brokerCredential(
   let held = "";
   return {
     scheme: "DPoP",
-    async headers(method: string, url: string): Promise<Readonly<Record<string, string>>> {
-      const client = await clientFor(env, sessionName(session));
+    async headers(
+      method: string,
+      url: string,
+      acting?: string
+    ): Promise<Readonly<Record<string, string>>> {
+      const client = await clientFor(env, (acting ?? "").trim() || sessionName(session));
       if (client === undefined) {
         throw new Error(
           "AGENT_SECRETS_URL and AGENT_SECRETS_MACHINE_IDENTITY no longer name a broker and an identity to trade"

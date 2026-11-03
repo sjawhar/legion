@@ -294,6 +294,13 @@ behind until that credential's own expiry, and starts a new one at its next trad
 enrolled under the old one stop renewing when it lapses, and a box enrolled with
 `agent-secrets enroll --helper` is enrolled again by running that command again.
 
+Only a trade that asks for a credential holds one, and a trade asks unless it says otherwise, so
+`agent-secrets`, the helper and a person's sign-in hold theirs by doing nothing. The clients that
+want a Dispatch token and read no secret — the `dispatch` command, the Oh My Pi and Claude Code
+plugins, `envoy-send` — decline it, since each of them makes a key per process and per session
+and a machine-logins list with a row per command run is a list nobody can read. So the machines
+on that list are the boxes that enrol sessions, not every process that ever traded.
+
 The credential expires with the token it was minted from, an hour after that token was minted, and
 a machine's session renews only while that credential is live: not revoked, not past its expiry,
 and its account still listed for its service. A machine that stops being able to prove its

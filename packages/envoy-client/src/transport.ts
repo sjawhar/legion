@@ -511,6 +511,18 @@ type RequestOptions = {
   readonly retry?: boolean;
   /** Called for each attempt that got no answer or a 5xx: one the listener may have acted on. */
   readonly onUnanswered?: () => void;
+  /**
+   * The session this call acts for, where its body names one the listener binds to the
+   * credential: a subscribe, an unsubscribe, a deregistration, a role claim, a replay, and a
+   * send's or a publish's `source_session`. The listener answers 403 to a body naming a session
+   * its broker token does not (`sessionNotBound`, packages/envoy/cmd/listener/brokerauth.go), so
+   * the credential is asked for that session's own headers rather than the caller's current
+   * ones; a call this process makes for the session it has just left — the hand-back of a role
+   * that session still holds — is the one that needs it. A read of another session's record
+   * names none: those are not narrowed, and asking for a credential of a session this process
+   * never acted as would trade for a name the broker refuses.
+   */
+  readonly actingSession?: string;
 };
 
 /** One attempt's outcome: the listener's status and body, or no answer and why. */
@@ -528,7 +540,8 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const attemptOnce = async (
     url: string,
     init: RequestInit,
-    deadlineMs: number
+    deadlineMs: number,
+    actingSession: string | undefined
   ): Promise<AttemptOutcome> => {
     let response: Response;
     // What a credential that could not mint said, where one could not. A listener that asks for
@@ -544,7 +557,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       // drain at shutdown — start before this request leaves.
       let presented: Readonly<Record<string, string>> | undefined;
       try {
-        const ready = credential?.headers(init.method ?? "GET", url);
+        const ready = credential?.headers(init.method ?? "GET", url, actingSession);
         presented = ready instanceof Promise ? await ready : ready;
       } catch (error) {
         unminted = error;
@@ -589,7 +602,12 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     const url = `${baseUrl}${path}`;
     const tries = options.retry === false ? 1 : attempts;
     for (let attempt = 0; attempt < tries; attempt += 1) {
-      const outcome = await attemptOnce(url, init, options.timeoutMs ?? timeoutMs);
+      const outcome = await attemptOnce(
+        url,
+        init,
+        options.timeoutMs ?? timeoutMs,
+        options.actingSession
+      );
       if ("unanswered" in outcome) {
         options.onUnanswered?.();
         if (attempt + 1 < tries) {
@@ -634,45 +652,55 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     subscribe: async (input) =>
       parseSubscribeAnswer(
         JSON.parse(
-          await post("/v1/interests/subscribe", {
-            session_id: input.sessionID,
-            dir: input.directory,
-            topics: expandSubscriptionTopics(input.topics),
-            port: input.port,
-            title: input.title,
-            ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
-            driving: input.driving,
-            ...(input.selfSubscribed === undefined
-              ? {}
-              : { self_subscribed: input.selfSubscribed }),
-            ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
-            // The client instance driving this session (`clientInstanceID`), omitted when the
-            // caller has none so an older listener sees an unchanged body. The listener stores it
-            // on the registry entry, where a soft role claim and a deregistration compare it.
-            ...(input.clientInstanceID === undefined
-              ? {}
-              : { client_instance_id: input.clientInstanceID }),
-            // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
-            // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
-            // re-subscribes on each tick). The listener stores it separately from the registering
-            // listener's own machine_id, and the session's owner reaches a serve-port session at
-            // it unless the session runs on the owner's machine (registered through it, or this
-            // value is the owner's machine id) and the owner has a host bridge.
-            // The owner is the listener the session's stored subscription names, else the one it
-            // registered through; only the owner delivers to the session, and any other listener
-            // leaves inbox messages to it silently. With a port, a value that is not a host name
-            // or IP address is refused with 400 (expected: ["host"]).
-            host: machineID(),
-            plugin: input.plugin.name,
-            plugin_version: input.plugin.version,
-          })
+          await post(
+            "/v1/interests/subscribe",
+            {
+              session_id: input.sessionID,
+              dir: input.directory,
+              topics: expandSubscriptionTopics(input.topics),
+              port: input.port,
+              title: input.title,
+              ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
+              driving: input.driving,
+              ...(input.selfSubscribed === undefined
+                ? {}
+                : { self_subscribed: input.selfSubscribed }),
+              ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
+              // The client instance driving this session (`clientInstanceID`), omitted when the
+              // caller has none so an older listener sees an unchanged body. The listener stores it
+              // on the registry entry, where a soft role claim and a deregistration compare it.
+              ...(input.clientInstanceID === undefined
+                ? {}
+                : { client_instance_id: input.clientInstanceID }),
+              // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
+              // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
+              // re-subscribes on each tick). The listener stores it separately from the registering
+              // listener's own machine_id, and the session's owner reaches a serve-port session at
+              // it unless the session runs on the owner's machine (registered through it, or this
+              // value is the owner's machine id) and the owner has a host bridge.
+              // The owner is the listener the session's stored subscription names, else the one it
+              // registered through; only the owner delivers to the session, and any other listener
+              // leaves inbox messages to it silently. With a port, a value that is not a host name
+              // or IP address is refused with 400 (expected: ["host"]).
+              host: machineID(),
+              plugin: input.plugin.name,
+              plugin_version: input.plugin.version,
+            },
+            // Every call below whose body names the session it acts for presents that session's
+            // own credential, since the listener binds a broker token's session to it.
+            { actingSession: input.sessionID }
+          )
         )
       ),
     unsubscribe: async (input) => {
-      await post("/v1/interests/unsubscribe", {
-        session_id: input.sessionID,
-        topics: expandSubscriptionTopics(input.topics),
-      });
+      await post(
+        "/v1/interests/unsubscribe",
+        {
+          session_id: input.sessionID,
+          topics: expandSubscriptionTopics(input.topics),
+        },
+        { actingSession: input.sessionID }
+      );
     },
     getInterest: async (sessionID) =>
       InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
@@ -698,6 +726,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             onUnanswered: () => {
               unanswered = true;
             },
+            ...(input.sourceSessionID === undefined || input.sourceSessionID === ""
+              ? {}
+              : { actingSession: input.sourceSessionID }),
           }
         );
         // A 2xx whose body does not parse is the listener's word that cannot be read.
@@ -719,15 +750,21 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
       const response = EnvelopeResponseSchema.parse(
         JSON.parse(
-          await post("/v1/messages/publish", {
-            source: input.source ?? "agent",
-            ...sourceSession(input.sourceSessionID),
-            topic: input.topic,
-            message: input.message,
-            ...(input.payload === undefined ? {} : { payload: input.payload }),
-            idempotency_key: idempotencyKey,
-            ...messageMetadata(input),
-          })
+          await post(
+            "/v1/messages/publish",
+            {
+              source: input.source ?? "agent",
+              ...sourceSession(input.sourceSessionID),
+              topic: input.topic,
+              message: input.message,
+              ...(input.payload === undefined ? {} : { payload: input.payload }),
+              idempotency_key: idempotencyKey,
+              ...messageMetadata(input),
+            },
+            input.sourceSessionID === undefined || input.sourceSessionID === ""
+              ? {}
+              : { actingSession: input.sourceSessionID }
+          )
         )
       );
       return {
@@ -742,9 +779,11 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         input.clientInstanceID === undefined
           ? ""
           : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
-      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
-        method: "DELETE",
-      });
+      await request(
+        `/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`,
+        { method: "DELETE" },
+        { actingSession: input.sessionID }
+      );
     },
     setRole: async (input) => {
       // `soft` and `previous_session_id` are omitted from the wire unless set,
@@ -762,7 +801,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         };
       let raw: string;
       try {
-        raw = await post("/v1/roles/set", body);
+        raw = await post("/v1/roles/set", body, { actingSession: input.sessionID });
       } catch (error) {
         // A soft claim refused by a live holder is an outcome, not a failure:
         // the listener answers 409 with the holder's id.
@@ -806,7 +845,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
               ),
               ...(input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }),
             },
-            { timeoutMs: REPLAY_TIMEOUT_MS, retry: false }
+            { timeoutMs: REPLAY_TIMEOUT_MS, retry: false, actingSession: input.sessionID }
           )
         )
       ),

@@ -18,6 +18,16 @@ export const EXCHANGE_CLIENT_ID = "dispatch-token-exchange";
  *  none, and an entry that fixes no session requires it. */
 export const FORM_SESSION = "session";
 
+/** The broker's second form parameter: whether this trade wants the launcher credential its
+ *  identity holds minted or moved onto the key it proved. An absent parameter asks, which is what
+ *  every client written before the parameter sends and what `agent-secrets` and the helper want;
+ *  {@link FORM_LAUNCHER_CREDENTIAL_DECLINED} is the one value that declines, and the broker
+ *  refuses any other spelling. */
+export const FORM_LAUNCHER_CREDENTIAL = "launcher_credential";
+
+/** The one value of {@link FORM_LAUNCHER_CREDENTIAL} that declines the credential. */
+export const FORM_LAUNCHER_CREDENTIAL_DECLINED = "false";
+
 /** The `subject_token_type` a pod presents its projected Kubernetes service-account token under. */
 export const SUBJECT_TOKEN_TYPE_KUBERNETES =
   "urn:envoy:params:oauth:token-type:kubernetes-service-account";

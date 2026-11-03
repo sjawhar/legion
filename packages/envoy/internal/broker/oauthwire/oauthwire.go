@@ -27,6 +27,23 @@ const (
 	// that fixes a session refuses a request naming another, and an entry that fixes none
 	// requires it.
 	FormSession = "session"
+	// FormLauncherCredential is the exchange request's second broker-defined form parameter:
+	// whether this trade wants the launcher credential its identity holds minted or moved onto
+	// the key it proved. Only a caller that goes on to enrol a session and read a secret does —
+	// `agent-secrets`, the helper, a person's sign-in — and for those it is the whole point of
+	// the trade, so an absent parameter means yes and every client that was written before this
+	// parameter keeps its credential. "false" is the one value that declines, and the broker
+	// refuses any other spelling rather than guessing.
+	//
+	// A caller that wants a Dispatch access token and nothing else sends "false": each trade
+	// that asks writes a launcher_credentials row keyed by the machine and the key it proved
+	// (exchange.MachineSubject) and a token_login audit row, and a key is one process's, so a
+	// fleet of short-lived callers that never read a secret would fill an operator's
+	// machine-logins list with rows nothing ever removes. Every TypeScript client declines
+	// (packages/broker-client/src/token-client.ts): none of them reads ExtraCredentialID.
+	FormLauncherCredential = "launcher_credential"
+	// FormLauncherCredentialDeclined is the one value of FormLauncherCredential that declines.
+	FormLauncherCredentialDeclined = "false"
 	// SubjectTokenTypeKubernetes is the subject_token_type a pod presents its projected
 	// Kubernetes service-account token under. RFC 8693 registers no name for one, so the broker
 	// defines this one and the exchange client is the only client that may present it.

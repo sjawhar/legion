@@ -106,6 +106,46 @@
       }
     },
     {
+      "name": "a trade that wants no launcher credential",
+      "about": "A caller that wants a Dispatch access token and nothing else sends launcher_credential=false, and the broker mints or moves no launcher credential for it: the answer carries no credential_id and no credential_expires_at, and the client reads the credential it was given as none. Every TypeScript client trades this way, since none of them enrols a session or reads a secret and a key is one process's and one session's, so a trade that asked would leave a launcher_credentials row and a token_login audit row behind for each of them. The parameter is absent from every other entry here because an absent parameter asks: that is what agent-secrets, the helper and a person's sign-in send, and what a client written before this parameter sends.",
+      "subject": {
+        "kind": "google-metadata",
+        "token": "google.machine.identity.token",
+        "token_type": "urn:envoy:params:oauth:token-type:google-identity"
+      },
+      "session": "example-box-session",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:google-identity",
+        "session": "${session}",
+        "launcher_credential": "false"
+      },
+      "proof": {
+        "header": { "typ": "dpop+jwt", "alg": "ES256", "jwk": "${public_jwk}" },
+        "claims": { "jti": "${jti}", "htm": "POST", "htu": "${token_endpoint}", "iat": "${iat}" }
+      },
+      "answer": {
+        "status": 200,
+        "body": {
+          "access_token": "broker-access-token-with-no-credential",
+          "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+          "token_type": "DPoP",
+          "expires_in": 1800
+        }
+      },
+      "expect": {
+        "outcome": "accept",
+        "token": {
+          "access_token": "broker-access-token-with-no-credential",
+          "token_type": "DPoP",
+          "expires_in": 1800,
+          "credential_id": ""
+        }
+      }
+    },
+    {
       "name": "a person trades their sign-in with the machine as the actor",
       "about": "The one request that carries two tokens: the person's own Google identity token from the device grant, and the machine's as the actor token, under a type of its own because what it proves is which box the person is asking from.",
       "subject": {
@@ -189,7 +229,7 @@
     },
     {
       "name": "the broker's token endpoint is out of bucket",
-      "about": "The one refusal a later trade may be answered differently: the endpoint spends a bucket per source address, and a bucket refills. A client with nothing live in hand still fails the call, and says what the broker said; a client holding a live token keeps writing with it instead (expect.permanent is false).",
+      "about": "The first of the three refusals a later trade may be answered differently: the endpoint spends a bucket per source address, and a bucket refills. A client with nothing live in hand still fails the call, and says what the broker said; a client holding a live token keeps writing with it instead (expect.permanent is false).",
       "subject": {
         "kind": "kubernetes-projected-file",
         "token": "projected.service.account.token",
@@ -218,6 +258,39 @@
         "outcome": "refuse",
         "permanent": false,
         "error_contains": "too many token requests; try again later"
+      }
+    },
+    {
+      "name": "the broker refuses this moment's DPoP proof",
+      "about": "The broker answers invalid_dpop_proof to a proof whose iat is outside its 60 s skew window, which is what a process started before NTP has corrected the host's clock signs. It is no judgement of the identity, so it is not a refusal a client stops on: one that dropped the token in hand here would fail every Dispatch and listener call until something restarted it, while the next trade after the correction succeeds. The broker's other DPoP refusal, use_dpop_nonce, is read the same way: each client already retries one once with the nonce the answer carried, and one that reaches the caller is an answer that carried no nonce, or a nonce the broker then refused in turn.",
+      "subject": {
+        "kind": "kubernetes-projected-file",
+        "token": "projected.service.account.token",
+        "token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account"
+      },
+      "session": "example-worker-session",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account",
+        "session": "${session}"
+      },
+      "proof": {
+        "header": { "typ": "dpop+jwt", "alg": "ES256", "jwk": "${public_jwk}" },
+        "claims": { "jti": "${jti}", "htm": "POST", "htu": "${token_endpoint}", "iat": "${iat}" }
+      },
+      "answer": {
+        "status": 400,
+        "body": {
+          "error": "invalid_dpop_proof",
+          "error_description": "the proof's iat is outside the broker's skew window"
+        }
+      },
+      "expect": {
+        "outcome": "refuse",
+        "permanent": false,
+        "error_contains": "the proof's iat is outside the broker's skew window"
       }
     },
     {

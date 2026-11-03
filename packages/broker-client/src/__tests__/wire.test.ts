@@ -18,7 +18,7 @@ import { metadataIdentity } from "../metadata-identity";
 import { projectedToken } from "../projected-token";
 import type { SubjectToken, TokenSource } from "../source";
 import { BrokerRefusedError, type BrokerToken, BrokerTokenClient } from "../token-client";
-import { TOKEN_PATH } from "../wire";
+import { FORM_LAUNCHER_CREDENTIAL, FORM_LAUNCHER_CREDENTIAL_DECLINED, TOKEN_PATH } from "../wire";
 
 /** The one file both clients read. It lives in the Go package's testdata because the Go suite is
  *  the half that existed first; this suite reads it by relative path. */
@@ -317,6 +317,10 @@ test("the wire corpus holds this client", async () => {
       subject: await corpusSource(exchange.subject),
       ...(exchange.actor === undefined ? {} : { actor: await corpusSource(exchange.actor) }),
       session: exchange.session,
+      // The entry's own form says whether this trade declines the launcher credential, so the
+      // one place the corpus states it is the form it asserts.
+      launcherCredential:
+        exchange.form[FORM_LAUNCHER_CREDENTIAL] !== FORM_LAUNCHER_CREDENTIAL_DECLINED,
     });
     let token: BrokerToken | undefined;
     let refusal: unknown;

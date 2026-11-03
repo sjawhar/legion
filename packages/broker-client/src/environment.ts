@@ -107,6 +107,14 @@ export function tradeSession(env: BrokerEnvironment, own = ""): string {
  * where it names no broker or no identity — a machine that trades nothing, which every
  * deployment that has not turned the exchange on is. The key is this process's own and is made
  * here, once per client, so only its public half ever leaves the process.
+ *
+ * It declines the launcher credential its identity holds (`launcherCredential`): every caller of
+ * this factory wants a Dispatch access token and nothing else, and none of them reads
+ * `credentialId`. A key is this process's and this session's, so asking would write a
+ * `launcher_credentials` row and an audit row for every `dispatch` call, every Claude Code hook
+ * run, every `envoy-send` and every session of a long-lived Oh My Pi or Claude Code process,
+ * each of them on the operator's machine-logins list for its hour and removed by nothing. The
+ * machine's own launcher credential is `agent-secrets`' and the helper's, which ask for it.
  */
 export async function brokerTokenClient(
   env: BrokerEnvironment,
@@ -120,5 +128,6 @@ export async function brokerTokenClient(
     key: await newDpopKey(),
     subject,
     session: tradeSession(env, own),
+    launcherCredential: false,
   });
 }
