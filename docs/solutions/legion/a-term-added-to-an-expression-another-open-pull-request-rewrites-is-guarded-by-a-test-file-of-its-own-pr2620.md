@@ -23,12 +23,14 @@ related_issues:
   term dropped by whoever resolves the merge then turns a test red in the merge-queue build. A
   comment on the other pull request is read by a person and checked by nobody, so it names that
   file rather than standing alone.
-- **Write the other branch's instruction where it survives your retro.** The plan handoff is
-  deleted from the head before READY, so an instruction that lives only in
-  `.legion/<issue>/plan.json` is gone the moment the merge lands. Put it in the learning document,
-  in the pull request body's `Not proven / risk`, or in a comment in the code it concerns.
+- **Write the other branch's instruction where it survives your retro.** A plan handoff is a
+  versioned record on your own Dispatch issue (`dispatch handoff-read`), and nobody working the
+  other branch reads it; before sjawhar/legion#2354 it was a committed
+  `.legion/<issue>/plan.json` that retro deleted from the head before READY, so it did not even
+  survive the merge. Put it in the learning document, in the pull request body's
+  `Not proven / risk`, or in a comment in the code it concerns.
 - **Say in the body which branch you took**, so the second merger knows which half of the plan is
-  live without reading a deleted file.
+  live without reading another issue's handoff.
 
 ## Evidence
 
@@ -52,5 +54,7 @@ annotation, normalized `""` → `default` on both sides: a Sandbox stored before
 existed carries none, and the round then falls back to comparing the image alone, which is exactly
 the fleet a ServiceAccount migration has to move. The controller's pod is not round-covered, so
 the term must also stay in `relaunch`'s own decision, outside the plugin-install guard. That was
-written in `.legion/INFRA-934/plan.json`, which retro removes before READY, which is why it is
-restated here.
+written in `.legion/INFRA-934/plan.json`, the committed plan handoff of the day, which retro
+removed before READY, which is why it is restated here. sjawhar/legion#2354 has since made a
+handoff a Dispatch record, so it outlives the merge — on this issue, where the other branch's
+worker still never looks.
