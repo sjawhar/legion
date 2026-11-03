@@ -137,6 +137,18 @@ function UnreadMark(): ReactNode {
   );
 }
 
+/**
+ * Where the mark goes on a card that draws no metadata line to carry it: over the card's
+ * top-right corner, out of the flow, as an ask's own urgency notch hangs over its top-left
+ * (`AskCard`). The read mark clears about a second after the card is on screen, and a mark
+ * with a block of its own would drop every card under it by that block's height as it went,
+ * under a finger already reaching for one. The 8 px lift leaves the mark's lower half inside
+ * the card's own top padding, so it covers no text, and `z-[1]` paints it over a card that is
+ * positioned itself (`AskCard` again) while staying under the docked composer's `z-[8]`, which
+ * the list scrolls behind on a phone.
+ */
+const CORNER_MARK = "absolute -top-2 right-2 z-[1]";
+
 /** The delivery a reply into this thread inherits: the root's target, in the mode of the
  *  thread's most recent attempt (root or any reply). */
 function threadDelivery(root: MessageConversation): ReplyTarget["thread"] | undefined {
@@ -716,12 +728,12 @@ function CommentTurn({
   return (
     <li
       aria-current={current ? "true" : undefined}
-      className="my-2"
+      className="relative my-2"
       data-turn={item.id}
       ref={register}
     >
       {item.unread ? (
-        <div className="mb-1 flex justify-end">
+        <div className={CORNER_MARK}>
           <UnreadMark />
         </div>
       ) : null}
@@ -1331,26 +1343,30 @@ export function ConversationTab({
               ref={register}
             >
               <div className="min-w-0 flex-1">
-                {item.unread ? (
-                  <div className="mb-1 flex justify-end">
-                    <UnreadMark />
-                  </div>
-                ) : null}
-                {/* The margin shows this same open ask beside the document, so a full
-                    two-row composer here is the question, its options and its answer
-                    controls twice on one screen. The list is the record: it carries the
-                    compact density, whose options answer in one click and whose note field
-                    stays behind its own disclosure. The row's own thread seeds the card, so a
-                    page of asks makes no per-ask thread request. */}
-                <AskCard
-                  ask={item.ask}
-                  currentReplyId={currentReplyId}
-                  initialThread={{ ask: item.ask, ...item.ask.thread }}
-                  initialThreadUpdatedAt={asks.dataUpdatedAt}
-                  markRead
-                  thread="collapsed"
-                  variant="compact"
-                />
+                {/* The wrapper takes the card's own top margin, which an urgent ask carries for
+                    its notch, so the corner mark sits on the card's edge either way. */}
+                <div className="relative">
+                  {item.unread ? (
+                    <div className={CORNER_MARK}>
+                      <UnreadMark />
+                    </div>
+                  ) : null}
+                  {/* The margin shows this same open ask beside the document, so a full
+                      two-row composer here is the question, its options and its answer
+                      controls twice on one screen. The list is the record: it carries the
+                      compact density, whose options answer in one click and whose note field
+                      stays behind its own disclosure. The row's own thread seeds the card, so a
+                      page of asks makes no per-ask thread request. */}
+                  <AskCard
+                    ask={item.ask}
+                    currentReplyId={currentReplyId}
+                    initialThread={{ ask: item.ask, ...item.ask.thread }}
+                    initialThreadUpdatedAt={asks.dataUpdatedAt}
+                    markRead
+                    thread="collapsed"
+                    variant="compact"
+                  />
+                </div>
               </div>
               <TurnPin onPin={() => pinConversation(item.id)} pinned={pinned} />
             </li>

@@ -1913,3 +1913,65 @@ test("an agent row's directory is still shown beside the longest name in use, so
     await setLiveSessions([]);
   }
 });
+
+test("the Agents filters fit a phone beside a 59-character machine name, and the Machine dropdown holds the whole name @phone", async ({
+  browser,
+}) => {
+  // The machine id the defect was measured against: a dropdown sized to this one option was
+  // 591 px wide, and a 390 px phone zoomed out to 615 px to fit it. Counted here rather than
+  // trusted, since a shorter name would prove nothing about the strip's width.
+  const machine59 = "legion-pod-sjawhar-legion-infra-341-dispatch-web-builder-01";
+  expect(machine59).toHaveLength(59);
+
+  const onLongMachine: FakeSession = {
+    capabilities: ["aside", "btw"],
+    dir: "/workspaces/filters",
+    last_seen: Date.now(),
+    machine_id: machine59,
+    roles: ["implementer"],
+    session_id: "long-machine-session",
+    title: "Filter bar",
+  };
+  await setLiveSessions([onLongMachine]);
+
+  // A live session Dispatch has never heard from sits in the closed `No Dispatch activity` fold,
+  // so it comments once and its row - and the filter option its machine fills - is on the page.
+  await createProject({ key: "MACH", name: "Machines" });
+  const issue = await createIssue({ project: "MACH", title: "Agent filter widths" });
+  await createComment(
+    issue.key,
+    { body: `Working from ${onLongMachine.dir}.` },
+    { actor: { id: onLongMachine.session_id, kind: "session" }, as: "agent" }
+  );
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/agents");
+    await expect(agentRow(page, onLongMachine.session_id)).toBeVisible();
+
+    // Nothing on the page is wider than the screen, so the browser never zooms out, and each
+    // filter dropdown fits inside that screen on its own.
+    await assertPageFits(page);
+    const viewport = page.viewportSize()?.width ?? 0;
+    for (const name of ["Machine", "Role"] as const) {
+      const dropdown = page.getByRole("combobox", { name });
+      await expect(dropdown).toBeVisible();
+      const box = await dropdown.boundingBox();
+      expect(
+        Math.round(box?.width ?? 0),
+        `the ${name} dropdown is ${Math.round(box?.width ?? 0)}px wide in a ${viewport}px viewport`
+      ).toBeLessThanOrEqual(viewport);
+    }
+
+    // The name the cap cuts short is one hover away, on the control itself: the dropdown carries
+    // the chosen machine's whole name.
+    const machine = page.getByRole("combobox", { name: "Machine" });
+    await machine.selectOption(machine59);
+    await expect(machine).toHaveAttribute("title", machine59);
+    await assertPageFits(page);
+  } finally {
+    await context.close();
+    await setLiveSessions([]);
+  }
+});

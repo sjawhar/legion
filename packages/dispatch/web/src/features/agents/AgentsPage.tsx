@@ -918,13 +918,23 @@ function AgentFilterBar({
 }): ReactNode {
   const { machines, roles } = filterOptions(agents);
   const field = `min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`;
+  // A dropdown is as wide as its longest option, so one long machine or role name would widen
+  // the strip, the document, and a phone's view of it: one 59-character machine id took 591 px
+  // and zoomed a 390 px screen out to 615. Each takes the search box's shape instead - a basis
+  // it may shrink below (`min-w-0`) - and cuts the chosen name short, which its own `title`
+  // then carries whole for a hover.
+  const dropdown = `${field} min-w-0 basis-40 truncate`;
   return (
-    <fieldset className="mb-3 flex flex-wrap items-center gap-2">
+    // `min-w-0` on the strip itself as well: a `fieldset` floors at `min-inline-size: min-content`
+    // in the browser's own stylesheet, which no cap on a field inside it can lower, and that floor
+    // alone held the strip 531 px wide in a 342 px column.
+    <fieldset className="mb-3 flex min-w-0 flex-wrap items-center gap-2">
       <legend className="sr-only">Agent filters</legend>
       <select
         aria-label="Machine"
-        className={field}
+        className={dropdown}
         onChange={(event) => onFilters({ ...filters, machine: event.target.value })}
+        title={filters.machine === "" ? "All machines" : filters.machine}
         value={filters.machine}
       >
         <option value="">All machines</option>
@@ -936,8 +946,9 @@ function AgentFilterBar({
       </select>
       <select
         aria-label="Role"
-        className={field}
+        className={dropdown}
         onChange={(event) => onFilters({ ...filters, role: event.target.value })}
+        title={filters.role === "" ? "All roles" : filters.role}
         value={filters.role}
       >
         <option value="">All roles</option>
