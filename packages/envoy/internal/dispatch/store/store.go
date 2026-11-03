@@ -38,11 +38,25 @@ var migrationFiles embed.FS
 // override them, deliberately and per pool (Pool.separate).
 const poolSizeParam = "pool_max_conns"
 
+// Option configures the pool Open makes.
+type Option func(*pgxpool.Config)
+
+// WithMaxConns bounds the shared pool at conns rather than at sharedPoolSize. It is for the test
+// harness, which holds one store per test database in one process
+// (internal/dispatch/store/storetest) and would otherwise ask the one Postgres its packages share
+// for sharedPoolSize connections per store, more than that server's own limit allows at once.
+// Nothing a deployment sets reaches it: how many connections Dispatch holds is a property of
+// Dispatch, picked in code (Open, sharedPoolSize).
+func WithMaxConns(conns int32) Option {
+	return func(config *pgxpool.Config) { config.MaxConns = conns }
+}
+
 // Open connects to databaseURL and verifies the database is reachable. The pool's size is
-// sharedPoolSize: how many connections Dispatch may hold is a property of Dispatch, not of the
-// string that names its database. Every connection it opens scans timestamptz in UTC
-// (scanTimestampsInUTC), as do the pools Pool.separate copies from its configuration.
-func Open(ctx context.Context, databaseURL string) (*Store, error) {
+// sharedPoolSize unless an option replaces it: how many connections Dispatch may hold is a
+// property of Dispatch, not of the string that names its database. Every connection it opens
+// scans timestamptz in UTC (scanTimestampsInUTC), as do the pools Pool.separate copies from its
+// configuration.
+func Open(ctx context.Context, databaseURL string, options ...Option) (*Store, error) {
 	declared, err := declaresPoolSize(databaseURL)
 	if err != nil {
 		return nil, err
@@ -58,6 +72,9 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	}
 	config.MaxConns = sharedPoolSize
 	config.AfterConnect = scanTimestampsInUTC
+	for _, option := range options {
+		option(config)
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("open Postgres pool: %w", err)
