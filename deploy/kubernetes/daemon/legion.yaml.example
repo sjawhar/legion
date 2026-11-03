@@ -50,6 +50,25 @@ projects:
   #     - { repo: acme/widgets, workflow: .github/workflows/deploy.yaml, step: Apply } # default branch
   #                                    # whose Apply step succeeds after a merge wakes that pull
   #                                    # request's open production check
+# repository_renames:                  # optional: a repository that moved, which the daemon then
+#   - from: acme/widgets-legacy        # treats as one repository wherever it compares a name —
+#     to: acme/widgets                 # GitHub's events name the new repository while every tree
+#                                      # Legion already recorded names the old. Both names are
+#                                      # compared without case. The equivalence is read-side only:
+#                                      # no record is rewritten, and a tree keeps the name it was
+#                                      # recorded under for its whole life, so keep the pair here
+#                                      # for as long as any record names the old repository.
+#                                      # Refused: a pair whose two names are one repository, a
+#                                      # repository renamed twice, a chain (acme/a -> acme/b
+#                                      # with acme/b -> acme/c), and one owner's repositories
+#                                      # moved to two owners (acme/a -> b/a with acme/c -> d/c),
+#                                      # since a gh directory is keyed by an owner and holds one
+#                                      # installation's token; several repositories of one owner
+#                                      # may move to one owner, and a rename inside the owner
+#                                      # (acme/a -> acme/b) counts as a move to that owner, so it
+#                                      # refuses acme/a -> acme/b beside acme/c -> d/c.
+#                                      # --check-config prints one line
+#                                      # per pair, to read the equivalence back before a transfer.
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off
 github_apps:
