@@ -15,10 +15,10 @@ import (
 // its parent is named, and for each range of the delete set its
 // client, clock and length, and it allocates nothing per struct. It exists because ygo exports no
 // count of the structs an update carries. crdt.ContentIDsFromUpdateV1 returns clock runs that
-// IDSet.Add coalesces as it goes (sjawhar/ygo v1.51.3-sami.7, crdt/idset.go:83, merging at
+// IDSet.Add coalesces as it goes (sjawhar/ygo v1.54.1-sami.3, crdt/idset.go:83, merging at
 // :21-28), so two structs and one struct of the same clocks are the same answer; and the decoder
 // under it, decodeStructsV1, is unexported and allocates an Item, its content and its decoded
-// values for every struct (crdt/merge.go:24-81), up to 1,048,576 of them for one frame. This
+// values for every struct (crdt/merge.go:24-78), up to 1,048,576 of them for one frame. This
 // repository cannot change ygo (its GitHub Apps have no write to sjawhar/ygo), so the walk lives
 // here.
 //

@@ -58,8 +58,8 @@ import (
 // The question is asked first of the clock sum, which costs no encode, and only where that cannot
 // clear the write is the document counted (leavesPastDecodeCap gives the steps). The sum clears
 // nothing past the cap, because it counts characters and the cap counts structs: ygo's state
-// vector is each client's last item's clock plus that item's length (crdt/store.go:190-200 in
-// sjawhar/ygo v1.51.3-sami.7), a string's length is its UTF-16 length (crdt/content.go:109), and
+// vector is each client's last item's clock plus that item's length (crdt/store.go:235-245 in
+// sjawhar/ygo v1.54.1-sami.3), a string's length is its UTF-16 length (crdt/content.go:109), and
 // one struct holds a whole run of typing. Measured on 2026-10-25, the shape room_heap_test.go
 // builds, typed over as benchmarkLiveDocument types, sums to 52,575 clocks at 51 KiB, 538,306 at
 // 524 KiB and 1,050,470 at a mebibyte, past the 1,048,576 cap, where it holds 77,600 structs
@@ -448,8 +448,8 @@ func updatesAdd(updates [][]byte) (uint64, bool) {
 
 // clockSum is the sum of doc's state vector. It bounds the structs doc has integrated from above,
 // since every one takes at least one clock, and says nothing past that: a struct of typed text
-// takes a clock for each character (crdt/store.go:190-200, crdt/content.go:109 in sjawhar/ygo
-// v1.51.3-sami.7).
+// takes a clock for each character (crdt/store.go:235-245, crdt/content.go:109 in sjawhar/ygo
+// v1.54.1-sami.3).
 func clockSum(doc *crdt.Doc) uint64 {
 	var clocks uint64
 	for _, clock := range doc.StateVector() {
@@ -464,10 +464,10 @@ func clockSum(doc *crdt.Doc) uint64 {
 // can still cause. Of those structs, every one doc has integrated takes at least one clock of the
 // state vector (clockSum), but a parked one takes none: the state vector stops at the gap a parked
 // struct waits behind, and the encoded state carries each parked struct, with at most a skip over
-// the gap before it (withParked, crdt/update.go:122-149 in sjawhar/ygo v1.51.3-sami.7). So the
+// the gap before it (withParked, crdt/update.go:230-258 in sjawhar/ygo v1.54.1-sami.3). So the
 // encoded state holds at most the clock sum and two structs for each parked one, and the splits
 // are splitsAStructCanCause for each parked struct and each parked delete range
-// (crdt.Doc.PendingStats, crdt/doc.go:1140-1159). A room may park up to maxUpdateItems structs
+// (crdt.Doc.PendingStats, crdt/doc.go:1183-1200). A room may park up to maxUpdateItems structs
 // (Server.MaxPendingItems, which New sets), none of which the clock sum sees.
 func structCeiling(doc *crdt.Doc) uint64 {
 	parked := doc.PendingStats()

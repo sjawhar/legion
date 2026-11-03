@@ -44,7 +44,7 @@ var atCapStates struct {
 // merge into one item, in the room or in a decode of its state.
 //
 // ygo anchors a text insert after the deleted items next to its left neighbour
-// (skipDeletedForTextAnchor, sjawhar/ygo v1.51.3-sami.7, crdt/ytext.go:964-988), and the
+// (skipDeletedForTextAnchor, sjawhar/ygo v1.54.1-sami.3, crdt/ytext.go:766-809), and the
 // fixture's first paragraph opens with deleted characters, so each of the more than half a million
 // inserts at its very head walked past all of them: 1,240 s of the 1,426 s the long-edited case of
 // TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame took on 2026-10-28, against
@@ -139,7 +139,7 @@ const agentRewritesEnv = "DISPATCH_REBUILD_AGENT_REWRITES"
 // The write is one that adds, not one that trims: a write trimming the long-edited document's
 // last line lands on it at the cap, since a delete range splits an item only where one of its
 // ends falls inside that item, so a range covering whole items splits none of them and adds no
-// struct (sjawhar/ygo v1.51.3-sami.7, crdt/yarray.go:827-844), and the document stays at the cap
+// struct (sjawhar/ygo v1.54.1-sami.3, crdt/yarray.go:826-843), and the document stays at the cap
 // it was already at, as logPastDecodeCap's comment allows for. What no document at the cap takes
 // is a write that adds a struct, and that is what a rebuild has to make room for.
 func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *testing.T) {
@@ -649,12 +649,13 @@ func oneClientAtCapState(t *testing.T) []byte {
 // whole-state message lets the walk read before the walk refuses it. Here the history is one
 // client's, at the decode cap, and the browser's own client sorts before it, so the message the
 // browser hands back - its own unsent edits, then the history - is refused by the walk at the
-// history's header, the group that passes the cap, with no struct of the history read. Left
-// connected on that refusal the browser would be answered SyncStatus(0) and keep every later
-// edit of it, naming the old history's items, parked: the walk's refusal is a plain error rather
-// than a *websocket.PeerClose, and ygo closes a peer whose update the hook refused only for a
-// PeerClose (sjawhar/ygo v1.51.3-sami.7, provider/websocket/peer.go:254-260, over the
-// Hocuspocus framing New sets). The room closes it with the document's own close and
+// history's header, the group that passes the cap, with no struct of the history read. The walk's
+// refusal is a plain error rather than a *websocket.PeerClose, which ygo answers SyncStatus(0)
+// and then closes with 4205 "Reset Connection" (sjawhar/ygo v1.54.1-sami.3,
+// provider/websocket/peer_update.go:139-151, provider/websocket/peer.go:266-283, over the
+// Hocuspocus framing New sets); 4205 is what @hocuspocus/provider 2.x reconnects at once after,
+// so the browser would hand the same message back on every reconnect while each later edit of it,
+// naming the old history's items, parked. The room closes it with the document's own close and
 // DOC_REBUILT; it reconnects from a fresh read of the rebuilt document, as the editor's
 // 4413 path does, not with its old state; and a new edit from it is applied and stored.
 func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBeforeReadingAnyOfIt(t *testing.T) {

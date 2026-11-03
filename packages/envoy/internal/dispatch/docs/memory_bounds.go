@@ -46,7 +46,7 @@ type MemoryBounds struct {
 	// It is not in the spec: it is the plan's departure 8, large applies taking turns, weighed by
 	// each apply's estimate rather than counted in slots. Every browser's first sync hands over
 	// its whole state, and ygo's apply decodes every struct of it, and every value of each,
-	// before decodeAndPark drops what the room already holds (sjawhar/ygo v1.54.1-sami.1,
+	// before decodeAndPark drops what the room already holds (sjawhar/ygo v1.54.1-sami.3,
 	// crdt/update.go:807-942, the values at :1222-1263), so fifty browsers reconnecting at once
 	// to rooms of heavy documents would otherwise decode fifty handoffs at the same moment. A
 	// count of slots sized for the heaviest handoff could not bound an update the editor never

@@ -421,7 +421,7 @@ func TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas(t *testing.T) {
 // reloaded room's total starts at what its stored state re-scans, which is what the first room had
 // come to, short of the scans of the refusal, which the store never held. Each frame's client is
 // above the one before it, so a decode of the stored state, which takes each client's structs in
-// the order of their clients (sjawhar/ygo v1.54.1-sami.1, crdt/update.go:386), integrates the
+// the order of their clients (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:386), integrates the
 // frames in the order the room applied them.
 func TestTheRoomScanTotalSurvivesAReloadOverARealSocket(t *testing.T) {
 	memory := newMemoryHarness(t)
@@ -547,7 +547,7 @@ const (
 	tangledChainClient = 1_000
 	// tangledScanClient is the client of scanFrame's items, above every client of the chain, so
 	// each of its items wins the tie-break against each item of the chain and scans on past it
-	// (sjawhar/ygo v1.54.1-sami.1, crdt/item.go:170-179).
+	// (sjawhar/ygo v1.54.1-sami.3, crdt/item.go:170-179).
 	tangledScanClient = 4_000_000
 	// scanFramePadding is the bytes of the string scanFrame opens with: its 256 KiB take the
 	// frame's own share of its apply-heap estimate past the 2 MiB under which the room does not
@@ -599,7 +599,7 @@ func chainFrame(t *testing.T, state []byte) []byte {
 // scanFrame is a frame of client's: a string of scanFramePadding bytes after the chain's last item,
 // where nothing follows it to scan, and then items one-character strings, each naming the first
 // item chainFrame chained as its left origin and no right origin, so each scans the chain from
-// there to its end (sjawhar/ygo v1.54.1-sami.1, crdt/item.go:152-200).
+// there to its end (sjawhar/ygo v1.54.1-sami.3, crdt/item.go:152-200).
 func scanFrame(client crdt.ClientID, items int) []byte {
 	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
 		encoder.WriteVarUint(1)
@@ -1745,7 +1745,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	const growers, markID, unheldMarkID, commentMark = 4, "memory-unrecorded-mark", "memory-unrecorded-mark-unheld", "proofComment"
 	// A hundred shrinks are one browser's four cuts of fifty bytes each, sent to twenty-five
 	// documents in the order it made them: ygo's update observer encodes a transaction's structs
-	// beside the document's whole delete set (sjawhar/ygo v1.54.1-sami.1, crdt/doc.go:591-595), so
+	// beside the document's whole delete set (sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:616-620), so
 	// each carries the deletes of the cuts before it too, which a document that has taken them
 	// holds.
 	const shrunk, cutsEach, cutBytes = 25, 4, 50
@@ -2316,7 +2316,7 @@ const (
 // room closes the browser that sent it with 4413 DOC_UPDATE_REFUSED, read from the close frame,
 // and the room's state vector and state are what they were, for a frame of valid GC structs
 // ending in one bad byte, which ygo's own apply would integrate in part before it failed
-// (sjawhar/ygo v1.54.1-sami.1, crdt/update.go:810-935), for a subdocument and for a struct under
+// (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:810-935), for a subdocument and for a struct under
 // a root the Proof editor never writes
 // (Service.weighPeerUpdate). Only that browser is closed: another reading
 // the room goes on reading it. The stored document, once settled, holds none of them.

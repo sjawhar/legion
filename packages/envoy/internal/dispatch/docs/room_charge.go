@@ -44,7 +44,7 @@ const earlyCountCharge = 16 << 20
 // prices the struct total of the whole state once its structs outweigh its elements (copyHeap),
 // which every struct the structure part charged is part of. The structure part over-charges what
 // merges back too: ygo squashes a run of typed characters into one item and re-merges a split
-// nothing came between (sjawhar/ygo v1.54.1-sami.1, crdt/transaction.go:26-31), while each struct
+// nothing came between (sjawhar/ygo v1.54.1-sami.3, crdt/transaction.go:26-31), while each struct
 // is charged as one of its own with both its splits; and it charges every struct at the heaviest
 // kind's price, rendered or not, so a rendered struct is charged here beside its count's price of
 // the elements it makes. What deletes leave behind - tombstones a rendering does not show - is
@@ -115,8 +115,8 @@ func (c *roomCharge) grew(structure int64) {
 // its content a rendering can show to the uncounted part, as contentAdded counts it, and its
 // structure to the structure part, priced as the hook prices a browser's update
 // (peerWeighing.structureHeap). Every struct the update carries is new to the room, since ygo
-// encodes a transaction's update from the state before it (sjawhar/ygo v1.54.1-sami.1,
-// buildPhase2, crdt/doc.go:591-595), so each is charged with the splits its integration can cause,
+// encodes a transaction's update from the state before it (sjawhar/ygo v1.54.1-sami.3,
+// buildPhase2, crdt/doc.go:616-620), so each is charged with the splits its integration can cause,
 // with the splits each delete range can leave at its ends (deletedRuns.splitEnds) and
 // the content no rendering prices. It refuses nothing: the write has committed, and its charge only
 // raises the budget's figures, so the budget refuses browsers and closes unused rooms sooner. The
@@ -213,7 +213,7 @@ func (c *roomCharge) deletes() *deletedRuns {
 // contentAdded is the bytes of content update, one transaction's update as the room's update
 // observer is handed it, added that a rendering can show: the content of each struct it carries,
 // every one of them new to the room, since ygo encodes a transaction's update from the state
-// before it (sjawhar/ygo v1.54.1-sami.1, buildPhase2, crdt/doc.go:591-595), whoever wrote it - a
+// before it (sjawhar/ygo v1.54.1-sami.3, buildPhase2, crdt/doc.go:616-620), whoever wrote it - a
 // browser's update the peer hook admitted, or the server's own write. Its delete set, which ygo
 // fills with every deleted item of the room on every transaction, adds nothing and is not counted:
 // charging the update's bytes, as the budget did, charged a heavily edited room its whole delete

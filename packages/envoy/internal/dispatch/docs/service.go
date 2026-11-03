@@ -744,8 +744,8 @@ func New(deps Deps) *Service {
 	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an
 	// Apply on a room no peer is in returns (reearth/ygo#269, in the pinned fork). Eager eviction,
 	// ygo's default, evicts the room the moment its last peer leaves, even while
-	// a Server.Apply is inside its callback on that room (sjawhar/ygo v1.51.3-sami.7,
-	// provider/websocket/peer.go:501-585 checks peers alone): the callback's write then lands on
+	// a Server.Apply is inside its callback on that room (sjawhar/ygo v1.54.1-sami.3,
+	// provider/websocket/peer.go:540-624 checks peers alone): the callback's write then lands on
 	// the evicted room and reaches the store only through its retiring persistence worker, while
 	// the next access has already loaded the store without it and serves, and takes, the next
 	// write on a state missing the first. The two writes, each made from the same document, merge
@@ -757,8 +757,8 @@ func New(deps Deps) *Service {
 	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
 	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
 	// stranded persistence, on the committing goroutine: the room's doc.OnUpdate observer, which
-	// loadRoom registers (provider/websocket/server.go:1807-1849) and which runs on the goroutine
-	// that committed once the commit has released the document's lock (crdt/doc.go:794-799), calls
+	// loadRoom registers (provider/websocket/server.go:1840-1887) and which runs on the goroutine
+	// that committed once the commit has released the document's lock (crdt/doc.go:830-835), calls
 	// persistStranded (persistence.go:126-164) after the room's persistence worker retires. The
 	// service's CloseRoom waits for a repair's commit (roomServer), so a repair never meets it; a
 	// published write's suppression slot is finished before ygo's persistence observer runs
@@ -1298,7 +1298,7 @@ func ArtifactVersionEventPayload(
 // rewriteLive's (Service.leavesPastDecodeCap). What the stamp adds is at most one struct for each
 // repair: pmdoc.Update writes a minted id as one attribute set (pmdoc's updateElement), a map
 // item whose origin is the attribute's last item, whole, so it splits nothing (crdt/yxml.go:
-// 510-525 in sjawhar/ygo v1.51.3-sami.7), and it writes nothing of the rest of the tree, which
+// 510-525 in sjawhar/ygo v1.54.1-sami.3), and it writes nothing of the rest of the tree, which
 // the stamp read in the same transaction and hands back as it was (pmdoc's updateChildren). A
 // browser's edit landing after the caller's read can leave more blocks to stamp than it counted;
 // the stamp then writes nothing, so it never adds more than it was answered on, and the next
@@ -2288,7 +2288,7 @@ func (s *Service) closeReservedRoom(ctx context.Context, reservation roomCloseRe
 // time ygo looks: the sweep retires live, a load replaces it, and the close drops the
 // replacement's browsers and the state a write on it holds. So the close runs inside a
 // Server.Apply on the room, which the idle sweep never retires while an Apply is in it (sjawhar/ygo
-// v1.51.3-sami.7, provider/websocket/idle_sweep.go, evictIdleRoom: an Apply holds the room's
+// v1.54.1-sami.3, provider/websocket/idle_sweep.go, evictIdleRoom: an Apply holds the room's
 // in-flight count from entry until it returns, whatever idle stamp a leaving browser puts on the
 // room meanwhile), with the close gate held (roomServer.closeInstance): a room that still holds
 // live once both are held is the room ygo then closes. A room already gone from the name is not

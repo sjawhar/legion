@@ -659,7 +659,7 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 
 // The tags of the document socket's frames this harness reads and writes: Hocuspocus's framing,
 // which Dispatch's rooms speak (docs.New sets Server.HocuspocusFraming), puts the room's name before
-// each (sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:66-80).
+// each (sjawhar/ygo v1.54.1-sami.3, provider/websocket/server.go:104-118).
 const (
 	frameSync       = 0
 	frameSyncStatus = 8
@@ -828,7 +828,7 @@ func (b *browser) read() {
 // await is the room's next answer, which must carry tag, or the reason the socket ended first. A
 // SyncStep2 the room relays from another browser of the room - the whole state that browser handed
 // back, which ygo relays to the room's other peers as the frame it arrived in (applySyncUpdate,
-// sjawhar/ygo v1.51.3-sami.7, provider/websocket/peer.go:247-264) - reads as the answer to a request
+// sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer.go:266-283) - reads as the answer to a request
 // for the room's state would, so a wait for any other answer passes over it.
 func (b *browser) await(tag uint64) (browserAnswer, error) {
 	timer := time.NewTimer(browserAnswerWithin)

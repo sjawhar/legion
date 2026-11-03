@@ -80,7 +80,7 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 // the close; nil for a caller with none.
 //
 // ygo's Apply holds the room's in-flight count "to protect rm from a concurrent eviction while in
-// use" (sjawhar/ygo v1.51.3-sami.7, provider/websocket/inject.go:334-337) and its idle sweep
+// use" (sjawhar/ygo v1.54.1-sami.3, provider/websocket/inject.go:332-335) and its idle sweep
 // honours that count, but its CloseRoom does not: a forced close takes the room out of the
 // server's map whatever is inside an Apply on it, and that apply's write then lands on a room the
 // server no longer holds, reaching the store only through its retiring persistence worker, while

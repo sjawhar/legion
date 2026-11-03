@@ -85,14 +85,14 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 // peer's update only once the room's update observer has returned, so a keystroke's latency here
 // is everything the peer's read loop runs for it before that broadcast: the peer update hook
 // (Service.weighPeerUpdate, ygo's Server.OnPeerUpdate), the apply the hook is handed, which is
-// ygo's own, crdt.ApplyUpdateV1 of the update into the room's document (sjawhar/ygo
-// v1.51.3-sami.7, provider/websocket/peer_update.go:84-94), and the observer's whole turn with the
-// replica (renderedReplica.observe), which ygo fires inside that apply once its transaction
-// commits (crdt/doc.go:794-799): the drain of the room's update log, the content each drained
-// update added charged to the room budget (chargeAdded), the update applied to the replica, and
-// the render (renderDocumentForUpdate), which skips pmdoc.Read's copy since the tree it renders
-// never outlives the call. 120 keystrokes 20 ms apart on a 524 KiB document; each run reports the
-// latencies' percentiles in milliseconds.
+// ygo's own, crdt.ApplyUpdateV1Landed of the update into the room's document (sjawhar/ygo
+// v1.54.1-sami.3, provider/websocket/peer_update.go:109-124, provider/websocket/peer.go:289-295),
+// and the observer's whole turn with the replica (renderedReplica.observe), which ygo fires
+// inside that apply once its transaction commits (crdt/doc.go:830-835): the drain of the room's
+// update log, the content each drained update added charged to the room budget (chargeAdded), the
+// update applied to the replica, and the render (renderDocumentForUpdate), which skips
+// pmdoc.Read's copy since the tree it renders never outlives the call. 120 keystrokes 20 ms apart
+// on a 524 KiB document; each run reports the latencies' percentiles in milliseconds.
 //
 // Each keystroke reaches the room as a browser's does: typed on the browser's own copy of the room,
 // and handed to the hook as the V1 update that copy's transaction encodes (crdt.Doc.OnUpdate, the

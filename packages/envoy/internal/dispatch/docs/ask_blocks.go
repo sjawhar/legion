@@ -167,7 +167,7 @@ func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, e
 // the one block it lands on (repairLive), at most askRepair.attributes of them, and pmdoc.Update
 // writes each attribute it sets as one map item whose origin is the attribute's last item, whole,
 // so it splits nothing (pmdoc's updateElement; crdt/yxml.go:510-525 in sjawhar/ygo
-// v1.51.3-sami.7), and each it deletes as a deletion of that item, which adds no struct; it writes
+// v1.54.1-sami.3), and each it deletes as a deletion of that item, which adds no struct; it writes
 // nothing of the rest of the tree, read in the same transaction and handed back as it was
 // (pmdoc's updateChildren). An answer is one of those attributes: its text is the value of one
 // item, however long. A repair that rewrites a block's wording (decidedWording) can write any

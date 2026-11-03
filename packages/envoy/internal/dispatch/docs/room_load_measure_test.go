@@ -116,7 +116,7 @@ func measureLoad(t *testing.T, load func() any) loadCost {
 // then the same load). A load fails that allocates three and a half decodes: beside its two
 // decodes it makes two encodes of the room's state, each lighter than a decode, the struct total's
 // count (newRoomTotals, countRoom) and the base ygo's update log records at the room's first
-// commit (sjawhar/ygo v1.51.3-sami.7, crdt/update_log.go:50-56), which the replica, holding the
+// commit (sjawhar/ygo v1.54.1-sami.3, crdt/update_log.go:62-70), which the replica, holding the
 // load's copy, drops; and a socket's admission renders the tree it checks. On 2026-10-28, while the
 // replica decoded the room again at its first transaction, the server's load allocated 4.00
 // decodes of the agent-rewritten state and 3.89 of the long-edited one, and a socket's 4.10 and

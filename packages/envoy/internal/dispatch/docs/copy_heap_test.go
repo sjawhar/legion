@@ -34,7 +34,7 @@ const copyHeapMeasurement = "DISPATCH_MEASURE_COPY_HEAP"
 //
 // The run is six keystrokes past a million so that those three frames carry the whole total
 // themselves. Under sjawhar/ygo v1.51.3-sami.7 the seed document's own decode counted four scans,
-// and a run of 1,000,000 reached the total with them; under v1.54.1-sami.1 that decode counts
+// and a run of 1,000,000 reached the total with them; under v1.54.1-sami.3 that decode counts
 // none, measured as the unscanned state's re-scan in
 // TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans.
 func keystrokeRunStates(t *testing.T) (keystrokes, scanned []byte) {

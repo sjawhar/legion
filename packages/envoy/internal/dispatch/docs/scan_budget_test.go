@@ -118,7 +118,7 @@ const longSessionPlaceCharacters = 1_000
 // do. Each keystroke is one update the room takes as it is made, and each browser sees the other's
 // keystrokes between 5 and 20 updates late, drawn afresh at each keystroke. The client of the
 // second browser is the higher, so its items scan on past the first's at the same place
-// (sjawhar/ygo v1.54.1-sami.1, crdt/item.go:170-179).
+// (sjawhar/ygo v1.54.1-sami.3, crdt/item.go:170-179).
 //
 // Each place is driven in documents of its own, fresh from seed, and handed to take as one place's
 // updates in the order its room takes them. A conflict scan passes only the items between an
@@ -333,7 +333,7 @@ func TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans(t 
 // chainedRun applies to doc count one-character items of client, each after the one before and
 // the first after after, each in a remote transaction of its own, as a room takes each of a
 // person's keystrokes: ygo merges a run of characters only within one transaction (sjawhar/ygo
-// v1.54.1-sami.1, crdt/transaction.go:242-247), so each stays an item of its own, and a scan from the
+// v1.54.1-sami.3, crdt/transaction.go:242-247), so each stays an item of its own, and a scan from the
 // run's first item passes count-1 distinct items. doc must have no observer yet, which would pay
 // for every transaction.
 func chainedRun(tb testing.TB, doc *crdt.Doc, after crdt.ID, client crdt.ClientID, count int) {
@@ -370,7 +370,7 @@ func lastCharacter(tb testing.TB, doc *crdt.Doc) crdt.ID {
 // browser's, perFrameScanCeiling. One frame scans a run of 400,000 distinct items once; the other a
 // run of 2,000 items two hundred times. lock-ms is the time from the apply's start to the room's
 // first update observer, which ygo runs once the transaction has released the document's lock
-// (sjawhar/ygo v1.54.1-sami.1, crdt/doc.go:805-813); ns/scan and the bytes a scanned item adds,
+// (sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:830-838); ns/scan and the bytes a scanned item adds,
 // against a frame of one item that scans nothing, are the per-item costs perFrameScanCeiling and
 // bytesOfAScanMark quote. Run it with -benchtime=1x: each iteration builds its room afresh, a
 // keystroke at a time.

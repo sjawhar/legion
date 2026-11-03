@@ -35,7 +35,7 @@ func (s *Service) chargeLoadedRoom(room string, live *crdt.Doc, replica *rendere
 // update its persistence has not appended. A room still loading is not closed either: its load
 // has not returned, and the opener waiting on it would find it gone. The close's unload returns
 // the room's charge (releaseUnloadedRoom), and ygo's CloseRoom fires that unload before it returns
-// wherever it is the one that removed the room (sjawhar/ygo v1.54.1-sami.1,
+// wherever it is the one that removed the room (sjawhar/ygo v1.54.1-sami.3,
 // provider/websocket/inject.go:625-641), so the next look at the budget sees the charge gone. Each
 // close is logged with the budget's own figures before and after it, which is how an operator, or
 // a test of the real process, tells a room the budget closed from one that retired on its own.

@@ -18,7 +18,7 @@ import (
 // admitted, a transaction of the server's own (roomCharge.wrote) - with the GC runs and deleted
 // items it integrated (record). A clock it lists that the room holds is deleted; one the room does
 // not hold yet is in a range the room keeps parked, since ygo parks the part of a range past the
-// clocks it holds (sjawhar/ygo v1.54.1-sami.1, crdt/delete_set.go:385-397, crdt/update.go:783-786)
+// clocks it holds (sjawhar/ygo v1.54.1-sami.3, crdt/delete_set.go:385-397, crdt/update.go:783-786)
 // and an update is listed only once its apply has returned. A delete range it covers whole adds no
 // struct, and one that overlaps what it lists none at an end inside it (splitEnds), so neither the
 // structure part nor the struct total charges a browser's whole-state handoff for the delete set it

@@ -11,7 +11,7 @@ import (
 
 // jsonReencodeGrowth is the most a byte of JSON content can grow to once ygo writes it into the
 // room's state again. ygo keeps a JSON item's, a format's and an embed's values decoded and encodes
-// each again as JSON text with encoding/json (fmtValToJSON, sjawhar/ygo v1.54.1-sami.1,
+// each again as JSON text with encoding/json (fmtValToJSON, sjawhar/ygo v1.54.1-sami.3,
 // crdt/update.go:488-500 and :1563-1574). A JSON item whose values read only as lib0 Any, as ygo
 // up to 1.51.0 wrote them (decodeContent's wireJSON case, :1231-1263), grows the most: each false,
 // one byte, is written as the five of false with its length prefix, six bytes a byte. A JSON text
@@ -87,7 +87,7 @@ type peerWeighing struct {
 // what a browser holding a history at the decode cap needs: its whole-state message, the history
 // with an edit made since, is past the cap, and the walk refuses it at the header of the group
 // that passes it; when the browser's own client sorts before the history's (ygo writes groups by
-// ascending client, sjawhar/ygo v1.54.1-sami.1, crdt/update.go:386; Yjs by descending, yjs 13.6.32
+// ascending client, sjawhar/ygo v1.54.1-sami.3, crdt/update.go:386; Yjs by descending, yjs 13.6.32
 // src/utils/encoding.js:99), and a history one client wrote is one group, no struct of the history
 // is read before that refusal, and only the header shows it. Every rule the walk refuses a
 // history's handoff by - its count, its content, its delete set - comes at that header or after
@@ -186,7 +186,7 @@ func (w *peerWeighing) walkedDelete(client, clock, length uint64) {
 // splitsAStructCanCause is the most structs integrating one struct can add to a store beyond
 // itself, and the most applying one delete range can: each splits at most the item it starts in
 // and the item it ends in (an item's integrate splits the items holding its origin and its right
-// origin, sjawhar/ygo v1.54.1-sami.1, crdt/update.go:928-935 and crdt/item.go:98-110, through
+// origin, sjawhar/ygo v1.54.1-sami.3, crdt/update.go:928-935 and crdt/item.go:98-110, through
 // crdt/store.go:136-185; a delete range splits the items at its two ends,
 // crdt/delete_set.go:199-201).
 const splitsAStructCanCause = 2
@@ -279,7 +279,7 @@ func unrenderedBytes(walked updateStruct) uint64 {
 }
 
 // frameBytes is what walked, a struct past the room's state, can add to the room's frame total:
-// to the whole-state frame (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.54.1-sami.1,
+// to the whole-state frame (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.54.1-sami.3,
 // crdt/update.go:94-98 and :236-258, and encodeItem, :461-588), now and through whatever happens
 // to it later -
 //

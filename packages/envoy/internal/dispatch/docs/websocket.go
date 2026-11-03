@@ -610,8 +610,8 @@ func (s *Service) refuseIfRebuilding(room string) error {
 // allowInject decides whether ygo may apply an injection to a room. Its issue read goes
 // through the shared pool for a caller that need hold no connection of its own (the
 // settlement warm-up in settleRoom), and that is outside the pool's deadlock cycle only
-// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.51.3-sami.7,
-// provider/websocket/inject.go:321-330): an injection refused here has published no room
+// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.54.1-sami.3,
+// provider/websocket/inject.go:319-328): an injection refused here has published no room
 // placeholder for a connection-holder to park on, so nothing holding a connection is waiting
 // on this read. A vendored reordering of those two calls puts it back in the cycle.
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
@@ -675,8 +675,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}()
 	loaded := taken.decoded
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
-	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.7,
-	// provider/websocket/inject.go:521-529) and closes the channel awaitRoomRecovery waits on
+	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.54.1-sami.3,
+	// provider/websocket/inject.go:518-526) and closes the channel awaitRoomRecovery waits on
 	// only once CloseRoom has returned (failRoomLocked), so a wait here is a cycle: the load
 	// holds the eviction, and the eviction holds the load. No deadline breaks it either -
 	// both loaders that reach this one carry context.Background(), the settlement warm-up
@@ -733,7 +733,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
-	// returns (sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:1765-1860: loadRoom closes
+	// returns (sjawhar/ygo v1.54.1-sami.3, provider/websocket/server.go:1803-1893: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
 	tree, err := treeOf(doc)
 	var markdown string

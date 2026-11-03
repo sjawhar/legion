@@ -13,8 +13,8 @@ import (
 	"github.com/reearth/ygo/encoding"
 )
 
-// ygoDecodeStructsV1 is ygo's own V1 struct decoder (sjawhar/ygo v1.51.3-sami.7,
-// crdt/merge.go:24-81), unexported, reached here as the independent count the walk is checked
+// ygoDecodeStructsV1 is ygo's own V1 struct decoder (sjawhar/ygo v1.54.1-sami.3,
+// crdt/merge.go:24-78), unexported, reached here as the independent count the walk is checked
 // against: it decodes every struct of an update into an Item, in the update's order for each
 // client, through the same decodeItem the room's apply runs, and drops only skips. ygo exports
 // nothing that counts structs (crdt.ContentIDsFromUpdateV1 coalesces them into runs), which is why

@@ -129,7 +129,7 @@ const (
 // last character of the document's last text, a chain of usedUpChain one-character items, each of
 // a client of its own so none merges with its neighbour, and then items of one client each naming
 // the chain's first as its left origin and no right origin, so each scans the chain to its end
-// (Item.integrate, sjawhar/ygo v1.51.3-sami.7, crdt/item.go:117-192). The room the next load
+// (Item.integrate, sjawhar/ygo v1.54.1-sami.3, crdt/item.go:116-202). The room the next load
 // makes counts its scan total from that re-scan (servicePersistenceAdapter.LoadDoc), so it is
 // used up: typing in place goes on within usedUpScanBudget, a larger apply is refused
 // DOC_NEEDS_REBUILD, and a rebuild takes the document (nearACap). A real document reaches that
@@ -191,7 +191,7 @@ const (
 // client of its own so none merges with its neighbour. An insert a browser made at that place
 // before the chain arrived - a paste at the end of that text, offline - names the same left origin
 // and no right origin, so its apply scans the chain to its end (Item.integrate, sjawhar/ygo
-// v1.54.1-sami.1, crdt/item.go:107-202): 40,000 items, past the 27,594 an update no rule weighs
+// v1.54.1-sami.3, crdt/item.go:107-202): 40,000 items, past the 27,594 an update no rule weighs
 // is allowed (scanCeiling(0)), so the room refuses it whole and the browser is closed 4413
 // DOC_TOO_TANGLED (documentTooTangled). Decoding the chain costs the room about one scan an item,
 // 40,001 of its 1,000,000-item scan total measured on this pod (the browser row of

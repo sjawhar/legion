@@ -202,7 +202,7 @@ const structTotalRecheck = maxUpdateItems / 64
 //
 // The total is an exact count plus what the hook admitted since it. The count walks the room's
 // encoded state (countRoomStructs), which carries parked structs and parked delete ranges
-// (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.54.1-sami.1, crdt/update.go:236-258). It is taken at
+// (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.54.1-sami.3, crdt/update.go:236-258). It is taken at
 // the room's load, beside the load's rendering (keepReplica), with each count the service's
 // measurer makes of the room (elementMeasurer.count), and by the hook to confirm a total near or
 // past the cap. What the hook admits after it is each update's addition (peerWeighing.added): its
@@ -339,7 +339,7 @@ func retiredClientsOf(doc *crdt.Doc) map[crdt.ClientID]uint64 {
 
 // retiredClock reads a retired client's clock as ygo decodes the int64 a rebuild wrote: lib0 Any
 // writes an integer within 32 bits as a varint, which decodes as an int64, and a larger one within
-// 2^53 as a float64 (sjawhar/ygo v1.54.1-sami.1, encoding/encoder.go:283-299,
+// 2^53 as a float64 (sjawhar/ygo v1.54.1-sami.3, encoding/encoder.go:283-299,
 // internal/anycodec/decoder.go:276-296). A clock of zero retires nothing.
 func retiredClock(value any) (uint64, bool) {
 	switch value := value.(type) {

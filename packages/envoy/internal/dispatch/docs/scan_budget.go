@@ -8,16 +8,16 @@ import (
 )
 
 // Integrating an item scans the items between its left and right origins (Item.integrate,
-// sjawhar/ygo v1.51.3-sami.7, crdt/item.go:117-192). One the editor sends scans only what other
+// sjawhar/ygo v1.54.1-sami.3, crdt/item.go:116-202). One the editor sends scans only what other
 // people inserted concurrently at the same place, but an item naming a left origin early in a list
 // and no right origin scans to the list's end, so an update of n such items scans n times the list:
 // ygo's release notes record 2,000 of them against a list of 20,000 taking 20.8 s. Every room
 // therefore gives each remote apply an allowance of scans, asked of the room as the apply begins,
 // under the document's lock and with the apply's origin (roomScans.budget,
-// Doc.SetIntegrateScanBudget, crdt/doc.go:175-212); an apply whose scans, the drain of the parked
+// Doc.SetIntegrateScanBudget, crdt/doc.go:179-216); an apply whose scans, the drain of the parked
 // queue it ends with included, would pass it is refused and taken back out whole, and a drain the
 // allowance cannot hold is taken back with the parked queue kept while the update stands
-// (crdt/apply_rollback.go:9-34, :221-309).
+// (crdt/apply_rollback.go:9-34, :274-361).
 // A browser's update scans at most the per-frame ceiling or what is left of the room's scan total,
 // whichever is less; the server's own remote applies scan at most the ceiling.
 
@@ -297,7 +297,7 @@ func decodeStoredCopy(update []byte, maxPending int) (decodedState, error) {
 // what the last of them scanned. An apply that changes a text whose type carries formatting
 // commits a second transaction after the remote one, ygo's format cleanup, which integrates
 // nothing and so scans nothing (Doc.afterRemoteObservers and Doc.formattingCleanupLocked,
-// sjawhar/ygo v1.54.1-sami.1, crdt/ytext_format_cleanup.go:50-74 and :83-119, run for a type a
+// sjawhar/ygo v1.54.1-sami.3, crdt/ytext_format_cleanup.go:50-74 and :83-119, run for a type a
 // ContentFormat item's integrate marked, crdt/item.go:340-344). Reading the last transaction's
 // count left the decode of a document whose text carries a mark at zero - the tangle the browser
 // row of packages/dispatch/e2e/document-refusals.e2e.ts builds re-scans 40,001 items and was read

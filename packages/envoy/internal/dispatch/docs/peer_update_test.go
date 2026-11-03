@@ -33,7 +33,7 @@ var (
 
 // The hook is driven here at its own level, as ygo drives it: the room's document, the update's
 // bytes, and an apply that applies the update to that document exactly as the room's own does
-// (sjawhar/ygo v1.54.1-sami.1, provider/websocket/peer_update.go:84-89). What a real browser meets
+// (sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer_update.go:84-89). What a real browser meets
 // over a real socket is the real-process drive; what these rows pin is the rule itself.
 func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 	atTheBound := proseAtLeast(pmdoc.MaxDocumentBytes)
@@ -364,7 +364,7 @@ func peerDocument(t *testing.T, room *crdt.Doc) (*crdt.Doc, *crdt.YXmlText) {
 }
 
 // firstText is the first text in node's document order, however deep it is nested. ygo's own node
-// interface is unexported (sjawhar/ygo v1.54.1-sami.1, crdt/yxml.go:16), so the walk takes each
+// interface is unexported (sjawhar/ygo v1.54.1-sami.3, crdt/yxml.go:16), so the walk takes each
 // child as it comes.
 func firstText(node any) *crdt.YXmlText {
 	var children []any
@@ -850,7 +850,7 @@ func deleteRangesFrom(client uint64, n int) []byte {
 // An update the walk refuses is never applied: the hook refuses it with 4413
 // DOC_UPDATE_REFUSED, the walk's own error behind the close (documentUpdateRefused, refusedWith),
 // with which ygo closes that browser and relays nothing, and the room is as it was. ygo
-// integrates each struct as it decodes it (sjawhar/ygo v1.54.1-sami.1, crdt/update.go:810-935):
+// integrates each struct as it decodes it (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:810-935):
 // on a document with no scan bound or budget, a frame of valid structs ending in one bad byte
 // leaves those structs in it, and a room's bounded document takes them back out only after it has
 // decoded and integrated every one (crdt/apply_rollback.go:9-21), the work the walk keeps off the
@@ -913,7 +913,7 @@ func TestAPeerUpdateTheWalkRefusesIsNeverApplied(t *testing.T) {
 
 // Every refusal the hook makes carries a code and a reason of Dispatch's own. ygo closes a peer
 // whose update the hook refused before the apply ran with 4205 "Reset Connection" for any error
-// that is no *websocket.PeerClose (sjawhar/ygo v1.54.1-sami.1,
+// that is no *websocket.PeerClose (sjawhar/ygo v1.54.1-sami.3,
 // provider/websocket/peer_update.go:38-52, :139-151), and @hocuspocus/provider 2.x reconnects at
 // once after 4205 and sends the refused frame again, which the same rule refuses again: a loop,
 // each round a whole sync. 4413 is the band the editor reads as permanent, so it drops the
@@ -1612,8 +1612,8 @@ func chainedCharacters(n int) []byte {
 // three runs, each into a fresh document from into: an upper bound on the heap the apply adds at
 // its peak, since no byte it holds can be one it did not allocate. The document has an update
 // observer, as every room does (ygo's own, and the room's, onLoadDocument), so the apply
-// encodes the update its transaction made for the observers (sjawhar/ygo v1.54.1-sami.1,
-// crdt/doc.go:591-595) as a room's does. Two collections before each run empty the pool ygo's
+// encodes the update its transaction made for the observers (sjawhar/ygo v1.54.1-sami.3,
+// crdt/doc.go:616-620) as a room's does. Two collections before each run empty the pool ygo's
 // encoders come from (encoding/pool.go:17-19), whose primary and victim caches each survive one,
 // so the encode grows its buffer from nothing, as it does in a pod whose pool a collection emptied.
 // scanRefused is whether the apply is to be refused by the document's scan budget

@@ -759,8 +759,8 @@ func TestAWriteLeavingParkedStructsPastTheDecodeCapIsRefusedAsUndecodable(t *tes
 // (typeAndDelete gives why), and then runs keystrokes typed one after another, each in a
 // transaction of its own, as keystrokes reach a room, a hundred into each of a run of texts so no
 // keystroke walks far to its place. The room keeps each keystroke a struct; a decode of its state
-// merges each text's hundred into one (squashRuns, crdt/transaction.go:168-323 in sjawhar/ygo
-// v1.51.3-sami.7).
+// merges each text's hundred into one (squashRuns, crdt/transaction.go:242-397 in sjawhar/ygo
+// v1.54.1-sami.3).
 func typedRoom(t *testing.T, structs, runs int) *crdt.Doc {
 	t.Helper()
 	const keystrokes = 100
