@@ -1,20 +1,26 @@
 import { type ReactNode, useCallback, useState } from "react";
 import { Link } from "react-router-dom";
 
-import type { Artifact, InboxRow } from "../../api/types";
-import { linkHoverText, linkText, secondaryButtonCompact } from "../../theme/classes";
+import type { Artifact, InboxRow, MyReplyRow } from "../../api/types";
+import {
+  linkHoverText,
+  linkText,
+  secondaryButtonCompact,
+  textMutedOnCanvas,
+} from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { PriorityControl } from "../issue/PriorityControl";
 import { blockFragment } from "../refs/block-reference";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
-import { InboxOwnerLink } from "./AskOwnerLink";
+import { AskOwnerLink, InboxOwnerLink } from "./AskOwnerLink";
 import { AssignToMe } from "./AssignToMe";
 import { askIssueKey, controlName } from "./ask-name";
 import { EarlierApproval } from "./EarlierApproval";
 import { SnoozeControl } from "./SnoozeControl";
 import { isUnassigned } from "./sections";
 import { isSnoozed } from "./snooze";
+import { threadOwner, threadReferenceRoute } from "./ThreadRowCard";
 
 /** The page "Open page" opens: the question's issue, or — for a project document, which has no
  *  issue page — the document itself at the section the column is scrolled to. The section is the
@@ -142,6 +148,47 @@ export function ReadingPaneHead({
           {approveDrawn ? null : <EarlierApproval approval={approval} />}
         </>
       )}
+    </header>
+  );
+}
+
+/**
+ * The reading column's head for a Reply or an Agent row: who the thread belongs to, **Open
+ * page** - the thread's own page, which the server names in the row's `ref`: the document with
+ * the thread open, the issue's conversation, or `/agents/<id>/live` for an Agent row - and
+ * **Copy ref**.
+ *
+ * An Agent row has no **Copy ref**: Dispatch's reference grammar has no form for an issue-less
+ * message (`dispatch://KEY/message/<id>` needs an issue key, and `dispatch://agent/` covers only
+ * artifacts), which is why `y` does nothing on such a row either. Priority, **Assign to me** and
+ * **Snooze** are a question's controls and show for no thread row at all.
+ */
+export function ThreadPaneHead({
+  sectionBlockId,
+  thread,
+}: {
+  /** The heading of the section the column scrolled to, where the column shows a document: the
+   *  page opens there rather than at the document's top. */
+  sectionBlockId?: string | undefined;
+  thread: MyReplyRow;
+}): ReactNode {
+  const owner = threadOwner(thread);
+  const reference = threadReferenceRoute(thread);
+  const page =
+    sectionBlockId === undefined ? thread.ref : `${thread.ref}${blockFragment(sectionBlockId)}`;
+  return (
+    <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      {owner === null ? (
+        <span className={`min-w-0 truncate text-sm font-semibold ${textMutedOnCanvas}`}>
+          {thread.session?.name ?? "Agent message"}
+        </span>
+      ) : (
+        <AskOwnerLink className="grow" inboxOwner owner={owner} />
+      )}
+      <Link className={`text-sm ${linkText} ${linkHoverText}`} to={page}>
+        Open page
+      </Link>
+      {reference === undefined ? null : <CopyRefButton route={reference} />}
     </header>
   );
 }

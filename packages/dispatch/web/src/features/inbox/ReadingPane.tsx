@@ -12,19 +12,28 @@ import {
 import { isText } from "../../api/artifact-version";
 import { api } from "../../api/client";
 import { issueQuery, whoAmIQuery } from "../../api/queries";
-import type { AskApproval, InboxRow } from "../../api/types";
+import type {
+  Artifact,
+  AskApproval,
+  AuthenticatedUser,
+  InboxRow,
+  MyReplyRow,
+} from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
-import { quoteAccentBorder } from "../../theme/classes";
+import { quoteAccentBorder, textPrimaryOnCanvas } from "../../theme/classes";
 import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import { CHANGED_BLOCK_CLASS } from "../doc/change-marks";
-import { liveTextQueryOptions, ProofDocument } from "../doc/ProofDocument";
+import { liveTextQueryOptions, ProofDocument, type ProofDocumentProps } from "../doc/ProofDocument";
 import { DocumentRuntime } from "../doc/runtime";
 import { loadBlockSchema } from "../doc/schema";
 import { BLOCK_ID_ATTRIBUTE, scrollBlockToTop, scrollElementToTop } from "../doc/scroll-block";
 import { VersionView } from "../doc/VersionView";
 import { AskCard } from "./AskCard";
 import { isDecisionAsk } from "./ask-decision";
-import { ReadingPaneHead } from "./ReadingPaneHead";
+import type { InboxListRow } from "./list-row";
+import { questionLine } from "./question-line";
+import { ReadingPaneHead, ThreadPaneHead } from "./ReadingPaneHead";
+import { ThreadBody } from "./ThreadBody";
 
 /**
  * How long the column waits after the last change of the selected question before it opens
@@ -129,13 +138,14 @@ function useSettled(artifactId: string): boolean {
 }
 
 export interface ReadingPaneProps {
-  ask: InboxRow;
   /** The reader's own answer landed; the list selects the next row. */
   onAnswered: (askId: string) => void;
   /** The head's Snooze write is in flight or refused, or has stopped being either: the Inbox
    *  keeps a live row listed, which is what keeps this column on it long enough for a refusal
    *  to be read. */
   onSnoozeLive: (askId: string, live: boolean) => void;
+  /** The selected row: an open ask, or a thread of the reader's own. */
+  row: InboxListRow;
   viewer: string | undefined;
 }
 
@@ -154,20 +164,24 @@ function PaneFrame({
   children,
   content,
   head,
+  label = "Selected question",
   scroller,
   sectionBar,
 }: {
   children: ReactNode;
   content?: RefObject<HTMLDivElement | null>;
   head: ReactNode;
+  /** What the column is of: a question, or a thread of the reader's own. */
+  label?: string;
   scroller?: RefObject<HTMLDivElement | null>;
   sectionBar?: SectionBar;
 }): ReactNode {
   return (
     <section
-      aria-label="Selected question"
+      aria-label={label}
       className="flex h-full min-h-0 flex-col gap-3"
       data-testid="inbox-pane"
+      id="inbox-pane"
     >
       {head}
       <div className="min-h-0 flex-1 overflow-y-auto" ref={scroller}>
@@ -386,27 +400,63 @@ function ApprovalBody({
   );
 }
 
-/** A question written as a decision block: the live document, drawn by the document page's own
- *  component in its pane surface, scrolled so that the heading of the question's section sits
- *  at the top of the column, with a bar marking the section down to the block. */
-function DecisionBody({
+/** What a column showing a document at one block holds: the refs it measures and scrolls, the
+ *  document itself, where the section bar stands, and whether it could be placed at all. */
+interface DocumentAtBlock {
+  /** The document, once the read lands. */
+  readonly artifact: Artifact | undefined;
+  /** Whether the editor has drawn the block the column is opened at; undefined while it has
+   *  drawn no block at all, and false once it has drawn a document holding no such block. */
+  readonly blockFound: boolean | undefined;
+  readonly content: RefObject<HTMLDivElement | null>;
+  /** The document cannot be opened beside the list: the read failed, or its own admission did. */
+  readonly failed: boolean;
+  readonly isClosed: boolean;
+  readonly onUnavailable: () => void;
+  /** Every read the document needs has landed, so it can be drawn. */
+  readonly ready: boolean;
+  readonly scroller: RefObject<HTMLDivElement | null>;
+  readonly sectionBar: SectionBar | undefined;
+  /** The heading of the section the column scrolled to, once the document has drawn. */
+  readonly sectionBlockId: string | undefined;
+  readonly showsDocument: boolean;
+  /** Puts the column back at the block it was opened for. */
+  readonly skipToBlock: () => void;
+  readonly user: AuthenticatedUser | undefined;
+}
+
+/**
+ * The live document opened at one block: the read, the placement, the section bar and the
+ * fall-back every body that shows a document beside the list shares.
+ *
+ * The column follows the selection only once it has settled (`useSettled`), reads the document
+ * under the document page's own keys, and reports whether the editor has drawn the block it was
+ * opened at: a question written as a decision block, and a comment thread anchored in a project
+ * document, are the same placement problem, and this is the one answer to it.
+ */
+function useDocumentAtBlock({
   artifactId,
-  ask,
   blockId,
-  onAnswered,
-  onSnoozeLive,
-  viewer,
-}: PaneFlowProps & { artifactId: string; blockId: string }): ReactNode {
+  issueKey,
+}: {
+  artifactId: string;
+  blockId: string;
+  issueKey: string | null;
+}): DocumentAtBlock {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const [sectionBar, setSectionBar] = useState<SectionBar | undefined>(undefined);
   const [sectionBlockId, setSectionBlockId] = useState<string | undefined>(undefined);
+  // Whether the editor has drawn the block the column is opened at; undefined while it has drawn
+  // no blocks at all. A document that holds no such block is an anchor the column cannot place,
+  // which is what its host falls back from.
+  const [blockFound, setBlockFound] = useState<boolean | undefined>(undefined);
   const settled = useSettled(artifactId);
 
   const user = useQuery(whoAmIQuery()).data;
   const issue = useQuery({
-    ...issueQuery(ask.issue_key ?? undefined),
-    enabled: ask.issue_key !== null,
+    ...issueQuery(issueKey ?? undefined),
+    enabled: issueKey !== null,
   });
   const artifactQuery = useQuery({ ...artifactQueryOptions(artifactId), enabled: settled });
   // The read the document page's own editor is admitted by: the server answers it `409
@@ -417,34 +467,39 @@ function DecisionBody({
   const textQuery = useQuery({ ...liveTextQueryOptions(artifactId), enabled: settled });
 
   const artifact = artifactQuery.data;
-  // A document whose own admission failed after this column's read succeeded falls back to the
-  // card too: the page answers that with a repair or a rebuild prompt, which a column beside a
-  // list never shows, so the document reports it here instead (`onUnavailable`) and the card
-  // takes its place. The report names the document it is about, so selecting another question
-  // is not answered with the last one's failure.
+  // A document whose own admission failed after this column's read succeeded falls back too: the
+  // page answers that with a repair or a rebuild prompt, which a column beside a list never
+  // shows, so the document reports it here instead (`onUnavailable`). The report names the
+  // document it is about, so selecting another row is not answered with the last one's failure.
   const [unavailable, setUnavailable] = useState<string | undefined>(undefined);
   const failed = artifactQuery.isError || textQuery.isError || unavailable === artifactId;
   const showsDocument = !failed && artifact !== undefined;
 
   // The editor draws its blocks after the socket syncs, and a diagram or a picture moves them
   // again afterwards, so the placement runs on every change of the drawn document: the scroll
-  // once, when the question's block is first there, and the bar whenever the blocks move.
+  // once, when the block is first there, and the bar whenever the blocks move.
   useEffect(() => {
     setSectionBar(undefined);
     setSectionBlockId(undefined);
+    setBlockFound(undefined);
     const column = scroller.current;
     const drawn = content.current;
     if (column === null || drawn === null || !showsDocument) {
       return;
     }
-    // The column is placed once, when the question's block is first drawn; the bar follows the
-    // blocks for as long as they move.
+    // The column is placed once, when the block is first drawn; the bar follows the blocks for
+    // as long as they move.
     let placed = false;
     const place = () => {
       const block = blockElement(drawn, blockId);
       if (block === null) {
+        // Nothing drawn yet says nothing about the block; a drawn document without it does.
+        setBlockFound((current) =>
+          drawn.querySelector(`[${BLOCK_ID_ATTRIBUTE}]`) === null ? current : false
+        );
         return;
       }
+      setBlockFound(true);
       const headingId = sectionHeadingId(drawn, blockId);
       if (!placed) {
         if (headingId === undefined) {
@@ -471,43 +526,58 @@ function DecisionBody({
     };
   }, [blockId, showsDocument]);
 
-  const skipToAnswer = useCallback(() => {
+  const skipToBlock = useCallback(() => {
     const column = scroller.current;
     if (column !== null) {
       scrollBlockToTop(blockId, column);
     }
   }, [blockId]);
 
+  return {
+    artifact,
+    blockFound,
+    content,
+    failed,
+    isClosed: issue.data !== undefined && issue.data.closed_at !== null,
+    onUnavailable: () => setUnavailable(artifactId),
+    ready: settled && artifact !== undefined && user !== undefined && textQuery.data !== undefined,
+    scroller,
+    sectionBar,
+    sectionBlockId,
+    showsDocument,
+    skipToBlock,
+    user,
+  };
+}
+
+/** A question written as a decision block: the live document, drawn by the document page's own
+ *  component in its pane surface, scrolled so that the heading of the question's section sits
+ *  at the top of the column, with a bar marking the section down to the block. */
+function DecisionBody({
+  artifactId,
+  ask,
+  blockId,
+  onAnswered,
+  onSnoozeLive,
+  viewer,
+}: PaneFlowProps & { artifactId: string; blockId: string }): ReactNode {
+  const document = useDocumentAtBlock({ artifactId, blockId, issueKey: ask.issue_key });
+  const { artifact, failed, showsDocument, user } = document;
+
   const body = (): ReactNode => {
     if (failed) {
       return <QuestionCard ask={ask} onAnswered={onAnswered} />;
     }
     const name = ask.approval?.name ?? ask.document?.name ?? "the document";
-    const skeleton = <LoadingSkeleton label={`Opening ${name}`} />;
-    if (!settled || artifact === undefined || user === undefined || textQuery.data === undefined) {
-      return skeleton;
+    if (!document.ready || artifact === undefined || user === undefined) {
+      return <LoadingSkeleton label={`Opening ${name}`} />;
     }
     return (
-      <ProofDocument
+      <PaneDocument
+        anchoredThread={undefined}
         artifact={artifact}
-        highlight={undefined}
-        isClosed={issue.data !== undefined && issue.data.closed_at !== null}
-        key={artifact.id}
+        document={document}
         onAskAnswered={onAnswered}
-        onUnavailable={() => setUnavailable(artifact.id)}
-        onVersionChange={noVersionChange}
-        owner={
-          artifact.issue_key === null
-            ? {
-                artifactId: artifact.id,
-                kind: "document",
-                project: artifact.project,
-                slug: artifact.slug,
-              }
-            : { kind: "issue", key: artifact.issue_key }
-        }
-        showDiff={false}
-        surface="pane"
         user={user}
       />
     );
@@ -515,42 +585,275 @@ function DecisionBody({
 
   return (
     <PaneFrame
-      content={content}
+      content={document.content}
       head={
         <ReadingPaneHead
           artifact={artifact}
           ask={ask}
           onAnswered={onAnswered}
           onNextChange={undefined}
-          onSkipToAnswer={showsDocument ? skipToAnswer : undefined}
+          onSkipToAnswer={showsDocument ? document.skipToBlock : undefined}
           onSnoozeLive={onSnoozeLive}
-          sectionBlockId={sectionBlockId}
+          sectionBlockId={document.sectionBlockId}
           viewer={viewer}
         />
       }
-      scroller={scroller}
-      sectionBar={sectionBar}
+      scroller={document.scroller}
+      sectionBar={document.sectionBar}
     >
       {body()}
     </PaneFrame>
   );
 }
 
+/** The live document in the column, with whatever its host draws under one of its blocks. */
+function PaneDocument({
+  anchoredThread,
+  artifact,
+  document,
+  onAskAnswered,
+  user,
+}: {
+  anchoredThread: ProofDocumentProps["anchoredThread"];
+  artifact: Artifact;
+  document: DocumentAtBlock;
+  onAskAnswered: (askId: string) => void;
+  user: AuthenticatedUser;
+}): ReactNode {
+  return (
+    <ProofDocument
+      anchoredThread={anchoredThread}
+      artifact={artifact}
+      highlight={undefined}
+      isClosed={document.isClosed}
+      key={artifact.id}
+      onAskAnswered={onAskAnswered}
+      onUnavailable={document.onUnavailable}
+      onVersionChange={noVersionChange}
+      owner={
+        artifact.issue_key === null
+          ? {
+              artifactId: artifact.id,
+              kind: "document",
+              project: artifact.project,
+              slug: artifact.slug,
+            }
+          : { kind: "issue", key: artifact.issue_key }
+      }
+      showDiff={false}
+      surface="pane"
+      user={user}
+    />
+  );
+}
+
+/** The subject line a thread body opens with: what the thread is about, in one line. */
+function ThreadSubject({ thread }: { thread: MyReplyRow }): ReactNode {
+  return (
+    <h2 className={`text-sm font-semibold ${textPrimaryOnCanvas}`} data-inbox-thread-subject="">
+      {questionLine(thread.subject)}
+    </h2>
+  );
+}
+
+/** Which of the column's four thread bodies this is, as the pane marks it. */
+type ThreadPaneBody = "agent" | "ask" | "document" | "issue";
+
+/** A thread that needs no document: a comment thread on an issue, an issue message
+ *  conversation, an ask that is not a decision block, and a thread whose document the column
+ *  could not open, which shows the quote the thread is anchored to in place of it. */
+function ThreadBodyPane({
+  body,
+  fallback = false,
+  quote,
+  thread,
+}: {
+  body: ThreadPaneBody;
+  /** Whether this is the document body falling back to the thread alone. */
+  fallback?: boolean;
+  quote: boolean;
+  thread: MyReplyRow;
+}): ReactNode {
+  return (
+    <PaneFrame head={<ThreadPaneHead thread={thread} />} label="Selected thread">
+      <div data-inbox-pane-body={body} data-inbox-pane-fallback={fallback ? "" : undefined}>
+        <ThreadSubject thread={thread} />
+        <ThreadBody openAtFirstUnread quote={quote} thread={thread} />
+      </div>
+    </PaneFrame>
+  );
+}
+
 /**
- * The Inbox's reading column: the selected question's own document, where the answer is given.
+ * A comment thread anchored in a project document: the live document, opened at the section
+ * that holds the anchored block, with the quote highlighted and the thread drawn inside the
+ * document column directly below that block, through the node view's own slot.
  *
- * One of three flows, by what the selected question is, each with only its own reads and its own
- * effects under the one head: a question written as a decision block (`DecisionBody`), an
- * approval request (`ApprovalBody`), and a question in no document (`CardBody`), which is what a
- * question whose document could not be opened falls back to as well — the column never shows the
- * document page's rebuild or repair prompts.
+ * It falls back to the thread alone, with its quote, when the document cannot be opened and when
+ * the document holds no such block - an orphaned anchor, or one naming a block that has gone.
+ */
+function DocumentThreadBody({
+  artifactId,
+  blockId,
+  thread,
+}: {
+  artifactId: string;
+  blockId: string;
+  thread: MyReplyRow;
+}): ReactNode {
+  const document = useDocumentAtBlock({ artifactId, blockId, issueKey: null });
+  const { artifact, blockFound, failed, user } = document;
+  if (failed || blockFound === false) {
+    return <ThreadBodyPane body="document" fallback quote thread={thread} />;
+  }
+  const body = (): ReactNode => {
+    if (!document.ready || artifact === undefined || user === undefined) {
+      return <LoadingSkeleton label={`Opening ${thread.document?.name ?? "the document"}`} />;
+    }
+    return (
+      <PaneDocument
+        anchoredThread={{
+          blockId,
+          children: <ThreadBody openAtFirstUnread thread={thread} />,
+          markId: thread.anchor?.mark_id ?? null,
+        }}
+        artifact={artifact}
+        document={document}
+        onAskAnswered={noAnswer}
+        user={user}
+      />
+    );
+  };
+  return (
+    <PaneFrame
+      content={document.content}
+      head={<ThreadPaneHead sectionBlockId={document.sectionBlockId} thread={thread} />}
+      label="Selected thread"
+      scroller={document.scroller}
+      sectionBar={document.sectionBar}
+    >
+      <div data-inbox-pane-body="document">{body()}</div>
+    </PaneFrame>
+  );
+}
+
+/** The thread of an ask. A decision block's ask opens its document at its section, where the
+ *  block hosts its own answer form and exchange, as an open question's does; every other ask
+ *  shows its card, with its answer and its thread. */
+function AskThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
+  // The card's own key, so the card below reads no second copy of the same thread.
+  const read = useQuery({
+    queryFn: () => api.getAsk(thread.thread_id),
+    queryKey: ["ask-thread", thread.thread_id],
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const ask = read.data?.ask;
+  if (ask !== undefined && isDecisionAsk(ask)) {
+    return (
+      <AskDocumentBody
+        artifactId={ask.block_artifact.id}
+        blockId={ask.block_id}
+        issueKey={ask.issue_key}
+        thread={thread}
+      />
+    );
+  }
+  return <ThreadBodyPane body="ask" quote={false} thread={thread} />;
+}
+
+/** The document of a decision block's ask, opened at its section: the block draws the question,
+ *  its answer and its thread itself (`AskBlockCard`). */
+function AskDocumentBody({
+  artifactId,
+  blockId,
+  issueKey,
+  thread,
+}: {
+  artifactId: string;
+  blockId: string;
+  issueKey: string | null;
+  thread: MyReplyRow;
+}): ReactNode {
+  const document = useDocumentAtBlock({ artifactId, blockId, issueKey });
+  const { artifact, failed, user } = document;
+  if (failed) {
+    return <ThreadBodyPane body="ask" fallback quote thread={thread} />;
+  }
+  return (
+    <PaneFrame
+      content={document.content}
+      head={<ThreadPaneHead sectionBlockId={document.sectionBlockId} thread={thread} />}
+      label="Selected thread"
+      scroller={document.scroller}
+      sectionBar={document.sectionBar}
+    >
+      <div data-inbox-pane-body="ask">
+        {!document.ready || artifact === undefined || user === undefined ? (
+          <LoadingSkeleton label={`Opening ${thread.document?.name ?? "the document"}`} />
+        ) : (
+          <PaneDocument
+            anchoredThread={undefined}
+            artifact={artifact}
+            document={document}
+            onAskAnswered={noAnswer}
+            user={user}
+          />
+        )}
+      </div>
+    </PaneFrame>
+  );
+}
+
+/** The reading column for a Reply or an Agent row: one body per shape the thread comes in. */
+function ThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
+  if (thread.kind === "ask") {
+    return <AskThreadPane thread={thread} />;
+  }
+  const anchor = thread.anchor;
+  const blockId = anchor?.block_id;
+  if (
+    thread.kind === "comment" &&
+    thread.document !== undefined &&
+    anchor !== undefined &&
+    !anchor.orphaned &&
+    blockId !== null &&
+    blockId !== undefined
+  ) {
+    return <DocumentThreadBody artifactId={anchor.artifact_id} blockId={blockId} thread={thread} />;
+  }
+  // A thread in a document whose anchor cannot be placed - orphaned, or naming no block - is the
+  // document body falling back to the thread alone, with its quote.
+  const inDocument = thread.kind === "comment" && thread.document !== undefined;
+  return (
+    <ThreadBodyPane
+      body={thread.kind === "agent" ? "agent" : inDocument ? "document" : "issue"}
+      fallback={inDocument}
+      quote={inDocument}
+      thread={thread}
+    />
+  );
+}
+
+/**
+ * The Inbox's reading column: what the selected row is, where it is answered.
+ *
+ * A question is one of three flows, each with only its own reads and its own effects under the
+ * one head: a question written as a decision block (`DecisionBody`), an approval request
+ * (`ApprovalBody`), and a question in no document (`CardBody`), which is what a question whose
+ * document could not be opened falls back to as well — the column never shows the document
+ * page's rebuild or repair prompts. A Reply or an Agent row is one of four thread bodies
+ * (`ThreadPane`), which fall back the same way.
  */
 export function ReadingPane({
-  ask,
   onAnswered,
   onSnoozeLive,
+  row,
   viewer,
 }: ReadingPaneProps): ReactNode {
+  if (row.kind === "thread") {
+    return <ThreadPane thread={row.thread} />;
+  }
+  const ask = row.ask;
   const subject = subjectOf(ask);
   const flow = { ask, onAnswered, onSnoozeLive, viewer };
   if (subject.kind === "approval") {
@@ -561,6 +864,10 @@ export function ReadingPane({
   }
   return <CardBody {...flow} />;
 }
+
+/** A thread's document answers nothing of the column's: an ask answered in one of its blocks is
+ *  the block's own business, and the list reads its rows again on the event. */
+function noAnswer(): void {}
 
 /** The column carries no version picker: which version it shows is the question's, never the
  *  reader's. */

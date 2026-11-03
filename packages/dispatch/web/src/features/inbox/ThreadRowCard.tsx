@@ -22,6 +22,7 @@ import { AskOwnerLink } from "./AskOwnerLink";
 import { rowPriority, rowType } from "./list-row";
 import { questionLine } from "./question-line";
 import { RowKindIcon, RowPriorityTag } from "./RowMarks";
+import { ThreadBody } from "./ThreadBody";
 
 /** The issue or project document a thread belongs to, or null for an Agent row, which belongs
  *  to neither: its thread is a message the reader sent a session. */
@@ -55,21 +56,13 @@ export function threadReferenceRoute(thread: MyReplyRow): DispatchReferenceRoute
  * A Reply or an Agent row as a card: the layout below the reading pane's width, and the one the
  * drawer shows at every width.
  *
- * This is the card's **shell**. It draws the head - the kind icon, the title and the time of
- * the last write, then the priority tag and the whole issue key and title - and the two
- * controls a thread row offers, **Open** and **Mark read**. What goes between them, the
- * thread's own replies, is `children`: the body is written elsewhere, and a card with none
- * renders its head and its controls alone.
+ * It draws the head - the kind icon, the title and the time of the last write, then the priority
+ * tag and the whole issue key and title - then the thread itself, exactly as the reading pane
+ * draws it and collapsed the same way (`ThreadBody`), and the two controls a thread row offers,
+ * **Open** and **Mark read**. A thread anchored in a document shows the text it is anchored to
+ * rather than the document: a card is no place to open one.
  */
-export function ThreadRowCard({
-  children,
-  thread,
-}: {
-  /** The thread's replies, drawn by whoever owns them; a card given none shows head and
-   *  controls alone. */
-  children?: ReactNode;
-  thread: MyReplyRow;
-}): ReactNode {
+export function ThreadRowCard({ thread }: { thread: MyReplyRow }): ReactNode {
   const queryClient = useQueryClient();
   const markRead = useKeyedWrite({
     label: () => "Thread marked read",
@@ -113,7 +106,7 @@ export function ThreadRowCard({
           <AskOwnerLink className="grow" owner={owner} />
         )}
       </div>
-      {children}
+      <ThreadBody quote thread={thread} />
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">
         {/* The server's `ref` names the thread's root, never the reply: an anchored root
             redirects to its document, and a comment's thread opens as it lands. */}

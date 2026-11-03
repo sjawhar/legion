@@ -60,6 +60,7 @@ import {
   rowUrgency,
 } from "./list-row";
 import { useMotionHold } from "./motion-hold";
+import { PaneDivider, usePaneWidth } from "./PaneDivider";
 import { type PlacedRow, usePaneSelection } from "./pane-selection";
 import { useFoldedGroups, useThreadOrder } from "./preferences";
 import { questionLine } from "./question-line";
@@ -609,6 +610,11 @@ export function Inbox({
   const listScroller = useRef<HTMLDivElement>(null);
   /** The reading column, where `h`, `o`, `y`, Enter and `1`-`9` act while it is on. */
   const paneRef = useRef<HTMLDivElement>(null);
+  /** The grid the list, the divider and the reading column share, whose width a drag of the
+   *  divider is measured against. */
+  const columnsRef = useRef<HTMLDivElement>(null);
+  /** How much of that grid the reading column takes, kept for the reader's browser. */
+  const [paneWidth, setPaneWidth] = usePaneWidth();
   // A refetch can land while a pointer travels between rows; adopt it once that pointer settles.
   const adoptedInbox = useMotionHold(inbox.data, listRef);
   const adoptedThreads = useMotionHold(threads.data?.rows, listRef);
@@ -1202,21 +1208,32 @@ export function Inbox({
     <div className={paneShown ? "flex min-h-0 flex-1 flex-col gap-4" : "space-y-4"}>
       {header}
       {paneShown ? (
-        <div className="flex min-h-0 flex-1 gap-6">
+        // The two columns are a grid of two fractions, so the share the reader dragged the
+        // divider to is exactly the share the pane takes, at any width; the divider is the
+        // column between them and takes its own.
+        <div
+          className="grid min-h-0 flex-1"
+          ref={columnsRef}
+          style={{
+            gridTemplateColumns:
+              subject === undefined
+                ? "minmax(0, 1fr)"
+                : `minmax(0, ${1 - paneWidth}fr) auto minmax(0, ${paneWidth}fr)`,
+          }}
+        >
           {listColumn}
           {subject === undefined ? null : (
-            <div className="min-w-0 flex-1" ref={paneRef}>
-              {subject.kind === "ask" ? (
+            <>
+              <PaneDivider columns={columnsRef} onWidthChange={setPaneWidth} width={paneWidth} />
+              <div className="min-w-0" ref={paneRef}>
                 <ReadingPane
-                  ask={subject.ask}
                   onAnswered={recordAnswered}
                   onSnoozeLive={onSnoozeLive}
+                  row={subject}
                   viewer={viewer}
                 />
-              ) : (
-                <ThreadRowCard thread={subject.thread} />
-              )}
-            </div>
+              </div>
+            </>
           )}
         </div>
       ) : (
