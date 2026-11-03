@@ -908,7 +908,7 @@ func TestSecretListShowsValueAndDeletion(t *testing.T) {
 	}
 	rows := map[string][]string{}
 	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
-	if got := strings.Fields(lines[0]); strings.Join(got, " ") != "NAME OWNER TIER KIND MAX_GRANT VALUE DELETED EARLIEST_PURGE" {
+	if got := strings.Fields(lines[0]); strings.Join(got, " ") != "NAME OWNER TIER KIND MAX_GRANT DEFAULT_GRANT VALUE DELETED EARLIEST_PURGE" {
 		t.Fatalf("header = %q", lines[0])
 	}
 	for _, line := range lines[1:] {

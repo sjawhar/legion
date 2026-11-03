@@ -48,8 +48,9 @@ type createRequestResponse struct {
 	// for "anyone", linking approve_url. Null when the policy decided it at once, so no record
 	// names one.
 	Approver *string `json:"approver"`
-	// How many seconds its grant lasts, as the signed request asked; null when it asked for no
-	// lifetime, and the grant lasts until the session ends. A reused or coalesced request answers
+	// How many seconds its grant lasts, as the signed request asked; or, when it asked for none, 12
+	// hours; null when every name is tagged default-grant=session and the grant lasts until the
+	// session ends. A reused or coalesced request answers
 	// its own, which equals the one asked for. A client that asked for a lifetime and reads null,
 	// or no such field from a broker before it, was not given that lifetime.
 	LifetimeSeconds *int `json:"lifetime_seconds"`

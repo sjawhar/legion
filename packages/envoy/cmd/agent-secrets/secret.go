@@ -663,13 +663,13 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tOWNER\tTIER\tKIND\tMAX_GRANT\tVALUE\tDELETED\tEARLIEST_PURGE")
+	fmt.Fprintln(tw, "NAME\tOWNER\tTIER\tKIND\tMAX_GRANT\tDEFAULT_GRANT\tVALUE\tDELETED\tEARLIEST_PURGE")
 	for _, v := range views {
 		value := "no"
 		if v.HasValue {
 			value = "yes"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", v.Name, orDash(v.Owner), orDash(v.Tier), orDash(v.Kind), orDash(v.MaxGrant), value, formatTime(v.Deleted), formatTime(v.EarliestPurge))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", v.Name, orDash(v.Owner), orDash(v.Tier), orDash(v.Kind), orDash(v.MaxGrant), orDash(v.DefaultGrant), value, formatTime(v.Deleted), formatTime(v.EarliestPurge))
 	}
 	if err := tw.Flush(); err != nil {
 		return secretFailIn(stderr, form, s, err)

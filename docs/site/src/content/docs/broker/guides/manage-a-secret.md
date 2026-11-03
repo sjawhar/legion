@@ -109,6 +109,8 @@ machine's Application Default Credentials are its own identity, and so does ever
   lists the GitHub accounts the broker mints installation tokens for, separated by spaces, so the
   shell quotes it: `--github-owners "acme-org ada"`. A comma is refused before anything is written.
 - **`--max-grant`** is optional. It is the longest `--ttl` a request for this secret may use.
+- **`--default-grant session`** is optional. A request with no `--ttl` for secrets that all carry it
+  gets a grant that lasts until its session ends, instead of 12 hours.
   It must be a duration of at least one second.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
   Ctrl-W and the terminal's kill-line character edit it. An unhandled control byte, including
@@ -286,13 +288,13 @@ retagged DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-eas
 broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
-Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--max-grant` or a combination. A retag that
+Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--max-grant`, `--default-grant` or a combination. A retag that
 sets tags reads the owner and tier tags the secret holds and sends both in one request. On AWS,
 this lets an IAM condition inspect both tags. Every other tag or annotation stays as it is. For a
 secret missing an owner or tier tag, name that tag too.
 
 `--kind none` removes the kind tag and the `mint-service-account` tag written with it,
-`--github-owners none` removes the GitHub owners and `--max-grant none` removes the max grant. A
+`--github-owners none` removes the GitHub owners and `--max-grant none` removes the max grant, and `--default-grant none` removes the opt-out. A
 removal is a retag of its own: it changes no other tag, so the cloud refusing it leaves the secret
 as it was. A retag that names `none` beside another change is refused before it writes anything.
 So is a retag that would leave a `github-app` secret without `--github-owners`, as the broker would

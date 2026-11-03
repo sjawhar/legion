@@ -314,7 +314,7 @@ const noRulesFile = "the broker reads each secret's owner and tier from the secr
 
 // noGrantCap is why BROKER_MAX_GRANT_SECONDS is gone: a request chooses a shorter lifetime, or
 // its grant lasts until the requesting session ends.
-const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts until the requesting session ends"
+const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts 12 hours, or until the requesting session ends for a secret tagged default-grant=session"
 
 // noMintTargets is why BROKER_MINT_TARGETS is gone: each secret's kind tag names its minter.
 const noMintTargets = "the broker no longer mints service account tokens; a secret's kind tag selects what it mints"
