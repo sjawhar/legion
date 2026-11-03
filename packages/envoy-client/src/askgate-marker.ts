@@ -332,11 +332,13 @@ function ownerFile(dir: string, owner: AskgateOwner): string {
 
 /**
  * Makes `owner` an owner of session directory `dir`'s record, carrying `mode` for the CLI's marker
- * check of that session, and removes the files of owners whose process is gone. It makes the owner's
- * store first (`keepStore`), so the file never names a store that is not there. A gone owner with a
- * start time is removed: no later process of its namespace has its pid and start time, and one of
- * another namespace that only seemed gone writes its own file again at its next call
- * (`setRecordMode`). One with no start time is left, as its pid can return.
+ * check of that session, and removes the files of owners known to be gone. It makes the owner's
+ * store first (`keepStore`), so the file never names a store that is not there. Only an owner of
+ * this pid namespace is known gone: no later process of the namespace has its pid and start time.
+ * The file of an owner of another namespace, or of one written before the namespace was kept, stays
+ * whatever its pid reads here, since its process may still run and would lose its record until its
+ * next call; it is inert wherever its owner counts gone, and goes with the session directory's
+ * prune. One with no start time is left too, as its pid can return.
  */
 export function writeAskgateRecord(
   dir: string,
@@ -358,7 +360,13 @@ export function writeAskgateRecord(
     } catch {
       continue;
     }
-    if (other !== undefined && other.owner.start !== null && !ownerLive(other.owner, now)) {
+    const gone =
+      other !== undefined &&
+      other.owner.start !== null &&
+      other.owner.ns !== null &&
+      other.owner.ns === pidNamespace() &&
+      !ownerLive(other.owner, now);
+    if (gone) {
       rmSync(file, { force: true });
     }
   }
@@ -486,6 +494,37 @@ export function sweepStores(root: string, now: number): void {
       // Gone since the listing, or not this user's to remove.
     }
   }
+}
+
+/**
+ * Whether an owner file of session directory `dir`'s record names a marker store that is still
+ * there. The daily prune keeps such a directory whatever `askgateState` reads of its owners: a
+ * store goes when its process exits or once the store sweep counts it gone, and the sweep keeps the
+ * store of an owner it cannot look up (one an earlier pi-envoy wrote with no pid namespace, which
+ * may be another namespace's live process) longer than any pid lookup here could. A record that
+ * cannot be read counts as naming one.
+ */
+export function recordNamesStore(dir: string): boolean {
+  const record = join(dir, ASKGATE_RECORD);
+  let names: string[];
+  try {
+    names = readdirSync(record);
+  } catch (error) {
+    return !hasErrnoCode(error, "ENOENT");
+  }
+  for (const name of names) {
+    if (!name.endsWith(OWNER_FILE)) continue;
+    try {
+      const parsed = parseOwner(readFileSync(join(record, name), "utf-8"));
+      if (parsed === undefined) return true;
+      statSync(parsed.owner.store);
+      return true;
+    } catch (error) {
+      // The owner file went after the listing, or the store it names is gone.
+      if (!hasErrnoCode(error, "ENOENT")) return true;
+    }
+  }
+  return false;
 }
 
 /** What the record of a session's state directory requires of a gated write. */

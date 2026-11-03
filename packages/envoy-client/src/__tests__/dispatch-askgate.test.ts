@@ -622,6 +622,8 @@ describe("AskGate at the dispatch CLI", () => {
     expect(existsSync(dir)).toBe(true);
     rmSync(ownerFile("ses-1", { pid: process.pid, start: startOf(process.pid) }));
     writeRecord("ses-1", { pid: process.pid, start: "1", store: store() });
+    // The gone process's store went with it (at its exit, or by the store sweep).
+    rmSync(store(), { recursive: true });
     utimesSync(dir, old, old);
     writeFileSync(join(stateDir, ".pruned"), "");
     utimesSync(join(stateDir, ".pruned"), old, old);
@@ -663,13 +665,18 @@ describe("AskGate at the dispatch CLI", () => {
     expect(messagePosts()).toHaveLength(1);
 
     // The process ended without removing its store: its beat stops, so after MARKER_MAX_AGE_MS the
-    // next prune takes the store, and the record names no live owner.
+    // next prune takes the store, and the one after it the session directory, whose record then
+    // names no live owner and no store that is still there.
     utimesSync(join(boxStore, "markers"), idle, idle);
     utimesSync(boxStore, idle, idle);
     utimesSync(join(stateDir, ".pruned"), longIdle, longIdle);
     utimesSync(dir, longIdle, longIdle);
     pruneSessions(stateDir, Date.now());
     expect(existsSync(boxStore)).toBe(false);
+    expect(existsSync(dir)).toBe(true);
+    utimesSync(join(stateDir, ".pruned"), longIdle, longIdle);
+    utimesSync(dir, longIdle, longIdle);
+    pruneSessions(stateDir, Date.now());
     expect(existsSync(dir)).toBe(false);
     expect((await run(MESSAGE)).code).toBe(0);
   });
