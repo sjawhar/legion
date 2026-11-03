@@ -24,6 +24,13 @@ func TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild(t *testin
 			run.quiesce()
 			run.held()
 			run.report()
+			// The test names one state: a hand-over between a held task's queue and the
+			// confirmation that tells what it holds. A seed that never reaches it checks nothing
+			// this test is for, and passes with every guard of that window broken.
+			if run.counts.handedBeforeConfirm == 0 {
+				t.Fatalf("seed %d: 0 hand-overs between a held task and its confirmation; the seed does not reach "+
+					"the state this test guards", seed)
+			}
 		})
 	}
 }
