@@ -367,7 +367,8 @@ SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServ
 # in ci.yaml differs from the text built here, so the two steps cannot name different sets.
 DAEMON_RACE_PACKAGES = ["internal/daemon", "internal/record", "internal/sessionproxy", "internal/launcher"]
 DAEMON_RACE_STEP = "Test the concurrent packages under the race detector"
-DAEMON_RACE_TEXT = "go test -count=1 -race -timeout 30m " + " ".join(f"./{p}/" for p in DAEMON_RACE_PACKAGES)
+DAEMON_RACE_PKGS = [f"./{p}/" for p in DAEMON_RACE_PACKAGES]
+DAEMON_RACE_TEXT = "go test -count=1 -race -timeout 30m " + " ".join(DAEMON_RACE_PKGS)
 DAEMON_PLAIN_STEP = "Test the Go daemon"
 DAEMON_PLAIN_PATTERN = "/(" + "|".join(DAEMON_RACE_PACKAGES) + ")$"
 DAEMON_PLAIN_SCRIPT = f"""\
@@ -405,18 +406,16 @@ GATES = [
     ], reads=CI_SELF + setup_go("typecheck", f"{DAEMON}/go.mod")),
 
     gate("test", "test", runs=[
-        step_run("test", DAEMON_RACE_STEP, DAEMON_RACE_TEXT,
-                 DAEMON, [f"./{p}/" for p in DAEMON_RACE_PACKAGES], race=True),
+        step_run("test", DAEMON_RACE_STEP, DAEMON_RACE_TEXT, DAEMON, DAEMON_RACE_PKGS, race=True),
         script_run("scripts/e2e/stage1-skeleton.sh", 'go build -o "$work/legion" ./cmd/legion', at("test", "Stage 1 live proof"),
                    DAEMON, ["./cmd/legion"], mode="build"),
         script_run("scripts/e2e/lib/held-port.test.ts", 'const build = Bun.spawnSync(["go", "build", "-o", listener, "./cmd/listener"], {',
                    at("test", "bun test scripts/e2e/lib"), ENVOY, ["./cmd/listener"], mode="build"),
     ], exact=[
-        # The plain step runs go list ./... minus the four packages the race step tests, so each of
-        # them runs once per job. check-ci-filters.sh reduces only a one-line go test, so the step's
-        # whole script is pinned, as the envoy-go unit step's is. It declares ./... on purpose: the
-        # race step tests the four, so the test filter must still select the job on a change to any
-        # of them, and the gate's closure is what it is today.
+        # check-ci-filters.sh reduces only a one-line go test, so the step's whole script is
+        # pinned, as the envoy-go unit step's is. The entry declares ./... on purpose: the race
+        # step tests the four, so the test filter must still select the job on a change to any of
+        # them, and the gate's closure is what it is today.
         pinned_step("test", DAEMON_PLAIN_STEP, DAEMON, DAEMON_PLAIN_SCRIPT, [
             (DAEMON, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
