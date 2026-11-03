@@ -176,23 +176,26 @@ func applyAskBacklinkCounts(asks []*model.Ask, counts map[string]int) {
 	}
 }
 
-// queueAskDetails queues in b what every listed ask carries beside its row - its identity event
-// and its inbound graph-edge count - and returns the apply that stamps them onto the asks once
-// the batch is closed. The two statements are queued in that order wherever an ask is read: the
-// issue read queues them beside its other reads (readIssueDetails), and a read of its own sends
-// them as a batch of its own (loadAskDetails). No ask queues nothing and its apply stamps
-// nothing.
+// queueAskDetails queues in b what every listed ask carries beside its row - its identity event,
+// its inbound graph-edge count, and the part ids of its options and of its answer with its part
+// revision - and returns the apply that stamps them onto the asks once the batch is closed. The
+// three statements are queued in that order wherever an ask is read: the issue read queues them
+// beside its other reads (readIssueDetails), and a read of its own sends them as a batch of its
+// own (loadAskDetails). No ask queues nothing and its apply stamps nothing.
 func queueAskDetails(b *pgx.Batch, asks []*model.Ask) func() error {
 	askIDs := distinctAskIDs(asks)
 	openedEventIDs := make(map[string]int64, len(askIDs))
 	counts := map[string]int{}
+	partIDs := make([]refs.AskIDs, len(asks))
 	events.QueueOpenedEventIDs(b, askIDs, openedEventIDs)
 	refs.QueueBacklinkCounts(b, "ask", askIDs, refs.AskBacklinkExclusions, counts)
+	refs.QueueAskPartIDs(b, asks, partIDs)
 	return func() error {
 		if err := applyOpenedEventIDs(asks, openedEventIDs); err != nil {
 			return err
 		}
 		applyAskBacklinkCounts(asks, counts)
+		applyAskPartIDs(asks, partIDs)
 		return nil
 	}
 }
@@ -210,6 +213,56 @@ func loadAskDetails(ctx context.Context, q queryer, asks []*model.Ask) error {
 		return err
 	}
 	return apply()
+}
+
+// attachAskPartIDs reads, in one query over `ask_blocks`, the part id of every listed ask's
+// options and answer and the ask's current part revision (`refs.AskPartIDs`), so every read
+// that shows an ask's options shows the reference of each: `dispatch://<key>/ask/<id>#b-<part
+// id>`, pinned to the ask's `revision` with `@v<N>`. It is read beside attachAskBacklinkCounts,
+// which every list and detail read of an ask already pays for, and never by a write, whose
+// answer carries no id. A list of asks reads the same ids in its own batch instead
+// (queueAskDetails, over refs.QueueAskPartIDs).
+//
+// Which option or answer each stored part stands for, and what an ask the index has not reached
+// or an option no part stands for carries, is refs.AskPartIDs'.
+func attachAskPartIDs(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if len(asks) == 0 {
+		return nil
+	}
+	partIDs, err := refs.AskPartIDs(ctx, q, asks)
+	if err != nil {
+		return err
+	}
+	applyAskPartIDs(asks, partIDs)
+	return nil
+}
+
+// applyAskPartIDs stamps each ask with the ids read for it, in the asks' own order: the part id
+// of each of its options and of its answer, and the revision its parts have reached. Both halves
+// of the read end here - attachAskPartIDs for one ask or a read of its own, queueAskDetails for
+// a list read in a batch.
+func applyAskPartIDs(asks []*model.Ask, partIDs []refs.AskIDs) {
+	for index, ask := range asks {
+		ask.Revision = partIDs[index].Revision
+		for option := range ask.Options {
+			ask.Options[option].ID = partIDs[index].Options[option]
+		}
+		if ask.Answer != nil {
+			ask.Answer.ID = partIDs[index].Answer
+		}
+	}
+}
+
+// attachAskReadFields is what every list and detail read of an ask attaches beyond its row: its
+// inbound graph-edge count (attachAskBacklinkCounts), then the part ids of its options and of its
+// answer with its part revision (attachAskPartIDs). A write attaches neither. The two are always
+// read together and in this order, so the reads a caller pays for, and the error it reports, are
+// the same at every site.
+func attachAskReadFields(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if err := attachAskBacklinkCounts(ctx, q, asks); err != nil {
+		return err
+	}
+	return attachAskPartIDs(ctx, q, asks)
 }
 
 func (s *server) loadAskAnchorArtifact(

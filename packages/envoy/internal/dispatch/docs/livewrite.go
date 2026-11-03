@@ -568,16 +568,20 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite, head int64) (*
 // decode of a read point's state (buildFork) and the clone of the room's replica a warm fork
 // takes instead (Service.forkPoint), which must be the document that decode builds.
 func forkOptions(client crdt.ClientID) []crdt.DocOption {
-	return documentCopyOptions(crdt.WithClientID(client))
+	return documentCopyOptions(maxUpdateItems, crdt.WithClientID(client))
 }
 
-// buildFork is a write's fork of state, an encoded document state, whose items client authors.
+// buildFork is a write's fork of state, an encoded document state, whose items client authors:
+// the stored history a cold write read (coldFork, rebuildFork) or the state of the room a warm
+// one encodes where no replica holds that state (warmFork, which clones the replica itself
+// where one does, Service.forkPoint). It decodes through decodeStoredState, so a refusal of a
+// stored history reads as a room's load of the same history would log it.
 func buildFork(client crdt.ClientID, state []byte) (*crdt.Doc, error) {
 	fork := crdt.New(forkOptions(client)...)
 	if len(state) == 0 {
 		return fork, nil
 	}
-	if err := crdt.ApplyUpdateV1(fork, state, nil); err != nil {
+	if err := decodeStoredState(fork, state); err != nil {
 		return nil, err
 	}
 	return fork, nil

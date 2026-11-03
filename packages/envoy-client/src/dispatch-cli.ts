@@ -65,9 +65,9 @@ const HOSTS = ["omp", "claude"] as const satisfies readonly DispatchHost[];
  *  the CLI adds counted (`fitOutput`). */
 const CLAUDE_OUTPUT_MAX = 25_000;
 
-/** Why a file that changed after AskGate's review is refused or posts unreviewed. */
+/** Why a file that changed after AskGate read it is refused or posts unreviewed. */
 const SAME_MESSAGE =
-  "AskGate reviews the calls of a message before any of them runs, so it did not review that change.";
+  "AskGate reads the files of a message's calls before any of them runs, so it did not see that change.";
 
 /** What the CLI prints when the call reached Dispatch but its local record could not be written. */
 const STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
@@ -382,7 +382,7 @@ export async function runDispatchCli(
           return refuse(
             spent.changed === undefined
               ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.`
-              : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`,
+              : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message than the one that changes the file.`,
             REFUSED,
             parsed.tool,
             { mode: "block", why: spent.why, asksCarried }
