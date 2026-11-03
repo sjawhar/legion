@@ -761,8 +761,9 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 			detail = "the requesting enrollment is no longer live"
 		}
 	}
-	if _, err := tx.Exec(ctx, `update requests set state=$2, decided_at=now(), decided_by=$3, decision_detail=$4 where id=$1 and state='pending'`,
-		requestID, next, login, nullable(detail)); err != nil {
+	if _, err := tx.Exec(ctx, `update requests set state=$2, decided_at=now(), decided_by=$3, decision_detail=$4,
+		lifetime_seconds = case when $2 = 'granted' then $5::int else lifetime_seconds end where id=$1 and state='pending'`,
+		requestID, next, login, nullable(detail), lifetime); err != nil {
 		return Decision{}, err
 	}
 	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, actor, detail) values ($1,$2,$3,$4,$5)`,
