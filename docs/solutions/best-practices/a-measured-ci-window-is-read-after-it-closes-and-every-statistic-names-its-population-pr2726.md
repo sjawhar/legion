@@ -19,8 +19,8 @@ Extends docs/solutions/best-practices/an-instrument-that-answers-a-smaller-quest
 
 That note's shape is the instrument that answers a narrower question than the one asked, and
 returns the answer that lets the work go on.
-Two instruments it does not list, both of which shipped wrong answers through an implementer and
-a tester in one pull request:
+Three instruments it does not list, all of which shipped wrong answers through an implementer, a
+tester and a reviewer in one pull request:
 
 - **A window read before it closed.**
   When the criterion is "the newest N jobs created before T", and a job counts only once some
@@ -40,6 +40,12 @@ a tester in one pull request:
   A selection rule is a filter, so it is checked by what it refuses: for every job of the window
   you do not count, record the fact that excluded it as GitHub gives it — the job's conclusion,
   the deciding step's conclusion, or the annotation's text.
+- **A figure you did not measure carries its source's population, not your sentence's.**
+  Copying a number out of a comment, a pull request body or another document copies a claim about
+  a set you have not looked at.
+  Copy the population with the number, or re-measure before you write it: correcting one figure of
+  a sentence re-opens every other figure in it, and the one you filled in by copying is the one
+  that costs the next round.
 
 ## Evidence
 
@@ -70,3 +76,14 @@ counted `test` jobs of main push runs.
   annotation `repository transferred`, and seven cancelled by a bot.
   The near case is job 125771373229, which reached its race step and ran 3 m 41 s of its 30
   minutes before the cancel, and is still out.
+- **The inherited figure.** The same pull request's `docs/testing.md` paragraph said
+  `internal/daemon` "took up to 694 s without `-race`", which no population gives: 694 s is the
+  race step's maximum in the spec's table.
+  The implementer measured the replacement for that half of the sentence and filled the other
+  half — "306 to 570 s under `-race`" — by copying `.github/workflows/ci.yaml`'s race-step
+  comment, which names "the green runs of 2026-11-02 and 2026-11-03".
+  The tester then measured that population: over its 39 green main `test` jobs the range is
+  322.432 s to 560.390 s, so neither end is attained.
+  The figure is really from sjawhar/legion#2709's pull request body, over 51 green `test` jobs of
+  those two days, pull-request jobs included.
+  One copied number cost a fourth round of a paragraph that had already had three.

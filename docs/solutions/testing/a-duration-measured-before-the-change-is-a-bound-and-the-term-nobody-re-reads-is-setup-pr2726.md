@@ -20,7 +20,7 @@ Extends docs/solutions/testing/a-race-lane-names-the-packages-that-hold-the-shar
 That note's third bullet is the budget rule: a job's `timeout-minutes` stays above the sum of the
 largest setup time and, for each `go test` step, its largest measured green duration plus its own
 `-timeout`.
-Two things about the terms of that sum, which the rule does not say and which a later editor
+Three things about the terms of that sum, which the rule does not say and which a later editor
 needs.
 
 - **A term measured before the change is a bound, not a measurement, whenever the change moves
@@ -34,6 +34,12 @@ needs.
   is on the test steps.
   Read it at the head you are sizing, not only from the historic window, and spend the headroom
   the sum leaves only after you have.
+- **Round a bound away from the data.**
+  A maximum written to fewer digits rounds up and a minimum rounds down, because a bound written
+  the other way is simply false: "at most 625 s" for a measured 625.457 s says less than the
+  measurement it cites.
+  Precision is where a bound quietly becomes an estimate, so either carry the digits you measured
+  or round outward and say which you did.
 
 ## Evidence
 
@@ -54,3 +60,9 @@ sum of 4578 s, about 76.3 minutes:
   4624 s, 77.1 minutes, inside 80 — but it leaves 2.9 minutes of headroom rather than the 3.7 the
   comment implies, and the next change to the job's step list should re-measure before it spends
   any of it.
+- **The rounding.** The same pull request's `docs/testing.md` says `internal/daemon` took "at most
+  625 s" in the plain step over the spec's 49 green main `test` jobs.
+  The measurement is 625.457 s, job 125690118806, so the bound as written is below the figure it
+  bounds.
+  The number came from the spec's own table, which had already rounded it down; nothing between
+  the table and the document asked which way a maximum rounds.
