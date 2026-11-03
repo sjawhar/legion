@@ -121,45 +121,62 @@ func TestStatementTimings(t *testing.T) {
 	// can run, and names the side it read, so the two-commit run is this one test against two
 	// databases rather than a second harness.
 	side, label := documentArmSide(t, runner)
-	runner.Head(t, "searchQuery, keywords only"+label,
-		benchtime.Statement{SQL: side.searchQuery, Args: searchArguments})
-	runner.Head(t, "searchQueryMeaning"+label,
-		benchtime.Statement{SQL: side.searchQueryMeaning, Args: slices.Concat(searchArguments, meaning)})
-	runner.Head(t, "relatedKeywordQuery"+label,
-		benchtime.Statement{SQL: side.relatedKeywordQuery, Args: slices.Concat(relatedArguments, []any{lexemes, weights})})
-	runner.Head(t, "relatedMeaningQuery"+label, benchtime.Statement{
-		SQL:  side.relatedMeaningQuery,
-		Args: slices.Concat(relatedArguments, meaning, []any{lexemes, weights}),
+	// Every one of the five reads artifact_versions in the release before this change's text,
+	// and this release's schema still holds that table, so on the after side each is a pair:
+	// that release's text and this one alternately on one database, which the runner fails when
+	// the after median is not below the before. On a database migrated from that release there
+	// is no after text to run, so each is measured alone there, which is protocol 2's before
+	// side and the reading a two-commit run compares.
+	meaningSetup := []string{relatedEFSearch}
+	if side.searchQuery != searchQuery {
+		runner.Head(t, "searchQuery, keywords only"+label,
+			benchtime.Statement{SQL: side.searchQuery, Args: searchArguments})
+		runner.Head(t, "searchQueryMeaning"+label,
+			benchtime.Statement{SQL: side.searchQueryMeaning, Args: slices.Concat(searchArguments, meaning)})
+		runner.Head(t, "relatedKeywordQuery"+label,
+			benchtime.Statement{SQL: side.relatedKeywordQuery, Args: slices.Concat(relatedArguments, []any{lexemes, weights})})
 		// The check raises hnsw.ef_search for its own transaction, so a measurement without it
 		// would be of a statement production never runs (relatedEFSearch).
-		Setup: []string{relatedEFSearch},
-	})
-	// The probe is the one document-arm statement whose before text runs on either schema: it
-	// reads artifact_versions through a lateral, and this release's schema still holds that
-	// table. So on the after side it is a pair, the release before this change's text and this
-	// one alternately on one database, which is the reading the probe's gain is judged on and
-	// which the runner fails when the after median is not below the before. On the before side
-	// there is no after text to run, so the before text is measured alone there.
-	//
-	// The pair's subject is subjects.ProbeLexemes, the project's twenty rarest words, not the
-	// three the other statements are measured on. Twenty is the list a question of a paragraph
-	// or two hands the picker, and rare is what it hands it: of the text's words the picker
-	// probes live only those its statistics do not hold, the noise and the too-common already
-	// dropped (pickRelatedTerms). On three words, and on the project's commonest, every arm
-	// matches its first row at once, both texts read tens of milliseconds whatever their plans
-	// are, and a committed "lower after" there decides nothing. On twenty rare words the
-	// document arm is the statement's whole cost, which is where the two texts differ: six runs
-	// of the pair on the 15 GB database spanned 8.8 s to 10.4 s before and 19 ms to 31 ms
-	// after.
+		runner.Head(t, "relatedMeaningQuery"+label, benchtime.Statement{
+			SQL:   side.relatedMeaningQuery,
+			Args:  slices.Concat(relatedArguments, meaning, []any{lexemes, weights}),
+			Setup: meaningSetup,
+		})
+		runner.Head(t, "relatedProbeSQL"+label,
+			benchtime.Statement{SQL: side.relatedProbeSQL, Args: []any{subjects.Project, lexemes, subjects.Issue, (*string)(nil)}})
+		return
+	}
+
+	searchPair := slices.Concat(searchArguments, meaning)
+	relatedKeywordPair := slices.Concat(relatedArguments, []any{lexemes, weights})
+	relatedMeaningPair := slices.Concat(relatedArguments, meaning, []any{lexemes, weights})
+	runner.Pair(t, "searchQuery, keywords only",
+		benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments},
+		benchtime.Statement{SQL: searchQuery, Args: searchArguments})
+	runner.Pair(t, "searchQueryMeaning",
+		benchtime.Statement{SQL: mainSearchQueryMeaning, Args: searchPair},
+		benchtime.Statement{SQL: searchQueryMeaning, Args: searchPair})
+	runner.Pair(t, "relatedKeywordQuery",
+		benchtime.Statement{SQL: mainRelatedKeywordQuery, Args: relatedKeywordPair},
+		benchtime.Statement{SQL: relatedKeywordQuery, Args: relatedKeywordPair})
+	runner.Pair(t, "relatedMeaningQuery",
+		benchtime.Statement{SQL: mainRelatedMeaningQuery, Args: relatedMeaningPair, Setup: meaningSetup},
+		benchtime.Statement{SQL: relatedMeaningQuery, Args: relatedMeaningPair, Setup: meaningSetup})
+
+	// The probe's pair takes a subject of its own, subjects.ProbeLexemes, the project's twenty
+	// rarest words rather than the three the other statements are measured on. Twenty is the
+	// list a question of a paragraph or two hands the picker, and rare is what it hands it: of
+	// the text's words the picker probes live only those its statistics do not hold, the noise
+	// and the too-common already dropped (pickRelatedTerms). On three words, and on the
+	// project's commonest, every arm matches its first row at once, both texts read tens of
+	// milliseconds whatever their plans are, and a committed "lower after" there decides
+	// nothing. On twenty rare words the document arm is the statement's whole cost, which is
+	// where the two texts differ: six runs of the pair on the 15 GB database spanned 8.8 s to
+	// 10.4 s before and 19 ms to 31 ms after.
 	//
 	// Every write that runs the check excludes its own owner (relatedExclusion), so the probe is
 	// measured with the subject issue excluded: with nothing excluded each arm's exists stops at
 	// the first row it meets, which is not the statement production runs.
-	mainProbeArguments := []any{subjects.Project, lexemes, subjects.Issue, (*string)(nil)}
-	if side.relatedProbeSQL != relatedProbeSQL {
-		runner.Head(t, "relatedProbeSQL"+label, benchtime.Statement{SQL: side.relatedProbeSQL, Args: mainProbeArguments})
-		return
-	}
 	pairArguments := []any{subjects.Project, subjects.ProbeLexemes, subjects.Issue, (*string)(nil)}
 	runner.Pair(t, "relatedProbeSQL",
 		benchtime.Statement{SQL: mainRelatedProbeSQL, Args: pairArguments},
