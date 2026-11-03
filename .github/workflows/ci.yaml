@@ -1378,7 +1378,7 @@ jobs:
         run: .github/scripts/check-pr-text.sh
 
       - name: Post pr-title on the head
-        if: always() && steps.pr-text.outcome != 'skipped' && github.event.pull_request.head.repo.full_name == github.repository
+        if: always() && steps.pr-text.outcome != 'skipped' && github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
