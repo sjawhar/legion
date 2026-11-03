@@ -6,10 +6,12 @@ body: |
   only caller, reads the credential id out of the answer and refuses one without it, and the
   sessions a sign-in enrols read that person's secrets under that credential, so a sign-in
   holding none was a sign-in that could do nothing. A machine's own trade declines as before.
-  The revoke of a sign-in already ended every access token its box key minted, whether or not
-  the trade held a credential (`store.RevokePersonSignInTx` selects on the person and the box
-  key the stored session names, not on the credential), and a test now holds that: a revoke
-  after a sign-in's trade leaves its token `active: false`.
+  The revoke of a sign-in ends a token in one of two ways: `store.RevokePersonSignInTx` ends
+  every access token the person and the box key had minted when its statement began, and the
+  revoke's next statement ends, through the sign-in's credential, a token from a trade that
+  committed while the revoke waited. A declined trade's token held no credential, so the second
+  way missed it; every person's token now holds one. A test holds the first way: a revoke after
+  a sign-in's trade leaves its token `active: false`.
 
   `legion controller start`'s one check that the controller's machine can hold a Dispatch
   credential now declines the launcher credential (`launcher_credential=false`) and names its

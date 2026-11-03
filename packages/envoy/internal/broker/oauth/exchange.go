@@ -817,11 +817,13 @@ func (p *Provider) machineCredential(ctx context.Context, r *http.Request, sessi
 // It runs in the transaction the token is written in, for the reason the machine's credential
 // does: a revoke that commits first refuses this trade, and one that commits after it ends the
 // token this trade minted, so no token outlives the sign-in it was minted under. The revoke
-// reaches that token through the row written here and not through the credential: it ends every
-// live access token whose stored session names this person and this box key
-// (store.RevokePersonSignInTx), and the credential the sign-in holds with them
-// (enroll.Service.RevokePersonSignIn). A person's trade may not decline that credential
-// (personDeclinesNothing), so the two always end together.
+// needs both of its halves for that. store.RevokePersonSignInTx ends every live access token
+// whose stored session names this person and this box key, but its one statement reads the
+// tokens as they stood when it began, so a token from a trade that commits while the revoke waits
+// on the sign-in row's lock is not among them; enroll.Service.RevokePersonSignIn's next
+// statement ends that one, through the credential the sign-in holds (endCredential, by
+// credential_id). That is why a person's trade may not decline the credential
+// (personDeclinesNothing): a token with none would escape the second half.
 //
 // Both refusals are invalid_grant rather than a server error, and name the sign-in command: the
 // subject token is sound and it is the broker's own record that refuses, which the person fixes

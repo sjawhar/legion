@@ -129,7 +129,9 @@ func TestASignInThatDeclinesItsCredentialIsRefused(t *testing.T) {
 // access token whose stored session names that person and that box key
 // (store.RevokePersonSignInTx) — the sign-in row here is the real table's, since this suite's
 // own recorder stands in for it only while the trade runs — and the credential the sign-in
-// holds ends with it (enroll.Service.RevokePersonSignIn, whose half this test does not run).
+// holds ends with it (enroll.Service.RevokePersonSignIn, whose half this test does not run). That
+// second half is what ends a token from a trade that commits while the revoke's statement waits,
+// which the first half's statement does not see; it reaches only a token that names a credential.
 func TestRevokingASignInEndsTheTokenItsTradeMinted(t *testing.T) {
 	f := newSignInFixture(t)
 	key := newKey(t)
