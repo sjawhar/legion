@@ -251,7 +251,13 @@ type loopPlan struct {
 	Proposals     []loopProposal    `json:"proposals"`
 	ReviewPages   []loopReviewPage  `json:"review_pages"`
 	ReviewIndexes []loopReviewIndex `json:"review_indexes"`
-	Totals        loopTotals        `json:"totals"`
+	// Rehearsal is how many of the source's proposals this plan holds when it is a rehearsal —
+	// the first n, for a run on a stack too small for the whole seed — and 0 when the plan is the
+	// loop's own. A rehearsal is a true subset of the whole plan, cut from it, so what it writes
+	// is byte for byte what the whole seed would write for those proposals; every count loop-seed-
+	// check judges comes from the plan, so a rehearsal checks against its own totals and says so.
+	Rehearsal int        `json:"rehearsal,omitempty"`
+	Totals    loopTotals `json:"totals"`
 }
 
 // loopProposal is one issue of the seed: one source row, its counts, and the part documents its
@@ -932,6 +938,36 @@ func loopMedian(pages []loopReviewPage) int64 {
 	return sizes[(len(sizes)-1)/2]
 }
 
+// loopRehearsal cuts the whole plan down to its first n proposals, with the review pages and
+// indexes of those proposals alone and the totals recomputed. It is a cut rather than a plan of
+// its own so that a rehearsal writes byte for byte what the whole seed writes for those
+// proposals, and so that no second planner can drift from the one the loop's seed comes from.
+// n at or above the plan's proposal count gives the whole plan back, unmarked.
+func loopRehearsal(p *loopPlan, n int) *loopPlan {
+	if n <= 0 || n >= len(p.Proposals) {
+		return p
+	}
+	cut := &loopPlan{
+		Source:       p.Source,
+		SourceSHA256: p.SourceSHA256,
+		Seed:         p.Seed,
+		Proposals:    p.Proposals[:n],
+		Rehearsal:    n,
+	}
+	for _, page := range p.ReviewPages {
+		if page.Proposal < n {
+			cut.ReviewPages = append(cut.ReviewPages, page)
+		}
+	}
+	for _, idx := range p.ReviewIndexes {
+		if idx.Proposal < n {
+			cut.ReviewIndexes = append(cut.ReviewIndexes, idx)
+		}
+	}
+	cut.Totals = loopPlanTotals(cut)
+	return cut
+}
+
 // runLoopSeedPlan plans the Verified Linux spec loop's seed and writes it, without a stack: every
 // record a Dispatch deployment must hold to carry the loop, from the embedded source file and the
 // seed alone.
@@ -939,10 +975,14 @@ func runLoopSeedPlan(args []string) error {
 	fs := flag.NewFlagSet("loop-seed-plan", flag.ExitOnError)
 	seed := fs.Uint64("seed", 1, "the seed of every size the plan draws")
 	out := fs.String("out", "", "the plan's path (default $LOADTEST_ROOT/loopseed.plan.json)")
+	rehearsal := fs.Int("rehearsal", 0, "plan the first n proposals alone, for a rehearsal on a stack too small for the whole seed (0: the whole seed)")
 	_ = fs.Parse(args)
 
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	if *rehearsal < 0 {
+		return fmt.Errorf("-rehearsal %d is not a count of proposals", *rehearsal)
 	}
 	if *out == "" {
 		*out = filepath.Join(loadtestRoot(), "loopseed.plan.json")
@@ -955,13 +995,18 @@ func runLoopSeedPlan(args []string) error {
 	if err != nil {
 		return err
 	}
+	plan = loopRehearsal(plan, *rehearsal)
 	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
 		return err
 	}
 	lg := log.New(os.Stderr, "loadgen loop-seed-plan: ", 0)
 	writeJSONFile(*out, plan, 0o644, lg)
-	lg.Printf("%d issues, %d parts, %d comment rows of %d bytes, %d review pages of %d bytes: %s",
+	rehearsalNote := ""
+	if plan.Rehearsal > 0 {
+		rehearsalNote = fmt.Sprintf(" (a rehearsal of %d of %d proposals)", plan.Rehearsal, len(rows))
+	}
+	lg.Printf("%d issues, %d parts, %d comment rows of %d bytes, %d review pages of %d bytes%s: %s",
 		plan.Totals.Issues, plan.Totals.Parts, plan.Totals.CommentRows, plan.Totals.ThreadBytes,
-		plan.Totals.ReviewPages, plan.Totals.ReviewPageBytes, *out)
+		plan.Totals.ReviewPages, plan.Totals.ReviewPageBytes, rehearsalNote, *out)
 	return nil
 }

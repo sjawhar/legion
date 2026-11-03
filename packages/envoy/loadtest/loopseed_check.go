@@ -162,7 +162,9 @@ func loopCheckLines(p *loopPlan, f loopFound) []loopCheckLine {
 }
 
 // printLoopCheck writes one line per check and then the verdict, and answers how many failed.
-func printLoopCheck(w io.Writer, lines []loopCheckLine) int {
+// rehearsal is the plan's own: a plan that holds a cut of the loop's proposals says so in the
+// verdict, so a reader never takes a rehearsal's pass for the seed the issue's A2 asks about.
+func printLoopCheck(w io.Writer, lines []loopCheckLine, rehearsal int) int {
 	failed := 0
 	for _, l := range lines {
 		verdict := "ok"
@@ -173,10 +175,14 @@ func printLoopCheck(w io.Writer, lines []loopCheckLine) int {
 		fmt.Fprintf(w, "%s: expected %d, found %d — %s (%+.2f%%)\n",
 			l.Name, l.Expected, l.Found, verdict, l.delta()*100)
 	}
+	note := ""
+	if rehearsal > 0 {
+		note = fmt.Sprintf(" (a rehearsal of %d proposals, not the loop's whole seed)", rehearsal)
+	}
 	if failed == 0 {
-		fmt.Fprintf(w, "loop-seed-check: all %d checks passed\n", len(lines))
+		fmt.Fprintf(w, "loop-seed-check: all %d checks passed%s\n", len(lines), note)
 	} else {
-		fmt.Fprintf(w, "loop-seed-check: %d of %d checks failed\n", failed, len(lines))
+		fmt.Fprintf(w, "loop-seed-check: %d of %d checks failed%s\n", failed, len(lines), note)
 	}
 	return failed
 }
@@ -213,7 +219,7 @@ func runLoopSeedCheck(args []string) error {
 		return err
 	}
 	lines := loopCheckLines(p, found)
-	if failed := printLoopCheck(os.Stdout, lines); failed > 0 {
+	if failed := printLoopCheck(os.Stdout, lines, p.Rehearsal); failed > 0 {
 		return fmt.Errorf("%d of %d checks failed", failed, len(lines))
 	}
 	return nil

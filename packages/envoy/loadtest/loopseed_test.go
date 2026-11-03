@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -557,5 +558,58 @@ func TestLoopShareGivesEachWeightAtLeastOne(t *testing.T) {
 	}
 	if _, err := loopShare(2, []int{1, 1, 1}); err == nil {
 		t.Error("a total too small for one each was shared out all the same")
+	}
+}
+
+// TestLoopRehearsalIsATrueSubsetOfTheWholePlan: a rehearsal of n proposals holds the whole plan's
+// first n unchanged, the review pages and indexes of those proposals alone, and totals of its own,
+// so what it writes is byte for byte what the whole seed writes for those proposals.
+func TestLoopRehearsalIsATrueSubsetOfTheWholePlan(t *testing.T) {
+	whole := loopPlanned(t)
+	const n = 10
+	cut := loopRehearsal(whole, n)
+
+	if cut.Rehearsal != n {
+		t.Errorf("rehearsal = %d, want %d", cut.Rehearsal, n)
+	}
+	if len(cut.Proposals) != n {
+		t.Fatalf("proposals = %d, want %d", len(cut.Proposals), n)
+	}
+	for i := range cut.Proposals {
+		if !reflect.DeepEqual(cut.Proposals[i], whole.Proposals[i]) {
+			t.Fatalf("proposal %d of the rehearsal is not the whole plan's", i)
+		}
+	}
+	for _, page := range cut.ReviewPages {
+		if page.Proposal >= n {
+			t.Fatalf("the rehearsal holds review page %d of proposal %d, which it does not hold", page.Index, page.Proposal)
+		}
+	}
+	var pages, indexes int
+	for _, page := range whole.ReviewPages {
+		if page.Proposal < n {
+			pages++
+		}
+	}
+	for _, idx := range whole.ReviewIndexes {
+		if idx.Proposal < n {
+			indexes++
+		}
+	}
+	if len(cut.ReviewPages) != pages || len(cut.ReviewIndexes) != indexes {
+		t.Errorf("rehearsal has %d pages and %d indexes, want the whole plan's %d and %d for those proposals",
+			len(cut.ReviewPages), len(cut.ReviewIndexes), pages, indexes)
+	}
+	if cut.Totals.Issues != n || cut.Totals.ReviewPages != pages {
+		t.Errorf("totals = %+v, want %d issues and %d review pages", cut.Totals, n, pages)
+	}
+	if cut.Totals.ThreadBytes >= whole.Totals.ThreadBytes {
+		t.Errorf("rehearsal thread bytes %d, want fewer than the whole plan's %d", cut.Totals.ThreadBytes, whole.Totals.ThreadBytes)
+	}
+	if same := loopRehearsal(whole, 0); same != whole {
+		t.Error("a rehearsal of 0 proposals is not the whole plan")
+	}
+	if same := loopRehearsal(whole, len(whole.Proposals)+1); same != whole {
+		t.Error("a rehearsal of more proposals than the plan holds is not the whole plan")
 	}
 }

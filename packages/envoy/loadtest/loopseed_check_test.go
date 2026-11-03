@@ -126,7 +126,7 @@ func TestLoopSeedCheckVerdicts(t *testing.T) {
 func TestLoopSeedCheckPrints(t *testing.T) {
 	p := loopPlanned(t)
 	var pass strings.Builder
-	if failed := printLoopCheck(&pass, loopCheckLines(p, loopCheckFound(p))); failed != 0 {
+	if failed := printLoopCheck(&pass, loopCheckLines(p, loopCheckFound(p)), p.Rehearsal); failed != 0 {
 		t.Fatalf("a seed that matches its plan failed %d checks", failed)
 	}
 	want := strings.Join([]string{
@@ -150,7 +150,7 @@ func TestLoopSeedCheckPrints(t *testing.T) {
 	short.ThreadBytes = p.Totals.ThreadBytes / 2
 	short.OverCap = 2
 	var fail strings.Builder
-	if failed := printLoopCheck(&fail, loopCheckLines(p, short)); failed != 3 {
+	if failed := printLoopCheck(&fail, loopCheckLines(p, short), p.Rehearsal); failed != 3 {
 		t.Errorf("%d checks failed, want 3", failed)
 	}
 	for _, line := range []string{
@@ -220,7 +220,7 @@ func TestLoopSeedCheckLive(t *testing.T) {
 		t.Fatalf("the database holds %+v, want the plan's %+v", found, want)
 	}
 	var out strings.Builder
-	if failed := printLoopCheck(&out, loopCheckLines(p, found)); failed != 0 {
+	if failed := printLoopCheck(&out, loopCheckLines(p, found), p.Rehearsal); failed != 0 {
 		t.Fatalf("%d checks failed over a seed that matches its plan:\n%s", failed, out.String())
 	}
 	t.Logf("over a live database:\n%s", out.String())
@@ -347,5 +347,38 @@ func loopStoreSeed(ctx context.Context, t *testing.T, pool *pgxpool.Pool, planID
 		case loopKindResolve:
 			exec(`update comments set resolved = true where id = $1`, o.local)
 		}
+	}
+}
+
+// TestLoopSeedCheckNamesARehearsal: a plan that holds a cut of the loop's proposals says so in the
+// verdict, whether it passed or failed, so nobody reads a rehearsal's pass as the whole seed's.
+func TestLoopSeedCheckNamesARehearsal(t *testing.T) {
+	p := loopTestPlanOf(t, 3, loopTestRows(), map[int]int{0: 1})
+	p.Rehearsal = len(p.Proposals)
+	lines := loopCheckLines(p, loopCheckFound(p))
+
+	var passed strings.Builder
+	if failed := printLoopCheck(&passed, lines, p.Rehearsal); failed != 0 {
+		t.Fatalf("%d checks failed on a seed that matches its plan:\n%s", failed, passed.String())
+	}
+	want := fmt.Sprintf("(a rehearsal of %d proposals, not the loop's whole seed)", p.Rehearsal)
+	if !strings.Contains(passed.String(), want) {
+		t.Errorf("the verdict does not name the rehearsal:\n%s", passed.String())
+	}
+
+	short := loopCheckFound(p)
+	short.CommentRows = 0
+	var failedOut strings.Builder
+	if failed := printLoopCheck(&failedOut, loopCheckLines(p, short), p.Rehearsal); failed == 0 {
+		t.Fatal("a seed missing every comment row passed")
+	}
+	if !strings.Contains(failedOut.String(), want) {
+		t.Errorf("the failing verdict does not name the rehearsal:\n%s", failedOut.String())
+	}
+
+	var whole strings.Builder
+	printLoopCheck(&whole, lines, 0)
+	if strings.Contains(whole.String(), "rehearsal") {
+		t.Errorf("a whole plan's verdict names a rehearsal:\n%s", whole.String())
 	}
 }
