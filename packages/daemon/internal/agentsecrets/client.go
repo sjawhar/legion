@@ -563,29 +563,26 @@ func classify(err error) loginClass {
 	}
 }
 
-// shortSchedule and longSchedule are the two schedules a failed login takes, the word its log
-// line carries and the name loginRetry's two backoffs go by.
-const (
-	shortSchedule = "short"
-	longSchedule  = "long"
-)
+// short answers whether c takes the short schedule, which only a broker that was not there to
+// decide does. It is the one place that decides, so the backoff a failure counts against and
+// the word its log line carries can never say different things.
+func (c loginClass) short() bool { return c == brokerUnavailable }
 
-// schedule names the schedule c takes: the short one only for a broker that was not there to
-// decide.
+// schedule is the word the log line carries for c's schedule.
 func (c loginClass) schedule() string {
-	if c == brokerUnavailable {
-		return shortSchedule
+	if c.short() {
+		return "short"
 	}
-	return longSchedule
+	return "long"
 }
 
 // failed records a login that failed with err and answers its class and the wait before the next.
-// The class's schedule names which of the two backoffs counts the failure, so that one branch
-// decides the schedule; the other kind's run has ended, and starts fresh when it comes again.
+// The class names which of the two backoffs counts the failure; the other kind's run has ended,
+// and starts fresh when it comes again.
 func (r *loginRetry) failed(err error) (loginClass, time.Duration) {
 	class := classify(err)
 	taken, ended := &r.long, &r.short
-	if class.schedule() == shortSchedule {
+	if class.short() {
 		taken, ended = &r.short, &r.long
 	}
 	ended.failed = 0
