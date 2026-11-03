@@ -488,8 +488,8 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 			// its fastest of sampleCount.
 			var fastestUpdate, fastestWalks time.Duration
 			for sample := range sampleCount {
-				took := timedWithDeadline(t, fmt.Sprintf("replacing every other block at %d blocks", blocks), perCallDeadline, update)
-				walked := timedWithDeadline(t, fmt.Sprintf("ygo's walks to every other block at %d blocks", blocks), perCallDeadline, walks)
+				took := timedWithDeadline(t, fmt.Sprintf("replacing every other block at %d blocks", blocks), perCallDeadline(t), update)
+				walked := timedWithDeadline(t, fmt.Sprintf("ygo's walks to every other block at %d blocks", blocks), perCallDeadline(t), walks)
 				if sample == 0 || took < fastestUpdate {
 					fastestUpdate = took
 				}
@@ -944,16 +944,39 @@ func fastestOf(timed func() time.Duration) time.Duration {
 	return best
 }
 
-// perCallDeadline bounds every one of growthVerdict's measured calls: well under go test's own
-// ten-minute default per-package timeout, so a single call that itself blocks far longer than
-// this file's bound allows fails fast and names its own shape and size (the file-level comment
-// above has why that matters). It is a wall-clock bound guarding a CPU-time budget, so box-load
-// scheduling starvation, not only a regression, could in principle trip it on a healthy call -
-// measured margin against that: the slowest observed healthy call at this file's current sizes,
-// under real ambient box load, was "<a" rendering at parseFullTarget/renderFullTarget's race-mode
-// size in about 0.8s, and "a_b*" parsing at the non-race size in about 0.9s - both over 60x under
-// this deadline. A margin under 10x would call for raising it; this one does not.
-const perCallDeadline = 60 * time.Second
+// perCallReportMargin is what perCallDeadline leaves of the test binary's own deadline, so a
+// measured call that hangs fails this file's shape by name (timedWithDeadline) while go test's
+// own timeout is still some way off. Without that margin the package's default timeout fires
+// first, with no shape attached, which is the property the file-level comment above records.
+const perCallReportMargin = 60 * time.Second
+
+// perCallHangCap bounds a measured call when the run has no deadline to read (-timeout 0): a
+// hang still has to be reported, and half an hour is far past any healthy call at these sizes.
+const perCallHangCap = 30 * time.Minute
+
+// perCallDeadline bounds every one of growthVerdict's measured calls: what the test binary's own
+// deadline leaves after perCallReportMargin, capped at perCallHangCap. It is read from the
+// deadline rather than fixed because each measured call is a CPU-time measurement (cpuTimeOf,
+// cputest.Measure) that repeats its operation until a window reaches the measurement's
+// resolution, so the wall time it takes is the CPU it needs multiplied by whatever contention the
+// runner is under; a fixed wall-clock bound over a CPU-time budget fails healthy calls on a
+// loaded shared runner, which is what this file's own history records. For scale: the slowest
+// observed healthy call at this file's current sizes, under real ambient box load, was "<a"
+// rendering at parseFullTarget/renderFullTarget's race-mode size in about 0.8s, and "a_b*"
+// parsing at the non-race size in about 0.9s. A run whose deadline leaves no more than the
+// margin fails once, by name: that reads like a misconfigured run, not a hang.
+func perCallDeadline(t *testing.T) time.Duration {
+	t.Helper()
+	deadline, bounded := t.Deadline()
+	if !bounded {
+		return perCallHangCap
+	}
+	left := time.Until(deadline)
+	if left <= perCallReportMargin {
+		t.Fatalf("the test binary's deadline leaves %s, not more than perCallReportMargin (%s): this looks like a misconfigured run; raise -timeout", left.Round(time.Millisecond), perCallReportMargin)
+	}
+	return min(perCallHangCap, left-perCallReportMargin)
+}
 
 // growsLinearly times what at each of sizes in turn and fails t at the first size whose time grew
 // more than allowance times faster than the size did (growthVerdict, which this wraps). Every
@@ -962,7 +985,7 @@ const perCallDeadline = 60 * time.Second
 func growsLinearly(t *testing.T, what string, sizes []int, allowance int, timed func(size int) (time.Duration, error)) {
 	t.Helper()
 	bounded := func(size int) time.Duration {
-		return timedWithDeadline(t, fmt.Sprintf("%s at %s", what, sizeText(size)), perCallDeadline, func() (time.Duration, error) {
+		return timedWithDeadline(t, fmt.Sprintf("%s at %s", what, sizeText(size)), perCallDeadline(t), func() (time.Duration, error) {
 			return timed(size)
 		})
 	}
