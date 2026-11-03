@@ -73,10 +73,12 @@ factual claim in it, one at a time, and you do not judge the design.
    `dispatch read`. A requirement, a decision or a proposal is not a claim.
 2. **Best practice and world-class.** The spec's `### Best practice and world-class` entry must:
 
-   - List every best practice with its source and whether the design follows it.
+   - List every best practice with its source, why it applies here and whether the design follows
+     it.
    - State the world-class answer and every shortfall from it with its reason.
-   - Hold the final round's best-practice and world-class verdicts in that entry, with each
-     reviewer's model (a model, not a role or agent name) and the clock time (UTC) it answered.
+   - Hold the final round's best-practice and world-class verdicts in that entry, each reviewer's
+     own verdict with its model (a model, not a role or agent name) and the clock time (UTC) its
+     answer arrived.
    - Show every finding from either review fixed or recorded with the fact or cost that requires it.
    - After a third review round, list the changes since the last round and every finding still open,
      with its cost.

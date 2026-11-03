@@ -23,18 +23,18 @@ From this problem alone, research and answer three questions. Do not ask for or 
 3. Which fact of this setup, if any, rules out a practice or the world-class answer? A cost in time, money or effort is not such a fact.
 ```
 
-Record its answers in a file or a Dispatch comment before any text that states or leans to a design. Recording them does not end your turn: go on with the work.
+Wait for its answers in the same turn: in Claude Code, start it without `run_in_background`; in omp, `wait` for its task. Never end your turn while it runs: in a headless session, the end of your turn stops every subagent still running, and its answers never arrive. Record its answers in a file or a Dispatch comment before any text that states or leans to a design. Recording them does not end your turn: go on with the work.
 
 Then:
 
 - Follow every best practice unless a fact of this case rules it out, and write that fact in the design. Less work, less money, no new credential, or a precedent here that does it another way is not such a fact.
 - Design the world-class answer. Fall short of it only when a fact of this case requires it, and name each shortfall with its reason. Name a cost the person must accept as a cost, for them to decide.
 - Settle a disputed fact with evidence: the documentation, the code or a probe. Ask the person only for a cost to accept or a choice of priority.
-- In a spec, open the `Design` part with a `### Best practice and world-class` entry copied from step 1: each best practice with its source and whether the design follows it, the world-class answer, and each place the design falls short with its reason. The approver then sees the comparison without asking for it.
+- In a spec, open the `Design` part with a `### Best practice and world-class` entry copied from step 1: each best practice with its source, why it applies here and whether the design follows it, the world-class answer, and each place the design falls short with its reason. The approver then sees the comparison without asking for it.
 
 ## 2. Before each approval request
 
-Start two fresh subagents, one per brief. A fresh subagent starts with no history and gets only the text you send it. In each first-round reviewer's first message, give only the problem: what must work, for whom, the constraints and numbers, the person's words that describe the problem, and the setup. Do not include the proposal's title, design, options, decisions, recommendation or conclusion, or a person's words that state a proposal: a reviewer that reads the design first tends to accept it. After it answers, paste the whole proposal's text into your next message to that same subagent and ask it to compare. A path or a file name is not the proposal, even when the reviewer can read files. If your harness cannot message a finished subagent, give a second fresh subagent the first reviewer's answer and the whole proposal's text, and ask it only to make that comparison. Where your harness offers a subagent on a different model family, use it for these reviews, because a reviewer on the author's model shares its blind spots.
+Start two fresh subagents, one per brief, and wait for each answer in the same turn, as in step 1. A fresh subagent starts with no history and gets only the text you send it. In each first-round reviewer's first message, give only the problem: what must work, for whom, the constraints and numbers, the person's words that describe the problem, and the setup. Do not include the proposal's title, design, options, decisions, recommendation or conclusion, or a person's words that state a proposal: a reviewer that reads the design first tends to accept it. After it answers, paste the whole proposal's text into your next message to that same subagent and ask it to compare. A path or a file name is not the proposal, even when the reviewer can read files. If your harness cannot message a finished subagent, give a second fresh subagent the first reviewer's answer and the whole proposal's text, and ask it only to make that comparison. Where your harness offers a subagent on a different model family, use it for these reviews, because a reviewer on the author's model shares its blind spots.
 
 Best practice:
 
@@ -65,7 +65,7 @@ List each place it accepts less than that answer (a manual step, a workaround, a
 ```
 
 - Fix each finding from either review, or record it in the `### Best practice and world-class` entry with the fact or the cost that requires it. Never request approval while a finding is neither. A NOT WORLD-CLASS verdict whose findings are all fixed or recorded does not block the request.
-- Write the final round's verdicts of both reviewers in that entry, not in another section: each verdict, the reviewer's model (such as `anthropic/claude-opus-5`, never its role or agent name) and the clock time (UTC) it answered. Name the verdicts in the approval request, so the approver sees that the reviews ran and what they found.
+- Write the final round's verdicts of both reviewers in that entry, not in another section: for each reviewer, its own verdict, its model (such as `anthropic/claude-opus-5`, never its role or agent name) and the clock time (UTC) its answer arrived. Take that time from your harness when the answer arrives (run `date -u` at once), never from text the reviewer or you wrote. Name the verdicts in the approval request, so the approver sees that the reviews ran and what they found.
 - Run step 2 again before a later approval request when the design, the problem, its constraints or the evidence changed since the last review.
 - Stop after three rounds of step 2 on one proposal: list each change made after the last round and each finding still open, with its cost, in the entry. Review loops between agents do not end by themselves.
 - When a reviewer names a practice or an answer you did not consider, go back to step 1 with it instead of defending the design.
