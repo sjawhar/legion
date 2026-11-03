@@ -26,14 +26,79 @@ import {
   textPrimaryOnSurfaceMuted,
 } from "../../theme/classes";
 import { buildIssuePath } from "../refs/routes";
+import { Chart, type ChartCompare, type ChartRange, type ChartSeries } from "./Chart";
 import { formatMinutes, pct } from "./lib/format";
-import { Sparkbars } from "./Sparkbars";
 import { TargetBadge } from "./TargetBadge";
 
 const UNOWNED_P0_SHOWN = 6;
 
 /** What a pending read shows in each number's place. */
 const PENDING = "\u2026";
+
+/** The comparison the page offers the panel's two charts: the range it reads beside the
+ *  window, how the reader names another, and that range's answer once it lands (`Chart`). A
+ *  host that reads no second range passes none, and each chart shows its graph-or-table
+ *  control alone. */
+export interface MeasuresCompare {
+  readonly range: ChartRange | null;
+  readonly onRange: (next: ChartRange | null) => void;
+  readonly data: DeliveryMeasuresResponse | undefined;
+}
+
+/** The deploys-a-day card's chart: one bar a day against the target. */
+function deploySeries(response: DeliveryMeasuresResponse): ChartSeries[] {
+  const target = response.targets.deploys_per_day;
+  return [
+    {
+      kind: "spark",
+      format: (v) => `${v} deploys`,
+      label: "Deploys",
+      max: target,
+      met: (v) => v >= target,
+      points: response.measures.daily.map((d) => ({
+        label: d.day,
+        value: d.deploys,
+        partial: d.partial,
+      })),
+      target,
+    },
+  ];
+}
+
+/** The deploy-run-success card's chart: each day's share of concluded runs that reached
+ *  production, against the target. */
+function runSuccessSeries(response: DeliveryMeasuresResponse): ChartSeries[] {
+  const target = response.targets.deploy_run_success_rate;
+  return [
+    {
+      kind: "spark",
+      format: pct,
+      label: "Run success",
+      max: 1,
+      met: (v) => v >= target,
+      points: response.measures.daily.map((d) => ({
+        label: d.day,
+        value: d.run_success_rate,
+        partial: d.partial,
+      })),
+      target,
+    },
+  ];
+}
+
+/** A card's comparison: the page's, with the compare range's answer read as this card's own
+ *  series. */
+function cardCompare(
+  compare: MeasuresCompare | undefined,
+  series: (response: DeliveryMeasuresResponse) => ChartSeries[]
+): ChartCompare | undefined {
+  if (compare === undefined) return undefined;
+  return {
+    onRange: compare.onRange,
+    range: compare.range,
+    series: compare.data === undefined ? undefined : series(compare.data),
+  };
+}
 
 /** The change-failure-rate card's breakdown: deploys with a confirmed break, and how many more
  *  have only unreviewed (pending) flags. `confirmedOrPending` counts each deploy once (the
@@ -94,8 +159,17 @@ function DefinitionCard(props: { title: string; value: string; children: ReactNo
 /** The delivery measures for the page's window and facets: Sami's six KPI targets, then one
  *  compact strip of the DORA headline numbers; every alternative definition and breakdown lives
  *  behind the "Definitions & alternatives" fold, so the timeline keeps the bulk of the page.
- *  `data` is undefined while the read is pending, when the cards show their frame. */
-export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undefined }): ReactNode {
+ *  `data` is undefined while the read is pending, when the cards show their frame. The two
+ *  cards that draw a measure over the window draw it through `Chart`, which gives each the
+ *  graph-or-table and compare controls every such chart has; `compare` is the page's own
+ *  comparison, omitted where no second range is read. */
+export function MeasuresPanel({
+  compare,
+  data,
+}: {
+  compare?: MeasuresCompare;
+  data: DeliveryMeasuresResponse | undefined;
+}): ReactNode {
   const [open, setOpen] = useState(false);
   const show = (format: (response: DeliveryMeasuresResponse) => string): string =>
     data === undefined ? PENDING : format(data);
@@ -147,17 +221,12 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
               </span>
             )}
           </div>
-          {measures === undefined || targets === undefined ? null : (
-            <Sparkbars
-              format={(v) => `${v} deploys`}
-              max={targets.deploys_per_day}
-              met={(v) => v >= targets.deploys_per_day}
-              points={measures.daily.map((d) => ({
-                label: d.day,
-                value: d.deploys,
-                partial: d.partial,
-              }))}
-              target={targets.deploys_per_day}
+          {data === undefined ? null : (
+            <Chart
+              compare={cardCompare(compare, deploySeries)}
+              label="Deploys a day"
+              range={{ kind: "custom", from: data.window.from, to: data.window.to }}
+              series={deploySeries(data)}
             />
           )}
         </KpiCard>
@@ -277,18 +346,13 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
               </span>
             )}
           </div>
-          {measures === undefined || targets === undefined ? null : (
+          {data === undefined || measures === undefined ? null : (
             <>
-              <Sparkbars
-                format={pct}
-                max={1}
-                met={(v) => v >= targets.deploy_run_success_rate}
-                points={measures.daily.map((d) => ({
-                  label: d.day,
-                  value: d.run_success_rate,
-                  partial: d.partial,
-                }))}
-                target={targets.deploy_run_success_rate}
+              <Chart
+                compare={cardCompare(compare, runSuccessSeries)}
+                label="Deploy runs reaching production"
+                range={{ kind: "custom", from: data.window.from, to: data.window.to }}
+                series={runSuccessSeries(data)}
               />
               <div className={`text-[11px] ${textMutedOnSurface}`}>
                 {measures.deploy_run_success.cancelled} cancelled runs not counted

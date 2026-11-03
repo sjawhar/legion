@@ -636,6 +636,40 @@ test("a brushed measures failure keeps the timeline and offers its own Retry", a
   expect(screen.queryByText("Couldn't load the delivery measures.")).toBeNull();
 });
 
+test("a chart's comparison reads the range just before the window as a second view, and moving the window ends it", async () => {
+  renderPage();
+  const socket = await answered(emptyTimeline);
+  const compare = await screen.findByLabelText("Deploys a day comparison");
+  expect(Array.from(compare.querySelectorAll("option"), (option) => option.textContent)).toEqual([
+    "No comparison",
+    "Previous day",
+    "Custom range…",
+  ]);
+
+  fireEvent.change(compare, { target: { value: "preceding" } });
+
+  // The day before the window, of the same length, read as a second view of its own.
+  const compared = await subscriptionTo(socket, {
+    kind: "measures",
+    window: { from: "2024-05-31T00:00:00.000Z", to: "2024-06-01T00:00:00.000Z" },
+    query: "",
+  });
+  serve(socket, snapshotFrame(compared.sub, emptyMeasures));
+  await waitFor(() =>
+    expect(document.querySelectorAll('[data-chart-range="compare"]').length).toBeGreaterThan(0)
+  );
+
+  // A new window ends the comparison: its default was the range before the window it was named
+  // on, so the view it subscribed goes with that window.
+  fireEvent.change(screen.getByLabelText("Window"), { target: { value: "7d" } });
+
+  await waitFor(() =>
+    expect(socket.sent).toContainEqual({ type: "unsubscribe", sub: compared.sub })
+  );
+  expect(screen.getByLabelText<HTMLSelectElement>("Deploys a day comparison").value).toBe("none");
+  expect(document.querySelector('[data-chart-range="compare"]')).toBeNull();
+});
+
 test("the drill-down is a dialog: focus moves into it, Escape closes it and focus returns to the row", async () => {
   renderPage();
   await answered({ ...emptyTimeline, prs: [listedPR] });

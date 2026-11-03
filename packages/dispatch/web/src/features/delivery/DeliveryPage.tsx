@@ -10,7 +10,6 @@ import { QueryError } from "../../components/QueryError";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
 import {
   borderStrong,
-  dragHandleBg,
   linkText,
   surfaceBg,
   surfaceMutedBg,
@@ -20,10 +19,10 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
   textPrimaryOnSurface,
-  textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import type { ChartRange } from "./Chart";
 import { DeliverySettingsForm } from "./DeliverySettingsForm";
 import { DrillDown } from "./DrillDown";
 import { FacetPanel } from "./FacetPanel";
@@ -51,6 +50,7 @@ import {
 } from "./lib/window";
 import { MeasuresPanel } from "./MeasuresPanel";
 import { PRList } from "./PRList";
+import { type SegmentedOption, SegmentedToggle } from "./SegmentedToggle";
 import { SourceFreshness } from "./SourceFreshness";
 import { Timeline, type TimelineSelection } from "./Timeline";
 import { WindowControl } from "./WindowControl";
@@ -196,26 +196,22 @@ function useSettled<T>(value: T, delayMs: number): T {
   return settled;
 }
 
-/** The Timeline | List segmented toggle. */
+const MODES: readonly SegmentedOption<Mode>[] = [
+  { value: "timeline", label: "Timeline" },
+  { value: "list", label: "List" },
+];
+
+/** The Timeline | List segmented toggle, the shape every chart's Graph | Table copies
+ *  (`SegmentedToggle`). */
 function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => void }): ReactNode {
-  const item = (value: Mode, label: string) => (
-    <button
-      aria-pressed={mode === value}
-      className={`h-8 px-3 text-sm font-medium first:rounded-l-md last:rounded-r-md ${
-        mode === value ? `${surfaceMutedBg} ${textPrimaryOnSurfaceMuted}` : textSecondaryOnCanvas
-      }`}
-      onClick={() => onChange(value)}
-      type="button"
-    >
-      {label}
-    </button>
-  );
   return (
-    <fieldset aria-label="View" className={`mr-4 flex rounded-md border ${borderStrong}`}>
-      {item("timeline", "Timeline")}
-      <span aria-hidden="true" className={`w-px ${dragHandleBg}`} />
-      {item("list", "List")}
-    </fieldset>
+    <SegmentedToggle
+      className="mr-4"
+      label="View"
+      onChange={onChange}
+      options={MODES}
+      value={mode}
+    />
   );
 }
 
@@ -327,6 +323,21 @@ export function DeliveryPage(): ReactNode {
     enabled: state.brush !== null,
   });
   const measures = state.brush === null ? data?.measures : brushed.data;
+  // The range the measures panel's charts compare the window with, and its own read of the
+  // measures (INFRA-1077): a comparison is a second request, never a wider window, so each of
+  // the two stays inside the server's 84-day cap. The reader names it on any of the panel's
+  // charts and every chart shows it; moving the window or the brush ends it, since its default
+  // is the range just before the window it was named on. While nothing is compared the query
+  // names the window's own view and is disabled, so it reads and subscribes nothing.
+  const [compareRange, setCompareRange] = useState<ChartRange | null>(null);
+  const compared = useQuery({
+    ...deliveryMeasuresQuery({
+      kind: "measures",
+      window: compareRange === null ? liveWindow(state.window) : liveWindow(compareRange),
+      query: liveQuery,
+    }),
+    enabled: compareRange !== null,
+  });
   // When the answer on screen last changed (its snapshot or its latest delta). While a facet change
   // waits for its snapshot, the previous answer stays on screen (`keepPreviousData`) and the new
   // query reports `dataUpdatedAt` 0, so this keeps the last time an answer arrived instead of
@@ -401,7 +412,10 @@ export function DeliveryPage(): ReactNode {
                 ? `${state.window.from}|${state.window.to}`
                 : state.window.preset
             }
-            onChange={(window) => setState({ ...state, window, brush: null })}
+            onChange={(window) => {
+              setState({ ...state, window, brush: null });
+              setCompareRange(null);
+            }}
             value={state.window}
           />
         )}
@@ -413,7 +427,10 @@ export function DeliveryPage(): ReactNode {
             {state.brush === null ? null : (
               <button
                 className={`ml-3 underline ${linkText}`}
-                onClick={() => setState({ ...state, brush: null })}
+                onClick={() => {
+                  setState({ ...state, brush: null });
+                  setCompareRange(null);
+                }}
                 type="button"
               >
                 clear brush window
@@ -457,7 +474,10 @@ export function DeliveryPage(): ReactNode {
               onRetry={() => void brushed.refetch()}
             />
           ) : (
-            <MeasuresPanel data={measures} />
+            <MeasuresPanel
+              compare={{ data: compared.data, onRange: setCompareRange, range: compareRange }}
+              data={measures}
+            />
           )}
 
           {data === undefined || activeWindow === null ? null : (
@@ -520,7 +540,10 @@ export function DeliveryPage(): ReactNode {
                       components={data.components}
                       filters={state.filters}
                       lanes={state.view.lanes}
-                      onBrush={(brush) => setState({ ...state, brush })}
+                      onBrush={(brush) => {
+                        setState({ ...state, brush });
+                        setCompareRange(null);
+                      }}
                       onSelect={setSelection}
                       prs={shownPRs}
                       runs={data.runs}

@@ -419,6 +419,35 @@ test("without at in its URL the page subscribes today's pipeline", async () => {
   expect(socket.subscribes()).toHaveLength(1);
 });
 
+test("a card's comparison reads the seven days before the shown ones as a second view", async () => {
+  renderPage("/pipeline?at=2026-10-02T12:00:00Z");
+  const { socket, frame } = await subscribed();
+  act(() => socket.receive(snapshotFrame(frame.sub, PIPELINE)));
+  await screen.findByText("PR CI");
+
+  // The route answers the seven days ending on one day and no other length, so the reader
+  // compares the seven days just before the shown ones or nothing.
+  const compare = screen.getByLabelText("PR CI comparison");
+  expect(Array.from(compare.querySelectorAll("option"), (option) => option.textContent)).toEqual([
+    "No comparison",
+    "Previous 7 days",
+  ]);
+
+  fireEvent.change(compare, { target: { value: "preceding" } });
+
+  // Pinned to the last instant of the day the preceding seven end on, Sep 25.
+  const compared = await waitFor(() => {
+    const again = socket.subscribed("pipeline");
+    expect(again.view).toEqual({ kind: "pipeline", at: "2026-09-25T23:59:59.000Z" });
+    return again;
+  });
+  act(() => socket.receive(snapshotFrame(compared.sub, PIPELINE)));
+
+  await waitFor(() =>
+    expect(document.querySelectorAll('[data-chart-range="compare"]').length).toBeGreaterThan(0)
+  );
+});
+
 test("an unconfigured delivery points at the settings that set it up", async () => {
   renderPage();
   const { socket, frame } = await subscribed();
