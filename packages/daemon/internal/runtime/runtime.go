@@ -146,6 +146,14 @@ type Runtime interface {
 	// deletes an issue's disk, so every caller states what makes it still due rather than
 	// leaving the question to a nil.
 	ReplacePod(ctx context.Context, k Known, due func(context.Context) error) error
+	// RescueUnpushed is the push check of the place k's process runs in, made just before
+	// ReplacePod deletes it: the process's own shim checks every workspace on that place's disk
+	// for work its remote lacks and pushes it to rescue branches named from request.Branch, as
+	// the process's role and with that role's own credential, so the daemon handles no secret for
+	// it. It answers one entry per workspace. k must record a running process in the place it
+	// names. A shim built before the check is ErrRescueUnsupported. A runtime whose places outlive
+	// every replacement (a tmux pane's host directory) has nothing to check and answers nil.
+	RescueUnpushed(ctx context.Context, k Known, request RescueRequest) ([]WorkspaceRescue, error)
 	// CleanupTree deletes what the runtime holds for tree beyond its claims' processes, once every
 	// claim of the tree has retired and the tree's cleanup is reserved (store.CleanupReservedTree);
 	// nil once nothing of it remains. A runtime that holds nothing per tree returns nil at once.

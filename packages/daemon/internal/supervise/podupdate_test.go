@@ -642,6 +642,24 @@ func TestPodUpdateOpensARoundForAStalePluginThatCanAnswer(t *testing.T) {
 	}
 }
 
+// A pod round's task tells the worker what the replacement takes beyond its unpushed commits: the
+// pod's scratch and temporary files, which no commit holds, and that evidence it still needs goes
+// on Dispatch before it answers. A plugin round keeps the disk, so its task says nothing of it.
+func TestThePodRoundsTaskSaysTheScratchGoesWithThePod(t *testing.T) {
+	pod := UpdateTask(testRound, testReasons)
+	for _, want := range []string{
+		"The pod's scratch and temporary files go with the pod",
+		"If you need such a file as evidence, put it on Dispatch before you answer.",
+	} {
+		if !strings.Contains(pod, want) {
+			t.Errorf("the pod round's task does not say %q:\n%s", want, pod)
+		}
+	}
+	if plugin := UpdateTask(PluginRound(PodUpdateContract+1), testReasons); strings.Contains(plugin, "scratch") {
+		t.Errorf("the plugin round's task speaks of scratch files the restart keeps:\n%s", plugin)
+	}
+}
+
 // A stale plugin on a claim that cannot answer keeps today's immediate relaunch: no round is
 // opened, and the process is replaced at once. The relaunch keeps the pod and the disk, so what
 // it costs is the turn alone.
