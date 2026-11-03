@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -122,5 +123,140 @@ func TestReadCommitsNamesTheTableWhenItCannotRead(t *testing.T) {
 	// With no write in the window there is no row to read, and nothing depends on one.
 	if rows, err := readCommits(ctx, unreachablePG, 1, nil); err != nil || rows != nil {
 		t.Fatalf("readCommits with no markers = %v, %v; want nothing read and no error", rows, err)
+	}
+}
+
+// unitWindow is one unit session's life, as a session that started a second into the step and
+// stopped nine seconds in recorded it: its subscribe went out at 1,000 ms and was acknowledged at
+// 1,100 ms, its unsubscribe at 9,000 ms and 9,100 ms.
+func unitWindow() sessionWindow {
+	return sessionWindow{Class: deliveryClassUnit, ID: "ses-lg-unit-00001", Issues: []string{"LOOP-1"},
+		SubSent: 1000 * msNs, SubAck: 1100 * msNs, UnsubSent: 9000 * msNs, UnsubAck: 9100 * msNs}
+}
+
+// loopWrite is one committed comment on issue, with the commit time the case places in a
+// session's life, and the receipts of its event by the sessions that took it.
+func loopWrite(marker, event int64, issue string, commitNs int64) ([]writeRec, []commitRow) {
+	return []writeRec{{Marker: marker, Kind: kindComment, Issue: issue, InWindow: true,
+			Sent: commitNs - 20*msNs, Arrival: commitNs - 10*msNs, Response: commitNs + 10*msNs, Status: 201}},
+		[]commitRow{{EventID: event, Type: primaryEventType[kindComment], Marker: marker, CommitNs: commitNs}}
+}
+
+// TestJoinDeliveryExpectationRule: a loop session is owed a write that committed after the
+// listener acknowledged its subscribe and more than the receipt deadline before it acknowledged
+// its unsubscribe. Every other place in its life is its own column: before the subscribe went out
+// and after the unsubscribe landed it was owed nothing, and inside either edge the write is a
+// boundary, which is neither expected nor lost.
+func TestJoinDeliveryExpectationRule(t *testing.T) {
+	const deadline = time.Second
+	for _, c := range []struct {
+		name     string
+		commitNs int64
+		received bool
+		want     classDelivery
+	}{
+		{"committed before the subscribe went out", 900 * msNs, false, classDelivery{Sessions: 1}},
+		{"committed while the subscribe was in flight", 1050 * msNs, false, classDelivery{Sessions: 1, Boundary: 1}},
+		{"committed after the subscribe and well before the unsubscribe, and lost", 5000 * msNs, false,
+			classDelivery{Sessions: 1, Expected: 1, Lost: 1}},
+		{"committed after the subscribe and well before the unsubscribe, and received", 5000 * msNs, true,
+			classDelivery{Sessions: 1, Expected: 1, Received: 1}},
+		{"committed inside the receipt deadline of the unsubscribe", 8500 * msNs, false,
+			classDelivery{Sessions: 1, Boundary: 1}},
+		{"committed after the unsubscribe was acknowledged", 9200 * msNs, false, classDelivery{Sessions: 1}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			writes, commits := loopWrite(1, 50, "LOOP-1", c.commitNs)
+			var receipts []receipt
+			if c.received {
+				receipts = []receipt{{EventID: 50, Recv: c.commitNs + 100*msNs, Session: unitWindow().ID}}
+			}
+			got := deliveryJoin{writes: writes, commits: commits, receipts: receipts,
+				windows: []sessionWindow{unitWindow()}, deadline: deadline, durationS: 10}.join()
+			if unit := got.ByClass[deliveryClassUnit]; unit != c.want {
+				t.Fatalf("unit class %+v, want %+v", unit, c.want)
+			}
+			// The step's own totals follow the rule: what the sessions were owed is expected, and
+			// what never arrived is missing.
+			if got.ExpectedIssueTopicReceipts != c.want.Expected || got.Missing != c.want.Lost {
+				t.Fatalf("expected %d missing %d, want %d and %d",
+					got.ExpectedIssueTopicReceipts, got.Missing, c.want.Expected, c.want.Lost)
+			}
+		})
+	}
+}
+
+// TestJoinDeliveryCountsASecondReceiptAsADuplicate: one session taking one event twice is one
+// receipt and one duplicate, and the delivery latency is the first receipt's alone.
+func TestJoinDeliveryCountsASecondReceiptAsADuplicate(t *testing.T) {
+	w := unitWindow()
+	writes, commits := loopWrite(1, 50, "LOOP-1", 5000*msNs)
+	receipts := []receipt{
+		{EventID: 50, Recv: 5200 * msNs, Session: w.ID},
+		{EventID: 50, Recv: 5900 * msNs, Session: w.ID},
+	}
+
+	got := deliveryJoin{writes: writes, commits: commits, receipts: receipts,
+		windows: []sessionWindow{w}, deadline: time.Second, durationS: 10}.join()
+
+	want := classDelivery{Sessions: 1, Expected: 1, Received: 1, Duplicate: 1}
+	if unit := got.ByClass[deliveryClassUnit]; unit != want {
+		t.Fatalf("unit class %+v, want %+v", unit, want)
+	}
+	if got.IssueTopicReceipts != 1 || got.Missing != 0 {
+		t.Fatalf("receipts %d missing %d, want 1 and 0: the duplicate is no second receipt", got.IssueTopicReceipts, got.Missing)
+	}
+	if from := got.DeliveryMsFromCommit; from.N != 1 || from.Max != 200 {
+		t.Fatalf("delivery from commit %+v, want one sample of 200 ms, the first receipt's", from)
+	}
+}
+
+// TestJoinDeliveryCountsTheClassesApart: a write both a unit session and the driver session
+// follow is expected twice, once in each class, and each class's loss is its own.
+func TestJoinDeliveryCountsTheClassesApart(t *testing.T) {
+	unit := unitWindow()
+	driver := sessionWindow{Class: deliveryClassDriver, ID: "ses-lg-driver", Issues: []string{"LOOP-1", "LOOP-2"},
+		SubSent: 10 * msNs, SubAck: 20 * msNs}
+	writes, commits := loopWrite(1, 50, "LOOP-1", 5000*msNs)
+	other, otherCommits := loopWrite(2, 60, "LOOP-2", 6000*msNs)
+	receipts := []receipt{
+		{EventID: 50, Recv: 5100 * msNs, Session: driver.ID},
+		{EventID: 60, Recv: 6100 * msNs, Session: driver.ID},
+	}
+
+	got := deliveryJoin{writes: append(writes, other...), commits: append(commits, otherCommits...),
+		receipts: receipts, windows: []sessionWindow{unit, driver}, deadline: time.Second, durationS: 10}.join()
+
+	wantUnit := classDelivery{Sessions: 1, Expected: 1, Lost: 1}
+	wantDriver := classDelivery{Sessions: 1, Expected: 2, Received: 2}
+	if u := got.ByClass[deliveryClassUnit]; u != wantUnit {
+		t.Errorf("unit class %+v, want %+v: the unit followed LOOP-1 alone and took nothing", u, wantUnit)
+	}
+	if d := got.ByClass[deliveryClassDriver]; d != wantDriver {
+		t.Errorf("driver class %+v, want %+v: the driver followed both issues and took both", d, wantDriver)
+	}
+	if got.ExpectedIssueTopicReceipts != 3 || got.IssueTopicReceipts != 2 || got.Missing != 1 {
+		t.Fatalf("expected %d receipts %d missing %d, want 3, 2 and 1",
+			got.ExpectedIssueTopicReceipts, got.IssueTopicReceipts, got.Missing)
+	}
+}
+
+// TestJoinDeliveryWithoutSessionsCarriesNoClass: a step that ran the flat population alone counts
+// what it always has, and summary.json carries no by_class at all.
+func TestJoinDeliveryWithoutSessionsCarriesNoClass(t *testing.T) {
+	writes, commits := loopWrite(1, 50, "LGA-1", 5000*msNs)
+	got := joinDelivery(writes, commits, []receipt{{EventID: 50, Recv: 5100 * msNs}}, map[string]int{"LGA-1": 2}, 10)
+	if got.ByClass != nil {
+		t.Fatalf("by_class %+v, want none", got.ByClass)
+	}
+	if got.ExpectedIssueTopicReceipts != 2 || got.IssueTopicReceipts != 1 || got.Missing != 1 {
+		t.Fatalf("expected %d receipts %d missing %d, want 2, 1 and 1", got.ExpectedIssueTopicReceipts, got.IssueTopicReceipts, got.Missing)
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "by_class") {
+		t.Fatalf("a step with no loop session records a class:\n%s", b)
 	}
 }

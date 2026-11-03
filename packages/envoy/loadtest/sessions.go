@@ -99,24 +99,35 @@ func (ns *natsSessions) handler(session int, agent bool, nonce int64) nats.MsgHa
 			ns.relay.coreCopy(m, agent)
 			return
 		}
-		var env contracts.Envelope
-		if json.Unmarshal(m.Data, &env) != nil {
+		id, typ, ok := envelopeEvent(m.Data)
+		if !ok {
 			return
 		}
-		var ev struct {
-			ID   int64  `json:"id"`
-			Type string `json:"type"`
-		}
-		if json.Unmarshal([]byte(env.Payload), &ev) != nil {
-			return
-		}
-		key := ev.Type
+		key := typ
 		if agent {
-			key = "agent." + ev.Type
+			key = "agent." + typ
 		}
 		ns.envelopes.offer(key, m.Data, nonce)
-		ns.receipts.add(receipt{EventID: ev.ID, Recv: now, Agent: agent})
+		ns.receipts.add(receipt{EventID: id, Recv: now, Agent: agent})
 	}
+}
+
+// envelopeEvent is the id and the type of the Dispatch event an envelope carries, as a session
+// reads them off a message of its subscriptions or off a relay frame; ok is false when the bytes
+// are no envelope, or its payload is no event of Dispatch's (internal/contracts envelope.go).
+func envelopeEvent(data []byte) (id int64, typ string, ok bool) {
+	var env contracts.Envelope
+	if json.Unmarshal(data, &env) != nil {
+		return 0, "", false
+	}
+	var ev struct {
+		ID   int64  `json:"id"`
+		Type string `json:"type"`
+	}
+	if json.Unmarshal([]byte(env.Payload), &ev) != nil {
+		return 0, "", false
+	}
+	return ev.ID, ev.Type, true
 }
 
 func (ns *natsSessions) close() {

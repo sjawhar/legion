@@ -45,16 +45,27 @@ type runConfig struct {
 	// without the flag, where every path is seed.json's.
 	loopSeedPath string
 	loop         *loopSeed
-	sessions     int
-	events       float64
-	requests     float64
-	warmup       time.Duration
-	duration     time.Duration
-	grace        time.Duration
-	mix          eventMix
-	routes       routeMix
-	human        float64
-	live         int
+	// The spec loop's own sessions (loopsessions.go), beside the flat population: unitStarts is
+	// the rate the unit sessions start at, which is 0 for a step that runs none of them, unitLife
+	// how long each lives, loopListeners the endpoints they register on (the units over all but
+	// the last, the driver on the last), driverTopics how many issue topics the driver follows,
+	// and receiptDeadline the deadline a receipt is expected by, which the delivery join's
+	// expectation rule takes (delivery.go).
+	unitStarts      float64
+	unitLife        time.Duration
+	loopListeners   []string
+	driverTopics    int
+	receiptDeadline time.Duration
+	sessions        int
+	events          float64
+	requests        float64
+	warmup          time.Duration
+	duration        time.Duration
+	grace           time.Duration
+	mix             eventMix
+	routes          routeMix
+	human           float64
+	live            int
 	// dashboard is the dashboard stream the build under test serves, probed once before the
 	// window (probeDashboard): dashboardLive or dashboardSSE.
 	dashboard string
@@ -114,6 +125,11 @@ func runLoad(args []string) error {
 	name := fs.String("name", "", "step name (default: the -out directory's name)")
 	seedPath := fs.String("seed", "", "seed.json path (default $LOADTEST_ROOT/seed.json)")
 	loopSeedPath := fs.String("loop-seed", "", "the Verified Linux spec loop's own seed (loadgen loop-seed-export): the step's issues are its proposals, and a read or a write lands on one in proportion to its requirement ids")
+	unitStarts := fs.Float64("unit-starts", 0, "unit sessions started per second: the spec loop's short-lived sessions, each following one proposal for -unit-life (0 runs the flat -sessions population alone, as a step always has)")
+	unitLife := fs.Duration("unit-life", 5*time.Minute, "how long a unit session lives before it publishes its exit message, unsubscribes and stops heartbeating")
+	loopListeners := fs.String("loop-listeners", "", "the listener endpoints the loop's sessions register on, comma separated: the unit sessions round-robin over all but the last, and the driver session takes the last")
+	driverTopics := fs.Int("driver-topics", 614, "issue topics the driver session follows: every proposal the loop's driver is live on first, then the others by the size of their part documents")
+	receiptDeadline := fs.Duration("receipt-deadline", time.Second, "the deadline a receipt is expected by, from the write's commit: a session whose unsubscribe was acknowledged inside it is counted on the boundary, not lost (the pass rule judges delivery p99 from arrival at 1,000 ms)")
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
@@ -179,6 +195,12 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-session-delivery must be %s or %s, not %q", sessionDeliveryCore, sessionDeliveryConsumer, *delivery)
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
+	}
+	loopFlags := loopSessionFlags{unitStarts: *unitStarts, unitLife: *unitLife, listeners: *loopListeners,
+		driverTopics: *driverTopics, deadline: *receiptDeadline}
+	loopEndpoints, err := loopFlags.check(*loopSeedPath != "")
+	if err != nil {
+		return err
 	}
 	if *out == "" {
 		return fmt.Errorf("-out is required")
@@ -250,6 +272,8 @@ func runLoad(args []string) error {
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, sessionDelivery: *delivery,
+		unitStarts: *unitStarts, unitLife: *unitLife, loopListeners: loopEndpoints,
+		driverTopics: *driverTopics, receiptDeadline: *receiptDeadline,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 		copyMeta: copyMeta, replay: rs,
 	}, sf)
@@ -260,8 +284,9 @@ const redacted = "<redacted>"
 
 // recordedArgs is every flag given to fs, once parsed, as "-name=value" in fs's (lexical) order:
 // the value of each tokenFlags flag replaced by redacted, and each urlFlags flag's value without
-// its credentials (redactEndpoint: -pg as its hosts, ports and database alone). runLoad takes no
-// positional argument, so these are all of its arguments.
+// its credentials (redactEndpoint: -pg as its hosts, ports and database alone). -loop-listeners
+// is a list of URLs, and every element of it is recorded without its credentials too. runLoad
+// takes no positional argument, so these are all of its arguments.
 func recordedArgs(fs *flag.FlagSet) []string {
 	var out []string
 	fs.Visit(func(f *flag.Flag) {
@@ -271,6 +296,12 @@ func recordedArgs(fs *flag.FlagSet) []string {
 			value = redacted
 		case slices.Contains(urlFlags, name):
 			value = redactEndpoint(name, value)
+		case name == "-loop-listeners":
+			eps := strings.Split(value, ",")
+			for i, ep := range eps {
+				eps[i] = redactURL(strings.TrimSpace(ep))
+			}
+			value = strings.Join(eps, ",")
 		}
 		out = append(out, name+"="+value)
 	})
@@ -374,8 +405,12 @@ type summary struct {
 	CommitOrderLock lockSummary       `json:"commit_order_lock"`
 	UngrantedLocks  ungrantedSummary  `json:"ungranted_locks"`
 	Sessions        sessionsSummary   `json:"sessions"`
-	Live            liveSummary       `json:"live"`
-	LiveBytes       int64             `json:"live_bytes"`
+	// LoopSessions is how the spec loop's own sessions went (-unit-starts), absent for a step
+	// that ran the flat population alone; what each of their classes was owed and what it got is
+	// under events.by_class (classDelivery).
+	LoopSessions *loopSessionsSummary `json:"loop_sessions,omitempty"`
+	Live         liveSummary          `json:"live"`
+	LiveBytes    int64                `json:"live_bytes"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
@@ -475,6 +510,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	}
 	reg := st.registerSessions(ctx, ns)
 	st.startHeartbeat(ctx, reg)
+	lp := st.startLoopSessions(ctx, ns)
 
 	st.openWindow(time.Now())
 	meta.Start, meta.WindowStart, meta.WindowEnd = st.start, st.winStart, st.winEnd
@@ -492,9 +528,18 @@ func execute(cfg runConfig, sf seedFile) error {
 		reqs, requestsDone = st.runRequests(ctx, a)
 	}
 	pr := st.startProbes(ctx, ns.pulls)
+	var unitsDone <-chan struct{}
+	if lp != nil {
+		unitsDone = lp.runUnits(ctx, st.start, st.winStart, st.winEnd)
+	}
 
 	<-eventsDone
 	<-requestsDone
+	if unitsDone != nil {
+		// The unit sessions' schedule ends with the window; the sessions it started live on
+		// until their life runs out or the step's context ends (loopSessions.stop).
+		<-unitsDone
+	}
 	lg.Printf("generators done at %s; grace %s", time.Since(st.start).Round(time.Second), cfg.grace)
 	time.Sleep(cfg.grace)
 	pr.wait()
@@ -505,8 +550,11 @@ func execute(cfg runConfig, sf seedFile) error {
 	if ns.relay != nil {
 		ns.relay.writeFrames(cfg.out, st.sessions, lg)
 	}
+	if lp != nil {
+		lp.stop()
+	}
 
-	sum := st.buildSummary(ns, reg, wr, writes, reqs, live, pr)
+	sum := st.buildSummary(ns, lp, reg, wr, writes, reqs, live, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	end := readPGClock(context.Background(), cfg.ep.pg)
 	logPGClock(lg, "end", end)
@@ -567,9 +615,12 @@ func newStep(cfg runConfig, sf seedFile, lg *log.Logger, nonce int64) *step {
 	return st
 }
 
-func (st *step) issueTopic(i int) string {
-	return "notifications.dispatch.issue." + st.sf.Issues[i].Key + ".>"
-}
+func (st *step) issueTopic(i int) string { return issueTopicOf(st.sf.Issues[i].Key) }
+
+// issueTopicOf is the notification topic of one issue and everything under it, which a session
+// subscribes and registers to follow that issue (internal/dispatch/outbox routes an issue's
+// events to notifications.dispatch.issue.<key>.<kind>).
+func issueTopicOf(key string) string { return "notifications.dispatch.issue." + key + ".>" }
 
 // openWindow starts the generators' clock at start: the window opens after the warm-up.
 func (st *step) openWindow(start time.Time) {
@@ -810,8 +861,10 @@ func (st *step) profile(ctx context.Context) {
 }
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
-// reads the run's commit rows and names the ungranted locks' relations, so it runs after the load.
-func (st *step) buildSummary(ns *natsSessions, reg *registrar, wr *writer, writes *collector[writeRec], reqs *requestLoad, live *liveSockets, pr *probes) summary {
+// reads the run's commit rows and names the ungranted locks' relations, so it runs after the
+// load, and it reads the loop sessions' windows, so it runs after they have all stopped
+// (loopSessions.stop). lp is nil for a step that ran the flat population alone.
+func (st *step) buildSummary(ns *natsSessions, lp *loopSessions, reg *registrar, wr *writer, writes *collector[writeRec], reqs *requestLoad, live *liveSockets, pr *probes) summary {
 	cfg := st.cfg
 	ws := writes.snapshot()
 	frames := live.frames.snapshot()
@@ -831,6 +884,11 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, wr *writer, write
 		watcherCount[st.sf.Issues[i].Key] = len(subscribed)
 	}
 	durS := cfg.duration.Seconds()
+	join := deliveryJoin{writes: ws, commits: commits, receipts: ns.receipts.snapshot(),
+		watchers: watcherCount, deadline: cfg.receiptDeadline, durationS: durS}
+	if lp != nil {
+		join.windows = lp.windows.snapshot()
+	}
 	sum := summary{
 		Config: summaryConfig{
 			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, Live: cfg.live,
@@ -840,7 +898,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, wr *writer, write
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
 			SessionDelivery: cfg.sessionDelivery, MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
 		},
-		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
+		Events:   join.join(),
 		Requests: summarizeRequests(reqs.recs.snapshot(), int(reqs.dropped.Load()), cfg.requests, durS),
 		Sessions: sessionsSummary{
 			Registered: int(reg.ok.Load()), RegisterErrors: int(reg.errs.Load()), HeartbeatErrors: reg.heartbeatErrs.Load(),
@@ -850,6 +908,10 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, wr *writer, write
 		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
 		Live:            summarizeLive(frames, ws, commits),
 		LiveBytes:       live.bytes.Load(),
+	}
+	if lp != nil {
+		s := lp.summary()
+		sum.LoopSessions = &s
 	}
 	sum.Loop = wr.loopRecord()
 	if ns.relay != nil {

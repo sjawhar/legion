@@ -419,3 +419,19 @@ func TestLoopSummaryConfigNamesItsSeed(t *testing.T) {
 		t.Fatalf("a step without a loop seed records one:\n%s", plain)
 	}
 }
+
+// TestMetaRecordsTheLoopListenersWithoutCredentials: -loop-listeners is a list of listener URLs,
+// and meta.json records every element of it without its userinfo, as it records the endpoint
+// flags (TestAForeignRunsMetaHoldsNoTokenOrPassword).
+func TestMetaRecordsTheLoopListenersWithoutCredentials(t *testing.T) {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.String("loop-listeners", "", "")
+	if err := fs.Parse([]string{"-loop-listeners", "http://agent:listener-password-4f1c@127.0.0.1:1, http://127.0.0.1:2"}); err != nil {
+		t.Fatal(err)
+	}
+	got := recordedArgs(fs)
+	want := []string{"-loop-listeners=http://127.0.0.1:1,http://127.0.0.1:2"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("recorded %q, want %q", got, want)
+	}
+}
