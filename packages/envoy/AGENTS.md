@@ -3749,7 +3749,8 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
 - **Settings** (`bus.SessionConsumers`):
   explicit ack, `AckWait` 60 s, `MaxAckPending` 1,024, `MaxDeliver` unlimited, `InactiveThreshold` 72 hours (the stream's retention, `contracts.DeliveryDuplicateWindow`), and the stream's replica count.
   A new consumer starts at the sequence after the stream's last, which delivers what `DeliverNew` delivers, and that start is recorded on the session's entry (`consumer_start`), which is what the durable path skips by.
-  When the registration's `resume` names the stream's current `envoy_stream_id`, the consumer starts at `resume.seq + 1` instead, and a start below the stream's first sequence answers `gap: true`.
+  When the registration's `resume` names the stream's current `envoy_stream_id` and carries a `seq`, the consumer starts at `resume.seq + 1` instead, a `seq` of 0 included (a session that holds nothing of the stream starts at sequence 1), and a start below the stream's first sequence answers `gap: true`.
+  A `resume` without `seq`, or naming another `envoy_stream_id`, leaves the start at the stream's end.
 
 - **Filter:** the session's agent subject and each followed topic the stream stores (`bus.StreamCaptures`), reduced so that no two filters overlap (`bus.ReduceFilterSubjects`:
   a subject another contains is dropped, two that partly overlap become their common token prefix and `>`, and `X` and `X.>` both stay).
