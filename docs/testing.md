@@ -45,6 +45,18 @@ rather than beside the module's other Postgres-backed packages: together they sh
 service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
 (`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).
 
+`packages/daemon/internal/daemon` is the daemon's such package. On CI's runners it took up to
+694 s without `-race`, under the test job's `go test -timeout 20m ./...`, and 306 to 600 s under
+`-race`, where go test's own ten minutes ran out on main at 2201840998; the test job's race step
+gives it 30 minutes. On a busy machine it takes longer still (908 s under `-race` on a shared
+devbox), so a command that runs the whole package, alone or in a pattern that includes it,
+passes `-timeout 30m`:
+
+```sh
+cd packages/daemon
+go test -race -timeout 30m ./internal/daemon/
+```
+
 ## A database a Go test creates
 
 A Go test that creates a Postgres database writes `create database … strategy file_copy`, as
