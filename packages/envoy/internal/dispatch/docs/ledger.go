@@ -39,7 +39,7 @@ import (
 // leaves that a later read of the same transaction would have seen - a document's head, a
 // version's number and time, an anchor's quote, an approval request's state, a source's
 // references - the ledger holds in memory (pendingRoom, NextVersion, RegisterPendingAnchor,
-// pendingApproval, referenced), and the read takes it from there.
+// recordPendingApproval, referenced), and the read takes it from there.
 //
 // A writer that runs its operations in a transaction of its own, which no caller joined, carries
 // no `tx` and marks its ledger `ownTx` instead: a settlement (settleRoomWithin) and the block-id
@@ -106,8 +106,9 @@ type Ledger struct {
 	// they will stand (RegisterPendingAnchor), in the order they were first registered.
 	anchors map[string][]*PendingAnchor
 	// approvals holds, per document, its open approval request as this transaction's queued
-	// writes leave it (pendingApproval).
-	approvals map[string]*pendingApproval
+	// writes leave it (recordPendingApproval): the row as moved to the transaction's version
+	// (MoveApprovalAsk), edited_at included.
+	approvals map[string]*model.Ask
 	// reviews holds, per document, the newest review this transaction has queued (QueueReview),
 	// which the table answers only once the write phase has run (PendingReview).
 	reviews map[string]model.ArtifactReview
@@ -537,24 +538,17 @@ func pendingRefKey(ctx context.Context, artifactID string) (string, bool) {
 	return refKey, pending
 }
 
-// pendingApproval is a document's open approval request as the writes this transaction has queued
-// leave it: ask is the row as moved to the transaction's version (MoveApprovalAsk), edited_at
-// included.
-type pendingApproval struct {
-	ask *model.Ask
-}
-
-// recordPendingApproval records pending as artifactID's open approval request on the ledger ctx
+// recordPendingApproval records ask as artifactID's open approval request on the ledger ctx
 // queues tx's writes on, when there is one: the caller has queued the write that leaves it so.
-func recordPendingApproval(ctx context.Context, tx pgx.Tx, artifactID string, pending pendingApproval) {
+func recordPendingApproval(ctx context.Context, tx pgx.Tx, artifactID string, ask *model.Ask) {
 	ledger := queueFor(ctx, tx)
 	if ledger == nil {
 		return
 	}
 	if ledger.approvals == nil {
-		ledger.approvals = make(map[string]*pendingApproval)
+		ledger.approvals = make(map[string]*model.Ask)
 	}
-	ledger.approvals[artifactID] = &pending
+	ledger.approvals[artifactID] = ask
 }
 
 // recordPendingReview records review as the newest review of artifactID on the ledger ctx queues

@@ -41,8 +41,8 @@ func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 // request a version write of this transaction moved (MoveApprovalAsk), else the stored one.
 func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
 	if ledger := queueFor(ctx, tx); ledger != nil {
-		if pending := ledger.approvals[artifactID]; pending != nil {
-			return pending.ask, nil
+		if ask := ledger.approvals[artifactID]; ask != nil {
+			return ask, nil
 		}
 	}
 	return OpenApprovalAsk(ctx, tx, artifactID)
@@ -60,8 +60,8 @@ func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 // A context holding no ledger at all is refused by the rewording it makes (RewriteApprovalAsk,
 // errUnjoined). Its writes reach the transaction's write queue and the event it appends reaches
 // its ledger (eventSink), which publishes it after its Commit. Where its writes are queued, the
-// ledger records the request as moved (pendingApproval), so the carry that follows in the same
-// version write reads the request as this move leaves it.
+// ledger records the request as moved (recordPendingApproval), so the carry that follows in the
+// same version write reads the request as this move leaves it.
 func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) error {
 	ask, err := openApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
@@ -77,7 +77,7 @@ func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 	if err := RewriteApprovalAsk(ctx, tx, broker, ask, mover, version.Number, summary, serverURL); err != nil {
 		return err
 	}
-	recordPendingApproval(ctx, tx, artifactID, pendingApproval{ask: ask})
+	recordPendingApproval(ctx, tx, artifactID, ask)
 	return nil
 }
 
