@@ -914,6 +914,9 @@ export const AgentAsks = z.array(
     question: z.string(),
     options: z.array(AskOption).nullish(),
     created_at: z.string().nullish(),
+    /** Dispatch's time of the person's answer, which `conversationOrder` compares with the spec's
+     *  versions; absent while the ask is open. */
+    answer: z.looseObject({ at: z.string().nullish() }).nullish(),
   })
 );
 /** agent-texts.json: each message, comment and ask the run's session wrote. */
@@ -2674,10 +2677,16 @@ const indented = (text: string, depth = 6) =>
     .map((line) => `${" ".repeat(depth)}${line}`)
     .join("\n");
 
-/** spec-writing and spec-rewrite: one row per run, with the eight scores below.
- * The row passes when its eight scores pass; `judged` gives the judges' counts, which pass or fail
+/** spec-writing and spec-rewrite: one row per run, with the ten scores below.
+ * The row passes when its ten scores pass; `judged` gives the judges' counts, which pass or fail
  * nothing here: the acceptance run of the skills that replace dispatch-brainstorming holds each
  * count to its own bound.
+ *   - asked and grew: the run held the conversation before it wrote the design
+ *     (conversationOrder). `asked` is the session's first question to the person being older than
+ *     its first spec version, so a run that writes a draft and asks after it fails however short
+ *     that draft is; `grew` is no version stating a design (`## Requirements`, `## Design` or
+ *     `## Acceptance`) before the person has answered a question of the run's own. A session that
+ *     wrote no version fails both.
  *   - outline: outlineProblems finds nothing.
  *   - checked: the transcript holds at least one spec write (writesSpec: a write Dispatch made of
  *     the run's own primary spec, each `dispatch` command of a call apart), a spec-only check
@@ -2715,6 +2724,68 @@ const indented = (text: string, depth = 6) =>
  *     questions.json's `dominated`, `settled` and kinds; numbers.json's `names_number`;
  *     preamble.json's passages by kind; proposal.json's verdicts. Each row whose id is in
  *     seeded.json is left out. */
+/** The headings a spec states a design under: the parts a person's answers shape. A version that
+ *  holds one has stated a design. */
+const DESIGN_HEADINGS = ["## Design", "## Acceptance", "## Requirements"];
+
+/** Whether the run held the conversation before it wrote the design (`skill://dispatch-writing-specs`,
+ *  "The conversation"), read from what Dispatch recorded rather than from the transcript's prose:
+ *
+ *  - `asked`: the session's first question to the person (agent-asks.json, the seeded asks and the
+ *    approval request left out) is older than its first version of the spec. A run that writes a
+ *    spec first and asks after it fails, however short that first draft is.
+ *  - `grew`: no version of the spec states a design (`DESIGN_HEADINGS`) before a person has
+ *    answered a question of the run's own. The first such version is compared with the oldest
+ *    answer Dispatch recorded, so a draft of the problem alone passes and one that states the
+ *    design before any answer does not.
+ *
+ *  A run whose session wrote no version is neither: it scores both false, as a run that wrote the
+ *  spec with no question does. */
+export function conversationOrder(
+  runDir: string,
+  own: string
+): { asked: boolean; grew: boolean; notes: string[] } {
+  const seeded = seededIds(runDir);
+  const asks = json(path.join(runDir, "agent-asks.json"), AgentAsks).filter(
+    (ask) => ask.kind !== "approval" && !seeded.has(ask.id)
+  );
+  const versions = sessionVersions(runDir, own);
+  const first = versions[0];
+  if (first === undefined)
+    return {
+      asked: false,
+      grew: false,
+      notes: ["conversation: the session wrote no spec version"],
+    };
+  const firstAsk = asks
+    .map((ask) => ask.created_at ?? "")
+    .filter((at) => at !== "")
+    .toSorted()[0];
+  const asked = firstAsk !== undefined && firstAsk < (first.created_at ?? "");
+  const answers = asks
+    .map((ask) => ask.answer?.at ?? "")
+    .filter((at) => at !== "")
+    .toSorted();
+  const design = versions.find((version) => {
+    const file = path.join(runDir, "spec-versions", `${version.version}.md`);
+    if (!existsSync(file)) return false;
+    const text = readFileSync(file, "utf8");
+    return DESIGN_HEADINGS.some((heading) => text.includes(heading));
+  });
+  const grew =
+    design === undefined || (answers[0] !== undefined && answers[0] < (design.created_at ?? ""));
+  const notes: string[] = [];
+  if (!asked)
+    notes.push(
+      `conversation: the first spec version (${first.version}, ${first.created_at ?? "?"}) came before any question to the person (${firstAsk ?? "none"})`
+    );
+  if (!grew && design !== undefined)
+    notes.push(
+      `conversation: version ${design.version} (${design.created_at ?? "?"}) states a design, and the person had answered nothing by then (${answers[0] ?? "no answer"})`
+    );
+  return { asked, grew, notes };
+}
+
 function specRow(
   runDir: string,
   run: string,
@@ -2858,6 +2929,9 @@ function specRow(
   for (const row of passages) details.push(`preamble ${row.kind} in ${row.source}: ${row.passage}`);
   const proposals = judged(runDir, "proposal.json", ProposalOutput, inputs).rows;
 
+  const conversation = conversationOrder(runDir, id);
+  details.push(...conversation.notes);
+
   const scores = {
     outline: outline.length === 0,
     checked,
@@ -2867,6 +2941,8 @@ function specRow(
     chat,
     quoted,
     self,
+    asked: conversation.asked,
+    grew: conversation.grew,
   };
   const notes = [
     `source=${source} turns=${turns} approved=${approved}`,
@@ -3352,8 +3428,9 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "           which point a person at the asks to read and do not check a recommendation.",
       "           brainstorm: the design went to the issue's spec and nothing leaked the project",
       "           lookup (brainstormSurface); a person still reads notes for unagreed points.",
-      "           spec-writing and spec-rewrite: the eight scores of specRow pass (outline,",
-      "           checked, refusals, plan, routed, chat, quoted, self); the judges' counts follow",
+      "           spec-writing and spec-rewrite: the ten scores of specRow pass (outline,",
+      "           checked, refusals, plan, routed, chat, quoted, self, asked, grew); the judges'",
+      "           counts follow",
       "           them, and the source table gives each source and label's median fault count",
       "           askgate: the rule for the run's label and case (askgateReview)",
       "pass+ref   passed, and the agent read the file the rule is in (askgate: never counted)",

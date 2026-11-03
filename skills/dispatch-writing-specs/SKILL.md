@@ -9,6 +9,15 @@ description: "Use in a session with Dispatch before you write or change a spec, 
 
 Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec (`skill://legion-worker`).
 
+## The conversation
+
+A spec is a conversation with the person, not a document you write and then ask them about. In order:
+
+1. Research: read the issue, the code and what the person has already written.
+2. Send what you found and the design questions it leaves open, a few at a time, in the person's terms, before the spec states any design.
+3. Write each part only after the answers it rests on. Nothing is polished ahead of what you know.
+4. A wrong premise or a changed request changes the request first, before you write more.
+
 ## The outline
 
 Find the issue's project with `dispatch projects` or `dispatch search`, never the environment. The spec's `##` parts, in order:
@@ -48,7 +57,7 @@ For each spec, ask, comment and message:
 
 ## Each version
 
-1. After a person's answer, comment or edit, rewrite what it touches and delete what it contradicts. Never narrate an edit or what used to be here: versions and comments hold the history. Reply in a comment's thread.
+1. After a person's answer, comment or edit, reread the problem and rewrite what the answer touches, deleting what it contradicts: each answer is integrated into the whole spec, never appended. Never narrate an edit or what used to be here: versions and comments hold the history. Reply in a comment's thread.
 2. Before each spec write, paste the whole spec, never a path, into a fresh subagent: it lists gaps, conflicts, uncheckable requirements, unclear text and missing or needless questions. Fix or record each.
 3. Before each approval request, `wait` for a read-only fact check: `task(agent="scout")`.
 4. Name each version with `dispatch doc-edit --summary`.

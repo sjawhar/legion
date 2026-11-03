@@ -1266,11 +1266,18 @@ const cleanJudges: Record<string, object> = {
   "proposal.json": { rows: [{ item: "the greeting word", verdict: "proposed", ask: null }] },
   "shared-runs.json": { rows: [] },
 };
+/** A question the run asked the person, opened and answered before the earliest version any
+ *  fixture here writes (`conversationOrder`: a question before the first version, an answer
+ *  before the version that states a design). A fixture that means to fail `asked` or `grew`
+ *  passes its own times. */
 const openAsk = (id: string) => ({
   id,
   question: "Which name should the example use?",
   options: [{ label: "Ada" }, { label: "Grace" }],
   multiple: false,
+  // `second(1)` and `second(2)`, written out: this runs at module scope, above that helper.
+  created_at: "2026-10-24T10:00:01.000Z",
+  answer: { at: "2026-10-24T10:00:02.000Z" },
 });
 const approvedStates = [
   { turn: 1, open_asks: [openAsk("ask-1")], approval: null },
@@ -2312,6 +2319,21 @@ specRun("spec-writing-head-100", {
     finish
   ),
   versions: [8.5, 12.5, 16.5],
+});
+// The one-shot draft the conversation rule forbids: the spec's first version at second 120, the
+// question to the person opened at 150 and answered at 170. Every other score passes, so the row
+// fails on `asked` and `grew` alone.
+specRun("spec-writing-head-140", {
+  asks: [
+    {
+      kind: "question",
+      ...openAsk("ask-1"),
+      state: "answered",
+      created_at: second(150),
+      answer: { at: second(170) },
+    },
+    { id: "appr-1", kind: "approval", question: "Approve spec.md v3?", options: [] },
+  ],
 });
 // A check between them: it counts for the helper's write.
 specRun("spec-writing-head-101", {
@@ -3534,7 +3556,18 @@ function rowOf(name: string): string {
   const end = all.findIndex((line, index) => index > start && !line.startsWith("  "));
   return all.slice(start, end < 0 ? undefined : end).join("\n");
 }
-const SCORES = ["outline", "checked", "refusals", "plan", "routed", "chat", "quoted", "self"];
+const SCORES = [
+  "outline",
+  "checked",
+  "refusals",
+  "plan",
+  "routed",
+  "chat",
+  "quoted",
+  "self",
+  "asked",
+  "grew",
+];
 /** The scores of a spec run's row, by name. */
 function scoresOf(name: string): Record<string, string> {
   const row = rowOf(name);
@@ -3938,6 +3971,25 @@ test("checked: a version Dispatch recorded for the session that no shown write m
   expect(rowOf("spec-writing-head-101").split("\n")[0]).toContain(" writes_seen=2 versions=3");
   // A run whose shown writes match its recorded versions carries no flag.
   expect(rowOf("spec-writing-head-1")).not.toContain("writes_seen=");
+});
+
+test("asked and grew: a run that writes the spec before it asks fails, however short the draft", () => {
+  // The one-shot draft: the question comes after the first version, and the version that states a
+  // design comes before any answer.
+  expect(scoresOf("spec-writing-head-140")).toEqual({
+    ...allPass,
+    asked: "false",
+    grew: "false",
+  });
+  expect(rowOf("spec-writing-head-140")).toContain(
+    `conversation: the first spec version (2, ${second(120)}) came before any question to the person (${second(150)})`
+  );
+  expect(rowOf("spec-writing-head-140")).toContain(
+    `conversation: version 2 (${second(120)}) states a design, and the person had answered nothing by then (${second(170)})`
+  );
+  // Asking first and answering first is the pass, which `spec-writing-head-1` already shows.
+  expect(scoresOf("spec-writing-head-1").asked).toBe("true");
+  expect(scoresOf("spec-writing-head-1").grew).toBe("true");
 });
 
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {
