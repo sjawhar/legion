@@ -185,8 +185,11 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     // This admission's restore of the browser's saved rows; a refused edit is dropped after it.
     let restored: Promise<void> = Promise.resolve();
     // The server last closed a socket for want of room, and has applied nothing from this browser
-    // since.
+    // since. `busyCloses` counts those closes, so an applied answer clears `busy` only when no
+    // busy close came after the answer arrived: the pending sync answers once its saved row is
+    // cleared, which is asynchronous, and a close that lands meanwhile is the newer word.
     let busy = false;
+    let busyCloses = 0;
     let provider: HocuspocusProvider;
     // `connect: false` below means this class cannot instantiate a socket until `sync` is assigned
     // after the provider exists; the explicit `websocket.connect()` is deliberately last.
@@ -292,6 +295,7 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
             provider.disconnect();
             break;
           case DOCUMENT_BUSY_CLOSE_CODE:
+            busyCloses += 1;
             if (!busy) {
               busy = true;
               callbacks.onBusy(true);
@@ -304,9 +308,12 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
           return;
         }
         // The pending sync parses the frame, which is the one parse of it: it answers whether the
-        // server applied the frame it acknowledges, and `undefined` for anything else.
+        // server applied the frame it acknowledges, and `undefined` for anything else. It answers
+        // after it has cleared the acknowledged row, so a busy close that arrived meanwhile -
+        // after this frame, as the socket delivered them - keeps the notice up.
+        const closesBefore = busyCloses;
         void Promise.resolve(sync?.frameReceived(new Uint8Array(event.data))).then((applied) => {
-          if (busy && applied === true) {
+          if (busy && applied === true && busyCloses === closesBefore) {
             busy = false;
             callbacks.onBusy(false);
           }

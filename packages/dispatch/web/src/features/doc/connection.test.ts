@@ -761,3 +761,36 @@ test("a real provider closed as busy reconnects, keeps the edit, and says when i
     expect(harness.refusals).toEqual([]);
   });
 });
+
+test("a busy close that arrives after an applied answer keeps the busy notice up", async () => {
+  const artifact = artifactId();
+  await withProvider(artifact, async (harness) => {
+    const socket = await admitWritable(harness, artifact, 0);
+    const text = harness.connection.doc.getText("t");
+    text.insert(0, "waits for room");
+    const clientId = harness.connection.doc.clientID;
+    await waitFor(async () => expect(await rowsOf(artifact)).toEqual([[artifact, clientId, 1]]));
+    socket.receive(syncStatusFrame(false, artifact));
+    socket.dispatchEvent(
+      new CloseEvent("close", { code: DOCUMENT_BUSY_CLOSE_CODE, reason: "DOC_BUSY" })
+    );
+    expect(harness.busy).toEqual([true]);
+    await waitFor(() => expect(OpenSocket.opened).toHaveLength(2));
+    const reconnected = await harness.socket(1);
+    reconnected.receive(authenticatedFrame("read-write", artifact));
+    reconnected.receive(syncStep1Frame(Uint8Array.of(0), artifact));
+    reconnected.receive(syncStep2Frame(Y.encodeStateAsUpdate(new Y.Doc()), artifact));
+    // The server applies the reconnected provider's SyncStep2, then turns this browser's next edit
+    // away for want of room, in the same turn: the busy close lands while the pending sync is
+    // still clearing the row the applied answer acknowledged.
+    reconnected.receive(syncStatusFrame(true, artifact));
+    reconnected.dispatchEvent(
+      new CloseEvent("close", { code: DOCUMENT_BUSY_CLOSE_CODE, reason: "DOC_BUSY" })
+    );
+
+    // The row's clear is what the applied answer waits on, and its transaction completes before
+    // the read that finds it gone, so the answer has been handled by the time this reads it.
+    await waitFor(async () => expect(await rowsOf(artifact)).toEqual([]));
+    expect(harness.busy).toEqual([true]);
+  });
+});
