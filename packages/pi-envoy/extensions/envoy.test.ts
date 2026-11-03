@@ -5797,6 +5797,47 @@ console.log(JSON.stringify(args));
     }
   });
 
+  test("a session started while every round trip is rejected still registers over HTTP", async () => {
+    // The reconcile pass's own contract, stated above its `handle.subscribe` call in envoy.ts:
+    // "Only opening the session's agent subject needs NATS. The registration and the role go over
+    // HTTP, so a NATS outage stops neither … and the next pass opens the subject." A connection
+    // that is reconnecting rejects every pending round trip (`resetOutbound`) and is never closed
+    // (`maxReconnectAttempts: -1`), so an open that waits such a rejection out waits for the whole
+    // outage, and the pass that owns it never reaches its registration: the listener does not know
+    // this session, no role is claimed and nothing is delivered to it, for as long as NATS is
+    // away. Waiting out a blip is the point of the retry; holding the HTTP half of the pass behind
+    // it is not.
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    try {
+      const paths: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        paths.push(new URL(input.toString()).pathname);
+        return responseWithRegistration(input, init, []);
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?outage-still-registers");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      const reconnecting = Promise.reject(new Error("the connection is reconnecting"));
+      reconnecting.catch(() => undefined);
+      natsState.heldFlush = reconnecting as unknown as Promise<void>;
+
+      const started = fixture.handlers.get("session_start")?.({}, sessionContext("ses_outage"));
+      started?.catch(() => undefined);
+      // Three seconds of a reconnecting connection, against a registration the pass sends over
+      // HTTP the moment its NATS half is settled or given up on.
+      for (let tick = 0; tick < 300 && !paths.includes("/v1/interests/subscribe"); tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(paths).toContain("/v1/interests/subscribe");
+
+      natsState.heldFlush = undefined;
+      await started;
+    } finally {
+      delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+    }
+  }, 30_000);
+
   test("a role-bound notice subject whose connection closes under its round trip is closed, and no registration carries it", async () => {
     // The open marks the subject as the role's before it subscribes, and unmarks it again when the
     // open throws, because a caller reads a throw as "nothing opened". So the subject must be gone
